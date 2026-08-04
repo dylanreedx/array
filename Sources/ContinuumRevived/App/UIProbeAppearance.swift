@@ -193,8 +193,29 @@ enum UIProbeAppearance {
     /// and the dedicated `appearance.agentInbox`), each card owning a fill and an
     /// outline. Floored AT the measured number, the program's convention: growth
     /// passes, shrinkage is the signal.
-    private static let minimumThemedViews = 27
-    private static let minimumSentineledSlots = 53
+    ///
+    /// 156 / 141 — RE-MEASURED in queue 94's P1.1–P1.4, which is the packet that
+    /// moved both numbers and the one change they are measured in.
+    ///
+    /// VIEWS 27 → 156. The 27 was measured at P3.6 and never re-floored while the
+    /// swept tree grew, so it had drifted to a floor no regression could reach
+    /// (the sweep was already covering 127). P1.4 adds one `InboxRowFocusRingView`
+    /// per row card — 29 across the four inbox surfaces — taking the honest
+    /// measurement to 156. Re-floored AT it, which is what the convention above
+    /// says and what the drift had quietly stopped doing.
+    ///
+    /// SLOTS 53 → 141, and this one went DOWN from the 169 that was really being
+    /// swept, for exactly the reason the packet exists. `ownedColorSlots` drops a
+    /// border slot at zero width and a fill slot at `nil`, and after P1.1/P1.2 a
+    /// row at rest has both: no perimeter in any state, and no fill until you
+    /// point at it, select it, or open its tile. So each of the 29 cards gave up
+    /// 2 slots (fill + outline) and gave back 1 focus-ring outline, and the one
+    /// SELECTED card in `appearance.agentInbox` keeps its ladder fill:
+    /// 169 − 58 + 29 + 1 = 141. A floor left at 169 would have turned this correct
+    /// change red for the wrong reason; a floor left at 53 would have stopped
+    /// measuring anything at all.
+    private static let minimumThemedViews = 156
+    private static let minimumSentineledSlots = 141
 
     /// P1.10: the tile paints three plain `NSView` container fills, which
     /// `ownedLayers(of:)` cannot attribute to it (a view never answers for a
@@ -690,10 +711,20 @@ enum UIProbeAppearance {
         "CanvasNSView",
         "WorkspaceSidebarView",
         "WorkspaceTopBarView",
-        // P3.6. The list's own `panel` fill, and the row card — `tileBody` filled,
-        // outlined `border`, or `borderStrong` while the row is selected.
+        // P3.6. The list's own `panel` fill, and the row card. 94/P1.1 took the
+        // card's outline away and 94/P1.2 replaced its one-fill-in-every-state
+        // `tileBody` with the `SidebarSurfaceRole` ladder, so what this owner
+        // paints now is: NOTHING at rest (a resting card owns no colour slot at
+        // all, which is why `adoptedSurfaces` selects a row — see there), and one
+        // of the three sidebar fills otherwise.
         "AgentInboxView",
         "AgentInboxCardView",
+        // 94/P1.4. The row's keyboard focus ring: a hairline `AgentLineRole.focusRing`
+        // border on a view of its own, hidden unless the row has the keyboard. It
+        // reaches this gate whether or not it is on screen, for the reason
+        // `InboxUndoToast` below records — the walk reads the layer colours a view
+        // painted in `init`.
+        "InboxRowFocusRingView",
         // P3.10. The ⌘-hold hint pill: `SurfaceToken.overlay` fill with a
         // `LineToken.border` outline. It only paints while the modifier is held, so
         // what puts it under this gate is the `chrome.agentInbox.jumpHints` Lab card
@@ -772,6 +803,16 @@ enum UIProbeAppearance {
             values.insert(hex(AgentSurfaceRole.composer.color.cgColor(for: theme)))
             values.insert(hex(AccentToken.accentInput.color.cgColor(for: theme)))
             values.insert(hex(AccentToken.accentFailed.color.cgColor(for: theme)))
+        case "AgentInboxCardView":
+            // 94/P1.2: the sidebar's interaction ladder, owner-scoped exactly like
+            // the roles above. The THREE emphases only — `resting` is deliberately
+            // absent, because a resting row paints no fill at all and therefore
+            // owns no slot for this gate to check. Admitting it here would let an
+            // opaque resting card back in under the name of the role that means
+            // "unfilled".
+            for role in SidebarSurfaceRole.rowEmphases {
+                values.insert(hex(role.color.cgColor(for: theme)))
+            }
         default:
             break
         }
@@ -947,6 +988,13 @@ enum UIProbeAppearance {
                 hex(AccentToken.accentInput.color.cgColor(for: theme)),
                 hex(AccentToken.accentFailed.color.cgColor(for: theme)),
             ]
+            // 94/P1.2: the row card's admission is the sidebar ladder's three
+            // EMPHASES and nothing else — pinned here so a later packet cannot
+            // quietly widen it to `resting` (which would re-admit an opaque
+            // resting card) or to a tile role.
+            let sidebarValues = Set(SidebarSurfaceRole.rowEmphases.map {
+                hex($0.color.cgColor(for: theme))
+            })
             for kind in [ColorSlot.Kind.background, .fill] {
                 let base = legalValues(for: kind, theme: theme)
                 guard legalValues(forOwner: "ChoiceButton", kind: kind, theme: theme)
@@ -955,6 +1003,8 @@ enum UIProbeAppearance {
                         == base.union([composerFill]),
                       legalValues(forOwner: "ComposerActionButton", kind: kind, theme: theme)
                         == base.union(actionValues),
+                      legalValues(forOwner: "AgentInboxCardView", kind: kind, theme: theme)
+                        == base.union(sidebarValues),
                       legalValues(forOwner: "ManagedAgentTileNSView", kind: kind, theme: theme)
                         == base else {
                     throw fail("per-owner role admission widened another owner or admitted the wrong \(kind.rawValue) set in \(theme.rawValue)")
@@ -1198,15 +1248,31 @@ enum UIProbeAppearance {
                     viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
                     tiles: [], groups: [], lastActiveTileId: nil))
             }),
-            AdoptedSurface(id: "sidebar", size: NSSize(width: 280, height: 520), make: {
-                let view = WorkspaceSidebarView(frame: .zero)
-                view.reload(tree: LabFixtures.sidebarTree(), currentWorkspaceId: LabFixtures.workspaceId)
-                // P3.6: the sidebar's content is the inbox, and an EMPTY inbox owns
-                // no row cards — so `AgentInboxCardView` would be an adopted owner
-                // this gate never sees paint, which it is right to call out.
-                view.reloadInbox(rows: LabFixtures.inboxRows())
-                return view
-            }),
+            AdoptedSurface(
+                id: "sidebar", size: NSSize(width: 280, height: 520),
+                make: {
+                    let view = WorkspaceSidebarView(frame: .zero)
+                    view.reload(tree: LabFixtures.sidebarTree(), currentWorkspaceId: LabFixtures.workspaceId)
+                    // P3.6: the sidebar's content is the inbox, and an EMPTY inbox owns
+                    // no row cards — so `AgentInboxCardView` would be an adopted owner
+                    // this gate never sees paint, which it is right to call out.
+                    view.reloadInbox(rows: LabFixtures.inboxRows())
+                    return view
+                },
+                // 94/P1.2 extends P3.6's reason one step. A row at REST now paints
+                // no fill at all, so rows alone are no longer enough: with none of
+                // them selected, `AgentInboxCardView` owns no colour slot and the
+                // adopted-owner census reports it as "painted nothing in the probed
+                // surfaces". Selecting one row is what puts the ladder's fill under
+                // this gate — and it is the same state `appearance.agentInbox`
+                // renders in the sentinel sweep, for the same reason.
+                prepare: { root in
+                    guard let sidebar = root as? WorkspaceSidebarView,
+                          let id = LabFixtures.inboxRows().first?.id else { return }
+                    _ = sidebar.inboxForQA.selectRowForQA(id: id)
+                    root.layoutSubtreeIfNeeded()
+                }
+            ),
             AdoptedSurface(id: "topBar", size: NSSize(width: 900, height: 44), make: {
                 let view = WorkspaceTopBarView(frame: .zero)
                 view.reload(LabFixtures.topBarModel(save: .saveFailed, message: "disk full"))

@@ -370,11 +370,150 @@ enum UIProbeGeometry {
         return SidebarProbeHost(window: window, host: host, inbox: inbox)
     }
 
+    // MARK: - P1.1/P1.2/P1.3 — what a row is allowed to paint
+    //
+    // Tickets: 94/P1.1-remove-row-borders.md, P1.2-interaction-fill-ladder.md,
+    //          P1.3-header-shelf-hairlines.md
+    //
+    // NEGATIVE TESTS OBSERVED RED AGAINST THIS CODE (2026-08-03). Every one was
+    // run against the FINAL implementation, then reverted, and the file restored
+    // by hash before the green run below.
+    //
+    //  1 · P1.1 — the border comes back. `AgentInboxCardView.init`:
+    //      `layer?.borderWidth = 1`
+    //      → `sidebar-ux-check@220pt.NSAppearanceNameAqua: 'openai-codex/gpt-5.6-sol'
+    //         paints a 1.0pt row perimeter — a row paints no border in any state (P1.1)`
+    //  2 · P1.2 — selection made louder than hover, by resolving it first in
+    //      `AgentInboxCardView.surfaceRole`:
+    //      → `sidebar-ux-check.ladder.NSAppearanceNameAqua: pointing at a selected
+    //         row resolved sidebarSelected — hover is one step louder than selection`
+    //  3 · P1.3 — one 1pt literal back, in `InboxBulkActionBar.init`:
+    //      → `sidebar-ux-check@220pt.NSAppearanceNameAqua:
+    //         /AgentInboxView/InboxBulkActionBar paints a 1.0pt line, past the 0.5pt
+    //         hairline — every boundary the sidebar keeps comes from AgentLineRole at
+    //         hairline width (P1.3)`
+    //  4 · P1.4 — a permanent ring: `focusRing.isHidden = false` in
+    //      `AgentInboxCardView.init`:
+    //      → `sidebar-ux-check.ladder.NSAppearanceNameAqua: after the pointer left
+    //         the list a row still shows its focus ring — the focus treatment must
+    //         not outlive focus (P1.4)`
+    //  5 · The re-measured census floor really bites:
+    //      `minimumSentineledSlots` 141 → 142
+    //      → `--ui-probe-check`: `sentinelled 141 layer colours, floor is 142`
+    //
+    // NOT DISCRIMINATING, recorded so nobody mistakes it for coverage: setting
+    // `focusRing.isHidden = false` inside the `hasKeyboardFocus` DIDSET is a no-op
+    // and left the gate green — a rebuilt cell is a fresh card whose
+    // `hasKeyboardFocus` never changes from its `false` default, so the observer
+    // never runs. The ring's default has to be mutated in `init` to break it,
+    // which is witness 4.
+
+    /// This gate's hex spelling for a resolved colour, so a fill can be compared
+    /// to a token value rather than to another `CGColor` object.
+    private static func hex(_ color: CGColor?) -> String {
+        guard let color, let srgb = NSColor(cgColor: color)?.usingColorSpace(.sRGB) else { return "nil" }
+        func part(_ value: CGFloat) -> String { String(format: "%02X", Int((min(max(value, 0), 1) * 255).rounded())) }
+        return "#" + part(srgb.redComponent) + part(srgb.greenComponent)
+            + part(srgb.blueComponent) + part(srgb.alphaComponent)
+    }
+
+    /// The row's fill must BE the fill its resolved role names — and at rest it
+    /// must be no fill at all, or exactly the panel showing through.
+    ///
+    /// Holding the role and the pixel to each other is what makes this stronger
+    /// than either half: a row that resolves `.hover` while painting the resting
+    /// value, and a row that paints the hover value while resting, are both red.
+    private static func expectRowFill(
+        _ geometry: AgentInboxRowGeometryForQA, role: SidebarSurfaceRole,
+        row: AgentInboxRow, theme: TokenTheme, label: String
+    ) throws {
+        let painted = hex(geometry.resolvedFill)
+        guard role != .resting else {
+            // `nil` is the honest answer, and `panel` is the only other one that
+            // means "the sidebar's own surface" — the design decision allows
+            // either spelling and forbids a third.
+            let panel = hex(SidebarSurfaceRole.rowBase.color.cgColor(for: theme))
+            guard geometry.resolvedFill == nil || painted == panel else {
+                throw fail("\(label): resting row '\(row.title)' paints \(painted), which is neither nothing nor the panel \(panel) — surface is reserved for interaction (P1.1)")
+            }
+            return
+        }
+        let expected = hex(role.color.cgColor(for: theme))
+        guard painted == expected else {
+            throw fail("\(label): '\(row.title)' resolved \(role.rawValue) but paints \(painted), not the role's \(expected) — the fill must come from SidebarSurfaceRole (P1.2)")
+        }
+    }
+
+    /// Every line and shadow a row paints, held to the two rules: the card's own
+    /// perimeter and shadow are ZERO in every state (no row carries state on an
+    /// edge), and nothing the row paints is wider than `LineWidth.hairline`.
+    private static func expectRowLines(
+        _ geometry: AgentInboxRowGeometryForQA, row: AgentInboxRow, label: String
+    ) throws {
+        for key in ["card.border", "card.shadowOpacity", "focusRing.border"] {
+            guard geometry.paintedLines[key] != nil else {
+                throw fail("\(label): '\(row.title)' reported no \(key) — the row paint seam stopped covering it")
+            }
+        }
+        for (line, width) in geometry.paintedLines.sorted(by: { $0.key < $1.key }) {
+            guard width.isFinite, width >= 0 else {
+                throw fail("\(label): '\(row.title)' paints an invalid \(line) of \(width)")
+            }
+            if line == "card.border" || line == "card.shadowOpacity" {
+                guard width == 0 else {
+                    throw fail("\(label): '\(row.title)' paints \(line) = \(width) — a row communicates state with a fill and its content, never a border, a shadow or an inset stroke (P1.2)")
+                }
+                continue
+            }
+            guard width <= LineWidth.hairline else {
+                throw fail("\(label): '\(row.title)' paints \(line) at \(width)pt, past the \(LineWidth.hairline)pt hairline (P1.3)")
+            }
+        }
+    }
+
+    /// P1.3 over the WHOLE live sidebar subtree, not just the rows: no view
+    /// paints a line wider than the hairline, and no two views in an
+    /// ancestor/descendant relationship both paint one.
+    ///
+    /// The second half is "one boundary per surface, no nested boxes" as a
+    /// structure rather than a style note — a panel border plus a row border, or
+    /// a boxed section header inside a bordered list, is what it catches.
+    private static func expectHairlineContainment(_ root: NSView, label: String) throws {
+        func visit(_ view: NSView, path: String, borderedAncestor: String?) throws {
+            let width = Double(view.layer?.borderWidth ?? 0)
+            let name = "\(path)/\(String(describing: type(of: view)))"
+            // P1.3: a section heading and a paging footer are HEADINGS, not
+            // cards — a label, a count, and a disclosure affordance, painted
+            // straight onto the list. Anything that is a table cell but not a row
+            // must therefore paint no container at all: no fill, no edge.
+            if view is NSTableCellView, !(view is AgentInboxRowCell) {
+                guard view.layer?.backgroundColor == nil, width == 0 else {
+                    throw fail("\(label): \(name) paints a container box (fill \(hex(view.layer?.backgroundColor)), border \(width)pt) — shelf and section headers paint no box (P1.3)")
+                }
+            }
+            var ownsBoundary = borderedAncestor
+            if width > 0 {
+                guard width <= LineWidth.hairline else {
+                    throw fail("\(label): \(name) paints a \(width)pt line, past the \(LineWidth.hairline)pt hairline — every boundary the sidebar keeps comes from AgentLineRole at hairline width (P1.3)")
+                }
+                if let outer = borderedAncestor {
+                    throw fail("\(label): \(name) paints a boundary inside \(outer)'s — one boundary per surface, no nested boxes (P1.3)")
+                }
+                ownsBoundary = name
+            }
+            for subview in view.subviews {
+                try visit(subview, path: name, borderedAncestor: ownsBoundary)
+            }
+        }
+        try visit(root, path: "", borderedAncestor: nil)
+    }
+
     private static func checkSidebarProbe(
         _ probe: SidebarProbeHost, rows: [AgentInboxRow], width: CGFloat,
         appearanceName: NSAppearance.Name
     ) throws -> (cells: Int, labels: Int, truncated: Int) {
         let label = "sidebar-ux-check@\(Int(width))pt.\(appearanceName.rawValue)"
+        let theme: TokenTheme = appearanceName == .darkAqua ? .dark : .light
         // Size the whole subtree first. Applying rows before this line is the
         // offscreen-materialization bug this leg exists to prevent.
         probe.host.layoutSubtreeIfNeeded()
@@ -436,13 +575,27 @@ enum UIProbeGeometry {
                   geometry.variant == row.variant else {
                 throw fail("\(label): live row \(row.id.uuidString) lost its state or resolved variant")
             }
+            // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.1-remove-row-borders.md
+            //
+            // THE ASSERTION IS FLIPPED HERE, and the flip is the packet. P0.2
+            // asserted `borderWidth >= 0` and `fill.alpha > 0` — it observed the
+            // grey box around every idle row rather than blessing its removal.
+            // Now a row paints NO perimeter in any state and NOTHING at rest, so
+            // the same two accessors assert the opposite over the same live tree
+            // in both appearances: a reintroduced border or an opaque resting
+            // card fails exactly the assertion the removal satisfies.
             guard let borderWidth = geometry.paintedBorderWidth,
-                  borderWidth.isFinite, borderWidth >= 0 else {
-                throw fail("\(label): '\(row.title)' has no finite painted border width")
+                  borderWidth.isFinite, borderWidth == 0 else {
+                throw fail("\(label): '\(row.title)' paints a \(geometry.paintedBorderWidth.map { "\($0)pt" } ?? "missing") row perimeter — a row paints no border in any state (P1.1)")
             }
-            guard let fill = geometry.resolvedFill, fill.alpha > 0 else {
-                throw fail("\(label): '\(row.title)' has no resolved painted fill")
+            guard let role = geometry.surfaceRole else {
+                throw fail("\(label): '\(row.title)' resolved no SidebarSurfaceRole — a row's fill must come from the ladder, not from a literal")
             }
+            try expectRowFill(geometry, role: role, row: row, theme: theme, label: label)
+            // P1.2 step 4: no row communicates state through a border, a shadow
+            // or an inset stroke — and P1.3: no sidebar line exceeds the
+            // hairline. Both are measurements over the same dictionary.
+            try expectRowLines(geometry, row: row, label: label)
             paintedStates.insert(row.state)
 
             let expectedElements: Set<String>
@@ -503,7 +656,277 @@ enum UIProbeGeometry {
         guard paintedStates == Set(InboxState.allCases) else {
             throw fail("\(label): paint seam covered \(paintedStates.count) states, expected every InboxState")
         }
+        // P1.3, over the whole subtree at this width and appearance.
+        try expectHairlineContainment(probe.inbox, label: label)
         return (cells.count, labelCount, truncatedCount)
+    }
+
+    // MARK: - P1.2/P1.4 — the interaction ladder and the focus ring
+    //
+    // Tickets: 94/P1.2-interaction-fill-ladder.md, P1.4-focus-ring-and-floors.md
+    //
+    // Four states, measured off the LIVE row rather than off the token table:
+    // resting (unfilled), multi-selected, hovered, route-active — with SELECTION
+    // QUIETER THAN HOVER, because hover is transient pointer feedback and
+    // selection is a resting state you park on. The ordering is asserted as an
+    // emphasis measurement against the resting panel, in both appearances, so it
+    // cannot be satisfied by naming the roles in the right order and painting
+    // them in the wrong one.
+
+    /// One row's paint, as this gate reads it back.
+    private struct LadderReading {
+        let role: SidebarSurfaceRole
+        let fill: String
+        /// Contrast of the painted fill against the resting panel — the number
+        /// `SidebarTokens.rowEmphasisRatio` predicts, measured off the pixel.
+        let emphasis: Double
+        let isFocusRingVisible: Bool
+        let lines: [String: Double]
+    }
+
+    private static func chipColor(_ color: CGColor?) -> ChipColor? {
+        guard let color, let srgb = NSColor(cgColor: color)?.usingColorSpace(.sRGB) else { return nil }
+        return ChipColor(r: srgb.redComponent, g: srgb.greenComponent, b: srgb.blueComponent)
+    }
+
+    private static func ladderReading(
+        _ inbox: AgentInboxView, agent: UUID, theme: TokenTheme, label: String
+    ) throws -> LadderReading {
+        // An offscreen probe window defers the incremental reload `redraw` asks
+        // for, so the cells in the tree can predate the input change. Measured:
+        // without this the leg failed with `a multi-selected pair resolved
+        // sidebarResting/sidebarResting` on a table whose `selectedRowIndexes`
+        // really did hold two rows. `rebuildRowsForQA` forces the rebuild the
+        // screen would have got, without emptying the selection.
+        inbox.rebuildRowsForQA()
+        let matching = inbox.qaRowGeometriesForQA.filter { $0.agentID == agent }
+        guard matching.count == 1, let geometry = matching.first else {
+            throw fail("\(label): agent \(agent.uuidString) has \(matching.count) live rows to measure, expected exactly 1 — a retired cell is still in the tree and a stale reading is what this would report")
+        }
+        guard let role = geometry.surfaceRole else {
+            throw fail("\(label): agent \(agent.uuidString) resolved no SidebarSurfaceRole")
+        }
+        let panel = SidebarSurfaceRole.rowBase.color.resolved(for: theme)
+        // An unfilled row IS the panel — that is the identity the role declares,
+        // so the measurement carries the panel through rather than inventing a
+        // value for "no fill".
+        let painted = chipColor(geometry.resolvedFill) ?? panel
+        return LadderReading(
+            role: role,
+            fill: hex(geometry.resolvedFill),
+            emphasis: WCAGContrast.ratio(painted, panel),
+            isFocusRingVisible: geometry.isFocusRingVisible,
+            lines: geometry.paintedLines
+        )
+    }
+
+    /// No row anywhere in the list is lit or ringed. The "nothing is left behind"
+    /// assertion, used after an exit, a scroll, a re-render and a deactivation.
+    private static func expectNothingLit(_ inbox: AgentInboxView, why: String, label: String) throws {
+        inbox.layoutForQA()
+        for geometry in inbox.qaRowGeometriesForQA {
+            guard geometry.surfaceRole == .resting || geometry.surfaceRole == .selected else {
+                throw fail("\(label): after \(why) a row is still on \(geometry.surfaceRole?.rawValue ?? "nil") — no row may be left lit (P1.2)")
+            }
+            guard !geometry.isFocusRingVisible else {
+                throw fail("\(label): after \(why) a row still shows its focus ring — the focus treatment must not outlive focus (P1.4)")
+            }
+        }
+        guard inbox.hoveredAgentIdForQA == nil else {
+            throw fail("\(label): after \(why) the list still believes agent \(inbox.hoveredAgentIdForQA!.uuidString) is hovered")
+        }
+    }
+
+    private static func checkSidebarInteractionLadder(rows: [AgentInboxRow], probeHeight: CGFloat) throws -> Int {
+        var asserted = 0
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            NSApp?.appearance = NSAppearance(named: appearanceName)
+            let theme: TokenTheme = appearanceName == .darkAqua ? .dark : .light
+            let label = "sidebar-ux-check.ladder.\(appearanceName.rawValue)"
+            let probe = try makeSidebarProbeHost(
+                width: CGFloat(WorkspaceSidebarConfig.defaultWidth),
+                height: probeHeight, appearanceName: appearanceName
+            )
+            probe.inbox.clock = { LabFixtures.inboxNow }
+            probe.inbox.toggleShelf()
+            probe.host.layoutSubtreeIfNeeded()
+            probe.inbox.reload(rows: rows)
+            probe.inbox.layoutForQA()
+
+            let ids = probe.inbox.rowIdsForQA
+            guard ids.count >= 2 else { throw fail("\(label): the ladder needs at least two rows") }
+            let first = ids[0]
+            let second = ids[1]
+
+            // 1 · At rest, unfilled.
+            let resting = try ladderReading(probe.inbox, agent: first, theme: theme, label: label)
+            guard resting.role == .resting, resting.fill == "nil" else {
+                throw fail("\(label): an untouched row is on \(resting.role.rawValue) painting \(resting.fill) — a row at rest is unfilled (P1.1)")
+            }
+            asserted += 1
+
+            // 2 · Hover, and hover CLEARS on exit.
+            guard probe.inbox.hoverRowForQA(id: first) else {
+                throw fail("\(label): the first row must be hoverable")
+            }
+            let hovered = try ladderReading(probe.inbox, agent: first, theme: theme, label: label)
+            guard hovered.role == .hover else {
+                throw fail("\(label): a hovered row resolved \(hovered.role.rawValue), not hover")
+            }
+            _ = probe.inbox.hoverRowForQA(id: nil)
+            try expectNothingLit(probe.inbox, why: "the pointer left the list", label: label)
+            asserted += 1
+
+            // 3 · Multi-selection. Two rows selected are two rows FILLED — the
+            // outline they used to take is gone.
+            guard probe.inbox.selectRowsForQA(ids: [first, second]) else {
+                throw fail("\(label): two rows must be selectable together")
+            }
+            // Not vacuous: the pair must really BE selected, or the fill
+            // assertion below would be measuring two resting rows.
+            guard probe.inbox.selectedRowCountForQA == 2 else {
+                throw fail("\(label): the probe selected \(probe.inbox.selectedRowCountForQA) rows, not 2 — multiple selection is off or the ids are not on screen")
+            }
+            let selected = try ladderReading(probe.inbox, agent: first, theme: theme, label: label)
+            let selectedSecond = try ladderReading(probe.inbox, agent: second, theme: theme, label: label)
+            guard selected.role == .selected, selectedSecond.role == .selected else {
+                throw fail("\(label): a multi-selected pair resolved \(selected.role.rawValue)/\(selectedSecond.role.rawValue), not selected")
+            }
+            asserted += 1
+
+            // 4 · Hover OUTRANKS selection: the row you are pointing at always
+            // reads above a parked selection, which is what "selection is
+            // quieter than hover" means on screen rather than in a table.
+            _ = probe.inbox.hoverRowForQA(id: first)
+            let hoveredSelected = try ladderReading(probe.inbox, agent: first, theme: theme, label: label)
+            guard hoveredSelected.role == .hover else {
+                throw fail("\(label): pointing at a selected row resolved \(hoveredSelected.role.rawValue) — hover is one step louder than selection")
+            }
+            _ = probe.inbox.hoverRowForQA(id: nil)
+            asserted += 1
+
+            // 5 · Route-active is the loudest, and it is distinguishable from a
+            // multi-selected row rather than merely from a resting one: both
+            // rows below are SELECTED, and only one has its tile open.
+            // `openAgentId` IS route-active (see its note on `AgentInboxView`),
+            // and setting it re-filters and re-renders the list — which empties
+            // the table's selection. So the pair is re-selected AFTER it, and the
+            // assertion below is then genuinely about two SELECTED rows, one of
+            // which also has its tile open.
+            probe.inbox.openAgentId = first
+            guard probe.inbox.selectRowsForQA(ids: [first, second]) else {
+                throw fail("\(label): the pair must re-select once a tile is open")
+            }
+            let active = try ladderReading(probe.inbox, agent: first, theme: theme, label: label)
+            let stillSelected = try ladderReading(probe.inbox, agent: second, theme: theme, label: label)
+            guard active.role == .active, stillSelected.role == .selected else {
+                throw fail("\(label): route-active/multi-selected resolved \(active.role.rawValue)/\(stillSelected.role.rawValue)")
+            }
+            guard active.fill != stillSelected.fill else {
+                throw fail("\(label): the route-active row and a multi-selected row both paint \(active.fill) — the two must be distinguishable from EACH OTHER (P1.2)")
+            }
+            asserted += 1
+
+            // 6 · Four distinct fills, and the ORDERING by measurement.
+            let ladder = [resting, selected, hovered, active]
+            let fills = Set(ladder.map(\.fill))
+            guard fills.count == ladder.count else {
+                throw fail("\(label): the four states paint \(fills.count) distinct fills (\(fills.sorted().joined(separator: ", "))) — all four must be distinguishable by measured fill")
+            }
+            guard resting.emphasis == 1.0 else {
+                throw fail(String(format: "%@: a resting row measures %.3f:1 against the panel, not the 1.000 identity", label, resting.emphasis))
+            }
+            guard selected.emphasis < hovered.emphasis else {
+                throw fail(String(
+                    format: "%@: selected measures %.3f:1 and hover %.3f:1 against the panel — SELECTION MUST STAY QUIETER THAN HOVER (P1.2)",
+                    label, selected.emphasis, hovered.emphasis))
+            }
+            guard hovered.emphasis < active.emphasis else {
+                throw fail(String(
+                    format: "%@: hover measures %.3f:1 and route-active %.3f:1 — the open agent's row is the loudest step",
+                    label, hovered.emphasis, active.emphasis))
+            }
+            // And the painted ladder must agree with the token ladder P0.5 pinned,
+            // so a fill cannot drift away from the role it claims.
+            for reading in [selected, hovered, active] {
+                let predicted = SidebarTokens.rowEmphasisRatio(reading.role, theme: theme)
+                guard abs(reading.emphasis - predicted) <= 0.01 else {
+                    throw fail(String(
+                        format: "%@: %@ measures %.3f:1 on screen but %.3f:1 in the token table",
+                        label, reading.role.rawValue, reading.emphasis, predicted))
+                }
+            }
+            asserted += 1
+
+            // 7 · No state anywhere in the ladder is carried by an edge.
+            for reading in ladder {
+                guard reading.lines["card.border"] == 0, reading.lines["card.shadowOpacity"] == 0 else {
+                    throw fail("\(label): the \(reading.role.rawValue) state paints border \(reading.lines["card.border"] ?? -1) / shadow \(reading.lines["card.shadowOpacity"] ?? -1) — no row communicates state through a border, a shadow or an inset stroke (P1.2)")
+                }
+                guard reading.isFocusRingVisible == false else {
+                    throw fail("\(label): the \(reading.role.rawValue) state shows a focus ring without the keyboard — focus is not a fill state (P1.4)")
+                }
+            }
+            asserted += 1
+
+            // 8 · The FOCUS RING. Both rows are selected; only one has the
+            // keyboard, so a keyboard user can tell which row Return will act on.
+            probe.inbox.openAgentId = nil
+            guard probe.inbox.selectRowsForQA(ids: [first, second]) else {
+                throw fail("\(label): the pair must re-select for the focus leg")
+            }
+            // The ring goes on AFTER the pair is selected, and it moves no
+            // selection — so what the two readings below differ by is exactly
+            // the keyboard, on two rows that are otherwise in the same state.
+            guard probe.inbox.focusRowByKeyboardForQA(id: second) else {
+                throw fail("\(label): the second row must take keyboard focus")
+            }
+            let focused = try ladderReading(probe.inbox, agent: second, theme: theme, label: label)
+            let merelySelected = try ladderReading(probe.inbox, agent: first, theme: theme, label: label)
+            guard focused.isFocusRingVisible, !merelySelected.isFocusRingVisible else {
+                throw fail("\(label): keyboard focus is not distinguishable from selection — ring visible focused=\(focused.isFocusRingVisible) selected=\(merelySelected.isFocusRingVisible) (P1.4)")
+            }
+            guard focused.role == merelySelected.role else {
+                throw fail("\(label): keyboard focus changed the row's FILL (\(focused.role.rawValue) vs \(merelySelected.role.rawValue)) — focus is a temporary ring, selection is the resting fill")
+            }
+            guard focused.lines["focusRing.border"] == LineWidth.hairline else {
+                throw fail("\(label): the focus ring paints \(focused.lines["focusRing.border"] ?? -1)pt, not the \(LineWidth.hairline)pt hairline (P1.3/P1.4)")
+            }
+            guard focused.lines["card.border"] == 0 else {
+                throw fail("\(label): a focused row grew a permanent perimeter of \(focused.lines["card.border"] ?? -1)pt — the ring is a separate temporary view, never the row's own edge")
+            }
+            // A ring may not outlive the selection it marks: move the selection
+            // off the focused row and the ring goes with it.
+            guard probe.inbox.selectRowsForQA(ids: [first]) else {
+                throw fail("\(label): the selection must move off the focused row")
+            }
+            let unfocused = try ladderReading(probe.inbox, agent: second, theme: theme, label: label)
+            guard !unfocused.isFocusRingVisible, probe.inbox.keyboardFocusAgentIdForQA == nil else {
+                throw fail("\(label): the focus ring survived the selection moving off its row (P1.4)")
+            }
+            asserted += 1
+
+            // 9 · Nothing permanent remains. Hover a row, then take the window's
+            // key state away: both transient treatments go.
+            _ = probe.inbox.hoverRowForQA(id: first)
+            probe.inbox.resignKeyForQA()
+            try expectNothingLit(probe.inbox, why: "the window stopped being key", label: label)
+            asserted += 1
+
+            // 10 · SCROLL, and ROW REUSE. Both are the stuck-hover bug: the row
+            // under the pointer changes without the pointer moving. Hover is
+            // re-derived from where the pointer actually is — which, in a
+            // headless probe, is nowhere near the list — so nothing stays lit.
+            _ = probe.inbox.hoverRowForQA(id: first)
+            probe.inbox.scrollForQA(byPoints: AgentInboxView.rowHeight * 3)
+            try expectNothingLit(probe.inbox, why: "the list scrolled under the pointer", label: label)
+            _ = probe.inbox.hoverRowForQA(id: first)
+            // A full re-render rebuilds every cell — the reuse path.
+            probe.inbox.reload(rows: rows)
+            try expectNothingLit(probe.inbox, why: "every row cell was rebuilt", label: label)
+            asserted += 1
+        }
+        return asserted
     }
 
     /// P0.2's additive sidebar leg. It deliberately observes today's paint rather
@@ -588,9 +1011,12 @@ enum UIProbeGeometry {
                 totalTruncated += counts.truncated
             }
         }
+        // P1.2/P1.4: the four-state ladder and the focus ring, driven through the
+        // view's own hover / selection / route-active / keyboard inputs.
+        let ladderAssertions = try checkSidebarInteractionLadder(rows: rows, probeHeight: probeHeight)
         print(String(
-            format: "UIProbeGeometry: sidebar UX seam materialized %d live row cells (%d defect-corpus rows per leg) and measured %d labels across 220/280/320pt in Aqua and Dark Aqua; %d labels currently elide by drawable-width measurement; zero-size host rejected with a named error",
-            totalCells, rows.count, totalLabels, totalTruncated
+            format: "UIProbeGeometry: sidebar UX seam materialized %d live row cells (%d defect-corpus rows per leg) and measured %d labels across 220/280/320pt in Aqua and Dark Aqua; %d labels currently elide by drawable-width measurement; every row paints a zero perimeter, no shadow and no fill at rest, and no sidebar line exceeds %.1fpt with no nested boundary anywhere in the subtree; %d interaction-ladder assertions held per appearance (resting < selected < hover < route-active by measured emphasis, hover outranking selection, a hairline focus ring distinct from selection, and nothing left lit after an exit, a deactivation, a scroll or a full rebuild); zero-size host rejected with a named error",
+            totalCells, rows.count, totalLabels, totalTruncated, LineWidth.hairline, ladderAssertions
         ))
     }
 

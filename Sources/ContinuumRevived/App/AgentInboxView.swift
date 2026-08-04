@@ -105,6 +105,22 @@ struct AgentInboxRowGeometryForQA {
     let labels: [AgentInboxLabelGeometryForQA]
     let paintedBorderWidth: Double?
     let resolvedFill: CGColor?
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.2-interaction-fill-ladder.md
+    /// Which step of the interaction ladder this row RESOLVED to, read off the
+    /// card. Reported next to `resolvedFill` so a check can hold the two to each
+    /// other: a role that resolves without its fill being painted, or a fill
+    /// painted for a role the row is not on, is the defect either half alone
+    /// would miss.
+    let surfaceRole: SidebarSurfaceRole?
+    /// Every line and shadow the row paints, keyed by what paints it. P1.1
+    /// requires the card's perimeter to be zero in every state, P1.2 requires no
+    /// state to be carried by a border or a shadow, and P1.3 requires no sidebar
+    /// line to exceed `LineWidth.hairline` — all three are measurements over
+    /// this dictionary rather than three separate accessors that could disagree.
+    let paintedLines: [String: Double]
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.4-focus-ring-and-floors.md
+    /// Whether the row's focus ring is on screen right now.
+    let isFocusRingVisible: Bool
 }
 
 @MainActor
@@ -332,11 +348,53 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// Whether the ⌘-hold hint pills are showing. VIEW-LOCAL and transient, like
     /// hover: it is a fact about the modifier you are holding right now.
     private var jumpHintsVisible = false
-    /// The row the mouse is over, or -1. Hover is one of P3.5's three
-    /// interaction facts and it is tracked HERE, on the table, rather than per
-    /// cell: cell views are recycled, so a tracking area installed on one would
-    /// follow it onto a different row.
-    private var hoveredRow = -1
+    /// The AGENT the mouse is over. Hover is one of P3.5's three interaction
+    /// facts and it is tracked HERE, on the table, rather than per cell: cell
+    /// views are recycled, so a tracking area installed on one would follow it
+    /// onto a different row.
+    ///
+    /// P1.2 made it an AGENT ID rather than the table row index it was. An index
+    /// is a fact about the list that handed it out, and this list re-renders
+    /// under the pointer for four reasons that do not move the mouse — a fold, a
+    /// scope flip, the shelf, a page of history — plus every scroll. Keyed by
+    /// index, all of those left the previous row's index lit on whichever agent
+    /// had moved into it; keyed by agent, the fill follows the agent, and
+    /// `refreshHoverFromPointer()` re-derives from where the pointer actually is
+    /// whenever the list or the viewport moves under it.
+    private var hoveredAgentId: UUID?
+    /// The table row `hoveredAgentId` currently occupies, or -1. DERIVED, so it
+    /// cannot drift out of step with the id the way a second stored index could.
+    private var hoveredRow: Int {
+        guard let hoveredAgentId,
+              let index = rows.firstIndex(where: { $0.id == hoveredAgentId }) else { return -1 }
+        return tableRow(forRowIndex: index) ?? -1
+    }
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.4-focus-ring-and-floors.md
+    /// The agent the KEYBOARD is on — the row Return will act on — or nil when
+    /// the last thing that moved the selection was the mouse.
+    ///
+    /// Distinct from the selection on purpose. In an `NSTableView` arrow-key
+    /// navigation IS a selection move, so the two are the same row by
+    /// construction and P3.5 was right to treat them as one fact for recession.
+    /// They are NOT the same for VISIBILITY: a keyboard user needs to see which
+    /// row Return will act on, and a mouse user who clicked a row already knows.
+    /// So the ring is armed only by a key event and disarmed by a mouse one, and
+    /// it never outlives the selection it marks or the window's key state.
+    ///
+    /// STORED AS AN INTENT AND RESOLVED AGAINST THE SELECTION. "A ring never
+    /// outlives the selection it marks" is then a derivation rather than
+    /// something a notification handler has to remember — and it has to be,
+    /// because `NSTableView` does not guarantee delivering
+    /// `tableViewSelectionDidChange` synchronously for a programmatic selection
+    /// change. Measured: with the rule living in that handler,
+    /// `--sidebar-ux-check` reported `the focus ring survived the selection
+    /// moving off its row` with the selection already narrowed correctly.
+    private var keyboardFocusIntent: UUID?
+    private var keyboardFocusAgentId: UUID? {
+        guard let id = keyboardFocusIntent, let row = tableRow(forAgentId: id),
+              tableView.selectedRowIndexes.contains(row) else { return nil }
+        return id
+    }
     /// The selection as the cells were last painted for it. `selectionDidChange`
     /// reports the NEW selection only, so the rows that just lost it — the ones that
     /// have to start receding again — have to be remembered.
@@ -346,6 +404,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// `Int` could only ever repaint one of them.
     private var selectedRowsForEmphasis = IndexSet()
     private var trackingArea: NSTrackingArea?
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.2-interaction-fill-ladder.md
+    /// The scroll and window-deactivation subscriptions hover depends on, held as
+    /// TOKENS so `viewDidMoveToWindow` can drop exactly this view's own before
+    /// taking the next window's — see the note there for why the blanket
+    /// `removeObserver(self)` is not an option. Every block captures `self`
+    /// weakly, so nothing here retains the view.
+    private var interactionObservers: [NSObjectProtocol] = []
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.13-inline-rename.md
     /// The field a rename is being typed into, and the AGENT it is about — by id
@@ -526,6 +591,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// (`InboxScope.filter`). Set by the host on every push; a change re-filters,
     /// and an unchanged value does no work, so this cannot cost the incremental
     /// refresh (P2B.7) its "one cell rebuilt".
+    ///
+    /// Ticket: docs/38-tickets/94-sidebar-native-ux/P1.2-interaction-fill-ladder.md
+    /// THIS IS ALSO THE ROUTE-ACTIVE INPUT — the loudest step of the fill ladder,
+    /// and deliberately not a second property beside it. Route-active means "the
+    /// agent whose tile is open", `AppDelegate.focusedInboxAgentId()` already
+    /// resolves exactly that from `CanvasState.lastActiveTileId`, and it already
+    /// arrives here through `setInboxOpenAgent` on every sidebar reload. A new
+    /// `routeActiveAgentID` would have been a second projection of one fact, which
+    /// is the shape `_DESIGN.md` rules out ("one owner answers what an agent is
+    /// doing"), and it would have needed a host edit to feed something the host is
+    /// already feeding. Nil-safe throughout: no open tile, no route-active row,
+    /// and the ladder simply has three steps instead of four.
     var openAgentId: UUID? {
         didSet {
             guard openAgentId != oldValue else { return }
@@ -778,6 +855,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // nothing to apply them to.
         selectedRowsForEmphasis = IndexSet()
         updateBulkBar()
+        // P1.2: the list under the pointer just changed, so hover is re-derived
+        // from the pointer rather than carried over or dropped. This is the row
+        // REUSE half of "no row is left lit": `reloadData` rebuilt every cell,
+        // and the agent under the mouse may now be a different one.
+        refreshHoverFromPointer()
     }
 
     /// Apply a new set of rows knowing WHICH agents moved (P2B.7's change set).
@@ -925,7 +1007,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         settledLimit += InboxSort.settledPageStep
         tableView.deselectAll(nil)
         selectedRowsForEmphasis = IndexSet()
-        hoveredRow = -1
+        // P1.2: hover and the focus ring are dropped and then RE-DERIVED from
+        // where the pointer actually is once the new list is on screen
+        // (`render` ends in `refreshHoverFromPointer()`), so a fold or a scope
+        // flip cannot leave a row lit that the pointer is no longer over — and
+        // cannot un-light the row it still is over either.
+        hoveredAgentId = nil
+        keyboardFocusIntent = nil
         render(display(from: allRows))
     }
 
@@ -942,7 +1030,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         shelfExpanded.toggle()
         tableView.deselectAll(nil)
         selectedRowsForEmphasis = IndexSet()
-        hoveredRow = -1
+        // P1.2: hover and the focus ring are dropped and then RE-DERIVED from
+        // where the pointer actually is once the new list is on screen
+        // (`render` ends in `refreshHoverFromPointer()`), so a fold or a scope
+        // flip cannot leave a row lit that the pointer is no longer over — and
+        // cannot un-light the row it still is over either.
+        hoveredAgentId = nil
+        keyboardFocusIntent = nil
         render(display(from: allRows))
     }
 
@@ -1016,7 +1110,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         }
         tableView.deselectAll(nil)
         selectedRowsForEmphasis = IndexSet()
-        hoveredRow = -1
+        // P1.2: hover and the focus ring are dropped and then RE-DERIVED from
+        // where the pointer actually is once the new list is on screen
+        // (`render` ends in `refreshHoverFromPointer()`), so a fold or a scope
+        // flip cannot leave a row lit that the pointer is no longer over — and
+        // cannot un-light the row it still is over either.
+        hoveredAgentId = nil
+        keyboardFocusIntent = nil
         render(display(from: allRows))
     }
 
@@ -1051,7 +1151,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         scope = next
         tableView.deselectAll(nil)
         selectedRowsForEmphasis = IndexSet()
-        hoveredRow = -1
+        // P1.2: hover and the focus ring are dropped and then RE-DERIVED from
+        // where the pointer actually is once the new list is on screen
+        // (`render` ends in `refreshHoverFromPointer()`), so a fold or a scope
+        // flip cannot leave a row lit that the pointer is no longer over — and
+        // cannot un-light the row it still is over either.
+        hoveredAgentId = nil
+        keyboardFocusIntent = nil
         updateScopeMenu()
         render(display(from: allRows))
         if notify { onScopeChange?(next) }
@@ -1255,6 +1361,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
             isInteracting: interacting,
             now: clock()
         )
+        // P1.2/P1.4: the interaction ladder is set through its own call for the
+        // reason the pill below is — `apply` paints what the agent IS, and where
+        // the pointer and the keyboard are is not that.
+        cell.applyInteraction(interaction(forTableRow: row))
         // P3.10: the hint is set AFTER `apply` and through its own call, because it
         // is an overlay and not part of the row's content — `apply` paints what the
         // agent IS, and a pill is a thing about the keyboard.
@@ -1272,7 +1382,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // selections — with a range selected, a single index cannot name them.
         let previous = selectedRowsForEmphasis
         selectedRowsForEmphasis = tableView.selectedRowIndexes
-        redraw(tableRows: Array(previous.symmetricDifference(tableView.selectedRowIndexes)))
+        // P1.4: which INPUT moved the selection decides whether the focus ring is
+        // armed, and it is resolved before the rows are redrawn so the ring and
+        // the fill are painted by the SAME rebuild — see `setKeyboardFocus`.
+        let focusTouched = updateKeyboardFocusForSelection()
+        redraw(tableRows: Array(previous.symmetricDifference(tableView.selectedRowIndexes))
+            + focusTouched)
         updateBulkBar()
     }
 
@@ -1426,10 +1541,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         field.wantsLayer = true
         field.layer?.cornerRadius = Radius.card
         field.layer?.masksToBounds = true
-        field.layer?.borderWidth = 1
-        // `borderStrong`, the focus/selection line — an open editor is the one thing
-        // on this list with the keyboard, and `border` is what every row already draws.
-        field.layer?.borderColor = LineToken.borderStrong.color.cgColor(in: self)
+        // P1.3: the shared hairline, not a 1pt literal. `_DESIGN.md` caps every
+        // boundary the sidebar keeps at 0.5pt and this is one of the four this
+        // program had left.
+        field.layer?.borderWidth = LineWidth.hairline
+        // `focusRing`, the ROLE for focus and selection (it resolves to the same
+        // `borderStrong` this line used to name directly — the role carries the
+        // contrast reasoning, a raw `LineToken` carries only a value). An open
+        // editor is the one thing on this list holding the keyboard, and after
+        // P1.1 no row draws a perimeter for it to be confused with.
+        field.layer?.borderColor = AgentLineRole.focusRing.color.cgColor(in: self)
         field.delegate = self
         field.setAccessibilityIdentifier("ContinuumAgentInboxRenameField")
         addSubview(field, positioned: .above, relativeTo: nil)
@@ -1904,8 +2025,26 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// are one test rather than two, because arrow-key navigation in an
     /// `NSTableView` IS a selection move — a keyboard-active row and the selected
     /// row are the same row by construction.
+    ///
+    /// P1.2 LEFT THIS ALONE, deliberately, and split the FILL out beside it
+    /// instead. This one test still answers the question P3.5 asked it —
+    /// "is this row's recession cleared?" — and the answer is genuinely the same
+    /// for all three inputs, because recession is about whether you are engaged
+    /// with the row at all. The fills are a different question with three
+    /// different answers (`interaction(forTableRow:)`), so they get three tests.
     private func isInteracting(row: Int) -> Bool {
         row == hoveredRow || tableView.selectedRowIndexes.contains(row)
+    }
+
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.2-interaction-fill-ladder.md
+    /// The three fill/ring facts for one table row, each answered separately.
+    private func interaction(forTableRow row: Int) -> RowInteraction {
+        guard let id = agentIdForTableRow(row) else { return .none }
+        return RowInteraction(
+            isHovered: id == hoveredAgentId,
+            isRouteActive: id == openAgentId,
+            hasKeyboardFocus: id == keyboardFocusAgentId
+        )
     }
 
     /// Rebuild the cells of just these rows, ignoring any that are not on screen.
@@ -2073,19 +2212,154 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
 
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
-        setHovered(row: tableView.row(at: tableView.convert(event.locationInWindow, from: nil)))
+        setHovered(agentId: agentId(atWindowPoint: event.locationInWindow))
     }
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
-        setHovered(row: -1)
+        setHovered(agentId: nil)
     }
 
-    private func setHovered(row: Int) {
-        guard row != hoveredRow else { return }
-        let previous = hoveredRow
-        hoveredRow = row
-        redraw(tableRows: [previous, row])
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.2-interaction-fill-ladder.md
+    /// Subscribe to the two events that move a row out from under the pointer
+    /// without the pointer moving: the list SCROLLING, and the window losing key.
+    ///
+    /// `.mouseMoved` cannot cover either. A scroll fires no mouse-moved event, so
+    /// without the first the row the pointer is now over stays unlit and the one
+    /// it left stays lit — the classic stuck-hover bug, one step removed from the
+    /// row-reuse version of it. And a window that stops being key stops delivering
+    /// tracking events at all (`.activeInKeyWindow`), so without the second the
+    /// last hovered row stays lit behind an app you switched away from.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        let center = NotificationCenter.default
+        // TOKENS, and never `removeObserver(self)`. The blanket form is one call
+        // and it is wrong here: `NSView` and `NSTableView` register the view
+        // itself as an observer of AppKit's own notifications, and removing those
+        // took the table's deferred incremental reload with it — measured,
+        // `--agent-inbox-check`: `selecting a row must clear its recession — text
+        // alpha 0.88, wanted 1.0`, on a selection that had really moved.
+        for token in interactionObservers { center.removeObserver(token) }
+        interactionObservers = []
+        guard let window else {
+            setHovered(agentId: nil)
+            setKeyboardFocus(agentId: nil)
+            return
+        }
+        let clipView = scrollView.contentView
+        clipView.postsBoundsChangedNotifications = true
+        interactionObservers.append(center.addObserver(
+            forName: NSView.boundsDidChangeNotification, object: clipView, queue: nil
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshHoverFromPointer() }
+        })
+        for name in [NSWindow.didResignKeyNotification, NSWindow.didResignMainNotification] {
+            interactionObservers.append(center.addObserver(
+                forName: name, object: window, queue: nil
+            ) { [weak self] _ in
+                // Both transient treatments go: a lit row and a focus ring are
+                // each a statement about what the pointer and the keyboard are
+                // doing HERE, and neither is true of a window you switched away
+                // from.
+                MainActor.assumeIsolated {
+                    self?.setHovered(agentId: nil)
+                    self?.setKeyboardFocus(agentId: nil)
+                }
+            })
+        }
+    }
+
+    /// Which agent is under a point in window coordinates, or nil — off the end
+    /// of the list, on the shelf heading or the paging footer (neither is an
+    /// agent), or outside the list's own viewport.
+    private func agentId(atWindowPoint point: NSPoint) -> UUID? {
+        let local = tableView.convert(point, from: nil)
+        let viewport = scrollView.contentView.convert(scrollView.contentView.bounds, to: tableView)
+        guard viewport.contains(local) else { return nil }
+        let row = tableView.row(at: local)
+        guard row >= 0 else { return nil }
+        return item(at: row)?.agentRow?.id
+    }
+
+    /// Re-derive hover from where the pointer actually is. Called after every
+    /// re-render and on every scroll, so hover is a function of the pointer and
+    /// the current list rather than a memory of an older one.
+    private func refreshHoverFromPointer() {
+        guard let window, window.isKeyWindow else {
+            setHovered(agentId: nil)
+            return
+        }
+        setHovered(agentId: agentId(atWindowPoint: window.mouseLocationOutsideOfEventStream))
+    }
+
+    private func setHovered(agentId: UUID?) {
+        guard agentId != hoveredAgentId else { return }
+        let previous = hoveredAgentId
+        hoveredAgentId = agentId
+        redraw(tableRows: [tableRow(forAgentId: previous), tableRow(forAgentId: agentId)]
+            .compactMap { $0 })
+    }
+
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.4-focus-ring-and-floors.md
+    /// Move the ring, and answer which table rows have to be repainted for it.
+    ///
+    /// `redrawing: false` exists for one caller and one measured reason: inside
+    /// `tableViewSelectionDidChange`, AppKit is still mid-selection-update, and a
+    /// `reloadData(forRowIndexes:)` delivered there takes the selection back out
+    /// from under it — the cell is then rebuilt with `isInteracting` false and the
+    /// row it just selected recedes (`--agent-inbox-check`: `selecting a row must
+    /// clear its recession — text alpha 0.88, wanted 1.0`). So that path collects
+    /// the rows and makes ONE redraw call after the notification's own work.
+    @discardableResult
+    private func setKeyboardFocus(agentId: UUID?, redrawing: Bool = true) -> [Int] {
+        guard agentId != keyboardFocusIntent else { return [] }
+        // What was PAINTED before and after — the resolved value, not the intent,
+        // so a row whose ring was already suppressed is not repainted for nothing.
+        let previous = keyboardFocusAgentId
+        keyboardFocusIntent = agentId
+        let touched = [tableRow(forAgentId: previous), tableRow(forAgentId: keyboardFocusAgentId)]
+            .compactMap { $0 }
+        if redrawing { redraw(tableRows: touched) }
+        return touched
+    }
+
+    /// Arm or disarm the focus ring from the event that moved the selection.
+    ///
+    /// The EVENT is what tells the two inputs apart — a `.keyDown` reached the
+    /// table's own `keyDown:`/`moveUp:`/`moveDown:` and a mouse click reached its
+    /// `mouseDown:`. A programmatic selection (`selectRowForQA`, the ⌘-digit jump's
+    /// landing, the post-action advance) carries no event of its own and therefore
+    /// changes nothing here, except that a ring can never survive on a row that is
+    /// no longer selected.
+    private func updateKeyboardFocusForSelection() -> [Int] {
+        var touched: [Int] = []
+        switch NSApp.currentEvent?.type {
+        case .keyDown:
+            touched += setKeyboardFocus(
+                agentId: agentIdForTableRow(tableView.selectedRow), redrawing: false)
+        case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
+             .otherMouseDown, .otherMouseUp:
+            touched += setKeyboardFocus(agentId: nil, redrawing: false)
+        default:
+            break
+        }
+        // The rows that LOST the ring because the selection moved off them are
+        // repainted by the caller's own symmetric-difference redraw; the ring
+        // itself is already gone by derivation (see `keyboardFocusAgentId`).
+        return touched
+    }
+
+    /// The table row an agent occupies, or nil for an agent that is not on
+    /// screen. Nil-in, nil-out, so a caller can hand it a `nil` id.
+    private func tableRow(forAgentId id: UUID?) -> Int? {
+        guard let id, let index = rows.firstIndex(where: { $0.id == id }) else { return nil }
+        return tableRow(forRowIndex: index)
+    }
+
+    /// The agent on a table row, or nil for a heading, a footer, or -1.
+    private func agentIdForTableRow(_ tableRow: Int) -> UUID? {
+        guard tableRow >= 0 else { return nil }
+        return item(at: tableRow)?.agentRow?.id
     }
 
     // MARK: - QA
@@ -2565,11 +2839,81 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
 
     @discardableResult
     func hoverRowForQA(id: UUID?) -> Bool {
-        guard let id else { setHovered(row: -1); return true }
-        guard let index = rows.firstIndex(where: { $0.id == id }),
-              let tableRow = tableRow(forRowIndex: index) else { return false }
-        setHovered(row: tableRow)
+        guard let id else { setHovered(agentId: nil); return true }
+        // Still resolved through the row maps rather than stored blind: a check
+        // that "hovers" an agent which is not on screen must fail, not silently
+        // arm a fill nobody can see.
+        guard rows.contains(where: { $0.id == id }), tableRow(forAgentId: id) != nil else { return false }
+        setHovered(agentId: id)
         return true
+    }
+
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.2-interaction-fill-ladder.md
+    /// The agent the pointer is on, as the view believes it — so a check can
+    /// assert hover CLEARED rather than infer it from a fill.
+    var hoveredAgentIdForQA: UUID? { hoveredAgentId }
+    /// The route-active agent under the name the ladder uses. `openAgentId` is
+    /// the one owner of the fact (see its note); this reads it back so a check
+    /// can name what it is asserting.
+    var routeActiveAgentIdForQA: UUID? { openAgentId }
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.4-focus-ring-and-floors.md
+    var keyboardFocusAgentIdForQA: UUID? { keyboardFocusAgentId }
+
+    /// Put the KEYBOARD's cursor on a row without moving the selection — the
+    /// state `⇧↓` leaves behind: a range selected, and one row of it the one
+    /// Return will act on.
+    ///
+    /// THE RING ONLY, deliberately. Production arms it from the real event
+    /// (`updateKeyboardFocusForSelection` reads `NSApp.currentEvent`), and a
+    /// headless probe cannot post a `.keyDown` that `NSTableView` will route
+    /// through its own `moveUp:`/`moveDown:` — so this is the seam, and what it
+    /// exercises is the fact under test: the ring is a treatment of its own, it
+    /// does not move or borrow the selection's fill, and a selection change that
+    /// drops this row takes the ring with it.
+    @discardableResult
+    func focusRowByKeyboardForQA(id: UUID?) -> Bool {
+        guard let id else { setKeyboardFocus(agentId: nil); return true }
+        guard tableRow(forAgentId: id) != nil else { return false }
+        setKeyboardFocus(agentId: id)
+        return true
+    }
+
+    /// Drop both transient treatments the way losing key does, so the "nothing is
+    /// left lit behind a window you switched away from" rule is assertable in a
+    /// headless probe (an offscreen `NSWindow` never posts `didResignKey`).
+    func resignKeyForQA() {
+        setHovered(agentId: nil)
+        setKeyboardFocus(agentId: nil)
+    }
+
+    /// Scroll the list by `points` and let hover re-derive, so the scroll half of
+    /// "hover survives scrolling" is exercised through the real notification path.
+    func scrollForQA(byPoints points: Double) {
+        let origin = scrollView.contentView.bounds.origin
+        scrollView.contentView.scroll(to: NSPoint(x: origin.x, y: origin.y + points))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        layoutForQA()
+    }
+
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.2-interaction-fill-ladder.md
+    /// Rebuild every row cell from the inputs as they stand right now.
+    ///
+    /// MEASURED NEED, not belt-and-braces. `redraw(tableRows:)` asks AppKit for an
+    /// incremental reload, and an offscreen probe window defers that reload
+    /// indefinitely — the cells the check then reads are the ones built before the
+    /// input changed, so a genuinely selected pair reads back as two resting rows
+    /// (`sidebar-ux-check.ladder…: a multi-selected pair resolved
+    /// sidebarResting/sidebarResting` on a table whose `selectedRowIndexes` really
+    /// did hold two). `reloadData(forRowIndexes:)` over every row rather than
+    /// `reloadData()`, because the second one EMPTIES the selection and the
+    /// selection is half of what is under test.
+    func rebuildRowsForQA() {
+        guard tableView.numberOfRows > 0 else { return }
+        cellsByRow.removeAll()
+        tableView.reloadData(
+            forRowIndexes: IndexSet(0..<tableView.numberOfRows),
+            columnIndexes: IndexSet(integer: 0))
+        layoutForQA()
     }
 
     /// Force the table to realise a cell for every row, so the accessors above
@@ -2844,6 +3188,19 @@ protocol AgentInboxRowCell: NSTableCellView {
                disclosure: RowDisclosure, rollup: ChildRollup?, isSelected: Bool,
                isInteracting: Bool, now: Date)
 
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.2-interaction-fill-ladder.md
+    /// The pointer's and the keyboard's facts about this row, set through their
+    /// OWN call rather than as three more parameters on `apply`.
+    ///
+    /// The split is the same one `showJumpHint` already makes and for the same
+    /// reason: `apply` paints what the agent IS — its words, its recession, its
+    /// indent — and the cell re-runs it from its stored `shown` tuple on every
+    /// appearance flip. Where the pointer is and which row Return will act on are
+    /// facts about the INPUT, they live on the card so they survive that re-run,
+    /// and threading them back through `apply` would make an appearance flip a
+    /// place hover state could be dropped.
+    func applyInteraction(_ interaction: RowInteraction)
+
     /// What the row's disclosure triangle does. Set by the list, which is the only
     /// thing that knows the fold state; a cell with `RowDisclosure.none` never calls
     /// it because it has no control to click.
@@ -2888,6 +3245,22 @@ protocol AgentInboxRowCell: NSTableCellView {
 /// row with no children in this list — most rows — and it draws nothing at all
 /// rather than a disabled control, which would put a dead glyph on every line of a
 /// list that has no orchestrator in it.
+// Ticket: docs/38-tickets/94-sidebar-native-ux/P1.2-interaction-fill-ladder.md
+// Ticket: docs/38-tickets/94-sidebar-native-ux/P1.4-focus-ring-and-floors.md
+/// What the pointer and the keyboard are doing to one row, as one value.
+///
+/// Selection is deliberately NOT in here: it is an `NSTableView` fact the table
+/// already owns and `apply` already carries. These three are the ones the list has
+/// to track itself — where the pointer is, which agent's tile is open, and which
+/// row Return will act on.
+struct RowInteraction: Equatable {
+    var isHovered = false
+    var isRouteActive = false
+    var hasKeyboardFocus = false
+
+    static let none = RowInteraction()
+}
+
 enum RowDisclosure: Equatable {
     case none
     case expanded
@@ -2972,7 +3345,8 @@ final class InboxJumpHintView: NSView, TokenThemed {
     init() {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.borderWidth = 1
+        // P1.3's shared hairline (was a 1pt literal).
+        layer?.borderWidth = LineWidth.hairline
         // `Radius.card`, NOT `Radius.pill`, for the reason `BranchChipNSView` already
         // records at its own radius: CALayer does not clamp a radius to half the
         // view's height, so 999 on a 15pt pill is undefined-looking geometry. Measured
@@ -3011,7 +3385,11 @@ final class InboxJumpHintView: NSView, TokenThemed {
     func applyTokens() {
         let theme = effectiveTokenTheme
         layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: theme)
-        layer?.borderColor = LineToken.border.color.cgColor(for: theme)
+        // P1.3: the ROLE, not the raw token — an overlay card that holds
+        // controls is a control boundary, and the role is what carries the 3.0
+        // line floor into the contrast gate. Same resolved value as the
+        // `LineToken.border` this line used to name, so no pixel moves.
+        layer?.borderColor = AgentLineRole.controlBoundary.color.cgColor(for: theme)
         label.textColor = TextToken.textPrimary.color.nsColor(in: self)
     }
 
@@ -3465,7 +3843,8 @@ final class InboxBulkActionBar: NSView, TokenThemed {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
-        layer?.borderWidth = 1
+        // P1.3's shared hairline (was a 1pt literal).
+        layer?.borderWidth = LineWidth.hairline
         layer?.cornerRadius = Radius.card
         isHidden = true
 
@@ -3570,7 +3949,11 @@ final class InboxBulkActionBar: NSView, TokenThemed {
     func applyTokens() {
         let theme = effectiveTokenTheme
         layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: theme)
-        layer?.borderColor = LineToken.border.color.cgColor(for: theme)
+        // P1.3: the ROLE, not the raw token — an overlay card that holds
+        // controls is a control boundary, and the role is what carries the 3.0
+        // line floor into the contrast gate. Same resolved value as the
+        // `LineToken.border` this line used to name, so no pixel moves.
+        layer?.borderColor = AgentLineRole.controlBoundary.color.cgColor(for: theme)
         countLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
         keptLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
     }
@@ -3655,7 +4038,8 @@ final class InboxUndoToast: NSView, TokenThemed {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
-        layer?.borderWidth = 1
+        // P1.3's shared hairline (was a 1pt literal).
+        layer?.borderWidth = LineWidth.hairline
         layer?.cornerRadius = Radius.card
         isHidden = true
 
@@ -3720,7 +4104,11 @@ final class InboxUndoToast: NSView, TokenThemed {
     func applyTokens() {
         let theme = effectiveTokenTheme
         layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: theme)
-        layer?.borderColor = LineToken.border.color.cgColor(for: theme)
+        // P1.3: the ROLE, not the raw token — an overlay card that holds
+        // controls is a control boundary, and the role is what carries the 3.0
+        // line floor into the contrast gate. Same resolved value as the
+        // `LineToken.border` this line used to name, so no pixel moves.
+        layer?.borderColor = AgentLineRole.controlBoundary.color.cgColor(for: theme)
         messageLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         undoButton.attributedTitle = NSAttributedString(
             string: "\(InboxUndoToast.separator) \(InboxUndoToast.undoTitle)",
@@ -3753,8 +4141,67 @@ final class InboxUndoToast: NSView, TokenThemed {
     }
 }
 
-/// The card one row's words sit on: a `tileBody` fill with a `border` outline,
-/// or `borderStrong` while the row is selected.
+// Ticket: docs/38-tickets/94-sidebar-native-ux/P1.4-focus-ring-and-floors.md
+/// The row's keyboard focus treatment: a hairline `focusRing` ring plus a soft
+/// glow of the same colour, hidden unless the row is the one Return will act on.
+///
+/// A SEPARATE VIEW rather than a border on the card, and that separation is the
+/// whole point of the packet pair. P1.1/P1.2 make the row's own perimeter
+/// permanently zero and reserve the card's surface for the interaction ladder,
+/// which is asserted structurally (`paintedBorderWidth == 0` in every state) —
+/// so the one line the row is still allowed to paint has to belong to something
+/// else, be TEMPORARY, and be at most `LineWidth.hairline`. All three are true
+/// of this view and none of them can be true of the card.
+///
+/// No animation, deliberately: `Reduce Motion` must suppress any focus
+/// animation without removing the cue, and the cheapest way to hold that
+/// promise for every reader is to have no animation to suppress. The cue is the
+/// ring, which appears and disappears in one frame.
+@MainActor
+final class InboxRowFocusRingView: NSView, TokenThemed {
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = Radius.card
+        // P1.3's shared hairline, not a literal: the sidebar's one remaining
+        // line width is a value `runSidebarSurfaceChecks` pins.
+        layer?.borderWidth = LineWidth.hairline
+        layer?.shadowOffset = .zero
+        layer?.shadowRadius = Space.s
+        layer?.shadowOpacity = Float(Opacity.receded)
+        applyTokens()
+    }
+
+    required init?(coder: NSCoder) { return nil }
+
+    func applyTokens() {
+        let theme = effectiveTokenTheme
+        let ring = AgentLineRole.focusRing.color.cgColor(for: theme)
+        layer?.borderColor = ring
+        // The glow is the same colour as the ring, so "soft glow" adds no
+        // second value to gate — and it is re-resolved HERE rather than in
+        // `init`, or an appearance flip would leave a light-theme glow on a
+        // dark row (the P1.9 stale-CGColor bug shape).
+        layer?.shadowColor = ring
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
+    }
+}
+
+// Ticket: docs/38-tickets/94-sidebar-native-ux/P1.1-remove-row-borders.md
+// Ticket: docs/38-tickets/94-sidebar-native-ux/P1.2-interaction-fill-ladder.md
+/// The surface one row's words sit on. SURFACE IS RESERVED FOR INTERACTION
+/// (`_DESIGN.md`): it paints no perimeter in any state, nothing at all at rest,
+/// and exactly one of `SidebarSurfaceRole`'s three fills while you are pointing
+/// at it, have it selected, or have its tile open.
+///
+/// P1.1 took the border away and P1.2 replaced what it was saying. Before them
+/// this was a `tileBody` fill with a `border` outline that became `borderStrong`
+/// while selected — one fill in every state, so an OUTLINE was the only signal
+/// the list had, and a grey box was painted around every idle row to carry it.
 ///
 /// A VIEW, not a layer on the cell — and not an `NSTableRowView` either. Both
 /// alternatives were tried and both are wrong for a gate reason:
@@ -3770,34 +4217,106 @@ final class InboxUndoToast: NSView, TokenThemed {
 /// A plain `NSView` is answerable for its own layer, has no sublayers but its
 /// own, and IS the background the labels inside it are measured against.
 final class AgentInboxCardView: NSView, TokenThemed {
+    /// The three interaction facts, held SEPARATELY. P3.5 collapsed hover,
+    /// selection and keyboard-active into one `isInteracting` test because all
+    /// three did the same one thing — clear the row's recession. P1.2 splits
+    /// them because they no longer do: each resolves to a different step of the
+    /// ladder, and "selected" and "hovered" and "route-active" have to be
+    /// distinguishable from each other, not merely from resting.
     var isSelected = false {
-        didSet { applyTokens() }
+        didSet { guard isSelected != oldValue else { return }; applyTokens() }
+    }
+    var isHovered = false {
+        didSet { guard isHovered != oldValue else { return }; applyTokens() }
+    }
+    /// The agent whose tile is open — the loudest step, because it answers
+    /// "where am I" from anywhere in the list.
+    var isRouteActive = false {
+        didSet { guard isRouteActive != oldValue else { return }; applyTokens() }
+    }
+    /// P1.4. Not part of the fill ladder at all: focus is a temporary ring, so a
+    /// keyboard-focused row and a merely selected row are distinguishable
+    /// WITHOUT either of them borrowing the other's fill.
+    var hasKeyboardFocus = false {
+        didSet {
+            guard hasKeyboardFocus != oldValue else { return }
+            focusRing.isHidden = !hasKeyboardFocus
+        }
+    }
+
+    private let focusRing = InboxRowFocusRingView()
+
+    /// Which step of `SidebarSurfaceRole` this row is on, loudest input first.
+    ///
+    /// ROUTE-ACTIVE OUTRANKS HOVER OUTRANKS SELECTION, which is the ladder's own
+    /// order (`SidebarSurfaceRole.rowEmphases` is quietest-first: selected 0.07 <
+    /// hover 0.08 < active 0.11). Resolving in the same order the fills are
+    /// ordered in is what makes "selection is quieter than hover" true of the
+    /// RENDERED row and not merely of the token table: pointing at a selected
+    /// row lifts it to hover rather than leaving it at the quieter step.
+    var surfaceRole: SidebarSurfaceRole {
+        if isRouteActive { return .active }
+        if isHovered { return .hover }
+        if isSelected { return .selected }
+        return .resting
     }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.cornerRadius = Radius.card
-        layer?.borderWidth = 1
+        // Rows never paint a perimeter: state is fill plus content (P1.1, and
+        // `_DESIGN.md`'s "Surface is reserved for interaction"). Assigned once
+        // and never again — there is no state that raises it, which is what
+        // `checkSidebarProbe` asserts over the live tree in both appearances.
+        layer?.borderWidth = 0
+
+        focusRing.translatesAutoresizingMaskIntoConstraints = false
+        focusRing.isHidden = true
+        addSubview(focusRing)
+        NSLayoutConstraint.activate([
+            focusRing.leadingAnchor.constraint(equalTo: leadingAnchor),
+            focusRing.trailingAnchor.constraint(equalTo: trailingAnchor),
+            focusRing.topAnchor.constraint(equalTo: topAnchor),
+            focusRing.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
         applyTokens()
     }
 
     required init?(coder: NSCoder) { return nil }
 
-    /// `borderStrong` is the P1.3 token for "focus and selection", so a selected
-    /// card is OUTLINED rather than tinted: a fill change would move every text
-    /// pair on the row onto an undocumented background, while the outline is a pair
-    /// P1.6 already gates at the 3.0 line floor.
+    /// One fill, resolved from the role — never a `LineToken` and never a border.
+    ///
+    /// `nil` at rest, not `panel`: "unfilled" has to be structurally true rather
+    /// than a colour that happens to match, because `UIProbeAppearance`'s
+    /// `ownedColorSlots` counts a painted fill and `UIProbeContrast` measures a
+    /// row's words against the nearest ancestor that paints one. With `nil` the
+    /// sidebar's own `panel` IS the row's background in both gates, which is
+    /// exactly what the design decision says a resting row shows.
     func applyTokens() {
         let theme = effectiveTokenTheme
-        layer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(for: theme)
-        layer?.borderColor = (isSelected ? LineToken.borderStrong : LineToken.border).color.cgColor(for: theme)
+        let role = surfaceRole
+        layer?.backgroundColor = role == .resting ? nil : role.color.cgColor(for: theme)
     }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         applyTokens()
     }
+
+    /// Every line and shadow this row paints, for the P1.1/P1.2/P1.3
+    /// assertions: the card's own perimeter (which must be zero in every
+    /// state), its shadow (which must be absent — a row may not communicate
+    /// state with one), and the focus ring's hairline.
+    var qaPaintedLines: [String: Double] {
+        [
+            "card.border": Double(layer?.borderWidth ?? 0),
+            "card.shadowOpacity": Double(layer?.shadowOpacity ?? 0),
+            "focusRing.border": Double(focusRing.layer?.borderWidth ?? 0),
+        ]
+    }
+
+    var qaIsFocusRingVisible: Bool { !focusRing.isHidden }
 }
 
 /// One row's words, on the card that carries them.
@@ -3989,6 +4508,13 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
 
     func showJumpHint(_ chord: String?) { jumpHint.show(chord) }
 
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.2-interaction-fill-ladder.md
+    func applyInteraction(_ interaction: RowInteraction) {
+        card.isHovered = interaction.isHovered
+        card.isRouteActive = interaction.isRouteActive
+        card.hasKeyboardFocus = interaction.hasKeyboardFocus
+    }
+
     @discardableResult
     func clickDisclosureForQA() -> Bool {
         guard !disclosureButton.isHidden else { return false }
@@ -4068,7 +4594,10 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
             ],
             labels: labels,
             paintedBorderWidth: card.layer.map { Double($0.borderWidth) },
-            resolvedFill: card.layer?.backgroundColor
+            resolvedFill: card.layer?.backgroundColor,
+            surfaceRole: card.surfaceRole,
+            paintedLines: card.qaPaintedLines,
+            isFocusRingVisible: card.qaIsFocusRingVisible
         )
     }
     var qaTitle: String { titleLabel.stringValue }
@@ -4264,6 +4793,13 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
 
     func showJumpHint(_ chord: String?) { jumpHint.show(chord) }
 
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.2-interaction-fill-ladder.md
+    func applyInteraction(_ interaction: RowInteraction) {
+        card.isHovered = interaction.isHovered
+        card.isRouteActive = interaction.isRouteActive
+        card.hasKeyboardFocus = interaction.hasKeyboardFocus
+    }
+
     @discardableResult
     func clickDisclosureForQA() -> Bool {
         guard !disclosureButton.isHidden else { return false }
@@ -4348,7 +4884,10 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
             ],
             labels: labels,
             paintedBorderWidth: card.layer.map { Double($0.borderWidth) },
-            resolvedFill: card.layer?.backgroundColor
+            resolvedFill: card.layer?.backgroundColor,
+            surfaceRole: card.surfaceRole,
+            paintedLines: card.qaPaintedLines,
+            isFocusRingVisible: card.qaIsFocusRingVisible
         )
     }
     var qaTitle: String { titleLabel.stringValue }
