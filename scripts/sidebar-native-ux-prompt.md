@@ -76,7 +76,23 @@ If this is a repair pass, address every blocking reviewer finding but do not cha
 out-of-scope suggestions. If the packet still conflicts with compiled reality, stop rather than
 inventing a second architecture.
 
-Your final nonblank line must be exactly one of:
+## THE LAST LINE — read this twice
+
+The harness reads **only the last non-blank line** of your output. It compares that one
+line, exactly, against two tokens. Anything else there — a summary bullet, a closing
+sentence, a note that you did not commit — is read as a malformed result, and **the
+entire pass is discarded: no review, no commit, the loop stops.** This has happened
+three times in this program, each time to a worker that had finished good work and then
+wrote one more helpful line under it.
+
+So: put your summary, your evidence, your witnesses and your caveats ABOVE. Then end.
+
+Your final non-blank line must be exactly one of:
 
 - `WORKER: READY`
 - `WORKER: BLOCKED <concrete reason>`
+
+`WORKER: READY` means the implementation is complete and the focused checks pass. It does
+**not** claim you committed or ran the full matrix — the harness does both, and you are
+forbidden from either, so do not add a line explaining that you did not. Nothing follows
+the token. No period, no bullet, no blank-line-then-postscript.
