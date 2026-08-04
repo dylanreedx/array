@@ -220,12 +220,42 @@ $(cat "$PROMPT_FILE")"
   write_status running "worker-pass-$pass-finished"
   [ "$rc" -eq 0 ] || return "$rc"
 
-  token="$(awk 'NF { line=$0 } END { print line }' "$output")"
-  case "$token" in
-    'WORKER: READY') return 0 ;;
-    'WORKER: BLOCKED '*) echo "$token" >&2; return 20 ;;
-    *) echo "malformed worker result: ${token:-empty}" >&2; return 21 ;;
-  esac
+  # Read the worker's verdict.
+  #
+  # This used to require the token to be the LAST non-blank line, which cost four
+  # stops on 2026-08-04: workers finished good implementations and then wrote a
+  # closing summary line under the token, or omitted it entirely, and the whole pass
+  # was discarded before review. Prompt wording did not fix it — one worker never
+  # emitted the token at all.
+  #
+  # So: find a line that is EXACTLY the token, anywhere, preferring the last such
+  # line. That keeps the signal precise — prose mentioning the token in a sentence
+  # still does not match — while tolerating a postscript.
+  #
+  # BLOCKED is checked first and independently: a worker that says it is blocked
+  # must never be read as ready because a stray READY appears earlier.
+  local blocked ready
+  blocked="$(grep -n '^WORKER: BLOCKED .\+$' "$output" | tail -1 | cut -d: -f2-)"
+  ready="$(grep -c '^WORKER: READY$' "$output")"
+  if [ -n "$blocked" ]; then
+    echo "$blocked" >&2
+    return 20
+  fi
+  if [ "$ready" -gt 0 ]; then
+    return 0
+  fi
+
+  # No verdict at all. The token is a convenience signal; the REAL gates are the
+  # independent review and the final matrix, both of which still run. So if the
+  # worker changed tracked files, treat that as an implicit ready and say so loudly
+  # in the log — the review will judge the work on its merits either way. If it
+  # changed nothing, there is genuinely nothing to review.
+  if [ -n "$(git status --porcelain -- Sources docs scripts 2>/dev/null | grep -v '^??')" ]; then
+    echo "worker emitted no verdict token; tracked changes present, proceeding to review (PROTOCOL VIOLATION, recorded)" >&2
+    return 0
+  fi
+  echo "worker emitted no verdict token and changed nothing: $(awk 'NF { line=$0 } END { print line }' "$output")" >&2
+  return 21
 }
 
 run_review() {
