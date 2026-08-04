@@ -2638,6 +2638,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
 
     // MARK: - QA
 
+    /// Pin the list's scroller style for a measurement probe.
+    ///
+    /// A legacy scroller reserves a permanent lane and narrows the content width every
+    /// measurement is taken against, so a machine whose "Show scroll bars" preference
+    /// is Always measures a different sidebar than one set to When scrolling. The probe
+    /// pins it; PRODUCTION MUST NOT. An earlier attempt set `.overlay` on the shipped
+    /// scroll view for this reason, which silently overrode the user's own preference
+    /// to make a check deterministic — the determinism was real, the place was wrong.
+    func pinScrollerStyleForQA() {
+        scrollView.scrollerStyle = .overlay
+    }
+
+
     /// How many AGENT rows the table is drawing. Measured off the table (P4.7 and
     /// P4.8 each add a row to it that is not an agent) rather than reported from
     /// `rows`, so it still witnesses that the model reached the screen.
@@ -4732,6 +4745,7 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         stateLabel.font = .token(.label)
 
         elapsedLabel.font = .token(.captionMono)
+        elapsedLabel.lineBreakMode = .byClipping
 
         metaLabel.font = .token(.label)
         metaLabel.lineBreakMode = .byTruncatingTail
@@ -4857,6 +4871,11 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
             // rather than as an elided string.
             AgentInboxCellView.yieldingMinimumWidth(projectLabel, .caption),
             titleLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: AgentInboxCellView.minimumTextWidth(.title)),
+            // The duration is a column, not an intrinsic-width label. Its lane is
+            // measured from every widest form the shared formatter can emit and
+            // includes the NSTextField cell inset, so a longer run cannot take
+            // points from the status or project columns.
+            elapsedLabel.widthAnchor.constraint(equalToConstant: AgentInboxCellView.elapsedColumnWidth),
         ])
         let metaMinimumWidth = AgentInboxCellView.yieldingMinimumWidth(metaLabel, .label)
         self.metaMinimumWidth = metaMinimumWidth
@@ -5324,16 +5343,25 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         return "\(BranchChipNSView.branchGlyph) \(branch)"
     }
 
-    /// `45s` / `4m` / `2h11m`. Whole units only: a turn's duration is glanced at,
-    /// and a seconds field on an hour-long run is noise that also makes the label
-    /// reflow every second — which is what `.captionMono` is holding still for.
+    /// The one shared duration vocabulary used by cards, parked rows, the tile
+    /// header and future phone payloads. A negative optional is absent from a row
+    /// (it is not a real elapsed fact); malformed finite/infinite values are made
+    /// safe by `AgentElapsedFormatter` when a caller has a non-negative value.
     static func elapsedText(_ elapsed: TimeInterval?) -> String? {
         guard let elapsed, elapsed >= 0 else { return nil }
-        let seconds = Int(elapsed.rounded(.down))
-        if seconds < 60 { return "\(seconds)s" }
-        let minutes = seconds / 60
-        if minutes < 60 { return "\(minutes)m" }
-        return "\(minutes / 60)h\(minutes % 60)m"
+        return AgentElapsedFormatter.elapsedLabel(elapsed)
+    }
+
+    /// Width of the card's elapsed column, measured with the exact caption-mono
+    /// font and the same 4pt NSTextField cell inset used by the drawable-width
+    /// QA seam. The formatter owns the candidate labels; the AppKit layer only
+    /// measures them.
+    static var elapsedColumnWidth: Double {
+        let font = NSFont.token(.captionMono)
+        return AgentElapsedFormatter.columnLabels.map { label in
+            Double(ceil((label as NSString).size(withAttributes: [.font: font]).width))
+                + Metrics.cellTextInset
+        }.max() ?? Metrics.cellTextInset
     }
 
     var qaAgentID: UUID? { shown?.row.id }
@@ -5456,6 +5484,7 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         branchLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         timeLabel.font = .token(.captionMono)
+        timeLabel.lineBreakMode = .byClipping
         timeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         disclosureButton.target = self
@@ -5493,6 +5522,10 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
             // a required floor next to them is what breaks a required constraint.
             titleLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: AgentInboxCellView.minimumTextWidth(.title)),
             AgentInboxCellView.yieldingMinimumWidth(branchLabel, .label),
+            // Parked rows share their line with relative time. Keep that lane
+            // fixed from the shared formatter's widest relative forms so the
+            // name never changes width merely because the clock advanced.
+            timeLabel.widthAnchor.constraint(equalToConstant: AgentInboxSlimCellView.relativeTimeColumnWidth),
         ])
 
         // P3.10: an overlay here too — a parked row is one line, so a pill in the
@@ -5622,13 +5655,25 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         return "\(BranchChipNSView.branchGlyph) \(branch)"
     }
 
+    /// Width of the parked-row time column, measured for both suffix/prefix
+    /// forms from the shared formatter's own candidate labels and the exact
+    /// caption-mono font. The 4pt cell inset is part of the lane.
+    static var relativeTimeColumnWidth: Double {
+        let font = NSFont.token(.captionMono)
+        let labels = AgentElapsedFormatter.columnLabels.flatMap { ["\($0) ago", "in \($0)"] }
+        return labels.map { label in
+            Double(ceil((label as NSString).size(withAttributes: [.font: font]).width))
+                + Metrics.cellTextInset
+        }.max() ?? Metrics.cellTextInset
+    }
+
     /// How long ago the work stopped, or how long until a snooze is up.
     ///
-    /// In `AgentInboxCellView.elapsedText`'s units (`45s` / `4m` / `2h11m`), reused
-    /// rather than reimplemented, so a duration means the same thing on a card and
-    /// on the row it collapses into. Empty for a lifecycle with no time to show and
-    /// for a distance that has gone negative — an overdue snooze is P4.6's raised
-    /// hand, not a row for this view to label "in -3m".
+    /// In `AgentInboxCellView.elapsedText`'s units, reused rather than
+    /// reimplemented, so a duration means the same thing on a card and on the row
+    /// it collapses into. Empty for a lifecycle with no time to show and for a
+    /// distance that has gone negative — an overdue snooze is P4.6's raised hand,
+    /// not a row for this view to label "in -3m".
     static func relativeText(for lifecycle: InboxLifecycle, now: Date) -> String {
         switch lifecycle {
         case .settled(let at):

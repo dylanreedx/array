@@ -369,6 +369,11 @@ enum UIProbeGeometry {
                 width, host.bounds.width, host.bounds.height, inbox.bounds.width, inbox.bounds.height
             ))
         }
+        // Pin the scroller before any content is applied: a legacy scroller reserves a
+        // lane and narrows every width this probe measures, so leaving it to the
+        // machine's preference makes the truncation table machine-dependent. The
+        // shipped view deliberately does NOT do this — see `pinScrollerStyleForQA`.
+        inbox.pinScrollerStyleForQA()
         return SidebarProbeHost(window: window, host: host, inbox: inbox)
     }
 
@@ -927,7 +932,11 @@ enum UIProbeGeometry {
         let needs = AgentInboxCellView.RowFitNeeds(
             project: AgentInboxCellView.measuredTextWidth("continuum", .caption),
             state: AgentInboxCellView.measuredTextWidth("Working", .label),
-            elapsed: AgentInboxCellView.measuredTextWidth("162h21m", .captionMono),
+            // Keep the old three-digit-hour fixture's duration, but measure the
+            // bounded vocabulary it now emits (`6d`) rather than a second legacy
+            // elapsed string.
+            elapsed: AgentInboxCellView.measuredTextWidth(
+                AgentElapsedFormatter.elapsedLabel(162 * 3_600 + 21 * 60), .captionMono),
             title: AgentInboxCellView.measuredTextWidth("pi", .title),
             disclosure: 0)
         let needsFull = needs.metaBandNeed(elapsed: true, project: true)
@@ -1863,6 +1872,164 @@ enum UIProbeGeometry {
         return asserted
     }
 
+    // MARK: - P2.5 — one elapsed vocabulary and fixed lanes
+
+    private static func measuredElapsedNeed(_ text: String) -> Double {
+        let font = NSFont.token(.captionMono)
+        return Double(ceil((text as NSString).size(withAttributes: [.font: font]).width))
+            + Metrics.cellTextInset
+    }
+
+    private static func checkElapsedFormatterAndColumns() throws -> Int {
+        let day = TimeInterval(86_400)
+        let cases: [(TimeInterval, String)] = [
+            (0, "0s"),
+            (59, "59s"),
+            (60, "1m"),
+            (65, "1m 5s"),
+            (3_599, "59m 59s"),
+            (3_600, "1h 0m"),
+            (86_399, "23h 59m"),
+            (86_400, "1d"),
+            (6 * day + 21 * 3_600 + 5 * 60, "6d"),
+            (999 * day, "999d"),
+            (1_000 * day, ">999d"),
+            (-1, "0s"),
+            (.infinity, "0s"),
+            (-.infinity, "0s"),
+            (.nan, "0s"),
+        ]
+        var asserted = 0
+        for (seconds, expected) in cases {
+            let actual = AgentElapsedFormatter.elapsedLabel(seconds)
+            guard actual == expected else {
+                throw fail("sidebar-ux-check.elapsed: \(seconds)s formatted as '\(actual)', expected '\(expected)'")
+            }
+            asserted += 1
+        }
+
+        let widestNeed = AgentElapsedFormatter.columnLabels.map(measuredElapsedNeed).max() ?? 0
+        guard AgentElapsedFormatter.columnLabels.contains("59m 59s"),
+              AgentElapsedFormatter.columnLabels.contains("23h 59m"),
+              AgentElapsedFormatter.columnLabels.contains(">999d"),
+              widestNeed > 0 else {
+            throw fail("sidebar-ux-check.elapsed: columnLabels do not cover the formatter's bounded widest forms")
+        }
+        for (_, expected) in cases {
+            guard measuredElapsedNeed(expected) <= widestNeed + 0.01 else {
+                throw fail("sidebar-ux-check.elapsed: formatter emitted '\(expected)' wider than its fixed column (need \(measuredElapsedNeed(expected))pt, lane \(widestNeed)pt)")
+            }
+            asserted += 1
+        }
+
+        let epoch = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let now = epoch.addingTimeInterval(100_000)
+        let cardID = UUID(uuidString: "5B000000-0000-4000-8000-000000000001")!
+        let slimID = UUID(uuidString: "5B000000-0000-4000-8000-000000000002")!
+        func card(elapsed: TimeInterval) -> AgentInboxRow {
+            AgentInboxRow(
+                id: cardID, title: "Elapsed name", projectName: "continuum",
+                state: .working, elapsed: elapsed, variant: .card, createdAt: epoch)
+        }
+        func slim(endedAt: Date) -> AgentInboxRow {
+            AgentInboxRow(
+                id: slimID, title: "Elapsed name", state: .ready,
+                lifecycle: .settled(at: endedAt), variant: .slim, createdAt: epoch)
+        }
+        let widths: [CGFloat] = [
+            CGFloat(WorkspaceSidebarConfig.minWidth),
+            CGFloat(WorkspaceSidebarConfig.defaultWidth),
+            320,
+        ]
+        let height = CGFloat((AgentInboxView.rowHeight + AgentInboxView.scopeControlHeight + 160).rounded(.up))
+
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            NSApp?.appearance = NSAppearance(named: appearanceName)
+            for width in widths {
+                let cardProbe = try makeSidebarProbeHost(
+                    width: width, height: height, appearanceName: appearanceName)
+                cardProbe.inbox.reload(rows: [card(elapsed: 65)])
+                cardProbe.inbox.layoutForQA()
+                cardProbe.host.layoutSubtreeIfNeeded()
+                cardProbe.inbox.layoutForQA()
+                guard let shortCard = cardProbe.inbox.qaRowGeometriesForQA.first,
+                      let shortElapsed = shortCard.labels.first(where: { $0.element == "elapsed" }),
+                      let shortTitle = shortCard.labels.first(where: { $0.element == "title" }),
+                      !shortElapsed.isHidden, !shortTitle.isHidden else {
+                    throw fail("sidebar-ux-check.elapsed@\(Int(width))pt.\(appearanceName.rawValue): card elapsed/name witness did not materialize")
+                }
+                let shortElapsedWidth = shortElapsed.frame.width
+                guard shortElapsed.drawableWidth + 0.5 >= shortElapsed.neededWidth,
+                      Double(shortElapsed.frame.width) + 0.5 >= AgentInboxCellView.elapsedColumnWidth else {
+                    throw fail(String(format: "sidebar-ux-check.elapsed@%.0fpt.%@: row elapsed string need %.1fpt, drawable %.1fpt, fixed lane %.1fpt",
+                                       width, appearanceName.rawValue, shortElapsed.neededWidth,
+                                       shortElapsed.drawableWidth, AgentInboxCellView.elapsedColumnWidth))
+                }
+                cardProbe.inbox.reload(rows: [card(elapsed: 86_399)])
+                cardProbe.inbox.layoutForQA()
+                cardProbe.host.layoutSubtreeIfNeeded()
+                cardProbe.inbox.layoutForQA()
+                guard let longCard = cardProbe.inbox.qaRowGeometriesForQA.first,
+                      let longElapsed = longCard.labels.first(where: { $0.element == "elapsed" }),
+                      let longTitle = longCard.labels.first(where: { $0.element == "title" }),
+                      !longElapsed.isHidden, !longTitle.isHidden else {
+                    throw fail("sidebar-ux-check.elapsed@\(Int(width))pt.\(appearanceName.rawValue): long card elapsed/name witness did not materialize")
+                }
+                guard longElapsed.drawableWidth + 0.5 >= longElapsed.neededWidth,
+                      Double(longElapsed.frame.width) + 0.5 >= AgentInboxCellView.elapsedColumnWidth else {
+                    throw fail(String(format: "sidebar-ux-check.elapsed@%.0fpt.%@: long elapsed string need %.1fpt, drawable %.1fpt, fixed lane %.1fpt",
+                                       width, appearanceName.rawValue, longElapsed.neededWidth,
+                                       longElapsed.drawableWidth, AgentInboxCellView.elapsedColumnWidth))
+                }
+                guard abs(shortElapsedWidth - longElapsed.frame.width) <= 0.5 else {
+                    throw fail("sidebar-ux-check.elapsed@\(Int(width))pt.\(appearanceName.rawValue): elapsed lane moved from \(shortElapsedWidth)pt to \(longElapsed.frame.width)pt")
+                }
+                guard abs(shortTitle.drawableWidth - longTitle.drawableWidth) <= 0.5 else {
+                    throw fail("sidebar-ux-check.elapsed@\(Int(width))pt.\(appearanceName.rawValue): name drawable width changed from \(shortTitle.drawableWidth)pt to \(longTitle.drawableWidth)pt when only elapsed changed")
+                }
+                asserted += 4
+
+                let slimProbe = try makeSidebarProbeHost(
+                    width: width, height: height, appearanceName: appearanceName)
+                slimProbe.inbox.clock = { now }
+                slimProbe.inbox.reload(rows: [slim(endedAt: now)])
+                slimProbe.inbox.layoutForQA()
+                slimProbe.host.layoutSubtreeIfNeeded()
+                slimProbe.inbox.layoutForQA()
+                guard let shortSlim = slimProbe.inbox.qaRowGeometriesForQA.first,
+                      let shortTime = shortSlim.labels.first(where: { $0.element == "time" }),
+                      let shortSlimTitle = shortSlim.labels.first(where: { $0.element == "title" }),
+                      !shortTime.isHidden, !shortSlimTitle.isHidden else {
+                    throw fail("sidebar-ux-check.elapsed.slim@\(Int(width))pt.\(appearanceName.rawValue): row has no live time/name labels")
+                }
+                slimProbe.inbox.reload(rows: [slim(endedAt: now.addingTimeInterval(-3_599))])
+                slimProbe.inbox.layoutForQA()
+                slimProbe.host.layoutSubtreeIfNeeded()
+                slimProbe.inbox.layoutForQA()
+                guard let longSlim = slimProbe.inbox.qaRowGeometriesForQA.first,
+                      let longTime = longSlim.labels.first(where: { $0.element == "time" }),
+                      let longSlimTitle = longSlim.labels.first(where: { $0.element == "title" }),
+                      !longTime.isHidden, !longSlimTitle.isHidden else {
+                    throw fail("sidebar-ux-check.elapsed.slim@\(Int(width))pt.\(appearanceName.rawValue): long relative-time witness did not materialize")
+                }
+                guard longTime.text == "59m 59s ago",
+                      longTime.drawableWidth + 0.5 >= longTime.neededWidth,
+                      Double(longTime.frame.width) + 0.5 >= AgentInboxSlimCellView.relativeTimeColumnWidth else {
+                    throw fail(String(format: "sidebar-ux-check.elapsed.slim@%.0fpt.%@: row rendered '%@' with need %.1fpt, drawable %.1fpt, fixed lane %.1fpt",
+                                       width, appearanceName.rawValue, longTime.text,
+                                       longTime.neededWidth, longTime.drawableWidth,
+                                       AgentInboxSlimCellView.relativeTimeColumnWidth))
+                }
+                guard abs(shortTime.frame.width - longTime.frame.width) <= 0.5,
+                      abs(shortSlimTitle.drawableWidth - longSlimTitle.drawableWidth) <= 0.5 else {
+                    throw fail("sidebar-ux-check.elapsed.slim@\(Int(width))pt.\(appearanceName.rawValue): name drawable width changed when only relative time changed")
+                }
+                asserted += 3
+            }
+        }
+        return asserted
+    }
+
     /// P0.2's additive sidebar leg. It deliberately observes today's paint rather
     /// than blessing the later surface, truncation, or row-height decisions: those
     /// packets consume these live accessors and tighten the assertion in their own
@@ -1957,6 +2124,7 @@ enum UIProbeGeometry {
         // would let the ladder be satisfied by declaring three cases and using
         // one.
         let tierAssertions = try checkSidebarFitTierLadder()
+        let elapsedAssertions = try checkElapsedFormatterAndColumns()
         // Both ENDS of the ladder are reached by real rows at shipping widths. The
         // middle rung is reached too, at a width derived from a row's own
         // measurements inside `checkSidebarFitTierLadder` — see the note there for
@@ -1970,6 +2138,7 @@ enum UIProbeGeometry {
             totalCells, rows.count, totalLabels, totalTruncated, LineWidth.hairline,
             ladderAssertions, tierAssertions
         ))
+        print("UIProbeGeometry: elapsed formatter table and fixed sidebar/tile column held in \(elapsedAssertions) live assertions")
     }
 
     // MARK: - P0.4 — the inbox truncation gate at the widths that ship
@@ -2054,12 +2223,13 @@ enum UIProbeGeometry {
     ///
     /// TWO ENTRIES HERE ARE NOT P2.1's: `row50` and `row51` are the corpus's only
     /// SLIM rows, and a slim row is one line holding four things — it has no bands
-    /// to split and no tier to step down. `row51`'s three widths come from a time
-    /// label the gate renders against an unpinned clock (`--sidebar-ux-check` pins
-    /// it, this gate does not), which is P2.5's finding and P2.5's to heal. They
-    /// are listed here rather than in `sacrificedByOrder` because they are names,
-    /// not sacrifices; the gate's name rule and `expectRowBandsAndSacrificeOrder`
-    /// both scope themselves to CARD rows for exactly that reason.
+    /// to split and no tier to step down. Their relative-time lanes are measured
+    /// separately from the shared formatter and the gate pins `LabFixtures.inboxNow`,
+    /// so these names record real fixed-lane truncation rather than a machine-date
+    /// artifact. They are listed here rather than in `sacrificedByOrder` because
+    /// they are names, not sacrifices; the gate's name rule and
+    /// `expectRowBandsAndSacrificeOrder` both scope themselves to CARD rows for
+    /// exactly that reason.
     private static let namesLongerThanTheRow: Set<String> = [
         "row14.title@min", "row16.title@min", "row17.title@min", "row18.title@min", "row19.title@min",
         "row20.title@min", "row21.title@min", "row22.title@min", "row23.title@min", "row24.title@min",
@@ -2067,7 +2237,8 @@ enum UIProbeGeometry {
         "row30.title@min", "row31.title@min", "row32.title@min", "row33.title@min", "row34.title@min",
         "row35.title@min", "row36.title@min", "row37.title@min", "row38.title@min", "row39.title@min",
         "row4.title@min", "row40.title@min", "row41.title@min", "row42.title@min", "row43.title@min",
-        "row44.title@min", "row47.title@min", "row50.title@min", "row51.title@default", "row51.title@min",
+        "row44.title@min", "row47.title@min", "row50.title@default", "row50.title@min", "row50.title@wide",
+        "row51.title@default", "row51.title@min",
     ]
 
     /// What gave way so the name did not have to, keyed the same way. Every
@@ -2100,9 +2271,16 @@ enum UIProbeGeometry {
         "row33.branch@min", "row34.branch@min", "row35.branch@min", "row36.branch@min", "row37.branch@min",
         "row38.branch@min", "row39.branch@min", "row40.branch@min", "row41.branch@min", "row42.branch@min",
         "row43.branch@min", "row44.branch@min", "row46.branch@min", "row47.branch@min",
-        "row50.branch@min", "row51.branch@default", "row51.branch@min", "row51.branch@wide",
+        "row50.branch@default", "row50.branch@min", "row50.branch@wide",
+        "row51.branch@default", "row51.branch@min",
     ]
 
+    /// P2.5 DELTA: the four `row50` keys at default/wide are real slim-row
+    /// elisions from reserving the formatter-sized relative-time lane (that row's
+    /// pinned value is `in 3h 45m`); they are not a card-probe artifact. The old
+    /// `row51.branch@wide` key is deliberately absent: row51 settles at epoch+63m
+    /// while `LabFixtures.inboxNow` is epoch+75m, so the pinned value is `12m ago`,
+    /// not the machine-date `~993d` value the unpinned gate used to measure.
     /// What may truncate today: the two recorded sets and nothing else.
     private static var expectedSidebarTruncations: Set<String> {
         namesLongerThanTheRow.union(sacrificedByOrder)
@@ -2135,7 +2313,12 @@ enum UIProbeGeometry {
                 let probe = try makeSidebarProbeHost(
                     width: gate.width, height: probeHeight, appearanceName: appearanceName
                 )
-                probe.host.layoutSubtreeIfNeeded()
+                // Match the materialization contract used by the live sidebar
+                // leg: pin the relative-time clock and open the shelf BEFORE
+                // applying rows. Applying into a closed/offscreen shelf builds
+                // no parked cells and makes this gate pass vacuously.
+                probe.inbox.clock = { LabFixtures.inboxNow }
+                probe.inbox.toggleShelf()
                 probe.inbox.reload(rows: rows)
                 probe.inbox.layoutForQA()
                 probe.host.layoutSubtreeIfNeeded()
@@ -2256,10 +2439,63 @@ enum UIProbeGeometry {
                   name.minX >= 0, header.qaName == longName else {
                 throw fail("agent header: name label escaped its lane at \(Int(width))pt — truncation must stay inside the shell")
             }
+            // `apply` is a live view entry point and stamps its first display from
+            // the wall clock. Drive the same timer seam to the presenter's pinned
+            // 65-second value before measuring, so this offscreen assertion is not
+            // a machine-date probe.
+            header.qaTick(now: Date(timeIntervalSince1970: 165))
+            header.layoutSubtreeIfNeeded()
+            guard let renderedElapsed = header.qaElapsed,
+                  let elapsedFrame = header.qaElapsedFrame else {
+                throw fail("agent header: working presentation did not materialize its elapsed lane at \(Int(width))pt")
+            }
+            let renderedNeed = measuredElapsedNeed(renderedElapsed)
+            guard renderedElapsed == AgentElapsedFormatter.prefixedLabel(65),
+                  Double(elapsedFrame.width) + 0.5 >= renderedNeed else {
+                throw fail(String(format: "sidebar-ux-check.elapsed.header@%.0fpt: tile rendered '%@' for 65.0s, need %.1fpt drawable width but got %.1fpt",
+                                   width, renderedElapsed, renderedNeed, elapsedFrame.width))
+            }
+            // THE WIDEST RENDERED FORM, not just a short one. Every case this leg drove
+            // was 7 glyphs (`· 1m 5s`, `· >999d`), which a lane sized from the BARE
+            // forms also fits — so attempt 1's exact regression (a 43pt lane against a
+            // 49-55pt need, clipped with no ellipsis) passed this assertion. Tick to a
+            // 9-glyph form so the lane must be sized from what it RENDERS.
+            for (interval, expected) in [(86_399.0, "23h 59m"), (3_599.0, "59m 59s")] {
+                header.qaTick(now: Date(timeIntervalSince1970: interval + 100))
+                header.layoutSubtreeIfNeeded()
+                guard let wide = header.qaElapsed, let wideFrame = header.qaElapsedFrame else {
+                    throw fail("agent header: no elapsed lane for the widest rendered form at \(Int(width))pt")
+                }
+                let wideNeed = measuredElapsedNeed(wide)
+                guard wide == AgentElapsedFormatter.prefixedLabel(interval) else {
+                    throw fail("agent header: expected the formatter to emit '\(expected)' for \(interval)s, rendered '\(wide)'")
+                }
+                guard Double(wideFrame.width) + 0.5 >= wideNeed else {
+                    throw fail(String(format: "ui-geometry-check.elapsed.header@%.0fpt: the lane is %.1fpt but rendering '%@' needs %.1fpt — size the lane from the RENDERED string, prefix included (P2.5)",
+                                       width, wideFrame.width, wide, wideNeed))
+                }
+            }
+            header.qaTick(now: Date(timeIntervalSince1970: 165))
+            header.layoutSubtreeIfNeeded()
             let elapsedBefore = header.qaElapsedFrame
             header.qaTick(now: Date(timeIntervalSince1970: 226))
+            header.layoutSubtreeIfNeeded()
             guard header.qaElapsedFrame == elapsedBefore else {
                 throw fail("agent header: a timer tick moved the elapsed label frame — ticks must not relayout")
+            }
+            guard let tickElapsed = header.qaElapsed,
+                  let tickFrame = header.qaElapsedFrame,
+                  Double(tickFrame.width) + 0.5 >= measuredElapsedNeed(tickElapsed) else {
+                throw fail("agent header: a timer tick rendered an elapsed form wider than its fixed drawable lane")
+            }
+            let widestHeaderSeconds = 1_000 * TimeInterval(86_400)
+            header.qaTick(now: Date(timeIntervalSince1970: 100 + widestHeaderSeconds))
+            header.layoutSubtreeIfNeeded()
+            guard let widestElapsed = header.qaElapsed,
+                  let widestFrame = header.qaElapsedFrame,
+                  widestElapsed == AgentElapsedFormatter.prefixedLabel(widestHeaderSeconds),
+                  Double(widestFrame.width) + 0.5 >= measuredElapsedNeed(widestElapsed) else {
+                throw fail("agent header: bounded widest elapsed form exceeded its rendered fixed lane")
             }
             guard header.qaTimerIsActive else {
                 throw fail("agent header: working state did not keep its one-second timer")

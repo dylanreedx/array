@@ -1,5 +1,75 @@
 import Foundation
 
+// Ticket: docs/38-tickets/94-sidebar-native-ux/P2.5-elapsed-formatter-column.md
+/// One duration vocabulary for every agent surface. The formatter deliberately
+/// keeps seconds only when they carry information, keeps hours in a two-digit
+/// minute form, and switches to days before the number can become an ever-growing
+/// sidebar column. The overflow spelling remains bounded while still saying that
+/// the duration is beyond the displayed day range.
+public enum AgentElapsedFormatter {
+    public static let headerPrefix = "· "
+    private static let minute: TimeInterval = 60
+    private static let hour: TimeInterval = 3_600
+    private static let day: TimeInterval = 86_400
+    private static let maximumDisplayedDays = 999
+
+    /// The only widest forms the formatter can emit. Keeping these samples next
+    /// to the formatter makes AppKit lanes consumers of the vocabulary rather
+    /// than owners of a second hand-maintained duration list.
+    public static let columnLabels = ["59m 59s", "23h 59m", ">999d"]
+
+    /// Every duration that sits on a branch boundary of `elapsedLabel`, so a lane can
+    /// be sized from what the formatter ACTUALLY emits rather than from a list someone
+    /// has to remember to update. `columnLabels` above is the human-readable statement
+    /// of the same set; `runSidebarUXChecks` asserts the two agree, which is what keeps
+    /// the list honest instead of decorative.
+    public static let widestFormProbes: [TimeInterval] = [
+        59,          // "59s"      — last sub-minute
+        3_599,       // "59m 59s"  — last sub-hour, and one of the two widest
+        86_399,      // "23h 59m"  — last sub-day, the other widest
+        86_400,      // "1d"
+        999 * 86_400 + 1,  // ">999d"  — the bounded-range marker
+    ]
+
+    public static var prefixedColumnLabels: [String] {
+        columnLabels.map { "\(headerPrefix)\($0)" }
+    }
+
+    public static func prefixedLabel(_ seconds: TimeInterval) -> String {
+        "\(headerPrefix)\(elapsedLabel(seconds))"
+    }
+
+    /// Format a duration for a human glance. Negative, NaN and infinite values
+    /// are intentionally safe: a malformed clock cannot crash a surface or
+    /// manufacture a giant label. Past 999 days the `>` marker preserves the
+    /// useful fact that the value exceeds the bounded display range.
+    public static func elapsedLabel(_ seconds: TimeInterval) -> String {
+        guard seconds.isFinite else { return "0s" }
+        let wholeSeconds = min(
+            max(0, seconds.rounded(.down)),
+            TimeInterval(maximumDisplayedDays + 1) * day)
+        let s = Int(wholeSeconds)
+        if s < Int(minute) { return "\(s)s" }
+
+        let minutes = s / Int(minute)
+        let remainderSeconds = s % Int(minute)
+        if s < Int(hour) {
+            return remainderSeconds == 0
+                ? "\(minutes)m"
+                : "\(minutes)m \(remainderSeconds)s"
+        }
+
+        let hours = s / Int(hour)
+        let remainderMinutes = (s % Int(hour)) / Int(minute)
+        if s < Int(day) {
+            return "\(hours)h \(remainderMinutes)m"
+        }
+
+        let days = s / Int(day)
+        return days > maximumDisplayedDays ? ">\(maximumDisplayedDays)d" : "\(days)d"
+    }
+}
+
 // Ticket: docs/38-tickets/90-agent-ux/P3.1-inbox-row-model.md
 //
 // ONE PURE VALUE PER ROW, so the list view is dumb.

@@ -39,7 +39,9 @@ final class AgentTileHeaderView: NSView, TokenThemed {
         stateLabel.font = .token(.label)
         elapsedLabel.font = .token(.captionMono)
         elapsedLabel.alignment = .left
+        elapsedLabel.lineBreakMode = .byClipping
         elapsedLabel.setContentHuggingPriority(.required, for: .horizontal)
+        elapsedLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         overflowButton.target = self
         overflowButton.action = #selector(showActions(_:))
@@ -69,6 +71,7 @@ final class AgentTileHeaderView: NSView, TokenThemed {
             row.bottomAnchor.constraint(equalTo: bottomAnchor),
             stateDot.widthAnchor.constraint(equalToConstant: 6),
             stateDot.heightAnchor.constraint(equalToConstant: 6),
+            elapsedLabel.widthAnchor.constraint(equalToConstant: Self.elapsedColumnWidth),
             overflowButton.widthAnchor.constraint(equalToConstant: 28),
             overflowButton.heightAnchor.constraint(equalToConstant: 28),
         ])
@@ -123,6 +126,23 @@ final class AgentTileHeaderView: NSView, TokenThemed {
         elapsedTimer = timer
     }
 
+    /// The header lane measures the rendered prefixed label, not the bare
+    /// formatter value. The separator is decorative on screen but still occupies
+    /// drawable width, so leaving it out would clip the timer around ten minutes.
+    private static var elapsedColumnWidth: CGFloat {
+        let font = NSFont.token(.captionMono)
+        // Measured over what the formatter EMITS at every branch boundary, prefix
+        // included — not over a hand-kept list. An earlier attempt measured the bare
+        // forms and clipped a nine-glyph string; the list it measured was also 8pt
+        // short of the rendered need, which is exactly the drift a derived set removes.
+        let width = AgentElapsedFormatter.widestFormProbes.map { seconds in
+            Double(ceil((AgentElapsedFormatter.prefixedLabel(seconds) as NSString)
+                .size(withAttributes: [.font: font]).width))
+                + Metrics.cellTextInset
+        }.max() ?? Metrics.cellTextInset
+        return CGFloat(width)
+    }
+
     private func updateElapsed(now: Date) {
         guard let current = presentation,
               let start = current.startedAt else {
@@ -130,19 +150,17 @@ final class AgentTileHeaderView: NSView, TokenThemed {
             elapsedLabel.isHidden = true
             return
         }
-        let seconds = max(0, Int(now.timeIntervalSince(start)))
-        elapsedLabel.stringValue = "· \(Self.elapsedText(seconds))"
+        let interval = now.timeIntervalSince(start)
+        let seconds = interval.isFinite ? max(0, Int(interval.rounded(.down))) : 0
+        let label = AgentElapsedFormatter.elapsedLabel(interval)
+        elapsedLabel.stringValue = AgentElapsedFormatter.headerPrefix + label
         elapsedLabel.isHidden = false
+        // Keep the spoken value free of the decorative separator. The numeric
+        // duration remains live on each tick; the bounded formatter owns the visual
+        // lane rather than replacing the established accessibility vocabulary.
         setAccessibilityValue("\(current.stateLabel), \(seconds) seconds elapsed")
         // Deliberately no `needsLayout`: the mono label has stable reserved width,
         // and a timer tick must not invalidate the transcript below this view.
-    }
-
-    private static func elapsedText(_ seconds: Int) -> String {
-        if seconds < 60 { return "\(seconds)s" }
-        let minutes = seconds / 60
-        let remainder = seconds % 60
-        return "\(minutes)m \(remainder)s"
     }
 
     @objc private func showActions(_ sender: Any?) {
