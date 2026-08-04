@@ -218,7 +218,28 @@ $(cat "$PROMPT_FILE")"
   wait "$CURRENT_CHILD"; rc=$?
   CURRENT_CHILD=""
   write_status running "worker-pass-$pass-finished"
-  [ "$rc" -eq 0 ] || return "$rc"
+
+  # A worker that DIED is not the same as a worker that produced nothing.
+  #
+  # On 2026-08-04 a P2.6 pass ran 35 minutes, wrote 558 lines across the packet's
+  # four files, built clean — and then the provider returned a 500 ("Codex error ...
+  # request ID 0e17acc7"). `pi` exited nonzero, this line discarded the whole pass,
+  # and the loop stopped with `worker-failed` while a complete candidate sat in the
+  # tree. That is the same mistake the verdict-token parser below used to make, in a
+  # different costume: treating a TRANSPORT failure as a QUALITY failure.
+  #
+  # The real gates are the independent review and the final matrix, and both still
+  # run. So when the child dies but left tracked changes, go to review and record the
+  # death loudly. When it dies having changed nothing — a provider that was never
+  # reachable, an auth failure, an instant crash — there is genuinely nothing to
+  # review, and the stop (plus the watchdog's `fetch failed` park) is correct.
+  if [ "$rc" -ne 0 ]; then
+    if [ -n "$(git status --porcelain -- Sources docs scripts 2>/dev/null | grep -v '^??')" ]; then
+      log "$ticket worker exited $rc but left tracked changes; proceeding to review (WORKER DIED, recorded)"
+    else
+      return "$rc"
+    fi
+  fi
 
   # Read the worker's verdict.
   #
