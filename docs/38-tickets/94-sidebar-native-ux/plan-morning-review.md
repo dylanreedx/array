@@ -76,11 +76,30 @@ P0.4's entry witness went red naming **117 truncations** in the shipped row, alm
 project chip survives. One fixture's oversized project name crushes its own title by 110 pt at
 *every* width, 320 included.
 
-Those 117 keys are now the `expectedSidebarTruncations` table in `UIProbeGeometry.swift`, and it
-rots in **both** directions — a new truncation is red, and a tracked truncation that *heals*
-without being removed is also red. So the row-anatomy work cannot quietly improve things: it has to
-delete its entries in the same change. **The table shrinking toward empty is the literal progress
-bar for Phase 2.** Check its current size with:
+Those 117 keys became the `expectedSidebarTruncations` table in `UIProbeGeometry.swift`, and it rots
+in **both** directions — a new truncation is red, and a tracked truncation that *heals* without being
+removed is also red. So row anatomy cannot quietly improve things: it has to delete its entries in
+the same change.
+
+### Correction: the table is now 154, and that is the work succeeding
+
+I told you earlier that "shrinking toward empty" was the progress bar. That was too simple, and the
+honest picture is better. P2.1/P2.2 healed **64** keys — **every title at default and wide width, and
+every project chip** — and then *added* 101 recorded sacrifices, almost all `branch`.
+
+Why: the card is exactly three lines of type, and P2.1 may not move height (P2.3 owns that). So the
+third band holds the meta line and the branch **together**, and the branch pays for it — which is
+precisely what the recorded sacrifice order says should happen. The table is now split so a surviving
+key cannot lie about which case it is:
+
+- **`namesLongerThanTheRow` (49)** — a name genuinely longer than a 220 pt row *after* everything
+  else has already yielded. A decision.
+- **`sacrificedByOrder` (105)** — the recorded sacrifice. A caption or branch eliding *so the name
+  does not*.
+
+**The measure that matters is the first set, and that no card title elides at 280 or 320 pt at all.**
+P2.4 will heal a large block of the `branch` keys legitimately, by dropping the model id from the
+meta line (~85 pt shorter). Current size:
 
 ```bash
 grep -c '@min"\|@default"\|@wide"' Sources/ContinuumRevived/App/UIProbeGeometry.swift
