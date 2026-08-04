@@ -93,7 +93,8 @@ For UI tickets also run the exact applicable app checks:
 ```
 
 Surface checks requiring a real terminal or display are supervised. Headless skipping of those known
-surface legs is honest; skipping semantic, geometry, contrast, baseline, I5, or build legs is not.
+surface legs is honest; skipping semantic, geometry, contrast, baseline, I5, or build legs is not —
+**with one stated exception, below, for a ticket whose own purpose is to move a visual baseline.**
 
 ### Sidebar-specific verification rules
 
@@ -122,6 +123,28 @@ surface legs is honest; skipping semantic, geometry, contrast, baseline, I5, or 
 A visual ticket may produce candidate screenshots or uncommitted candidate baselines. Only a
 supervised packet may approve and commit a visual baseline move, after both appearances and multiple
 runs are inspected.
+
+### A ticket that legitimately moves a baseline
+
+Some autonomous packets exist precisely to change what a committed baseline records — a row height, a
+band order, a glyph. For those, "run the baseline leg and leave it green" and "never bless in an
+autonomous ticket" cannot both be satisfied, and reading them together as a hard requirement traps
+the worker in a contradiction it has no legal move out of. That is a defect in this runbook, not in
+the candidate. **Resolved, 2026-08-04, after it stalled P2.3 at the rework limit:**
+
+- The required evidence is the baseline leg run with `CONTINUUM_SKIP_UI_BASELINES=1`, plus **the list
+  of baselines the change moves**, measured by running `--ui-baseline-check` once and recording which
+  renders differ and by how much. Both go in the handoff, and the harness copies them to `_LEDGER.md`.
+- **A recorded baseline mismatch is expected evidence for such a ticket, not a failing gate, and is
+  not by itself a `REWORK` reason.** What IS a rework reason: blessing a baseline, raising
+  `maximumDifferingFraction`, or a moved baseline the handoff does not name.
+- Every other leg — semantic, geometry, contrast, drawable-width, I5, build — must still be green
+  against the final candidate, and a candidate that changes a layout path must re-run them.
+- The accumulated move is blessed at the next supervised gate, on the built-in Retina display, by the
+  owner. `P1.5` blessed 22 renders this way; the Phase 2 move belongs to `P3.6`.
+
+This exception is narrow: it applies only where the packet's own `## Goal` implies the pixels change.
+It never licenses skipping a leg because it is inconvenient, and it never licenses blessing.
 
 ## Git discipline
 
