@@ -22,9 +22,30 @@ Never edit:
 
 - `_LEDGER.md`, `_QUEUE.md`, `_RUNBOOK.md`, `_DESIGN.md`, or any packet;
 - loop, prompt, control, or program-check machinery;
-- files outside the selected packet fence;
+- files outside the selected packet fence, **except under the narrow allowance below**;
 - queue 91's packets, guard, or closed tile work;
 - `website/`, root logo drafts, relay work, stashes, branches, or worktrees.
+
+### The fence allowance (ruling R2, `plan-session-rulings.md`)
+
+Several packets in this queue cannot satisfy their own `## Approach` inside their own fence: the
+assertions a packet deliberately moves, and the call sites a compile error forces, frequently live in
+`Sources/ContinuumRevived/App/ContinuumApp.swift` or `Sources/ContinuumRevived/App/AgentSupervisor.swift`,
+which most fences omit. Three of the four stalls in this program's first run were this, not
+implementation. **Do not mark a packet `blocked` for that reason.**
+
+You may edit `ContinuumApp.swift` and `AgentSupervisor.swift` outside your fence for exactly three
+purposes, and you must name the reason in your handoff so the harness records it in the ledger:
+
+1. a call site a compile error forces;
+2. an existing assertion whose **expected value** your packet deliberately moves — migrate it and
+   leave the reason in a comment beside it, never delete or weaken it;
+3. a printed summary that your change would otherwise make state something false.
+
+This allowance does **not** cover new behaviour in those files, and it never covers
+`Sources/ContinuumRevived/App/ComponentLab.swift` (committed baselines) or the P0.3 fixture corpus
+inside it (renumbering it invalidates every key in `expectedSidebarTruncations`). The precedent is
+P0.4's ledger row, which records the same deviation for the same reason.
 
 Never run `git add`, `git commit`, `git reset`, `git checkout`, `git clean`, `git stash`, rebase,
 merge, or push. Do not launch another implementation or review agent.
