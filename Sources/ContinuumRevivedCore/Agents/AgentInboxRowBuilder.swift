@@ -19,6 +19,53 @@ import Foundation
 // controller, no disk, no clock — `now` is a parameter, because a row is built at
 // render time and `elapsed` must be measured against the caller's frame, not
 // against whenever this function happened to run.
+// Ticket: docs/38-tickets/94-sidebar-native-ux/P3.3-single-status-owner.md
+//
+// ONE OWNER ANSWERS WHAT AN AGENT IS DOING, and this is the mapping.
+//
+// PLACEMENT (design C2): `InboxState` lives in ContinuumRevivedAgentUI, which is
+// compiler-forbidden from importing Core (`AgentInboxRow.swift:12-17`), and
+// `AgentTileTurnSnapshot` is a Core type. So the mapping cannot live beside the
+// vocabulary; it lives here, beside the join that uses it, as an extension on the
+// vocabulary's own type. That is the same call P1.1 made when it moved
+// `AgentStatus` into the shared module, and it introduces no new dependency edge.
+//
+// TOTAL, WITH NO `default` — the packet's "a new snapshot state without a row
+// meaning is a compile error". `AgentTileOperationalState` carries associated
+// values so it cannot be `CaseIterable`; the exhaustiveness gate is therefore this
+// switch plus `AgentTileOperationalState.kindName`'s hand-listed table and the
+// count assertion over it in `runAgentInboxRowBuilderChecks`.
+public extension InboxState {
+    /// The row's state for an agent the supervisor is reporting a turn for.
+    ///
+    /// `.queued` folds onto `.working` because a queued prompt is work in motion
+    /// from the human's side and a sixth row state is what the vocabulary exists to
+    /// forbid. `.restored` folds onto `.ready`: a restored agent is waiting on you,
+    /// and "we adopted this record at boot" is a fact about our knowledge, not about
+    /// the agent (the same distinction `AgentObservation` draws) — the inbox carries
+    /// it as `unobservedAgentIds`, not as a status.
+    ///
+    /// `.failed` maps to `.failed`, which is the first thing in the program that
+    /// makes that state REACHABLE (§5.11): no `AgentStatus` records failure, so
+    /// `InboxState.state(for:pending:)` could never produce it. It has been
+    /// coloured, labelled and token-gated on every surface since P1.3, waiting for
+    /// exactly this fact.
+    static func state(forSnapshot snapshot: AgentTileTurnSnapshot) -> InboxState {
+        switch snapshot.state {
+        case .ready: return .ready
+        case .working: return .working
+        case .queued: return .working
+        case .needsAction(let request):
+            switch request.kind {
+            case .approval: return .approval
+            case .input: return .input
+            }
+        case .failed: return .failed
+        case .restored: return .ready
+        }
+    }
+}
+
 public enum AgentInboxRowBuilder {
     /// Rows for every agent in the snapshot, in the order
     /// `AgentsBoardProjection.rows` returns them.
@@ -34,29 +81,53 @@ public enum AgentInboxRowBuilder {
     /// words that "the value is fed to rows from the desktop side when that list
     /// exists". This is that list existing. An agent with no entry reads `.none`,
     /// which is what a caller with no read-state (the phone, a fixture) gets.
+    /// P3.3: `turnSnapshots` is the supervisor's turn state, keyed by the same
+    /// aggregate identity every row is keyed by. An agent with an entry takes its
+    /// state from it and from nothing else; the ring-derived fold below is the
+    /// fallback for a caller that has no supervisor (the phone, a fixture) — and
+    /// through the app it is unreachable, because every id in `records` has a
+    /// snapshot (`AgentSupervisor.turnSnapshot` returns one for every record it
+    /// holds) and the row source IS `records.keys`. That is asserted at the app
+    /// level as "every row has a snapshot", non-vacuously; the fallback itself is
+    /// exercised by a Core fixture (§5.10).
     public static func rows(
         from snapshot: ActivityLogSnapshot,
         context: [UUID: AgentRowContext] = [:],
         attention: [UUID: InboxAttention] = [:],
+        turnSnapshots: [UUID: AgentTileTurnSnapshot] = [:],
         now: Date
     ) -> [AgentInboxRow] {
         AgentsBoardProjection.rows(from: snapshot, context: context)
-            .map { row(from: $0, attention: attention[$0.agentId] ?? .none, now: now) }
+            .map {
+                row(
+                    from: $0,
+                    attention: attention[$0.agentId] ?? .none,
+                    turnSnapshot: turnSnapshots[$0.agentId],
+                    now: now
+                )
+            }
     }
 
     public static func row(
         from boardRow: AgentsBoardRow,
         attention: InboxAttention = .none,
+        turnSnapshot: AgentTileTurnSnapshot? = nil,
         now: Date
     ) -> AgentInboxRow {
         let context = boardRow.context
-        // P3.2: the status alone cannot say WHICH of the two things a
-        // `needsAttention` agent wants, and a pending request outranks the fold's
-        // status. Both facts come from `AgentsBoardProjection`, which owns the
-        // ring; this join still derives nothing of its own.
-        let state = AgentInboxRow.state(
-            for: boardRow.status,
-            pending: AgentsBoardProjection.pendingRequest(in: boardRow.recent))
+        // P3.3: ONE OWNER. The supervisor's turn snapshot answers what the agent is
+        // doing; the event ring below answers only for a caller that has no
+        // supervisor to ask. The arm in which a stamped activity draft outranked the
+        // derivation is GONE — drafts supply the timeline, never the status.
+        //
+        // P3.2 (queue 90): the fallback's status alone cannot say WHICH of the two
+        // things a `needsAttention` agent wants, so the ring's pending request still
+        // outranks it there. Both facts come from `AgentsBoardProjection`, which owns
+        // the ring; this join still derives nothing of its own.
+        let state = turnSnapshot.map(InboxState.state(forSnapshot:))
+            ?? AgentInboxRow.state(
+                for: boardRow.status,
+                pending: AgentsBoardProjection.pendingRequest(in: boardRow.recent))
         // P4 populates these two; until it does, every agent is active and no row
         // is slim (`RowVariant.forLifecycle` is what keeps those two consistent —
         // a caller never picks a variant).
@@ -78,7 +149,12 @@ public enum AgentInboxRowBuilder {
             role: context?.role,
             branch: branch(for: context),
             isIsolated: context?.isIsolated ?? false,
-            elapsed: state == .working ? elapsed(in: boardRow, now: now) : nil,
+            // P3.3: anchored to STAMPED WORK when the owner stamped some. The ring
+            // scan below is the fallback, and it is the 158h bug when it is the only
+            // input: a restored agent's ring holds one synthetic draft stamped
+            // `record.lastSeenAt`, so the "current working run" starts at the spawn
+            // instant however recent the actual prompt was.
+            elapsed: elapsed(state: state, turnSnapshot: turnSnapshot, boardRow: boardRow, now: now),
             // P2D.4 nests children under their parent, and assigns the depth in
             // `InboxSort` — depth is a property of the row's place in a LIST and
             // this fold sees one agent at a time. `parentId` below is the fact it
@@ -114,6 +190,29 @@ public enum AgentInboxRowBuilder {
     /// answers when it did not. nil means "not known", never "no branch".
     private static func branch(for context: AgentRowContext?) -> String? {
         context?.checkedOutBranch ?? context?.worktreeBranch
+    }
+
+    /// The row's elapsed reading, from the stamped turn start when there is one.
+    ///
+    /// Clamped at 0 for the same reason the ring scan is: a last-writer-wins merge
+    /// can hand us a start from a host whose clock runs ahead, and a negative
+    /// duration renders as a count-up backwards.
+    ///
+    /// nil when the owner reports no turn in flight — the snapshot is authoritative
+    /// in BOTH directions, so an agent whose turn ended shows no clock even if the
+    /// ring's trailing run still looks working. The ring is consulted only when
+    /// there is no snapshot at all, and then only for a working row, exactly as
+    /// before.
+    private static func elapsed(
+        state: InboxState,
+        turnSnapshot: AgentTileTurnSnapshot?,
+        boardRow: AgentsBoardRow,
+        now: Date
+    ) -> TimeInterval? {
+        if let turnSnapshot {
+            return turnSnapshot.turnStartedAt.map { max(0, now.timeIntervalSince($0)) }
+        }
+        return state == .working ? elapsed(in: boardRow, now: now) : nil
     }
 
     /// How long the current working stretch has been running.

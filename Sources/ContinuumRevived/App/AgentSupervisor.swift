@@ -95,6 +95,12 @@ final class AgentSupervisor {
         var didFail = false
         var pendingRequests: [String: AgentPendingRequest] = [:]
         var requestOrder: [String] = []
+        /// P3.3: when the turn now in flight started. THE anchor for every elapsed
+        /// reading, and the fact the supervisor was not keeping — without it the
+        /// sidebar measured from the event ring, whose oldest working event for a
+        /// restored agent is a synthetic draft stamped at the SPAWN instant (the
+        /// 158-hour reading). Non-nil exactly while `execution == .working`.
+        var turnStartedAt: Date?
     }
     private var turnFacts: [AgentID: TurnFacts] = [:]
 
@@ -1237,7 +1243,11 @@ final class AgentSupervisor {
                 // under-advertised the transport — and painted the two windows
                 // "Unavailable" on the composer.
                 canStop: occupied
-            )
+            ),
+            // P3.3: carried, never derived here. A consumer that wanted an elapsed
+            // reading had to reach for the event ring instead, which is why the
+            // sidebar and the tile header measured different durations for one turn.
+            turnStartedAt: facts.turnStartedAt
         )
     }
 
@@ -1566,43 +1576,59 @@ final class AgentSupervisor {
         }
     }
 
-    private func updateTurnFacts(with event: AgentRuntimeEvent, for id: AgentID) {
+    private func updateTurnFacts(with event: AgentRuntimeEvent, for id: AgentID, now: Date = Date()) {
         var facts = turnFacts[id] ?? TurnFacts()
         switch event {
         case .turnStarted:
             facts.execution = .working
             facts.didFail = false
             facts.failureMessage = nil
+            // P3.3: THE elapsed anchor, stamped by the one owner of turn state at
+            // the one event that means "work started now". Every other candidate is
+            // a proxy: `record.lastSeenAt` is the spawn instant, and the event ring's
+            // trailing working run starts at whatever synthetic draft a restore left
+            // behind — which is the 158-hour reading the sidebar was showing.
+            facts.turnStartedAt = now
         case let .turnCompleted(_, _, outcome, errorMessage):
             facts.execution = .ready
             facts.didFail = outcome == .failed
             facts.failureMessage = outcome == .failed ? errorMessage : nil
+            facts.turnStartedAt = nil
         case let .sessionStateChanged(state):
             // `.running` is session/process state, not proof of an active turn.
             // Only turnStarted/turnCompleted move the execution fact.
             if state == .error {
                 facts.execution = .ready
                 facts.didFail = true
+                facts.turnStartedAt = nil
             } else if state == .stopped || state == .ready {
                 facts.execution = .ready
+                facts.turnStartedAt = nil
             }
         case let .requestOpened(_, requestID, kind):
             let request = AgentPendingRequest(
                 requestID: requestID,
                 prompt: kind.compiledRequestPrompt,
-                responseMode: .fixedChoice(ApprovalDecision.compiledChoices)
+                responseMode: .fixedChoice(ApprovalDecision.compiledChoices),
+                // P3.3: stated by the event that produced it. An approval is an
+                // approval because the adapter opened one and is holding it, not
+                // because its choice list happened to be non-empty.
+                kind: .approval
             )
             facts.pendingRequests[requestID] = request
             if !facts.requestOrder.contains(requestID) { facts.requestOrder.append(requestID) }
         case let .userInputRequested(_, requestID, questions):
             // User-input events carry prompt text but no compiled response-mode
             // capability. Empty choices therefore remain fixed-choice([]), never a
-            // fabricated freeform editor.
+            // fabricated freeform editor — and, since P3.3, never evidence of the
+            // request's KIND either: `.fixedChoice([])` is what an approval with no
+            // decisions would compile to as well.
             let prompt = questions.map(\.prompt).filter { !$0.isEmpty }.joined(separator: " ")
             let request = AgentPendingRequest(
                 requestID: requestID,
                 prompt: prompt.isEmpty ? "Provider requested input" : prompt,
-                responseMode: .fixedChoice([])
+                responseMode: .fixedChoice([]),
+                kind: .input
             )
             facts.pendingRequests[requestID] = request
             if !facts.requestOrder.contains(requestID) { facts.requestOrder.append(requestID) }
@@ -1613,9 +1639,15 @@ final class AgentSupervisor {
             facts.execution = .ready
             facts.didFail = true
             facts.failureMessage = message
+            facts.turnStartedAt = nil
         case .itemStarted, .itemCompleted, .contentDelta, .tokenUsageUpdated:
             break
         }
+        // The invariant this file owns, asserted in `--agent-supervisor-check`: a
+        // stamped start exists exactly while a turn is in flight, so a stale anchor
+        // can never outlive the turn it measured.
+        assert((facts.turnStartedAt != nil) == (facts.execution == .working),
+               "turnStartedAt must be non-nil exactly while execution is working")
         turnFacts[id] = facts
     }
 
@@ -2740,7 +2772,8 @@ private func checkCapabilityDrivenTurnStates<Failure: Error>(
         agentID: id,
         snapshot: .init(
             state: .ready,
-            capabilities: .sendStop(canSend: true, canStop: false)
+            capabilities: .sendStop(canSend: true, canStop: false),
+            turnStartedAt: nil
         )
     )
     composer.composerRequestedSend(composer.textView)
@@ -2758,7 +2791,8 @@ private func checkCapabilityDrivenTurnStates<Failure: Error>(
         agentID: id,
         snapshot: .init(
             state: .ready,
-            capabilities: .sendStop(canSend: true, canStop: false)
+            capabilities: .sendStop(canSend: true, canStop: false),
+            turnStartedAt: nil
         )
     )
     composer.composerRequestedSend(composer.textView)
@@ -2769,7 +2803,8 @@ private func checkCapabilityDrivenTurnStates<Failure: Error>(
         agentID: id,
         snapshot: .init(
             state: .ready,
-            capabilities: .sendStop(canSend: true, canStop: false)
+            capabilities: .sendStop(canSend: true, canStop: false),
+            turnStartedAt: nil
         )
     )
     composer.composerRequestedSend(composer.textView)
@@ -2821,7 +2856,7 @@ private func checkCapabilityDrivenTurnStates<Failure: Error>(
     // missing queue capability means unavailable, not omission from the vocabulary.
     let queued = AgentTileStatePresenter.present(
         name: "Checker",
-        snapshot: .init(state: .queued, capabilities: .sendStop(canSend: false, canStop: false)),
+        snapshot: .init(state: .queued, capabilities: .sendStop(canSend: false, canStop: false), turnStartedAt: nil),
         branchContext: nil,
         startedAt: Date(timeIntervalSince1970: 1),
         now: Date(timeIntervalSince1970: 2)
@@ -7021,4 +7056,145 @@ private func ticketQueueInstallSource() throws -> String {
         throw ScanError(description: "installInitialTicketQueueTile scanned as empty")
     }
     return body.joined(separator: "\n")
+}
+
+// MARK: - P3.3 · the row's state and the tile's presentation say the same thing
+//
+// Ticket: docs/38-tickets/94-sidebar-native-ux/P3.3-single-status-owner.md
+//
+// `AgentTileStatePresenter` lives above the row builder (it is App-layer, and it
+// paints a header), so it cannot be the shared owner — the SNAPSHOT is. This check
+// is the agreement: for every one of the six operational states, the row's
+// `InboxState` and the tile's presentation must carry the same meaning, with exactly
+// one divergence, named and reasoned.
+//
+// THE DIVERGENCE: the presenter renders `.failed` as `AgentStatus.idle` (the header
+// has its own "Failed" label and does not need a status to carry it), which folds to
+// `InboxState.ready`. The row maps `.failed` to `.failed`, because the inbox's one
+// label slot is the only place a human sees that an agent broke —
+// `AgentInboxRow.swift:52-55` records `.failed` as reachable-but-unwired, "Phase 4
+// wires a fact"; this is that fact (§5.11).
+@MainActor
+func checkInboxStateAgreesWithTilePresenter<Failure: Error>(fail: (String) -> Failure) throws -> String {
+    let approval = AgentPendingRequest(
+        requestID: "req-approval",
+        prompt: "Approve running a command?",
+        responseMode: .fixedChoice(ApprovalDecision.compiledChoices),
+        kind: .approval
+    )
+    let input = AgentPendingRequest(
+        requestID: "req-input",
+        prompt: "Which branch should this land on?",
+        responseMode: .fixedChoice([]),
+        kind: .input
+    )
+    // Hand-listed because `AgentTileOperationalState` carries associated values and
+    // cannot be `CaseIterable` (design C8). `kindName` is the table the count below
+    // is asserted against, so a seventh case cannot be added without appearing here.
+    let states: [AgentTileOperationalState] = [
+        .ready, .working, .queued, .needsAction(approval), .needsAction(input),
+        .failed(message: "provider failed"), .restored
+    ]
+    guard Set(states.map(\.kindName)).count == 6 else {
+        throw fail("presenter-agreement: the case table covers \(Set(states.map(\.kindName)).count) of AgentTileOperationalState's 6 kinds — \(Set(states.map(\.kindName)).sorted())")
+    }
+
+    let now = Date(timeIntervalSince1970: 1_900_000_000)
+    var rows: [String] = []
+    for state in states {
+        let snapshot = AgentTileTurnSnapshot(
+            state: state,
+            capabilities: .sendStop(canSend: true, canStop: true),
+            turnStartedAt: now.addingTimeInterval(-30)
+        )
+        let mine = InboxState.state(forSnapshot: snapshot)
+        let presented = AgentTileStatePresenter.present(
+            name: "Agreement",
+            snapshot: snapshot,
+            branchContext: nil,
+            startedAt: now.addingTimeInterval(-30),
+            now: now
+        )
+        // The tile's fold, given everything the tile knows — including WHICH request
+        // is open, which is a fact the presenter holds but does not put in its status.
+        var pending: PendingRequest?
+        if case let .needsAction(request) = state { pending = request.kind }
+        let theirs = AgentInboxRow.state(for: presented.status, pending: pending)
+        let isTheDivergence = snapshot.state.kindName == "failed"
+        if isTheDivergence {
+            guard mine == .failed, theirs == .ready else {
+                throw fail("presenter-agreement: the ONE named divergence is gone — a failed turn reads row \(mine.rawValue) / tile-fold \(theirs.rawValue). If the presenter started carrying failure in its status this exception must be deleted, not kept as a lie")
+            }
+        } else {
+            guard mine == theirs else {
+                throw fail("presenter-agreement: \(snapshot.state.kindName) reads \(mine.rawValue) on the row and \(theirs.rawValue) through the tile's presentation — two surfaces telling a human different things about one agent")
+            }
+        }
+        rows.append("\(snapshot.state.kindName)=\(mine.rawValue)\(isTheDivergence ? "(tile \(theirs.rawValue), documented)" : "")")
+    }
+
+    // The elapsed anchor is the snapshot's, on both surfaces.
+    let working = AgentTileTurnSnapshot(
+        state: .working,
+        capabilities: .sendStop(canSend: false, canStop: true),
+        turnStartedAt: now.addingTimeInterval(-30)
+    )
+    let workingPresentation = AgentTileStatePresenter.present(
+        name: "Agreement", snapshot: working, branchContext: nil,
+        startedAt: working.turnStartedAt, now: now
+    )
+    guard workingPresentation.elapsedSeconds == 30 else {
+        throw fail("presenter-agreement: the tile header measures \(String(describing: workingPresentation.elapsedSeconds))s from the stamped turn start, expected 30")
+    }
+    return "row/tile state agreement over \(states.count) snapshots (\(rows.joined(separator: ", "))), one documented divergence, 30s elapsed from the stamped start on both surfaces"
+}
+
+// MARK: - P3.2 · no surface may list managed records ungated
+//
+// The behavioural half of the gate is a compile-time fact inside Core
+// (`reconciledRecords(_:)` needs a `Proof` nothing outside Core can mint), and
+// `ManagedAgentSessionStore.loadAll()` stays public for Core's own reader and the
+// store's round-trip check. This scan is what keeps the app target off it: an
+// unreviewed `managedSessionStore.loadAll()` in `ContinuumApp.swift` would restore
+// exactly the ungated listing P3.2 removed, and it would do it silently.
+//
+// It also pins the two swallowed reads out of existence: `(try? …) ?? []` around a
+// listing turns a refusal into "no agents", which is the bug in its quietest form.
+func checkManagedSessionReadGateSources() throws -> String {
+    struct ScanError: Error, CustomStringConvertible { let description: String }
+    let path = "Sources/ContinuumRevived/App/ContinuumApp.swift"
+    let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        .appendingPathComponent(path)
+    guard let source = try? String(contentsOf: url, encoding: .utf8) else {
+        throw ScanError(description: "could not read \(path) — run this check from the repo root")
+    }
+    let lines = source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    var offenders: [String] = []
+    for (index, line) in lines.enumerated() {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.hasPrefix("//") else { continue }
+        if trimmed.contains("managedSessionStore.loadAll()") {
+            offenders.append("\(index + 1): ungated listing read — \(trimmed)")
+        }
+        if trimmed.contains("reconciledRecords"), trimmed.contains("try?") {
+            offenders.append("\(index + 1): a swallowed listing read reports 'no agents' for a refusal — \(trimmed)")
+        }
+        if trimmed.contains("reconciledManagedSessionSource.records"), trimmed.contains("try?") {
+            offenders.append("\(index + 1): a swallowed listing read reports 'no agents' for a refusal — \(trimmed)")
+        }
+    }
+    guard offenders.isEmpty else {
+        throw ScanError(description: "P3.2: \(offenders.count) ungated or swallowed managed-session listing read(s) in \(path):\n" + offenders.joined(separator: "\n"))
+    }
+    // Vacuity guard: the gated door must actually be in use, or an empty scan means
+    // the app stopped listing agents rather than that it lists them safely.
+    let gatedReads = lines.filter { line in
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return !trimmed.hasPrefix("//")
+            && (trimmed.contains("reconciledRecords(") || trimmed.contains("reconciledManagedSessionSource.records("))
+    }
+    guard !gatedReads.isEmpty else {
+        throw ScanError(description: "P3.2: \(path) contains no gated listing read at all, so the scan above passed vacuously")
+    }
+    return "managed-session read gate: 0 ungated/swallowed listing reads in ContinuumApp.swift, \(gatedReads.count) gated reads present"
 }

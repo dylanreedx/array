@@ -317,6 +317,45 @@ private func runManagedSessionReconciliationContract() throws {
     expect(backupsAfterSecond == backupsAfterFirst,
            "a second sweep performs no write at all — AtomicWriter backs up on every write, so \(backupsAfterSecond) backups against \(backupsAfterFirst) is the proof")
 
+    // MARK: 6 · the gate covers the LISTING, never the tile-keyed read (P3.2, §5.8)
+
+    // Six callers key by tile and run before anything could have reconciled: the
+    // tmux window-target lookups in `ZoneRuntimeController` (x4), `TileSpawner`'s
+    // respawn guard and `AppDelegate.managedSessionRecord(forTileId:)`. If the gate
+    // covered them, a tmux window restore would break at boot. So `load(tileId:)`
+    // answers pre-sweep — and the sweep preserves every field those callers read,
+    // which is what makes gating the listing alone safe rather than merely cheaper.
+    let splitRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("continuum-managed-session-split-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: splitRoot) }
+    let splitStore = ManagedAgentSessionStore(projectRoot: splitRoot)
+    let splitTile = tile("B1")
+    let splitCursor = Data([0x72, 0x65, 0x73, 0x75, 0x6d, 0x65])
+    try splitStore.upsert(ManagedAgentSessionRecord(
+        tileId: splitTile,
+        agentKind: .managed,
+        status: .running,
+        lastSeenAt: lastSeenAt,
+        resumeCursor: splitCursor,
+        runtimePayload: try ManagedAgentSessionRecord.makeRuntimePayload(windowTarget: "%77", cwd: "/tmp/continuum-split")
+    ))
+    guard let beforeSweep = try splitStore.load(tileId: splitTile) else {
+        throw ManagedSessionCheckError("the tile-keyed read returned nil BEFORE the sweep — the tmux window restore reads this at boot and cannot wait for a reconciliation")
+    }
+    expect(beforeSweep.status == .running,
+           "a tile-keyed read is NOT gated and reports what is on disk — got \(beforeSweep.status.rawValue)")
+    expect(beforeSweep.tmuxWindowTarget() == "%77",
+           "the boot-critical window target is readable before any sweep — got \(String(describing: beforeSweep.tmuxWindowTarget()))")
+
+    _ = try ManagedSessionReconciliation.reconcile(store: splitStore, reason: .continuumQuit, now: sweptAt)
+    guard let afterSweep = try splitStore.load(tileId: splitTile) else {
+        throw ManagedSessionCheckError("the tile-keyed read returned nil after the sweep — the sweep must rewrite the record, never remove it")
+    }
+    expect(afterSweep.status == .cancelled && afterSweep.endedReason == .continuumQuit,
+           "the same record read by tile now carries the sweep's terminal status and reason — got \(afterSweep.status.rawValue)/\(String(describing: afterSweep.endedReason))")
+    expect(afterSweep.tmuxWindowTarget() == "%77" && afterSweep.resumeCursor == splitCursor,
+           "the sweep preserves every field the tile-keyed callers read — window target \(String(describing: afterSweep.tmuxWindowTarget())), cursor \(String(describing: afterSweep.resumeCursor?.count)) bytes")
+
     writeManagedSessionManifest([
         "statusCaseCount": ManagedSessionStatus.allCases.count,
         "nonTerminalStatuses": nonTerminal.map(\.rawValue),
@@ -330,7 +369,10 @@ private func runManagedSessionReconciliationContract() throws {
         "secondSweepTerminalizedCount": secondReport.terminalized.count,
         "secondSweepBytesIdentical": bytesAfterSecond == migratedBytes,
         "backupsAfterFirstSweep": backupsAfterFirst,
-        "backupsAfterSecondSweep": backupsAfterSecond
+        "backupsAfterSecondSweep": backupsAfterSecond,
+        "tileKeyedReadBeforeSweep": beforeSweep.status.rawValue,
+        "tileKeyedReadAfterSweep": afterSweep.status.rawValue,
+        "tileKeyedWindowTargetSurvives": afterSweep.tmuxWindowTarget() == "%77"
     ], named: "ticket94-p31-managed-session-sweep.json")
 }
 

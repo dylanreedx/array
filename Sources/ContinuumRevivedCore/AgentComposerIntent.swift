@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentUI
 import Foundation
 
 /// A request produced by the composer. Intents are provider-neutral values: the
@@ -47,11 +48,31 @@ public struct AgentPendingRequest: Equatable, Sendable {
     public var requestID: String
     public var prompt: String
     public var responseMode: AgentRequestResponseMode
+    /// WHICH of the two things this request wants — an approval the adapter is
+    /// holding open, or an answer to a question (P3.3).
+    ///
+    /// EXPLICIT, and never inferred from `responseMode`: a `userInputRequested`
+    /// event compiles to `.fixedChoice([])` because the runtime advertises no
+    /// freeform capability, and an approval whose adapter offered no decisions
+    /// would compile to the same empty list. Sniffing the choice list would
+    /// therefore classify a real approval as a question the first time a provider
+    /// sent one with no choices. The producing event knows the answer; it says so.
+    ///
+    /// `PendingRequest` is the desktop row vocabulary's word for this fact
+    /// (`ContinuumRevivedAgentUI`), reused rather than redefined so the tile's
+    /// request and the row's state cannot disagree about what a hand raised means.
+    public var kind: PendingRequest
 
-    public init(requestID: String, prompt: String, responseMode: AgentRequestResponseMode) {
+    public init(
+        requestID: String,
+        prompt: String,
+        responseMode: AgentRequestResponseMode,
+        kind: PendingRequest
+    ) {
         self.requestID = requestID
         self.prompt = prompt
         self.responseMode = responseMode
+        self.kind = kind
     }
 }
 
@@ -72,15 +93,53 @@ public enum AgentTileOperationalState: Equatable, Sendable {
     case needsAction(AgentPendingRequest)
     case failed(message: String?)
     case restored
+
+    /// One word per case, hand-listed because `needsAction` and `failed` carry
+    /// associated values and the enum therefore cannot be `CaseIterable` (design
+    /// C8). This switch has NO `default`, so a seventh case is a compile error
+    /// here as well as in `InboxState.state(forSnapshot:)` — and the check that
+    /// counts these names is what catches a case added to this table without being
+    /// given a row meaning.
+    public var kindName: String {
+        switch self {
+        case .ready: return "ready"
+        case .working: return "working"
+        case .queued: return "queued"
+        case .needsAction: return "needsAction"
+        case .failed: return "failed"
+        case .restored: return "restored"
+        }
+    }
 }
 
 public struct AgentTileTurnSnapshot: Equatable, Sendable {
     public var state: AgentTileOperationalState
     public var capabilities: AgentTurnCapabilities
+    /// When the turn now in flight actually started, or nil when none is.
+    ///
+    /// P3.3: this is the ONLY honest anchor for an elapsed reading, and its absence
+    /// was the 158-hour bug. With no stamped start the inbox measured from the
+    /// oldest event in the ring's trailing working run, and for an agent restored
+    /// from disk that run is a synthetic draft stamped `record.lastSeenAt` — the
+    /// SPAWN instant. A week-old agent that had just been handed a prompt therefore
+    /// read "158h".
+    ///
+    /// The invariant, held by `AgentSupervisor.updateTurnFacts`: non-nil exactly
+    /// while the supervisor's execution fact is `.working`. Stamped on
+    /// `.turnStarted`, cleared by every transition that returns execution to
+    /// `.ready` (`.turnCompleted`, `.runtimeError`, a session state change). A bare
+    /// `Date` is host-neutral, so it is I5-safe to hold beside state that a
+    /// presenter reads (§5.2).
+    public var turnStartedAt: Date?
 
-    public init(state: AgentTileOperationalState, capabilities: AgentTurnCapabilities) {
+    public init(
+        state: AgentTileOperationalState,
+        capabilities: AgentTurnCapabilities,
+        turnStartedAt: Date?
+    ) {
         self.state = state
         self.capabilities = capabilities
+        self.turnStartedAt = turnStartedAt
     }
 
     public var executionState: AgentTurnExecutionState {

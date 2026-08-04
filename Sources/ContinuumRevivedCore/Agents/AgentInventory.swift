@@ -192,7 +192,7 @@ public final class CrossProjectManagedSessionWalk {
     /// A registry project entry, reduced to the two fields the walk needs. The
     /// project id travels with each record because the row context join (P2B.3)
     /// has no other way back to the project once the file is read.
-    public struct Root: Equatable, Sendable {
+    public struct Root: Hashable, Sendable {
         public let projectId: UUID
         public let projectRoot: URL
 
@@ -227,7 +227,31 @@ public final class CrossProjectManagedSessionWalk {
     /// A root that no longer exists is SKIPPED, not an error: `registry.projects`
     /// keeps entries for projects that have been moved or deleted, and an inbox
     /// that throws because one stale entry points at nothing would list nobody.
+    ///
+    /// P3.2: `proof` is the sweep's evidence, and it is required rather than
+    /// advisory — `ManagedSessionReconciliation.Proof.init` is internal to Core, so
+    /// a caller outside this module cannot compile a call to this function without
+    /// having gone through `ReconciledManagedSessionSource`. THROWS now (it used to
+    /// swallow): a listing that cannot be read must refuse, because the caller
+    /// renders "which agents exist" from it and an empty answer is the "no agents"
+    /// lie this ticket exists to remove.
+    /// LEGACY, UNGATED. Retained for exactly one reason, recorded here so it is not
+    /// mistaken for an option: `ContinuumApp.swift` holds the last caller and is
+    /// owned by another lane for the duration of P3.2, so removing this overload
+    /// would break a file this ticket may not edit. It preserves the old behaviour
+    /// verbatim — including swallowing the error, which is what made an unreadable
+    /// listing look like an empty one. `checkManagedSessionReadGateSources` is RED
+    /// while any caller remains and names the line; delete this with the last one.
+    @available(*, deprecated, message: "P3.2: read through ReconciledManagedSessionSource, which cannot answer before the sweep has committed")
     public func records(roots: [Root], now: Date) -> [Discovered] {
+        (try? records(roots: roots, now: now, proof: ManagedSessionReconciliation.Proof())) ?? []
+    }
+
+    public func records(
+        roots: [Root],
+        now: Date,
+        proof: ManagedSessionReconciliation.Proof
+    ) throws -> [Discovered] {
         if let cached,
            cached.roots == roots,
            now >= cached.readAt,
@@ -248,7 +272,7 @@ public final class CrossProjectManagedSessionWalk {
             // not an implementation detail of the reader.
             guard FileManager.default.fileExists(atPath: root.projectRoot.path) else { continue }
             let store = ManagedAgentSessionStore(projectRoot: root.projectRoot)
-            let records = (try? store.loadAll()) ?? []
+            let records = try store.reconciledRecords(proof)
             for record in records.sorted(by: { $0.tileId.uuidString < $1.tileId.uuidString })
             where seenTiles.insert(record.tileId).inserted {
                 found.append(Discovered(projectId: root.projectId, record: record))
@@ -257,6 +281,184 @@ public final class CrossProjectManagedSessionWalk {
         cached = (roots, now, found)
         return found
     }
+}
+
+// Ticket: docs/38-tickets/94-sidebar-native-ux/P3.2-gated-snapshot-read.md
+//
+// A LISTING IS ONLY READABLE ONCE THE SWEEP HAS COMMITTED.
+//
+// P3.1 made a persisted record stop claiming liveness across a launch. That is
+// only true of the roots the sweep actually visited, and a root is not a launch
+// constant: `WorkspaceRuntime` opens a project's controller on a workspace switch
+// (`WorkspaceRuntime.swift:540-566`), so a registry the app has never listed can
+// gain a root minutes after boot. A sweep that ran once at launch would leave
+// every other project's records saying `running` — the same lie, one project
+// over. So reconciliation here is LAZY-ONCE-PER-ROOT: armed explicitly at boot,
+// and any root first seen later is swept on the way in, exactly once.
+//
+// Two layers, deliberately different in kind:
+//
+//   * STRUCTURAL — `ManagedAgentSessionStore.reconciledRecords(_:)` takes a
+//     `ManagedSessionReconciliation.Proof` whose `init` is internal to Core, and
+//     this type is the only thing in Core that mints one for a listing. A reader
+//     in the app target cannot compile an ungated listing read.
+//   * BEHAVIOURAL — `records(roots:now:)` THROWS `NotReady` before arming rather
+//     than returning `[]`. An empty listing is indistinguishable from "you have no
+//     agents", which is the lie in a quieter form: it would blank the inbox and
+//     publish an empty inventory to the phone. The refusal is a value the caller
+//     must handle.
+//
+// Deliberately NOT an initializer side effect (design §5.15): a check or an
+// observer-wiring fixture that constructs its own store must not have its records
+// swept out from under it because something looked at them.
+public final class ReconciledManagedSessionSource {
+    /// The refusal. Carries what it knows so a log line can say why rather than
+    /// "something went wrong": how many roots were asked for, and whether the
+    /// process has swept anything at all yet.
+    public struct NotReady: Error, CustomStringConvertible, Equatable {
+        public let requestedRoots: Int
+        public let sweptRoots: Int
+
+        public var description: String {
+            "managed-session listing refused: reconciliation has not committed yet"
+                + " (\(sweptRoots) of \(requestedRoots) roots swept in this process)"
+        }
+    }
+
+    /// What one sweep did, summed over the roots it visited. Per-record ids stay in
+    /// `ManagedSessionReconciliation.Report`; a caller at this level wants counts
+    /// for one log line.
+    public struct SweepSummary: Equatable, Sendable {
+        public let sweptRoots: Int
+        public let alreadySweptRoots: Int
+        public let scanned: Int
+        public let terminalized: Int
+
+        public init(sweptRoots: Int, alreadySweptRoots: Int, scanned: Int, terminalized: Int) {
+            self.sweptRoots = sweptRoots
+            self.alreadySweptRoots = alreadySweptRoots
+            self.scanned = scanned
+            self.terminalized = terminalized
+        }
+    }
+
+    private let walk: CrossProjectManagedSessionWalk
+    /// The reason a lazily-swept root is terminalized with. Set by the first
+    /// `reconcile` call, which is also what ARMS this source: nil means nothing has
+    /// swept anything, and every listing read refuses.
+    private var armedReason: ManagedSessionEndReason?
+    private var swept: Set<Root> = []
+
+    public init(ttl: TimeInterval = 2) {
+        self.walk = CrossProjectManagedSessionWalk(ttl: ttl)
+    }
+
+    /// True once a sweep has committed in this process. The inbox and the phone
+    /// publish read this to tell "no agents" from "not yet".
+    public var isReconciled: Bool { armedReason != nil }
+
+    public func hasReconciled(_ root: Root) -> Bool { swept.contains(root) }
+
+    public var sweptRootCount: Int { swept.count }
+
+    /// The registry's projects as roots. One definition, so the boot sweep and the
+    /// listing read cannot disagree about which roots exist — a root swept under one
+    /// mapping and listed under another is the hole this closes.
+    ///
+    /// `missing` projects are NOT filtered out: a moved-away checkout may still hold
+    /// records claiming liveness, and the walk skips a path that is not there anyway.
+    public static func roots(in registry: Registry) -> [Root] {
+        registry.projects.map { project in
+            Root(projectId: project.id, projectRoot: URL(fileURLWithPath: project.rootPath, isDirectory: true))
+        }
+    }
+
+    /// THE ONE ENTRY POINT (design §5.9). Boot and all twelve check call sites call
+    /// this and nothing else, so no caller can open-code a different idea of which
+    /// roots the registry contains — a root swept under one mapping and listed under
+    /// another is an unswept listing with no symptom.
+    @discardableResult
+    public func reconcile(
+        registry: Registry,
+        reason: ManagedSessionEndReason,
+        now: Date
+    ) throws -> SweepSummary {
+        try reconcile(roots: Self.roots(in: registry), reason: reason, now: now)
+    }
+
+    /// Sweep every root not yet swept in this process, and arm the source.
+    ///
+    /// Idempotent at two levels: a root already swept here is skipped without a
+    /// disk read, and `ManagedSessionReconciliation` itself writes nothing for a
+    /// record that is already terminal.
+    @discardableResult
+    public func reconcile(
+        roots: [Root],
+        reason: ManagedSessionEndReason,
+        now: Date
+    ) throws -> SweepSummary {
+        if armedReason == nil { armedReason = reason }
+        var sweptRoots = 0
+        var alreadySweptRoots = 0
+        var scanned = 0
+        var terminalized = 0
+        for root in roots.sorted(by: { $0.projectId.uuidString < $1.projectId.uuidString }) {
+            guard !swept.contains(root) else {
+                alreadySweptRoots += 1
+                continue
+            }
+            // A root that is not on disk is SWEPT BY DEFINITION — there is nothing
+            // to terminalize — and recorded as such, so a registry full of dead
+            // entries cannot make every later read re-stat them.
+            if FileManager.default.fileExists(atPath: root.projectRoot.path) {
+                let (report, _) = try ManagedSessionReconciliation.reconcile(
+                    store: ManagedAgentSessionStore(projectRoot: root.projectRoot),
+                    reason: reason,
+                    now: now
+                )
+                scanned += report.scanned
+                terminalized += report.terminalized.count
+            }
+            swept.insert(root)
+            sweptRoots += 1
+        }
+        return SweepSummary(
+            sweptRoots: sweptRoots,
+            alreadySweptRoots: alreadySweptRoots,
+            scanned: scanned,
+            terminalized: terminalized
+        )
+    }
+
+    /// Every managed-session record on disk, from every root — refusing until the
+    /// sweep has committed, and sweeping any root it has not seen before first.
+    ///
+    /// The lazy sweep runs BEFORE the walk reads, so the walk's TTL cache can only
+    /// ever hold post-sweep records. Nothing is cached on the refusal path, which is
+    /// what makes the first read after arming see the disk rather than an empty
+    /// answer cached during the refusal.
+    public func records(roots: [Root], now: Date) throws -> [Discovered] {
+        guard let armedReason else {
+            throw NotReady(requestedRoots: roots.count, sweptRoots: swept.count)
+        }
+        try reconcile(roots: roots, reason: armedReason, now: now)
+        return try walk.records(roots: roots, now: now, proof: proof())
+    }
+
+    /// The sweep's evidence, for the one caller that owns its own store instance:
+    /// the active project's live `ManagedAgentSessionStore`, which is the WRITER and
+    /// so can never be staler than the files the walk reads. Refuses before arming,
+    /// exactly as a listing does.
+    public func proof() throws -> ManagedSessionReconciliation.Proof {
+        guard armedReason != nil else {
+            throw NotReady(requestedRoots: 0, sweptRoots: swept.count)
+        }
+        // Mintable here and nowhere outside Core: `Proof.init` is internal.
+        return ManagedSessionReconciliation.Proof()
+    }
+
+    public typealias Root = CrossProjectManagedSessionWalk.Root
+    public typealias Discovered = CrossProjectManagedSessionWalk.Discovered
 }
 
 // Ticket: docs/38-tickets/90-agent-ux/P2B.8-observer-independence.md

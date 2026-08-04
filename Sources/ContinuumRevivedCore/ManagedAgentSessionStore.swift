@@ -2,7 +2,6 @@ import Foundation
 
 public final class ManagedAgentSessionStore: @unchecked Sendable {
     private let writer: AtomicWriter
-    var reinterpretNonTerminalOnRead = false
     private let layout: ProjectStoreLayout
 
     public init(projectRoot: URL, retainedBackups: Int = 3) {
@@ -17,12 +16,18 @@ public final class ManagedAgentSessionStore: @unchecked Sendable {
         try writer.write(record, to: layout.managedSessionFile(tileId: record.tileId))
     }
 
+    /// ONE TILE, and deliberately NOT gated behind the sweep (P3.2, design §5.8).
+    /// Six callers key by tile and are boot-critical — the tmux window-target
+    /// lookups in `ZoneRuntimeController`, `TileSpawner`'s respawn guard and
+    /// `AppDelegate.managedSessionRecord(forTileId:)` — and a tmux window
+    /// restore that had to wait for a reconciliation would break at boot. What
+    /// they read (`runtimePayload`, `resumeCursor`) is preserved verbatim by the
+    /// sweep; only the LISTING ("which agents exist, and what were they doing")
+    /// is gated, because that is what a surface answers a human with.
     public func load(tileId: UUID) throws -> ManagedAgentSessionRecord? {
         let url = layout.managedSessionFile(tileId: tileId)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        var record: ManagedAgentSessionRecord = try writer.read(at: url)
-        if reinterpretNonTerminalOnRead, !record.status.isTerminal { record.status = .cancelled; record.endedReason = .continuumRestarted }
-        return record
+        return try writer.read(at: url)
     }
 
     public func delete(tileId: UUID) throws {
@@ -31,6 +36,11 @@ public final class ManagedAgentSessionStore: @unchecked Sendable {
         try FileManager.default.removeItem(at: url)
     }
 
+    /// The raw listing. Core's own reader (the sweep, the cross-project walk) and
+    /// the store's round-trip check; NOT for a surface — see
+    /// `reconciledRecords(_:)`, which is the gated door, and
+    /// `checkManagedSessionReadGateSources` in the app target, which fails if any
+    /// App file lists records through this one.
     public func loadAll() throws -> [ManagedAgentSessionRecord] {
         let dir = layout.managedSessionsDirectory
         guard FileManager.default.fileExists(atPath: dir.path) else { return [] }
@@ -42,9 +52,7 @@ public final class ManagedAgentSessionStore: @unchecked Sendable {
         var records: [ManagedAgentSessionRecord] = []
         for entry in entries where entry.pathExtension == "json" {
             do {
-                var record: ManagedAgentSessionRecord = try writer.read(at: entry)
-                if reinterpretNonTerminalOnRead, !record.status.isTerminal { record.status = .cancelled; record.endedReason = .continuumRestarted }
-                records.append(record)
+                records.append(try writer.read(at: entry))
             } catch {
                 continue
             }
@@ -120,7 +128,21 @@ public struct ManagedSessionReconciliation {
                 alreadyTerminal.append(record.tileId)
                 continue
             }
-            store.reinterpretNonTerminalOnRead = true
+            // Rebuilt, not mutated: `schemaVersion` is a `let`, so going through
+            // `init` is what stamps the current version, and that stamp is the
+            // migration marker the byte assertion looks for. A reader that merely
+            // reinterpreted a stale status on the way out would satisfy every
+            // decoded assertion and leave the file still claiming liveness — which
+            // is why this WRITES.
+            try store.upsert(ManagedAgentSessionRecord(
+                tileId: record.tileId,
+                agentKind: record.agentKind,
+                status: .cancelled,
+                endedReason: reason,
+                lastSeenAt: record.lastSeenAt,
+                resumeCursor: record.resumeCursor,
+                runtimePayload: record.runtimePayload
+            ))
             terminalized.append(record.tileId)
         }
         let report = Report(

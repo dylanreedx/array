@@ -31,7 +31,9 @@ func runAgentInboxRowBuilderChecks() {
     runInboxRowBranchCheck()
     runInboxRowPendingRequestCheck()
     runInboxSortDivergesFromBoardOrderCheck()
-    print("AgentInboxRowBuilder checks: coverage/identity, refresh stability, headless rows, title source, terminal sessions, elapsed derivation, branch precedence, the approval/input split and the frozen-vs-attention-first sort divergence passed")
+    runInboxRowSnapshotIsTheOwnerCheck()
+    runInboxRowStampedElapsedCheck()
+    print("AgentInboxRowBuilder checks: coverage/identity, refresh stability, headless rows, title source, terminal sessions, elapsed derivation, branch precedence, the approval/input split, the frozen-vs-attention-first sort divergence, P3.3's snapshot-owned state over all 6 operational kinds and the stamped elapsed anchor passed")
 }
 
 // MARK: - Fixture
@@ -745,4 +747,184 @@ private func inboxAgentRecord(_ id: AgentID, name: String, spawnedAfter: TimeInt
         lastActivityAt: inboxNow.addingTimeInterval(spawnedAfter),
         tileId: nil
     )
+}
+
+// MARK: - 6 · P3.3 · one owner answers what an agent is doing
+
+// Ticket: docs/38-tickets/94-sidebar-native-ux/P3.3-single-status-owner.md
+//
+// The supervisor's turn snapshot is the ONLY source of a row's state. Two properties
+// that a table alone cannot show, so both are asserted through the real builder:
+//
+//   * the snapshot is authoritative in BOTH directions — a ring that still looks
+//     working cannot make a settled agent read Working, and a quiet ring cannot make
+//     a working agent read Ready;
+//   * the mapping is total over all six operational kinds, and `kindName`'s
+//     hand-listed table is what catches a seventh case added without a row meaning
+//     (`AgentTileOperationalState` carries associated values, so it cannot be
+//     `CaseIterable` — design C8).
+
+private func inboxRequest(_ kind: PendingRequest) -> AgentPendingRequest {
+    AgentPendingRequest(
+        requestID: "req-\(kind.rawValue)",
+        prompt: "PROMPT-MUST-NOT-REACH-THE-ROW",
+        responseMode: .fixedChoice([]),
+        kind: kind
+    )
+}
+
+private func inboxTurnSnapshot(
+    _ state: AgentTileOperationalState,
+    turnStartedAt: Date? = nil
+) -> AgentTileTurnSnapshot {
+    AgentTileTurnSnapshot(
+        state: state,
+        capabilities: .sendStop(canSend: true, canStop: true),
+        turnStartedAt: turnStartedAt
+    )
+}
+
+private func runInboxRowSnapshotIsTheOwnerCheck() {
+    // THE TRUTH TABLE. Hand-listed with its kindName, so the count assertion below
+    // is over the same values the mapping was asserted on.
+    let table: [(state: AgentTileOperationalState, expected: InboxState)] = [
+        (.ready, .ready),
+        (.working, .working),
+        // Queued work is in motion from the human's side; a sixth row state is what
+        // the vocabulary exists to forbid.
+        (.queued, .working),
+        (.needsAction(inboxRequest(.approval)), .approval),
+        (.needsAction(inboxRequest(.input)), .input),
+        // Reachable for the FIRST time here (§5.11): no AgentStatus records failure,
+        // so `state(for:pending:)` could never produce `.failed`.
+        (.failed(message: "provider failed"), .failed),
+        // A restored agent is waiting on you. "We adopted this record at boot" is a
+        // fact about our knowledge and travels as `unobservedAgentIds`, not as a
+        // status — reading it as Working is the lie P3.1 removed from disk.
+        (.restored, .ready),
+    ]
+    for row in table {
+        let mapped = InboxState.state(forSnapshot: inboxTurnSnapshot(row.state))
+        expect(mapped == row.expected,
+               "P3.3 mapping: \(row.state.kindName) must read \(row.expected.rawValue), got \(mapped.rawValue)")
+    }
+    expect(Set(table.map(\.state.kindName)).count == 6,
+           "the truth table covers all six operational kinds — got \(Set(table.map(\.state.kindName)).sorted())")
+    expect(Set(table.map(\.state.kindName)) == Set(["ready", "working", "queued", "needsAction", "failed", "restored"]),
+           "AgentTileOperationalState.kindName's table and this one name the same six kinds — got \(Set(table.map(\.state.kindName)).sorted())")
+
+    // I5: the mapping reads the case and the kind, and NOTHING else. The request's
+    // prompt is provider text; it must not reach a row that renders on the desktop
+    // and feeds the phone's fold.
+    let approvalRows = AgentInboxRowBuilder.rows(
+        from: inboxSnapshot(),
+        context: inboxIndex(),
+        turnSnapshots: [inboxIsolatedAgentId.rawValue: inboxTurnSnapshot(.needsAction(inboxRequest(.approval)))],
+        now: inboxNow
+    )
+    expect(!approvalRows.contains { "\($0)".contains("PROMPT-MUST-NOT-REACH-THE-ROW") },
+           "a pending request's prompt must not reach any field of a row — \(approvalRows.map(\.title))")
+    expect(approvalRows.first { $0.id == inboxIsolatedAgentId.rawValue }?.state == .approval,
+           "an open approval reads as approval through the real builder")
+
+    // BOTH DIRECTIONS. The ring says needsAttention 20s ago (the fixture's own
+    // drafts); the snapshot says the turn is over. The row follows the snapshot.
+    let noisyRing: [AgentActivityEventDraft] = [
+        inboxDraft(inboxIsolatedAgentId, status: .working, kind: "turn.started", secondsAfterStart: -120),
+        inboxDraft(inboxIsolatedAgentId, status: .needsAttention, kind: "needs-attention", secondsAfterStart: -20),
+    ]
+    let ringOnly = AgentInboxRowBuilder.rows(
+        from: inboxSnapshot(activityByAgent: [inboxIsolatedAgentId: noisyRing]),
+        context: inboxIndex(),
+        now: inboxNow
+    ).first { $0.id == inboxIsolatedAgentId.rawValue }
+    // §5.10: this IS the fallback, exercised where it is reachable — a caller with no
+    // supervisor. Through the app it cannot be reached (every row's id has a
+    // snapshot), which is why the app asserts "every row has a snapshot" instead.
+    expect(ringOnly?.state == .input,
+           "fixture check: with NO snapshot the ring's fold still answers, or the both-directions assertions below are vacuous — got \(String(describing: ringOnly?.state))")
+
+    let settled = AgentInboxRowBuilder.rows(
+        from: inboxSnapshot(activityByAgent: [inboxIsolatedAgentId: noisyRing]),
+        context: inboxIndex(),
+        turnSnapshots: [inboxIsolatedAgentId.rawValue: inboxTurnSnapshot(.ready)],
+        now: inboxNow
+    ).first { $0.id == inboxIsolatedAgentId.rawValue }
+    expect(settled?.state == .ready,
+           "the drafts-win arm is GONE: a stamped activity draft supplies the timeline, never the status — got \(String(describing: settled?.state))")
+    expect(settled?.elapsed == nil,
+           "a settled agent shows no clock however working its ring still looks — got \(String(describing: settled?.elapsed))")
+
+    let quietRing = AgentInboxRowBuilder.rows(
+        from: inboxSnapshot(),
+        context: inboxIndex(),
+        turnSnapshots: [inboxHeadlessAgentId.rawValue: inboxTurnSnapshot(.working, turnStartedAt: inboxNow.addingTimeInterval(-45))],
+        now: inboxNow
+    ).first { $0.id == inboxHeadlessAgentId.rawValue }
+    expect(quietRing?.state == .working && quietRing?.elapsed == 45,
+           "an agent whose ring holds nothing still reads Working from its owner, measured from the stamped start — got \(String(describing: quietRing?.state))/\(String(describing: quietRing?.elapsed))")
+}
+
+/// THE 158-HOUR BUG, as a fixture. The reported symptom: a sidebar row on a
+/// freshly-prompted agent reading "158h". Its ring holds one synthetic draft stamped
+/// `record.lastSeenAt` — the SPAWN instant, days old — because a restored agent has
+/// no real events, and the old elapsed derivation measured the trailing working run
+/// from exactly that draft.
+private func runInboxRowStampedElapsedCheck() {
+    let sevenDays: TimeInterval = 7 * 24 * 3600
+    // A restored agent: the only thing in its ring is the synthetic status draft the
+    // fold writes for a record with no recorded events, stamped a week ago.
+    let staleRing: [AgentActivityEventDraft] = [
+        inboxDraft(inboxIsolatedAgentId, status: .working, kind: "desktop.managedStatus", secondsAfterStart: -sevenDays),
+    ]
+    let bugged = AgentInboxRowBuilder.rows(
+        from: inboxSnapshot(activityByAgent: [inboxIsolatedAgentId: staleRing]),
+        context: inboxIndex(),
+        now: inboxNow
+    ).first { $0.id == inboxIsolatedAgentId.rawValue }
+    expect(bugged?.elapsed == sevenDays,
+           "fixture check: the ring-anchored reading really is \(sevenDays)s (168h) here, or the assertion below cannot fail — got \(String(describing: bugged?.elapsed))")
+
+    let fixed = AgentInboxRowBuilder.rows(
+        from: inboxSnapshot(activityByAgent: [inboxIsolatedAgentId: staleRing]),
+        context: inboxIndex(),
+        turnSnapshots: [inboxIsolatedAgentId.rawValue: inboxTurnSnapshot(.working, turnStartedAt: inboxNow.addingTimeInterval(-30))],
+        now: inboxNow
+    ).first { $0.id == inboxIsolatedAgentId.rawValue }
+    expect(fixed?.state == .working,
+           "the freshly-prompted restored agent is working — got \(String(describing: fixed?.state))")
+    expect(fixed?.elapsed == 30,
+           "THE 158-HOUR BUG: a turn stamped 30s ago must read 30s, not the age of the record it was restored from — got \(String(describing: fixed?.elapsed))s")
+
+    // Still measured against the caller's clock, never stored.
+    let later = AgentInboxRowBuilder.rows(
+        from: inboxSnapshot(activityByAgent: [inboxIsolatedAgentId: staleRing]),
+        context: inboxIndex(),
+        turnSnapshots: [inboxIsolatedAgentId.rawValue: inboxTurnSnapshot(.working, turnStartedAt: inboxNow.addingTimeInterval(-30))],
+        now: inboxNow.addingTimeInterval(60)
+    ).first { $0.id == inboxIsolatedAgentId.rawValue }
+    expect(later?.elapsed == 90,
+           "the stamped anchor is measured at render time against the caller's clock — got \(String(describing: later?.elapsed))")
+
+    // A start from a host whose clock runs ahead clamps at 0 rather than counting
+    // backwards, exactly as the ring-derived reading does.
+    let ahead = AgentInboxRowBuilder.rows(
+        from: inboxSnapshot(),
+        context: inboxIndex(),
+        turnSnapshots: [inboxIsolatedAgentId.rawValue: inboxTurnSnapshot(.working, turnStartedAt: inboxNow.addingTimeInterval(600))],
+        now: inboxNow
+    ).first { $0.id == inboxIsolatedAgentId.rawValue }
+    expect(ahead?.elapsed == 0,
+           "a turn start stamped in the future clamps to 0 — got \(String(describing: ahead?.elapsed))")
+
+    // An owner reporting a turn with no stamp at all (a state that carries no work)
+    // shows no clock — the snapshot is authoritative about the ABSENCE too.
+    let unstamped = AgentInboxRowBuilder.rows(
+        from: inboxSnapshot(activityByAgent: [inboxIsolatedAgentId: staleRing]),
+        context: inboxIndex(),
+        turnSnapshots: [inboxIsolatedAgentId.rawValue: inboxTurnSnapshot(.restored)],
+        now: inboxNow
+    ).first { $0.id == inboxIsolatedAgentId.rawValue }
+    expect(unstamped?.elapsed == nil,
+           "with an owner reporting no turn in flight the row shows no clock, not the ring's week-old run — got \(String(describing: unstamped?.elapsed))")
 }

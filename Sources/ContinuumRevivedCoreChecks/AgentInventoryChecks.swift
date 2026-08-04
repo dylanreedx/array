@@ -470,10 +470,192 @@ private func runCrossProjectWalkChecks() {
         CrossProjectManagedSessionWalk.Root(projectId: walkProjectMissing, projectRoot: rootMissing),
     ]
 
-    runCrossProjectWalkUnionCheck(roots: roots)
-    runCrossProjectWalkOrderCheck(roots: roots)
-    runCrossProjectWalkDedupCheck(rootA: rootA)
-    runCrossProjectWalkCacheCheck(roots: roots, rootB: rootB)
+    // P3.2: the walk is now behind the sweep, so every check below needs the
+    // sweep's proof — which is the point. This one source arms them all.
+    let proof = runReconciledSourceRefusalCheck(roots: roots)
+
+    runCrossProjectWalkUnionCheck(roots: roots, proof: proof)
+    runCrossProjectWalkOrderCheck(roots: roots, proof: proof)
+    runCrossProjectWalkDedupCheck(rootA: rootA, proof: proof)
+    runCrossProjectWalkCacheCheck(roots: roots, rootB: rootB, proof: proof)
+    runReconciledSourceLateRootCheck(temp: temp)
+    runReconciledSourceRootMappingCheck()
+}
+
+// MARK: - P3.2 · the listing is only readable once the sweep has committed
+
+// Ticket: docs/38-tickets/94-sidebar-native-ux/P3.2-gated-snapshot-read.md
+//
+// Returns the proof the walk checks below need, so obtaining one is itself part of
+// the assertion: there is no way to read a listing without a sweep having run.
+private func runReconciledSourceRefusalCheck(roots: [CrossProjectManagedSessionWalk.Root]) -> ManagedSessionReconciliation.Proof {
+    let source = ReconciledManagedSessionSource(ttl: 2)
+    expect(!source.isReconciled,
+           "a freshly constructed source has reconciled nothing — reconciliation is an explicit call, never an init side effect (§5.15)")
+    expect(source.sweptRootCount == 0,
+           "constructing a source sweeps no root, so a fixture that merely builds one cannot have its records rewritten under it — got \(source.sweptRootCount)")
+
+    // THE REFUSAL. Not an empty array: a caller cannot tell `[]` from "you have no
+    // agents", and treating the refusal as no-agents is the bug in a quieter form.
+    var refusal: Error?
+    do {
+        let served = try source.records(roots: roots, now: walkNow)
+        fputs("FAIL: a listing read BEFORE the sweep committed returned \(served.count) records instead of refusing — an unreconciled read is exactly what P3.1 exists to prevent, and returning [] would blank the inbox and publish an empty inventory to the phone\n", stderr)
+        Foundation.exit(1)
+    } catch {
+        refusal = error
+    }
+    expect(refusal is ReconciledManagedSessionSource.NotReady,
+           "the refusal is an explicit not-ready value the caller must handle — got \(String(describing: refusal))")
+    expect((refusal as? ReconciledManagedSessionSource.NotReady)?.description.contains("not committed") == true,
+           "the not-ready value says what it means, so a log line can explain a blank inbox — got \(String(describing: refusal))")
+    do {
+        _ = try source.proof()
+        fputs("FAIL: the sweep's proof was mintable before any sweep ran, so the active project's own store could be listed unreconciled\n", stderr)
+        Foundation.exit(1)
+    } catch {
+        expect(error is ReconciledManagedSessionSource.NotReady,
+               "proof() refuses with the same not-ready value — got \(error)")
+    }
+
+    // Arming it. The sweep terminalizes A's `.running` record; B's is already
+    // `.stopped` and is not rewritten.
+    let summary: ReconciledManagedSessionSource.SweepSummary
+    let proof: ManagedSessionReconciliation.Proof
+    do {
+        summary = try source.reconcile(roots: roots, reason: .continuumRestarted, now: walkNow)
+        proof = try source.proof()
+    } catch {
+        fputs("FAIL: the launch sweep over three registry roots failed: \(error)\n", stderr)
+        Foundation.exit(1)
+    }
+    expect(source.isReconciled, "the source is armed once a sweep has committed")
+    expect(summary.sweptRoots == 3 && summary.alreadySweptRoots == 0,
+           "the sweep visits every root once, including the one whose directory is gone — got \(summary)")
+    expect(summary.terminalized == 1,
+           "exactly the one record claiming liveness is terminalized (A running; B already stopped) — got \(summary)")
+    expect(roots.allSatisfy { source.hasReconciled($0) },
+           "every root the sweep visited is recorded as swept, so a later read does not re-stat it")
+
+    // The refusal cached nothing: this read sees the DISK, not an empty answer
+    // cached while the source was refusing (design: "TTL cache no pre-sweep serve").
+    do {
+        let served = try source.records(roots: roots, now: walkNow)
+        expect(served.count == 2,
+               "the first read after arming enumerates the disk rather than serving an answer cached during the refusal — got \(served.count)")
+        expect(served.allSatisfy { $0.record.status.isTerminal },
+               "a gated listing can only report records the sweep already terminalized — got \(served.map { $0.record.status.rawValue })")
+        expect(served.contains { $0.record.endedReason == .continuumRestarted },
+               "the swept record reached the listing with the reason it was cancelled for — got \(served.map { String(describing: $0.record.endedReason) })")
+    } catch {
+        fputs("FAIL: a listing read after the sweep committed still refused: \(error)\n", stderr)
+        Foundation.exit(1)
+    }
+
+    let idempotent: ReconciledManagedSessionSource.SweepSummary
+    do {
+        idempotent = try source.reconcile(roots: roots, reason: .continuumQuit, now: walkNow.addingTimeInterval(60))
+    } catch {
+        fputs("FAIL: a second sweep over the same roots failed: \(error)\n", stderr)
+        Foundation.exit(1)
+    }
+    expect(idempotent.sweptRoots == 0 && idempotent.alreadySweptRoots == 3,
+           "a root swept in this process is never swept again — got \(idempotent)")
+    return proof
+}
+
+/// N10's property: a root that appears AFTER the arming sweep is swept on the way
+/// in, exactly once. A launch-only sweep leaves every project the human has not
+/// opened yet reporting `running` off disk, and roots do appear late —
+/// `WorkspaceRuntime` opens a project's controller on a workspace switch.
+private func runReconciledSourceLateRootCheck(temp: URL) {
+    let early = temp.appendingPathComponent("late-early", isDirectory: true)
+    let late = temp.appendingPathComponent("late-appeared", isDirectory: true)
+    let earlyRoot = CrossProjectManagedSessionWalk.Root(projectId: walkProjectA, projectRoot: early)
+    let lateRoot = CrossProjectManagedSessionWalk.Root(projectId: walkProjectB, projectRoot: late)
+    let lateTile = UUID(uuidString: "2B200000-0000-4000-8000-0000000000D1")!
+    let afterTile = UUID(uuidString: "2B200000-0000-4000-8000-0000000000D2")!
+    let source = ReconciledManagedSessionSource(ttl: 0)
+    do {
+        try FileManager.default.createDirectory(at: early, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: late, withIntermediateDirectories: true)
+        try ManagedAgentSessionStore(projectRoot: late).upsert(walkRecord(tileId: lateTile, kind: .managed, status: .running))
+        // Armed on the EARLY root only — the booted project, which is all a
+        // launch-time sweep can know about.
+        try source.reconcile(roots: [earlyRoot], reason: .continuumRestarted, now: walkNow)
+    } catch {
+        fputs("FAIL: the late-root fixture could not be written: \(error)\n", stderr)
+        Foundation.exit(1)
+    }
+    expect(!source.hasReconciled(lateRoot),
+           "fixture check: the late root really has not been swept yet, or the assertion below is vacuous")
+
+    do {
+        let served = try source.records(roots: [earlyRoot, lateRoot], now: walkNow.addingTimeInterval(1))
+        guard let discovered = served.first(where: { $0.record.tileId == lateTile }) else {
+            fputs("FAIL: the record in the late-appearing root did not reach the listing at all — served \(served.map(\.record.tileId))\n", stderr)
+            Foundation.exit(1)
+        }
+        expect(discovered.record.status == .cancelled,
+               "a root first seen AFTER the arming sweep is swept on the way in — its record reads \(discovered.record.status.rawValue), and a launch-only sweep is what leaves it saying running")
+        expect(discovered.record.endedReason == .continuumRestarted,
+               "the lazily swept record carries the arming sweep's reason — got \(String(describing: discovered.record.endedReason))")
+        expect(source.hasReconciled(lateRoot),
+               "the late root is now recorded as swept")
+    } catch {
+        fputs("FAIL: the listing refused after the late root appeared: \(error)\n", stderr)
+        Foundation.exit(1)
+    }
+
+    // ONCE per root, not once per read: a record written after that root was swept
+    // is LIVE, and re-sweeping on every listing would cancel a running agent.
+    do {
+        try ManagedAgentSessionStore(projectRoot: late).upsert(walkRecord(tileId: afterTile, kind: .managed, status: .running))
+        let served = try source.records(roots: [earlyRoot, lateRoot], now: walkNow.addingTimeInterval(2))
+        let fresh = served.first(where: { $0.record.tileId == afterTile })
+        expect(fresh?.record.status == .running,
+               "a record created after its root was swept still claims liveness — the sweep is once per root, not once per read, or listing the inbox would cancel the agent you just spawned (got \(String(describing: fresh?.record.status.rawValue)))")
+    } catch {
+        fputs("FAIL: the post-sweep listing failed: \(error)\n", stderr)
+        Foundation.exit(1)
+    }
+}
+
+/// ONE mapping from registry to roots, so the sweep and the listing cannot disagree
+/// about which roots exist — a root swept under one mapping and listed under another
+/// is an unswept listing with no symptom.
+private func runReconciledSourceRootMappingCheck() {
+    var registry = Registry.empty()
+    let presentId = UUID(uuidString: "2B200000-0000-4000-8000-0000000000E1")!
+    let missingId = UUID(uuidString: "2B200000-0000-4000-8000-0000000000E2")!
+    registry.projects = [
+        ProjectEntry(id: presentId, name: "Present", rootPath: "/tmp/continuum-present",
+                     workspaceId: nil, lastOpenedAt: walkNow, pinned: false, missing: false),
+        ProjectEntry(id: missingId, name: "Gone", rootPath: "/tmp/continuum-gone",
+                     workspaceId: nil, lastOpenedAt: walkNow, pinned: false, missing: true),
+    ]
+    let roots = ReconciledManagedSessionSource.roots(in: registry)
+    expect(roots.count == 2,
+           "a project marked missing still contributes a root — its checkout may hold records claiming liveness, and the walk skips a path that is not there anyway (got \(roots.count))")
+    expect(roots.map(\.projectId) == [presentId, missingId],
+           "each root carries its project's id, which is the row context's only way back to the project — got \(roots.map(\.projectId))")
+    expect(roots.first?.projectRoot.path == "/tmp/continuum-present",
+           "a root's URL is its project's rootPath — got \(String(describing: roots.first?.projectRoot.path))")
+}
+
+/// The gated walk, for the four checks whose subject is the walk itself. Holding a
+/// `Proof` is the whole precondition, and it can only have come from a sweep.
+private func walkRecords(
+    roots: [CrossProjectManagedSessionWalk.Root],
+    now: Date,
+    proof: ManagedSessionReconciliation.Proof
+) -> [CrossProjectManagedSessionWalk.Discovered] {
+    do {
+        return try CrossProjectManagedSessionWalk().records(roots: roots, now: now, proof: proof)
+    } catch {
+        fputs("FAIL: the gated cross-project walk threw: \(error)\n", stderr)
+        Foundation.exit(1)
+    }
 }
 
 private func walkRecord(tileId: UUID, kind: AgentKind, status: ManagedSessionStatus) -> ManagedAgentSessionRecord {
@@ -489,8 +671,8 @@ private func walkRecord(tileId: UUID, kind: AgentKind, status: ManagedSessionSta
 /// published inventory. Only ONE of these roots can be the active project, so a
 /// walk that only saw the active one would return a single entry here — which is
 /// exactly today's behaviour without this ticket.
-private func runCrossProjectWalkUnionCheck(roots: [CrossProjectManagedSessionWalk.Root]) {
-    let found = CrossProjectManagedSessionWalk().records(roots: roots, now: walkNow)
+private func runCrossProjectWalkUnionCheck(roots: [CrossProjectManagedSessionWalk.Root], proof: ManagedSessionReconciliation.Proof) {
+    let found = walkRecords(roots: roots, now: walkNow, proof: proof)
     expect(found.count == 2,
            "two project roots with one record each fold into 2 discovered agents, and a root that does not exist is skipped — got \(found.count)")
     expect(found.contains(where: { $0.projectId == walkProjectA && $0.record.tileId == walkTileA }),
@@ -523,9 +705,9 @@ private func runCrossProjectWalkUnionCheck(roots: [CrossProjectManagedSessionWal
 }
 
 /// 2 · Registry order must not reach the output.
-private func runCrossProjectWalkOrderCheck(roots: [CrossProjectManagedSessionWalk.Root]) {
-    let forward = CrossProjectManagedSessionWalk().records(roots: roots, now: walkNow)
-    let reversed = CrossProjectManagedSessionWalk().records(roots: roots.reversed(), now: walkNow)
+private func runCrossProjectWalkOrderCheck(roots: [CrossProjectManagedSessionWalk.Root], proof: ManagedSessionReconciliation.Proof) {
+    let forward = walkRecords(roots: roots, now: walkNow, proof: proof)
+    let reversed = walkRecords(roots: roots.reversed(), now: walkNow, proof: proof)
     expect(forward == reversed,
            "the walk's order is independent of registry order — got \(forward.map(\.record.tileId)) vs \(reversed.map(\.record.tileId))")
     expect(forward.map(\.projectId) == forward.map(\.projectId).sorted { $0.uuidString < $1.uuidString },
@@ -533,40 +715,47 @@ private func runCrossProjectWalkOrderCheck(roots: [CrossProjectManagedSessionWal
 }
 
 /// 3 · One path, two registry entries — an agent is listed once.
-private func runCrossProjectWalkDedupCheck(rootA: URL) {
+private func runCrossProjectWalkDedupCheck(rootA: URL, proof: ManagedSessionReconciliation.Proof) {
     let duplicated = [
         CrossProjectManagedSessionWalk.Root(projectId: walkProjectA, projectRoot: rootA),
         CrossProjectManagedSessionWalk.Root(projectId: walkProjectB, projectRoot: rootA),
     ]
-    let found = CrossProjectManagedSessionWalk().records(roots: duplicated, now: walkNow)
+    let found = walkRecords(roots: duplicated, now: walkNow, proof: proof)
     expect(found.count == 1,
            "two registry entries pointing at ONE root list that root's agent once — got \(found.count)")
 }
 
 /// 4 · The cache holds for its TTL and no longer.
-private func runCrossProjectWalkCacheCheck(roots: [CrossProjectManagedSessionWalk.Root], rootB: URL) {
+private func runCrossProjectWalkCacheCheck(roots: [CrossProjectManagedSessionWalk.Root], rootB: URL, proof: ManagedSessionReconciliation.Proof) {
     let walk = CrossProjectManagedSessionWalk(ttl: 2)
-    expect(walk.records(roots: roots, now: walkNow).count == 2, "the cache check starts from the 2 agents on disk")
+    func served(_ now: Date, _ walkRoots: [CrossProjectManagedSessionWalk.Root]) -> [CrossProjectManagedSessionWalk.Discovered] {
+        do { return try walk.records(roots: walkRoots, now: now, proof: proof) }
+        catch {
+            fputs("FAIL: the gated cross-project walk threw: \(error)\n", stderr)
+            Foundation.exit(1)
+        }
+    }
+    expect(served(walkNow, roots).count == 2, "the cache check starts from the 2 agents on disk")
 
     // A record that appears AFTER the first read is the only way to tell a cache
     // hit from a re-read: same inputs, different disk.
     try? ManagedAgentSessionStore(projectRoot: rootB).upsert(walkRecord(tileId: walkTileLate, kind: .pi, status: .running))
 
-    expect(walk.records(roots: roots, now: walkNow.addingTimeInterval(1)).count == 2,
-           "a read inside the TTL is served from cache and does not re-enumerate the disk — got \(walk.records(roots: roots, now: walkNow.addingTimeInterval(1)).count)")
-    expect(walk.records(roots: roots, now: walkNow.addingTimeInterval(2)).count == 3,
-           "the first read after the TTL sees the new agent — got \(walk.records(roots: roots, now: walkNow.addingTimeInterval(2)).count)")
+    expect(served(walkNow.addingTimeInterval(1), roots).count == 2,
+           "a read inside the TTL is served from cache and does not re-enumerate the disk — got \(served(walkNow.addingTimeInterval(1), roots).count)")
+    expect(served(walkNow.addingTimeInterval(2), roots).count == 3,
+           "the first read after the TTL sees the new agent — got \(served(walkNow.addingTimeInterval(2), roots).count)")
 
     // Clocks move backwards (sleep/wake, NTP). A cache entry stamped in the
     // future must not become immortal. Discriminating only because the disk
     // changed again since the read now cached: same roots, same TTL window by
     // arithmetic, so a cache hit here would report the stale 3.
     try? ManagedAgentSessionStore(projectRoot: rootB).upsert(walkRecord(tileId: walkTileLater, kind: .pi, status: .running))
-    expect(walk.records(roots: roots, now: walkNow.addingTimeInterval(-3600)).count == 4,
-           "a backwards clock jump re-reads instead of serving a cache entry stamped in the future — got \(walk.records(roots: roots, now: walkNow.addingTimeInterval(-3600)).count)")
+    expect(served(walkNow.addingTimeInterval(-3600), roots).count == 4,
+           "a backwards clock jump re-reads instead of serving a cache entry stamped in the future — got \(served(walkNow.addingTimeInterval(-3600), roots).count)")
 
     // A changed root set must not be served from a cache keyed on the old one.
     let narrowed = Array(roots.prefix(1))
-    expect(walk.records(roots: narrowed, now: walkNow.addingTimeInterval(-3600)).count == 1,
-           "a different root set re-reads rather than reusing the cached answer — got \(walk.records(roots: narrowed, now: walkNow.addingTimeInterval(-3600)).count)")
+    expect(served(walkNow.addingTimeInterval(-3600), narrowed).count == 1,
+           "a different root set re-reads rather than reusing the cached answer — got \(served(walkNow.addingTimeInterval(-3600), narrowed).count)")
 }
