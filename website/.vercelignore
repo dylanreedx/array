@@ -1,0 +1,8 @@
+# Never upload local credentials, generated output, or internal notes.
+.vercel/
+.env*
+node_modules/
+dist/
+.astro/
+_HANDOFF.md
+.vscode/

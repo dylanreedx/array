@@ -13,9 +13,9 @@ yarn-error.log*
 pnpm-debug.log*
 
 
-# environment variables
-.env
-.env.production
+# environment variables and local Vercel metadata
+.env*
+.vercel/
 
 # macOS-specific files
 .DS_Store
