@@ -520,8 +520,34 @@ enum UIProbeGeometry {
             guard error.message == expectedZeroSizeMessage else { throw error }
         }
 
-        let rows = LabFixtures.inboxRows()
+        // P0.3: the probe consumes the DEFECT corpus — the rows that can fail
+        // the truncation, dead-space, elapsed, fan-out and identity packets —
+        // never the Component Lab's baseline fixtures, whose committed PNGs
+        // must stay byte-identical while this corpus grows.
+        let rows = LabFixtures.inboxDefectRows()
         guard !rows.isEmpty else { throw fail("sidebar-ux-check: corpus is empty") }
+        guard Set(rows.map(\.id)).count == rows.count else {
+            throw fail("sidebar-ux-check: corpus agent ids are not unique")
+        }
+        // P4.8 pages the settled tail at `settledPageSize` rows, hiding the rest
+        // behind a footer that is not an agent cell — which would make the
+        // cells == rows assertion below fail at the symptom instead of the
+        // cause. The corpus keeps its settled tail within the first page; a
+        // packet that needs a longer tail must expand paging here first.
+        let settledRows = rows.filter { InboxSort.section(for: $0.lifecycle, now: LabFixtures.inboxNow) == .settled }.count
+        guard settledRows <= InboxSort.settledPageSize else {
+            throw fail("sidebar-ux-check: corpus has \(settledRows) settled rows, past the \(InboxSort.settledPageSize)-row first page — expand paging in the probe before asserting cells == rows")
+        }
+        // P0.3: the host's height is DERIVED from the corpus, not fixed at 620pt.
+        // Materialization is bounded by the viewport, so a 40-child fan-out in a
+        // 620pt host would leave most rows unbuilt and cells == rows could never
+        // hold. Pitch is the tallest row (a card) plus the inter-cell gap; +2
+        // rows cover the shelf heading and a paging footer, and the tail slack
+        // covers the scope control and the card/slim difference in its favour.
+        let rowPitch = AgentInboxView.rowHeight + Space.s
+        let probeHeight = CGFloat(
+            (Double(rows.count + 2) * rowPitch + AgentInboxView.scopeControlHeight + 160).rounded(.up)
+        )
         let widths: [CGFloat] = [
             CGFloat(WorkspaceSidebarConfig.minWidth),
             CGFloat(WorkspaceSidebarConfig.defaultWidth),
@@ -534,8 +560,19 @@ enum UIProbeGeometry {
             NSApp?.appearance = NSAppearance(named: appearanceName)
             for width in widths {
                 let probe = try makeSidebarProbeHost(
-                    width: width, height: 620, appearanceName: appearanceName
+                    width: width, height: probeHeight, appearanceName: appearanceName
                 )
+                // The corpus carries parked rows, whose relative times are read
+                // from the view's injected clock. The Lab's canned `inboxNow` is
+                // what keeps the snoozed fixture ON the shelf (wake in its
+                // future) and every rendered time deterministic between runs.
+                probe.inbox.clock = { LabFixtures.inboxNow }
+                // The shelf hides its rows behind a heading by default, and a
+                // hidden row materializes no cell. Open it before rows are
+                // applied so every corpus row is on screen and countable; the
+                // heading itself is not an `AgentInboxRowCell` and stays out of
+                // the count.
+                probe.inbox.toggleShelf()
                 let counts = try checkSidebarProbe(
                     probe, rows: rows, width: width, appearanceName: appearanceName
                 )
@@ -545,8 +582,8 @@ enum UIProbeGeometry {
             }
         }
         print(String(
-            format: "UIProbeGeometry: sidebar UX seam materialized %d live row cells and measured %d labels across 220/280/320pt in Aqua and Dark Aqua; %d labels currently elide by drawable-width measurement; zero-size host rejected with a named error",
-            totalCells, totalLabels, totalTruncated
+            format: "UIProbeGeometry: sidebar UX seam materialized %d live row cells (%d defect-corpus rows per leg) and measured %d labels across 220/280/320pt in Aqua and Dark Aqua; %d labels currently elide by drawable-width measurement; zero-size host rejected with a named error",
+            totalCells, rows.count, totalLabels, totalTruncated
         ))
     }
 

@@ -411,6 +411,194 @@ enum LabFixtures {
         }
     }
 
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P0.3-row-fixture-corpus.md
+    // ===== P0.3 SIDEBAR DEFECT CORPUS BEGIN (scanned by runSidebarDefectCorpusChecks) =====
+    //
+    // A SEPARATE corpus, deliberately NOT more rows on `inboxRows()` or
+    // `inboxParkedRows()`: those two lists are the subjects of committed Component
+    // Lab baselines (`chrome.agentInbox`, `.parked`, `.bulk`, `.jumpHints`), and
+    // growing them would change renders whose whole content is something else.
+    // This corpus renders in NO pixel baseline — it is consumed by
+    // `UIProbeGeometry.runSidebarUXChecks` (`--sidebar-ux-check`), whose
+    // assertions are counts and measured widths, so it can carry the shapes the
+    // baseline fixtures must not: a 40-child fan-out, a 162-hour elapsed, a name
+    // that is a model id, a dead-space row with no role and no branch.
+    //
+    // Every string below is WRITTEN, never captured from a real session (I5): no
+    // real path, host, user name, transcript or key shape may appear here, and
+    // `runSidebarDefectCorpusChecks` scans this region for those shapes on every
+    // run of ContinuumRevivedAgentUIChecks.
+
+    /// The declared vocabulary of defect shapes, one case per shape the sidebar
+    /// program exists to fix. `sidebarDefectRows(for:)` switches over this enum
+    /// EXHAUSTIVELY with no `default:`, which is what makes declaration/usage
+    /// parity structural in both directions: a declared case with no rows fails
+    /// to compile, and a row can only be built inside a declared case's arm.
+    enum SidebarRowFixture: String, CaseIterable {
+        /// The row's NAME is a fully qualified provider/model id — the "a name
+        /// is never an identifier" defect, expressible at last.
+        case titleIsModelId
+        /// nil role AND nil branch AND nil model: the two-empty-lines dead-space
+        /// row shape.
+        case nilRoleNilBranch
+        /// A three-digit-hour elapsed (162h21m). The shipped formatter is
+        /// uncapped, so this renders literally — which is what the elapsed
+        /// packet needs to be able to fail on.
+        case elapsedThreeDigitHour
+        /// An agent with NO live snapshot — disk-derived, never confirmed. It
+        /// renders as a normal working row today; P3.4 renders unconfirmed
+        /// later. `sidebarUnobservedAgentIds()` is the flag that packet reads.
+        case unobservedNoSnapshot
+        /// One parent with FORTY depth-1 children — the fan-out the bounded
+        /// fan-out decision has to be tested against.
+        case fanOutFortyChildren
+        /// A parent → child → grandchild chain, so depths 0, 1 and 2 all render.
+        case depthChainToCap
+        /// A project name wider than the whole row at 220 pt.
+        case projectNameWiderThanRow
+        /// A name carrying combining marks plus a right-to-left run. Arabic
+        /// harakat and Hebrew niqqud stay combining under NFC, so the marks
+        /// survive any normalization of this file.
+        case combiningMarksRTLName
+        /// A genuinely snoozed row (wake in the future), so the shelf heading
+        /// and the slim variant are both exercised.
+        case snoozedOnShelf
+        /// A settled row: history block, slim variant.
+        case settledSlimTail
+        /// An archived row fed straight to the view. Production drops archived
+        /// rows before the list ever sees them (P4.1), but the compiled view
+        /// keeps one in the live block as a card — the corpus carries it so the
+        /// probe witnesses today's compiled behaviour rather than assuming it.
+        case archivedCard
+    }
+
+    /// How many depth-1 children the fan-out fixture spawns. Named so the checks
+    /// target can pin the count without duplicating the corpus.
+    static let sidebarFanOutChildCount = 40
+    /// 162h21m in seconds — a three-digit-hour elapsed, set directly on the
+    /// fixture. The Lab's other corpora top out at 2h21m, which cannot fail the
+    /// elapsed packet.
+    static let sidebarThreeDigitHourElapsed: TimeInterval = 584_460
+
+    /// The rows for ONE declared shape. All `AgentInboxRow` construction in this
+    /// corpus happens inside this switch — `runSidebarDefectCorpusChecks` scans
+    /// for a row built anywhere else in the region and fails it.
+    static func sidebarDefectRows(for fixture: SidebarRowFixture) -> [AgentInboxRow] {
+        func at(_ minutes: Double) -> Date { epoch.addingTimeInterval(minutes * 60) }
+        func rowId(_ index: Int) -> UUID {
+            UUID(uuidString: String(format: "00000000-0000-0000-0000-0000000005%02X", index))!
+        }
+        switch fixture {
+        case .titleIsModelId:
+            return [AgentInboxRow(
+                id: rowId(0x01), title: "openai-codex/gpt-5.6-sol", projectName: "continuum",
+                workspaceName: "Overnight", state: .approval, attention: .unread,
+                model: "gpt-5.6-sol", role: "reviewer", branch: "agent/model-id-name",
+                isIsolated: true, createdAt: at(1_010))]
+        case .nilRoleNilBranch:
+            return [AgentInboxRow(
+                id: rowId(0x02), title: "claude · dead space", projectName: "continuum",
+                workspaceName: "Overnight", state: .ready, attention: .none,
+                lifecycle: .active, model: nil, role: nil, branch: nil,
+                createdAt: at(1_009))]
+        case .elapsedThreeDigitHour:
+            return [AgentInboxRow(
+                id: rowId(0x03), title: "claude · long haul", projectName: "continuum",
+                workspaceName: "Overnight", state: .working, model: "claude-opus-5",
+                role: "builder", branch: "main",
+                elapsed: sidebarThreeDigitHourElapsed, createdAt: at(1_008))]
+        case .unobservedNoSnapshot:
+            return [AgentInboxRow(
+                id: rowId(0x04), title: "codex · unobserved record", projectName: "continuum",
+                workspaceName: "Overnight", state: .working, model: "gpt-5.6-sol",
+                role: "builder", branch: "agent/unobserved", isIsolated: true,
+                createdAt: at(1_007))]
+        case .fanOutFortyChildren:
+            let parent = AgentInboxRow(
+                id: rowId(0x05), title: "codex · fan-out orchestrator", projectName: "continuum",
+                workspaceName: "Overnight", state: .working, model: "gpt-5.6-sol",
+                role: "orchestrator", branch: "main", createdAt: at(900))
+            let children = (1...sidebarFanOutChildCount).map { index in
+                AgentInboxRow(
+                    id: rowId(0x05 + index), title: "codex · fan-out worker \(index)",
+                    projectName: "continuum", workspaceName: "Overnight", state: .ready,
+                    model: "gpt-5.6-sol", role: "worker",
+                    branch: "agent/fan-out-\(index)", isIsolated: true,
+                    depth: 1, createdAt: at(899 - Double(index)), parentId: parent.id)
+            }
+            return [parent] + children
+        case .depthChainToCap:
+            let root = AgentInboxRow(
+                id: rowId(0x2E), title: "claude · chain root", projectName: "continuum",
+                workspaceName: "Overnight", state: .ready, attention: .woke,
+                model: "claude-opus-5", role: "orchestrator", branch: "main",
+                depth: 0, createdAt: at(800))
+            let child = AgentInboxRow(
+                id: rowId(0x2F), title: "claude · chain worker", projectName: "continuum",
+                workspaceName: "Overnight", state: .input, model: "claude-opus-5",
+                role: "builder", branch: "agent/chain-worker", isIsolated: true,
+                depth: 1, createdAt: at(799), parentId: root.id)
+            let grandchild = AgentInboxRow(
+                id: rowId(0x30), title: "claude · chain grandchild", projectName: "continuum",
+                workspaceName: "Overnight", state: .ready, attention: .unread,
+                model: "claude-opus-5", role: "worker", branch: "agent/chain-grandchild",
+                isIsolated: true, depth: 2, createdAt: at(798), parentId: child.id)
+            return [root, child, grandchild]
+        case .projectNameWiderThanRow:
+            return [AgentInboxRow(
+                id: rowId(0x31), title: "claude · wide project",
+                projectName: "a-project-name-wide-enough-to-outrun-a-220pt-sidebar-row-by-itself",
+                workspaceName: "Overnight", state: .ready, model: "claude-opus-5",
+                role: "builder", branch: "main", createdAt: at(700))]
+        case .combiningMarksRTLName:
+            // Synthetic bidirectional name: Latin, then an Arabic run with
+            // combining harakat (fatha U+064E, damma-tanwin U+064C), then a
+            // Hebrew run with combining niqqud (holam U+05B9, tsere U+05B5).
+            return [AgentInboxRow(
+                id: rowId(0x32), title: "bidi · عَامِلٌ סוֹכֵן test", projectName: "continuum",
+                workspaceName: "Overnight", state: .failed, model: "claude-opus-5",
+                role: "debugger", branch: "agent/bidi-name", isIsolated: true,
+                createdAt: at(699))]
+        case .snoozedOnShelf:
+            return [AgentInboxRow(
+                id: rowId(0x33), title: "claude · parked snooze", projectName: "continuum",
+                workspaceName: "Overnight", state: .ready,
+                lifecycle: .snoozed(until: at(300)), model: "claude-opus-5",
+                role: "builder", branch: "main", variant: .slim, createdAt: at(698))]
+        case .settledSlimTail:
+            return [AgentInboxRow(
+                id: rowId(0x34), title: "claude · parked settle", projectName: "continuum",
+                workspaceName: "Overnight", state: .ready,
+                lifecycle: .settled(at: at(63)), model: "claude-opus-5",
+                role: "builder", branch: "main", variant: .slim, createdAt: at(697))]
+        case .archivedCard:
+            return [AgentInboxRow(
+                id: rowId(0x35), title: "claude · archived record", projectName: "continuum",
+                workspaceName: "Overnight", state: .ready, lifecycle: .archived,
+                model: "claude-opus-5", role: "builder", branch: "main",
+                variant: .card, createdAt: at(696))]
+        }
+    }
+
+    /// The whole corpus, each row paired with the declared shape it renders.
+    /// Built by iterating `allCases`, so a declared case cannot be skipped.
+    static func sidebarDefectCorpus() -> [(fixture: SidebarRowFixture, row: AgentInboxRow)] {
+        SidebarRowFixture.allCases.flatMap { fixture in
+            sidebarDefectRows(for: fixture).map { (fixture, $0) }
+        }
+    }
+
+    /// What the sidebar probe renders — every corpus row, in declaration order.
+    static func inboxDefectRows() -> [AgentInboxRow] { sidebarDefectCorpus().map(\.row) }
+
+    /// The unobserved flag: agents in the corpus that have NO live snapshot.
+    /// Nothing renders it differently today — P3.4 does — but declaring it here
+    /// keeps the fixture alive and readable until that packet lands.
+    static func sidebarUnobservedAgentIds() -> Set<UUID> {
+        Set(sidebarDefectRows(for: .unobservedNoSnapshot).map(\.id))
+    }
+    // ===== P0.3 SIDEBAR DEFECT CORPUS END =====
+
     static func sidebarTree() -> SidebarTree {
         let alpha = SidebarZoneRow(
             zoneId: selectedZoneId, name: "continuum-revived", color: "#5B8DEF", navKey: "1", collapsed: false, projectId: UUID(),

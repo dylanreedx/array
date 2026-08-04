@@ -2,7 +2,7 @@
 
 ## heartbeat
 
-last-touch 2026-08-03T23:11:58Z · ticket P0.2-sidebar-check-seam.md · attempt 1 · pid — · status done
+last-touch 2026-08-04T01:03:10Z · ticket P0.3-row-fixture-corpus.md · attempt 1 · pid — · status done
 
 ## states
 
@@ -12,7 +12,7 @@ last-touch 2026-08-03T23:11:58Z · ticket P0.2-sidebar-check-seam.md · attempt 
 |---|---|---|---|---|
 | `P0.1-program-contract.md` | done | this commit | 2026-08-03T22:15:24Z | Harness-owned completion: focused worker checks, independent opposite-model review, swift build, and final matrix passed. Evidence: /Users/dylan/.pi/sidebar-native-ux-runs/continuum-overnight/run-20260803T170016/tasks/iteration-001-P0.1-program-contract.md. |
 | `P0.2-sidebar-check-seam.md` | done | this commit | 2026-08-03T23:11:58Z | Focus-session completion (loop retired; see plan-focus-session-handoff.md): worker's probe + QA seam preserved from the blocked loop run, matrix leg and inventory record added here. --sidebar-ux-check green at 220/280/320 in both appearances: 42 cells, 252 labels, 24 eliding by drawable width, zero-size host refused. |
-| `P0.3-row-fixture-corpus.md` | pending | — | — | — |
+| `P0.3-row-fixture-corpus.md` | done | this commit | 2026-08-04T01:03:10Z | Focus-session completion: 11 declared shapes / 53 corpus rows with two-way declaration-usage parity, coverage pinned (5 states, 3 attention, 4 lifecycles, 2 variants, depths 0-2), 40-child fan-out, 100h elapsed, bidi+combining title. Probe re-pointed at the corpus with content-derived host height (fence deviation: UIProbeGeometry.swift, the probe renders the corpus). AgentUIChecks + sidebar-ux-check (318 cells/1884 labels/208 eliding) + component-lab (60 baselines byte-identical) + agent-inbox-check all green. Negative witnesses observed red then restored green: planted /Users home path (exit 1, I5 hygiene), planted ssh-rsa key shape (exit 1, I5 hygiene), .failed coverage removed (exit 1, coverage). |
 | `P0.4-inbox-geometry-gate.md` | pending | — | — | — |
 | `P0.5-row-token-vocabulary.md` | pending | — | — | — |
 | `P1.1-remove-row-borders.md` | pending | — | — | — |

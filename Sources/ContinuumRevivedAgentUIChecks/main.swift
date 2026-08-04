@@ -80,6 +80,9 @@ runAgentTileTokenChecks()
 // Ticket: docs/38-tickets/91-agent-tile-ux/P4.6-send-stop-intent-state.md
 runComposerActionPresentationChecks()
 
+// Ticket: docs/38-tickets/94-sidebar-native-ux/P0.3-row-fixture-corpus.md
+runSidebarDefectCorpusChecks()
+
 print("ContinuumRevivedAgentUIChecks passed")
 
 // MARK: - P4.6 — truthful composer intents, capabilities and action state
@@ -187,6 +190,346 @@ func runComposerActionPresentationChecks() {
 
     print("Composer action negative witness observed red (exit \(witness.terminationStatus)): \(expectedWitness)")
     print("Composer action checks passed: \(rows) state/capability/draft rows and conservative no-RPC presentation")
+}
+
+// MARK: - P0.3 (94-sidebar-native-ux) — the sidebar defect corpus's gates
+//
+// Ticket: docs/38-tickets/94-sidebar-native-ux/P0.3-row-fixture-corpus.md
+//
+// The corpus itself lives in `LabFixtures` (Sources/ContinuumRevived/App/
+// ComponentLab.swift) because the app-module probe renders it, and this target
+// deliberately depends on ContinuumRevivedAgentUI ALONE (see Package.swift) —
+// so the corpus VALUES are not linkable from here, and by the P1.1 direction
+// they must never become so. The gates below therefore read the corpus the way
+// `ContinuumRevivedAgentContentChecks` reads its production seams: off the
+// SOURCE, between two pinned markers, with comments stripped by a real
+// scanner before any structural claim is made. What stays value-level here is
+// the vocabulary the coverage matrix is derived FROM — `InboxState.allCases`,
+// `InboxAttention.allCases`, `RowVariant.allCases`, `AgentInboxRow.maxDepth`
+// are compiled in from AgentUI, so a state or variant added later demands a
+// fixture without this file being touched. What stays value-level in the APP
+// is the rendering half of the parity gate: `--sidebar-ux-check` materializes
+// the corpus and asserts cells == rows, every state painted, and each cell's
+// class matching its row's variant.
+//
+// NEGATIVE WITNESSES — each mutation made against the final ComponentLab.swift
+// corpus, run, observed red at exit 1, and reverted with the reversion proved
+// by `git diff`. Quoted, not predicted:
+//
+//   (a) a home path planted in the wide-project fixture's projectName
+//       (`"/Users/plantedwitness/checkouts/wide"`):
+//         FAIL: SidebarDefectCorpus: I5 hygiene violation — home-path shape
+//         '/Users/plantedwitness' in the corpus region; fixtures are written,
+//         never captured
+//   (b) a key-shaped string planted in the dead-space fixture's title
+//       (`"ssh-rsa AAAAB3NzaC1yc2E dead space"`):
+//         FAIL: SidebarDefectCorpus: I5 hygiene violation — key-material shape
+//         'ssh-rsa' in the corpus region; fixtures are written, never captured
+//   (c) the corpus's one failed-state fixture removed (`state: .failed` →
+//       `state: .ready` on the combiningMarksRTLName row):
+//         FAIL: SidebarDefectCorpus: no fixture carries state: .failed — every
+//         InboxState needs at least one corpus row
+func runSidebarDefectCorpusChecks() {
+    let repoRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()  // ContinuumRevivedAgentUIChecks
+        .deletingLastPathComponent()  // Sources
+        .deletingLastPathComponent()  // repo root
+    let componentLabURL = repoRoot
+        .appendingPathComponent("Sources/ContinuumRevived/App/ComponentLab.swift")
+    let probeURL = repoRoot
+        .appendingPathComponent("Sources/ContinuumRevived/App/UIProbeGeometry.swift")
+    guard let componentLab = try? String(contentsOf: componentLabURL, encoding: .utf8) else {
+        expect(false, "SidebarDefectCorpus: could not read \(componentLabURL.path)")
+        return
+    }
+    guard let probeSource = try? String(contentsOf: probeURL, encoding: .utf8) else {
+        expect(false, "SidebarDefectCorpus: could not read \(probeURL.path)")
+        return
+    }
+
+    // The corpus region, marker to marker. The markers are the contract that
+    // lets this file find the corpus without linking it; losing one is red, not
+    // a silent no-op scan.
+    let beginMarker = "===== P0.3 SIDEBAR DEFECT CORPUS BEGIN"
+    let endMarker = "===== P0.3 SIDEBAR DEFECT CORPUS END"
+    expect(componentLab.components(separatedBy: beginMarker).count == 2,
+           "SidebarDefectCorpus: ComponentLab.swift must contain the BEGIN marker exactly once")
+    expect(componentLab.components(separatedBy: endMarker).count == 2,
+           "SidebarDefectCorpus: ComponentLab.swift must contain the END marker exactly once")
+    guard let beginRange = componentLab.range(of: beginMarker),
+          let endRange = componentLab.range(of: endMarker),
+          beginRange.upperBound < endRange.lowerBound else {
+        expect(false, "SidebarDefectCorpus: corpus markers are missing or out of order")
+        return
+    }
+    let rawRegion = String(componentLab[beginRange.upperBound..<endRange.lowerBound])
+
+    // A real comment stripper — line comments, nested block comments, string
+    // literals honoured (a `//` inside a string is content, and a planted
+    // secret inside a comment is still scanned because HYGIENE runs on the raw
+    // region). Structural claims below are made on the stripped text only, so
+    // a `state: .failed` in a comment cannot satisfy a coverage gate.
+    func stripComments(_ source: String) -> String {
+        var out = String.UnicodeScalarView()
+        let scalars = Array(source.unicodeScalars)
+        var i = 0
+        var blockDepth = 0
+        var inLine = false
+        var inString = false
+        while i < scalars.count {
+            let c = scalars[i]
+            let next: Unicode.Scalar? = i + 1 < scalars.count ? scalars[i + 1] : nil
+            if inLine {
+                if c == "\n" { inLine = false; out.append(c) }
+            } else if blockDepth > 0 {
+                if c == "/", next == "*" { blockDepth += 1; i += 1 } else if c == "*", next == "/" {
+                    blockDepth -= 1
+                    i += 1
+                } else if c == "\n" {
+                    out.append(c)
+                }
+            } else if inString {
+                out.append(c)
+                if c == "\\", let next {
+                    out.append(next)
+                    i += 1
+                } else if c == "\"" {
+                    inString = false
+                }
+            } else if c == "/", next == "/" {
+                inLine = true
+                i += 1
+            } else if c == "/", next == "*" {
+                blockDepth = 1
+                i += 1
+            } else {
+                out.append(c)
+                if c == "\"" { inString = true }
+            }
+            i += 1
+        }
+        return String(String.UnicodeScalarView(out))
+    }
+    let region = stripComments(rawRegion)
+
+    func matches(_ pattern: String, in text: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            expect(false, "SidebarDefectCorpus: invalid scan pattern \(pattern)")
+            return []
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.matches(in: text, range: range).compactMap { match in
+            Range(match.range(at: match.numberOfRanges > 1 ? 1 : 0), in: text).map { String(text[$0]) }
+        }
+    }
+    func braceBlock(startingAt anchor: String, in text: String) -> String? {
+        guard let anchorRange = text.range(of: anchor),
+              let openIndex = text[anchorRange.upperBound...].firstIndex(of: "{") else { return nil }
+        var depth = 0
+        var i = openIndex
+        while i < text.endIndex {
+            let c = text[i]
+            if c == "{" { depth += 1 }
+            if c == "}" {
+                depth -= 1
+                if depth == 0 { return String(text[openIndex...i]) }
+            }
+            i = text.index(after: i)
+        }
+        return nil
+    }
+
+    // 1. DECLARATION/USAGE PARITY, both directions. The declaration is the
+    //    `SidebarRowFixture` enum; the usage is `sidebarDefectRows(for:)`'s
+    //    switch. The switch is also compile-exhaustive in the app module — this
+    //    gate is what makes the pairing visible to the fast layer-1 leg, and
+    //    what catches a `default:` shortcut the compiler would happily accept.
+    guard let enumBlock = braceBlock(startingAt: "enum SidebarRowFixture", in: region) else {
+        expect(false, "SidebarDefectCorpus: the corpus region no longer declares enum SidebarRowFixture")
+        return
+    }
+    let declared = Set(matches(#"case\s+([a-z][A-Za-z0-9_]*)"#, in: enumBlock))
+    guard let switchBlock = braceBlock(startingAt: "switch fixture", in: region) else {
+        expect(false, "SidebarDefectCorpus: sidebarDefectRows(for:) lost its switch over the declared fixtures")
+        return
+    }
+    let arms = Set(matches(#"case\s+\.([A-Za-z0-9_]+)\s*:"#, in: switchBlock))
+    expect(!switchBlock.contains("default:"),
+           "SidebarDefectCorpus: the corpus switch must stay exhaustive — a default: arm lets a declared fixture render nothing")
+    for name in declared.subtracting(arms).sorted() {
+        expect(false, "SidebarDefectCorpus: declared fixture .\(name) has no corpus rows — a declared case nobody renders is dead vocabulary")
+    }
+    for name in arms.subtracting(declared).sorted() {
+        expect(false, "SidebarDefectCorpus: corpus arm .\(name) is not a declared SidebarRowFixture case")
+    }
+    // Rows must only be built inside the declared arms: an AgentInboxRow
+    // constructed elsewhere in the region is a fixture nobody declared.
+    if let blockRange = region.range(of: switchBlock) {
+        var outside = region
+        outside.removeSubrange(blockRange)
+        expect(!outside.contains("AgentInboxRow("),
+               "SidebarDefectCorpus: an AgentInboxRow is constructed outside the fixture switch — every corpus row must trace to a declared case")
+    } else {
+        expect(false, "SidebarDefectCorpus: could not relocate the fixture switch inside the corpus region")
+    }
+    expect(region.contains("SidebarRowFixture.allCases.flatMap"),
+           "SidebarDefectCorpus: sidebarDefectCorpus() must iterate SidebarRowFixture.allCases, so no declared case can be skipped")
+
+    // 2. The packet's REQUIRED shapes, by name. Deleting or renaming one is
+    //    red here even though parity above would still balance.
+    let required: Set<String> = [
+        "titleIsModelId", "nilRoleNilBranch", "elapsedThreeDigitHour",
+        "unobservedNoSnapshot", "fanOutFortyChildren", "depthChainToCap",
+        "projectNameWiderThanRow", "combiningMarksRTLName",
+        "snoozedOnShelf", "settledSlimTail", "archivedCard",
+    ]
+    for name in required.subtracting(declared).sorted() {
+        expect(false, "SidebarDefectCorpus: required defect shape .\(name) is no longer declared")
+    }
+
+    // 3. COVERAGE MATRIX, derived from the compiled vocabulary wherever the
+    //    vocabulary is enumerable — a sixth InboxState lands and this gate
+    //    demands its fixture with no edit here.
+    for state in InboxState.allCases {
+        expect(switchBlock.contains("state: .\(state.rawValue)"),
+               "SidebarDefectCorpus: no fixture carries state: .\(state.rawValue) — every InboxState needs at least one corpus row")
+    }
+    for attention in InboxAttention.allCases {
+        expect(switchBlock.contains("attention: .\(attention.rawValue)"),
+               "SidebarDefectCorpus: no fixture carries attention: .\(attention.rawValue) — every InboxAttention needs at least one corpus row")
+    }
+    // InboxLifecycle carries associated values, so it cannot be CaseIterable;
+    // the four spellings are pinned by hand and this comment is the reminder
+    // that a fifth lifecycle case must be added here too.
+    for lifecycle in ["lifecycle: .active", "lifecycle: .snoozed(until:", "lifecycle: .settled(at:", "lifecycle: .archived"] {
+        expect(switchBlock.contains(lifecycle),
+               "SidebarDefectCorpus: no fixture carries \(lifecycle) — every InboxLifecycle needs at least one corpus row")
+    }
+    for variant in RowVariant.allCases {
+        expect(switchBlock.contains("variant: .\(variant.rawValue)"),
+               "SidebarDefectCorpus: no fixture carries variant: .\(variant.rawValue) — both RowVariant values need a corpus row")
+    }
+    for depth in 0...AgentInboxRow.maxDepth {
+        expect(switchBlock.contains("depth: \(depth),"),
+               "SidebarDefectCorpus: no fixture is written at depth \(depth) — depths 0…\(AgentInboxRow.maxDepth) each need a corpus row (the sort confirms the hint from the parentId chain)")
+    }
+
+    // 4. Per-shape teeth, so a required case cannot be kept in name while its
+    //    defect quietly leaves the row. Arm text is the stripped source between
+    //    one `case .name:` and the next.
+    var armText: [String: String] = [:]
+    do {
+        let pattern = #"case\s+\.([A-Za-z0-9_]+)\s*:"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            expect(false, "SidebarDefectCorpus: invalid arm pattern")
+            return
+        }
+        let range = NSRange(switchBlock.startIndex..<switchBlock.endIndex, in: switchBlock)
+        let found = regex.matches(in: switchBlock, range: range)
+        for (index, match) in found.enumerated() {
+            guard let nameRange = Range(match.range(at: 1), in: switchBlock),
+                  let armStart = Range(match.range, in: switchBlock)?.upperBound else { continue }
+            let armEnd = index + 1 < found.count
+                ? (Range(found[index + 1].range, in: switchBlock)?.lowerBound ?? switchBlock.endIndex)
+                : switchBlock.endIndex
+            armText[String(switchBlock[nameRange])] = String(switchBlock[armStart..<armEnd])
+        }
+    }
+    func arm(_ name: String) -> String { armText[name] ?? "" }
+    func literal(_ argument: String, in text: String) -> String? {
+        matches("\(argument): \"([^\"]*)\"", in: text).first
+    }
+    expect(arm("titleIsModelId").contains("title: \"openai-codex/gpt-5.6-sol\""),
+           "SidebarDefectCorpus: titleIsModelId must use the fully qualified provider/model id as the row's NAME")
+    for field in ["model: nil", "role: nil", "branch: nil"] {
+        expect(arm("nilRoleNilBranch").contains(field),
+               "SidebarDefectCorpus: nilRoleNilBranch lost \(field) — the dead-space shape needs both empty lines")
+    }
+    expect(arm("elapsedThreeDigitHour").contains("elapsed: sidebarThreeDigitHourElapsed"),
+           "SidebarDefectCorpus: elapsedThreeDigitHour must set the named three-digit-hour constant directly on the fixture")
+    if let seconds = matches(#"sidebarThreeDigitHourElapsed: TimeInterval = ([0-9_]+)"#, in: region).first,
+       let value = Double(seconds.replacingOccurrences(of: "_", with: "")) {
+        expect(value >= 100 * 3_600,
+               "SidebarDefectCorpus: sidebarThreeDigitHourElapsed is \(Int(value))s, under the 100-hour floor a three-digit-hour fixture exists for")
+    } else {
+        expect(false, "SidebarDefectCorpus: sidebarThreeDigitHourElapsed lost its parseable declaration")
+    }
+    if let count = matches(#"sidebarFanOutChildCount = ([0-9_]+)"#, in: region).first {
+        expect(count == "40",
+               "SidebarDefectCorpus: sidebarFanOutChildCount is \(count), not the packet's forty")
+    } else {
+        expect(false, "SidebarDefectCorpus: sidebarFanOutChildCount lost its parseable declaration")
+    }
+    expect(arm("fanOutFortyChildren").contains("(1...sidebarFanOutChildCount)")
+        && arm("fanOutFortyChildren").contains("parentId: parent.id"),
+           "SidebarDefectCorpus: fanOutFortyChildren must build its forty rows under one parent from the named count")
+    expect(arm("depthChainToCap").contains("parentId: root.id")
+        && arm("depthChainToCap").contains("parentId: child.id"),
+           "SidebarDefectCorpus: depthChainToCap lost its parent → child → grandchild chain")
+    if let projectName = literal("projectName", in: arm("projectNameWiderThanRow")) {
+        expect(projectName.count >= 40,
+               "SidebarDefectCorpus: projectNameWiderThanRow's project is \(projectName.count) characters — too short to outrun a 220pt row")
+    } else {
+        expect(false, "SidebarDefectCorpus: projectNameWiderThanRow lost its project name literal")
+    }
+    if let title = literal("title", in: arm("combiningMarksRTLName")) {
+        let scalars = title.unicodeScalars
+        expect(scalars.contains { $0.properties.generalCategory == .nonspacingMark },
+               "SidebarDefectCorpus: combiningMarksRTLName's title carries no combining mark")
+        expect(scalars.contains { (0x0590...0x08FF).contains(Int($0.value)) || (0xFB1D...0xFEFF).contains(Int($0.value)) },
+               "SidebarDefectCorpus: combiningMarksRTLName's title carries no right-to-left run")
+    } else {
+        expect(false, "SidebarDefectCorpus: combiningMarksRTLName lost its title literal")
+    }
+    expect(region.contains("static func sidebarUnobservedAgentIds"),
+           "SidebarDefectCorpus: the unobserved-agent flag declaration is gone — P3.4 renders it, and losing it now orphans the fixture")
+
+    // 5. WIRING: the probe must render THIS corpus. Rendering itself is gated
+    //    value-level in the app (`--sidebar-ux-check` asserts cells == rows and
+    //    every InboxState painted); this leg pins that the wiring cannot be
+    //    quietly pointed back at the baseline fixtures.
+    expect(probeSource.contains("LabFixtures.inboxDefectRows()"),
+           "SidebarDefectCorpus: UIProbeGeometry no longer renders the defect corpus — every declared shape must reach a check leg")
+
+    // 6. I5 HYGIENE over the RAW region — comments included, because a pasted
+    //    transcript lands in comments as easily as in literals. Red on any
+    //    real-session shape: home paths, key material, token shapes, secret
+    //    runs, hostname shapes, or this machine's own user names.
+    func hygieneViolations(in text: String) -> [String] {
+        var violations: [String] = []
+        for path in matches(#"(/(?:Users|home)/[A-Za-z0-9._-]+)"#, in: text) {
+            violations.append("home-path shape '\(path)'")
+        }
+        if text.contains("~/") { violations.append("home-path shape '~/'") }
+        for key in ["ssh-rsa", "ssh-ed25519", "ssh-dss", "ecdsa-sha2", "-----BEGIN", "PRIVATE KEY"] where text.contains(key) {
+            violations.append("key-material shape '\(key)'")
+        }
+        for token in matches(#"(AKIA[0-9A-Z]{16})"#, in: text) {
+            violations.append("AWS-key shape '\(token)'")
+        }
+        for token in matches(#"(ghp_[A-Za-z0-9]{30,}|xox[abprs]-[A-Za-z0-9-]+)"#, in: text) {
+            violations.append("token shape '\(token)'")
+        }
+        for run in matches(#"([A-Za-z0-9+/=]{40,})"#, in: text) {
+            violations.append("secret-looking run '\(run.prefix(20))…' (\(run.count) chars)")
+        }
+        for host in matches(#"\b([A-Za-z0-9][A-Za-z0-9-]*\.(?:local|lan|internal|corp|com|net|org|io|dev|ai))\b"#, in: text) {
+            violations.append("hostname shape '\(host)'")
+        }
+        let userNames = [NSUserName(), FileManager.default.homeDirectoryForCurrentUser.lastPathComponent]
+        for name in Set(userNames.map { $0.lowercased() }) where name.count >= 4 {
+            if text.lowercased().contains(name) { violations.append("real user name '\(name)'") }
+        }
+        return violations
+    }
+    for violation in hygieneViolations(in: rawRegion) {
+        expect(false, "SidebarDefectCorpus: I5 hygiene violation — \(violation) in the corpus region; fixtures are written, never captured")
+    }
+
+    print("SidebarDefectCorpus checks passed: \(declared.count) declared shapes ↔ \(arms.count) corpus arms in two-way parity with no default:, "
+        + "coverage pinned for \(InboxState.allCases.count) states / \(InboxAttention.allCases.count) attention values / 4 lifecycles / \(RowVariant.allCases.count) variants / depths 0…\(AgentInboxRow.maxDepth), "
+        + "forty-child fan-out and \(Int(100 * 3_600))s-floor elapsed parsed from source, bidi title carries combining marks and an RTL run, "
+        + "probe wiring verified, and the I5 hygiene scan found nothing in the raw corpus region")
 }
 
 // MARK: - P0.3 — the v2 tile's surfaces, line roles and radii
