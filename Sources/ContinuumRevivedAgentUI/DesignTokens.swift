@@ -449,6 +449,171 @@ public enum AgentTileTokens {
     }
 }
 
+// Ticket: docs/38-tickets/94-sidebar-native-ux/P0.5-row-token-vocabulary.md
+//
+// The sidebar's interaction fill ladder: resting, multi-selected, hovered,
+// route-active. Queue 94's locked decision is that SURFACE IS RESERVED FOR
+// INTERACTION — a sidebar row paints no perimeter border and no status fill;
+// at rest it is the panel itself, and the only fills it ever takes are these
+// three, with SELECTION QUIETER THAN HOVER because hover is transient pointer
+// feedback and selection is a resting state you park on. That is T3 Code's
+// model (plan-sidebar-t3code-study.md: hover 8%, route-active 11%, selected 7%
+// foreground mixes), and it is deliberately the OPPOSITE loudness order from
+// the tile's `rowSelected`/`rowHover` above: a selected transcript row must
+// out-step every card fill and pairs with `focusRing`, so the tile ladder
+// steps 1.24/1.46:1 selected vs 1.06/1.10:1 hover. An inbox list has no card
+// fills to beat, and a selection you park on must not shout.
+//
+// WHY A NEW TYPE RATHER THAN NEW CASES. `AgentSurfaceRole` is pinned to five
+// cases in `runAgentTileTokenChecks`, its `rowSelected` extremity across the
+// sixteen-surface ladder is load-bearing for that suite's pinned worst-case
+// table, and its values are consumed live (ChoiceListView, ChoiceButton,
+// ComposerTextView, ApprovalRenderer) — so the tile enum must not grow and
+// its values must not move. Same call P0.3 made against P1.3's pinned enums;
+// `runSidebarSurfaceChecks` pins the tile row values to make it enforceable.
+//
+// NO INVENTED COLOURS. Every fill is `textPrimary` composited over `panel`
+// (the sidebar's own P1.3 surface) at a named alpha, using the same
+// `composited(over:alpha:)` model P3.5 gates the in-flight fade with. The
+// only new numbers are the three mix strengths, and they are T3 Code's, not
+// taste: selected 0.07 < hover 0.08 < active 0.11.
+//
+// MEASURED, both appearances, pinned to ±0.01 in `runSidebarSurfaceChecks`
+// (emphasis = contrast ratio of the resolved fill against the resting
+// `panel`):
+//
+//   role        alpha   light   dark    floor
+//   resting     0       1.00    1.00    —  (identity: it IS panel)
+//   selected    0.07    1.15    1.18    1.10
+//   hover       0.08    1.17    1.21    1.10
+//   active      0.11    1.25    1.32    1.20
+//
+// so hover > selected and active > hover hold BY MEASUREMENT in both themes,
+// and the suite asserts the strict ordering itself, not these pins alone.
+//
+// Every foreground the sidebar paints on the three fills is gated at its own
+// floor, worst case pinned (±0.01). The worst background is `sidebarActive`
+// in BOTH themes for every foreground — the strongest mix, the end of the
+// ladder:
+//
+//   foreground        light   dark    floor
+//   textPrimary       13.28   12.77    4.5
+//   textSecondary      5.28    6.89    4.5
+//   accentWorking      4.83    5.71    4.5
+//   accentApproval     4.96    7.89    4.5
+//   accentInput        5.58    5.65    4.5
+//   accentFailed       4.65    6.18    4.5
+//   accentDone         5.21    7.12    4.5
+//   controlBoundary    3.11    3.63    3.0
+//   focusRing          6.10    6.43    3.0
+//
+// `resting` contributes no pair: it resolves to `panel` exactly, and P1.3
+// already gates every text, accent, and line token there. Attention lines
+// are covered by value: `AgentLineRole.attentionAccents` are gated here as
+// status accents at the same 4.5 floor `attention` itself carries.
+//
+// NOTHING ADOPTS THESE YET, by packet instruction ("no baseline can move in
+// this packet"): the P1.x row work does the adopting.
+
+/// The sidebar row's interaction fills, quietest-first. Additive to
+/// `AgentSurfaceRole` for the reasons above; the two ladders serve different
+/// surfaces and deliberately disagree about selection loudness.
+public enum SidebarSurfaceRole: String, CaseIterable, Sendable {
+    /// A row at rest paints NO fill — this role resolves to `panel` itself,
+    /// so "unfilled" is a measurable identity, not a view-layer promise.
+    case resting = "sidebarResting"
+    /// A multi-selected row. QUIETER than hover: selection is a resting
+    /// state, and it is not the row you are pointing at.
+    case selected = "sidebarSelected"
+    /// A hovered row. Transient pointer feedback, one step louder than
+    /// selection so the pointer's row always reads above a parked selection.
+    case hover = "sidebarHover"
+    /// The route-active row — the agent whose tile is open. The loudest
+    /// step, because it answers "where am I" from anywhere in the list.
+    case active = "sidebarActive"
+
+    /// The strength of the `textPrimary` mix over `panel`. T3 Code's numbers
+    /// (7/8/11%), ordered selected < hover < active; `resting` mixes nothing.
+    public var emphasisAlpha: Double {
+        switch self {
+        case .resting: return 0
+        case .selected: return 0.07
+        case .hover: return 0.08
+        case .active: return 0.11
+        }
+    }
+
+    /// Resolved per theme by compositing existing tokens — never a fresh
+    /// hex. At alpha 0 `composited` returns the background exactly, so
+    /// `resting` IS `panel` by construction.
+    public var color: TokenColor {
+        let base = SidebarSurfaceRole.rowBase.color
+        let mix = TextToken.textPrimary.color
+        return TokenColor(
+            light: mix.light.composited(over: base.light, alpha: emphasisAlpha),
+            dark: mix.dark.composited(over: base.dark, alpha: emphasisAlpha))
+    }
+
+    /// The three fills, quietest-first — what `runSidebarSurfaceChecks`
+    /// orders and floors by measurement.
+    public static let rowEmphases: [SidebarSurfaceRole] = [.selected, .hover, .active]
+    /// What an emphasis is measured against: a sidebar row rests on `panel`
+    /// ("The sidebar and Settings" — P1.3).
+    public static let rowBase: SurfaceToken = .panel
+}
+
+/// The sidebar ladder's pair set, mirroring `AgentTileTokens`: these gate
+/// the THREE new fills, and `panel` (= `resting`) stays P1.3's to gate.
+public enum SidebarTokens {
+    /// Text painted on a sidebar fill. Same two as the tile, same reasoning.
+    public static let surfaceTextTokens: [TextToken] = [.textPrimary, .textSecondary]
+    /// A row carries its status as an accent word or glyph, so every accent
+    /// must read on every fill. This superset of
+    /// `AgentLineRole.attentionAccents` is what covers attention lines on
+    /// these fills, by value, at the same 4.5 floor.
+    public static let statusAccents: [AccentToken] = AccentToken.allCases
+    /// The semantic line roles a sidebar fill can host. The decorative
+    /// hairline is deliberately absent — exempt, and never state-bearing.
+    public static let gatedLineRoles: [AgentLineRole] = [.controlBoundary, .focusRing]
+
+    /// Every pair the sidebar ladder claims is legal, derived from the
+    /// declarations above so a new fill cannot ship unpaired.
+    public static var documentedPairs: [TokenPair] {
+        var pairs: [TokenPair] = []
+        for surface in SidebarSurfaceRole.rowEmphases {
+            for text in surfaceTextTokens {
+                pairs.append(TokenPair(
+                    foreground: text.rawValue, background: surface.rawValue,
+                    color: text.color, backgroundColor: surface.color,
+                    floor: DesignTokens.textFloor))
+            }
+            for accent in statusAccents {
+                pairs.append(TokenPair(
+                    foreground: accent.rawValue, background: surface.rawValue,
+                    color: accent.color, backgroundColor: surface.color,
+                    floor: DesignTokens.textFloor))
+            }
+            for role in gatedLineRoles {
+                guard let floor = role.contrastFloor else { continue }
+                pairs.append(TokenPair(
+                    foreground: role.rawValue, background: surface.rawValue,
+                    color: role.color, backgroundColor: surface.color, floor: floor))
+            }
+        }
+        return pairs
+    }
+
+    /// How far a fill steps from the resting panel, as a ratio the same
+    /// evaluator measures. This is the number the ladder's ordering is
+    /// asserted on — selection quieter than hover is a measurement here,
+    /// never a naming convention.
+    public static func rowEmphasisRatio(_ role: SidebarSurfaceRole, theme: TokenTheme) -> Double {
+        WCAGContrast.ratio(
+            role.color.resolved(for: theme),
+            SidebarSurfaceRole.rowBase.color.resolved(for: theme))
+    }
+}
+
 /// Status accents. One per state, hue stable across themes.
 public enum AccentToken: String, CaseIterable, Sendable {
     case accentWorking

@@ -99,6 +99,21 @@ public enum AgentTileRadius {
     public static let ladder: [Double] = [tile, composer, artifact]
 }
 
+// Ticket: docs/38-tickets/94-sidebar-native-ux/P0.5-row-token-vocabulary.md
+/// Stroke widths. A width is a token for the same reason a colour or an
+/// alpha is: a literal `0.5` at a call site is a boundary decision made
+/// where nothing can measure it.
+public enum LineWidth {
+    /// THE hairline. Queue 94's `_DESIGN.md` caps any boundary the sidebar
+    /// keeps at 0.5 pt, drawn from `AgentLineRole` — the sidebar is this
+    /// token's first consumer, and ticket 93
+    /// (docs/38-tickets/93-global-border-audit.md) will sweep every other
+    /// border in the app onto it. One declaration, so "at most 0.5 pt" is a
+    /// value `runSidebarSurfaceChecks` pins rather than a convention call
+    /// sites remember. `Double`, like every metric here — views convert.
+    public static let hairline = 0.5
+}
+
 /// The two padding shapes. Collapsing today's 3/6/8/10/12 into exactly two is
 /// the ticket: a card is generous on all four edges, a row is compact
 /// vertically and keeps the card's horizontal rhythm so text left-aligns down

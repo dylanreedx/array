@@ -77,6 +77,9 @@ runPrecedenceMatrixChecks()
 // Ticket: docs/38-tickets/91-agent-tile-ux/P0.3-semantic-tile-tokens.md
 runAgentTileTokenChecks()
 
+// Ticket: docs/38-tickets/94-sidebar-native-ux/P0.5-row-token-vocabulary.md
+runSidebarSurfaceChecks()
+
 // Ticket: docs/38-tickets/91-agent-tile-ux/P4.6-send-stop-intent-state.md
 runComposerActionPresentationChecks()
 
@@ -895,4 +898,272 @@ func runAgentTileTokenChecks() {
         + "\(AgentLineRole.allCases.filter(\.isSemantic).count) semantic roles all reuse a gated P1.3 token and none aliases the hairline "
         + "(which peaks at \(fmt(hairlineWorst)):1, under the \(fmt(DesignTokens.lineFloor)):1 component floor), "
         + "\(exemptions.count) reasoned exemption, radii \(AgentTileRadius.ladder.map { Int($0) }) nest above card \(Int(Radius.card))")
+}
+
+
+// MARK: - P0.5 — the sidebar's interaction fill ladder and the hairline width
+//
+// Ticket: docs/38-tickets/94-sidebar-native-ux/P0.5-row-token-vocabulary.md
+//
+// Lives in this main rather than in a new file because the packet's file
+// fence names exactly three paths and a new file is not one of them.
+//
+// What this suite exists to catch, in the order the failures matter:
+//
+//  1. AN INVERTED LADDER — selection painted louder than hover. The
+//     sidebar's locked decision is the opposite of the tile's: hover is
+//     transient feedback, selection is a resting state. Gated BY MEASUREMENT
+//     (contrast of each resolved fill against the resting panel, both
+//     themes, strictly ordered), never by naming — so swapping two alphas
+//     goes red even though every name still reads correctly.
+//  2. AN IMPERCEPTIBLE STEP — an emphasis that collapses onto the panel.
+//     Nonzero floors per role, plus ±0.01 provenance pins.
+//  3. A FILL THAT ORPHANS ITS FOREGROUNDS — text, a status accent, or a
+//     semantic line role that no longer clears its own floor on a fill.
+//  4. THE TILE LADDER MOVING UNDER THIS PACKET — `rowSelected`/`rowHover`
+//     are consumed live (ChoiceListView, ChoiceButton, ComposerTextView,
+//     ApprovalRenderer); P0.5 is additive, so their values are pinned here
+//     by hexKey.
+//  5. THE HAIRLINE DRIFTING — `_DESIGN.md` caps any sidebar boundary at
+//     0.5 pt and ticket 93 sweeps the whole app with this one token, so a
+//     1.0 "just this once" is exactly the regression.
+//
+// NEGATIVE WITNESSES — each edit made against this final code, run, and
+// observed red at exit 1. Quoted, not predicted:
+//
+//   (a) the alphas of `selected` and `hover` swapped in DesignTokens.swift
+//       (0.07 ↔ 0.08 — the inverted pair, every name still "correct"):
+//         FAIL: SidebarTokens: hover (1.15:1) must be a stronger step than
+//         selected (1.17:1) against panel in light — hover is transient
+//         feedback, selection is a resting state, and an inverted ladder
+//         paints selection louder
+//   (b) `LineWidth.hairline` 0.5 → 1.0 in Metrics.swift:
+//         FAIL: LineWidth: the shared hairline must stay 0.5 pt, got 1.0 —
+//         _DESIGN.md caps any sidebar boundary at 0.5 pt, and ticket 93
+//         sweeps the whole app with this one token
+func runSidebarSurfaceChecks() {
+    func fmt(_ value: Double) -> String { String(format: "%.2f", value) }
+
+    // 0. Metric anchor, same as the tile suite: without it every ratio below
+    //    could be meaningless and the suite would still print green.
+    let anchor = WCAGContrast.ratio(ChipColor(r: 1, g: 1, b: 1), ChipColor(r: 0, g: 0, b: 0))
+    expect(anchor >= 20.9 && anchor <= 21.1,
+           "SidebarTokens: white/black must be ~21:1, got \(fmt(anchor)) — the ratio function is broken")
+
+    // 1. Additive contract. P0.5 adds a NEW TYPE; the tile's pinned enum has
+    //    its own count gate above, and the tile row values that live views
+    //    consume (ChoiceListView/ChoiceButton/ComposerTextView/
+    //    ApprovalRenderer) must not move under cover of this packet.
+    expect(SidebarSurfaceRole.allCases.count == 4,
+           "SidebarTokens: expected 4 sidebar roles, got \(SidebarSurfaceRole.allCases.count)")
+    expect(AgentSurfaceRole.rowSelected.color.light.hexKey == "D8E4F6"
+        && AgentSurfaceRole.rowSelected.color.dark.hexKey == "2B3547",
+           "SidebarTokens: the tile's adopted rowSelected moved (\(AgentSurfaceRole.rowSelected.color.light.hexKey)/\(AgentSurfaceRole.rowSelected.color.dark.hexKey)) — P0.5 adds a sidebar ladder, it does not retune the tile's")
+    expect(AgentSurfaceRole.rowHover.color.light.hexKey == "F2F4F7"
+        && AgentSurfaceRole.rowHover.color.dark.hexKey == "1B2028",
+           "SidebarTokens: the tile's adopted rowHover moved (\(AgentSurfaceRole.rowHover.color.light.hexKey)/\(AgentSurfaceRole.rowHover.color.dark.hexKey)) — P0.5 adds a sidebar ladder, it does not retune the tile's")
+
+    // 2. Resting is the panel ITSELF — "at rest it is unfilled" as an
+    //    identity the evaluator can measure, not a view-layer promise.
+    expect(SidebarSurfaceRole.rowBase == .panel,
+           "SidebarTokens: the sidebar rests on \(SidebarSurfaceRole.rowBase.rawValue), not panel — P1.3 names panel as the sidebar's surface")
+    expect(SidebarSurfaceRole.resting.emphasisAlpha == 0,
+           "SidebarTokens: resting must mix nothing over the panel, got alpha \(SidebarSurfaceRole.resting.emphasisAlpha)")
+    for theme in TokenTheme.allCases {
+        expect(SidebarSurfaceRole.resting.color.resolved(for: theme).hexKey
+            == SurfaceToken.panel.color.resolved(for: theme).hexKey,
+               "SidebarTokens: resting in \(theme.rawValue) is \(SidebarSurfaceRole.resting.color.resolved(for: theme).hexKey), not panel's \(SurfaceToken.panel.color.resolved(for: theme).hexKey) — a resting row paints NO fill")
+        expect(SidebarTokens.rowEmphasisRatio(.resting, theme: theme) == 1.0,
+               "SidebarTokens: resting must measure exactly 1.00:1 against panel in \(theme.rawValue), got \(fmt(SidebarTokens.rowEmphasisRatio(.resting, theme: theme)))")
+    }
+    expect(!SidebarSurfaceRole.rowEmphases.contains(.resting)
+        && Set(SidebarSurfaceRole.rowEmphases + [.resting]) == Set(SidebarSurfaceRole.allCases)
+        && SidebarSurfaceRole.rowEmphases.count == 3,
+           "SidebarTokens: the emphases must be exactly the three fills — resting is not an emphasis, and no fill may be missing")
+
+    // 3. No invented colours: every role is exactly `textPrimary` composited
+    //    over `panel` at the role's own alpha, in both themes. If `color`
+    //    ever decouples from its declared ingredients, this goes red.
+    for role in SidebarSurfaceRole.allCases {
+        for theme in TokenTheme.allCases {
+            let derived = TextToken.textPrimary.color.resolved(for: theme)
+                .composited(over: SurfaceToken.panel.color.resolved(for: theme), alpha: role.emphasisAlpha)
+            expect(role.color.resolved(for: theme).hexKey == derived.hexKey,
+                   "SidebarTokens: \(role.rawValue) in \(theme.rawValue) is \(role.color.resolved(for: theme).hexKey), not textPrimary over panel at \(role.emphasisAlpha) (\(derived.hexKey)) — a sidebar fill reuses existing tokens, it never invents a value")
+        }
+    }
+
+    // 4. Every fill is themed, in range, and unambiguously light-under-Aqua
+    //    / dark-under-dark — the same rule P1.3 and P0.3 apply.
+    for role in SidebarSurfaceRole.rowEmphases {
+        let token = role.color
+        expect(token.light.hexKey != token.dark.hexKey,
+               "SidebarTokens: \(role.rawValue) has the same value in both themes (\(token.light.hexKey)) — it is not themed")
+        for theme in TokenTheme.allCases {
+            let c = token.resolved(for: theme)
+            expect(c.r >= 0 && c.r <= 1 && c.g >= 0 && c.g <= 1 && c.b >= 0 && c.b <= 1,
+                   "SidebarTokens: \(role.rawValue).\(theme.rawValue) is out of the 0…1 sRGB range")
+        }
+        expect(WCAGContrast.relativeLuminance(token.light) > 0.5,
+               "SidebarTokens: \(role.rawValue) light is not a light surface (luminance \(fmt(WCAGContrast.relativeLuminance(token.light))))")
+        expect(WCAGContrast.relativeLuminance(token.dark) < 0.2,
+               "SidebarTokens: \(role.rawValue) dark is not a dark surface (luminance \(fmt(WCAGContrast.relativeLuminance(token.dark))))")
+    }
+
+    // 5. Distinctness within the ladder, per theme: resting and the three
+    //    fills are four different values, or the ladder lost a step.
+    for theme in TokenTheme.allCases {
+        var keys: [String: String] = [:]
+        for role in SidebarSurfaceRole.allCases {
+            let key = role.color.resolved(for: theme).hexKey
+            expect(keys[key] == nil,
+                   "SidebarTokens: \(role.rawValue) in \(theme.rawValue) is the same value as \(keys[key] ?? "?") (\(key)) — the ladder lost a step")
+            keys[key] = role.rawValue
+        }
+    }
+
+    // 6. THE ORDERING, by measurement — the packet's headline. Hover must be
+    //    a strictly stronger step than selection, and route-active stronger
+    //    than hover, in BOTH appearances; each step also clears a
+    //    perceptibility floor so "quieter" can never decay into "absent".
+    var emphasisSummary: [String] = []
+    for theme in TokenTheme.allCases {
+        let selected = SidebarTokens.rowEmphasisRatio(.selected, theme: theme)
+        let hover = SidebarTokens.rowEmphasisRatio(.hover, theme: theme)
+        let active = SidebarTokens.rowEmphasisRatio(.active, theme: theme)
+        expect(selected >= 1.10,
+               "SidebarTokens: selected is \(fmt(selected)):1 against panel in \(theme.rawValue), under its 1.10:1 perceptibility floor — a selection you cannot see")
+        expect(hover >= 1.10,
+               "SidebarTokens: hover is \(fmt(hover)):1 against panel in \(theme.rawValue), under its 1.10:1 perceptibility floor — a hover you cannot see")
+        expect(active >= 1.20,
+               "SidebarTokens: active is \(fmt(active)):1 against panel in \(theme.rawValue), under its 1.20:1 perceptibility floor — the open agent's row must answer \"where am I\"")
+        expect(hover > selected,
+               "SidebarTokens: hover (\(fmt(hover)):1) must be a stronger step than selected (\(fmt(selected)):1) against panel in \(theme.rawValue) — hover is transient feedback, selection is a resting state, and an inverted ladder paints selection louder")
+        expect(active > hover,
+               "SidebarTokens: active (\(fmt(active)):1) must be a stronger step than hover (\(fmt(hover)):1) against panel in \(theme.rawValue) — the route-active row is the ladder's loudest step")
+        emphasisSummary.append("\(theme.rawValue) \(fmt(selected))/\(fmt(hover))/\(fmt(active))")
+    }
+
+    // 7. Provenance pins, ±0.01 — the measured table in DesignTokens.swift's
+    //    P0.5 note cannot go stale while this stays green.
+    let pinnedEmphasis: [(role: SidebarSurfaceRole, theme: TokenTheme, ratio: Double)] = [
+        (.selected, .light, 1.15), (.selected, .dark, 1.18),
+        (.hover, .light, 1.17), (.hover, .dark, 1.21),
+        (.active, .light, 1.25), (.active, .dark, 1.32)
+    ]
+    expect(Set(pinnedEmphasis.map(\.role)) == Set(SidebarSurfaceRole.rowEmphases),
+           "SidebarTokens: the emphasis provenance table must cover exactly the three fills")
+    for pin in pinnedEmphasis {
+        let ratio = SidebarTokens.rowEmphasisRatio(pin.role, theme: pin.theme)
+        expect(abs(ratio - pin.ratio) <= 0.01,
+               "SidebarTokens: \(pin.role.rawValue) in \(pin.theme.rawValue) is \(fmt(ratio)):1 against panel, but the documented provenance says \(fmt(pin.ratio)):1 — update the P0.5 table in DesignTokens.swift with the new measurement")
+    }
+
+    // 8. Pair identity, derived here independently of `documentedPairs`:
+    //    3 fills x (2 text + 5 accents + controlBoundary + focusRing) = 27.
+    //    Resting is deliberately absent — it IS panel, which P1.3 gates.
+    let pairs = SidebarTokens.documentedPairs
+    var expectedPairs: Set<String> = []
+    for surface in SidebarSurfaceRole.rowEmphases {
+        for text in SidebarTokens.surfaceTextTokens {
+            expectedPairs.insert("\(text.rawValue)|\(surface.rawValue)|\(fmt(DesignTokens.textFloor))")
+        }
+        for accent in SidebarTokens.statusAccents {
+            expectedPairs.insert("\(accent.rawValue)|\(surface.rawValue)|\(fmt(DesignTokens.textFloor))")
+        }
+        for role in SidebarTokens.gatedLineRoles {
+            guard let floor = role.contrastFloor else { continue }
+            expectedPairs.insert("\(role.rawValue)|\(surface.rawValue)|\(fmt(floor))")
+        }
+    }
+    expect(pairs.count == 27, "SidebarTokens: expected 27 documented sidebar pairs, got \(pairs.count)")
+    let actualKeys = pairs.map { "\($0.foreground)|\($0.background)|\(fmt($0.floor))" }
+    expect(Set(actualKeys).count == actualKeys.count,
+           "SidebarTokens: the sidebar pairs contain duplicates (\(actualKeys.count) pairs, \(Set(actualKeys).count) distinct) — a duplicated easy pair can hide a lost hard one")
+    let missing = expectedPairs.subtracting(actualKeys).sorted()
+    let extra = Set(actualKeys).subtracting(expectedPairs).sorted()
+    expect(missing.isEmpty && extra.isEmpty,
+           "SidebarTokens: the gated sidebar pairs do not match the declarations — missing \(missing), unexpected \(extra)")
+    expect(!pairs.contains { $0.background == SidebarSurfaceRole.resting.rawValue },
+           "SidebarTokens: resting must contribute no pair — it resolves to panel, and panel is P1.3's to gate")
+
+    // 8b. Line-role hygiene: only semantic roles are gated on a fill, the
+    //     decorative hairline is never one of them, and attention lines are
+    //     covered BY VALUE because both attention accents are gated as
+    //     status accents at the same 4.5 floor `attention` itself carries.
+    expect(SidebarTokens.gatedLineRoles.allSatisfy(\.isSemantic),
+           "SidebarTokens: every gated sidebar line role must be semantic")
+    expect(!SidebarTokens.gatedLineRoles.contains(.decorativeHairline),
+           "SidebarTokens: the decorative hairline is exempt and must never be gated as a sidebar line role — a state-bearing line may not resolve to it")
+    for accent in AgentLineRole.attentionAccents {
+        expect(SidebarTokens.statusAccents.contains(accent),
+               "SidebarTokens: attention lines take \(accent.rawValue)'s hue, so the sidebar pair set must include it — an attention ring on a fill would otherwise be unmeasured")
+    }
+    expect(AgentLineRole.attention.contrastFloor == DesignTokens.textFloor,
+           "SidebarTokens: attention's floor moved off the text floor — the by-value coverage above assumed 4.5, so re-derive the sidebar pair set")
+
+    // 9. Every pair, both themes, against its own floor.
+    var rows: [String] = []
+    var failures: [String] = []
+    for pair in pairs.sorted(by: { ($0.foreground, $0.background) < ($1.foreground, $1.background) }) {
+        for theme in TokenTheme.allCases {
+            let ratio = pair.ratio(for: theme)
+            let ok = ratio >= pair.floor
+            rows.append(String(
+                format: "  %-16@ on %-16@ %-5@ %6@:1  floor %@:1  %@",
+                pair.foreground as NSString, pair.background as NSString, theme.rawValue as NSString,
+                fmt(ratio) as NSString, fmt(pair.floor) as NSString, (ok ? "ok" : "FAIL") as NSString))
+            if !ok {
+                failures.append("\(pair.foreground) on \(pair.background) in \(theme.rawValue) is \(fmt(ratio)):1, below its \(fmt(pair.floor)):1 floor")
+            }
+        }
+    }
+    print("SidebarTokens: \(pairs.count) sidebar pairs x \(TokenTheme.allCases.count) themes")
+    for row in rows { print(row) }
+    expect(failures.isEmpty,
+           "SidebarTokens: \(failures.count) pair(s) below floor:\n  - " + failures.joined(separator: "\n  - "))
+
+    // 10. Pin the MARGIN, not just the floor, and the worst background too:
+    //     `sidebarActive` — the strongest mix, the end of the ladder — for
+    //     every foreground in both themes, so the pins cannot silently start
+    //     describing a different fill.
+    let pinnedWorst: [(foreground: String, theme: TokenTheme, ratio: Double)] = [
+        ("textPrimary", .light, 13.28), ("textPrimary", .dark, 12.77),
+        ("textSecondary", .light, 5.28), ("textSecondary", .dark, 6.89),
+        ("accentWorking", .light, 4.83), ("accentWorking", .dark, 5.71),
+        ("accentApproval", .light, 4.96), ("accentApproval", .dark, 7.89),
+        ("accentInput", .light, 5.58), ("accentInput", .dark, 5.65),
+        ("accentFailed", .light, 4.65), ("accentFailed", .dark, 6.18),
+        ("accentDone", .light, 5.21), ("accentDone", .dark, 7.12),
+        ("controlBoundary", .light, 3.11), ("controlBoundary", .dark, 3.63),
+        ("focusRing", .light, 6.10), ("focusRing", .dark, 6.43)
+    ]
+    expect(Set(pinnedWorst.map(\.foreground)) == Set(pairs.map(\.foreground)),
+           "SidebarTokens: the pinned-margin table must cover exactly the gated foregrounds (table \(Set(pinnedWorst.map(\.foreground)).sorted()) vs gated \(Set(pairs.map(\.foreground)).sorted()))")
+    for pin in pinnedWorst {
+        let candidates = pairs.filter { $0.foreground == pin.foreground }
+        guard let measured = candidates.min(by: { $0.ratio(for: pin.theme) < $1.ratio(for: pin.theme) }) else {
+            expect(false, "SidebarTokens: \(pin.foreground) has no documented pair to measure a margin against")
+            return
+        }
+        let ratio = measured.ratio(for: pin.theme)
+        expect(abs(ratio - pin.ratio) <= 0.01,
+               "SidebarTokens: \(pin.foreground) in \(pin.theme.rawValue) has worst ratio \(fmt(ratio)):1, but the documented provenance says \(fmt(pin.ratio)):1 — update the P0.5 table in DesignTokens.swift with the new measurement")
+        expect(measured.background == SidebarSurfaceRole.active.rawValue,
+               "SidebarTokens: \(pin.foreground)'s worst background in \(pin.theme.rawValue) is \(measured.background), not \(SidebarSurfaceRole.active.rawValue) — the sidebar ladder moved")
+    }
+
+    // 11. The hairline width token. One declaration, pinned: `_DESIGN.md`
+    //     caps any sidebar boundary at 0.5 pt, and ticket 93's app-wide
+    //     sweep consumes this same token, so a drift here drifts everywhere.
+    expect(LineWidth.hairline > 0,
+           "LineWidth: the hairline must be a positive width, got \(LineWidth.hairline)")
+    expect(LineWidth.hairline == 0.5,
+           "LineWidth: the shared hairline must stay 0.5 pt, got \(LineWidth.hairline) — _DESIGN.md caps any sidebar boundary at 0.5 pt, and ticket 93 sweeps the whole app with this one token")
+
+    print("SidebarSurface checks passed: \(SidebarSurfaceRole.allCases.count) roles resolve from existing tokens (resting IS panel), "
+        + "emphasis selected/hover/active measured " + emphasisSummary.joined(separator: ", ")
+        + " with hover > selected and active > hover in both themes, "
+        + "\(pairs.count * TokenTheme.allCases.count) measurements clear their floor (worst always on \(SidebarSurfaceRole.active.rawValue)), "
+        + "tile rowSelected/rowHover values unmoved, hairline pinned at \(LineWidth.hairline) pt")
 }
