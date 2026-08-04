@@ -420,6 +420,54 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// a depth alone cannot tell two orchestrators' children apart.
     public let parentId: UUID?
 
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P2.3-content-derived-row-height.md
+    /// Whether the card's upper metadata band has something to draw. These
+    /// predicates intentionally inspect only the content slots, never a row's
+    /// semantic importance or lifecycle. The AppKit cell uses the same facts to
+    /// hide an empty band, so height and presentation cannot disagree.
+    public func drawsMetaLine(drawingProject: Bool = true, drawingElapsed: Bool = true) -> Bool {
+        let hasElapsed = elapsed.map { $0 >= 0 } ?? false
+        return (drawingProject && projectName?.isEmpty == false)
+            || label?.isEmpty == false
+            || (drawingElapsed && hasElapsed)
+    }
+
+    public var drawsMetaLine: Bool { drawsMetaLine() }
+
+    /// Whether the card's lower detail band has something to draw. Empty strings
+    /// are not content for the role/model line, while a present branch is passed
+    /// to the branch formatter and therefore remains a drawn badge even when the
+    /// branch text itself is empty.
+    public var drawsDetailLine: Bool {
+        role?.isEmpty == false || model?.isEmpty == false || branch != nil
+    }
+
+    /// The number of lines the row's card will actually draw, including the
+    /// name's always-present subject line. This is content-derived: no state,
+    /// attention, lifecycle, or variant meaning is used to choose the count.
+    public var drawnLineCount: Int {
+        drawnLineCount(drawingProject: true, drawingElapsed: true)
+    }
+
+    /// Add one detail line when a caller has content that is not stored in the
+    /// row itself, such as a folded child rollup. It cannot add a second line
+    /// when the detail band already has content because both draw on that band.
+    public func drawnLineCount(
+        drawingProject: Bool = true,
+        drawingElapsed: Bool = true,
+        includingAdditionalDetail: Bool = false
+    ) -> Int {
+        1 + (drawsMetaLine(drawingProject: drawingProject, drawingElapsed: drawingElapsed) ? 1 : 0)
+            + (drawsDetailLine || includingAdditionalDetail ? 1 : 0)
+    }
+
+    public func drawnLineCount(includingAdditionalDetail: Bool) -> Int {
+        drawnLineCount(
+            drawingProject: true,
+            drawingElapsed: true,
+            includingAdditionalDetail: includingAdditionalDetail)
+    }
+
     public init(
         id: UUID,
         title: String,

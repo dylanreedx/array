@@ -153,6 +153,23 @@ public enum Metrics {
         (Typography.style(for: role).size * lineHeightMultiple).rounded(.up)
     }
 
+    /// The height of a sequence of rendered text lines, including their shared
+    /// insets and the gaps between them. The roles may differ — a sidebar card
+    /// puts a title line between two label lines — so the view can derive its
+    /// height from the content it actually draws without copying line-height
+    /// arithmetic into the AppKit layer.
+    ///
+    /// An empty sequence still has the requested insets. Callers that draw text
+    /// always include at least one role, but keeping the result well-defined makes
+    /// the helper safe for a content-derived layout path.
+    public static func rowHeight(
+        for roles: [TextRole], insets: EdgeInsetsToken = Inset.row, spacing: Double = 0
+    ) -> Double {
+        let totalLineHeight = roles.reduce(0) { $0 + lineHeight(for: $1) }
+        let gaps = Double(max(0, roles.count - 1)) * spacing
+        return totalLineHeight + gaps + insets.vertical
+    }
+
     /// The height a row of `lines` lines of `role` needs, including `insets`.
     /// This is what replaces the hardcoded 52/44/24: a row's height is a
     /// FUNCTION of its type, so P1.4's size moves cannot clip it.
@@ -160,7 +177,7 @@ public enum Metrics {
     /// `lines` below 1 is clamped to 1 — a row that holds text holds at least
     /// one line, and returning something smaller would be a silent clip.
     public static func rowHeight(for role: TextRole, lines: Int = 1, insets: EdgeInsetsToken = Inset.row) -> Double {
-        Double(max(1, lines)) * lineHeight(for: role) + insets.vertical
+        rowHeight(for: Array(repeating: role, count: max(1, lines)), insets: insets)
     }
 }
 

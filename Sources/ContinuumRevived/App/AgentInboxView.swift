@@ -207,16 +207,12 @@ private func inboxLabelGeometryForQA(
 @MainActor
 final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate,
                             NSTextFieldDelegate, TokenThemed {
-    /// The row card's height, DERIVED from the type it holds rather than the
-    /// packet's "≈78pt": one `.title` line for the name and two `.label` lines
-    /// for the metadata, the two gaps between them, and the card's own padding.
-    /// Comes out at 79pt, which is what the packet was approximating — and a
-    /// P1.4 size move now grows the row instead of clipping it.
+    /// The tallest card height: three lines (metadata, name, detail), the two
+    /// inter-band gaps, and the card's own padding. It remains a useful ceiling
+    /// for offscreen probes, while individual cards use `height(for:)` below so
+    /// empty bands do not reserve this space.
     static var rowHeight: Double {
-        Metrics.lineHeight(for: .title)
-            + 2 * Metrics.lineHeight(for: .label)
-            + 2 * Space.s
-            + Inset.card.vertical
+        Metrics.rowHeight(for: [.label, .title, .label], insets: Inset.card, spacing: Space.s)
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.7-slim-rows.md
@@ -231,9 +227,49 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// from `slimRowHeight` rather than restated, so a P1.4 type move moves both.
     static var shelfHeaderHeight: Double { slimRowHeight }
 
-    /// The height a row of this variant gets. The two numbers are far enough apart
-    /// (79 vs 35) that the collapse is the visible fact it is meant to be, and the
-    /// gap is asserted rather than left to the two derivations happening to differ.
+    /// The height of a row's rendered content. Card rows ask the shared metrics
+    /// helper for the roles their live cell will draw; the name is always present,
+    /// while the two label bands are included only when their content slots are
+    /// non-empty. A collapsed rollup counts as detail content because it is drawn
+    /// on that band. The variant branch selects the already-rendered one-line
+    /// parked cell; it does not classify a row by importance.
+    static func height(
+        for row: AgentInboxRow,
+        availableWidth: Double? = nil,
+        disclosure: RowDisclosure = .none,
+        rollup: ChildRollup? = nil
+    ) -> Double {
+        switch row.variant {
+        case .slim:
+            return slimRowHeight
+        case .card:
+            let drawsRollup = disclosure == .collapsed && rollup != nil
+            let tier = availableWidth.map {
+                AgentInboxCellView.fitTier(
+                    for: row,
+                    available: $0,
+                    disclosure: disclosure)
+            }
+            let lineCount = row.drawnLineCount(
+                drawingProject: tier?.drawsProject ?? true,
+                drawingElapsed: tier?.drawsElapsed ?? true,
+                includingAdditionalDetail: drawsRollup)
+            var roles: [TextRole] = []
+            if lineCount > 0 {
+                if row.drawsMetaLine(
+                    drawingProject: tier?.drawsProject ?? true,
+                    drawingElapsed: tier?.drawsElapsed ?? true) {
+                    roles.append(.label)
+                }
+                roles.append(.title)
+                if lineCount > roles.count { roles.append(.label) }
+            }
+            return Metrics.rowHeight(for: roles, insets: Inset.card, spacing: Space.s)
+        }
+    }
+
+    /// Variant-only compatibility for callers that need the density ceiling but
+    /// do not have a row's content. Rendering uses `height(for:disclosure:rollup:)`.
     static func height(for variant: RowVariant) -> Double {
         switch variant {
         case .card: return rowHeight
@@ -516,6 +552,22 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     private var settledMoreCell: AgentInboxSettledMoreView?
     private(set) var cellBuildCountForQA = 0
 
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P2.3-content-derived-row-height.md
+    /// `NSTableView` caches delegate heights independently of the cell's layout.
+    /// A divider drag can change a row's measured-fit tier without changing its
+    /// identity or content, so the width used for the last height invalidation is
+    /// kept here and compared after this view lays out its table.
+    private var lastTableWidthForHeightCache: CGFloat?
+    /// The width used by the most recent delegate query. During an initial host
+    /// layout AppKit can ask heights before the scroll view finishes resizing the
+    /// column; the mismatch must schedule one more invalidation after `super.layout`.
+    private var lastHeightQueryColumnWidth: CGFloat?
+    /// A cell can materialize during `super.layout` after the table has already
+    /// chosen a row height. One follow-up table pass re-asks that height against
+    /// the cell's now-live content and then clears this flag.
+    private var needsHeightRevalidation = true
+    private var isInvalidatingHeightsForWidth = false
+
     // Ticket: docs/38-tickets/90-agent-ux/P4.12-crossfade-in-place.md
     /// The OUTGOING cell of a row whose variant just moved, still on screen and
     /// fading out where it stood, keyed by the AGENT it belongs to.
@@ -739,6 +791,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // What this ticket owns is what a SELECTION SET may do, below.
         tableView.allowsMultipleSelection = true
         tableView.translatesAutoresizingMaskIntoConstraints = false
+        // The table is the scroll view's document view. Keep its horizontal
+        // document width following the clip viewport so a divider drag changes
+        // the cell's actual fit lane in both directions, not only on the first
+        // shrink.
+        tableView.autoresizingMask = [.width]
 
         column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("agent-inbox-row"))
         column.resizingMask = .autoresizingMask
@@ -876,6 +933,81 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         applyTokens()
     }
 
+    /// Re-ask every table row for its height when the sidebar divider changes the
+    /// width available to the cell. `AgentInboxCellView.layout()` re-tiers the
+    /// labels, but AppKit's row-height cache does not observe that cell-local
+    /// change; without this invalidation a row can keep the old one-/two-line
+    /// height until its content changes for an unrelated reason.
+    override func layout() {
+        let columnWidthAtLayoutEntry = column.width
+        super.layout()
+        // `NSScrollView` owns the document view's frame, but does not grow a
+        // previously narrowed table back to the new clip width by itself. The
+        // sidebar has no horizontal scrolling, so the table's document lane is
+        // always exactly the viewport lane before heights are re-asked.
+        let viewportWidth = scrollView.contentView.bounds.width
+        if viewportWidth > 0,
+           tableView.frame.width != viewportWidth || column.width != viewportWidth {
+            var frame = tableView.frame
+            frame.size.width = viewportWidth
+            tableView.frame = frame
+            // Column autoresizing is not retroactive for a document view that
+            // was already narrowed, so keep the one row column in the same lane
+            // as the table before its cells lay themselves out.
+            column.width = viewportWidth
+        }
+        // `tableView.bounds.width` includes the scroll view's document lane,
+        // while the vertical scroller can make the actual row column narrower.
+        // Height derivation must use the same column width the live cell receives.
+        let width = column.width
+        guard width > 0 else { return }
+        // Tier boundaries are measured values, and a fractional divider move can
+        // cross one. Do not hide any width change behind a point-sized tolerance:
+        // AppKit's widths are fractional and the height cache must follow the
+        // actual lane, not a rounded approximation of it.
+        let widthChanged = columnWidthAtLayoutEntry != width
+            || (lastTableWidthForHeightCache.map { $0 != width } ?? true)
+            || (lastHeightQueryColumnWidth.map { $0 != width } ?? false)
+        lastTableWidthForHeightCache = width
+        guard (widthChanged || needsHeightRevalidation), tableView.numberOfRows > 0,
+              !isInvalidatingHeightsForWidth else { return }
+        needsHeightRevalidation = false
+        isInvalidatingHeightsForWidth = true
+        let indexes = IndexSet(0..<tableView.numberOfRows)
+        let selectedIDs = selectedRows.map(\.id)
+        tableView.noteHeightOfRows(withIndexesChanged: indexes)
+        // Rebuild the live cells as well as their cached heights. The cell owns
+        // the measured-fit tier, and a document view can otherwise retain a
+        // narrow cell frame after its column has widened. A full reload is used
+        // on this resize-only path because AppKit may be in the middle of a
+        // virtual row pass; restore the selection by identity immediately after.
+        cellsByRow.removeAll()
+        tableView.reloadData()
+        // The width change can happen during the parent's layout pass. Drive the
+        // table's own pass now so its row views receive the same height the
+        // delegate just returned before a host-level clipping probe inspects them.
+        tableView.layoutSubtreeIfNeeded()
+        let restoredSelection = IndexSet(selectedIDs.compactMap(tableRow(forAgentId:)))
+        tableView.selectRowIndexes(restoredSelection, byExtendingSelection: false)
+        selectedRowsForEmphasis = restoredSelection
+        // The full reload built cells while the table selection was empty. Rebuild
+        // selected rows once more so their interaction fill is painted from the
+        // restored selection rather than only remembered in the table model.
+        if !restoredSelection.isEmpty {
+            tableView.reloadData(
+                forRowIndexes: restoredSelection, columnIndexes: IndexSet(integer: 0))
+            tableView.layoutSubtreeIfNeeded()
+        }
+        // The rename editor lives above the table, so rebuilding cells does not
+        // move it with the title it is editing. Resize is a real geometry change
+        // even when the row identity and content stay put: a fit-tier transition
+        // can change both the title's Y and the row's document position. Follow
+        // the rebuilt live cell here, not only from applyRows.
+        repositionRenameField()
+        needsHeightRevalidation = false
+        isInvalidatingHeightsForWidth = false
+    }
+
     // MARK: - Input
 
     /// Replace the list. Sorting is NOT the caller's to do: `InboxSort` owns the
@@ -990,6 +1122,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         }
         let disclosureMoved = previousParents.symmetricDifference(parentsWithChildren)
         let previous = rows
+        let valueChanged = Set(zip(previous, next.compactMap(\.agentRow))
+            .filter { $0.0 != $0.1 }
+            .map { $0.1.id })
+        // Hold an unaffected visible row as the user's visual anchor. A numeric
+        // clip origin is not enough when a preceding row grows: AppKit must keep
+        // the content the user was reading in the same viewport position.
+        let scrollAnchor = visibleScrollAnchor(
+            excluding: changed.touched.union(valueChanged))
         setItems(next)
         let indexes = IndexSet(rows.indices.filter {
             changed.touched.contains(rows[$0].id) || rows[$0] != previous[$0]
@@ -1002,6 +1142,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // draw its one collapsed line into a card-sized slot — and keep the slot.
         tableView.noteHeightOfRows(withIndexesChanged: indexes)
         tableView.reloadData(forRowIndexes: indexes, columnIndexes: IndexSet(integer: 0))
+        layoutSubtreeIfNeeded()
+        restoreScrollAnchor(scrollAnchor)
         // P3.11: an incremental apply keeps the selection (the rows are the same agents
         // in the same order), so what a selected row may DO can change under a bar that
         // is already up — an agent that just started working must lose Archive.
@@ -1350,13 +1492,21 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
 
     func numberOfRows(in tableView: NSTableView) -> Int { items.count }
 
-    /// P3.7: settled and snoozed collapse, everything else is a full card. The
-    /// height is asked of the ROW's variant and of nothing else — the list may not
-    /// decide a `ready` or `failed` agent has earned less room, which is the
-    /// density mistake the rule exists to forbid.
+    /// P3.7: parked rows still use their one-line variant. Card rows, however,
+    /// ask the content-derived height path for the bands this row actually draws;
+    /// the list never branches on state, attention, or lifecycle importance.
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        lastHeightQueryColumnWidth = column.width
         guard let model = item(at: row)?.agentRow else { return AgentInboxView.shelfHeaderHeight }
-        return AgentInboxView.height(for: model.variant)
+        let indent = Double(max(0, model.depth)) * AgentInboxView.indentPerLevel
+        let available = max(
+            0,
+            Double(column.width) - indent - Inset.card.horizontal)
+        return AgentInboxView.height(
+            for: model,
+            availableWidth: available,
+            disclosure: disclosure(for: model),
+            rollup: rollupsByParent[model.id])
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md
@@ -1402,6 +1552,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         case .card: cell = AgentInboxCellView()
         case .slim: cell = AgentInboxSlimCellView()
         }
+        needsHeightRevalidation = true
+        // AppKit may ask for a cell before it has assigned the row frame. Give
+        // the cell the live column width before `apply` measures its fit tier;
+        // otherwise an empty initial frame leaves a hidden band visible while
+        // the table has already cached the shorter content-derived height.
+        cell.setLayoutWidth(Double(column.width))
+        var cellFrame = cell.frame
+        cellFrame.size.width = column.width
+        cell.frame = cellFrame
         cell.identifier = NSUserInterfaceItemIdentifier(AgentInboxView.accessibilityIdentifier(for: model))
         cell.setAccessibilityIdentifier(AgentInboxView.accessibilityIdentifier(for: model))
         let agentId = model.id
@@ -2331,6 +2490,48 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         }
     }
 
+    /// The first visible agent not being changed by an incremental apply. The
+    /// anchor is stored in viewport coordinates, not as a document-space Y: AppKit
+    /// may already move the clip origin while it remeasures the table.
+    private func visibleScrollAnchor(excluding excluded: Set<UUID>)
+        -> (id: UUID, viewportMinY: CGFloat)?
+    {
+        let visibleRect = scrollView.contentView.convert(
+            scrollView.contentView.bounds, to: tableView)
+        var fallback: (id: UUID, viewportMinY: CGFloat)?
+        for tableRow in items.indices {
+            guard let id = item(at: tableRow)?.agentRow?.id else { continue }
+            let frame = tableView.rect(ofRow: tableRow)
+            guard frame.intersects(visibleRect) else { continue }
+            let viewportMinY = frame.minY - visibleRect.minY
+            if fallback == nil { fallback = (id, viewportMinY) }
+            if !excluded.contains(id) { return (id, viewportMinY) }
+        }
+        return fallback
+    }
+
+    /// Put the unaffected anchor back at its pre-update visual position. This is
+    /// deliberately a content adjustment rather than a row-index adjustment:
+    /// activity never reorders the list, but a variable-height row can move every
+    /// later document rect. The target is derived from the CURRENT document rect
+    /// and the saved viewport position, so an origin AppKit already constrained is
+    /// not given the same delta a second time (notably when a row shrinks at bottom).
+    private func restoreScrollAnchor(_ anchor: (id: UUID, viewportMinY: CGFloat)?) {
+        guard let anchor, let tableRow = tableRow(forAgentId: anchor.id) else { return }
+        let currentY = tableView.rect(ofRow: tableRow).minY
+        let visibleRect = scrollView.contentView.convert(
+            scrollView.contentView.bounds, to: tableView)
+        let desiredVisibleMinY = currentY - anchor.viewportMinY
+        let currentOrigin = scrollView.contentView.bounds.origin
+        let delta = desiredVisibleMinY - visibleRect.minY
+        // Use the current origin plus the difference between the desired and
+        // current viewport positions. If AppKit already constrained the origin to
+        // the bottom during re-layout, `delta` is zero and nothing is double-applied.
+        guard abs(delta) > 0.5 else { return }
+        scrollView.contentView.scroll(to: NSPoint(x: currentOrigin.x, y: currentOrigin.y + delta))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+
     /// Which agent is under a point in window coordinates, or nil — off the end
     /// of the list, on the shelf heading or the paging footer (neither is an
     /// agent), or outside the list's own viewport.
@@ -2615,6 +2816,42 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
             .filter { rowIndex(forTableRow: $0) != nil }
             .map { Double(tableView.rect(ofRow: $0).height - tableView.intercellSpacing.height) }
     }
+
+    /// The actual width AppKit handed the row column, not the requested host
+    /// frame. Fractional divider checks use this value to prove the live resize
+    /// crossed a fit tier by a real, bounded amount.
+    var columnWidthForQA: Double { Double(column.width) }
+
+    /// The live height for one agent, read from the table row rather than from
+    /// `AgentInboxView.height(for:)`. Incremental-height probes use this before
+    /// and after content arrives so a stale height cache cannot satisfy them.
+    func rowHeightForQA(id: UUID) -> Double? {
+        guard let tableRow = tableRow(forAgentId: id) else { return nil }
+        return Double(tableView.rect(ofRow: tableRow).height - tableView.intercellSpacing.height)
+    }
+
+    /// The agent ids whose live table rect intersects the clip viewport. This is
+    /// intentionally a visibility seam rather than a raw clip offset: an
+    /// incremental height change must preserve the content anchor the person was
+    /// looking at, not merely leave the scroll view's numeric origin untouched.
+    var visibleAgentIdsForQA: [UUID] {
+        let visibleRect = scrollView.contentView.convert(
+            scrollView.contentView.bounds, to: tableView)
+        return items.indices
+            .filter { tableView.rect(ofRow: $0).intersects(visibleRect) }
+            .compactMap { item(at: $0)?.agentRow?.id }
+    }
+
+    /// One row's live position in the clip view's coordinates. Comparing this
+    /// before and after an update tests the visible anchor even when AppKit
+    /// legitimately changes the document-space clip origin to preserve it.
+    func rowFrameInViewportForQA(id: UUID) -> NSRect? {
+        guard let tableRow = tableRow(forAgentId: id) else { return nil }
+        let frame = tableView.rect(ofRow: tableRow)
+        let origin = scrollView.contentView.bounds.origin
+        return frame.offsetBy(dx: -origin.x, dy: -origin.y)
+    }
+
     /// The heading's laid-out height, on the same terms — P4.7's own row.
     var shelfHeaderHeightForQA: Double? {
         guard let tableRow = shelfHeaderTableRow else { return nil }
@@ -2874,6 +3111,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// (Cross-review found exactly that hole.)
     var isRenameDelegateWiredForQA: Bool { renameField?.delegate === self }
     var renameFieldTextForQA: String? { renameField?.stringValue }
+    /// The inline editor's frame in the inbox's coordinates. P2.3's resize
+    /// witness compares it with the live title frame after the table rebuilds;
+    /// a stale overlay is otherwise invisible to row geometry checks.
+    var renameFieldFrameForQA: NSRect? { renameField?.frame }
+    /// The current title frame in the inbox's coordinates, after any width-driven
+    /// tier and row-height transition. This is deliberately read from the live
+    /// cell rather than reconstructed from the row model.
+    func titleFrameForQA(id: UUID) -> NSRect? {
+        guard let index = rows.firstIndex(where: { $0.id == id }),
+              let tableRow = tableRow(forRowIndex: index),
+              let cell = cellsByRow[tableRow] else { return nil }
+        return cell.convert(cell.titleFrame, to: self)
+    }
     /// Type into the open field. Sets the text the way the field editor would leave
     /// it; what the check is about is what Enter, Esc and blur then do with it.
     @discardableResult
@@ -2955,6 +3205,37 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         scrollView.contentView.scroll(to: NSPoint(x: origin.x, y: origin.y + points))
         scrollView.reflectScrolledClipView(scrollView.contentView)
         layoutForQA()
+    }
+
+    /// The live clip offset, read back from the scroll view rather than inferred
+    /// from row indexes. P2.3 uses it to prove an incremental height change does
+    /// not reset the user's scroll position.
+    var contentOffsetYForQA: Double { Double(scrollView.contentView.bounds.origin.y) }
+
+    /// Scroll to the list's document bottom through the real scroll view path.
+    /// The bottom-shrink witness needs AppKit's constrained origin, not an
+    /// arbitrary clip offset that happens to be large.
+    func scrollToBottomForQA() {
+        let clip = scrollView.contentView
+        let documentBottom = tableView.numberOfRows > 0
+            ? tableView.rect(ofRow: tableView.numberOfRows - 1).maxY
+            : 0
+        let maxY = max(0, documentBottom - clip.bounds.height)
+        clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: maxY))
+        scrollView.reflectScrolledClipView(clip)
+        layoutForQA()
+    }
+
+    /// Whether the list's own last row bottom is aligned with the clip viewport.
+    /// The bottom-shrink witness uses the actual laid-out content edge rather than
+    /// a stale document-view frame that may retain old trailing slack for one pass.
+    var isAtBottomForQA: Bool {
+        let visibleRect = scrollView.contentView.convert(
+            scrollView.contentView.bounds, to: tableView)
+        let documentBottom = tableView.numberOfRows > 0
+            ? tableView.rect(ofRow: tableView.numberOfRows - 1).maxY
+            : 0
+        return abs(visibleRect.maxY - documentBottom) <= 0.5
     }
 
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.2-interaction-fill-ladder.md
@@ -3246,6 +3527,11 @@ final class AgentInboxSettledMoreView: NSTableCellView, TokenThemed {
 /// it can be gated, and never in a condition scattered through the painting.
 @MainActor
 protocol AgentInboxRowCell: NSTableCellView {
+    /// Supply the table column before content is applied. AppKit can build a
+    /// cell with a zero frame, but tiered visibility and row height must agree
+    /// from the first layout pass.
+    func setLayoutWidth(_ width: Double)
+
     func apply(_ row: AgentInboxRow, emphasis: RowEmphasis, indent: Double,
                disclosure: RowDisclosure, rollup: ChildRollup?, isSelected: Bool,
                isInteracting: Bool, now: Date)
@@ -4395,6 +4681,9 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     private let metaLabel = NSTextField(labelWithString: "")
     private let branchLabel = NSTextField(labelWithString: "")
     private let stack = NSStackView()
+    private var metaBand: NSStackView?
+    private var detailBand: NSStackView?
+    private var layoutColumnWidth: Double?
     private var leadingInset: NSLayoutConstraint?
     /// What this cell is currently showing. Held so the cell can repaint its own
     /// text colours when the appearance moves — an `NSTextField.textColor` is a
@@ -4450,13 +4739,13 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         //   band 2  name    [disclosure, title]                 lineHeight(.title) = 19
         //   band 3  detail  [meta, branch]                      lineHeight(.label) = 14
         //   + 2 * Space.s between the bands + Inset.card.vertical
-        //   = 14 + 19 + 14 + 8 + 24 = 79 = `AgentInboxView.rowHeight`, UNCHANGED.
+        //   = 14 + 19 + 14 + 8 + 24 = 79 = `AgentInboxView.rowHeight` for a
+        //     full-content card.
         //
-        // Three bands and not four: the height above is exactly three lines of
-        // type, so `meta` and `branch` SHARE band 3 rather than taking a line
-        // each. That is the whole reason this packet can re-band without moving a
-        // point of height — P2.1 changes paint order and priorities, P2.3 owns
-        // height.
+        // Three bands and not four: the full-content case is exactly three lines
+        // of type, so `meta` and `branch` SHARE band 3 rather than taking a line
+        // each. P2.3 collapses an empty band, while this remains the tallest card
+        // geometry and the ceiling the offscreen probes use.
         //
         // THE DISCLOSURE TRIANGLE RIDES THE NAME BAND, DELIBERATELY, and it is
         // not a matter of taste: `InboxDisclosureButton` is an `NSButton`, and its
@@ -4470,6 +4759,7 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         // the triangle folds the agent's CHILDREN, and the name is what they are
         // children of.
         let metaBand = NSStackView(views: [projectLabel, NSView(), stateLabel, elapsedLabel])
+        self.metaBand = metaBand
         metaBand.orientation = .horizontal
         metaBand.alignment = .firstBaseline
         metaBand.spacing = Space.m
@@ -4493,6 +4783,7 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         nameBand.setHuggingPriority(.defaultLow, for: .horizontal)
 
         let detailBand = NSStackView(views: [metaLabel, branchLabel, NSView()])
+        self.detailBand = detailBand
         detailBand.orientation = .horizontal
         detailBand.alignment = .firstBaseline
         detailBand.spacing = Space.m
@@ -4518,6 +4809,10 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
             stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: Inset.card.left),
             stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Inset.card.right),
             stack.topAnchor.constraint(equalTo: card.topAnchor, constant: Inset.card.top),
+            // A content-derived row has no reserved lower shelf: hidden bands
+            // collapse in the stack, and the stack is pinned to BOTH vertical
+            // edges so the card height is exactly its drawn lines plus insets.
+            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -Inset.card.bottom),
             // Every band spans the card's text column, so the name's line is the
             // NAME's line: nothing else can take width from it, and a childless
             // row's title reaches the trailing edge of the card's text column.
@@ -4556,6 +4851,22 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
 
     required init?(coder: NSCoder) { return nil }
 
+    func setLayoutWidth(_ width: Double) {
+        layoutColumnWidth = width
+        applyFitTier()
+    }
+
+    private func updateBandVisibility() {
+        let metaDraws = [projectLabel, stateLabel, elapsedLabel].contains {
+            !$0.isHidden && !$0.stringValue.isEmpty
+        }
+        let detailDraws = [metaLabel, branchLabel].contains {
+            !$0.isHidden && !$0.stringValue.isEmpty
+        }
+        metaBand?.isHidden = !metaDraws
+        detailBand?.isHidden = !detailDraws
+    }
+
     /// Paint one row.
     ///
     /// THE EMPHASIS RULE, and the reason it is applied field by field rather than
@@ -4577,9 +4888,8 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     /// FOLDED — an expanded parent's children are on screen saying it themselves, and
     /// a second copy of what the next three rows already show is noise on the row
     /// that has the least space to spare. It joins the META LINE rather than taking a
-    /// fourth one: `AgentInboxView.rowHeight` is derived from exactly three lines of
-    /// type, so a new line would clip the card rather than grow it, and every
-    /// geometry gate and PNG baseline in the matrix is measured against that height.
+    /// fourth one: the content-derived height counts the rollup as the existing
+    /// detail band, so it cannot create a fourth line or reserve unexplained space.
     func apply(_ row: AgentInboxRow, emphasis: RowEmphasis, indent: Double,
                disclosure: RowDisclosure = .none, rollup: ChildRollup? = nil,
                isSelected: Bool = false,
@@ -4590,18 +4900,24 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         disclosureButton.show(disclosure)
 
         projectLabel.stringValue = row.projectName ?? ""
-        projectLabel.isHidden = row.projectName == nil
+        projectLabel.isHidden = row.projectName?.isEmpty != false
         titleLabel.stringValue = row.title
         stateLabel.stringValue = row.label ?? ""
-        stateLabel.isHidden = row.label == nil
+        stateLabel.isHidden = row.label?.isEmpty != false
         elapsedLabel.stringValue = AgentInboxCellView.elapsedText(row.elapsed) ?? ""
-        elapsedLabel.isHidden = row.elapsed == nil
+        elapsedLabel.isHidden = AgentInboxCellView.elapsedText(row.elapsed) == nil
         metaLabel.stringValue = AgentInboxCellView.metaText(
             role: row.role, model: row.model,
             rollup: disclosure == .collapsed ? rollup : nil)
         metaLabel.isHidden = metaLabel.stringValue.isEmpty
         branchLabel.stringValue = AgentInboxCellView.branchText(branch: row.branch, isIsolated: row.isIsolated)
         branchLabel.isHidden = branchLabel.stringValue.isEmpty
+
+        // Bands are content slots, not semantic state slots. The row model and
+        // the live label strings agree on which bands draw; a folded rollup is
+        // the one extra detail string supplied by the list. A fit tier may hide
+        // the sole project label later, so this is refreshed after tiering too.
+        updateBandVisibility()
 
         projectLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         titleLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
@@ -4675,6 +4991,36 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         return .captionHidden
     }
 
+    /// Resolve the same measured-fit tier before AppKit builds a cell. The table
+    /// delegate uses this to derive row height from the labels that will remain
+    /// visible after the tier drops a project or elapsed column; the live cell
+    /// passes its actual disclosure width through the overload below.
+    static func fitTier(
+        for row: AgentInboxRow,
+        available: Double,
+        disclosure: RowDisclosure,
+        disclosureWidth: Double? = nil
+    ) -> RowFitTier {
+        let needs = RowFitNeeds(
+            project: measuredTextWidth(row.projectName ?? "", .caption),
+            state: measuredTextWidth(row.label ?? "", .label),
+            elapsed: measuredTextWidth(elapsedText(row.elapsed) ?? "", .captionMono),
+            title: measuredTextWidth(row.title, .title),
+            disclosure: disclosure == .none
+                ? 0
+                : disclosureWidth ?? measuredDisclosureWidth(disclosure))
+        return fitTier(available: available, needs: needs)
+    }
+
+    /// Match the width the live disclosure button contributes to its name band
+    /// when height is asked before a cell exists.
+    private static func measuredDisclosureWidth(_ disclosure: RowDisclosure) -> Double {
+        guard disclosure != .none else { return 0 }
+        let button = InboxDisclosureButton()
+        button.show(disclosure)
+        return Double(button.fittingSize.width)
+    }
+
     /// Re-measure and re-tier. Called after `apply` sets the strings and again
     /// from `layout()`, so dragging the sidebar divider re-tiers every visible row
     /// without the list reloading anything.
@@ -4683,25 +5029,24 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         // An un-laid-out cell has no room to measure against; tiering it would
         // resolve the tightest tier off a zero width and hide facts on a row that
         // is about to be given 300pt. The first real layout pass tiers it.
-        let available = Double(bounds.width) - Double(leadingInset?.constant ?? 0)
-            - Inset.card.horizontal
+        let available = (layoutColumnWidth ?? Double(bounds.width))
+            - Double(leadingInset?.constant ?? 0) - Inset.card.horizontal
         guard available > 0 else { return }
 
-        let needs = RowFitNeeds(
-            project: AgentInboxCellView.measuredTextWidth(projectLabel.stringValue, .caption),
-            state: AgentInboxCellView.measuredTextWidth(stateLabel.stringValue, .label),
-            elapsed: AgentInboxCellView.measuredTextWidth(elapsedLabel.stringValue, .captionMono),
-            title: AgentInboxCellView.measuredTextWidth(titleLabel.stringValue, .title),
-            disclosure: shown.disclosure == .none ? 0 : Double(disclosureButton.fittingSize.width)
-        )
-        let tier = AgentInboxCellView.fitTier(available: available, needs: needs)
+        let tier = AgentInboxCellView.fitTier(
+            for: shown.row,
+            available: available,
+            disclosure: shown.disclosure,
+            disclosureWidth: Double(disclosureButton.fittingSize.width))
         guard tier != appliedTier else { return }
         appliedTier = tier
 
         // A tier may only ever take a fact AWAY from a row that has one: the
         // row's own nil-ness still decides whether the label exists at all.
-        projectLabel.isHidden = shown.row.projectName == nil || !tier.drawsProject
-        elapsedLabel.isHidden = shown.row.elapsed == nil || !tier.drawsElapsed
+        projectLabel.isHidden = shown.row.projectName?.isEmpty != false || !tier.drawsProject
+        elapsedLabel.isHidden = AgentInboxCellView.elapsedText(shown.row.elapsed) == nil
+            || !tier.drawsElapsed
+        updateBandVisibility()
         applyRelocatedFacts()
     }
 
@@ -4892,7 +5237,10 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     /// hiding — an agent's role and model are still on the row's title line's terms,
     /// but "1 needs you" exists nowhere else while the group is closed.
     static func metaText(role: String?, model: String?, rollup: ChildRollup? = nil) -> String {
-        [rollup?.summary, role, model].compactMap { $0 }.joined(separator: " · ")
+        [rollup?.summary, role, model]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
     }
 
     /// The branch line, in `BranchChipNSView`'s vocabulary rather than a second
@@ -5090,6 +5438,11 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     }
 
     required init?(coder: NSCoder) { return nil }
+
+    func setLayoutWidth(_ width: Double) {
+        // Slim rows have no measured-fit tiers; the method keeps the shared cell
+        // protocol honest when AppKit asks for either variant.
+    }
 
     /// Ticket: docs/38-tickets/90-agent-ux/P2D.5-child-rollup.md
     /// `rollup` is ACCEPTED AND NOT DRAWN here. A parked row is one line already

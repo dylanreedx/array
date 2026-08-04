@@ -304,7 +304,9 @@ enum UIProbeGeometry {
         let exceptionalRows = try checkExceptionalRenderers()
         // P0.4: the inbox measured at the widths it ships at, truncation gated
         // by drawable width against an explicit expected-defect table.
+        let sidebarHeightAssertions = try checkSidebarContentDerivedHeights()
         let sidebarGate = try checkSidebarTruncationGate()
+        print("UIProbeGeometry: content-derived sidebar row heights held in \(sidebarHeightAssertions) live width/appearance cases")
         print(String(
             format: "UIProbeGeometry: sidebar truncation gate measured %d labels at min/default/wide in both appearances; %d truncations, all in the expected table, none healed unrecorded",
             sidebarGate.measured, sidebarGate.truncated
@@ -982,6 +984,550 @@ enum UIProbeGeometry {
         return asserted
     }
 
+    // MARK: - P2.3 — content-derived card height
+    //
+    // The card has three possible content bands: metadata, the name, and detail.
+    // This probe uses deliberately small rows rather than the baseline corpus so
+    // every one-line, two-line, and three-line case is visible at every shipping
+    // width. It reads the laid-out table and the visible label frames, not the
+    // height function under test.
+    private static func checkSidebarContentDerivedHeights() throws -> Int {
+        let epoch = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let rows = [
+            AgentInboxRow(
+                id: UUID(uuidString: "5A000000-0000-4000-8000-000000000001")!,
+                title: "One line", state: .ready, attention: .none,
+                // Empty strings are accepted by the public row initializer. They
+                // must be treated like absent detail, or the cell would draw a
+                // separator-only `" · "` band that the height derivation omits.
+                model: "", role: "", branch: nil, elapsed: nil,
+                variant: .card, createdAt: epoch),
+            AgentInboxRow(
+                id: UUID(uuidString: "5A000000-0000-4000-8000-000000000002")!,
+                title: "Two lines", projectName: "continuum", state: .ready,
+                attention: .none, model: nil, role: nil, branch: nil, elapsed: nil,
+                variant: .card, createdAt: epoch.addingTimeInterval(1)),
+            AgentInboxRow(
+                id: UUID(uuidString: "5A000000-0000-4000-8000-000000000003")!,
+                title: "Three lines", projectName: "continuum", state: .ready,
+                attention: .none, model: nil, role: "builder", branch: nil, elapsed: nil,
+                variant: .card, createdAt: epoch.addingTimeInterval(2)),
+        ]
+        let captionHiddenProject = AgentInboxRow(
+            id: UUID(uuidString: "5A000000-0000-4000-8000-000000000004")!,
+            title: "Caption hidden", projectName: String(repeating: "project-name-", count: 32),
+            state: .ready, attention: .none,
+            model: nil, role: nil, branch: nil, elapsed: nil,
+            variant: .card, createdAt: epoch.addingTimeInterval(3))
+        let widths: [CGFloat] = [
+            CGFloat(WorkspaceSidebarConfig.minWidth),
+            CGFloat(WorkspaceSidebarConfig.defaultWidth),
+            320,
+        ]
+        guard let resizingProject = (1...128).map({ count in
+            String(repeating: "project-", count: count)
+        }).first(where: { project in
+            let candidate = AgentInboxRow(
+                id: UUID(uuidString: "5A000000-0000-4000-8000-000000000005")!,
+                title: "Resize witness", projectName: project, state: .ready,
+                attention: .none, model: nil, role: nil, branch: nil, elapsed: nil,
+                variant: .card, createdAt: epoch.addingTimeInterval(4))
+            return AgentInboxCellView.fitTier(
+                for: candidate, available: 320 - Inset.card.horizontal, disclosure: .none) == .full
+                && AgentInboxCellView.fitTier(
+                    for: candidate, available: CGFloat(WorkspaceSidebarConfig.minWidth) - Inset.card.horizontal,
+                    disclosure: .none) == .captionHidden
+        }) else {
+            throw fail("sidebar-ux-check.content-height: could not create a project that changes fit tier between 220pt and 320pt")
+        }
+        let resizingRow = AgentInboxRow(
+            id: UUID(uuidString: "5A000000-0000-4000-8000-000000000005")!,
+            title: "Resize witness", projectName: resizingProject, state: .ready,
+            attention: .none, model: nil, role: nil, branch: nil, elapsed: nil,
+            variant: .card, createdAt: epoch.addingTimeInterval(4))
+        let maxHeight = CGFloat(
+            (Double(rows.count + 1) * AgentInboxView.rowHeight
+                + AgentInboxView.scopeControlHeight + 160).rounded(.up)
+        )
+        var asserted = 0
+        var measuredHeights: Set<String> = []
+
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            for width in widths {
+                let probe = try makeSidebarProbeHost(
+                    width: width, height: maxHeight, appearanceName: appearanceName)
+                // The host is sized before content is applied. `layoutForQA` then
+                // forces the list's own materialization/layout pass, so this leg
+                // cannot pass by inspecting only three row values.
+                probe.inbox.reload(rows: rows)
+                probe.inbox.layoutForQA()
+                probe.host.layoutSubtreeIfNeeded()
+                probe.inbox.layoutForQA()
+
+                let sortedRows = InboxSort.sortForInbox(rows: rows)
+                let geometries = Dictionary(
+                    uniqueKeysWithValues: probe.inbox.qaRowGeometriesForQA.compactMap { geometry in
+                        geometry.agentID.map { ($0, geometry) }
+                    })
+                guard probe.inbox.rowHeightsForQA.count == sortedRows.count,
+                      geometries.count == sortedRows.count else {
+                    throw fail("sidebar-ux-check.content-height@\(Int(width))pt.\(appearanceName.rawValue): materialized rows do not cover the one/two/three-line fixtures")
+                }
+
+                for (index, row) in sortedRows.enumerated() {
+                    guard let geometry = geometries[row.id],
+                          probe.inbox.rowHeightsForQA.indices.contains(index) else {
+                        throw fail("sidebar-ux-check.content-height@\(Int(width))pt.\(appearanceName.rawValue): missing live geometry for \(row.title)")
+                    }
+                    if row.id == rows[0].id {
+                        guard AgentInboxCellView.metaText(role: row.role, model: row.model).isEmpty,
+                              geometry.labels.first(where: { $0.element == "meta" })?.isHidden == true else {
+                            throw fail("sidebar-ux-check.content-height@\(Int(width))pt.\(appearanceName.rawValue): empty role/model strings produced a visible separator-only detail band")
+                        }
+                    }
+                    let roles: [TextRole] = (row.drawsMetaLine ? [.label] : [])
+                        + [.title]
+                        + (row.drawsDetailLine ? [.label] : [])
+                    let expected = Metrics.rowHeight(for: roles, insets: Inset.card, spacing: Space.s)
+                    let measured = probe.inbox.rowHeightsForQA[index]
+                    guard abs(measured - expected) <= 0.5 else {
+                        throw fail(String(
+                            format: "sidebar-ux-check.content-height@%.0fpt.%@: '%@' drew %d content lines at %.1fpt, expected %.1fpt from Metrics",
+                            width, appearanceName.rawValue, row.title, row.drawnLineCount, measured, expected))
+                    }
+                    measuredHeights.insert("\(row.drawnLineCount)=\(String(format: "%.1f", measured))")
+
+                    let visibleFrames = geometry.labels
+                        .filter { !$0.isHidden && !$0.text.isEmpty && $0.frame.height > 0 }
+                        .map(\.frame)
+                    guard let minY = visibleFrames.map(\.minY).min(),
+                          let maxY = visibleFrames.map(\.maxY).max(),
+                          let cardFrame = geometry.elementFrames["card"] else {
+                        throw fail("sidebar-ux-check.content-height@\(Int(width))pt.\(appearanceName.rawValue): '\(row.title)' has no visible drawn content frame")
+                    }
+                    let drawnHeight = Double(maxY - minY)
+                    let interiorHeight = Double(cardFrame.height) - Inset.card.vertical
+                    let slack = interiorHeight - drawnHeight
+                    guard slack >= -0.5, slack <= 4.0 else {
+                        throw fail(String(
+                            format: "sidebar-ux-check.content-height@%.0fpt.%@: '%@' leaves %.1fpt unexplained vertical slack (card %.1fpt, drawn %.1fpt, inset %.1fpt)",
+                            width, appearanceName.rawValue, row.title, slack,
+                            cardFrame.height, drawnHeight, Inset.card.vertical))
+                    }
+                    asserted += 1
+                }
+
+                // A caption-hidden project is the only content in this fixture's
+                // metadata band. Once the measured-fit tier drops that project,
+                // the band itself must collapse; otherwise the row keeps a 14pt
+                // shelf with no drawable content and the height proof is lying.
+                // Negative witness observed on the final check: forcing the height
+                // path to keep the project produced red at the exact message
+                // `caption-hidden sole-meta row reserved 61.0pt, wanted 43.0pt`;
+                // the source was restored and its SHA-256 verified before green.
+                let hiddenProbe = try makeSidebarProbeHost(
+                    width: width, height: maxHeight, appearanceName: appearanceName)
+                hiddenProbe.inbox.reload(rows: [captionHiddenProject])
+                hiddenProbe.inbox.layoutForQA()
+                hiddenProbe.host.layoutSubtreeIfNeeded()
+                hiddenProbe.inbox.layoutForQA()
+                guard let hiddenGeometry = hiddenProbe.inbox.qaRowGeometriesForQA.first,
+                      hiddenGeometry.agentID == captionHiddenProject.id else {
+                    throw fail("sidebar-ux-check.content-height@\(Int(width))pt.\(appearanceName.rawValue): caption-hidden witness did not materialize")
+                }
+                guard hiddenGeometry.fitTier == .captionHidden else {
+                    throw fail("sidebar-ux-check.content-height@\(Int(width))pt.\(appearanceName.rawValue): over-wide sole project did not resolve captionHidden")
+                }
+                let hiddenProject = hiddenGeometry.labels.first { $0.element == "project" }
+                guard hiddenProject?.isHidden == true else {
+                    throw fail("sidebar-ux-check.content-height@\(Int(width))pt.\(appearanceName.rawValue): captionHidden left the sole project visible")
+                }
+                let oneLineHeight = Metrics.rowHeight(
+                    for: [.title], insets: Inset.card, spacing: Space.s)
+                guard let hiddenHeight = hiddenProbe.inbox.rowHeightForQA(id: captionHiddenProject.id),
+                      abs(hiddenHeight - oneLineHeight) <= 0.5 else {
+                    throw fail(String(
+                        format: "sidebar-ux-check.content-height@%.0fpt.%@: caption-hidden sole-meta row reserved %.1fpt, wanted %.1fpt for its one drawn line",
+                        width, appearanceName.rawValue, hiddenProbe.inbox.rowHeightForQA(id: captionHiddenProject.id) ?? -1, oneLineHeight))
+                }
+                let hiddenVisibleLabels = hiddenGeometry.labels.filter {
+                    !$0.isHidden && !$0.text.isEmpty && $0.frame.height > 0
+                }
+                guard hiddenVisibleLabels.map(\.element) == ["title"] else {
+                    throw fail("sidebar-ux-check.content-height@\(Int(width))pt.\(appearanceName.rawValue): caption-hidden witness still has a visible metadata label")
+                }
+                asserted += 3
+            }
+
+            // Exercise the live divider path, not only fresh hosts. The same row
+            // must shed its sole project band at 220pt and restore it at 320pt;
+            // `noteHeightOfRows` is the part that keeps AppKit's cache in step with
+            // the cell's width-driven tier.
+            let transitionProbe = try makeSidebarProbeHost(
+                width: 320, height: maxHeight, appearanceName: appearanceName)
+            transitionProbe.inbox.reload(rows: [resizingRow])
+            transitionProbe.inbox.layoutForQA()
+            transitionProbe.host.layoutSubtreeIfNeeded()
+            transitionProbe.inbox.layoutForQA()
+            let transitionTwoLineHeight = Metrics.rowHeight(
+                for: [.label, .title], insets: Inset.card, spacing: Space.s)
+            let transitionOneLineHeight = Metrics.rowHeight(
+                for: [.title], insets: Inset.card, spacing: Space.s)
+            guard let wideGeometry = transitionProbe.inbox.qaRowGeometriesForQA.first,
+                  wideGeometry.fitTier == .full,
+                  wideGeometry.labels.first(where: { $0.element == "project" })?.isHidden == false,
+                  let wideHeight = transitionProbe.inbox.rowHeightForQA(id: resizingRow.id),
+                  abs(wideHeight - transitionTwoLineHeight) <= 0.5 else {
+                throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): resize witness did not start as a full two-line row at 320pt")
+            }
+            func expectRenameEditorToFollowTitle(_ phase: String) throws {
+                guard let editor = transitionProbe.inbox.renameFieldFrameForQA,
+                      let title = transitionProbe.inbox.titleFrameForQA(id: resizingRow.id) else {
+                    throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): rename editor lost its live title geometry during \(phase)")
+                }
+                let expected = title.insetBy(dx: -Space.xs, dy: -Space.xs)
+                guard abs(editor.minX - expected.minX) <= 0.5,
+                      abs(editor.minY - expected.minY) <= 0.5,
+                      abs(editor.width - expected.width) <= 0.5,
+                      abs(editor.height - expected.height) <= 0.5 else {
+                    throw fail(String(
+                        format: "sidebar-ux-check.content-height.%@: rename editor stayed at %.1f,%.1f %.1fx%.1f during %@; live title wants %.1f,%.1f %.1fx%.1f",
+                        appearanceName.rawValue, editor.minX, editor.minY, editor.width, editor.height,
+                        phase, expected.minX, expected.minY, expected.width, expected.height))
+                }
+            }
+            guard transitionProbe.inbox.beginRename(agentId: resizingRow.id) else {
+                throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): resize witness could not open its inline rename editor")
+            }
+            try expectRenameEditorToFollowTitle("the initial wide layout")
+            let resizingNeeds = AgentInboxCellView.RowFitNeeds(
+                project: AgentInboxCellView.measuredTextWidth(resizingRow.projectName ?? "", .caption),
+                state: AgentInboxCellView.measuredTextWidth(resizingRow.label ?? "", .label),
+                elapsed: AgentInboxCellView.measuredTextWidth(
+                    AgentInboxCellView.elapsedText(resizingRow.elapsed) ?? "", .captionMono),
+                title: AgentInboxCellView.measuredTextWidth(resizingRow.title, .title),
+                disclosure: 0)
+            // The height delegate and the live cell both use the actual table
+            // column. The vertical scroller narrows that column inside the outer
+            // sidebar, so include that measured lane difference in the boundary.
+            let cellWidth = wideGeometry.elementFrames["cell"]?.width ?? 0
+            let columnInset = max(0, Double(transitionProbe.inbox.bounds.width) - Double(cellWidth))
+            let fractionalBoundary = resizingNeeds.metaBandNeed(
+                elapsed: true, project: true) + Inset.card.horizontal + columnInset
+            // The offscreen display is 1x, so AppKit snaps a fractional content
+            // frame to its neighbouring device pixel. Straddle the measured
+            // boundary with two fractional divider positions only 0.5pt apart;
+            // the live cell widths below prove that the transition was real rather
+            // than a large requested frame jump.
+            let fractionalAbove = fractionalBoundary + 0.125
+            let fractionalBelow = fractionalBoundary - 0.375
+            guard fractionalBelow > Double(WorkspaceSidebarConfig.minWidth),
+                  fractionalAbove < 320 else {
+                throw fail(String(
+                    format: "sidebar-ux-check.content-height.%@: resize witness has no fractional tier boundary inside the shipping widths (%.2fpt)",
+                    appearanceName.rawValue, fractionalBoundary))
+            }
+
+            // The two widths straddle a measured tier boundary by a fractional
+            // divider move. A point-sized invalidation tolerance would leave this
+            // transition stale even though the drawn project band changes.
+            var fractionalFrame = transitionProbe.host.frame
+            fractionalFrame.size.width = CGFloat(fractionalAbove)
+            transitionProbe.host.frame = fractionalFrame
+            transitionProbe.host.layoutSubtreeIfNeeded()
+            transitionProbe.inbox.layoutForQA()
+            let fractionalWideGeometry = transitionProbe.inbox.qaRowGeometriesForQA.first
+            let fractionalWideColumnWidth = transitionProbe.inbox.columnWidthForQA
+            let fractionalWideHeight = transitionProbe.inbox.rowHeightForQA(id: resizingRow.id)
+            guard fractionalWideGeometry?.fitTier == .full,
+                  let fractionalWideHeight,
+                  abs(fractionalWideHeight - transitionTwoLineHeight) <= 0.5 else {
+                throw fail(String(
+                    format: "sidebar-ux-check.content-height.%@: fractional width %.2fpt lost its full two-line height (inbox %.3f, cell %.3f, tier %@, project hidden %@, height %.1f wanted %.1f)",
+                    appearanceName.rawValue, fractionalAbove,
+                    transitionProbe.inbox.bounds.width,
+                    fractionalWideGeometry?.elementFrames["cell"]?.width ?? -1,
+                    fractionalWideGeometry?.fitTier?.rawValue ?? "nil",
+                    String(describing: fractionalWideGeometry?.labels.first(where: { $0.element == "project" })?.isHidden),
+                    fractionalWideHeight ?? -1, transitionTwoLineHeight))
+            }
+            fractionalFrame.size.width = CGFloat(fractionalBelow)
+            transitionProbe.host.frame = fractionalFrame
+            transitionProbe.host.layoutSubtreeIfNeeded()
+            transitionProbe.inbox.layoutForQA()
+            let fractionalNarrowGeometry = transitionProbe.inbox.qaRowGeometriesForQA.first
+            let fractionalNarrowColumnWidth = transitionProbe.inbox.columnWidthForQA
+            let fractionalNarrowHeight = transitionProbe.inbox.rowHeightForQA(id: resizingRow.id)
+            guard abs(fractionalWideColumnWidth - fractionalNarrowColumnWidth) > 0,
+                  abs(fractionalWideColumnWidth - fractionalNarrowColumnWidth) <= 0.5 else {
+                throw fail(String(
+                    format: "sidebar-ux-check.content-height.%@: fractional tier crossing requested %.3fpt, but the live column moved %.3fpt (above %.3f, below %.3f) — assert the actual divider delta, not the request",
+                    appearanceName.rawValue, fractionalAbove - fractionalBelow,
+                    abs(fractionalWideColumnWidth - fractionalNarrowColumnWidth),
+                    fractionalWideColumnWidth,
+                    fractionalNarrowColumnWidth))
+            }
+            guard fractionalNarrowGeometry?.fitTier == .captionHidden,
+                  let fractionalNarrowHeight,
+                  abs(fractionalNarrowHeight - transitionOneLineHeight) <= 0.5 else {
+                throw fail(String(
+                    format: "sidebar-ux-check.content-height.%@: fractional width %.2fpt left the caption-hidden row at a stale height (inbox %.3f, cell %.3f, tier %@, project hidden %@, height %.1f wanted %.1f)",
+                    appearanceName.rawValue, fractionalBelow,
+                    transitionProbe.inbox.bounds.width,
+                    fractionalNarrowGeometry?.elementFrames["cell"]?.width ?? -1,
+                    fractionalNarrowGeometry?.fitTier?.rawValue ?? "nil",
+                    String(describing: fractionalNarrowGeometry?.labels.first(where: { $0.element == "project" })?.isHidden),
+                    fractionalNarrowHeight ?? -1, transitionOneLineHeight))
+            }
+            try expectRenameEditorToFollowTitle("the fractional tier crossing")
+            asserted += 3
+
+            transitionProbe.window.setContentSize(
+                NSSize(width: CGFloat(WorkspaceSidebarConfig.minWidth), height: maxHeight))
+            transitionProbe.host.layoutSubtreeIfNeeded()
+            transitionProbe.inbox.layoutForQA()
+            guard let narrowGeometry = transitionProbe.inbox.qaRowGeometriesForQA.first,
+                  narrowGeometry.fitTier == .captionHidden,
+                  narrowGeometry.labels.first(where: { $0.element == "project" })?.isHidden == true,
+                  let narrowHeight = transitionProbe.inbox.rowHeightForQA(id: resizingRow.id),
+                  // Negative witness observed on the final check: expecting the
+                  // two-line height here exited 1 at the exact message
+                  // `sidebar-ux-check.content-height.NSAppearanceNameAqua: width transition left the caption-hidden row at the stale two-line height`.
+                  // The source was restored and its SHA-256 matched before green.
+                  abs(narrowHeight - transitionOneLineHeight) <= 0.5 else {
+                throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): width transition left the caption-hidden row at the stale two-line height")
+            }
+
+            try expectRenameEditorToFollowTitle("the minimum-width resize")
+
+            transitionProbe.window.setContentSize(
+                NSSize(width: CGFloat(WorkspaceSidebarConfig.defaultWidth), height: maxHeight))
+            transitionProbe.host.layoutSubtreeIfNeeded()
+            transitionProbe.inbox.layoutForQA()
+            try expectRenameEditorToFollowTitle("the default-width resize")
+            let middleTier = AgentInboxCellView.fitTier(
+                for: resizingRow,
+                available: CGFloat(WorkspaceSidebarConfig.defaultWidth) - Inset.card.horizontal,
+                disclosure: .none)
+            let middleExpectedHeight = Metrics.rowHeight(
+                for: middleTier.drawsProject ? [.label, .title] : [.title],
+                insets: Inset.card, spacing: Space.s)
+            let middleGeometry = transitionProbe.inbox.qaRowGeometriesForQA.first
+            let middleHeight = transitionProbe.inbox.rowHeightForQA(id: resizingRow.id)
+            guard middleGeometry?.fitTier == middleTier,
+                  middleGeometry?.labels.first(where: { $0.element == "project" })?.isHidden == !middleTier.drawsProject,
+                  let middleHeight,
+                  abs(middleHeight - middleExpectedHeight) <= 0.5 else {
+                throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): live 280pt transition disagreed with its measured tier")
+            }
+
+            transitionProbe.window.setContentSize(NSSize(width: 320, height: maxHeight))
+            transitionProbe.host.layoutSubtreeIfNeeded()
+            transitionProbe.inbox.layoutForQA()
+            let restoredGeometry = transitionProbe.inbox.qaRowGeometriesForQA.first
+            let restoredHeight = transitionProbe.inbox.rowHeightForQA(id: resizingRow.id)
+            guard restoredGeometry?.fitTier == .full,
+                  restoredGeometry?.labels.first(where: { $0.element == "project" })?.isHidden == false,
+                  let restoredHeight,
+                  abs(restoredHeight - transitionTwoLineHeight) <= 0.5 else {
+                throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): widening the row left its restored project band at the stale one-line height (inbox width \(transitionProbe.inbox.bounds.width), cell width \(restoredGeometry?.elementFrames["cell"]?.width ?? -1), tier \(restoredGeometry?.fitTier?.rawValue ?? "nil"), height \(restoredHeight ?? -1), project hidden \(String(describing: restoredGeometry?.labels.first(where: { $0.element == "project" })?.isHidden)))")
+            }
+            try expectRenameEditorToFollowTitle("the restored wide resize")
+            _ = transitionProbe.inbox.pressKeyInRenameForQA(#selector(NSResponder.cancelOperation(_:)))
+            asserted += 8
+        }
+
+        // The same content with a different resting mark/lifecycle must not move
+        // the card. This is the non-vacuous guard against height branching on
+        // attention or importance rather than on what the cell draws.
+        let base = rows[1]
+        let equivalent = AgentInboxRow(
+            id: base.id, title: base.title, projectName: base.projectName,
+            state: base.state, attention: .unread, lifecycle: .archived,
+            model: base.model, role: base.role, branch: base.branch,
+            isIsolated: base.isIsolated, elapsed: base.elapsed, depth: base.depth,
+            variant: .card, createdAt: base.createdAt, parentId: base.parentId)
+        guard AgentInboxView.height(for: base) == AgentInboxView.height(for: equivalent) else {
+            throw fail("sidebar-ux-check.content-height: identical drawn content changed height with attention/lifecycle")
+        }
+
+        // A content arrival changes only the row's height; the selected identity
+        // and the visible scroll anchor stay put through the incremental reload.
+        let scrollRows = (0..<7).map { index -> AgentInboxRow in
+            AgentInboxRow(
+                id: UUID(uuidString: String(format: "5A000000-0000-4000-8000-%012d", index + 100))!,
+                title: "Scroll \(index)",
+                state: .ready, attention: .none,
+                model: nil, role: nil, branch: nil, elapsed: nil,
+                variant: .card, createdAt: epoch.addingTimeInterval(Double(index + 10)))
+        }
+        // InboxSort puts the newest active row first. Change row 5, which is
+        // immediately before row 4 in the rendered order, so the content arrival
+        // is a visible/preceding-row change rather than an offscreen tail update.
+        let arriving = AgentInboxRow(
+            id: scrollRows[5].id, title: scrollRows[5].title, projectName: "continuum",
+            state: .ready, attention: .none, model: "gpt-5.6-sol", role: "builder",
+            branch: "agent/arriving", elapsed: nil, variant: .card,
+            createdAt: scrollRows[5].createdAt)
+        let nextScrollRows = scrollRows.map { $0.id == arriving.id ? arriving : $0 }
+        let oneLineHeight = Metrics.rowHeight(
+            for: [.title], insets: Inset.card, spacing: Space.s)
+        let threeLineHeight = Metrics.rowHeight(
+            for: [.label, .title, .label], insets: Inset.card, spacing: Space.s)
+        var incrementalWidths: [String] = []
+        // The selected anchor is the row immediately after the arriving row in
+        // the newest-first rendered order. It must remain the visible anchor even
+        // if AppKit adjusts the document-space clip origin while remeasuring.
+        let selectedID = scrollRows[4].id
+        for width in widths {
+            let scrollProbe = try makeSidebarProbeHost(
+                width: width, height: 190, appearanceName: .aqua)
+            scrollProbe.inbox.reload(rows: scrollRows)
+            scrollProbe.inbox.layoutForQA()
+            scrollProbe.host.layoutSubtreeIfNeeded()
+            scrollProbe.inbox.layoutForQA()
+            guard scrollProbe.inbox.selectRowForQA(id: selectedID) else {
+                throw fail("sidebar-ux-check.content-height@\(Int(width))pt: could not select the scroll anchor row")
+            }
+            scrollProbe.inbox.scrollForQA(byPoints: AgentInboxView.rowHeight)
+            let offsetBefore = scrollProbe.inbox.contentOffsetYForQA
+            let visibleBefore = scrollProbe.inbox.visibleAgentIdsForQA
+            guard visibleBefore.contains(arriving.id), visibleBefore.contains(selectedID),
+                  let anchorFrameBefore = scrollProbe.inbox.rowFrameInViewportForQA(id: selectedID),
+                  let anchorDocumentBefore = scrollProbe.inbox.tableRowFrameForQA(id: selectedID) else {
+                throw fail("sidebar-ux-check.content-height@\(Int(width))pt: visible scroll anchor was not materialized before content arrival (visible \(visibleBefore.map(\.uuidString)))")
+            }
+            guard let beforeHeight = scrollProbe.inbox.rowHeightForQA(id: arriving.id),
+                  abs(beforeHeight - oneLineHeight) <= 0.5 else {
+                throw fail(String(
+                    format: "sidebar-ux-check.content-height@%.0fpt: arriving row started at %.1fpt, wanted %.1fpt before content arrived",
+                    width, scrollProbe.inbox.rowHeightForQA(id: arriving.id) ?? -1, oneLineHeight))
+            }
+
+            scrollProbe.inbox.apply(
+                rows: nextScrollRows,
+                changed: AgentsBoardChangeSet(added: [], updated: [arriving.id], removed: []))
+            scrollProbe.host.layoutSubtreeIfNeeded()
+            scrollProbe.inbox.layoutForQA()
+            guard let afterHeight = scrollProbe.inbox.rowHeightForQA(id: arriving.id) else {
+                throw fail("sidebar-ux-check.content-height@\(Int(width))pt: arriving row has no live post-update height")
+            }
+            guard abs(afterHeight - threeLineHeight) <= 0.5,
+                  afterHeight > beforeHeight + 0.5 else {
+                throw fail(String(
+                    format: "sidebar-ux-check.content-height@%.0fpt: content arrival left row at %.1fpt (before %.1fpt, wanted %.1fpt) — stale row height cache",
+                    width, afterHeight, beforeHeight, threeLineHeight))
+            }
+            guard let arrivingGeometry = scrollProbe.inbox.qaRowGeometriesForQA.first(where: {
+                $0.agentID == arriving.id
+            }), arrivingGeometry.fitTier == .full else {
+                throw fail("sidebar-ux-check.content-height@\(Int(width))pt: arriving three-line witness did not draw its complete content")
+            }
+            guard scrollProbe.inbox.selectedRowIdsForQA == [selectedID] else {
+                throw fail("sidebar-ux-check.content-height@\(Int(width))pt: selection did not survive a content-derived row height change")
+            }
+            let visibleAfter = scrollProbe.inbox.visibleAgentIdsForQA
+            let anchorDocumentAfter = scrollProbe.inbox.tableRowFrameForQA(id: selectedID)
+            guard visibleAfter.contains(selectedID),
+                  let anchorFrameAfter = scrollProbe.inbox.rowFrameInViewportForQA(id: selectedID),
+                  abs(anchorFrameAfter.minY - anchorFrameBefore.minY) <= 0.5 else {
+                throw fail(String(
+                    format: "sidebar-ux-check.content-height@%.0fpt: visible anchor moved or disappeared when content arrived (before y %.1f, after y %.1f, visible %@)",
+                    width, anchorFrameBefore.minY,
+                    scrollProbe.inbox.rowFrameInViewportForQA(id: selectedID)?.minY ?? -1,
+                    visibleAfter.map(\.uuidString).joined(separator: ","))
+                    + " (offset before " + String(format: "%.1f", offsetBefore)
+                    + ", after " + String(format: "%.1f", scrollProbe.inbox.contentOffsetYForQA)
+                    + ", document y before " + String(format: "%.1f", anchorDocumentBefore.minY)
+                    + ", after " + String(format: "%.1f", anchorDocumentAfter?.minY ?? -1) + ")")
+            }
+            incrementalWidths.append("\(Int(width))pt=\(String(format: "%.1f→%.1f", beforeHeight, afterHeight))")
+            asserted += 4
+        }
+
+        // A shrink at the bottom is a separate anchor case. AppKit is allowed to
+        // constrain the clip origin when the document becomes shorter; restoring
+        // an old document-space delta after that constraint double-applies it.
+        // The row immediately after the shrinking row is the visible anchor, so
+        // its viewport position—not an assumed numeric offset—proves the result.
+        let bottomRows: [AgentInboxRow] = (0..<6).map { index in
+            AgentInboxRow(
+                id: UUID(uuidString: String(format: "5A000000-0000-4000-8000-%012d", index + 200))!,
+                title: "Bottom \(index)", projectName: "continuum", state: .working,
+                attention: .none, model: nil, role: "builder", branch: "agent/full",
+                isIsolated: true, elapsed: 30, variant: .card,
+                createdAt: epoch.addingTimeInterval(Double(index + 30)))
+        }
+        let shrinkingID = bottomRows[1].id
+        let bottomAnchorID = bottomRows[0].id
+        let bottomNextRows = bottomRows.map { row in
+            guard row.id == shrinkingID else { return row }
+            return AgentInboxRow(
+                id: row.id, title: row.title, state: .ready, attention: .none,
+                variant: .card, createdAt: row.createdAt)
+        }
+        let bottomOneLineHeight = Metrics.rowHeight(
+            for: [.title], insets: Inset.card, spacing: Space.s)
+        for width in widths {
+            let bottomProbe = try makeSidebarProbeHost(
+                width: width, height: 190, appearanceName: .aqua)
+            bottomProbe.inbox.reload(rows: bottomRows)
+            bottomProbe.inbox.layoutForQA()
+            bottomProbe.host.layoutSubtreeIfNeeded()
+            bottomProbe.inbox.layoutForQA()
+            guard Array(bottomProbe.inbox.rowIdsForQA.suffix(2)) == [shrinkingID, bottomAnchorID] else {
+                throw fail("sidebar-ux-check.content-height@\(Int(width))pt: bottom shrink witness did not place its changing row immediately before the anchor")
+            }
+            guard bottomProbe.inbox.selectRowForQA(id: bottomAnchorID) else {
+                throw fail("sidebar-ux-check.content-height@\(Int(width))pt: could not select the bottom visible anchor")
+            }
+            bottomProbe.inbox.scrollToBottomForQA()
+            guard bottomProbe.inbox.isAtBottomForQA else {
+                throw fail("sidebar-ux-check.content-height@\(Int(width))pt: bottom-shrink witness did not reach the constrained document bottom")
+            }
+            let visibleBefore = bottomProbe.inbox.visibleAgentIdsForQA
+            guard visibleBefore.contains(shrinkingID), visibleBefore.contains(bottomAnchorID),
+                  let anchorBefore = bottomProbe.inbox.rowFrameInViewportForQA(id: bottomAnchorID),
+                  let beforeHeight = bottomProbe.inbox.rowHeightForQA(id: shrinkingID),
+                  abs(beforeHeight - threeLineHeight) <= 0.5 else {
+                throw fail("sidebar-ux-check.content-height@\(Int(width))pt: bottom-shrink witness did not materialize both rows at the expected three-line height")
+            }
+
+            bottomProbe.inbox.apply(
+                rows: bottomNextRows,
+                changed: AgentsBoardChangeSet(added: [], updated: [shrinkingID], removed: []))
+            bottomProbe.host.layoutSubtreeIfNeeded()
+            bottomProbe.inbox.layoutForQA()
+            guard let afterHeight = bottomProbe.inbox.rowHeightForQA(id: shrinkingID) else {
+                throw fail("sidebar-ux-check.content-height@\(Int(width))pt: bottom shrink row lost its live height")
+            }
+            guard abs(afterHeight - bottomOneLineHeight) <= 0.5,
+                  beforeHeight > afterHeight + 0.5 else {
+                throw fail(String(
+                    format: "sidebar-ux-check.content-height@%.0fpt: bottom shrink changed %.1fpt to %.1fpt, wanted %.1fpt",
+                    width, beforeHeight, afterHeight, bottomOneLineHeight))
+            }
+            guard bottomProbe.inbox.isAtBottomForQA,
+                  bottomProbe.inbox.selectedRowIdsForQA == [bottomAnchorID],
+                  bottomProbe.inbox.visibleAgentIdsForQA.contains(bottomAnchorID),
+                  let anchorAfter = bottomProbe.inbox.rowFrameInViewportForQA(id: bottomAnchorID),
+                  abs(anchorAfter.minY - anchorBefore.minY) <= 0.5 else {
+                throw fail(String(
+                    format: "sidebar-ux-check.content-height@%.0fpt: bottom visible anchor moved during shrink (before y %.1f, after y %.1f, offset %.1f, atBottom %@, selected %@, visible %@)",
+                    width, anchorBefore.minY,
+                    bottomProbe.inbox.rowFrameInViewportForQA(id: bottomAnchorID)?.minY ?? -1,
+                    bottomProbe.inbox.contentOffsetYForQA,
+                    String(bottomProbe.inbox.isAtBottomForQA),
+                    bottomProbe.inbox.selectedRowIdsForQA.map(\.uuidString).joined(separator: ","),
+                    bottomProbe.inbox.visibleAgentIdsForQA.map(\.uuidString).joined(separator: ",")))
+            }
+            asserted += 4
+        }
+
+        print("UIProbeGeometry: content-derived sidebar heights measured 1/2/3-line cards at 220/280/320pt in both appearances (\(measuredHeights.sorted().joined(separator: ", "))); caption-hidden sole metadata collapsed; incremental arrival heights \(incrementalWidths.joined(separator: ", ")) preserved selection and scroll, including constrained-bottom shrink")
+        return asserted
+    }
+
     // MARK: - P1.2/P1.4 — the interaction ladder and the focus ring
     //
     // Tickets: 94/P1.2-interaction-fill-ladder.md, P1.4-focus-ring-and-floors.md
@@ -1334,6 +1880,7 @@ enum UIProbeGeometry {
                 observedTiers.formUnion(counts.tiers)
             }
         }
+        _ = try checkSidebarContentDerivedHeights()
         // P1.2/P1.4: the four-state ladder and the focus ring, driven through the
         // view's own hover / selection / route-active / keyboard inputs.
         let ladderAssertions = try checkSidebarInteractionLadder(rows: rows, probeHeight: probeHeight)

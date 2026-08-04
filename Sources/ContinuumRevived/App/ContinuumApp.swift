@@ -16618,6 +16618,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let navApp = AppDelegate()
         navApp.canvasView = overlayCanvas
         let now = Date()
+        // P3.2: ARM THE LISTING GATE, exactly as boot does, before anything reads
+        // agent activity. `nav a` selects a tile off the activity snapshot, so an
+        // unarmed source refuses the listing, the snapshot stays empty, and the wrong
+        // tile is selected. This fixture has no registry of its own at this point, and
+        // an empty registry is a legitimate sweep: there are no roots, so nothing can
+        // be claiming liveness. Readiness means A SWEEP COMMITTED, not that a root
+        // existed. Found by the loop's final matrix after the twelve sites enumerated
+        // for P3.2 missed this one; the second half of this check arms its own
+        // registry separately below.
+        try navApp.reconciledManagedSessionSource.reconcile(
+            registry: Registry.empty(), reason: .continuumRestarted, now: now)
         let tempProjectRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("continuum-nav-agent-check-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: tempProjectRoot, withIntermediateDirectories: true)
@@ -16754,6 +16765,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         ]
         try registryStore.save(navRegistry)
         navApp.registryStore = registryStore
+        // P3.2: arm the listing gate exactly as boot does. This fixture reaches the
+        // agent-activity rebuild through nav's tile selection, so without the sweep
+        // the listing REFUSES, the snapshot stays empty, and `nav a` selects the
+        // wrong tile — which is how this site was found: by the loop's final matrix,
+        // after the twelve sites enumerated for P3.2 missed this thirteenth one.
+        try navApp.reconciledManagedSessionSource.reconcile(
+            registry: navRegistry, reason: .continuumRestarted, now: now)
 
         navApp.openNavMode()
         navApp.handleNavModeKey(keyEvent("w", keyCode: 13))
