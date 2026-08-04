@@ -60,6 +60,18 @@ while true; do
       ;;
   esac
 
+  # A provider that cannot be reached is not a transient stop. On 2026-08-04 `pi`
+  # started failing with `fetch failed` after three retries, each worker pass dying in
+  # ~24s instead of the usual ~25min, and this watchdog restarted seven times before
+  # its consecutive-restart bound parked it. The bound worked, but seven restarts of
+  # something no restart can fix is pure churn — so detect it directly and park at
+  # once. The timing is the tell: a pass that dies in seconds did no work.
+  if ls -t "$HOME/.pi/sidebar-native-ux-runs/continuum-overnight"/run-*/tasks/*/worker-*.stderr 2>/dev/null \
+     | head -1 | xargs -r grep -lq 'fetch failed' 2>/dev/null; then
+    say "PARKED — the model provider is unreachable (fetch failed); no restart can fix this"
+    exit 0
+  fi
+
   # A clean tree is the precondition for a safe restart: uncommitted work means a
   # candidate is in flight and re-running the ticket would commingle or discard it.
   if [ -n "$(git status --porcelain | grep -v '^??')" ]; then
