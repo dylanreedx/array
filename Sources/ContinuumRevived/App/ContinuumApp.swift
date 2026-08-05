@@ -2852,6 +2852,28 @@ private struct WorkspaceDeleteConfirmationRequest: Equatable {
 }
 
 @MainActor
+/// P3.4's freeze, as a value the checks can hold still. An unobserved row's
+/// duration is the LAST-KNOWN fact: the first reading per identity is kept and
+/// reapplied on every rebuild, because a rebuild recomputing it from the render
+/// clock is precisely how the sidebar used to assert a liveness nobody
+/// confirmed. Re-observation drops the memory, so the live clock resumes.
+struct UnconfirmedElapsedFreeze {
+    private var lastKnown: [UUID: TimeInterval] = [:]
+
+    mutating func apply(rows: [AgentInboxRow], unobserved: Set<UUID>) -> [AgentInboxRow] {
+        rows.map { row in
+            guard unobserved.contains(row.id) else {
+                lastKnown.removeValue(forKey: row.id)
+                return row
+            }
+            if lastKnown[row.id] == nil, let elapsed = row.elapsed {
+                lastKnown[row.id] = elapsed
+            }
+            return row.withUnconfirmed(true, elapsed: lastKnown[row.id] ?? row.elapsed)
+        }
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, CanvasNSViewDelegate, NSSplitViewDelegate {
     private var window: NSWindow?
     private var ghostty: GhosttyRuntimeContext?
@@ -2931,6 +2953,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// because each read a different subset through a different filter. They now
     /// all read this one value, rebuilt by `rebuildAgentActivitySnapshot()`.
     private var agentActivity = AgentActivitySurface()
+    /// P3.4: an unobserved row is a last-known fact, not a live timer. The
+    /// builder must still receive the render clock for confirmed rows, so the
+    /// production seam keeps the first elapsed reading per unobserved identity
+    /// and reapplies it after each rebuild. A value type, so
+    /// `runAgentObserverIndependenceChecks` can drive the freeze deterministically
+    /// with a moved clock — the live check samples the same seam end to end.
+    private var unconfirmedFreeze = UnconfirmedElapsedFreeze()
     /// Coalesces surface pushes on the runner event path. `recordManagedActivity` is
     /// called per streamed token, and a push reloads the sidebar and sweeps the
     /// canvas — debounced exactly like `scheduleCompanionSyncPublish`.
@@ -6789,11 +6818,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             agents: records,
             checkedOutBranches: checkedOutBranches
         )
-        return AgentInboxRowBuilder.rows(
+        // P3.4 fence allowance: this is the single compiled call site where the
+        // activity surface's observation fact can reach the rows. Stamping the
+        // confidence modifier here preserves Core's pure join and keeps the
+        // supervisor's turn snapshot as the sole state owner.
+        let unobserved = agentActivity.unobservedAgentIds
+        let builtRows = AgentInboxRowBuilder.rows(
             from: agentActivity.snapshot, context: context, attention: attention,
             turnSnapshots: turnSnapshots, now: now
         )
         .filter { agentActivity.managedAgentIdentities.contains($0.id) }
+        return unconfirmedFreeze.apply(rows: builtRows, unobserved: unobserved)
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.16-inbox-lists-agents-only.md
@@ -20631,6 +20666,20 @@ extension AppDelegate {
                 && surface.snapshot.byAgent[headlessId.rawValue]?.status != .working,
                "an unobserved agent must NEVER read as working — the mark is our knowledge, and it may not be laundered into a claim about the agent")
 
+    // P3.4's propagation, at the phase where the fixture is strongest: every
+    // listed agent is unobserved RIGHT NOW, so rows built through the app's own
+    // seam must all carry the modifier. The overlap demand is what keeps this
+    // witness honest — a fixture drift that empties the intersection must fail
+    // here rather than let the equality pass over disjoint sets.
+    let stampedRows = app.buildAgentInboxRows(now: Date())
+    let unobservedNow = app.agentActivity.unobservedAgentIds
+    try expect(stampedRows.contains { unobservedNow.contains($0.id) },
+               "the propagation witness lost its subject: no built row is in the unobserved set (\(stampedRows.count) rows, \(unobservedNow.count) unobserved)")
+    for row in stampedRows {
+        try expect(row.isUnconfirmed == unobservedNow.contains(row.id),
+                   "production propagation: row '\(row.title)' isUnconfirmed=\(row.isUnconfirmed) disagrees with the surface's unobserved set (P3.4's one stamping seam)")
+    }
+
     // THE MEASUREMENT THAT RULED OUT A TIME THRESHOLD. Everything on disk here is an
     // hour old, and the app believes this agent's information is seconds old, because
     // `listSessions()` re-stamps it. Any threshold above a few seconds would leave
@@ -20736,6 +20785,34 @@ extension AppDelegate {
                "the silent agent in the other project stays marked — nobody heard from it")
 
     NSApplication.shared.dockTile.badgeLabel = nil
+    // MARK: P3.4 — the unconfirmed modifier and its frozen clock, at this seam.
+    //
+    // Semantics first, on the freeze value itself, with a moved clock the fixture
+    // controls: the first reading is the fact, a later rebuild's bigger reading
+    // must NOT replace it, and re-observation drops the memory so the live clock
+    // resumes. Then the wiring: rows built through the app's own
+    // buildAgentInboxRows carry the modifier for exactly the surface's set.
+    var freeze = UnconfirmedElapsedFreeze()
+    let frozenProbeId = UUID()
+    func probeRow(elapsed: TimeInterval) -> AgentInboxRow {
+        AgentInboxRow(
+            id: frozenProbeId, title: "frozen probe", projectName: nil,
+            state: .working, lifecycle: .active, model: "openai-codex/gpt-5.6-luna",
+            branch: nil, elapsed: elapsed, createdAt: Date(timeIntervalSinceReferenceDate: 800_000_000))
+    }
+    let firstFrozen = freeze.apply(rows: [probeRow(elapsed: 60)], unobserved: [frozenProbeId])
+    try expect(firstFrozen.first?.isUnconfirmed == true && firstFrozen.first?.elapsed == 60,
+               "an unobserved row must carry the unconfirmed modifier with its last-known duration — got \(String(describing: firstFrozen.first?.elapsed))")
+    let secondFrozen = freeze.apply(rows: [probeRow(elapsed: 3_660)], unobserved: [frozenProbeId])
+    try expect(secondFrozen.first?.elapsed == 60,
+               "an unconfirmed duration advanced across a rebuild — 60s became \(String(describing: secondFrozen.first?.elapsed)) (P3.4: a rebuild reapplies the last-known fact, it never recomputes liveness)")
+    let thawed = freeze.apply(rows: [probeRow(elapsed: 3_660)], unobserved: [])
+    try expect(thawed.first?.isUnconfirmed == false && thawed.first?.elapsed == 3_660,
+               "a re-observed agent must shed the modifier and resume the live clock — got \(String(describing: thawed.first?.elapsed))")
+    let refrozen = freeze.apply(rows: [probeRow(elapsed: 7_200)], unobserved: [frozenProbeId])
+    try expect(refrozen.first?.elapsed == 7_200,
+               "a NEW unobserved spell freezes at the new last-known fact, not the stale one — got \(String(describing: refrozen.first?.elapsed))")
+
     print("AgentObserverIndependence: with no ZoneRuntimeController and no canvas, 4 agents were listed from disk with their persisted statuses and all 4 marked unobserved; a live tile view and a runtime observer status each overrode the file and cleared the mark; releasing the observer put an agent back to unobserved without losing it; an agent's own event cleared the mark with no rebuild; and the agent in the released project stayed listed and marked throughout (terminal age measured \(String(format: "%.1f", terminalAge))s vs managed \(String(format: "%.0f", managedAge))s on the same hour-old fixture)")
     }
 }
@@ -25216,6 +25293,31 @@ static func checkRowStatusIsTurnState(
         throw fail("row-status: the sidebar row reads \(midRow) mid-turn, not working")
     }
     samples.append((phase: "mid-turn", row: midTurn, tile: tile.currentAgentStatus, running: true))
+
+    // MARK: 2.5 · the unconfirmed modifier at the production seam (P3.4)
+    //
+    // Mid-turn is the one deterministic moment this check owns an agent with a
+    // LIVE elapsed, so the freeze is proved here, at the seam a surface refresh
+    // actually goes through: mark the agent unobserved, rebuild twice with the
+    // clock moved an hour, and the duration must not advance — a rebuild is
+    // exactly where the pre-P3.4 implementation recomputed it. Then the control:
+    // observed again, the modifier clears and the clock resumes ticking.
+    app.agentActivity.unobservedAgentIds.insert(agentId.rawValue)
+    let unconfirmedT0 = Date()
+    guard let frozenFirst = app.buildAgentInboxRows(now: unconfirmedT0).first(where: { $0.id == agentId.rawValue }),
+          frozenFirst.isUnconfirmed, let frozenElapsed = frozenFirst.elapsed else {
+        throw fail("row-status: an agent in unobservedAgentIds did not build an unconfirmed row with a last-known duration")
+    }
+    guard let frozenSecond = app.buildAgentInboxRows(now: unconfirmedT0.addingTimeInterval(3600)).first(where: { $0.id == agentId.rawValue }),
+          frozenSecond.isUnconfirmed, frozenSecond.elapsed == frozenElapsed else {
+        throw fail("row-status: an unconfirmed duration advanced across a production rebuild — \(String(describing: frozenFirst.elapsed)) became \(String(describing: app.buildAgentInboxRows(now: unconfirmedT0.addingTimeInterval(3600)).first(where: { $0.id == agentId.rawValue })?.elapsed)) (P3.4: a rebuild must reapply the last-known fact, not recompute liveness)")
+    }
+    app.agentActivity.unobservedAgentIds.remove(agentId.rawValue)
+    guard let confirmedAgain = app.buildAgentInboxRows(now: unconfirmedT0.addingTimeInterval(3600)).first(where: { $0.id == agentId.rawValue }),
+          confirmedAgain.isUnconfirmed == false,
+          let tickingElapsed = confirmedAgain.elapsed, tickingElapsed > frozenElapsed + 3000 else {
+        throw fail("row-status: a re-observed agent must shed the unconfirmed modifier and resume the live clock (P3.4's confirmed control)")
+    }
 
     // MARK: 3 · after the turn — the reported bug
 

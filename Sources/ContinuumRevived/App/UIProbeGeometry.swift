@@ -994,7 +994,7 @@ enum UIProbeGeometry {
         // the slim cell's production constant; the exact live string remains part
         // of the need via `max`.
         let measuredTimeLaneNeed = AgentElapsedFormatter.columnLabels
-            .flatMap { ["\($0) ago", "in \($0)"] }
+            .flatMap { row.isUnconfirmed ? ["last seen \($0)"] : ["\($0) ago", "in \($0)"] }
             .map { candidate in
                 Double(ceil((candidate as NSString).size(withAttributes: [.font: NSFont.token(.captionMono)]).width))
                     + Metrics.cellTextInset
@@ -2488,6 +2488,120 @@ enum UIProbeGeometry {
         return asserted
     }
 
+    /// P3.4: observation confidence is asserted over the materialized row cell,
+    /// not just over a stamped model value. The same row is read twice after the
+    /// injected clock advances; its last-known duration must remain stable and its
+    /// live status word must not claim working.
+    private static func checkUnconfirmedFrozenClock(rows: [AgentInboxRow]) throws -> Int {
+        guard let source = rows.first(where: { $0.state == .working && $0.elapsed != nil }) else {
+            throw fail("sidebar-ux-check.unconfirmed: corpus has no working row with a duration witness")
+        }
+        let row = source.withUnconfirmed()
+        var assertions = 0
+        var slimQualifierDrawnWhole = false
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            for width in [CGFloat(WorkspaceSidebarConfig.minWidth), CGFloat(WorkspaceSidebarConfig.defaultWidth), CGFloat(320)] {
+                let probe = try makeSidebarProbeHost(
+                    width: width,
+                    height: AgentInboxView.rowHeight + AgentInboxView.scopeControlHeight + 80,
+                    appearanceName: appearanceName)
+                probe.inbox.clock = { LabFixtures.inboxNow }
+                // Size first; the list's own layout pass materializes the cell.
+                probe.host.layoutSubtreeIfNeeded()
+                probe.inbox.reload(rows: [row])
+                probe.inbox.layoutForQA()
+                probe.host.layoutSubtreeIfNeeded()
+                probe.inbox.layoutForQA()
+                guard probe.inbox.stateLabelsForQA == ["Unconfirmed"] else {
+                    throw fail("sidebar-ux-check.unconfirmed@\(Int(width))pt.\(appearanceName.rawValue): live row rendered a working status instead of Unconfirmed")
+                }
+                let firstElapsed = probe.inbox.elapsedLabelsForQA
+                guard let cardDuration = AgentInboxCellView.elapsedText(row.elapsed) else {
+                    throw fail("sidebar-ux-check.unconfirmed: the working witness lost its duration")
+                }
+                let expectedCardText = "last seen \(cardDuration)"
+                guard firstElapsed == [expectedCardText] else {
+                    throw fail("sidebar-ux-check.unconfirmed@\(Int(width))pt.\(appearanceName.rawValue): live row shows \(firstElapsed), expected exactly ['\(expectedCardText)'] — the qualifier must carry the REAL last-known duration")
+                }
+                guard let elapsedGeometry = probe.inbox.qaRowGeometriesForQA.first?.labels.first(where: { $0.element == "elapsed" }),
+                      elapsedGeometry.text == firstElapsed[0],
+                      elapsedGeometry.drawableWidth + 0.5 >= elapsedGeometry.neededWidth,
+                      elapsedGeometry.drawableWidth + 0.5
+                          >= AgentInboxCellView.elapsedColumnWidth(unconfirmed: true) - Metrics.cellTextInset else {
+                    let geometry = probe.inbox.qaRowGeometriesForQA.first?.labels.first(where: { $0.element == "elapsed" })
+                    throw fail(String(format: "sidebar-ux-check.unconfirmed@%.0fpt.%@: last-known duration '%@' needs %.1fpt but drawable width is %.1fpt (column %.1fpt)",
+                                      width, appearanceName.rawValue, firstElapsed.first ?? "", geometry?.neededWidth ?? 0,
+                                      geometry?.drawableWidth ?? 0, AgentInboxCellView.elapsedColumnWidth))
+                }
+                probe.inbox.clock = { LabFixtures.inboxNow.addingTimeInterval(3600) }
+                probe.inbox.layoutForQA()
+                let secondElapsed = probe.inbox.elapsedLabelsForQA
+                guard secondElapsed == firstElapsed else {
+                    throw fail("sidebar-ux-check.unconfirmed@\(Int(width))pt.\(appearanceName.rawValue): unconfirmed duration advanced from \(firstElapsed) to \(secondElapsed)")
+                }
+                assertions += 3
+
+                // The SLIM variant renders the qualifier in its own per-row time
+                // lane (review round 2, finding 3): a parked unconfirmed row must
+                // draw "last seen …" whole — exact text, drawable width against
+                // measured need — or the new lane is a promise only the card kept.
+                let parkedSource = source.withUnconfirmed(
+                    true, elapsed: source.elapsed)
+                let parked = AgentInboxRow(
+                    id: parkedSource.id, title: parkedSource.title,
+                    projectName: parkedSource.projectName,
+                    state: .ready, lifecycle: .settled(at: LabFixtures.inboxNow.addingTimeInterval(-300)),
+                    model: parkedSource.model, branch: nil,
+                    elapsed: parkedSource.elapsed,
+                    createdAt: parkedSource.createdAt).withUnconfirmed()
+                probe.inbox.clock = { LabFixtures.inboxNow }
+                probe.inbox.toggleShelf()
+                probe.inbox.reload(rows: [parked])
+                probe.inbox.layoutForQA()
+                probe.host.layoutSubtreeIfNeeded()
+                probe.inbox.layoutForQA()
+                guard let slimGeometry = probe.inbox.qaRowGeometriesForQA.first(where: { $0.agentID == parked.id }),
+                      slimGeometry.variant == .slim,
+                      let slimTime = slimGeometry.labels.first(where: { $0.element == "time" }) else {
+                    throw fail("sidebar-ux-check.unconfirmed-slim@\(Int(width))pt.\(appearanceName.rawValue): the parked unconfirmed row did not materialize as a slim cell")
+                }
+                if slimTime.isHidden {
+                    // The ladder may legitimately drop the time at a narrow width
+                    // — but a dropped fact relocates to VoiceOver WHOLE (the real
+                    // duration, not just the qualifier), and the drawn case must
+                    // still occur at the widest shipping width (asserted after
+                    // the loop), or the lane is a promise nothing kept.
+                    guard let relocatedDuration = AgentInboxCellView.elapsedText(parked.elapsed),
+                          slimGeometry.accessibilityLabel?.contains("last seen \(relocatedDuration)") == true else {
+                        throw fail("sidebar-ux-check.unconfirmed-slim@\(Int(width))pt.\(appearanceName.rawValue): the ladder dropped the last-known duration without relocating 'last seen …' and its REAL value to VoiceOver — got '\(slimGeometry.accessibilityLabel ?? "nil")'")
+                    }
+                    assertions += 1
+                    continue
+                }
+                guard let slimDuration = AgentInboxCellView.elapsedText(parked.elapsed) else {
+                    throw fail("sidebar-ux-check.unconfirmed-slim: the parked witness lost its duration")
+                }
+                let expectedSlimText = "last seen \(slimDuration)"
+                guard slimTime.text == expectedSlimText,
+                      slimTime.drawableWidth + 0.5 >= slimTime.neededWidth,
+                      Double(slimTime.frame.width) + 0.5
+                          >= AgentInboxSlimCellView.relativeTimeColumnWidth(unconfirmed: true) else {
+                    throw fail(String(
+                        format: "sidebar-ux-check.unconfirmed-slim@%.0fpt.%@: '%@' needs %.1fpt but drawable width is %.1fpt (lane %.1fpt, per-row lane %.1fpt)",
+                        width, appearanceName.rawValue, slimTime.text, slimTime.neededWidth,
+                        slimTime.drawableWidth, Double(slimTime.frame.width),
+                        AgentInboxSlimCellView.relativeTimeColumnWidth(unconfirmed: true)))
+                }
+                slimQualifierDrawnWhole = true
+                assertions += 1
+            }
+        }
+        guard slimQualifierDrawnWhole else {
+            throw fail("sidebar-ux-check.unconfirmed-slim: no shipping width drew the slim 'last seen' qualifier whole — the per-row lane is untested")
+        }
+        return assertions
+    }
+
     /// P0.2's additive sidebar leg. It deliberately observes today's paint rather
     /// than blessing the later surface, truncation, or row-height decisions: those
     /// packets consume these live accessors and tighten the assertion in their own
@@ -2587,6 +2701,7 @@ enum UIProbeGeometry {
         // one.
         let tierAssertions = try checkSidebarFitTierLadder()
         let elapsedAssertions = try checkElapsedFormatterAndColumns()
+        let unconfirmedAssertions = try checkUnconfirmedFrozenClock(rows: rows)
         // Both ENDS of the ladder are reached by real rows at shipping widths. The
         // middle rung is reached too, at a width derived from a row's own
         // measurements inside `checkSidebarFitTierLadder` — see the note there for
@@ -2600,6 +2715,7 @@ enum UIProbeGeometry {
             totalCells, rows.count, totalLabels, totalTruncated, LineWidth.hairline,
             ladderAssertions, slimParityAssertions, tierAssertions
         ))
+        print("UIProbeGeometry: unconfirmed rows held \(unconfirmedAssertions) live status/frozen-clock assertions at 220/280/320pt in both appearances")
         print("UIProbeGeometry: elapsed formatter table and fixed sidebar/tile column held in \(elapsedAssertions) live assertions")
     }
 

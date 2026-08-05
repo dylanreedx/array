@@ -2754,6 +2754,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     }
     var titlesForQA: [String] { cells().map(\.qaTitle) }
     var stateLabelsForQA: [String] { cells().map(\.qaStateLabel) }
+    var elapsedLabelsForQA: [String] { cells().map(\.qaElapsed) }
     var metaLinesForQA: [String] { cells().map(\.qaMeta) }
     var branchLinesForQA: [String] { cells().map(\.qaBranch) }
     /// The alpha the row's WORDS are painted at, and the alpha its status accent
@@ -4876,6 +4877,8 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         card.addSubview(stack)
 
         let leading = card.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 0)
+        let elapsedColumn = elapsedLabel.widthAnchor.constraint(
+            equalToConstant: AgentInboxCellView.elapsedColumnWidth(unconfirmed: false))
         leadingInset = leading
         NSLayoutConstraint.activate([
             leading,
@@ -4912,9 +4915,12 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
             // The duration is a column, not an intrinsic-width label. Its lane is
             // measured from every widest form the shared formatter can emit and
             // includes the NSTextField cell inset, so a longer run cannot take
-            // points from the status or project columns.
-            elapsedLabel.widthAnchor.constraint(equalToConstant: AgentInboxCellView.elapsedColumnWidth),
+            // points from the status or project columns. The lane is retuned per
+            // row in show(): an unconfirmed row pays for its own "last seen "
+            // qualifier instead of taxing every confirmed row's name.
+            elapsedColumn,
         ])
+        elapsedLaneConstraint = elapsedColumn
         let metaMinimumWidth = AgentInboxCellView.yieldingMinimumWidth(metaLabel, .label)
         self.metaMinimumWidth = metaMinimumWidth
         let metaCollapsedWidth = metaLabel.widthAnchor.constraint(equalToConstant: 0)
@@ -5001,10 +5007,28 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         projectLabel.stringValue = row.projectName ?? ""
         projectLabel.isHidden = row.projectName?.isEmpty != false
         titleLabel.stringValue = row.displayTitle
-        stateLabel.stringValue = row.label ?? ""
-        stateLabel.isHidden = row.label?.isEmpty != false
-        elapsedLabel.stringValue = AgentInboxCellView.elapsedText(row.elapsed) ?? ""
-        elapsedLabel.isHidden = AgentInboxCellView.elapsedText(row.elapsed) == nil
+        stateLabel.stringValue = row.presentationLabel ?? ""
+        stateLabel.isHidden = row.presentationLabel?.isEmpty != false
+        let elapsedText = AgentInboxCellView.elapsedText(row.elapsed)
+        // The lane is per row (see elapsedColumnWidth(unconfirmed:)): retune it
+        // before the string lands so the qualifier is never clipped and a
+        // confirmed row never reserves for it.
+        elapsedLaneConstraint?.constant = AgentInboxCellView.elapsedColumnWidth(unconfirmed: row.isUnconfirmed)
+        elapsedLabel.stringValue = row.isUnconfirmed
+            ? elapsedText.map { "last seen \($0)" } ?? ""
+            : elapsedText ?? ""
+        elapsedLabel.isHidden = elapsedLabel.stringValue.isEmpty
+        if row.isUnconfirmed {
+            // Confidence is quiet content, not a new state or an accent colour.
+            stateLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+            stateLabel.setAccessibilityLabel("Unconfirmed: last known status")
+        } else {
+            // Cells are recycled: a confirmed row must RESTORE the default so a
+            // reused cell cannot show "Working" while VoiceOver still says
+            // "Unconfirmed" (P3.4 review round 2, finding 2). nil hands the
+            // element back its stringValue-derived description.
+            stateLabel.setAccessibilityLabel(nil)
+        }
         branchLabel.stringValue = AgentInboxCellView.branchText(branch: row.branch)
         branchLabel.isHidden = branchLabel.stringValue.isEmpty
         metaLabel.stringValue = AgentInboxCellView.metaText(
@@ -5038,7 +5062,9 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         // why the label is hidden there rather than painted in some neutral: the
         // resting state carries no word and no colour, and that is the whole of
         // the decision.
-        stateLabel.textColor = (row.state.accent?.color ?? TextToken.textSecondary.color).nsColor(in: self)
+        stateLabel.textColor = (row.isUnconfirmed
+            ? TextToken.textSecondary.color
+            : (row.state.accent?.color ?? TextToken.textSecondary.color)).nsColor(in: self)
 
         for label in [projectLabel, titleLabel, elapsedLabel, metaLabel, branchLabel, providerGlyphLabel] {
             label.alphaValue = emphasis.textOpacity
@@ -5113,8 +5139,11 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     ) -> RowFitTier {
         let needs = RowFitNeeds(
             project: measuredTextWidth(row.projectName ?? "", .caption),
-            state: measuredTextWidth(row.label ?? "", .label),
-            elapsed: measuredTextWidth(elapsedText(row.elapsed) ?? "", .captionMono),
+            state: measuredTextWidth(row.presentationLabel ?? "", .label),
+            elapsed: measuredTextWidth(
+                row.isUnconfirmed
+                    ? elapsedText(row.elapsed).map { "last seen \($0)" } ?? ""
+                    : elapsedText(row.elapsed) ?? "", .captionMono),
             title: measuredTextWidth(row.displayTitle, .title),
             disclosure: disclosure == .none
                 ? 0
@@ -5394,13 +5423,27 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     /// font and the same 4pt NSTextField cell inset used by the drawable-width
     /// QA seam. The formatter owns the candidate labels; the AppKit layer only
     /// measures them.
-    static var elapsedColumnWidth: Double {
+    static var elapsedColumnWidth: Double { elapsedColumnWidth(unconfirmed: false) }
+
+    /// PER ROW, not per surface: only an unconfirmed row reserves room for its
+    /// "last seen " qualifier. A shared column sized for the qualifier taxed
+    /// every confirmed row ~45pt of name/project room for a form it never
+    /// renders — the oversized-reservation defect P0.4 quantified, reintroduced
+    /// through the elapsed lane. Within one row's life the lane is still fixed
+    /// across every clock tick (P2.5); confirmed→unconfirmed is a state change,
+    /// not a tick, and it may move the lane.
+    static func elapsedColumnWidth(unconfirmed: Bool) -> Double {
         let font = NSFont.token(.captionMono)
-        return AgentElapsedFormatter.columnLabels.map { label in
+        let labels = unconfirmed
+            ? AgentElapsedFormatter.columnLabels.map { "last seen \($0)" }
+            : AgentElapsedFormatter.columnLabels
+        return labels.map { label in
             Double(ceil((label as NSString).size(withAttributes: [.font: font]).width))
                 + Metrics.cellTextInset
         }.max() ?? Metrics.cellTextInset
     }
+
+    private var elapsedLaneConstraint: NSLayoutConstraint?
 
     var qaAgentID: UUID? { shown?.row.id }
     var qaVariant: RowVariant? { shown?.row.variant }
@@ -5698,7 +5741,7 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
             glyph: measuredTextWidth(glyph(for: row.state), .label),
             title: AgentInboxCellView.measuredTextWidth(row.displayTitle, .title),
             branch: AgentInboxCellView.measuredTextWidth(branchText(branch: row.branch), .label),
-            time: resolvedTime.isEmpty ? 0 : relativeTimeColumnWidth,
+            time: resolvedTime.isEmpty ? 0 : relativeTimeColumnWidth(unconfirmed: row.isUnconfirmed),
             disclosure: disclosure == .none
                 ? 0
                 : disclosureWidth ?? measuredDisclosureWidth(disclosure))
@@ -5759,13 +5802,17 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         leadingInset?.constant = indent
         disclosureButton.show(disclosure)
 
-        glyphLabel.stringValue = AgentInboxSlimCellView.glyph(for: row.state)
-        glyphLabel.setAccessibilityLabel(row.state.label ?? "Ready")
+        glyphLabel.stringValue = AgentInboxSlimCellView.glyph(for: row.isUnconfirmed ? .ready : row.state)
+        glyphLabel.setAccessibilityLabel(row.isUnconfirmed ? "Unconfirmed" : (row.state.label ?? "Ready"))
         glyphLabel.setAccessibilityRole(.image)
         titleLabel.stringValue = row.displayTitle
         branchLabel.stringValue = AgentInboxSlimCellView.branchText(branch: row.branch)
         branchLabel.isHidden = branchLabel.stringValue.isEmpty
-        timeLabel.stringValue = AgentInboxSlimCellView.relativeText(for: row.lifecycle, now: now)
+        let relativeText = AgentInboxSlimCellView.relativeText(for: row.lifecycle, now: now)
+        timeColumnWidth?.constant = AgentInboxSlimCellView.relativeTimeColumnWidth(unconfirmed: row.isUnconfirmed)
+        timeLabel.stringValue = row.isUnconfirmed
+            ? AgentInboxCellView.elapsedText(row.elapsed).map { "last seen \($0)" } ?? ""
+            : relativeText
         timeLabel.isHidden = timeLabel.stringValue.isEmpty
         updateOptionalSlotConstraints()
 
@@ -5850,9 +5897,15 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     /// Width of the parked-row time column, measured for both suffix/prefix
     /// forms from the shared formatter's own candidate labels and the exact
     /// caption-mono font. The 4pt cell inset is part of the lane.
-    static var relativeTimeColumnWidth: Double {
+    static var relativeTimeColumnWidth: Double { relativeTimeColumnWidth(unconfirmed: false) }
+
+    /// Per row, mirroring the card's rule: the "last seen " qualifier is paid
+    /// for only by the unconfirmed row that renders it.
+    static func relativeTimeColumnWidth(unconfirmed: Bool) -> Double {
         let font = NSFont.token(.captionMono)
-        let labels = AgentElapsedFormatter.columnLabels.flatMap { ["\($0) ago", "in \($0)"] }
+        let labels = AgentElapsedFormatter.columnLabels.flatMap {
+            unconfirmed ? ["last seen \($0)"] : ["\($0) ago", "in \($0)"]
+        }
         return labels.map { label in
             Double(ceil((label as NSString).size(withAttributes: [.font: font]).width))
                 + Metrics.cellTextInset

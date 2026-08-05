@@ -527,6 +527,10 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// is what `InboxSort` needs to place a child immediately after its parent —
     /// a depth alone cannot tell two orchestrators' children apart.
     public let parentId: UUID?
+    /// Confidence modifier supplied by the desktop observation surface. This is
+    /// deliberately separate from `state`: it says how well-known the state is,
+    /// never invents a sixth `InboxState`.
+    public let isUnconfirmed: Bool
 
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P2.3-content-derived-row-height.md
     /// Whether the card's upper metadata band has something to draw. These
@@ -535,8 +539,12 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// hide an empty band, so height and presentation cannot disagree.
     public func drawsMetaLine(drawingProject: Bool = true, drawingElapsed: Bool = true) -> Bool {
         let hasElapsed = elapsed.map { $0 >= 0 } ?? false
+        // `presentationLabel`, not `label`: the cell paints the PRESENTED word
+        // ("Unconfirmed" on an unobserved row), and height derived from the raw
+        // state word would under-allocate exactly that row — a one-line height
+        // for a two-line render (P3.4 review round 2, finding 1).
         return (drawingProject && projectName?.isEmpty == false)
-            || label?.isEmpty == false
+            || presentationLabel?.isEmpty == false
             || (drawingElapsed && hasElapsed)
     }
 
@@ -618,7 +626,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         // presentation choice a caller can disagree with.
         variant: RowVariant? = nil,
         createdAt: Date,
-        parentId: UUID? = nil
+        parentId: UUID? = nil,
+        isUnconfirmed: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -639,6 +648,28 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.variant = RowVariant.forLifecycle(lifecycle)
         self.createdAt = createdAt
         self.parentId = parentId
+        self.isUnconfirmed = isUnconfirmed
+    }
+
+    /// A surface stamps observation knowledge after the Core join. Keeping this
+    /// as a value copy preserves the builder's module boundary and the row's
+    /// snapshot semantics.
+    public func withUnconfirmed(
+        _ value: Bool = true,
+        elapsed frozenElapsed: TimeInterval? = nil
+    ) -> AgentInboxRow {
+        AgentInboxRow(
+            id: id, title: title, projectName: projectName, workspaceName: workspaceName,
+            state: state, attention: attention, lifecycle: lifecycle, model: model, role: role,
+            branch: branch, isIsolated: isIsolated,
+            elapsed: frozenElapsed ?? elapsed, depth: depth,
+            variant: variant, createdAt: createdAt, parentId: parentId, isUnconfirmed: value)
+    }
+
+    /// The status words the row may paint. Unconfirmed is a confidence modifier,
+    /// not a replacement state, and therefore leaves `state` unchanged.
+    public var presentationLabel: String? {
+        isUnconfirmed ? "Unconfirmed" : label
     }
 
     /// The row's ONE label, resolved down the packet's priority:
