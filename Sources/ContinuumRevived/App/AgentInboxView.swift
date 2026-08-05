@@ -405,6 +405,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// The agents the open menu is about, BY ID rather than by index: a push can
     /// arrive while the menu is up, and an index would then name a different agent.
     private var rowMenuTargetIds: [UUID] = []
+    /// Capability state starts unknown/hidden. It is filled by the detached,
+    /// bounded resolver and then repaints an already-open menu on the main actor;
+    /// building a menu never performs the capability lookup itself.
+    private var nameGenerationCapabilityAvailable = false
+    private var nameGenerationCapabilityTask: Task<Void, Never>?
 
     /// The rows as they are drawn — already through the scope filter (P3.8) and
     /// `InboxSort.sortForInbox`, so index N here is row N on screen and every
@@ -870,6 +875,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         emptyLabel.translatesAutoresizingMaskIntoConstraints = false
 
         super.init(frame: frameRect)
+
+        // A cached answer may be available from an earlier view, but the first
+        // frame must still be safe when the answer is unknown. Starting the task
+        // is non-blocking; its shell/auth work happens off the main actor.
+        nameGenerationCapabilityAvailable = AgentSupervisor.nameGenerationCapabilityAvailable
+        nameGenerationCapabilityTask = Task { [weak self] in
+            let capability = await AgentSupervisor.resolveNameGenerationCapability()
+            guard !Task.isCancelled else { return }
+            self?.applyNameGenerationCapability(capability)
+        }
 
         wantsLayer = true
         applyTokens()
@@ -2052,12 +2067,32 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         rebuildRowMenu(for: targetRows(forClickedRow: rowIndex(forTableRow: tableView.clickedRow) ?? -1))
     }
 
+    /// Completion of the capability resolver is a main-actor repaint only. It
+    /// re-derives current targets because a push may have changed the rows while
+    /// the shell was resolving; no stale menu snapshot is allowed to resurrect
+    /// an affordance for a removed row.
+    private func applyNameGenerationCapability(_ capability: AgentNameGenerationCapability?) {
+        let available = capability != nil
+        guard nameGenerationCapabilityAvailable != available else { return }
+        nameGenerationCapabilityAvailable = available
+        guard !rowMenuTargetIds.isEmpty else { return }
+        let targets = rowMenuTargetIds.compactMap { id in rows.first { $0.id == id } }
+        rebuildRowMenu(for: targets)
+        rowMenu.update()
+    }
+
     /// Fill `rowMenu` in for these agents: which items belong at all
     /// (`InboxRowAction.menuItems`), what each is called (counted for a selection) and
     /// whether it is live — with the reason in the tooltip when it is not.
     private func rebuildRowMenu(for targets: [AgentInboxRow]) {
         rowMenuTargetIds = targets.map(\.id)
-        rowMenuActions = InboxRowAction.menuItems(for: targets)
+        // Generated naming is a capability-gated affordance: unlike the other
+        // unwired actions, it is omitted entirely when Pi is unavailable or
+        // unauthenticated rather than shown dead.
+        rowMenuActions = InboxRowAction.menuItems(
+            for: targets,
+            includeGeneratedName: wiredRowActions.contains(.generateName)
+                && nameGenerationCapabilityAvailable)
         rowMenu.removeAllItems()
         for (index, action) in rowMenuActions.enumerated() {
             let item = NSMenuItem(
@@ -2094,7 +2129,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         case .openInTile:
             guard let first = targets.first else { return }
             onRevealRow?(first.id)
-        case .settle, .unsettle, .snooze, .wake, .markUnread, .rename, .stopAgent,
+        case .settle, .unsettle, .snooze, .wake, .markUnread, .rename, .generateName, .stopAgent,
              .archive, .delete:
             // P4.10: armed before the host runs, for the reason `performBulkAction`
             // records — a synchronous host has already re-pushed by the time it returns.
@@ -2112,12 +2147,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
 
     /// Whether the host can perform this action at all. `openInTile` rides P3.9's
     /// existing callback; everything else needs `onRowAction` AND a host that named
-    /// this action in `wiredRowActions` (P3.15) — one gate for all nine is what made
+    /// this action in `wiredRowActions` (P3.15) — one gate for every row action is what made
     /// wiring Delete mean also offering a Snooze that goes nowhere.
     private func isWired(_ action: InboxRowAction) -> Bool {
         switch action {
         case .openInTile: return onRevealRow != nil
-        case .settle, .unsettle, .snooze, .wake, .markUnread, .rename, .stopAgent,
+        case .settle, .unsettle, .snooze, .wake, .markUnread, .rename, .generateName, .stopAgent,
              .archive, .delete:
             return onRowAction != nil && wiredRowActions.contains(action)
         }
@@ -2146,7 +2181,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     static func advancesSelection(_ action: InboxRowAction) -> Bool {
         switch action {
         case .settle, .snooze, .archive, .delete: return true
-        case .openInTile, .unsettle, .wake, .markUnread, .rename, .stopAgent: return false
+        case .openInTile, .unsettle, .wake, .markUnread, .rename, .generateName, .stopAgent: return false
         }
     }
 
@@ -4146,6 +4181,7 @@ enum InboxRowAction: String, CaseIterable, Equatable {
     case wake
     case markUnread
     case rename
+    case generateName
     case stopAgent
     case archive
     case delete
@@ -4165,6 +4201,7 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         case .wake: return "Wake"
         case .markUnread: return "Mark Unread"
         case .rename: return "Rename"
+        case .generateName: return "Generate Name"
         case .stopAgent: return "Stop Agent"
         case .archive: return "Archive"
         case .delete: return "Delete"
@@ -4199,7 +4236,7 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         case .wake: return InboxUndoToast.wokenVerb
         case .archive: return InboxUndoToast.archivedVerb
         case .delete: return InboxUndoToast.deletedVerb
-        case .openInTile, .markUnread, .rename, .stopAgent: return nil
+        case .openInTile, .markUnread, .rename, .generateName, .stopAgent: return nil
         }
     }
 
@@ -4232,6 +4269,7 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         // The name is on the RECORD, and `AgentSupervisor.archive` deletes the record —
         // so an archived row has nothing left to rename.
         case .rename: return !InboxBulkAction.isArchived(row)
+        case .generateName: return !InboxBulkAction.isArchived(row)
         case .stopAgent: return InboxRowAction.hasTurnInFlight(row)
         case .archive: return InboxBulkAction.archive.isAvailable(for: row)
         case .delete: return InboxBulkAction.delete.isAvailable(for: row)
@@ -4240,9 +4278,15 @@ enum InboxRowAction: String, CaseIterable, Equatable {
 
     /// The items the menu SHOWS for these agents, in menu order. Empty for no agents,
     /// which is what a right-click on the background gets.
-    static func menuItems(for rows: [AgentInboxRow]) -> [InboxRowAction] {
+    static func menuItems(
+        for rows: [AgentInboxRow],
+        includeGeneratedName: Bool = true
+    ) -> [InboxRowAction] {
         guard !rows.isEmpty else { return [] }
-        return allCases.filter { $0.belongsInMenu(for: rows) }
+        return allCases.filter { action in
+            guard action != .generateName || includeGeneratedName else { return false }
+            return action.belongsInMenu(for: rows)
+        }
     }
 
     /// Which half of the ONE pair belongs in the menu. Everything else is unconditional —
@@ -4260,7 +4304,7 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         switch self {
         case .settle: return !rows.allSatisfy(InboxBulkAction.isSettled)
         case .unsettle: return rows.allSatisfy(InboxBulkAction.isSettled)
-        case .openInTile, .snooze, .wake, .markUnread, .rename, .stopAgent, .archive,
+        case .openInTile, .snooze, .wake, .markUnread, .rename, .generateName, .stopAgent, .archive,
              .delete:
             return true
         }
@@ -4320,6 +4364,7 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         case .markUnread:
             return row.attention == .unread ? "is already unread." : "is archived."
         case .rename: return "is archived."
+        case .generateName: return "is archived."
         case .stopAgent: return "has no turn in flight."
         case .archive:
             return InboxBulkAction.isRunning(row) ? "is still working." : "is already archived."

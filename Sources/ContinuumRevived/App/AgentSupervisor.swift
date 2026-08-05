@@ -3,6 +3,7 @@ import Darwin
 import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
+import ContinuumRevivedSync
 import Foundation
 
 // Ticket: docs/38-tickets/90-agent-ux/P2A.3-agent-supervisor.md
@@ -55,6 +56,774 @@ protocol AgentRunning: AnyObject, Sendable {
 
 extension PiAgentRunner: AgentRunning {}
 
+// MARK: - P4.5 generated-name one-shot
+
+/// The capability needed by the explicit generated-name action. It is resolved
+/// without launching the provider: the login shell supplies the executable PATH,
+/// and Pi's provider config supplies the authentication fact. A missing capability
+/// is therefore a hidden affordance, not a dead menu item.
+struct AgentNameGenerationCapability: Equatable, Sendable {
+    static let cheapModel = "openai-codex/gpt-5.4-mini"
+
+    let executable: String
+    let configDirectory: URL
+    let loginShellPath: String
+    let model: String
+
+    init(
+        executable: String,
+        configDirectory: URL,
+        loginShellPath: String,
+        model: String = AgentNameGenerationCapability.cheapModel
+    ) {
+        self.executable = executable
+        self.configDirectory = configDirectory
+        self.loginShellPath = loginShellPath
+        self.model = model
+    }
+
+    /// The login-shell PATH resolver is kept pure at the path-selection seam so
+    /// deterministic checks can use a fake executable without invoking Pi.
+    static func resolvedExecutable(
+        loginShellPath: String,
+        fileExists: (String) -> Bool
+    ) -> String? {
+        for component in loginShellPath.split(separator: ":", omittingEmptySubsequences: true) {
+            let directory = String(component)
+            let candidate = directory.hasSuffix("/")
+                ? directory + "pi"
+                : directory + "/pi"
+            if fileExists(candidate) { return candidate }
+        }
+        return nil
+    }
+
+    /// Resolve the live capability. This reads auth/config state only; notably it
+    /// never runs `pi --list-models` or another provider probe, so an absent
+    /// capability cannot spawn a process as a side effect of hiding the action.
+    static func live(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        now: Date = Date()
+    ) -> AgentNameGenerationCapability? {
+        let home = environment["HOME"] ?? NSHomeDirectory()
+        let configuredDirectory = environment["PI_CODING_AGENT_DIR"]
+            ?? URL(fileURLWithPath: home, isDirectory: true)
+                .appendingPathComponent(".pi/agent", isDirectory: true).path
+        let configDirectory = URL(fileURLWithPath: configuredDirectory, isDirectory: true)
+        guard hasAuthentication(
+            in: configDirectory,
+            now: now
+        ) else { return nil }
+        guard let loginShellPath = loginShellPath(environment: environment),
+              let executable = resolvedExecutable(
+                loginShellPath: loginShellPath,
+                fileExists: { FileManager.default.isExecutableFile(atPath: $0) }
+              ) else {
+            return nil
+        }
+        return AgentNameGenerationCapability(
+            executable: executable,
+            configDirectory: configDirectory,
+            loginShellPath: loginShellPath
+        )
+    }
+
+    /// Pure auth/config gate used by the live resolver and the deterministic
+    /// checks. A refresh credential is sufficient for Pi to refresh an expired
+    /// access token; an expired access-only credential is not.
+    static func hasAuthentication(
+        in configDirectory: URL,
+        now: Date,
+        data: Data? = nil
+    ) -> Bool {
+        let authData = data ?? (try? Data(contentsOf: configDirectory.appendingPathComponent("auth.json")))
+        guard let authData,
+              let object = try? JSONSerialization.jsonObject(with: authData),
+              let providers = object as? [String: Any],
+              let provider = providers["openai-codex"] as? [String: Any] else {
+            return false
+        }
+        let access = (provider["access"] as? String)?.isEmpty == false
+        let refresh = (provider["refresh"] as? String)?.isEmpty == false
+        guard access || refresh else { return false }
+        if refresh { return true }
+        guard let expires = provider["expires"] as? NSNumber else { return true }
+        return expires.doubleValue > now.timeIntervalSince1970 * 1000
+    }
+
+    /// Ask the user's login shell for PATH. The actual process work is owned by
+    /// `AgentNameOneShot` and always runs off-main with a timeout and bounded pipe
+    /// readers. Keeping this call synchronous is safe only for the resolver task;
+    /// no menu/query path calls `live()` directly.
+    private static func loginShellPath(environment: [String: String]) -> String? {
+        AgentNameOneShot.loginShellPath(environment: environment)
+    }
+}
+
+
+/// The menu's capability query is deliberately a snapshot. It never resolves a
+/// shell, reads auth, or launches a process. Resolution is started by a view and
+/// completed on the main actor only after the bounded utility task finishes.
+private final class AgentNameGenerationCapabilityCache: @unchecked Sendable {
+    enum State: Sendable {
+        case unknown
+        case unavailable
+        case available(AgentNameGenerationCapability)
+
+        var capability: AgentNameGenerationCapability? {
+            if case let .available(capability) = self { return capability }
+            return nil
+        }
+
+        var isAvailable: Bool { capability != nil }
+    }
+
+    static let shared = AgentNameGenerationCapabilityCache()
+
+    private let lock = NSLock()
+    private var state: State = .unknown
+    private var inFlight: Task<AgentNameGenerationCapability?, Never>?
+
+    func snapshot() -> State { lock.withLock { state } }
+
+    /// Starts at most one detached resolution. Returning an already-completed
+    /// task for a cached result keeps callers uniformly asynchronous without
+    /// making the main actor wait for even a lock or a shell startup.
+    func startResolution(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        now: Date = Date()
+    ) -> Task<AgentNameGenerationCapability?, Never> {
+        lock.withLock {
+            switch state {
+            case .available, .unavailable:
+                let cached = state.capability
+                return Task.detached { cached }
+            case .unknown:
+                break
+            }
+            if let inFlight { return inFlight }
+            let task = Task.detached(priority: .utility) { [weak self] in
+                let capability = AgentNameGenerationCapability.live(environment: environment, now: now)
+                self?.finish(capability)
+                return capability
+            }
+            inFlight = task
+            return task
+        }
+    }
+
+    /// Test-only reset. Production code never needs to forget a resolved
+    /// capability; the next app launch creates a fresh cache.
+    func resetForQA() {
+        lock.withLock {
+            state = .unknown
+            inFlight?.cancel()
+            inFlight = nil
+        }
+    }
+
+    private func finish(_ capability: AgentNameGenerationCapability?) {
+        lock.withLock {
+            state = capability.map(State.available) ?? .unavailable
+            inFlight = nil
+        }
+    }
+}
+
+private enum AgentNameOneShotError: Error, CustomStringConvertible, Sendable {
+    case launchFailed
+    case processGroupUnavailable
+    case failed(Int32)
+    case timedOut
+    case inputFailed
+
+    var description: String {
+        switch self {
+        case .launchFailed: return "launch failed"
+        case .processGroupUnavailable: return "process group unavailable"
+        case .failed(let code): return "provider exited with code \(code)"
+        case .timedOut: return "timed out"
+        case .inputFailed: return "prompt input failed"
+        }
+    }
+}
+
+/// A provider-independent, print-mode Pi invocation. The source prompt is
+/// written to stdin only; it is never an argv element, a session, or an event.
+private enum AgentNameOneShot {
+    static let timeout: TimeInterval = 8
+    static let processGroupGrace: TimeInterval = 0.15
+    static let maximumPromptLength = 8_000
+    static let systemPrompt = "Return exactly one JSON object with exactly one string field named name. The name value is short and human-readable, 1 to 8 words. Output one line only. No explanation, extra fields, markdown, punctuation, identifiers, model ids, roles, or UUIDs."
+
+    static func arguments(model: String) -> [String] {
+        [
+            "--no-session",
+            "--print",
+            "--mode", "text",
+            "--model", model,
+            "--thinking", "low",
+            "--no-tools",
+            "--no-extensions",
+            "--no-skills",
+            "--no-context-files",
+            "--no-approve",
+            "--system-prompt", systemPrompt,
+        ]
+    }
+
+    /// Accept only the exact one-field JSON shape requested by `systemPrompt`.
+    /// Provider chatter is not a recoverable prefix: a warning, label, fence,
+    /// extra field, plain prose line, or multi-line explanation fails closed
+    /// before the existing AgentName policy can turn it into a title.
+    /// Identifiers are rejected with the same metadata-aware rule as P4.3.
+    static func candidate(
+        from stdout: String,
+        model: String?,
+        role: String?,
+        id: UUID?
+    ) -> String? {
+        let nonEmptyLines = stdout
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard nonEmptyLines.count == 1 else { return nil }
+        let line = nonEmptyLines[0]
+        guard !line.hasPrefix("```") && !line.contains("```") && line != "---",
+              !line.hasPrefix("- ") && !line.hasPrefix("* "),
+              let data = line.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object.count == 1,
+              let rawName = object["name"] as? String else {
+            return nil
+        }
+        let name = stripWrappingQuotes(from: rawName)
+        guard !name.isEmpty,
+              !name.contains(where: { ":;!?{}[]()<>#*`".contains($0) }) else {
+            return nil
+        }
+        let lower = name.lowercased()
+        let words = lower.split(whereSeparator: { $0.isWhitespace })
+        let providerNoise = [
+            "warning", "fallback", "error", "progress", "assistant", "role", "user",
+            "system", "model", "title", "name", "generated", "output", "result",
+            "thinking", "note", "here", "sure", "okay", "suggest", "proposed"
+        ]
+        guard words.count <= 8,
+              !words.contains(where: { providerNoise.contains(String($0)) }),
+              !AgentName.isIdentifier(name, model: model, role: role, id: id),
+              AgentName.normalizedLabel(name) != nil else {
+            return nil
+        }
+        return AgentName.normalizedLabel(name)
+    }
+
+    private static func stripWrappingQuotes(from raw: String) -> String {
+        var line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pairs = [("\"", "\""), ("'", "'"), ("“", "”"), ("‘", "’"), ("`", "`")]
+        var changed = true
+        while changed, line.count >= 2 {
+            changed = false
+            for (opening, closing) in pairs where line.hasPrefix(opening) && line.hasSuffix(closing) {
+                line = String(line.dropFirst(opening.count).dropLast(closing.count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                changed = true
+                break
+            }
+        }
+        return line
+    }
+
+    private struct BoundedProcessResult: Sendable {
+        let stdout: String
+        let stderr: String
+        let status: Int32
+    }
+
+    /// Resolve the login-shell PATH with the same bounded process machinery as
+    /// the provider. A noisy rc file is drained into a capped buffer while the
+    /// leader runs, and a descendant that keeps either pipe open is killed before
+    /// this method returns.
+    static func loginShellPath(environment: [String: String]) -> String? {
+        let shell = environment["SHELL"].flatMap { path in
+            FileManager.default.isExecutableFile(atPath: path) ? path : nil
+        } ?? "/bin/zsh"
+        guard FileManager.default.isExecutableFile(atPath: shell) else { return nil }
+        let command = "printf '\\n__CONTINUUM_LOGIN_PATH__%s\\n' \"$PATH\""
+        do {
+            let result = try runProcess(
+                executable: shell,
+                arguments: [URL(fileURLWithPath: shell).lastPathComponent, "-ilc", command],
+                input: Data(),
+                environment: environment,
+                timeout: 1.0)
+            guard processExitCode(result.status) == 0,
+                  let marker = result.stdout.range(of: "__CONTINUUM_LOGIN_PATH__") else {
+                return nil
+            }
+            let path = result.stdout[marker.upperBound...]
+                .split(whereSeparator: \.isNewline)
+                .first.map(String.init) ?? ""
+            return path.isEmpty ? nil : path
+        } catch {
+            return nil
+        }
+    }
+
+    static func run(
+        capability: AgentNameGenerationCapability,
+        prompt: String,
+        cwd: URL,
+        timeout: TimeInterval = AgentNameOneShot.timeout,
+        environmentOverrides: [String: String] = [:],
+        configDirectoryOverride: URL? = nil,
+        inputWriteDelay: TimeInterval = 0
+    ) throws -> String {
+        let configDirectory = try temporaryConfigDirectory(
+            for: capability,
+            at: configDirectoryOverride)
+        defer { try? FileManager.default.removeItem(at: configDirectory) }
+
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = capability.loginShellPath
+        environment["PI_CODING_AGENT_DIR"] = configDirectory.path
+        environment.merge(environmentOverrides) { _, override in override }
+        // HOME is deliberately inherited untouched in production. The optional
+        // override exists only for the controlled fake-Pi fixture, which proves
+        // that --no-session creates no session/transcript artifact in a known home.
+
+        // Foundation's Process does not expose a pre-exec hook, and attempting
+        // setpgid(pid, pid) after Process.run() races the child's exec on macOS
+        // (EACCES). posix_spawn's SETPGROUP attribute creates the group before
+        // /bin/sh starts, so every descendant inherits it and timeout cleanup can
+        // kill the group without risking the app's own group.
+        let script = "cd -- \(shellQuote(cwd.path)) || exit 126; exec \"$@\""
+        let rawArguments = ["sh", "-c", script, "continuum-name-one-shot", capability.executable]
+            + arguments(model: capability.model)
+        let result = try runProcess(
+            executable: "/bin/sh",
+            arguments: rawArguments,
+            input: Data(prompt.utf8),
+            environment: environment,
+            timeout: timeout,
+            inputWriteDelay: inputWriteDelay)
+        guard processExitCode(result.status) == 0 else {
+            throw AgentNameOneShotError.failed(processExitCode(result.status))
+        }
+        return result.stdout
+    }
+
+    /// All blocking process and pipe work lives here. In particular, this never
+    /// calls `waitUntilExit` or `readDataToEndOfFile`: both would wait forever
+    /// when a normally-exited leader leaves a descendant holding a pipe.
+    private static func runProcess(
+        executable: String,
+        arguments: [String],
+        input: Data,
+        environment: [String: String],
+        timeout: TimeInterval,
+        inputWriteDelay: TimeInterval = 0,
+        stdoutLimit: Int = 64 * 1024,
+        stderrLimit: Int = 16 * 1024
+    ) throws -> BoundedProcessResult {
+        let inputPipe = Pipe()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        let stdoutBox = LockedData(limit: stdoutLimit)
+        let stderrBox = LockedData(limit: stderrLimit)
+        let stdoutReader = BoundedPipeReader(
+            handle: stdoutPipe.fileHandleForReading,
+            box: stdoutBox)
+        let stderrReader = BoundedPipeReader(
+            handle: stderrPipe.fileHandleForReading,
+            box: stderrBox)
+
+        let pid: pid_t
+        do {
+            pid = try spawnInOwnProcessGroup(
+                executable: executable,
+                arguments: arguments,
+                environment: environment,
+                input: inputPipe,
+                stdout: stdoutPipe,
+                stderr: stderrPipe)
+        } catch let error as AgentNameOneShotError {
+            stdoutReader.stopAndClose()
+            stderrReader.stopAndClose()
+            try? inputPipe.fileHandleForReading.close()
+            try? inputPipe.fileHandleForWriting.close()
+            try? stdoutPipe.fileHandleForWriting.close()
+            try? stderrPipe.fileHandleForWriting.close()
+            throw error
+        } catch {
+            stdoutReader.stopAndClose()
+            stderrReader.stopAndClose()
+            try? inputPipe.fileHandleForReading.close()
+            try? inputPipe.fileHandleForWriting.close()
+            try? stdoutPipe.fileHandleForWriting.close()
+            try? stderrPipe.fileHandleForWriting.close()
+            throw AgentNameOneShotError.launchFailed
+        }
+
+        let deadline = Date().addingTimeInterval(max(0.01, timeout))
+        do {
+            if inputWriteDelay > 0 {
+                Thread.sleep(forTimeInterval: min(inputWriteDelay, max(0.01, timeout)))
+            }
+            try writeInput(
+                input,
+                to: inputPipe.fileHandleForWriting.fileDescriptor,
+                until: deadline)
+            try inputPipe.fileHandleForWriting.close()
+        } catch {
+            try? inputPipe.fileHandleForWriting.close()
+            _ = cleanupProcessGroup(pid, knownStatus: nil)
+            stdoutReader.finish(timeout: processGroupGrace)
+            stderrReader.finish(timeout: processGroupGrace)
+            throw AgentNameOneShotError.inputFailed
+        }
+
+        var status = waitForProcess(pid, noHang: true)
+        while status == nil && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+            status = waitForProcess(pid, noHang: true)
+        }
+        guard let status else {
+            _ = cleanupProcessGroup(pid, knownStatus: nil)
+            stdoutReader.finish(timeout: processGroupGrace)
+            stderrReader.finish(timeout: processGroupGrace)
+            throw AgentNameOneShotError.timedOut
+        }
+
+        // This cleanup is intentional even after a successful leader exit. The
+        // leader can have forked a child that still owns stdout/stderr; killing
+        // the whole group before joining the bounded readers releases the slot.
+        let finalStatus = cleanupProcessGroup(pid, knownStatus: status) ?? status
+        stdoutReader.finish(timeout: processGroupGrace)
+        stderrReader.finish(timeout: processGroupGrace)
+        return BoundedProcessResult(
+            stdout: String(decoding: stdoutBox.data, as: UTF8.self),
+            stderr: String(decoding: stderrBox.data, as: UTF8.self),
+            status: finalStatus)
+    }
+
+    private static func writeInput(
+        _ data: Data,
+        to descriptor: Int32,
+        until deadline: Date
+    ) throws {
+        guard !data.isEmpty else { return }
+        setNonBlocking(descriptor)
+        try data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+            guard let baseAddress = bytes.baseAddress else { return }
+            var offset = 0
+            while offset < bytes.count {
+                let count = Darwin.write(
+                    descriptor,
+                    baseAddress.advanced(by: offset),
+                    bytes.count - offset)
+                if count > 0 {
+                    offset += count
+                    continue
+                }
+                if count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    guard Date() < deadline else { throw AgentNameOneShotError.inputFailed }
+                    Thread.sleep(forTimeInterval: 0.005)
+                    continue
+                }
+                throw AgentNameOneShotError.inputFailed
+            }
+        }
+    }
+
+    private static func spawnInOwnProcessGroup(
+        executable: String,
+        arguments: [String],
+        environment: [String: String],
+        input: Pipe,
+        stdout: Pipe,
+        stderr: Pipe
+    ) throws -> pid_t {
+        var fileActions: posix_spawn_file_actions_t?
+        guard posix_spawn_file_actions_init(&fileActions) == 0 else {
+            throw AgentNameOneShotError.launchFailed
+        }
+        defer { posix_spawn_file_actions_destroy(&fileActions) }
+
+        let inputRead = input.fileHandleForReading.fileDescriptor
+        let inputWrite = input.fileHandleForWriting.fileDescriptor
+        let stdoutRead = stdout.fileHandleForReading.fileDescriptor
+        let stdoutWrite = stdout.fileHandleForWriting.fileDescriptor
+        let stderrRead = stderr.fileHandleForReading.fileDescriptor
+        let stderrWrite = stderr.fileHandleForWriting.fileDescriptor
+        let addDup: (Int32, Int32) throws -> Void = { source, destination in
+            guard posix_spawn_file_actions_adddup2(&fileActions, source, destination) == 0 else {
+                throw AgentNameOneShotError.launchFailed
+            }
+        }
+        let addClose: (Int32) throws -> Void = { descriptor in
+            guard posix_spawn_file_actions_addclose(&fileActions, descriptor) == 0 else {
+                throw AgentNameOneShotError.launchFailed
+            }
+        }
+        try addDup(inputRead, STDIN_FILENO)
+        try addDup(stdoutWrite, STDOUT_FILENO)
+        try addDup(stderrWrite, STDERR_FILENO)
+        for (descriptor, duplicate) in [
+            (inputRead, Int32(STDIN_FILENO)),
+            (inputWrite, Int32(STDIN_FILENO)),
+            (stdoutRead, Int32(STDOUT_FILENO)),
+            (stdoutWrite, Int32(STDOUT_FILENO)),
+            (stderrRead, Int32(STDERR_FILENO)),
+            (stderrWrite, Int32(STDERR_FILENO)),
+        ] where descriptor != duplicate {
+            try addClose(descriptor)
+        }
+
+        var spawnAttributes: posix_spawnattr_t?
+        guard posix_spawnattr_init(&spawnAttributes) == 0 else {
+            throw AgentNameOneShotError.processGroupUnavailable
+        }
+        defer { posix_spawnattr_destroy(&spawnAttributes) }
+        guard posix_spawnattr_setflags(&spawnAttributes, Int16(POSIX_SPAWN_SETPGROUP)) == 0,
+              posix_spawnattr_setpgroup(&spawnAttributes, 0) == 0 else {
+            throw AgentNameOneShotError.processGroupUnavailable
+        }
+
+        var argv = try arguments.map { value -> UnsafeMutablePointer<CChar>? in
+            guard let pointer = strdup(value) else { throw AgentNameOneShotError.launchFailed }
+            return pointer
+        }
+        argv.append(nil)
+        defer { argv.dropLast().forEach { free($0) } }
+        var envp = try environment
+            .map { "\($0.key)=\($0.value)" }
+            .sorted()
+            .map { value -> UnsafeMutablePointer<CChar>? in
+                guard let pointer = strdup(value) else { throw AgentNameOneShotError.launchFailed }
+                return pointer
+            }
+        envp.append(nil)
+        defer { envp.dropLast().forEach { free($0) } }
+
+        var pid: pid_t = 0
+        let result = executable.withCString { path in
+            argv.withUnsafeMutableBufferPointer { argvBuffer in
+                envp.withUnsafeMutableBufferPointer { envpBuffer in
+                    posix_spawn(
+                        &pid,
+                        path,
+                        &fileActions,
+                        &spawnAttributes,
+                        UnsafePointer(argvBuffer.baseAddress!),
+                        UnsafePointer(envpBuffer.baseAddress!))
+                }
+            }
+        }
+        guard result == 0 else { throw AgentNameOneShotError.launchFailed }
+        // The parent must close its copies of the child's pipe ends, or EOF on
+        // stdout/stderr would wait for the parent's own descriptors forever.
+        try? input.fileHandleForReading.close()
+        try? stdout.fileHandleForWriting.close()
+        try? stderr.fileHandleForWriting.close()
+        return pid
+    }
+
+    /// Stop the entire process group after every leader outcome. The first grace
+    /// period lets a cooperative shell close its descendants; SIGKILL is the
+    /// bounded backstop for a child that ignores SIGTERM. `waitpid` is always the
+    /// WNOHANG form, so input failure cannot turn cleanup into a second hang.
+    private static func cleanupProcessGroup(
+        _ pid: pid_t,
+        knownStatus: Int32?
+    ) -> Int32? {
+        var status = knownStatus
+        if processGroupExists(pid) {
+            killProcessGroup(pid, signal: SIGTERM)
+        }
+        let termDeadline = Date().addingTimeInterval(processGroupGrace)
+        while Date() < termDeadline {
+            if status == nil { status = waitForProcess(pid, noHang: true) }
+            if !processGroupExists(pid) {
+                if status == nil { status = waitForProcess(pid, noHang: true) }
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        if processGroupExists(pid) {
+            killProcessGroup(pid, signal: SIGKILL)
+        }
+        let reapDeadline = Date().addingTimeInterval(processGroupGrace)
+        while status == nil && Date() < reapDeadline {
+            status = waitForProcess(pid, noHang: true)
+            if status == nil { Thread.sleep(forTimeInterval: 0.01) }
+        }
+        // Do not wait again after the bound. The pipe readers are closed by their
+        // own bounded finish path, so a broken provider cannot retain this slot.
+        return status
+    }
+
+    private static func setNonBlocking(_ descriptor: Int32) {
+        let flags = fcntl(descriptor, F_GETFL, 0)
+        guard flags >= 0 else { return }
+        _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK)
+        // A provider is allowed to close stdin immediately. Do not let that
+        // ordinary input-failure witness deliver SIGPIPE to the app process.
+        #if os(macOS)
+        _ = fcntl(descriptor, F_SETNOSIGPIPE, 1)
+        #endif
+    }
+
+    private final class BoundedPipeReader: @unchecked Sendable {
+        private let handle: FileHandle
+        private let descriptor: Int32
+        private let box: LockedData
+        private let done = DispatchSemaphore(value: 0)
+        private let lock = NSLock()
+        private var stopped = false
+        private var closed = false
+
+        init(handle: FileHandle, box: LockedData) {
+            self.handle = handle
+            self.descriptor = handle.fileDescriptor
+            self.box = box
+            setNonBlocking(descriptor)
+            DispatchQueue.global(qos: .utility).async { [self] in readLoop() }
+        }
+
+        func finish(timeout: TimeInterval) {
+            let result = done.wait(timeout: .now() + max(0, timeout))
+            if result == .timedOut {
+                stopAndClose()
+                _ = done.wait(timeout: .now() + 0.05)
+            } else {
+                stopAndClose()
+            }
+        }
+
+        func stopAndClose() {
+            let shouldClose = lock.withLock {
+                stopped = true
+                guard !closed else { return false }
+                closed = true
+                return true
+            }
+            if shouldClose { try? handle.close() }
+        }
+
+        private func readLoop() {
+            defer { done.signal() }
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while !isStopped {
+                let count = buffer.withUnsafeMutableBytes { bytes in
+                    Darwin.read(descriptor, bytes.baseAddress!, bytes.count)
+                }
+                if count > 0 {
+                    box.append(Data(buffer.prefix(count)))
+                    continue
+                }
+                if count == 0 { return }
+                if errno != EAGAIN && errno != EWOULDBLOCK {
+                    return
+                }
+                var descriptorSet = pollfd(
+                    fd: descriptor,
+                    events: Int16(POLLIN),
+                    revents: 0)
+                let pollResult = Darwin.poll(&descriptorSet, 1, 50)
+                if pollResult < 0 && errno != EINTR { return }
+            }
+        }
+
+        private var isStopped: Bool { lock.withLock { stopped } }
+    }
+
+    private static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\\''") + "'"
+    }
+
+    private static func waitForProcess(_ pid: pid_t, noHang: Bool = false) -> Int32? {
+        var status: Int32 = 0
+        let result = Darwin.waitpid(pid, &status, noHang ? WNOHANG : 0)
+        if result == pid { return status }
+        if result == -1 && errno != EINTR && errno != ECHILD { return status }
+        return nil
+    }
+
+    private static func processExitCode(_ status: Int32) -> Int32 {
+        // Darwin exposes the wait status as an opaque C macro family that is
+        // unavailable to Swift. These are the POSIX wait(2) bit fields: a zero
+        // low byte means normal exit; otherwise the low seven bits are a signal.
+        let signal = status & 0x7f
+        if signal == 0 { return (status >> 8) & 0xff }
+        if signal != 0x7f { return 128 + signal }
+        return status
+    }
+
+    private static func temporaryConfigDirectory(
+        for capability: AgentNameGenerationCapability,
+        at override: URL? = nil
+    ) throws -> URL {
+        let directory = override ?? FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuum-name-config-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        let settings = #"{"retry":{"maxRetries":0,"baseDelayMs":0}}"#
+        try settings.write(to: directory.appendingPathComponent("settings.json"), atomically: true, encoding: .utf8)
+        let auth = capability.configDirectory.appendingPathComponent("auth.json")
+        if FileManager.default.fileExists(atPath: auth.path) {
+            // Copy rather than symlink: Pi may refresh OAuth state during a run,
+            // but a best-effort name action must never mutate the user's durable
+            // credential file as a side effect.
+            let destination = directory.appendingPathComponent("auth.json")
+            try Data(contentsOf: auth).write(to: destination, options: .atomic)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: destination.path)
+        }
+        for name in ["models.json", "models-store.json"] {
+            let source = capability.configDirectory.appendingPathComponent(name)
+            let destination = directory.appendingPathComponent(name)
+            if FileManager.default.fileExists(atPath: source.path),
+               let data = try? Data(contentsOf: source) {
+                try? data.write(to: destination, options: .atomic)
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600],
+                    ofItemAtPath: destination.path)
+            }
+        }
+        return directory
+    }
+
+    private static func killProcessGroup(_ pid: Int32, signal: Int32) {
+        guard pid > 1 else { return }
+        if Darwin.kill(-pid, signal) != 0, errno != ESRCH {
+            // Best effort: the caller is already on the failure/timeout path.
+        }
+    }
+
+    private static func processGroupExists(_ pid: Int32) -> Bool {
+        guard pid > 1 else { return false }
+        return Darwin.kill(-pid, 0) == 0 || errno == EPERM
+    }
+
+    private final class LockedData: @unchecked Sendable {
+        private let lock = NSLock()
+        private let limit: Int
+        private var storage = Data()
+
+        init(limit: Int) { self.limit = max(0, limit) }
+
+        func append(_ data: Data) {
+            lock.withLock {
+                guard storage.count < limit else { return }
+                storage.append(data.prefix(limit - storage.count))
+            }
+        }
+        var data: Data { lock.withLock { storage } }
+    }
+}
+
 @MainActor
 final class AgentSupervisor {
     /// How much of an agent's event history a late subscriber replays. Capped
@@ -79,6 +848,10 @@ final class AgentSupervisor {
     /// tile header that renders it re-lays out on every streamed token, and a
     /// `git rev-parse` per render is a process launch per token.
     private let checkedOutBranches = CheckedOutBranchCache()
+    /// A provider seam is retained for deterministic checks. Production uses the
+    /// process-free cache snapshot; it never invokes a shell from this actor.
+    private let nameGenerationCapabilityProvider: (@Sendable () -> AgentNameGenerationCapability?)?
+    private let nameGenerationTimeout: TimeInterval
 
     /// The records this supervisor owns, in memory. `AgentStore` is the durable
     /// copy; this is the live one.
@@ -89,6 +862,12 @@ final class AgentSupervisor {
     private var runners: [AgentID: AgentRunning] = [:]
     private var subscribers: [AgentID: [UUID: AsyncStream<AgentRuntimeEvent>.Continuation]] = [:]
     private var history: [AgentID: [AgentRuntimeEvent]] = [:]
+    /// Prompt-derived naming context stays in memory only. It is deliberately not
+    /// an AgentRecord field and never reaches AgentInventory or the companion.
+    private var firstPromptByAgent: [AgentID: String] = [:]
+    private var activeNameGenerations = 0
+    private var nameGenerationTasks: [AgentID: Task<Void, Never>] = [:]
+    private var nameGenerationRequestIDs: [AgentID: UUID] = [:]
 
     /// Provider facts used by the v2 tile. Deliberately separate from `runners`:
     /// a provider process may remain alive while its turn is ready, and that must
@@ -113,13 +892,40 @@ final class AgentSupervisor {
         store: AgentStore,
         makeRunner: @escaping (AgentRecord) -> AgentRunning = AgentSupervisor.piRunner,
         warn: @escaping (String) -> Void = { fputs($0 + "\n", stderr) },
-        upsertRecord: ((AgentRecord) throws -> Void)? = nil
+        upsertRecord: ((AgentRecord) throws -> Void)? = nil,
+        nameGenerationCapabilityProvider: (@Sendable () -> AgentNameGenerationCapability?)? = nil,
+        nameGenerationTimeout: TimeInterval = AgentNameOneShot.timeout
     ) {
         self.store = store
         self.makeRunner = makeRunner
         self.warn = warn
         self.upsertRecord = upsertRecord ?? { record in try store.upsert(record) }
+        self.nameGenerationCapabilityProvider = nameGenerationCapabilityProvider
+        self.nameGenerationTimeout = nameGenerationTimeout
     }
+
+    /// The explicit action's cached capability gate. This is a snapshot only:
+    /// missing/unknown capability is hidden, and no login shell can run while a
+    /// menu is being built.
+    static var nameGenerationCapabilityAvailable: Bool {
+        AgentNameGenerationCapabilityCache.shared.snapshot().isAvailable
+    }
+
+    /// Start capability resolution without making the caller wait on a shell.
+    /// The returned task does its auth read and bounded login-shell probe on a
+    /// utility executor; callers can await it from a UI task and repaint safely.
+    static func resolveNameGenerationCapability() async -> AgentNameGenerationCapability? {
+        let task = AgentNameGenerationCapabilityCache.shared.startResolution()
+        return await task.value
+    }
+
+    /// The cached capability consumed by the already-gated row action. It is a
+    /// process-free read; a stale/unavailable cache simply refuses the action.
+    static func cachedNameGenerationCapability() -> AgentNameGenerationCapability? {
+        AgentNameGenerationCapabilityCache.shared.snapshot().capability
+    }
+
+    static let maximumConcurrentNameGenerations = 2
 
     // MARK: - Identity
 
@@ -707,6 +1513,11 @@ final class AgentSupervisor {
         if let inFlight = runners[id] {
             warn("AgentSupervisor.send: agent \(id.rawValue.uuidString) already has a prompt in flight (\(type(of: inFlight))); dropping \(prompt.count) chars")
             return
+        }
+        // Keep only the first local prompt for the explicit naming action. This
+        // dictionary is memory-only; AgentRecord/AgentInventory never receive it.
+        if firstPromptByAgent[id] == nil {
+            firstPromptByAgent[id] = String(prompt.prefix(AgentNameOneShot.maximumPromptLength))
         }
         // This is the ONE automatic naming funnel. The shared resolver applies
         // prompt, source-item, then parent-relative ordinal precedence; a later
@@ -1461,6 +2272,10 @@ final class AgentSupervisor {
             return false
         }
         guard let label = AgentSupervisor.sanitizedDisplayName(name) else { return false }
+        // A human rename disarms both the durable CAS marker and the best-effort
+        // process. The process may still be finishing, but its request id and
+        // expected title can no longer land it.
+        nameGenerationTasks[id]?.cancel()
         let changed = record.displayName != label
             || record.displayNameSource != .manual
             || record.namingRequest != nil
@@ -1544,6 +2359,160 @@ final class AgentSupervisor {
         }
         guard regenerate else { return nil }
         return beginNameGeneration(agentID: id)
+    }
+
+    // MARK: - P4.5 generated-name one-shot
+
+    /// The result of a burst routed through the supervisor. `accepted` is the
+    /// only set that armed a durable CAS request; `refused` includes terminal
+    /// rows, manual names, missing records/capability, and cap members.
+    struct GeneratedNameBatch: Equatable, Sendable {
+        let accepted: [AgentID]
+        let refused: [AgentID]
+
+        var acceptedCount: Int { accepted.count }
+        var didAcceptAny: Bool { !accepted.isEmpty }
+    }
+
+    /// The owner-level orchestration for the inbox action. Keeping the filtering,
+    /// cap admission, and per-agent completion wiring here means the app delegate
+    /// only supplies the compile-forced row-action callback; it cannot grow a
+    /// second naming owner or accidentally bypass the CAS.
+    @discardableResult
+    func requestGeneratedNames(
+        agentIDs: [AgentID],
+        onCompletion: (@Sendable (AgentID, Bool) -> Void)? = nil
+    ) -> GeneratedNameBatch {
+        var seen = Set<AgentID>()
+        var accepted: [AgentID] = []
+        var refused: [AgentID] = []
+        for id in agentIDs where seen.insert(id).inserted {
+            let started = requestGeneratedName(agentID: id) { landed in
+                onCompletion?(id, landed)
+            }
+            if started {
+                accepted.append(id)
+            } else {
+                refused.append(id)
+            }
+        }
+        return GeneratedNameBatch(accepted: accepted, refused: refused)
+    }
+
+    /// Start the explicit, best-effort generated-name action. This method only
+    /// claims the CAS token and schedules work; the blocking Process lives on a
+    /// detached utility task and never occupies the agent's turn runner.
+    @discardableResult
+    func requestGeneratedName(
+        agentID id: AgentID,
+        onCompletion: (@Sendable (Bool) -> Void)? = nil
+    ) -> Bool {
+        guard let record = records[id] else {
+            warn("AgentSupervisor.requestGeneratedName: no agent \(id.rawValue.uuidString)")
+            return false
+        }
+        guard record.displayNameSource != .manual else {
+            warn("AgentSupervisor.requestGeneratedName: manual name owns agent \(id.rawValue.uuidString); refusing generated overwrite")
+            return false
+        }
+        // This admission check is on the main actor, before capability lookup or
+        // CAS mutation. A refused burst member therefore remains unchanged and
+        // cannot make a synchronous login-shell probe part of the burst.
+        guard activeNameGenerations < Self.maximumConcurrentNameGenerations else {
+            warn("AgentSupervisor.requestGeneratedName: concurrency cap \(Self.maximumConcurrentNameGenerations) reached; refusing burst member")
+            return false
+        }
+        let capability: AgentNameGenerationCapability?
+        if let nameGenerationCapabilityProvider {
+            capability = nameGenerationCapabilityProvider()
+        } else {
+            capability = Self.cachedNameGenerationCapability()
+        }
+        guard let capability else {
+            warn("AgentSupervisor.requestGeneratedName: Pi capability/auth unavailable; no process spawned")
+            return false
+        }
+        // A second explicit click supersedes the old request. Cancellation is a
+        // hint to the detached task; the completion still proves the old CAS id,
+        // so cancellation failure cannot clobber a newer request.
+        nameGenerationTasks[id]?.cancel()
+        guard let request = beginNameGeneration(agentID: id) else { return false }
+        let source = firstPromptByAgent[id]
+            ?? "No source prompt is available. Propose a concise name from the current agent title: \(record.humanDisplayName)"
+        let prompt = Self.generatedNamePrompt(source)
+        let cwd = URL(fileURLWithPath: record.cwd, isDirectory: true)
+        let timeout = nameGenerationTimeout
+        activeNameGenerations += 1
+        nameGenerationRequestIDs[id] = request.id
+        let task = Task.detached(priority: .utility) { [weak self, capability, request, prompt, cwd, timeout, onCompletion, record] in
+            var candidate: String?
+            var failure: String?
+            do {
+                let stdout = try AgentNameOneShot.run(
+                    capability: capability,
+                    prompt: prompt,
+                    cwd: cwd,
+                    timeout: timeout)
+                candidate = AgentNameOneShot.candidate(
+                    from: stdout,
+                    model: record.model,
+                    role: record.role,
+                    id: record.id.rawValue)
+                if candidate == nil { failure = "invalid provider output" }
+            } catch let error as AgentNameOneShotError {
+                failure = error.description
+            } catch {
+                failure = "provider failed"
+            }
+            await MainActor.run {
+                self?.finishGeneratedName(
+                    candidate: candidate,
+                    failure: failure,
+                    request: request,
+                    agentID: id,
+                    onCompletion: onCompletion)
+            }
+        }
+        nameGenerationTasks[id] = task
+        return true
+    }
+
+    /// QA-only observability for the concurrency witness. It is not a second
+    /// capability or provider state owner.
+    var qaActiveNameGenerationCount: Int { activeNameGenerations }
+
+    private static func generatedNamePrompt(_ source: String) -> String {
+        let bounded = String(source.prefix(AgentNameOneShot.maximumPromptLength))
+        return "Name the agent from this user request. Return one short name only, with no explanation or metadata.\n\nUser request:\n\(bounded)"
+    }
+
+    private func finishGeneratedName(
+        candidate: String?,
+        failure: String?,
+        request: NamingRequest,
+        agentID id: AgentID,
+        onCompletion: (@Sendable (Bool) -> Void)?
+    ) {
+        activeNameGenerations = max(0, activeNameGenerations - 1)
+        if nameGenerationRequestIDs[id] == request.id {
+            nameGenerationRequestIDs[id] = nil
+            nameGenerationTasks[id] = nil
+        }
+        let landed: Bool
+        if let candidate {
+            landed = applyGeneratedName(candidate, for: request, agentID: id)
+        } else {
+            // A current failed request consumes only its marker. The record's
+            // existing/P4.2 name remains untouched; a stale/manual request is a
+            // no-op through the same CAS guard.
+            landed = applyGeneratedName("", for: request, agentID: id)
+        }
+        if let failure {
+            warn("AgentSupervisor.requestGeneratedName: agent \(id.rawValue.uuidString) \(failure); keeping its existing name")
+        } else if !landed {
+            warn("AgentSupervisor.requestGeneratedName: agent \(id.rawValue.uuidString) lost the naming CAS; keeping its existing name")
+        }
+        onCompletion?(landed)
     }
 
     // MARK: - Model and thinking level (P6.1)
@@ -2810,6 +3779,10 @@ func runAgentSupervisorChecks() async throws {
     let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
     let composerKeyAssertions = try runComposerKeyContractChecks()
     let completionAssertions = try await runCompletionComposerChecks()
+    // Run the one-shot's production sync-boundary witness first so a regression
+    // in its actual companion envelope fails at the named P4.5 assertion rather
+    // than being masked by the broader historical naming corpus below.
+    let generatedNameReport = try await checkGeneratedNameOneShot(config: config, fail: fail)
     let namingReport = try await checkAgentNameContract(config: config, cwd: cwd, fail: fail)
 
     // The script is deliberately a real turn shape with DISTINCT events, so
@@ -3077,7 +4050,546 @@ func runAgentSupervisorChecks() async throws {
     let turnStateReport = try await checkCapabilityDrivenTurnStates(config: config, cwd: cwd, fail: fail)
 
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport)")
+}
+
+@MainActor
+private func checkGeneratedNameOneShot<Failure: Error>(
+    config: AgentModelConfig.Resolution,
+    fail: (String) -> Failure
+) async throws -> String {
+    let fileManager = FileManager.default
+    let root = fileManager.temporaryDirectory
+        .appendingPathComponent("continuum-generated-name-oneshot-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fileManager.removeItem(at: root) }
+    try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+
+    let appSource = try String(
+        contentsOf: URL(fileURLWithPath: "Sources/ContinuumRevived/App/ContinuumApp.swift"),
+        encoding: .utf8)
+    guard !appSource.contains("generateNamesFromInbox"),
+          appSource.contains("requestGeneratedNames") else {
+        throw fail("generated-name orchestration still lives in ContinuumApp.swift instead of the supervisor owner")
+    }
+
+    // This is a real executable child, not a fake Process object. It records the
+    // argument vector and stdin separately, can hold a request open, and forks a
+    // child for the timeout witness. It never reaches the network.
+    let executable = root.appendingPathComponent("fake-pi", isDirectory: false)
+    let fakePi = """
+    #!/bin/sh
+    set -eu
+    printf '%s\\n' "$@" > .p45-args
+    has_no_session=false
+    for arg in "$@"; do
+      if [ "$arg" = "--no-session" ]; then has_no_session=true; fi
+    done
+    if [ "$has_no_session" = false ]; then
+      mkdir -p "$HOME/.pi/agent/sessions" "$HOME/.pi/agent/transcripts"
+      : > "$HOME/.pi/agent/sessions/fake-session.jsonl"
+      : > "$HOME/.pi/agent/transcripts/fake-transcript.jsonl"
+    fi
+    if [ -e .p45-input-failure ]; then
+      exec 0<&-
+      : > .p45-input-closed
+      (sleep 0.7; : > .p45-input-child-survived) &
+      printf '%s' "$!" > .p45-input-child-pid
+      sleep 30
+      exit 0
+    fi
+    cat > .p45-stdin
+    if [ -e .p45-normal-descendant ]; then
+      (sleep 0.7; : > .p45-normal-child-survived) &
+      printf '%s' "$!" > .p45-normal-child-pid
+      printf '%s\n' '{"name":"Normal Child"}'
+      exit 0
+    fi
+    if [ -e .p45-timeout ]; then
+      (sleep 0.7; : > .p45-child-survived) &
+      printf '%s' "$!" > .p45-child-pid
+      sleep 30
+      exit 0
+    fi
+    while [ -e .p45-hold ]; do sleep 0.01; done
+    if [ -e .p45-provider-output ]; then
+      cat .p45-provider-output
+      exit 0
+    fi
+    if [ -e .p45-invalid ]; then
+      printf '%s\\n' '{"name":"openai-codex/gpt-5.4-mini"}'
+      exit 0
+    fi
+    printf '%s\\n' '{"name":"\\"  Ship   It  \\""}'
+    """
+    try fakePi.write(to: executable, atomically: true, encoding: .utf8)
+    try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+    let configDirectory = root.appendingPathComponent("pi-config", isDirectory: true)
+    let controlledHome = root.appendingPathComponent("controlled-home", isDirectory: true)
+    let ephemeralConfig = root.appendingPathComponent("one-shot-config", isDirectory: true)
+    try fileManager.createDirectory(at: configDirectory, withIntermediateDirectories: true)
+    try fileManager.createDirectory(at: controlledHome, withIntermediateDirectories: true)
+    let authData = Data(#"{"openai-codex":{"access":"fixture-access","expires":4102444800000}}"#.utf8)
+    try authData.write(to: configDirectory.appendingPathComponent("auth.json"))
+    let capability = AgentNameGenerationCapability(
+        executable: executable.path,
+        configDirectory: configDirectory,
+        loginShellPath: "/bin:/usr/bin",
+        model: AgentNameGenerationCapability.cheapModel)
+
+    // Capability and login-shell resolution are pure enough to exercise without
+    // invoking a provider. The negative auth witness is intentionally expired.
+    let now = Date(timeIntervalSince1970: 1_000)
+    let validAuth = Data(#"{"openai-codex":{"access":"fixture-access"}}"#.utf8)
+    let refreshAuth = Data(#"{"openai-codex":{"refresh":"fixture-refresh","expires":0}}"#.utf8)
+    let expiredAuth = Data(#"{"openai-codex":{"access":"fixture-access","expires":999000}}"#.utf8)
+    guard AgentNameGenerationCapability.hasAuthentication(
+            in: configDirectory, now: now, data: validAuth),
+          AgentNameGenerationCapability.hasAuthentication(
+            in: configDirectory, now: now, data: refreshAuth),
+          !AgentNameGenerationCapability.hasAuthentication(
+            in: configDirectory, now: now, data: expiredAuth) else {
+        throw fail("auth gate accepted expired access or rejected a usable fixture credential")
+    }
+    guard AgentNameGenerationCapability.resolvedExecutable(
+            loginShellPath: "/missing:/bin", fileExists: { $0 == "/bin/pi" }) == "/bin/pi",
+          AgentNameGenerationCapability.resolvedExecutable(
+            loginShellPath: "/missing:/also-missing", fileExists: { _ in false }) == nil else {
+        throw fail("login-shell executable resolution did not select the first executable or refuse an absent one")
+    }
+
+    // The UI query is a snapshot, not a resolver. This records the initial
+    // unknown state as hidden and proves that a hanging/noisy login shell cannot
+    // make a main-actor menu query wait. The actual resolver is then exercised
+    // on a detached task with both stdout and stderr over the pipe cap.
+    AgentNameGenerationCapabilityCache.shared.resetForQA()
+    let queryStarted = Date()
+    let initialCapabilityQuery = AgentSupervisor.nameGenerationCapabilityAvailable
+    guard !initialCapabilityQuery,
+          Date().timeIntervalSince(queryStarted) < 0.05 else {
+        throw fail("the initial capability query was not immediately hidden: available=\(initialCapabilityQuery)")
+    }
+    let menuProbe = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 280, height: 240))
+    let menuProbeID = UUID()
+    menuProbe.wiredRowActions = [.generateName]
+    menuProbe.onRowAction = { _, _ in }
+    menuProbe.reload(rows: [AgentInboxRow(
+        id: menuProbeID,
+        title: "Menu probe",
+        state: .ready,
+        createdAt: now)])
+    menuProbe.layoutForQA()
+    let menuQueryStarted = Date()
+    guard menuProbe.openRowMenuForQA(clickedRowId: menuProbeID),
+          !menuProbe.rowMenuTitlesForQA.contains(InboxRowAction.generateName.title(forCount: 1)),
+          Date().timeIntervalSince(menuQueryStarted) < 0.05 else {
+        throw fail("the initial row-menu capability query was not immediately hidden")
+    }
+    let loginShell = root.appendingPathComponent("noisy-hanging-login-shell", isDirectory: false)
+    let noisyShell = """
+    #!/bin/sh
+    i=0
+    while [ "$i" -lt 4096 ]; do
+      printf 'login-shell-noise-%s-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' "$i"
+      printf 'login-shell-stderr-%s-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\\n' "$i" >&2
+      i=$((i + 1))
+    done
+    sleep 30
+    """
+    try noisyShell.write(to: loginShell, atomically: true, encoding: .utf8)
+    try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: loginShell.path)
+    let loginProbeStarted = Date()
+    let loginCapability = await Task.detached(priority: .utility) {
+        AgentNameGenerationCapability.live(
+            environment: [
+                "HOME": controlledHome.path,
+                "PI_CODING_AGENT_DIR": configDirectory.path,
+                "PATH": "/bin:/usr/bin",
+                "SHELL": loginShell.path,
+            ],
+            now: now)
+    }.value
+    guard loginCapability == nil,
+          Date().timeIntervalSince(loginProbeStarted) < 2 else {
+        throw fail("a noisy/hanging login shell was not bounded: result=\(String(describing: loginCapability))")
+    }
+    // The cache remains a hidden/unavailable answer until its own resolver has
+    // completed; this query is still process-free after the failed probe.
+    let postProbeQueryStarted = Date()
+    _ = AgentSupervisor.nameGenerationCapabilityAvailable
+    guard Date().timeIntervalSince(postProbeQueryStarted) < 0.05 else {
+        throw fail("the cached capability query performed synchronous shell work after resolution")
+    }
+
+    func fixtureManifest(in roots: [URL]) -> Set<String> {
+        var paths = Set<String>()
+        for root in roots {
+            guard let enumerator = fileManager.enumerator(
+                at: root,
+                includingPropertiesForKeys: nil,
+                options: []) else { continue }
+            while let item = enumerator.nextObject() as? URL {
+                let relative = item.path.hasPrefix(root.path + "/")
+                    ? String(item.path.dropFirst(root.path.count + 1))
+                    : item.lastPathComponent
+                paths.insert(root.lastPathComponent + "/" + relative)
+            }
+        }
+        return paths
+    }
+    func containsSessionOrTranscriptArtifact(_ paths: Set<String>) -> Bool {
+        paths.contains { path in
+            let lower = path.lowercased()
+            return lower.contains("session") || lower.contains("transcript")
+        }
+    }
+
+    // The actual one-shot proves stdin, --no-session, no user prompt in argv,
+    // no session/transcript artifact in a controlled HOME/config fixture, and
+    // the shared sanitizer on a quoted candidate line.
+    let fixtureRoots = [controlledHome, configDirectory]
+    let fixtureBefore = fixtureManifest(in: fixtureRoots)
+    let privatePrompt = "PRIVATE prompt that must never become argv metadata"
+    let output = try await Task.detached(priority: .utility) {
+        try AgentNameOneShot.run(
+            capability: capability,
+            prompt: privatePrompt,
+            cwd: root,
+            timeout: 2,
+            environmentOverrides: ["HOME": controlledHome.path],
+            configDirectoryOverride: ephemeralConfig)
+    }.value
+    guard AgentNameOneShot.candidate(
+            from: output,
+            model: config.model,
+            role: "reviewer",
+            id: UUID()) == "Ship It" else {
+        throw fail("the fake Pi output did not sanitize to the expected one-line name")
+    }
+    let args = try String(contentsOf: root.appendingPathComponent(".p45-args"), encoding: .utf8)
+    let receivedPrompt = try String(contentsOf: root.appendingPathComponent(".p45-stdin"), encoding: .utf8)
+    let fixtureAfter = fixtureManifest(in: fixtureRoots)
+    guard args.contains("--no-session"), args.contains("--print"),
+          !args.contains(privatePrompt), !args.contains("Ship It"),
+          receivedPrompt == privatePrompt,
+          fixtureBefore == fixtureAfter,
+          !containsSessionOrTranscriptArtifact(fixtureAfter),
+          !fileManager.fileExists(atPath: ephemeralConfig.path) else {
+        throw fail("--no-session did not keep the prompt on stdin only or left a session/transcript artifact: args=\(args.debugDescription), stdin=\(receivedPrompt.debugDescription), fixture=\(fixtureAfter.sorted())")
+    }
+    guard AgentNameOneShot.candidate(
+            from: "```\\nName: \"  \(config.model)  \"\\n```",
+            model: config.model,
+            role: "reviewer",
+            id: UUID()) == nil else {
+        throw fail("identifier-shaped one-shot output was accepted as a display name")
+    }
+
+    // These are real fake-Pi stdout cases, not only direct parser calls. Every
+    // wrapper/noise shape is refused as a whole; none is trimmed into a title.
+    let providerNoiseCases: [(String, String)] = [
+        ("warning", "{\"name\":\"Warning: using fallback model\"}\n"),
+        ("fallback", "{\"name\":\"fallback model selected\"}\n"),
+        ("error", "{\"name\":\"Error: provider unavailable\"}\n"),
+        ("progress", "{\"name\":\"Progress 40%\"}\n"),
+        ("role", "{\"name\":\"assistant: Ship It\"}\n"),
+        ("title-field", "{\"title\":\"Ship It\"}\n"),
+        ("extra-field", "{\"name\":\"Ship It\",\"status\":\"done\"}\n"),
+        ("fence", "```\n{\"name\":\"Ship It\"}\n```\n"),
+        ("prose", "Here is the name you requested: Ship It\n"),
+        ("multi-line", "{\"name\":\"Ship It\"}\nI hope this helps.\n")
+    ]
+    for (kind, noise) in providerNoiseCases {
+        let outputFile = root.appendingPathComponent(".p45-provider-output")
+        try noise.write(to: outputFile, atomically: true, encoding: .utf8)
+        let noiseOutput = try await Task.detached(priority: .utility) {
+            try AgentNameOneShot.run(
+                capability: capability,
+                prompt: privatePrompt,
+                cwd: root,
+                timeout: 2,
+                environmentOverrides: ["HOME": controlledHome.path],
+                configDirectoryOverride: ephemeralConfig)
+        }.value
+        try? fileManager.removeItem(at: outputFile)
+        guard AgentNameOneShot.candidate(
+                from: noiseOutput,
+                model: config.model,
+                role: "reviewer",
+                id: UUID()) == nil else {
+            throw fail("provider noise case \(kind) was converted into a candidate: \(noiseOutput.debugDescription)")
+        }
+    }
+
+    // A real supervisor request lands the result through the production mutation
+    // path and keeps the prompt-derived title/name out of the companion projection.
+    let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support", isDirectory: true))
+    let runner = ScriptedAgentRunner(script: [.sessionStateChanged(.ready)])
+    let supervisor = AgentSupervisor(
+        store: store,
+        makeRunner: { _ in runner },
+        nameGenerationCapabilityProvider: { capability },
+        nameGenerationTimeout: 2)
+    let generatedID = supervisor.spawn(
+        role: "reviewer",
+        prompt: privatePrompt,
+        cwd: root,
+        model: config.model,
+        thinking: config.thinking)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        !supervisor.isRunning(generatedID)
+    }) else {
+        throw fail("the fixture prompt did not finish before the generated-name action")
+    }
+    guard supervisor.requestGeneratedName(agentID: generatedID) else {
+        throw fail("an authenticated fake Pi capability did not start the explicit action")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.qaActiveNameGenerationCount == 0
+    }), let generated = supervisor.records[generatedID],
+          generated.displayName == "Ship It",
+          generated.displayNameSource == .prompt,
+          generated.namingRequest == nil,
+          try store.load(id: generatedID)?.displayName == "Ship It" else {
+        throw fail("the production request did not land the sanitized name through its CAS path")
+    }
+    let snapshot = AgentInventory.snapshot(
+        terminalDescriptors: [],
+        liveStatuses: [:],
+        agents: [generated],
+        activityByAgent: [:],
+        replicaId: UUID(),
+        now: Date())
+    guard snapshot.byAgent[generatedID.rawValue] != nil else {
+        throw fail("the companion snapshot did not contain the generated agent")
+    }
+    // This is the exact activity envelope sent by DesktopCompanionSyncService,
+    // not a host-bound AgentRecord and not merely a field inspection. The source
+    // prompt and generated name must both be absent from the bytes, while the
+    // boundary sentinel remains as the safe summary.
+    let companionPayload = String(
+        decoding: try JSONCodec.makeEncoder().encode(
+            SyncMessage.activity(.snapshot(snapshot))),
+        as: UTF8.self)
+    guard companionPayload.contains(AgentRecord.defaultAgentName),
+          !companionPayload.contains(privatePrompt),
+          !companionPayload.contains("Ship It") else {
+        throw fail("the actual companion payload carried the source prompt or generated name: \(companionPayload)")
+    }
+
+    // A missing capability refuses before any Process launch. This is the required
+    // negative witness for the hidden/absent-auth path.
+    let absentRoot = root.appendingPathComponent("absent", isDirectory: true)
+    let absentStore = AgentStore(applicationSupportDirectory: absentRoot)
+    let absentSupervisor = AgentSupervisor(
+        store: absentStore,
+        makeRunner: { _ in ScriptedAgentRunner(script: []) },
+        nameGenerationCapabilityProvider: { nil })
+    let absentID = absentSupervisor.spawn(
+        role: nil,
+        prompt: nil,
+        cwd: root,
+        model: config.model,
+        thinking: config.thinking)
+    guard !absentSupervisor.requestGeneratedName(agentID: absentID),
+          absentSupervisor.qaActiveNameGenerationCount == 0,
+          absentSupervisor.records[absentID]?.namingRequest == nil else {
+        throw fail("an absent capability started naming work or armed a durable request")
+    }
+
+    // A human rename while the real fake process is held must win the request CAS
+    // after the child returns. This is production mutation evidence, not a direct
+    // AgentRecord-only test.
+    let hold = root.appendingPathComponent(".p45-hold")
+    try Data().write(to: hold)
+    let raceID = supervisor.spawn(
+        role: nil,
+        prompt: nil,
+        cwd: root,
+        model: config.model,
+        thinking: config.thinking)
+    guard supervisor.requestGeneratedName(agentID: raceID),
+          await waitUntil(timeout: 5, pollInterval: 0.02, {
+              fileManager.fileExists(atPath: root.appendingPathComponent(".p45-stdin").path)
+          }),
+          supervisor.rename(agentID: raceID, to: "Human wins") else {
+        throw fail("the held production one-shot did not reach the rename race")
+    }
+    try fileManager.removeItem(at: hold)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.qaActiveNameGenerationCount == 0
+    }), supervisor.records[raceID]?.displayName == "Human wins",
+          supervisor.records[raceID]?.displayNameSource == .manual else {
+        throw fail("a human rename lost to a late generated-name completion")
+    }
+
+    // Three held requests prove the main-actor admission cap is race-safe: the
+    // first two use distinct fixture working directories so their fake providers
+    // cannot contend over one marker or stdin file, while the refused member is
+    // never armed. Releasing both accepted holds must release both slots.
+    let burstRoots = (0..<3).map { root.appendingPathComponent("burst-\($0)", isDirectory: true) }
+    for burstRoot in burstRoots {
+        try fileManager.createDirectory(at: burstRoot, withIntermediateDirectories: true)
+    }
+    for burstRoot in burstRoots.prefix(2) {
+        try Data().write(to: burstRoot.appendingPathComponent(".p45-hold"))
+    }
+    let burstIDs = burstRoots.map { burstRoot in
+        supervisor.spawn(role: nil, prompt: nil, cwd: burstRoot, model: config.model, thinking: config.thinking)
+    }
+    let burst = supervisor.requestGeneratedNames(agentIDs: burstIDs)
+    guard burst.accepted == Array(burstIDs.prefix(2)),
+          burst.refused == [burstIDs[2]],
+          supervisor.qaActiveNameGenerationCount == AgentSupervisor.maximumConcurrentNameGenerations,
+          supervisor.records[burstIDs[2]]?.displayName == AgentRecord.defaultAgentName,
+          supervisor.records[burstIDs[2]]?.namingRequest == nil else {
+        throw fail("the generated-name burst exceeded the concurrency cap or armed the refused member")
+    }
+    for burstRoot in burstRoots.prefix(2) {
+        try fileManager.removeItem(at: burstRoot.appendingPathComponent(".p45-hold"))
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.qaActiveNameGenerationCount == 0
+    }),
+          supervisor.records[burstIDs[0]]?.displayName == "Ship It",
+          supervisor.records[burstIDs[1]]?.displayName == "Ship It",
+          supervisor.records[burstIDs[2]]?.displayName == AgentRecord.defaultAgentName,
+          supervisor.records[burstIDs[2]]?.namingRequest == nil else {
+        throw fail("the capped burst did not release both accepted names while keeping the refused member unchanged")
+    }
+
+    // Timeout: the fake forks a child that would leave a marker after the leader
+    // exits. A process-group kill must prevent that marker from ever appearing.
+    let timeoutMarker = root.appendingPathComponent(".p45-timeout")
+    try Data().write(to: timeoutMarker)
+    _ = try? fileManager.removeItem(at: root.appendingPathComponent(".p45-child-survived"))
+    let timeoutResult = await Task.detached(priority: .utility) {
+        do {
+            _ = try AgentNameOneShot.run(
+                capability: capability,
+                prompt: "timeout prompt",
+                cwd: root,
+                timeout: 0.12)
+            return false
+        } catch AgentNameOneShotError.timedOut {
+            return true
+        } catch {
+            return false
+        }
+    }.value
+    try? fileManager.removeItem(at: timeoutMarker)
+    try? await Task.sleep(nanoseconds: 1_000_000_000)
+    guard timeoutResult,
+          !fileManager.fileExists(atPath: root.appendingPathComponent(".p45-child-survived").path) else {
+        throw fail("the one-shot timeout did not kill the forked process group")
+    }
+
+    func descendantIsAlive(pidFile: URL) -> Bool {
+        guard let text = try? String(contentsOf: pidFile, encoding: .utf8),
+              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+              pid > 1 else { return false }
+        return Darwin.kill(pid, 0) == 0 || errno == EPERM
+    }
+
+    // Normal leader exit is a separate failure mode from timeout: the fake
+    // writes a valid result and exits immediately, while its child keeps both
+    // output descriptors open. The return must stay bounded and the child must
+    // not get a chance to leave its survival marker.
+    let normalDescendantMarker = root.appendingPathComponent(".p45-normal-descendant")
+    try Data().write(to: normalDescendantMarker)
+    _ = try? fileManager.removeItem(at: root.appendingPathComponent(".p45-normal-child-survived"))
+    _ = try? fileManager.removeItem(at: root.appendingPathComponent(".p45-normal-child-pid"))
+    let normalStarted = Date()
+    let normalResult = await Task.detached(priority: .utility) {
+        try? AgentNameOneShot.run(
+            capability: capability,
+            prompt: "normal descendant prompt",
+            cwd: root,
+            timeout: 1)
+    }.value
+    let normalElapsed = Date().timeIntervalSince(normalStarted)
+    try? fileManager.removeItem(at: normalDescendantMarker)
+    try? await Task.sleep(nanoseconds: 1_000_000_000)
+    guard normalResult.map({ AgentNameOneShot.candidate(
+            from: $0,
+            model: config.model,
+            role: "reviewer",
+            id: UUID()) == "Normal Child" }) == true,
+          normalElapsed < 2,
+          !fileManager.fileExists(atPath: root.appendingPathComponent(".p45-normal-child-survived").path),
+          !descendantIsAlive(pidFile: root.appendingPathComponent(".p45-normal-child-pid")) else {
+        throw fail("normal leader exit did not bound pipe drain and process-group cleanup: elapsed=\(normalElapsed), output=\(String(describing: normalResult))")
+    }
+
+    // Input failure is the other cleanup path. The fake closes stdin before
+    // the write and leaves a descendant holding stdout/stderr; no unbounded
+    // post-SIGTERM wait or pipe read may retain the request slot.
+    let inputFailureMarker = root.appendingPathComponent(".p45-input-failure")
+    try Data().write(to: inputFailureMarker)
+    _ = try? fileManager.removeItem(at: root.appendingPathComponent(".p45-input-child-survived"))
+    _ = try? fileManager.removeItem(at: root.appendingPathComponent(".p45-input-child-pid"))
+    let inputFailureStarted = Date()
+    let inputFailureResult = await Task.detached(priority: .utility) {
+        do {
+            _ = try AgentNameOneShot.run(
+                capability: capability,
+                prompt: privatePrompt,
+                cwd: root,
+                timeout: 1,
+                inputWriteDelay: 0.2)
+            return "success"
+        } catch AgentNameOneShotError.inputFailed {
+            return "input-failed"
+        } catch {
+            return "other-failure"
+        }
+    }.value
+    let inputFailureElapsed = Date().timeIntervalSince(inputFailureStarted)
+    try? fileManager.removeItem(at: inputFailureMarker)
+    try? await Task.sleep(nanoseconds: 1_000_000_000)
+    guard inputFailureResult == "input-failed",
+          inputFailureElapsed < 2,
+          !fileManager.fileExists(atPath: root.appendingPathComponent(".p45-input-child-survived").path),
+          !descendantIsAlive(pidFile: root.appendingPathComponent(".p45-input-child-pid")) else {
+        throw fail("input failure did not bound cleanup: result=\(inputFailureResult), elapsed=\(inputFailureElapsed)")
+    }
+
+    // The same two paths must release the supervisor's concurrency slot. The
+    // input-failure agent starts with a real prompt-derived name so failure is
+    // also proven not to clobber the prior title.
+    let normalSupervisorRoot = root.appendingPathComponent("normal-supervisor", isDirectory: true)
+    let inputSupervisorRoot = root.appendingPathComponent("input-supervisor", isDirectory: true)
+    try fileManager.createDirectory(at: normalSupervisorRoot, withIntermediateDirectories: true)
+    try fileManager.createDirectory(at: inputSupervisorRoot, withIntermediateDirectories: true)
+    try Data().write(to: normalSupervisorRoot.appendingPathComponent(".p45-normal-descendant"))
+    try Data().write(to: inputSupervisorRoot.appendingPathComponent(".p45-input-failure"))
+    let normalSupervisorID = supervisor.spawn(
+        role: nil,
+        prompt: nil,
+        cwd: normalSupervisorRoot,
+        model: config.model,
+        thinking: config.thinking)
+    let inputSupervisorID = supervisor.spawn(
+        role: nil,
+        prompt: "Prior stable name",
+        cwd: inputSupervisorRoot,
+        model: config.model,
+        thinking: config.thinking)
+    guard let priorName = supervisor.records[inputSupervisorID]?.displayName else {
+        throw fail("input-failure setup did not create a prior display name")
+    }
+    guard supervisor.requestGeneratedNames(agentIDs: [normalSupervisorID, inputSupervisorID]).accepted.count == 2 else {
+        throw fail("normal/input-failure supervisor requests did not both claim a slot")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.qaActiveNameGenerationCount == 0
+    }), supervisor.records[normalSupervisorID]?.displayName == "Normal Child",
+          supervisor.records[inputSupervisorID]?.displayName == priorName,
+          supervisor.records[inputSupervisorID]?.namingRequest == nil else {
+        throw fail("normal/input-failure supervisor paths did not release their slots or preserve the prior name")
+    }
+
+    return "P4.5 async cached capability gate with bounded noisy/hanging login-shell witness; fake-pi stdin/--no-session with controlled HOME/config artifact absence, strict one-field JSON/noise rejection, auth/executable gates, exact companion-envelope prompt/generated scrub, production CAS, supervisor-owned burst cap/release, normal-exit/input-failure/timeout process-group cleanup, bounded pipe drains, and prior-name preservation"
 }
 
 @MainActor
