@@ -16,6 +16,11 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+if CommandLine.arguments.contains("--agent-status-vocabulary-check") {
+    runStatusVocabularyUnificationChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--agent-completion-negative-witness") {
     runAgentCompletionNegativeWitness()
     Foundation.exit(0)
@@ -10077,6 +10082,213 @@ runAgentModelConfigChecks()
 runAgentRuntimeEventRemapChecks()
 runManagedAgentActivityBridgeChecks()
 
+// P3.5 negative witness record (production mutation, not a test edit): replace
+// `isUnconfirmed ? AgentStatusVocabulary.unconfirmed : label` in
+// `AgentInboxRow.presentationLabel` with `... : attention.label`. The exact
+// command `swift run ContinuumRevivedCoreChecks --agent-status-vocabulary-check`
+// then exits nonzero at `P3.5 live sidebar word for configuring is Working,
+// got nil`; restore the line and rerun the same command for green.
+// P3.5: one status word across the chip, live sidebar projection, tile
+// presenter/header contract, and the encoded phone payload. The raw-status table
+// is exhaustive without making AgentStatus Hashable: the count plus one matching
+// row for every CaseIterable value proves there is exactly one row per case.
+func runStatusVocabularyUnificationChecks() {
+    struct StatusCase {
+        let status: AgentStatus
+        let rowState: InboxState
+        let chipWord: String
+        let headerWord: String
+        let sidebarWord: String?
+        let foldReason: String?
+    }
+
+    let statuses: [StatusCase] = [
+        // The row owns five semantic states, so these are deliberate, named folds:
+        // the phone/chip preserve the persisted word while the live row owns its
+        // operational meaning (or, for a resting row, its attention word).
+        StatusCase(status: .configuring, rowState: .working, chipWord: "Configuring", headerWord: "Configuring", sidebarWord: "Working",
+                   foldReason: "configuring folds into the five-state working row"),
+        StatusCase(status: .working, rowState: .working, chipWord: "Working", headerWord: "Working", sidebarWord: "Working", foldReason: nil),
+        StatusCase(status: .idle, rowState: .ready, chipWord: "Idle", headerWord: "Idle", sidebarWord: nil,
+                   foldReason: "idle is the established unlabeled ready row; the live header says Idle"),
+        StatusCase(status: .needsAttention, rowState: .input, chipWord: "Needs attention", headerWord: "Needs attention", sidebarWord: "Needs attention", foldReason: nil),
+        StatusCase(status: .done, rowState: .ready, chipWord: "Done", headerWord: "Done", sidebarWord: nil,
+                   foldReason: "done is a terminal raw status folded into the resting row"),
+        StatusCase(status: .stale, rowState: .ready, chipWord: "Stale", headerWord: "Stale", sidebarWord: nil,
+                   foldReason: "stale is a terminal raw status folded into the resting row"),
+    ]
+    expect(statuses.count == AgentStatus.allCases.count,
+           "P3.5 exhaustive status table has \(statuses.count) rows for \(AgentStatus.allCases.count) AgentStatus cases")
+    for status in AgentStatus.allCases {
+        expect(statuses.filter { $0.status == status }.count == 1,
+               "P3.5 exhaustive status table has exactly one row for \(status.rawValue)")
+    }
+
+    let agentID = UUID(uuidString: "A3500000-0000-4000-8000-000000000001")!
+    let tileID = UUID(uuidString: "A3500000-0000-4000-8000-000000000002")!
+    let replicaID = UUID(uuidString: "A3500000-0000-4000-8000-000000000003")!
+    let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+    let expectedSnapshotKeys: Set<String> = ["snapshotSequence", "snapshotReplicaId", "byAgent"]
+    let expectedActivityKeys: Set<String> = ["status", "lastSummary", "recent", "updatedAt", "tileId"]
+    let expectedEventKeys: Set<String> = [
+        "sequence", "replicaId", "agentId", "tileId", "tone", "kind", "status", "summary",
+        "occurredAtReferenceInterval",
+    ]
+
+    for entry in statuses {
+        let chip = StatusChipPresenter.display(for: entry.status)
+        expect(chip.label == entry.chipWord,
+               "P3.5 chip label for \(entry.status.rawValue) is \(entry.chipWord), got \(chip.label)")
+        expect(AgentInventory.displayName(for: entry.status) == entry.chipWord,
+               "P3.5 phone display word for \(entry.status.rawValue) is \(entry.chipWord)")
+        expect(entry.headerWord == AgentStatusVocabulary.label(for: entry.status),
+               "P3.5 tile-header word for \(entry.status.rawValue) is \(entry.headerWord)")
+
+        // Exercise the production snapshot -> board projection -> live sidebar
+        // row path. A missing turn snapshot is the real phone/restore fallback;
+        // the operational turn cases below exercise the live supervisor join.
+        let phone = DegradedDesktopActivitySnapshotSource.snapshot(
+            descriptors: [], liveStatuses: [:], managedAgents: [
+                DesktopManagedAgentActivity(
+                    agentId: agentID, tileId: tileID, agentKind: .managed,
+                    status: entry.status, updatedAt: now)
+            ], replicaId: replicaID, now: now)
+        let rows = AgentInboxRowBuilder.rows(from: phone, now: now)
+        guard let row = rows.first(where: { $0.id == agentID }) else {
+            fputs("FAIL: P3.5 no sidebar row for \(entry.status.rawValue)\n", stderr)
+            Foundation.exit(1)
+        }
+        expect(row.state == entry.rowState,
+               "P3.5 live sidebar state for \(entry.status.rawValue) is \(entry.rowState.rawValue), got \(row.state.rawValue)")
+        expect(row.presentationLabel == entry.sidebarWord,
+               "P3.5 live sidebar word for \(entry.status.rawValue) is \(entry.sidebarWord ?? "nil"), got \(row.presentationLabel ?? "nil")")
+        if let foldReason = entry.foldReason {
+            expect(entry.sidebarWord != entry.chipWord,
+                   "P3.5 named fold for \(entry.status.rawValue) must be an observable divergence: \(foldReason)")
+        } else {
+            expect(row.presentationLabel == entry.chipWord,
+                   "P3.5 non-folded sidebar/chip word agrees for \(entry.status.rawValue)")
+        }
+
+        // Encode the actual DesktopCompanionSyncService source snapshot shape,
+        // then inspect the bytes' decoded object. No hand-built phone payload is
+        // accepted here: the status and summary must survive AgentInventory's
+        // production source and JSONEncoder boundary together.
+        let encoded = try! JSONEncoder().encode(phone)
+        let payload = try! JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+        expect(Set(payload.keys) == expectedSnapshotKeys,
+               "P3.5 encoded phone snapshot schema keys remain unchanged")
+        // UUID-keyed dictionaries use JSONEncoder's stable alternating
+        // key/value array representation. Assert that wire shape explicitly;
+        // treating it as a dictionary would test a hand-built schema instead of
+        // the actual DesktopCompanionSyncService bytes.
+        let byAgent = payload["byAgent"] as! [Any]
+        expect(byAgent.count == 2 && (byAgent[0] as! String) == agentID.uuidString,
+               "P3.5 encoded phone byAgent key/value shape remains unchanged")
+        let activity = byAgent[1] as! [String: Any]
+        expect(Set(activity.keys) == expectedActivityKeys,
+               "P3.5 encoded phone activity schema keys remain unchanged for \(entry.status.rawValue)")
+        let recent = activity["recent"] as! [[String: Any]]
+        expect(recent.count == 1 && Set(recent[0].keys) == expectedEventKeys,
+               "P3.5 encoded phone event schema keys remain unchanged for \(entry.status.rawValue)")
+        let decoded = try! JSONDecoder().decode(ActivityLogSnapshot.self, from: encoded)
+        let activityValue = decoded.byAgent[agentID]!
+        expect(activityValue.status == entry.status,
+               "P3.5 encoded phone status survives for \(entry.status.rawValue)")
+        expect(activityValue.lastSummary == "Managed agent \(entry.chipWord.lowercased())",
+               "P3.5 encoded phone summary uses the shared word for \(entry.status.rawValue)")
+        expect(taintCheck(payload).isEmpty,
+               "P3.5 encoded phone payload remains I5-clean for \(entry.status.rawValue)")
+        expect(SyncPayloadTaint.violations(inEncodedJSON: String(decoding: encoded, as: UTF8.self)).isEmpty,
+               "P3.5 encoded phone bytes remain I5-clean for \(entry.status.rawValue)")
+    }
+
+    let approval = AgentPendingRequest(
+        requestID: "p3.5-approval", prompt: "Approve", responseMode: .fixedChoice(["Approve"]), kind: .approval)
+    let input = AgentPendingRequest(
+        requestID: "p3.5-input", prompt: "Answer", responseMode: .freeform, kind: .input)
+    struct OperationalCase {
+        let name: String
+        let snapshot: AgentTileTurnSnapshot
+        let status: AgentStatus
+        let rowState: InboxState
+        let sidebarWord: String?
+        let headerWord: String
+        let phoneStatus: AgentStatus
+        let foldReason: String?
+    }
+    let operational: [OperationalCase] = [
+        OperationalCase(name: "ready", snapshot: AgentTileTurnSnapshot(state: .ready, capabilities: AgentTurnCapabilities(canSend: true, canStop: false, canSteer: false, canQueue: true), turnStartedAt: nil), status: .idle, rowState: .ready, sidebarWord: nil, headerWord: "Idle", phoneStatus: .idle,
+                        foldReason: "ready keeps the established unlabeled row while the tile/header says Idle"),
+        OperationalCase(name: "working", snapshot: AgentTileTurnSnapshot(state: .working, capabilities: AgentTurnCapabilities(canSend: false, canStop: true, canSteer: true, canQueue: false), turnStartedAt: now.addingTimeInterval(-30)), status: .working, rowState: .working, sidebarWord: "Working", headerWord: "Working", phoneStatus: .working, foldReason: nil),
+        OperationalCase(name: "queued", snapshot: AgentTileTurnSnapshot(state: .queued, capabilities: AgentTurnCapabilities(canSend: false, canStop: true, canSteer: false, canQueue: false), turnStartedAt: now.addingTimeInterval(-30)), status: .working, rowState: .working, sidebarWord: "Working", headerWord: "Working", phoneStatus: .working, foldReason: nil),
+        OperationalCase(name: "approval", snapshot: AgentTileTurnSnapshot(state: .needsAction(approval), capabilities: AgentTurnCapabilities(canSend: true, canStop: false, canSteer: false, canQueue: true), turnStartedAt: now.addingTimeInterval(-30)), status: .needsAttention, rowState: .approval, sidebarWord: "Needs attention", headerWord: "Needs attention", phoneStatus: .needsAttention, foldReason: nil),
+        OperationalCase(name: "input", snapshot: AgentTileTurnSnapshot(state: .needsAction(input), capabilities: AgentTurnCapabilities(canSend: true, canStop: false, canSteer: false, canQueue: true), turnStartedAt: now.addingTimeInterval(-30)), status: .needsAttention, rowState: .input, sidebarWord: "Needs attention", headerWord: "Needs attention", phoneStatus: .needsAttention, foldReason: nil),
+        OperationalCase(name: "failed", snapshot: AgentTileTurnSnapshot(state: .failed(message: "runtime"), capabilities: AgentTurnCapabilities(canSend: true, canStop: false, canSteer: false, canQueue: true), turnStartedAt: nil), status: .idle, rowState: .failed, sidebarWord: AgentStatusVocabulary.failed, headerWord: AgentStatusVocabulary.failed, phoneStatus: .idle,
+                        foldReason: "AgentStatus has no failure case yet, so the phone carries idle while the tile/header and row carry Failed"),
+        OperationalCase(name: "restored", snapshot: AgentTileTurnSnapshot(state: .restored, capabilities: AgentTurnCapabilities(canSend: true, canStop: false, canSteer: false, canQueue: true), turnStartedAt: nil), status: .idle, rowState: .ready, sidebarWord: nil, headerWord: "Idle", phoneStatus: .idle,
+                        foldReason: "restored is the idle/ready fold and keeps the established unlabeled row"),
+    ]
+
+    // This is the live supervisor-owned path. The app-side
+    // checkInboxStateAgreesWithTilePresenter invokes AgentTileStatePresenter on
+    // these same inputs; Core can still exercise the production row join and the
+    // encoded companion source without importing the App target.
+    for entry in operational {
+        let boardRow = AgentsBoardRow(
+            agentId: agentID, tileId: tileID, status: entry.phoneStatus,
+            lastSummary: "Status fixture", recent: [], updatedAt: now)
+        let row = AgentInboxRowBuilder.row(from: boardRow, turnSnapshot: entry.snapshot, now: now)
+        expect(row.state == entry.rowState,
+               "P3.5 live turn \(entry.name) projects to sidebar state \(entry.rowState.rawValue), got \(row.state.rawValue)")
+        expect(row.presentationLabel == entry.sidebarWord,
+               "P3.5 live turn \(entry.name) projects to sidebar word \(entry.sidebarWord ?? "nil"), got \(row.presentationLabel ?? "nil")")
+        let chipWord = StatusChipPresenter.display(for: entry.status).label
+        let expectedHeaderWord = entry.rowState == .failed ? AgentStatusVocabulary.failed : chipWord
+        expect(entry.headerWord == expectedHeaderWord,
+               "P3.5 live turn \(entry.name) pins the tile-header word \(entry.headerWord)")
+        expect(InboxState.state(forSnapshot: entry.snapshot) == entry.rowState,
+               "P3.5 live turn \(entry.name) uses the canonical row-state mapping")
+        if let foldReason = entry.foldReason {
+            let phoneWord = AgentStatusVocabulary.label(for: entry.phoneStatus)
+            expect(entry.headerWord != phoneWord || entry.headerWord != (entry.sidebarWord ?? ""),
+                   "P3.5 named live fold for \(entry.name) is observable: \(foldReason)")
+        } else {
+            expect(entry.headerWord == entry.sidebarWord,
+                   "P3.5 live turn \(entry.name) has one header/sidebar word")
+        }
+
+        let phone = DegradedDesktopActivitySnapshotSource.snapshot(
+            descriptors: [], liveStatuses: [:], managedAgents: [
+                DesktopManagedAgentActivity(
+                    agentId: agentID, tileId: tileID, agentKind: .managed,
+                    status: entry.phoneStatus, updatedAt: now)
+            ], replicaId: replicaID, now: now)
+        let encoded = try! JSONEncoder().encode(phone)
+        let payload = try! JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+        expect(Set(payload.keys) == expectedSnapshotKeys,
+               "P3.5 live turn \(entry.name) uses the unchanged phone schema")
+        let byAgent = payload["byAgent"] as! [Any]
+        expect(byAgent.count == 2 && (byAgent[0] as! String) == agentID.uuidString,
+               "P3.5 live turn \(entry.name) carries the unchanged byAgent key/value shape")
+        let activity = byAgent[1] as! [String: Any]
+        expect((activity["status"] as! String) == entry.phoneStatus.rawValue,
+               "P3.5 live turn \(entry.name) carries its phone status")
+        expect(taintCheck(payload).isEmpty,
+               "P3.5 live turn \(entry.name) encoded payload remains I5-clean")
+    }
+
+    // Unconfirmed is a local confidence modifier, not an AgentStatus. It is
+    // intentionally a named exception: the sidebar says Unconfirmed while the
+    // status-bearing chip/header/phone retain the underlying state word.
+    let unconfirmed = AgentInboxRow(
+        id: agentID, title: "Unobserved", state: .ready,
+        model: "openai-codex/test", createdAt: now, isUnconfirmed: true)
+    expect(unconfirmed.presentationLabel == AgentStatusVocabulary.unconfirmed,
+           "P3.5 unconfirmed uses the shared confidence word")
+    print("P3.5 status vocabulary: \(statuses.count) exhaustive raw states, \(operational.count) live turns, actual row join, encoded phone schema, named folds, and I5 boundary passed")
+}
+
 // Ticket: docs/38-tickets/90-agent-ux/P1.4-type-scale.md — the type scale held
 // against the REAL ReadabilityPolicy band boundary (AgentUIChecks cannot see Core).
 runTypographyReadabilityChecks()
@@ -10092,6 +10304,7 @@ runAgentStoreChecks()
 // Ticket: docs/38-tickets/90-agent-ux/P2B.1-agent-inventory.md — the union of
 // terminal sessions and agents (tiled or headless) as one value.
 runAgentInventoryChecks()
+runStatusVocabularyUnificationChecks()
 
 // Ticket: docs/38-tickets/90-agent-ux/P2B.3-row-context-join.md — which agent
 // this is: project / zone / title / model joined onto every row.

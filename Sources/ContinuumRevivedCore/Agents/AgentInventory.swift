@@ -146,7 +146,10 @@ public enum AgentInventory {
     /// A summary that is a LABEL, never a transcript body (I5, enforced at
     /// `AgentActivityEvent`).
     public static func safeSummary(name: String, status: AgentStatus) -> String {
-        "\(name) \(displayName(for: status))"
+        // This is the existing timeline summary contract, whose lowercase
+        // spelling is wire-compatible. Derive it from the same canonical word
+        // as every rendered surface rather than maintaining a second table.
+        "\(name) \(displayName(for: status).lowercased())"
     }
 
     public static func displayName(for kind: AgentKind) -> String {
@@ -160,15 +163,11 @@ public enum AgentInventory {
         }
     }
 
+    /// The phone summary carries the same status word as the chip, sidebar
+    /// status projection and tile compatibility presentation. It remains a
+    /// summary field; the phone payload schema is unchanged.
     public static func displayName(for status: AgentStatus) -> String {
-        switch status {
-        case .configuring: "configuring"
-        case .working: "working"
-        case .idle: "idle"
-        case .needsAttention: "needs attention"
-        case .done: "done"
-        case .stale: "stale"
-        }
+        AgentStatusVocabulary.label(for: status)
     }
 }
 

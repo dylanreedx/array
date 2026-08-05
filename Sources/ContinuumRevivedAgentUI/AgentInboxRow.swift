@@ -90,6 +90,22 @@ public enum AgentElapsedFormatter {
 // forced by the module boundary — same call P1.1 made when it moved `AgentStatus`
 // here for exactly this reason.
 
+/// The status words shared by the chip, sidebar, tile and phone. Keeping this
+/// table beside the shared status enum prevents each surface from growing a
+/// private spelling of the same state.
+public enum AgentStatusVocabulary {
+    public static func label(for status: AgentStatus) -> String {
+        StatusChipPresenter.display(for: status).label
+    }
+
+    /// Failure is an operational snapshot state rather than an AgentStatus. It
+    /// still needs one word on the tile header and the live sidebar, so it lives
+    /// beside the shared status vocabulary instead of being duplicated by either
+    /// surface.
+    public static let failed = "Failed"
+    public static let unconfirmed = "Unconfirmed"
+}
+
 /// What the agent is doing. FIVE STATES, and only three MEANINGS get colour:
 /// **in motion** (`working`), **act now** (`approval`, `input`) and **broken**
 /// (`failed`). The resting state is deliberately unlabelled and uncoloured.
@@ -136,18 +152,17 @@ public enum InboxState: String, CaseIterable, Equatable, Sendable {
 
     /// The state's own label, or **nil for `ready`** — same reason as `accent`.
     ///
-    /// This is the head of the packet's label priority
-    /// (`working → approval → input → failed → (woke) → (done) → relative
-    /// timestamp`): a state that carries a label wins the row's one label slot.
-    /// The tail belongs to its owners and is not invented here — `(woke)` is
-    /// `InboxAttention` (P3.3) and `(done)`/settled is `InboxLifecycle` (P4.1),
-    /// with the relative timestamp as the last resort when nothing above speaks.
+    /// The words here are the live sidebar's state vocabulary. `approval` and
+    /// `input` are two row meanings of the one `needsAttention` status, so both
+    /// deliberately use the chip/header word rather than inventing a second
+    /// sidebar spelling. `ready` remains unlabeled so the established attention
+    /// axis can give a resting+woke row its word; live ready/restored rows are the
+    /// named fold to the header's `Idle` below.
     public var label: String? {
         switch self {
-        case .working: return "Working"
-        case .approval: return "Approval"
-        case .input: return "Input"
-        case .failed: return "Failed"
+        case .working: return AgentStatusVocabulary.label(for: .working)
+        case .approval, .input: return AgentStatusVocabulary.label(for: .needsAttention)
+        case .failed: return AgentStatusVocabulary.failed
         case .ready: return nil
         }
     }
@@ -669,7 +684,11 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// The status words the row may paint. Unconfirmed is a confidence modifier,
     /// not a replacement state, and therefore leaves `state` unchanged.
     public var presentationLabel: String? {
-        isUnconfirmed ? "Unconfirmed" : label
+        // This is the live sidebar cell's seam. Keep the established label
+        // priority here so InboxAttention.woke remains visible on a resting row;
+        // `InboxState.label` now supplies the shared state words for working,
+        // needs-attention, and failed rows.
+        isUnconfirmed ? AgentStatusVocabulary.unconfirmed : label
     }
 
     /// The row's ONE label, resolved down the packet's priority:

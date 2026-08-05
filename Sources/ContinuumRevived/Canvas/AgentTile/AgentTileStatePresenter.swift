@@ -64,15 +64,15 @@ struct AgentTileStatePresenter {
         now: Date = Date()
     ) -> Presentation {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let display = StatusChipPresenter.display(for: status)
+        let label = AgentStatusVocabulary.label(for: status)
         let isTimed = status == .working || status == .needsAttention
         let effectiveStart = isTimed ? startedAt : nil
         let elapsed = effectiveStart.map { max(0, Int(now.timeIntervalSince($0))) }
-        let accessibleState = elapsed.map { "\(display.label), \($0) seconds elapsed" } ?? display.label
+        let accessibleState = elapsed.map { "\(label), \($0) seconds elapsed" } ?? label
         return Presentation(
             name: trimmedName.isEmpty ? "Agent" : trimmedName,
             status: status,
-            stateLabel: display.label,
+            stateLabel: label,
             stateAccessibilityLabel: accessibleState,
             revealRequestID: nil,
             availableActionDescription: "Operational actions unavailable on compatibility presentation",
@@ -88,12 +88,15 @@ struct AgentTileStatePresenter {
         switch snapshot.state {
         case .ready:
             let action = snapshot.capabilities.canSend ? "Send a prompt" : "No turn action available"
-            return (.idle, "Ready", "Agent is ready. \(action)", nil, action)
+            let label = AgentStatusVocabulary.label(for: .idle)
+            return (.idle, label, "Agent is \(label.lowercased()). \(action)", nil, action)
         case .working:
             let action = snapshot.capabilities.canStop ? "Stop current turn" : "No turn action available"
-            return (.working, "Working", "Agent is working. \(action)", nil, action)
+            let label = AgentStatusVocabulary.label(for: .working)
+            return (.working, label, "Agent is working. \(action)", nil, action)
         case .queued:
-            return (.working, "Queued", "Prompt is queued. No immediate turn action available", nil, "No immediate turn action available")
+            let label = AgentStatusVocabulary.label(for: .working)
+            return (.working, label, "Prompt is queued. No immediate turn action available", nil, "No immediate turn action available")
         case .needsAction(let request):
             let choices: String
             switch request.responseMode {
@@ -104,15 +107,17 @@ struct AgentTileStatePresenter {
             case .optionalNote(let values):
                 choices = "Choices: \(values.joined(separator: ", ")); an optional note is available"
             }
-            return (.needsAttention, "Needs action", "Agent needs action. \(request.prompt). \(choices)", request.requestID, "Reveal provider request")
+            let label = AgentStatusVocabulary.label(for: .needsAttention)
+            return (.needsAttention, label, "Agent needs action. \(request.prompt). \(choices)", request.requestID, "Reveal provider request")
         case .failed(let message):
             let detail = message?.trimmingCharacters(in: .whitespacesAndNewlines)
             let accessibility = detail.flatMap { $0.isEmpty ? nil : $0 }.map { "Agent turn failed. \($0)" } ?? "Agent turn failed"
             let action = snapshot.capabilities.canSend ? "Retry with a new prompt" : "No retry action available"
-            return (.idle, "Failed", "\(accessibility). \(action)", nil, action)
+            return (.idle, AgentStatusVocabulary.failed, "\(accessibility). \(action)", nil, action)
         case .restored:
             let action = snapshot.capabilities.canSend ? "Send a prompt to continue" : "No turn action available"
-            return (.idle, "Restored", "Agent was restored from a previous session. \(action)", nil, action)
+            let label = AgentStatusVocabulary.label(for: .idle)
+            return (.idle, label, "Agent was restored from a previous session. \(action)", nil, action)
         }
     }
 }

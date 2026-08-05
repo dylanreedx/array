@@ -2864,8 +2864,15 @@ private func checkCapabilityDrivenTurnStates<Failure: Error>(
     let restoredPresentation = AgentTileStatePresenter.present(
         name: "Checker", snapshot: restored, branchContext: nil, startedAt: nil
     )
-    guard queued.stateLabel == "Queued", queued.stateAccessibilityLabel.contains("No immediate"),
-          restoredPresentation.stateLabel == "Restored",
+    // P3.5 moved these two existing expectations with the shared vocabulary:
+    // queued is the live Working word and restored is the live Idle word. Keep
+    // the action/accessibility checks beside the migrated labels so the test
+    // still proves the real presenter did not drop the reason for either fold.
+    guard queued.stateLabel == "Working",
+          queued.status == .working,
+          queued.stateAccessibilityLabel.contains("No immediate"),
+          restoredPresentation.stateLabel == "Idle",
+          restoredPresentation.status == .idle,
           restoredPresentation.availableActionDescription == "Send a prompt to continue" else {
         throw fail("turn-state: queued/restored presentation omitted truthful action accessibility")
     }
@@ -7099,6 +7106,20 @@ func checkInboxStateAgreesWithTilePresenter<Failure: Error>(fail: (String) -> Fa
         throw fail("presenter-agreement: the case table covers \(Set(states.map(\.kindName)).count) of AgentTileOperationalState's 6 kinds — \(Set(states.map(\.kindName)).sorted())")
     }
 
+    // P3.5 migrates this existing row/tile agreement gate from state-only proof
+    // to the words the real compatibility presenter gives its header. The phone
+    // source and sidebar join are exercised by the matrix-wired Core check; this
+    // App-layer assertion keeps their shared vocabulary honest at the actual tile
+    // seam rather than accepting an unused helper as a proxy.
+    for status in AgentStatus.allCases {
+        let presentation = AgentTileStatePresenter.present(
+            name: "Agreement", status: status, branchContext: nil, startedAt: nil)
+        let expected = AgentStatusVocabulary.label(for: status)
+        guard presentation.stateLabel == expected else {
+            throw fail("presenter-agreement: raw \(status.rawValue) reads \(presentation.stateLabel) in the tile header, expected \(expected)")
+        }
+    }
+
     let now = Date(timeIntervalSince1970: 1_900_000_000)
     var rows: [String] = []
     for state in states {
@@ -7120,6 +7141,30 @@ func checkInboxStateAgreesWithTilePresenter<Failure: Error>(fail: (String) -> Fa
         var pending: PendingRequest?
         if case let .needsAction(request) = state { pending = request.kind }
         let theirs = AgentInboxRow.state(for: presented.status, pending: pending)
+        let expectedHeaderLabel: String
+        switch snapshot.state {
+        case .ready, .restored:
+            expectedHeaderLabel = AgentStatusVocabulary.label(for: .idle)
+        case .working, .queued:
+            expectedHeaderLabel = AgentStatusVocabulary.label(for: .working)
+        case .needsAction:
+            expectedHeaderLabel = AgentStatusVocabulary.label(for: .needsAttention)
+        case .failed:
+            expectedHeaderLabel = AgentStatusVocabulary.failed
+        }
+        guard presented.stateLabel == expectedHeaderLabel else {
+            throw fail("presenter-agreement: \(snapshot.state.kindName) reads \(presented.stateLabel) in the real tile header, expected \(expectedHeaderLabel)")
+        }
+        if snapshot.state.kindName == "ready" || snapshot.state.kindName == "restored" {
+            guard mine.label == nil else {
+                throw fail("presenter-agreement: the named \(snapshot.state.kindName) fold must keep the established unlabeled ready row while the tile says \(expectedHeaderLabel)")
+            }
+        } else {
+            guard mine.label == expectedHeaderLabel else {
+                throw fail("presenter-agreement: \(snapshot.state.kindName) reads \(mine.label ?? "nil") in the sidebar and \(expectedHeaderLabel) in the tile header")
+            }
+        }
+
         let isTheDivergence = snapshot.state.kindName == "failed"
         if isTheDivergence {
             guard mine == .failed, theirs == .ready else {
