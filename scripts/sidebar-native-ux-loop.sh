@@ -15,12 +15,13 @@ EXPECTED_BRANCH="${EXPECTED_BRANCH:-overnight/agent-ux}"
 MAX_ITER="${MAX_ITER:-60}"
 MAX_REPAIR_PASSES="${MAX_REPAIR_PASSES:-2}"
 PI_WORKER_MODELS="${PI_WORKER_MODELS:-openai-codex/gpt-5.6-luna}"
-PI_THINKING="${PI_THINKING:-max}"
-# Reviews read a diff; they do not design anything. Every real catch this program
-# has produced (a widened gate, a self-agreeing assertion, a clipped header lane)
-# was visible in the diff, and max-thinking review rounds were costing 15-25 min
-# each — the single largest latency in a ticket. Worker stays at max.
-PI_REVIEW_THINKING="${PI_REVIEW_THINKING:-high}"
+# medium, matching agent-tile-ux-loop.sh, which delivered ten tickets in one day
+# (07-30) with the same worker->review->matrix structure. This loop first ran at
+# max, which taxed every pass 3-4x in wall clock — 25-35 min worker passes and
+# 15-25 min reviews, twice per ticket — without preventing the gate-widening and
+# vacuous-assertion defects the reviews then had to catch anyway.
+PI_THINKING="${PI_THINKING:-medium}"
+PI_REVIEW_THINKING="${PI_REVIEW_THINKING:-medium}"
 ROOT_PI_DIR="${ROOT_PI_DIR:-$HOME/.pi}"
 CONTROL_DIR="${CONTROL_DIR:-$ROOT_PI_DIR/sidebar-native-ux-loop-control/$(basename "$(git rev-parse --show-toplevel)")}"
 RUN_ROOT="${RUN_ROOT:-$ROOT_PI_DIR/sidebar-native-ux-runs/$(basename "$(git rev-parse --show-toplevel)")}"
