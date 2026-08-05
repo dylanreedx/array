@@ -210,14 +210,19 @@ final class AgentSupervisor {
             warn("AgentSupervisor.restore: could not read the agent store: \(error)")
             return report
         }
-        for record in stored {
+        for storedRecord in stored {
             // An agent this session already owns wins over the stored copy: `records`
             // is the live one and the store trails it by at most one persist. This is
             // also what makes `restore()` safe to call twice.
-            if records[record.id] != nil {
-                report.skipped.append(record.id)
+            if records[storedRecord.id] != nil {
+                report.skipped.append(storedRecord.id)
                 continue
             }
+            var record = storedRecord
+            // Legacy records used model ids, role ids, UUIDs, or blank names. Read
+            // them defensively and rewrite the corrected record before the inbox can
+            // observe it, including when the project root is temporarily stale.
+            if record.migrateDisplayNameIfNeeded() { persist(record) }
             var isDirectory: ObjCBool = false
             guard fileManager.fileExists(atPath: record.cwd, isDirectory: &isDirectory), isDirectory.boolValue else {
                 staleIDs.insert(record.id)
@@ -358,7 +363,11 @@ final class AgentSupervisor {
         let now = Date()
         let record = AgentRecord(
             id: id,
-            displayName: role ?? model,
+            // A spawn path creates only the shared permission sentinel. The
+            // first prompt is named later, inside `send(_:to:)`, so no alternate
+            // spawn path can accidentally derive a title from model or role.
+            displayName: AgentRecord.defaultAgentName,
+            displayNameSource: .sentinel,
             role: role,
             model: model,
             thinking: thinking,
@@ -399,6 +408,17 @@ final class AgentSupervisor {
         if let inFlight = runners[id] {
             warn("AgentSupervisor.send: agent \(id.rawValue.uuidString) already has a prompt in flight (\(type(of: inFlight))); dropping \(prompt.count) chars")
             return
+        }
+        // This is the ONE automatic naming funnel. A later prompt cannot clobber
+        // the first name, and a manual rename disarms the gate even if somebody
+        // deliberately types the sentinel. No model call, spawn path, or worktree
+        // slug participates in display naming.
+        if record.displayName == AgentRecord.defaultAgentName,
+           record.displayNameSource == .sentinel,
+           let name = AgentName.fromPrompt(prompt),
+           !AgentName.isIdentifier(name, model: record.model, role: record.role, id: record.id.rawValue) {
+            record.displayName = name
+            record.displayNameSource = .prompt
         }
         record.lastActivityAt = Date()
         // P4.4: a user message is the plainest real activity there is, so a settle
@@ -1092,7 +1112,7 @@ final class AgentSupervisor {
     /// one truncating line and it crosses to the phone inside
     /// `AgentInventory.safeSummary`, where anything over 512 characters is a
     /// `transcriptBody` taint (`SyncPayloadTaintScanner`).
-    static let maximumDisplayNameLength = 60
+    static let maximumDisplayNameLength = AgentName.maximumLength
 
     /// User text, made into a label. Whitespace and newlines collapse to single
     /// spaces, the result is capped, and an ABSOLUTE PATH keeps only its last
@@ -1113,8 +1133,7 @@ final class AgentSupervisor {
         if label.hasPrefix("/") || label.hasPrefix("~") {
             label = (label as NSString).lastPathComponent
         }
-        guard !label.isEmpty else { return nil }
-        return String(label.prefix(AgentSupervisor.maximumDisplayNameLength))
+        return AgentName.normalizedLabel(label)
     }
 
     /// Give an agent a human name. The name is the RECORD's (`AgentRecord.displayName`),
@@ -1123,8 +1142,9 @@ final class AgentSupervisor {
     /// (`AgentContextIndex`, `AgentInboxRowBuilder`, `AgentInventory`).
     ///
     /// Returns whether anything changed: false for an agent this supervisor does not
-    /// have, for a name that sanitises to nothing, and for the name it already had —
-    /// so a caller cannot mistake a no-op for a write and re-render for nothing.
+    /// have, for a name that sanitises to nothing, and for an already-manual name.
+    /// An explicit rename to the unchanged sentinel still changes provenance: it
+    /// disarms first-prompt naming so the human choice cannot be clobbered.
     @discardableResult
     func rename(agentID id: AgentID, to name: String) -> Bool {
         guard var record = records[id] else {
@@ -1132,8 +1152,13 @@ final class AgentSupervisor {
             return false
         }
         guard let label = AgentSupervisor.sanitizedDisplayName(name) else { return false }
-        guard record.displayName != label else { return false }
-        record.displayName = label
+        if record.displayName == label {
+            guard record.displayNameSource != .manual else { return false }
+            record.displayNameSource = .manual
+        } else {
+            record.displayName = label
+            record.displayNameSource = .manual
+        }
         records[id] = record
         persist(record)
         return true
@@ -2375,6 +2400,7 @@ func runAgentSupervisorChecks() async throws {
     let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
     let composerKeyAssertions = try runComposerKeyContractChecks()
     let completionAssertions = try await runCompletionComposerChecks()
+    let namingReport = try await checkAgentNameContract(config: config, cwd: cwd, fail: fail)
 
     // The script is deliberately a real turn shape with DISTINCT events, so
     // "in order" is checkable and a dropped or reordered event is named.
@@ -2641,7 +2667,405 @@ func runAgentSupervisorChecks() async throws {
     let turnStateReport = try await checkCapabilityDrivenTurnStates(config: config, cwd: cwd, fail: fail)
 
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport)")
+}
+
+@MainActor
+private func checkAgentNameContract<Failure: Error>(
+    config: AgentModelConfig.Resolution,
+    cwd: URL,
+    fail: (String) -> Failure
+) async throws -> String {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-agent-name-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = AgentStore(applicationSupportDirectory: root)
+    let runner = ScriptedAgentRunner(script: [.sessionStateChanged(.ready)])
+    let supervisor = AgentSupervisor(store: store, makeRunner: { _ in runner })
+
+    // P4.1: every spawn starts with the one shared permission sentinel, never a
+    // role/model/UUID. P4.2: the first valid prompt is the only seed site.
+    let id = supervisor.spawn(
+        role: "operator",
+        prompt: nil,
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking
+    )
+    guard let initial = supervisor.records[id],
+          initial.displayName == AgentRecord.defaultAgentName,
+          initial.displayNameSource == .sentinel,
+          initial.displayName != config.model,
+          initial.displayName != "operator",
+          initial.displayName != id.rawValue.uuidString else {
+        throw fail("a new agent did not start with the shared sentinel instead of an identifier")
+    }
+
+    supervisor.send("Fix\n\tparser", to: id)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { runner.runCount == 1 && !supervisor.isRunning(id) }) else {
+        throw fail("the first prompt did not finish in the deterministic naming runner")
+    }
+    guard let first = supervisor.records[id],
+          first.displayName == "Fix parser",
+          first.displayNameSource == .prompt else {
+        throw fail("the first prompt did not seed the display name inside send(_:to:): \(String(describing: supervisor.records[id]?.displayName))")
+    }
+
+    // A second prompt must not overwrite the first, and a manual rename must
+    // remain authoritative afterwards.
+    supervisor.send("A later prompt must not win", to: id)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { runner.runCount == 2 && !supervisor.isRunning(id) }) else {
+        throw fail("the second deterministic prompt did not finish")
+    }
+    guard supervisor.records[id]?.displayName == "Fix parser" else {
+        throw fail("a later prompt clobbered the first prompt name")
+    }
+    guard supervisor.rename(agentID: id, to: "Human chosen") else {
+        throw fail("the manual name did not persist")
+    }
+    supervisor.send("A third prompt must not reseed", to: id)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { runner.runCount == 3 && !supervisor.isRunning(id) }) else {
+        throw fail("the third deterministic prompt did not finish")
+    }
+    guard supervisor.records[id]?.displayName == "Human chosen",
+          supervisor.records[id]?.displayNameSource == .manual else {
+        throw fail("a manually renamed agent was reseeded by a later prompt")
+    }
+
+    // The forwarded spawn prompt still travels through send, not makeAgent.
+    let forwarded = supervisor.spawn(
+        role: nil,
+        prompt: "Spawned\nworker",
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking
+    )
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { runner.runCount == 4 && !supervisor.isRunning(forwarded) }) else {
+        throw fail("the forwarded first prompt did not finish")
+    }
+    guard supervisor.records[forwarded]?.displayName == "Spawned worker" else {
+        throw fail("the forwarded first prompt did not use the send funnel")
+    }
+    let identifierPrompt = supervisor.spawn(
+        role: "operator",
+        prompt: nil,
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking
+    )
+    supervisor.send(config.model, to: identifierPrompt)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { runner.runCount == 5 && !supervisor.isRunning(identifierPrompt) }),
+          supervisor.records[identifierPrompt]?.displayName == AgentRecord.defaultAgentName else {
+        throw fail("a prompt equal to a model id produced an identifier-shaped display name")
+    }
+
+    // An explicit manual rename to the same sentinel text is still a write: it
+    // changes provenance and must disarm the only automatic naming gate.
+    let manuallyKeptSentinel = supervisor.spawn(
+        role: "operator",
+        prompt: nil,
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking
+    )
+    guard supervisor.rename(agentID: manuallyKeptSentinel, to: AgentRecord.defaultAgentName),
+          supervisor.records[manuallyKeptSentinel]?.displayNameSource == .manual,
+          try store.load(id: manuallyKeptSentinel)?.displayNameSource == .manual else {
+        throw fail("an explicit rename to the unchanged sentinel did not disarm automatic naming")
+    }
+    supervisor.send("A manual sentinel choice must survive", to: manuallyKeptSentinel)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { runner.runCount == 6 && !supervisor.isRunning(manuallyKeptSentinel) }),
+          supervisor.records[manuallyKeptSentinel]?.displayName == AgentRecord.defaultAgentName,
+          supervisor.records[manuallyKeptSentinel]?.displayNameSource == .manual else {
+        throw fail("a manual sentinel rename was overwritten by the next prompt")
+    }
+
+    // Deterministic edge corpus: empty/whitespace stay displayable through the
+    // sentinel; all other cases preserve human text, including marks and RTL.
+    let combiningOnly = "\u{301}\u{302}"
+    let edgeCases: [(String, String?)] = [
+        ("", nil),
+        (" \n\t ", nil),
+        ("Fix\nparser", "Fix parser"),
+        ("Cafe\u{301}", "Cafe\u{301}"),
+        (combiningOnly, nil),
+        ("\u{202E}שלום עולם\u{202C}", "שלום עולם"),
+        ("\u{0001}left\u{0000}right\u{007F}", "leftright"),
+    ]
+    for (prompt, expected) in edgeCases {
+        guard AgentName.fromPrompt(prompt) == expected else {
+            throw fail("prompt naming edge case \(prompt.debugDescription) produced \(String(describing: AgentName.fromPrompt(prompt))), expected \(String(describing: expected))")
+        }
+    }
+    let longPrompt = String(repeating: "long words ", count: 20)
+    guard let longName = AgentName.fromPrompt(longPrompt),
+          longName.count == AgentName.maximumLength,
+          longName.hasSuffix(AgentName.ellipsis),
+          AgentSupervisor.maximumDisplayNameLength == AgentName.maximumLength else {
+        throw fail("prompt naming did not apply one \(AgentName.maximumLength)-character cap with one ellipsis rule")
+    }
+    guard AgentRecord.defaultAgentName == AgentName.defaultName,
+          AgentInboxRow.untitled == AgentName.defaultName else {
+        throw fail("the sentinel has divergent record and row definitions")
+    }
+    let sourceReport = try checkAgentNameSentinelSourceContract(fail: fail)
+
+    // P4.1 migration: old disk records with model, role, and UUID titles are
+    // rewritten before they enter the live inventory. A title that is merely a
+    // human-cased role name remains a legitimate human name at the row boundary.
+    let migrationRoot = root.appendingPathComponent("migration", isDirectory: true)
+    let migrationStore = AgentStore(applicationSupportDirectory: migrationRoot)
+    let modelID = AgentID(rawValue: UUID())
+    let roleID = AgentID(rawValue: UUID())
+    let uuidID = AgentID(rawValue: UUID())
+    let manualModelID = AgentID(rawValue: UUID())
+    let manualRoleID = AgentID(rawValue: UUID())
+    let manualSuffixID = AgentID(rawValue: UUID())
+    let manualUUIDID = AgentID(rawValue: UUID())
+    let manualUUIDName = UUID(uuidString: "D4A10000-0000-4000-8000-000000000004")!.uuidString
+    let modelSuffix = config.model.split(separator: "/").last.map(String.init) ?? config.model
+    let migrationDate = Date(timeIntervalSinceReferenceDate: 806_700_000)
+    let oldRecords = [
+        AgentRecord(id: modelID, displayName: config.model, model: config.model, thinking: config.thinking,
+                    cwd: cwd.path, createdAt: migrationDate, lastActivityAt: migrationDate),
+        AgentRecord(id: roleID, displayName: "operator", role: "operator", model: config.model,
+                    thinking: config.thinking, cwd: cwd.path, createdAt: migrationDate.addingTimeInterval(1),
+                    lastActivityAt: migrationDate.addingTimeInterval(1)),
+        AgentRecord(id: uuidID, displayName: uuidID.rawValue.uuidString, model: config.model,
+                    thinking: config.thinking, cwd: cwd.path, createdAt: migrationDate.addingTimeInterval(2),
+                    lastActivityAt: migrationDate.addingTimeInterval(2)),
+    ]
+    // Simulate the actual pre-provenance wire shape: the old records have no
+    // displayNameSource key, so decode must classify identifier seeds as automatic
+    // rather than inventing `.manual` provenance for them.
+    try FileManager.default.createDirectory(
+        at: migrationStore.layout.agentsDirectory,
+        withIntermediateDirectories: true
+    )
+    for record in oldRecords {
+        guard var object = try JSONSerialization.jsonObject(
+            with: JSONCodec.makeEncoder().encode(record)) as? [String: Any] else {
+            throw fail("the legacy migration fixture did not encode as an object")
+        }
+        object.removeValue(forKey: "displayNameSource")
+        let legacyData = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        try legacyData.write(to: migrationStore.layout.agentFile(id: record.id))
+    }
+    let manualRecords = [
+        AgentRecord(id: manualModelID, displayName: config.model, displayNameSource: .manual,
+                    model: config.model, thinking: config.thinking, cwd: cwd.path,
+                    createdAt: migrationDate.addingTimeInterval(3), lastActivityAt: migrationDate.addingTimeInterval(3)),
+        AgentRecord(id: manualRoleID, displayName: "operator", displayNameSource: .manual,
+                    role: "operator", model: config.model, thinking: config.thinking, cwd: cwd.path,
+                    createdAt: migrationDate.addingTimeInterval(4), lastActivityAt: migrationDate.addingTimeInterval(4)),
+        AgentRecord(id: manualSuffixID, displayName: modelSuffix, displayNameSource: .manual,
+                    model: config.model, thinking: config.thinking, cwd: cwd.path,
+                    createdAt: migrationDate.addingTimeInterval(5), lastActivityAt: migrationDate.addingTimeInterval(5)),
+        AgentRecord(id: manualUUIDID, displayName: manualUUIDName, displayNameSource: .manual,
+                    model: config.model, thinking: config.thinking, cwd: cwd.path,
+                    createdAt: migrationDate.addingTimeInterval(6), lastActivityAt: migrationDate.addingTimeInterval(6)),
+    ]
+    for record in manualRecords { try migrationStore.upsert(record) }
+    let migratedSupervisor = AgentSupervisor(store: migrationStore, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+    _ = migratedSupervisor.restore()
+    for record in oldRecords {
+        guard migratedSupervisor.records[record.id]?.displayName == AgentRecord.defaultAgentName,
+              migratedSupervisor.records[record.id]?.displayNameSource == .sentinel,
+              try migrationStore.load(id: record.id)?.displayName == AgentRecord.defaultAgentName else {
+            throw fail("the persisted \(record.displayName) identifier name was not migrated to the sentinel")
+        }
+    }
+    for record in manualRecords {
+        guard migratedSupervisor.records[record.id]?.displayName == record.displayName,
+              migratedSupervisor.records[record.id]?.displayNameSource == .manual,
+              migratedSupervisor.records[record.id]?.humanDisplayName == record.displayName,
+              try migrationStore.load(id: record.id)?.displayName == record.displayName else {
+            throw fail("a provenance-confirmed manual identifier name was erased during migration: \(record.displayName)")
+        }
+    }
+    let humanRoleRow = AgentInboxRow(
+        id: UUID(), title: "Operator", state: .ready, model: config.model, role: "operator", createdAt: migrationDate)
+    let modelRow = AgentInboxRow(
+        id: UUID(), title: config.model, state: .ready, model: config.model, createdAt: migrationDate)
+    let roleRow = AgentInboxRow(
+        id: UUID(), title: "operator", state: .ready, model: config.model, role: "operator", createdAt: migrationDate)
+    let uuidRow = AgentInboxRow(
+        id: UUID(), title: uuidID.rawValue.uuidString, state: .ready, model: config.model, createdAt: migrationDate)
+    guard humanRoleRow.displayTitle == "Operator",
+          modelRow.displayTitle == AgentRecord.defaultAgentName,
+          roleRow.displayTitle == AgentRecord.defaultAgentName,
+          uuidRow.displayTitle == AgentRecord.defaultAgentName,
+          roleRow.model == config.model && roleRow.role == "operator" else {
+        throw fail("identifier-shaped row titles were not defensively projected while metadata stayed available")
+    }
+
+    // I5: a prompt-derived local title is replaced before the real inventory
+    // snapshot is encoded. This drives the companion-shaped payload, not a source
+    // scan or a hand-written string filter.
+    let promptToken = "prompt-derived---\(UUID().uuidString)"
+    let promptRecord = AgentRecord(
+        id: AgentID(rawValue: UUID()), displayName: promptToken, displayNameSource: .prompt,
+        model: config.model, thinking: config.thinking, cwd: cwd.path,
+        createdAt: migrationDate, lastActivityAt: migrationDate)
+    let inventory = AgentInventory.snapshot(
+        terminalDescriptors: [], liveStatuses: [:], agents: [promptRecord],
+        activityByAgent: [:], replicaId: UUID(), now: migrationDate)
+    let encoded = try JSONCodec.makeEncoder().encode(inventory)
+    let payload = String(decoding: encoded, as: UTF8.self)
+    guard !payload.contains(promptToken), payload.contains(AgentRecord.defaultAgentName) else {
+        throw fail("prompt-derived display text crossed the companion payload")
+    }
+
+    return "agent naming: sentinel-only spawn, first-send seed, repeat/manual no-clobber incl. manual sentinel disarm, identifier prompt held at sentinel, edge corpus \(edgeCases.count), \(AgentName.maximumLength)-character cap, model/role/UUID migration with manual provenance, row defensive read, \(sourceReport), and prompt I5 boundary"
+}
+
+private struct AgentNameSentinelSourceMatch {
+    let path: String
+    let line: Int
+}
+
+private func checkAgentNameSentinelSourceContract<Failure: Error>(
+    fail: (String) -> Failure
+) throws -> String {
+
+    // This is a lexical scan, not a grep: comments may explain the sentinel and
+    // string contents may contain comment markers. Only executable Swift string
+    // literals whose decoded value is the shared sentinel count.
+    func matches(in source: String, target: String, path: String) -> [AgentNameSentinelSourceMatch] {
+        let scalars = Array(source.unicodeScalars)
+        var matches: [AgentNameSentinelSourceMatch] = []
+        var index = 0
+        var line = 1
+
+        func isNewline(_ scalar: Unicode.Scalar) -> Bool { scalar.value == 10 }
+        func isQuote(_ scalar: Unicode.Scalar) -> Bool { scalar.value == 34 }
+        func isSlash(_ scalar: Unicode.Scalar) -> Bool { scalar.value == 47 }
+        func isStar(_ scalar: Unicode.Scalar) -> Bool { scalar.value == 42 }
+        func isHash(_ scalar: Unicode.Scalar) -> Bool { scalar.value == 35 }
+
+        while index < scalars.count {
+            let scalar = scalars[index]
+            if isNewline(scalar) { line += 1; index += 1; continue }
+
+            // Line and nested block comments are skipped before looking for a
+            // quote, so a prose example cannot satisfy the source contract.
+            if isSlash(scalar), index + 1 < scalars.count, isSlash(scalars[index + 1]) {
+                index += 2
+                while index < scalars.count, !isNewline(scalars[index]) { index += 1 }
+                continue
+            }
+            if isSlash(scalar), index + 1 < scalars.count, isStar(scalars[index + 1]) {
+                index += 2
+                var depth = 1
+                while index < scalars.count, depth > 0 {
+                    if isNewline(scalars[index]) { line += 1; index += 1; continue }
+                    if isSlash(scalars[index]), index + 1 < scalars.count, isStar(scalars[index + 1]) {
+                        depth += 1
+                        index += 2
+                    } else if isStar(scalars[index]), index + 1 < scalars.count, isSlash(scalars[index + 1]) {
+                        depth -= 1
+                        index += 2
+                    } else {
+                        index += 1
+                    }
+                }
+                continue
+            }
+
+            // Count a regular or raw string. A raw string's hashes are part of
+            // its delimiter; its body still contributes one lexical literal.
+            var hashCount = 0
+            var delimiterIndex = index
+            while delimiterIndex < scalars.count, isHash(scalars[delimiterIndex]) {
+                hashCount += 1
+                delimiterIndex += 1
+            }
+            guard delimiterIndex < scalars.count, isQuote(scalars[delimiterIndex]) else {
+                index += 1
+                continue
+            }
+
+            let openingQuote = delimiterIndex
+            let isMultiline = openingQuote + 2 < scalars.count
+                && isQuote(scalars[openingQuote + 1])
+                && isQuote(scalars[openingQuote + 2])
+            let startLine = line
+            index = openingQuote + (isMultiline ? 3 : 1)
+            var value = ""
+            var escaped = false
+            var closed = false
+            while index < scalars.count {
+                if isNewline(scalars[index]) { line += 1 }
+
+                if isQuote(scalars[index]) {
+                    let quoteCount = isMultiline ? 3 : 1
+                    if index + quoteCount - 1 < scalars.count,
+                       (0..<quoteCount).allSatisfy({ isQuote(scalars[index + $0]) }) {
+                        var closingHashIndex = index + quoteCount
+                        var closingHashes = 0
+                        while closingHashIndex < scalars.count,
+                              closingHashes < hashCount,
+                              isHash(scalars[closingHashIndex]) {
+                            closingHashes += 1
+                            closingHashIndex += 1
+                        }
+                        if closingHashes == hashCount {
+                            index = closingHashIndex
+                            closed = true
+                            break
+                        }
+                    }
+                }
+
+                if hashCount == 0, !isMultiline, scalars[index].value == 92 {
+                    // Interpolation and escaped text cannot be the exact plain
+                    // sentinel literal. Skip the escaped scalar while retaining
+                    // lexical correctness for the following quote.
+                    escaped = true
+                    index += min(2, scalars.count - index)
+                    continue
+                }
+                value.unicodeScalars.append(scalars[index])
+                index += 1
+            }
+            if closed, !escaped, value == target {
+                matches.append(AgentNameSentinelSourceMatch(path: path, line: startLine))
+            }
+        }
+        return matches
+    }
+
+    let sourceRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        .appendingPathComponent("Sources", isDirectory: true)
+    let files = (FileManager.default.enumerator(
+        at: sourceRoot,
+        includingPropertiesForKeys: nil,
+        options: [.skipsHiddenFiles]
+    )?.compactMap { $0 as? URL }
+        .filter { $0.pathExtension == "swift" }
+        .sorted { $0.path < $1.path }) ?? []
+    guard !files.isEmpty else {
+        throw fail("AgentName sentinel source contract: no Swift sources were scanned")
+    }
+
+    let rootPrefix = sourceRoot.path + "/"
+    var found: [AgentNameSentinelSourceMatch] = []
+    for file in files {
+        let source = try String(contentsOf: file, encoding: .utf8)
+        let relativePath = file.path.hasPrefix(rootPrefix)
+            ? String(file.path.dropFirst(rootPrefix.count))
+            : file.path
+        found += matches(in: source, target: AgentRecord.defaultAgentName, path: relativePath)
+    }
+
+    guard found.count == 1 else {
+        let locations = found.map { "\($0.path):\($0.line)" }.joined(separator: ", ")
+        throw fail("AgentName sentinel source contract: expected exactly one executable sentinel literal, found \(found.count): \(locations)")
+    }
+    guard found[0].path == "ContinuumRevivedAgentUI/AgentInboxRow.swift" else {
+        throw fail("AgentName sentinel source contract: canonical literal moved to \(found[0].path):\(found[0].line)")
+    }
+    return "sentinel source contract: 1 executable literal at \(found[0].path):\(found[0].line), comments excluded"
 }
 
 @MainActor
@@ -3041,7 +3465,7 @@ func runAgentRestoreChecks() async throws {
     let projectId = UUID()
     let tiled = AgentRecord(
         id: AgentID(rawValue: UUID()),
-        displayName: "reviewer",
+        displayName: "Human reviewer",
         role: "reviewer",
         model: config.model,
         thinking: config.thinking,
@@ -3053,7 +3477,11 @@ func runAgentRestoreChecks() async throws {
     )
     let headless = AgentRecord(
         id: AgentID(rawValue: UUID()),
+        // P4.1: this fixture represents the pre-provenance automatic model seed;
+        // explicit `.sentinel` provenance lets the migration check stay honest
+        // without misclassifying a confirmed manual model-shaped name.
         displayName: config.model,
+        displayNameSource: .sentinel,
         model: config.model,
         thinking: config.thinking,
         cwd: liveCwd,
@@ -3109,7 +3537,7 @@ func runAgentRestoreChecks() async throws {
     guard let restoredTiled = supervisor.records[tiled.id] else {
         throw fail("the tiled agent is not in supervisor.records after restore")
     }
-    guard restoredTiled.displayName == "reviewer",
+    guard restoredTiled.displayName == "Human reviewer",
           restoredTiled.role == "reviewer",
           restoredTiled.model == config.model,
           restoredTiled.thinking == config.thinking,
@@ -3121,6 +3549,11 @@ func runAgentRestoreChecks() async throws {
     }
     guard supervisor.records[headless.id]?.tileId == nil else {
         throw fail("the headless agent came back with a tile binding: \(String(describing: supervisor.records[headless.id]?.tileId))")
+    }
+    guard supervisor.records[headless.id]?.displayName == AgentRecord.defaultAgentName,
+          supervisor.records[headless.id]?.displayNameSource == .sentinel,
+          try store.load(id: headless.id)?.displayName == AgentRecord.defaultAgentName else {
+        throw fail("restore did not migrate the persisted model id to the shared sentinel")
     }
     // The conversation is continuable because the Pi session id is derived from the
     // agent id, which is what survived. Asserted, since "history is not lost"
@@ -3266,8 +3699,11 @@ func runAgentRestoreChecks() async throws {
     guard second.restored.isEmpty else {
         throw fail("a second restore re-adopted \(second.restored.count) record(s)")
     }
-    guard supervisor.records[headless.id]?.displayName == config.model else {
-        throw fail("a second restore clobbered the live record with the stored copy: \(String(describing: supervisor.records[headless.id]?.displayName))")
+    // This used to pin `displayName == config.model`, which was the old spawn
+    // bug. The assertion stays load-bearing: after the restored agent is prompted,
+    // a second restore must not clobber its first-prompt name with the doctored disk copy.
+    guard supervisor.records[headless.id]?.displayName == "continue please" else {
+        throw fail("a second restore clobbered the live first-prompt name with the stored copy: \(String(describing: supervisor.records[headless.id]?.displayName))")
     }
     guard supervisor.records.count == 3 else {
         throw fail("restoring twice duplicated records: \(supervisor.records.count)")

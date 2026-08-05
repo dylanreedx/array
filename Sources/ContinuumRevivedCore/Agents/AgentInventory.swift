@@ -137,8 +137,10 @@ public enum AgentInventory {
             tone: status == .needsAttention ? .approval : .info,
             kind: "desktop.managedStatus",
             status: status,
-            // `displayName` only — no cwd, no branch, no path (I5).
-            summary: safeSummary(name: record.displayName, status: status),
+            // The local record is host-bound and a prompt-derived display name
+            // is prompt text. Only the boundary-safe projection crosses here —
+            // never cwd, branch, or the raw prompt-derived title (I5).
+            summary: safeSummary(name: record.syncDisplayName, status: status),
             occurredAt: record.lastActivityAt
         )
     }

@@ -21401,7 +21401,9 @@ extension AppDelegate {
     try expect(scoped.pickScopeForQA(.project("continuum")),
                "the project scope must be pickable from the popup's own menu")
     scoped.layoutForQA()
-    let wantedTitles = InboxSort.sortForInbox(rows: fixture.filter { $0.projectName == "continuum" }).map(\.title)
+    // P4.1: the row's subject is its defensive human-facing projection, not a
+    // persisted model/role/UUID identifier that was migrated to the sentinel.
+    let wantedTitles = InboxSort.sortForInbox(rows: fixture.filter { $0.projectName == "continuum" }).map(\.displayTitle)
     try expect(scoped.titlesForQA == wantedTitles,
                "a project scope leaves that project's agents, in the frozen order — got \(scoped.titlesForQA)")
     try expect(scoped.rowCountForQA < fixture.count,
@@ -21410,7 +21412,7 @@ extension AppDelegate {
     // you cannot see, so the selection goes even though this row is still on screen.
     try expect(scoped.selectedRowCountForQA == 0,
                "a scope change clears the selection — \(scoped.selectedRowCountForQA) rows are still selected, and this one is still visible")
-    try expect(scoped.titlesForQA.contains(survivor.title),
+    try expect(scoped.titlesForQA.contains(survivor.displayTitle),
                "…with the row itself still in the list, which is what makes that a statement about the selection")
     try expect(picked == [.project("continuum")],
                "picking from the popup reports the scope so the host can persist it — got \(picked.map(\.title))")
@@ -21486,9 +21488,9 @@ extension AppDelegate {
     // scope rather than a coarser project.
     try expect(scoped.pickScopeForQA(.workspace("Overnight")), "the workspace scope must be pickable")
     scoped.layoutForQA()
-    try expect(Set(scoped.titlesForQA) == Set(fixture.filter { $0.workspaceName == "Overnight" }.map(\.title)),
+    try expect(Set(scoped.titlesForQA) == Set(fixture.filter { $0.workspaceName == "Overnight" }.map(\.displayTitle)),
                "a workspace scope keeps every project's agents in it — got \(scoped.titlesForQA)")
-    try expect(Set(scoped.titlesForQA.compactMap { title in fixture.first { $0.title == title }?.projectName }).count > 1,
+    try expect(Set(scoped.titlesForQA.compactMap { title in fixture.first { $0.displayTitle == title }?.projectName }).count > 1,
                "…and this fixture's workspace must span more than one project, or that says nothing")
 
     // A SCOPE THAT MATCHES NOTHING says so, and says which kind of nothing it is.
@@ -21510,13 +21512,13 @@ extension AppDelegate {
     scoped.openAgentId = elsewhere.id
     scoped.setScope(.project("continuum"))
     scoped.layoutForQA()
-    try expect(scoped.titlesForQA.contains(elsewhere.title),
+    try expect(scoped.titlesForQA.contains(elsewhere.displayTitle),
                "the agent open in the focused tile is in the list whatever the scope says — got \(scoped.titlesForQA)")
-    try expect(Set(scoped.titlesForQA) == Set(wantedTitles + [elsewhere.title]),
+    try expect(Set(scoped.titlesForQA) == Set(wantedTitles + [elsewhere.displayTitle]),
                "…and it is the only thing the force-include adds — got \(scoped.titlesForQA)")
     scoped.openAgentId = nil
     scoped.layoutForQA()
-    try expect(!scoped.titlesForQA.contains(elsewhere.title),
+    try expect(!scoped.titlesForQA.contains(elsewhere.displayTitle),
                "closing that tile lets the scope hide the row again — got \(scoped.titlesForQA)")
 
     // PERSISTENCE, in isolated defaults: the scope survives a relaunch, and a value
@@ -22602,8 +22604,10 @@ extension AppDelegate {
     // managed session is in it, because neither is "your agent is running elsewhere".
     try expect(sidebar.inboxForQA.excludedTerminalAgentCount == 1,
                "the excluded terminal agents must reach the list — got \(sidebar.inboxForQA.excludedTerminalAgentCount)")
-    try expect(sidebar.inboxForQA.titlesForQA.contains("orchestrator"),
-               "the headless agent's row is named by the record it owns — got \(sidebar.inboxForQA.titlesForQA)")
+    // P4.1: the persisted role id is defensive-read as the shared sentinel;
+    // the row still carries the role/model as metadata for its lower bands.
+    try expect(sidebar.inboxForQA.titlesForQA.contains(AgentRecord.defaultAgentName),
+               "the headless agent's row is named by the record's safe human projection — got \(sidebar.inboxForQA.titlesForQA)")
     try expect(!sidebar.isWorkspaceTreeVisibleForQA,
                "the workspace tree is no longer the sidebar's content — the sidebar IS the inbox")
     // The tree is still THERE, which is the packet's "do not delete it wholesale":

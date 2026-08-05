@@ -49,14 +49,31 @@ public struct AgentID: Hashable, Codable, Sendable {
     }
 }
 
+public enum AgentDisplayNameSource: String, Codable, Sendable {
+    /// The shared sentinel is the only title the supervisor may replace
+    /// automatically.
+    case sentinel
+    /// A person chose or renamed the title.
+    case manual
+    /// The title came from a user's prompt and is therefore tainted at sync
+    /// boundaries even after it has been shortened for the sidebar.
+    case prompt
+}
+
 public struct AgentRecord: Codable, Equatable, Sendable {
     public static let currentSchemaVersion = 1
+    /// Compatibility spelling for callers that need the sentinel beside the
+    /// record. The literal itself lives in `AgentName`, once, in AgentUI.
+    public static let defaultAgentName = AgentName.defaultName
 
     /// Decode-forward version marker, per `TerminalSessionDescriptor`'s precedent.
     public let schemaVersion: Int
     public let id: AgentID
     /// User-facing and renameable. NOT an identifier — see `role`.
     public var displayName: String
+    /// Provenance is local bookkeeping: prompt-derived names are replaced by the
+    /// sentinel before `AgentInventory` constructs a companion snapshot.
+    public var displayNameSource: AgentDisplayNameSource
     /// Id matching a `.pi/agents/<role>.md`. An id, never shown as a title.
     public var role: String?
     /// Fully-qualified model id — the exact catalogue entry, per P0.10's
@@ -129,6 +146,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         schemaVersion: Int = AgentRecord.currentSchemaVersion,
         id: AgentID,
         displayName: String,
+        displayNameSource: AgentDisplayNameSource = .manual,
         role: String? = nil,
         model: String,
         thinking: String,
@@ -149,6 +167,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         self.schemaVersion = schemaVersion
         self.id = id
         self.displayName = displayName
+        self.displayNameSource = displayNameSource
         self.role = role
         self.model = model
         self.thinking = thinking
@@ -167,6 +186,50 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         self.archivedAt = archivedAt
     }
 
+    /// Defensive read for legacy records that used a model id, role id, UUID, or
+    /// blank value as the title. The raw value remains available for migration
+    /// diagnostics, but every presentation path has a safe human projection.
+    public var displayNameIsIdentifier: Bool {
+        AgentName.isIdentifier(displayName, model: model, role: role, id: id.rawValue)
+    }
+
+    /// The local, human-facing title. Prompt provenance is intentionally retained
+    /// here for the desktop row; `syncDisplayName` is the boundary-safe twin.
+    public var humanDisplayName: String {
+        guard let label = AgentName.normalizedLabel(displayName),
+              displayNameSource == .manual || !displayNameIsIdentifier else {
+            return Self.defaultAgentName
+        }
+        return label
+    }
+
+    /// The only name projection allowed into an activity/sync snapshot. A prompt
+    /// name is useful locally but is prompt-derived text, so the payload gets the
+    /// non-sensitive sentinel instead.
+    public var syncDisplayName: String {
+        displayNameSource == .prompt ? Self.defaultAgentName : humanDisplayName
+    }
+
+    /// Normalize one record read from disk and report whether its bytes should be
+    /// rewritten. Identifier-shaped and blank legacy names become the sentinel;
+    /// ordinary names receive the same cap/whitespace policy as new names.
+    @discardableResult
+    public mutating func migrateDisplayNameIfNeeded() -> Bool {
+        let normalized = AgentName.normalizedLabel(displayName)
+        // A source marked `.manual` is provenance-confirmed, not a legacy guess.
+        // Identifier-shaped text is migrated only when it still carries an
+        // automatic source; an exact human choice such as `operator`, the model
+        // id/suffix, or a UUID is left intact.
+        let invalid = normalized == nil
+            || (displayNameIsIdentifier && displayNameSource != .manual)
+        let desiredName = invalid ? Self.defaultAgentName : (normalized ?? Self.defaultAgentName)
+        let desiredSource = invalid ? AgentDisplayNameSource.sentinel : displayNameSource
+        guard displayName != desiredName || displayNameSource != desiredSource else { return false }
+        displayName = desiredName
+        displayNameSource = desiredSource
+        return true
+    }
+
     // Dates are encoded as `timeIntervalSinceReferenceDate` Doubles, following
     // `AgentActivityEvent`'s precedent and for the same two reasons recorded
     // there: `JSONCodec.makeEncoder` uses `.iso8601` with no fractional-second
@@ -176,7 +239,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     // `timeIntervalSinceReferenceDate` IS Date's storage, so no arithmetic
     // conversion happens and the round-trip is exact.
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, id, displayName, role, model, thinking, cwd
+        case schemaVersion, id, displayName, displayNameSource, role, model, thinking, cwd
         case worktreeBranch, projectId, parentAgentID, sourceItemId
         case createdAtReferenceInterval, lastActivityAtReferenceInterval
         case tileId
@@ -198,6 +261,15 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         displayName = try container.decode(String.self, forKey: .displayName)
         role = try container.decodeIfPresent(String.self, forKey: .role)
         model = try container.decode(String.self, forKey: .model)
+        // A pre-provenance record has no source field. Identifier-shaped and
+        // blank legacy seeds were automatic, while every other old title is
+        // treated as a human name. A record that carries `.manual` is explicit
+        // provenance and must win even when its text happens to equal metadata.
+        displayNameSource = try container.decodeIfPresent(AgentDisplayNameSource.self, forKey: .displayNameSource)
+            ?? (AgentName.normalizedLabel(displayName) == nil
+                || AgentName.isIdentifier(displayName, model: model, role: role, id: id.rawValue)
+                ? .sentinel
+                : .manual)
         thinking = try container.decode(String.self, forKey: .thinking)
         cwd = try container.decode(String.self, forKey: .cwd)
         worktreeBranch = try container.decodeIfPresent(String.self, forKey: .worktreeBranch)
@@ -231,6 +303,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         try container.encode(schemaVersion, forKey: .schemaVersion)
         try container.encode(id, forKey: .id)
         try container.encode(displayName, forKey: .displayName)
+        try container.encode(displayNameSource, forKey: .displayNameSource)
         try container.encodeIfPresent(role, forKey: .role)
         try container.encode(model, forKey: .model)
         try container.encode(thinking, forKey: .thinking)

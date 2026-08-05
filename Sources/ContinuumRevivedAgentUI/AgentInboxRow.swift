@@ -1,5 +1,114 @@
 import Foundation
 
+/// The one human-name policy shared by the record, the prompt funnel, and every
+/// row surface. This is intentionally in the dependency-free AgentUI module:
+/// Core can consume it, while the row cannot import Core back.
+public enum AgentName {
+    /// The only automatic-overwrite permission. A second sentinel literal would
+    /// let one surface silently disagree with the name gate.
+    public static let defaultName = "New agent"
+    /// One cap for prompt-derived names and manual renames alike.
+    public static let maximumLength = 60
+    /// The one truncation marker, included in the cap above.
+    public static let ellipsis = "…"
+
+    /// Human-cased prompt twin of `WorktreeManager.slug`: preserve case and
+    /// punctuation, collapse whitespace, discard controls, then apply the one
+    /// cap. A prompt with no drawable content leaves the sentinel in place.
+    public static func fromPrompt(_ prompt: String) -> String? {
+        normalizedLabel(prompt)
+    }
+
+    /// Normalize a label without deriving anything from it. Grapheme-aware
+    /// prefixing keeps combining marks and emoji clusters intact.
+    public static func normalizedLabel(_ raw: String) -> String? {
+        var collapsed = ""
+        var pendingSpace = false
+        for scalar in raw.unicodeScalars {
+            if CharacterSet.whitespacesAndNewlines.contains(scalar) {
+                pendingSpace = !collapsed.isEmpty
+                continue
+            }
+            // Strip C0/C1 controls and the invisible bidi formatting marks that
+            // can otherwise make a title read in a different order than it is
+            // stored. Real RTL letters are retained.
+            if CharacterSet.controlCharacters.contains(scalar) || isBidiControl(scalar.value) {
+                continue
+            }
+            if pendingSpace {
+                collapsed.append(" ")
+                pendingSpace = false
+            }
+            collapsed.unicodeScalars.append(scalar)
+        }
+        guard !collapsed.isEmpty else { return nil }
+        // A string made only of combining marks has no stable drawable subject;
+        // keep the sentinel rather than rendering an apparently blank title.
+        guard collapsed.unicodeScalars.contains(where: { !CharacterSet.nonBaseCharacters.contains($0) }) else {
+            return nil
+        }
+        let characters = Array(collapsed)
+        guard characters.count > maximumLength else { return collapsed }
+        let prefixLength = maximumLength - ellipsis.count
+        return String(characters.prefix(prefixLength)) + ellipsis
+    }
+
+    /// Whether a stored/displayed title is an identifier rather than a human
+    /// name. Comparisons are exact apart from surrounding whitespace and UUID
+    /// parsing; broad "looks technical" heuristics would reject real names.
+    public static func isIdentifier(
+        _ raw: String,
+        model: String? = nil,
+        role: String? = nil,
+        id: UUID? = nil
+    ) -> Bool {
+        isModelIdentifier(raw, model: model)
+            || normalizedForComparison(raw) == role.map(normalizedForComparison)
+            || UUID(uuidString: normalizedForComparison(raw)) != nil
+            || (id.map { UUID(uuidString: normalizedForComparison(raw)) == $0 } ?? false)
+    }
+
+    public static func isModelIdentifier(_ raw: String, model: String?) -> Bool {
+        let candidate = normalizedForComparison(raw)
+        guard !candidate.isEmpty, let model else { return false }
+        let normalizedModel = normalizedForComparison(model)
+        guard !normalizedModel.isEmpty else { return false }
+        if candidate == normalizedModel { return true }
+        guard !candidate.contains("/"), normalizedModel.contains("/") else { return false }
+        return normalizedModel.split(separator: "/").last.map(String.init) == candidate
+    }
+
+    /// Render-safe title projection. Metadata remains on the row's model/role
+    /// fields; this function only protects the subject line.
+    public static func displayTitle(
+        _ raw: String,
+        model: String? = nil,
+        role: String? = nil,
+        id: UUID? = nil
+    ) -> String {
+        guard let label = normalizedLabel(raw),
+              !isIdentifier(raw, model: model, role: role, id: id) else {
+            return defaultName
+        }
+        return label
+    }
+
+    private static func normalizedForComparison(_ raw: String) -> String {
+        raw.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).joined(separator: " ")
+    }
+
+    private static func isBidiControl(_ value: UInt32) -> Bool {
+        switch value {
+        case 0x061C, 0x200E, 0x200F,
+             0x202A, 0x202B, 0x202C, 0x202D, 0x202E,
+             0x2066, 0x2067, 0x2068, 0x2069:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
 // Ticket: docs/38-tickets/94-sidebar-native-ux/P2.5-elapsed-formatter-column.md
 /// One duration vocabulary for every agent surface. The formatter deliberately
 /// keeps seconds only when they carry information, keeps hours in a two-digit
@@ -573,27 +682,33 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         branch?.isEmpty == false || isIsolated || AgentProviderGlyph.glyph(for: model) != nil
     }
 
-    /// A malformed or legacy row may have copied its model id into `title`. Keep
-    /// that identifier out of the name position without renaming or persisting the
-    /// agent here; Phase 4 owns the actual name source. The provider glyph and its
-    /// accessibility/help label still expose the model below the name.
+    /// A malformed or legacy row may have copied an identifier into `title`.
+    /// Keep model, role, and UUID identifiers out of the name position without
+    /// renaming or persisting the agent here; the record/supervisor owns that
+    /// migration. The metadata remains available below the name.
     public var titleIsModelIdentifier: Bool {
-        let candidate = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let model = model?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !candidate.isEmpty, !model.isEmpty else { return false }
-        if candidate == model { return true }
-        guard candidate.contains("/") || model.contains("/") else { return false }
-        return candidate.split(separator: "/").last.map(String.init)
-            == model.split(separator: "/").last.map(String.init)
+        AgentName.isModelIdentifier(title, model: model)
     }
 
-    /// The human-facing title the cell may paint. Empty names and model-id names
-    /// use the shared sentinel rather than leaving a blank line or putting an
-    /// identifier back in the subject position.
+    public var titleIsRoleIdentifier: Bool {
+        guard let role else { return false }
+        return AgentName.normalizedLabel(title) == AgentName.normalizedLabel(role)
+            && AgentName.isIdentifier(title, role: role)
+    }
+
+    public var titleIsUUIDIdentifier: Bool {
+        UUID(uuidString: title.trimmingCharacters(in: .whitespacesAndNewlines)) != nil
+    }
+
+    public var titleIsIdentifier: Bool {
+        AgentName.isIdentifier(title, model: model, role: role, id: id)
+    }
+
+    /// The human-facing title the cell may paint. Empty and identifier-shaped
+    /// names use the one shared sentinel rather than leaving a blank line or
+    /// putting an identifier back in the subject position.
     public var displayTitle: String {
-        let candidate = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !candidate.isEmpty, !titleIsModelIdentifier else { return Self.untitled }
-        return candidate
+        AgentName.displayTitle(title, model: model, role: role, id: id)
     }
 
     /// The number of lines the row's card will actually draw, including the
@@ -755,7 +870,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// session whose tile the sidebar tree does not place, or a caller that built
     /// rows with no context index at all. A row with an empty title would render
     /// as a blank line, which reads as a broken list rather than an unnamed agent.
-    public static let untitled = "Agent"
+    public static let untitled = AgentName.defaultName
 
     /// TOTAL by construction — every `AgentStatus` resolves to exactly one state,
     /// with no `default:` (adding a status is then a compile error here, which is
