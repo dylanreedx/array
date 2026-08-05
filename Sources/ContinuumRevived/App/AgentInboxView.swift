@@ -147,6 +147,10 @@ struct AgentInboxRowGeometryForQA {
     /// full tier, is the defect either half alone would miss. `nil` on a variant
     /// that has no tiers (the slim row is one line and drops nothing).
     let fitTier: RowFitTier?
+    /// The slim row's measured tier. Keeping it separate from the card ladder
+    /// makes the two sacrifice vocabularies explicit while exposing both from
+    /// the same live geometry seam.
+    let slimFitTier: SlimRowFitTier?
 }
 
 // Ticket: docs/38-tickets/94-sidebar-native-ux/P2.2-measured-fit-tiers.md
@@ -186,6 +190,25 @@ enum RowFitTier: String, CaseIterable {
     var drawsElapsed: Bool { self == .full }
     /// Whether this tier draws the project chip.
     var drawsProject: Bool { self != .captionHidden }
+}
+
+// Ticket: docs/38-tickets/94-sidebar-native-ux/P2.6-slim-variant-parity.md
+/// The slim row has one line rather than the card's three bands, so its measured
+/// sacrifice is the same decision in a smaller vocabulary: branch first, then
+/// the re-derivable relative-time metric, and the name last. The glyph and the
+/// name remain in every tier.
+enum SlimRowFitTier: String, CaseIterable {
+    /// Glyph, name, branch and relative time all fit in the line.
+    case full
+    /// The branch gives way before the time and the name.
+    case branchHidden
+    /// Only the glyph and name remain. A name may still elide here when its own
+    /// measured need is wider than the complete line — no tier can manufacture
+    /// room for a name that does not fit.
+    case timeHidden
+
+    var drawsBranch: Bool { self == .full }
+    var drawsTime: Bool { self != .timeHidden }
 }
 
 @MainActor
@@ -578,6 +601,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// the cell's now-live content and then clears this flag.
     private var needsHeightRevalidation = true
     private var isInvalidatingHeightsForWidth = false
+    /// A fractional width override used only by the offscreen content-height
+    /// witness. The normal view always reads the scroll viewport; the witness
+    /// keeps the host-frame resize on the same production invalidation path even
+    /// when a 1x clip view rounds its viewport before `layout()` can see it.
+    private var qaViewportWidthOverride: CGFloat?
 
     // Ticket: docs/38-tickets/90-agent-ux/P4.12-crossfade-in-place.md
     /// The OUTGOING cell of a row whose variant just moved, still on screen and
@@ -956,7 +984,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // previously narrowed table back to the new clip width by itself. The
         // sidebar has no horizontal scrolling, so the table's document lane is
         // always exactly the viewport lane before heights are re-asked.
-        let viewportWidth = scrollView.contentView.bounds.width
+        let viewportWidth = qaViewportWidthOverride ?? scrollView.contentView.bounds.width
         if viewportWidth > 0,
            tableView.frame.width != viewportWidth || column.width != viewportWidth {
             var frame = tableView.frame
@@ -2845,6 +2873,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// frame. Fractional divider checks use this value to prove the live resize
     /// crossed a fit tier by a real, bounded amount.
     var columnWidthForQA: Double { Double(column.width) }
+
+    /// The fractional content-height witness keeps its live child-host resize
+    /// on the production `layout()` invalidation path. AppKit rounds the clip
+    /// viewport at 1x before that path can see the sub-point width, so the seam
+    /// supplies the host's measured width without reimplementing row invalidation.
+    func setViewportWidthForQA(_ width: Double) {
+        qaViewportWidthOverride = CGFloat(width)
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+    }
 
     /// The live height for one agent, read from the table row rather than from
     /// `AgentInboxView.height(for:)`. Incremental-height probes use this before
@@ -5398,7 +5436,8 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
             paintedLines: card.qaPaintedLines,
             isFocusRingVisible: card.qaIsFocusRingVisible,
             accessibilityLabel: accessibilityLabel(),
-            fitTier: appliedTier
+            fitTier: appliedTier,
+            slimFitTier: nil
         )
     }
     var qaTitle: String { titleLabel.stringValue }
@@ -5456,7 +5495,13 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     private let titleLabel = NSTextField(labelWithString: "")
     private let branchLabel = NSTextField(labelWithString: "")
     private let timeLabel = NSTextField(labelWithString: "")
+    private var layoutColumnWidth: Double?
     private var leadingInset: NSLayoutConstraint?
+    private var branchMinimumWidth: NSLayoutConstraint?
+    private var branchCollapsedWidth: NSLayoutConstraint?
+    private var timeColumnWidth: NSLayoutConstraint?
+    private var timeCollapsedWidth: NSLayoutConstraint?
+    private var appliedTier: SlimRowFitTier?
     private var shown: (row: AgentInboxRow, emphasis: RowEmphasis, disclosure: RowDisclosure,
                         isInteracting: Bool, now: Date)?
 
@@ -5471,17 +5516,19 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
 
         titleLabel.font = .token(.title)
         titleLabel.lineBreakMode = .byTruncatingTail
-        // The title takes the slack (there is no spacer view in this line — an
-        // unconstrained one is what made a card's height ambiguous once already and
-        // the render coin-flip that followed it), and it truncates LAST: half a
-        // branch name still identifies the branch, half an agent name is the agent
-        // you were looking for.
+        // The name is the subject and yields LAST. The branch is the first
+        // optional fact to leave the one-line row, followed by its relative-time
+        // metric; the glyph and the name remain the purpose of the row.
+        titleLabel.setContentCompressionResistancePriority(
+            AgentInboxCellView.nameCompressionResistance, for: .horizontal)
         titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         branchLabel.font = .token(.label)
-        // Middle, for the same reason the card's branch line uses it.
+        // Middle, for the same reason the card's branch line uses it. Its live
+        // floor is retracted when the measured tier drops the branch entirely.
         branchLabel.lineBreakMode = .byTruncatingMiddle
-        branchLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        branchLabel.setContentCompressionResistancePriority(
+            AgentInboxCellView.branchCompressionResistance, for: .horizontal)
 
         timeLabel.font = .token(.captionMono)
         timeLabel.lineBreakMode = .byClipping
@@ -5491,10 +5538,13 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         disclosureButton.action = #selector(disclosureClicked)
 
         // A parked group folds too: a snoozed parent and its snoozed children are
-        // nested in the shelf the same way the live block nests.
+        // nested in the shelf the same way the live block nests. The line uses
+        // measured tiers below rather than letting Auto Layout choose which
+        // optional fact to squeeze.
         let line = NSStackView(views: [disclosureButton, glyphLabel, titleLabel, branchLabel, timeLabel])
         line.orientation = .horizontal
         line.alignment = .firstBaseline
+        line.distribution = .fill
         line.spacing = Space.m
         line.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(line)
@@ -5514,18 +5564,35 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
             // top+bottom pair on a flexible stack can.
             line.centerYAnchor.constraint(equalTo: card.centerYAnchor),
 
-            // The same floors the card row carries, for the same reason: a
-            // truncating label squeezed to a few points renders as a rect with no
-            // glyph in it, which `UIProbePixels` is right to call flat. The
-            // branch's is a YIELDING floor (see `yieldingMinimumWidth`): this line
-            // holds two incompressible labels — the state glyph and the time — and
-            // a required floor next to them is what breaks a required constraint.
+            // The name's minimum includes the NSTextField cell inset. Optional
+            // columns have matching zero-width constraints, so a dropped label
+            // cannot keep reserving the room the tier just gave to the name.
             titleLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: AgentInboxCellView.minimumTextWidth(.title)),
-            AgentInboxCellView.yieldingMinimumWidth(branchLabel, .label),
-            // Parked rows share their line with relative time. Keep that lane
-            // fixed from the shared formatter's widest relative forms so the
-            // name never changes width merely because the clock advanced.
-            timeLabel.widthAnchor.constraint(equalToConstant: AgentInboxSlimCellView.relativeTimeColumnWidth),
+            // The branch floor and the fixed time lane are installed below as
+            // switchable constraints, so a dropped column cannot retain a hidden
+            // width through a second anonymous constraint.
+        ])
+
+        let branchMinimum = AgentInboxCellView.yieldingMinimumWidth(branchLabel, .label)
+        branchMinimumWidth = branchMinimum
+        let branchCollapsed = branchLabel.widthAnchor.constraint(equalToConstant: 0)
+        branchCollapsedWidth = branchCollapsed
+        // The fixed time lane is a measured requirement while present, not an
+        // intrinsic width that can steal the name's line. A zero companion makes
+        // hiding it structural.
+        let timeColumn = timeLabel.widthAnchor.constraint(equalToConstant: AgentInboxSlimCellView.relativeTimeColumnWidth)
+        timeColumnWidth = timeColumn
+        let timeCollapsed = timeLabel.widthAnchor.constraint(equalToConstant: 0)
+        timeCollapsedWidth = timeCollapsed
+        // Start with both optional columns collapsed. `apply` switches these
+        // pairs from the measured tier after their live strings are known.
+        NSLayoutConstraint.deactivate([
+            branchMinimum,
+            timeColumn,
+        ])
+        NSLayoutConstraint.activate([
+            branchCollapsed,
+            timeCollapsed,
         ])
 
         // P3.10: an overlay here too — a parked row is one line, so a pill in the
@@ -5542,8 +5609,8 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     required init?(coder: NSCoder) { return nil }
 
     func setLayoutWidth(_ width: Double) {
-        // Slim rows have no measured-fit tiers; the method keeps the shared cell
-        // protocol honest when AppKit asks for either variant.
+        layoutColumnWidth = width
+        applyFitTier()
     }
 
     /// Ticket: docs/38-tickets/90-agent-ux/P2D.5-child-rollup.md
@@ -5568,6 +5635,121 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     /// `.active` (P4.2 recorded the same gap — the writers of the stored facts are
     /// P4.3–P4.6), so today the second path is a proof about a function rather than
     /// about a rendering. When a writer lands, that is the check to look at.
+    private func updateOptionalSlotConstraints() {
+        let drawsBranch = !branchLabel.isHidden && !branchLabel.stringValue.isEmpty
+        branchMinimumWidth?.isActive = drawsBranch
+        branchCollapsedWidth?.isActive = !drawsBranch
+
+        let drawsTime = !timeLabel.isHidden && !timeLabel.stringValue.isEmpty
+        timeColumnWidth?.isActive = drawsTime
+        timeCollapsedWidth?.isActive = !drawsTime
+    }
+
+    struct SlimRowFitNeeds: Equatable {
+        let glyph: Double
+        let title: Double
+        let branch: Double
+        let time: Double
+        let disclosure: Double
+
+        func total(drawsBranch: Bool, drawsTime: Bool) -> Double {
+            let widths = [glyph, title,
+                          drawsBranch ? branch : 0,
+                          drawsTime ? time : 0,
+                          disclosure]
+                .filter { $0 > 0 }
+            guard !widths.isEmpty else { return 0 }
+            return widths.reduce(0, +) + Space.m * Double(widths.count - 1)
+        }
+    }
+
+    /// Resolve the slim row's tier from measured need, not a sidebar-width
+    /// threshold. The fixed time lane is measured from the shared formatter's
+    /// widest relative form so a clock tick cannot take points back from the
+    /// name after the tier has been chosen.
+    static func fitTier(available: Double, needs: SlimRowFitNeeds) -> SlimRowFitTier {
+        if needs.total(drawsBranch: true, drawsTime: true) <= available {
+            return .full
+        }
+        if needs.branch > 0,
+           needs.total(drawsBranch: false, drawsTime: true) <= available {
+            return .branchHidden
+        }
+        return .timeHidden
+    }
+
+    static func fitTier(
+        for row: AgentInboxRow,
+        available: Double,
+        disclosure: RowDisclosure,
+        disclosureWidth: Double? = nil,
+        timeText: String? = nil
+    ) -> SlimRowFitTier {
+        // Height is fixed for the slim variant, so the live cell supplies the
+        // injected-clock string. A caller that only has the row still gets a
+        // conservative lifecycle-based presence answer for deterministic math.
+        let resolvedTime = timeText ?? {
+            switch row.lifecycle {
+            case .settled, .snoozed: return "present"
+            case .active, .archived: return ""
+            }
+        }()
+        let needs = SlimRowFitNeeds(
+            glyph: measuredTextWidth(glyph(for: row.state), .label),
+            title: AgentInboxCellView.measuredTextWidth(row.displayTitle, .title),
+            branch: AgentInboxCellView.measuredTextWidth(branchText(branch: row.branch), .label),
+            time: resolvedTime.isEmpty ? 0 : relativeTimeColumnWidth,
+            disclosure: disclosure == .none
+                ? 0
+                : disclosureWidth ?? measuredDisclosureWidth(disclosure))
+        return fitTier(available: available, needs: needs)
+    }
+
+    private static func measuredTextWidth(_ text: String, _ role: TextRole) -> Double {
+        AgentInboxCellView.measuredTextWidth(text, role)
+    }
+
+    private static func measuredDisclosureWidth(_ disclosure: RowDisclosure) -> Double {
+        guard disclosure != .none else { return 0 }
+        let button = InboxDisclosureButton()
+        button.show(disclosure)
+        return Double(button.fittingSize.width)
+    }
+
+    private func applyFitTier() {
+        guard let shown else { return }
+        let available = (layoutColumnWidth ?? Double(bounds.width))
+            - Double(leadingInset?.constant ?? 0) - Inset.row.horizontal
+        guard available > 0 else { return }
+        let tier = AgentInboxSlimCellView.fitTier(
+            for: shown.row,
+            available: available,
+            disclosure: shown.disclosure,
+            disclosureWidth: Double(disclosureButton.fittingSize.width),
+            timeText: timeLabel.stringValue)
+        guard tier != appliedTier else { return }
+        appliedTier = tier
+        branchLabel.isHidden = shown.row.branch?.isEmpty != false || !tier.drawsBranch
+        timeLabel.isHidden = timeLabel.stringValue.isEmpty || !tier.drawsTime
+        updateOptionalSlotConstraints()
+        applyRelocatedFacts()
+    }
+
+    /// A dropped branch or relative time is relocated into the cell's spoken
+    /// label. The sighted row keeps its name-first line; VoiceOver keeps every
+    /// fact the measured tier had to remove.
+    private func applyRelocatedFacts() {
+        guard self.shown != nil else { return }
+        var spoken = [titleLabel.stringValue]
+        if branchLabel.isHidden, !branchLabel.stringValue.isEmpty {
+            spoken.append(branchLabel.stringValue)
+        }
+        if timeLabel.isHidden, !timeLabel.stringValue.isEmpty {
+            spoken.append(timeLabel.stringValue)
+        }
+        setAccessibilityLabel(spoken.joined(separator: ", "))
+    }
+
     func apply(_ row: AgentInboxRow, emphasis: RowEmphasis, indent: Double,
                disclosure: RowDisclosure = .none, rollup: ChildRollup? = nil,
                isSelected: Bool = false,
@@ -5578,11 +5760,14 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         disclosureButton.show(disclosure)
 
         glyphLabel.stringValue = AgentInboxSlimCellView.glyph(for: row.state)
+        glyphLabel.setAccessibilityLabel(row.state.label ?? "Ready")
+        glyphLabel.setAccessibilityRole(.image)
         titleLabel.stringValue = row.displayTitle
         branchLabel.stringValue = AgentInboxSlimCellView.branchText(branch: row.branch)
         branchLabel.isHidden = branchLabel.stringValue.isEmpty
         timeLabel.stringValue = AgentInboxSlimCellView.relativeText(for: row.lifecycle, now: now)
         timeLabel.isHidden = timeLabel.stringValue.isEmpty
+        updateOptionalSlotConstraints()
 
         titleLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
         branchLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
@@ -5593,6 +5778,13 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
             label.alphaValue = emphasis.textOpacity
         }
         glyphLabel.alphaValue = isInteracting ? Opacity.full : Opacity.receded
+        appliedTier = nil
+        applyFitTier()
+    }
+
+    override func layout() {
+        super.layout()
+        applyFitTier()
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -5696,18 +5888,26 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
             inboxLabelGeometryForQA("branch", label: branchLabel, in: self),
             inboxLabelGeometryForQA("time", label: timeLabel, in: self),
         ]
+        var frames: [String: NSRect] = [
+            "cell": bounds,
+            "card": card.convert(card.bounds, to: self),
+            "glyph": labels[0].frame,
+            "title": labels[1].frame,
+            "branch": labels[2].frame,
+            "time": labels[3].frame,
+        ]
+        // A parent's fold triangle takes real room in the one line this variant
+        // has, so the tier oracle must be able to see it. Reported only when
+        // drawn: a parked parent whose cell HID the triangle to make room shows
+        // up as a missing entry, which is the defect, not a formatting choice.
+        if let disclosure = shown?.disclosure, disclosure != .none, !disclosureButton.isHidden {
+            frames["disclosure"] = disclosureButton.convert(disclosureButton.bounds, to: self)
+        }
         return AgentInboxRowGeometryForQA(
             agentID: shown?.row.id,
             state: shown?.row.state,
             variant: shown?.row.variant,
-            elementFrames: [
-                "cell": bounds,
-                "card": card.convert(card.bounds, to: self),
-                "glyph": labels[0].frame,
-                "title": labels[1].frame,
-                "branch": labels[2].frame,
-                "time": labels[3].frame,
-            ],
+            elementFrames: frames,
             labels: labels,
             paintedBorderWidth: card.layer.map { Double($0.borderWidth) },
             resolvedFill: card.layer?.backgroundColor,
@@ -5715,11 +5915,10 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
             paintedLines: card.qaPaintedLines,
             isFocusRingVisible: card.qaIsFocusRingVisible,
             accessibilityLabel: accessibilityLabel(),
-            // A parked row is ONE line holding four things and dropping none of
-            // them: it has no tier, and reporting `.full` would be a claim about a
-            // ladder this variant is not on. P2.6 gives the slim row its own
-            // parity pass.
-            fitTier: nil
+            // The slim row reports its own measured ladder rather than pretending
+            // to have resolved one of the card's three-band tiers.
+            fitTier: nil,
+            slimFitTier: appliedTier
         )
     }
     var qaTitle: String { titleLabel.stringValue }

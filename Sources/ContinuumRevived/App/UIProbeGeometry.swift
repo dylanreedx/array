@@ -518,7 +518,7 @@ enum UIProbeGeometry {
     private static func checkSidebarProbe(
         _ probe: SidebarProbeHost, rows: [AgentInboxRow], width: CGFloat,
         appearanceName: NSAppearance.Name
-    ) throws -> (cells: Int, labels: Int, truncated: Int, tiers: Set<RowFitTier>) {
+    ) throws -> (cells: Int, labels: Int, truncated: Int, tiers: Set<RowFitTier>, slimTiers: Set<SlimRowFitTier>) {
         let label = "sidebar-ux-check@\(Int(width))pt.\(appearanceName.rawValue)"
         let theme: TokenTheme = appearanceName == .darkAqua ? .dark : .light
         // Size the whole subtree first. Applying rows before this line is the
@@ -577,6 +577,7 @@ enum UIProbeGeometry {
         var truncatedCount = 0
         var paintedStates = Set<InboxState>()
         var observedTiers = Set<RowFitTier>()
+        var observedSlimTiers = Set<SlimRowFitTier>()
         for row in rows {
             guard let geometry = geometryByID[row.id],
                   geometry.state == row.state,
@@ -724,6 +725,12 @@ enum UIProbeGeometry {
             if row.variant == .card {
                 try expectRowBandsAndSacrificeOrder(geometry, row: row, label: label)
                 if let tier = geometry.fitTier { observedTiers.insert(tier) }
+            } else {
+                // Parenthood from the rows array, not the cell: the oracle must
+                // be able to catch a cell that hid its own triangle.
+                let hasChildren = rows.contains { $0.parentId == row.id }
+                try expectSlimRowFitTier(geometry, row: row, hasChildren: hasChildren, label: label)
+                if let slimTier = geometry.slimFitTier { observedSlimTiers.insert(slimTier) }
             }
         }
         guard paintedStates == Set(InboxState.allCases) else {
@@ -731,7 +738,7 @@ enum UIProbeGeometry {
         }
         // P1.3, over the whole subtree at this width and appearance.
         try expectHairlineContainment(probe.inbox, label: label)
-        return (cells.count, labelCount, truncatedCount, observedTiers)
+        return (cells.count, labelCount, truncatedCount, observedTiers, observedSlimTiers)
     }
 
     // MARK: - P2.1/P2.2 — three bands, one recorded order, one measured tier
@@ -888,6 +895,178 @@ enum UIProbeGeometry {
         if let elapsedText = AgentInboxCellView.elapsedText(row.elapsed), elapsed.isHidden {
             guard spoken.contains(elapsedText) else {
                 throw fail("\(label): '\(row.title)' dropped its elapsed column at \(tier.rawValue) without folding '\(elapsedText)' into the accessibility label — a dropped column is relocated, never deleted (P2.2)")
+            }
+        }
+    }
+
+    /// The slim variant's measured ladder, read from the same live labels as the
+    /// card gate. Branch and relative time may disappear, but the name is kept
+    /// whenever the glyph-plus-name line itself fits; hidden facts stay in the
+    /// cell's accessibility label.
+    private static func expectSlimRowFitTier(
+        _ geometry: AgentInboxRowGeometryForQA, row: AgentInboxRow, hasChildren: Bool,
+        label: String
+    ) throws {
+        guard let tier = geometry.slimFitTier else {
+            throw fail("\(label): '\(row.title)' is slim but resolved no measured slim tier")
+        }
+        var byElement: [String: AgentInboxLabelGeometryForQA] = [:]
+        for measurement in geometry.labels { byElement[measurement.element] = measurement }
+        guard let card = geometry.elementFrames["card"],
+              let glyph = byElement["glyph"],
+              let title = byElement["title"],
+              let branch = byElement["branch"],
+              let time = byElement["time"] else {
+            throw fail("\(label): '\(row.title)' slim geometry lost a glyph, name, branch or time label")
+        }
+        let available = Double(card.width) - Inset.row.horizontal
+
+        // The fold triangle. `hasChildren` comes from the ROWS ARRAY, never from
+        // the cell — a parked parent that hid its triangle to make the tier math
+        // work must fail here, and a cell-reported flag could not catch that.
+        // The independent need is a fresh InboxDisclosureButton measured outside
+        // the cell's layout, the same move as measuring the time lane from the
+        // formatter's own forms instead of the cell's constant.
+        let disclosureFrame = geometry.elementFrames["disclosure"]
+        if hasChildren {
+            guard let disclosureFrame, disclosureFrame.width > 0 else {
+                throw fail("\(label): '\(row.title)' is a parent, but its slim cell draws no fold triangle — a parent must never hide its disclosure to make room")
+            }
+        } else if disclosureFrame != nil {
+            throw fail("\(label): '\(row.title)' has no children but its slim cell draws a fold triangle")
+        }
+        let disclosureNeed: Double
+        if hasChildren {
+            let probeButton = InboxDisclosureButton()
+            probeButton.show(.expanded)
+            let expandedNeed = Double(probeButton.fittingSize.width)
+            probeButton.show(.collapsed)
+            let collapsedNeed = Double(probeButton.fittingSize.width)
+            disclosureNeed = max(expandedNeed, collapsedNeed)
+            if let disclosureFrame {
+                guard Double(disclosureFrame.width) + 0.5 >= min(expandedNeed, collapsedNeed) else {
+                    throw fail(String(
+                        format: "%@: '%@' slim disclosure lane is %.1fpt, below its measured %.1fpt need",
+                        label, row.title, Double(disclosureFrame.width), min(expandedNeed, collapsedNeed)))
+                }
+            }
+        } else {
+            disclosureNeed = 0
+        }
+
+        // Resolve the expected tier independently from the live text needs. This
+        // is deliberately not `AgentInboxSlimCellView.fitTier(...)`: a slim cell
+        // that drops the branch too early must disagree with this arithmetic, or
+        // the check would only prove that production agrees with itself. Measure
+        // each exact live string with its live font and include the 4pt NSTextField
+        // cell inset, just as the card ladder and drawable-width gate do.
+        func exactNeed(
+            _ measurement: AgentInboxLabelGeometryForQA, included: Bool
+        ) throws -> Double {
+            guard included else { return 0 }
+            guard let font = measurement.font else {
+                throw fail("\(label): '\(row.title)' slim \(measurement.element) label has no font for independent tier measurement")
+            }
+            return Double(ceil((measurement.text as NSString).size(withAttributes: [.font: font]).width))
+                + Metrics.cellTextInset
+        }
+        let hasBranch = row.branch?.isEmpty == false
+        let relative = AgentInboxSlimCellView.relativeText(
+            for: row.lifecycle, now: LabFixtures.inboxNow)
+        let hasRelativeTime = !relative.isEmpty
+        if hasBranch {
+            guard !branch.text.isEmpty else {
+                throw fail("\(label): '\(row.title)' has a branch fact but the live slim branch string is empty")
+            }
+        }
+        if hasRelativeTime {
+            guard time.text == relative else {
+                throw fail("\(label): '\(row.title)' live slim time '\(time.text)' disagrees with its measured relative time '\(relative)'")
+            }
+        }
+        let glyphNeed = try exactNeed(glyph, included: true)
+        let titleNeed = try exactNeed(title, included: true)
+        let branchNeed = try exactNeed(branch, included: hasBranch)
+        let timeTextNeed = try exactNeed(time, included: hasRelativeTime)
+        // The live time is exact above, but the layout deliberately reserves a
+        // stable lane for every bounded formatter form so a clock tick cannot
+        // retake the name's points. Re-measure that lane here rather than reading
+        // the slim cell's production constant; the exact live string remains part
+        // of the need via `max`.
+        let measuredTimeLaneNeed = AgentElapsedFormatter.columnLabels
+            .flatMap { ["\($0) ago", "in \($0)"] }
+            .map { candidate in
+                Double(ceil((candidate as NSString).size(withAttributes: [.font: NSFont.token(.captionMono)]).width))
+                    + Metrics.cellTextInset
+            }
+            .max() ?? Metrics.cellTextInset
+        let timeNeed = hasRelativeTime ? max(timeTextNeed, measuredTimeLaneNeed) : 0
+        func totalNeed(drawsBranch: Bool, drawsTime: Bool) -> Double {
+            // The disclosure participates exactly as production's
+            // `SlimRowFitNeeds.total` says it does: a positive width in the
+            // stack, paying its own `Space.m` gap. Omitting it here was round
+            // 2's blocking finding — the oracle agreed with production only
+            // because no checked slim fixture was a parent.
+            let widths = [glyphNeed, titleNeed,
+                          drawsBranch ? branchNeed : 0,
+                          drawsTime ? timeNeed : 0,
+                          disclosureNeed]
+                .filter { $0 > 0 }
+            return widths.reduce(0, +) + Space.m * Double(max(0, widths.count - 1))
+        }
+        let expected: SlimRowFitTier
+        if totalNeed(drawsBranch: true, drawsTime: true) <= available {
+            expected = .full
+        } else if hasBranch && totalNeed(drawsBranch: false, drawsTime: true) <= available {
+            expected = .branchHidden
+        } else {
+            expected = .timeHidden
+        }
+        guard tier == expected else {
+            throw fail(String(
+                format: "%@: '%@' resolved slim %@ with %.1fpt available, but measured need resolves %@",
+                label, row.title, tier.rawValue, available, expected.rawValue))
+        }
+        let shouldDrawBranch = hasBranch && tier.drawsBranch
+        let shouldDrawTime = hasRelativeTime && tier.drawsTime
+        guard branch.isHidden == !shouldDrawBranch,
+              time.isHidden == !shouldDrawTime else {
+            throw fail("\(label): '\(row.title)' slim tier \(tier.rawValue) disagrees with live branch/time visibility")
+        }
+        if branch.isHidden, let branchValue = row.branch {
+            let branchText = AgentInboxSlimCellView.branchText(branch: branchValue)
+            if !branchText.isEmpty {
+                guard geometry.accessibilityLabel?.contains(branchText) == true else {
+                    throw fail("\(label): '\(row.title)' dropped its branch without relocating '\(branchText)' to VoiceOver")
+                }
+            }
+        }
+        if time.isHidden, hasRelativeTime {
+            guard geometry.accessibilityLabel?.contains(relative) == true else {
+                throw fail("\(label): '\(row.title)' dropped its relative time without relocating '\(relative)' to VoiceOver")
+            }
+        }
+        let baseNeed = glyphNeed + titleNeed + Space.m
+        if baseNeed <= available + 0.01 {
+            guard title.drawableWidth + 0.5 >= titleNeed else {
+                throw fail(String(
+                    format: "%@: slim name '%@' elides with %.1fpt of glyph-plus-name room and %.1fpt needed — optional facts must yield before the name",
+                    label, title.text, available, titleNeed))
+            }
+        } else if title.drawableWidth + 0.5 < titleNeed {
+            guard tier == .timeHidden else {
+                throw fail("\(label): slim name '\(row.title)' elides before the branch/time sacrifices are exhausted")
+            }
+        }
+        guard branch.compressionResistance < title.compressionResistance,
+              title.compressionResistance == Double(AgentInboxCellView.nameCompressionResistance.rawValue),
+              glyph.compressionResistance == Double(NSLayoutConstraint.Priority.required.rawValue),
+              time.compressionResistance == Double(NSLayoutConstraint.Priority.required.rawValue) else {
+            throw fail("\(label): slim '\(row.title)' does not expose branch < name < required glyph/time compression resistance")
+        }
+        if !time.isHidden {
+            guard Double(time.frame.width) + 0.5 >= AgentInboxSlimCellView.relativeTimeColumnWidth else {
+                throw fail("\(label): slim '\(row.title)' time lane is \(time.frame.width)pt, below its measured \(AgentInboxSlimCellView.relativeTimeColumnWidth)pt column")
             }
         }
     }
@@ -1239,8 +1418,36 @@ enum UIProbeGeometry {
             // must shed its sole project band at 220pt and restore it at 320pt;
             // `noteHeightOfRows` is the part that keeps AppKit's cache in step with
             // the cell's width-driven tier.
-            let transitionProbe = try makeSidebarProbeHost(
+            let transitionRootProbe = try makeSidebarProbeHost(
                 width: 320, height: maxHeight, appearanceName: appearanceName)
+            // The window content view is device-pixel rounded by AppKit. Keep
+            // that window root fixed and put this one resize witness in a
+            // regular child host: its frame can express the original 0.5pt
+            // divider move while the cells remain attached to the live window.
+            let transitionHost = NSView(frame: transitionRootProbe.host.bounds)
+            transitionHost.autoresizingMask = []
+            let transitionInbox = transitionRootProbe.inbox
+            let inboxConstraints = transitionRootProbe.host.constraints.filter { constraint in
+                (constraint.firstItem as? NSView) === transitionInbox
+                    || (constraint.secondItem as? NSView) === transitionInbox
+            }
+            transitionRootProbe.host.removeConstraints(inboxConstraints)
+            transitionInbox.removeFromSuperview()
+            transitionRootProbe.host.addSubview(transitionHost)
+            transitionInbox.translatesAutoresizingMaskIntoConstraints = true
+            transitionHost.addSubview(transitionInbox)
+            transitionInbox.frame = transitionHost.bounds
+            let transitionProbe = SidebarProbeHost(
+                window: transitionRootProbe.window, host: transitionHost, inbox: transitionInbox)
+            func layoutTransitionHost(width: CGFloat) {
+                var frame = transitionProbe.host.frame
+                frame.size.width = width
+                transitionProbe.host.frame = frame
+                transitionProbe.inbox.frame = transitionProbe.host.bounds
+                transitionProbe.host.layoutSubtreeIfNeeded()
+                transitionProbe.inbox.layoutForQA()
+                transitionProbe.inbox.setViewportWidthForQA(Double(width))
+            }
             transitionProbe.inbox.reload(rows: [resizingRow])
             transitionProbe.inbox.layoutForQA()
             transitionProbe.host.layoutSubtreeIfNeeded()
@@ -1307,11 +1514,7 @@ enum UIProbeGeometry {
             // The two widths straddle a measured tier boundary by a fractional
             // divider move. A point-sized invalidation tolerance would leave this
             // transition stale even though the drawn project band changes.
-            var fractionalFrame = transitionProbe.host.frame
-            fractionalFrame.size.width = CGFloat(fractionalAbove)
-            transitionProbe.host.frame = fractionalFrame
-            transitionProbe.host.layoutSubtreeIfNeeded()
-            transitionProbe.inbox.layoutForQA()
+            layoutTransitionHost(width: CGFloat(fractionalAbove))
             let fractionalWideGeometry = transitionProbe.inbox.qaRowGeometriesForQA.first
             let fractionalWideColumnWidth = transitionProbe.inbox.columnWidthForQA
             let fractionalWideHeight = transitionProbe.inbox.rowHeightForQA(id: resizingRow.id)
@@ -1327,10 +1530,7 @@ enum UIProbeGeometry {
                     String(describing: fractionalWideGeometry?.labels.first(where: { $0.element == "project" })?.isHidden),
                     fractionalWideHeight ?? -1, transitionTwoLineHeight))
             }
-            fractionalFrame.size.width = CGFloat(fractionalBelow)
-            transitionProbe.host.frame = fractionalFrame
-            transitionProbe.host.layoutSubtreeIfNeeded()
-            transitionProbe.inbox.layoutForQA()
+            layoutTransitionHost(width: CGFloat(fractionalBelow))
             let fractionalNarrowGeometry = transitionProbe.inbox.qaRowGeometriesForQA.first
             let fractionalNarrowColumnWidth = transitionProbe.inbox.columnWidthForQA
             let fractionalNarrowHeight = transitionProbe.inbox.rowHeightForQA(id: resizingRow.id)
@@ -1360,8 +1560,7 @@ enum UIProbeGeometry {
 
             transitionProbe.window.setContentSize(
                 NSSize(width: CGFloat(WorkspaceSidebarConfig.minWidth), height: maxHeight))
-            transitionProbe.host.layoutSubtreeIfNeeded()
-            transitionProbe.inbox.layoutForQA()
+            layoutTransitionHost(width: CGFloat(WorkspaceSidebarConfig.minWidth))
             guard let narrowGeometry = transitionProbe.inbox.qaRowGeometriesForQA.first,
                   narrowGeometry.fitTier == .captionHidden,
                   narrowGeometry.labels.first(where: { $0.element == "project" })?.isHidden == true,
@@ -1378,8 +1577,7 @@ enum UIProbeGeometry {
 
             transitionProbe.window.setContentSize(
                 NSSize(width: CGFloat(WorkspaceSidebarConfig.defaultWidth), height: maxHeight))
-            transitionProbe.host.layoutSubtreeIfNeeded()
-            transitionProbe.inbox.layoutForQA()
+            layoutTransitionHost(width: CGFloat(WorkspaceSidebarConfig.defaultWidth))
             try expectRenameEditorToFollowTitle("the default-width resize")
             let middleTier = AgentInboxCellView.fitTier(
                 for: resizingRow,
@@ -1398,8 +1596,7 @@ enum UIProbeGeometry {
             }
 
             transitionProbe.window.setContentSize(NSSize(width: 320, height: maxHeight))
-            transitionProbe.host.layoutSubtreeIfNeeded()
-            transitionProbe.inbox.layoutForQA()
+            layoutTransitionHost(width: 320)
             let restoredGeometry = transitionProbe.inbox.qaRowGeometriesForQA.first
             let restoredHeight = transitionProbe.inbox.rowHeightForQA(id: resizingRow.id)
             guard restoredGeometry?.fitTier == .full,
@@ -1872,6 +2069,267 @@ enum UIProbeGeometry {
         return asserted
     }
 
+    // MARK: - P2.6 — slim variant parity
+
+    /// The slim row reuses the card's surface view, but this gate drives the
+    /// interaction inputs through an actual slim cell at every shipping width
+    /// and appearance. A card-only ladder would let a separate slim view drift
+    /// while all of the existing P1.2/P1.4 checks stayed green.
+    private static func checkSidebarSlimVariantParity(
+        rows: [AgentInboxRow], probeHeight: CGFloat
+    ) throws -> Int {
+        guard let slim = rows.first(where: { $0.variant == .slim }),
+              let card = rows.first(where: { $0.variant == .card }) else {
+            throw fail("sidebar-ux-check.slim-parity: corpus must contain both a slim and a card row")
+        }
+        let widths: [CGFloat] = [
+            CGFloat(WorkspaceSidebarConfig.minWidth),
+            CGFloat(WorkspaceSidebarConfig.defaultWidth),
+            320,
+        ]
+        var asserted = 0
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            NSApp?.appearance = NSAppearance(named: appearanceName)
+            let theme: TokenTheme = appearanceName == .darkAqua ? .dark : .light
+            for width in widths {
+                let label = "sidebar-ux-check.slim-parity@\(Int(width))pt.\(appearanceName.rawValue)"
+                let probe = try makeSidebarProbeHost(
+                    width: width, height: probeHeight, appearanceName: appearanceName)
+                probe.inbox.clock = { LabFixtures.inboxNow }
+                probe.inbox.toggleShelf()
+                probe.host.layoutSubtreeIfNeeded()
+                probe.inbox.reload(rows: rows)
+                probe.inbox.layoutForQA()
+                probe.host.layoutSubtreeIfNeeded()
+                probe.inbox.layoutForQA()
+
+                func geometry(for id: UUID) throws -> AgentInboxRowGeometryForQA {
+                    guard let geometry = probe.inbox.qaRowGeometriesForQA.first(where: { $0.agentID == id }) else {
+                        throw fail("\(label): missing live geometry for \(id.uuidString)")
+                    }
+                    return geometry
+                }
+
+                // Resting paint is the same unfilled card surface, with the same
+                // zero perimeter and no shadow, on both cell classes.
+                let restingCard = try geometry(for: card.id)
+                let restingSlim = try geometry(for: slim.id)
+                for (row, geometry) in [(card, restingCard), (slim, restingSlim)] {
+                    guard geometry.surfaceRole == .resting else {
+                        throw fail("\(label): \(row.title) resting row resolved \(geometry.surfaceRole?.rawValue ?? "nil")")
+                    }
+                    try expectRowFill(geometry, role: .resting, row: row, theme: theme, label: label)
+                    try expectRowLines(geometry, row: row, label: label)
+                }
+                guard hex(restingCard.resolvedFill) == hex(restingSlim.resolvedFill) else {
+                    throw fail("\(label): card and slim resting rows do not share one fill")
+                }
+                asserted += 1
+
+                // Selection is the same fill on both variants; the live tree,
+                // rather than the shared class name, is the assertion.
+                guard probe.inbox.selectRowsForQA(ids: [card.id, slim.id]) else {
+                    throw fail("\(label): card and slim rows could not both be selected")
+                }
+                probe.inbox.rebuildRowsForQA()
+                let selectedCard = try geometry(for: card.id)
+                let selectedSlim = try geometry(for: slim.id)
+                guard selectedCard.surfaceRole == .selected,
+                      selectedSlim.surfaceRole == .selected,
+                      hex(selectedCard.resolvedFill) == hex(selectedSlim.resolvedFill) else {
+                    throw fail("\(label): card/slim selection did not resolve to one shared fill")
+                }
+                for (row, geometry) in [(card, selectedCard), (slim, selectedSlim)] {
+                    try expectRowLines(geometry, row: row, label: label)
+                }
+                asserted += 1
+
+                // Hover must outrank the quieter selected state on the slim
+                // variant too, without borrowing a border or shadow.
+                guard probe.inbox.hoverRowForQA(id: slim.id) else {
+                    throw fail("\(label): slim row could not be hovered")
+                }
+                probe.inbox.rebuildRowsForQA()
+                let hoveredSlim = try geometry(for: slim.id)
+                guard hoveredSlim.surfaceRole == .hover else {
+                    throw fail("\(label): hovered slim row resolved \(hoveredSlim.surfaceRole?.rawValue ?? "nil")")
+                }
+                try expectRowFill(hoveredSlim, role: .hover, row: slim, theme: theme, label: label)
+                try expectRowLines(hoveredSlim, row: slim, label: label)
+                asserted += 1
+
+                // Route-active is the loudest step, and focus is a separate
+                // temporary ring. Both are asked of the slim cell itself.
+                _ = probe.inbox.hoverRowForQA(id: nil)
+                probe.inbox.openAgentId = slim.id
+                probe.inbox.layoutForQA()
+                probe.inbox.rebuildRowsForQA()
+                let activeSlim = try geometry(for: slim.id)
+                guard activeSlim.surfaceRole == .active else {
+                    throw fail("\(label): route-active slim row resolved \(activeSlim.surfaceRole?.rawValue ?? "nil")")
+                }
+                try expectRowFill(activeSlim, role: .active, row: slim, theme: theme, label: label)
+                try expectRowLines(activeSlim, row: slim, label: label)
+                asserted += 1
+
+                probe.inbox.openAgentId = nil
+                guard probe.inbox.selectRowForQA(id: slim.id),
+                      probe.inbox.focusRowByKeyboardForQA(id: slim.id) else {
+                    throw fail("\(label): slim row could not take keyboard focus")
+                }
+                probe.inbox.rebuildRowsForQA()
+                let focusedSlim = try geometry(for: slim.id)
+                guard focusedSlim.surfaceRole == .selected,
+                      focusedSlim.isFocusRingVisible,
+                      focusedSlim.paintedLines["focusRing.border"] == LineWidth.hairline,
+                      focusedSlim.paintedLines["card.border"] == 0,
+                      focusedSlim.paintedLines["card.shadowOpacity"] == 0 else {
+                    throw fail("\(label): slim focus treatment did not use the shared hairline ring without a card border")
+                }
+                asserted += 1
+            }
+        }
+        asserted += try checkSlimTierReachabilityAndDisclosedParent(probeHeight: probeHeight)
+        return asserted
+    }
+
+    /// Round 2 of P2.6's review: the corpus's slim rows are all top-level
+    /// leaves, so the tier ladder's other rungs and the fold triangle's part in
+    /// the arithmetic were unproved. Both are proved here on live cells with
+    /// rows engineered from their own measurements — the same move as the card
+    /// ladder's middle rung, and for the same reason: the corpus may not grow a
+    /// fixture (P0.3 is pinned), and a tier nothing reaches is not a tier.
+    private static func checkSlimTierReachabilityAndDisclosedParent(
+        probeHeight: CGFloat
+    ) throws -> Int {
+        let settledAt = LabFixtures.inboxNow.addingTimeInterval(-300)
+        func slimRow(_ id: String, title: String, branch: String? = nil, parent: UUID? = nil) -> AgentInboxRow {
+            AgentInboxRow(
+                id: UUID(uuidString: id)!, title: title, projectName: nil,
+                state: .ready, lifecycle: .settled(at: settledAt),
+                model: "openai-codex/gpt-5.6-luna", branch: branch,
+                createdAt: settledAt.addingTimeInterval(-60), parentId: parent)
+        }
+        // Reached tiers, engineered: a short leaf that must keep everything, a
+        // branched leaf whose branch is wider than a 220pt line, and a leaf
+        // whose name alone is wider than a 320pt line.
+        let tiny = slimRow("6D000000-0000-4000-8000-000000000001", title: "Fix")
+        let branchy = slimRow(
+            "6D000000-0000-4000-8000-000000000002", title: "Nightly rebase",
+            branch: "agent/very-long-branch-name-that-cannot-share-a-narrow-line")
+        let sprawl = slimRow(
+            "6D000000-0000-4000-8000-000000000003",
+            title: String(repeating: "measured ", count: 12))
+        var asserted = 0
+        var reached = Set<SlimRowFitTier>()
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            NSApp?.appearance = NSAppearance(named: appearanceName)
+            for width in [CGFloat(WorkspaceSidebarConfig.minWidth), 320] {
+                let label = "sidebar-ux-check.slim-tiers@\(Int(width))pt.\(appearanceName.rawValue)"
+                let probe = try makeSidebarProbeHost(
+                    width: width, height: probeHeight, appearanceName: appearanceName)
+                probe.inbox.clock = { LabFixtures.inboxNow }
+                probe.inbox.toggleShelf()
+                probe.host.layoutSubtreeIfNeeded()
+                probe.inbox.reload(rows: [tiny, branchy, sprawl])
+                probe.inbox.layoutForQA()
+                probe.host.layoutSubtreeIfNeeded()
+                probe.inbox.layoutForQA()
+                for row in [tiny, branchy, sprawl] {
+                    guard let geometry = probe.inbox.qaRowGeometriesForQA.first(where: { $0.agentID == row.id }) else {
+                        throw fail("\(label): engineered slim row '\(row.title)' did not materialize")
+                    }
+                    try expectSlimRowFitTier(geometry, row: row, hasChildren: false, label: label)
+                    if let tier = geometry.slimFitTier { reached.insert(tier) }
+                    asserted += 1
+                }
+            }
+        }
+        guard reached == Set(SlimRowFitTier.allCases) else {
+            throw fail("sidebar-ux-check.slim-tiers: engineered rows reached only \(reached.map(\.rawValue).sorted().joined(separator: ", ")) — every slim tier must be reached by a live cell (P2.6)")
+        }
+
+        // The disclosed parked parent, at a width derived from the row's own
+        // measured needs so the triangle is exactly what tips the tier: without
+        // it the line fits whole, with it something must yield. An
+        // implementation that forgets the triangle in its fit math resolves
+        // .full here and disagrees with the oracle.
+        NSApp?.appearance = NSAppearance(named: .aqua)
+        let probeButton = InboxDisclosureButton()
+        probeButton.show(.expanded)
+        let disclosureNeed = Double(probeButton.fittingSize.width)
+        var parentTitle = "Parked sweep"
+        var parent = slimRow("6D000000-0000-4000-8000-000000000010", title: parentTitle)
+        let child = slimRow(
+            "6D000000-0000-4000-8000-000000000011", title: "Child",
+            parent: parent.id)
+        let calibration = try makeSidebarProbeHost(
+            width: 280, height: probeHeight, appearanceName: .aqua)
+        calibration.inbox.clock = { LabFixtures.inboxNow }
+        calibration.inbox.toggleShelf()
+        calibration.host.layoutSubtreeIfNeeded()
+        calibration.inbox.reload(rows: [parent, child])
+        calibration.inbox.layoutForQA()
+        calibration.host.layoutSubtreeIfNeeded()
+        calibration.inbox.layoutForQA()
+        guard let calibrated = calibration.inbox.qaRowGeometriesForQA.first(where: { $0.agentID == parent.id }),
+              let calibratedCard = calibrated.elementFrames["card"],
+              let titleGeometry = calibrated.labels.first(where: { $0.element == "title" }),
+              let glyphGeometry = calibrated.labels.first(where: { $0.element == "glyph" }),
+              let titleFont = titleGeometry.font else {
+            throw fail("sidebar-ux-check.slim-disclosure: the parked parent did not materialize at the calibration width")
+        }
+        // available(280) tells us the chrome the probe adds around the line.
+        let chrome = 280 - (Double(calibratedCard.width) - Inset.row.horizontal)
+        func widthOf(_ text: String, _ font: NSFont) -> Double {
+            Double(ceil((text as NSString).size(withAttributes: [.font: font]).width)) + Metrics.cellTextInset
+        }
+        let glyphNeed = glyphGeometry.neededWidth
+        let timeNeed = AgentElapsedFormatter.columnLabels
+            .flatMap { ["\($0) ago", "in \($0)"] }
+            .map { widthOf($0, NSFont.token(.captionMono)) }
+            .max() ?? Metrics.cellTextInset
+        // Grow the name until line-without-triangle just fits a width inside
+        // the shipping range and line-with-triangle does not.
+        while true {
+            let lineNeed = glyphNeed + Space.m + widthOf(parentTitle, titleFont)
+                + Space.m + timeNeed
+            let target = lineNeed + chrome + min(Space.m, disclosureNeed) / 2
+            if target >= 240 { break }
+            parentTitle += "m"
+        }
+        parent = slimRow("6D000000-0000-4000-8000-000000000010", title: parentTitle)
+        let lineNeed = glyphNeed + Space.m + widthOf(parentTitle, titleFont) + Space.m + timeNeed
+        let derivedWidth = (lineNeed + chrome + min(Space.m, disclosureNeed) / 2).rounded()
+        guard derivedWidth > Double(WorkspaceSidebarConfig.minWidth), derivedWidth < 320 else {
+            throw fail(String(
+                format: "sidebar-ux-check.slim-disclosure: derived width %.0fpt fell outside the shipping range — recalibrate the parent fixture",
+                derivedWidth))
+        }
+        let probe = try makeSidebarProbeHost(
+            width: CGFloat(derivedWidth), height: probeHeight, appearanceName: .aqua)
+        probe.inbox.clock = { LabFixtures.inboxNow }
+        probe.inbox.toggleShelf()
+        probe.host.layoutSubtreeIfNeeded()
+        probe.inbox.reload(rows: [parent, child])
+        probe.inbox.layoutForQA()
+        probe.host.layoutSubtreeIfNeeded()
+        probe.inbox.layoutForQA()
+        let label = "sidebar-ux-check.slim-disclosure@\(Int(derivedWidth))pt.aqua"
+        guard let parentGeometry = probe.inbox.qaRowGeometriesForQA.first(where: { $0.agentID == parent.id }) else {
+            throw fail("\(label): the parked parent did not materialize at its derived width")
+        }
+        guard parentGeometry.elementFrames["disclosure"] != nil else {
+            throw fail("\(label): the parked parent draws no fold triangle")
+        }
+        guard parentGeometry.slimFitTier == .timeHidden else {
+            throw fail("\(label): the triangle's width did not participate in the tier — resolved \(parentGeometry.slimFitTier?.rawValue ?? "nil"), expected timeHidden once the disclosure is paid for (P2.6 round 2)")
+        }
+        try expectSlimRowFitTier(parentGeometry, row: parent, hasChildren: true, label: label)
+        asserted += 2
+        return asserted
+    }
+
     // MARK: - P2.5 — one elapsed vocabulary and fixed lanes
 
     private static func measuredElapsedNeed(_ text: String) -> Double {
@@ -1933,7 +2391,7 @@ enum UIProbeGeometry {
         }
         func slim(endedAt: Date) -> AgentInboxRow {
             AgentInboxRow(
-                id: slimID, title: "Elapsed name", state: .ready,
+                id: slimID, title: "N", state: .ready,
                 lifecycle: .settled(at: endedAt), variant: .slim, createdAt: epoch)
         }
         let widths: [CGFloat] = [
@@ -2088,6 +2546,7 @@ enum UIProbeGeometry {
         var totalLabels = 0
         var totalTruncated = 0
         var observedTiers = Set<RowFitTier>()
+        var observedSlimTiers = Set<SlimRowFitTier>()
         for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
             NSApp?.appearance = NSAppearance(named: appearanceName)
             for width in widths {
@@ -2112,12 +2571,15 @@ enum UIProbeGeometry {
                 totalLabels += counts.labels
                 totalTruncated += counts.truncated
                 observedTiers.formUnion(counts.tiers)
+                observedSlimTiers.formUnion(counts.slimTiers)
             }
         }
         _ = try checkSidebarContentDerivedHeights()
         // P1.2/P1.4: the four-state ladder and the focus ring, driven through the
         // view's own hover / selection / route-active / keyboard inputs.
         let ladderAssertions = try checkSidebarInteractionLadder(rows: rows, probeHeight: probeHeight)
+        let slimParityAssertions = try checkSidebarSlimVariantParity(
+            rows: rows, probeHeight: probeHeight)
         // P2.2: the measured-fit tier ladder as arithmetic, plus the requirement
         // that every named tier is actually REACHED by a real row at a shipping
         // width. A tier nothing resolves to is a sacrifice nobody makes, and it
@@ -2134,9 +2596,9 @@ enum UIProbeGeometry {
             throw fail("sidebar-ux-check: the corpus reached only \(observedTiers.map(\.rawValue).sorted().joined(separator: ", ")) across the gated widths — a tier no live row resolves to is not a tier (P2.2)")
         }
         print(String(
-            format: "UIProbeGeometry: sidebar UX seam materialized %d live row cells (%d defect-corpus rows per leg) and measured %d labels across 220/280/320pt in Aqua and Dark Aqua; %d labels currently elide by drawable-width measurement; every row paints a zero perimeter, no shadow and no fill at rest, and no sidebar line exceeds %.1fpt with no nested boundary anywhere in the subtree; every card row draws its name on a band of its own between the meta band and the detail band, gives a childless row's name the whole text column, and carries the recorded sacrifice ladder (project < branch < meta < name < state == elapsed == required) as live compression resistances; %d interaction-ladder assertions held per appearance (resting < selected < hover < route-active by measured emphasis, hover outranking selection, a hairline focus ring distinct from selection, and nothing left lit after an exit, a deactivation, a scroll or a full rebuild); %d measured-fit tier assertions held (three tiers by measured need with no width literal, monotone, each sacrifice real, the name and the state never sacrificed, and every dropped column relocated to the accessibility label); zero-size host rejected with a named error",
+            format: "UIProbeGeometry: sidebar UX seam materialized %d live row cells (%d defect-corpus rows per leg) and measured %d labels across 220/280/320pt in Aqua and Dark Aqua; %d labels currently elide by drawable-width measurement; every row paints a zero perimeter, no shadow and no fill at rest, and no sidebar line exceeds %.1fpt with no nested boundary anywhere in the subtree; every card row draws its name on a band of its own between the meta band and the detail band, gives a childless row's name the whole text column, and carries the recorded sacrifice ladder (project < branch < meta < name < state == elapsed == required) as live compression resistances; %d interaction-ladder assertions held per appearance (resting < selected < hover < route-active by measured emphasis, hover outranking selection, a hairline focus ring distinct from selection, and nothing left lit after an exit, a deactivation, a scroll or a full rebuild); %d slim-variant parity assertions held at 220/280/320pt in both appearances; %d measured-fit tier assertions held (three tiers by measured need with no width literal, monotone, each sacrifice real, the name and the state never sacrificed, and every dropped column relocated to the accessibility label); zero-size host rejected with a named error",
             totalCells, rows.count, totalLabels, totalTruncated, LineWidth.hairline,
-            ladderAssertions, tierAssertions
+            ladderAssertions, slimParityAssertions, tierAssertions
         ))
         print("UIProbeGeometry: elapsed formatter table and fixed sidebar/tile column held in \(elapsedAssertions) live assertions")
     }
@@ -2221,15 +2683,13 @@ enum UIProbeGeometry {
     /// P2.1 healed all 6 and all 48 of them by giving the name a line nothing
     /// else can take width from, and what is left is `@min` only.
     ///
-    /// TWO ENTRIES HERE ARE NOT P2.1's: `row50` and `row51` are the corpus's only
-    /// SLIM rows, and a slim row is one line holding four things — it has no bands
-    /// to split and no tier to step down. Their relative-time lanes are measured
-    /// separately from the shared formatter and the gate pins `LabFixtures.inboxNow`,
-    /// so these names record real fixed-lane truncation rather than a machine-date
-    /// artifact. They are listed here rather than in `sacrificedByOrder` because
-    /// they are names, not sacrifices; the gate's name rule and
-    /// `expectRowBandsAndSacrificeOrder` both scope themselves to CARD rows for
-    /// exactly that reason.
+    /// P2.6 removes the two old slim entries from this set: the slim line now
+    /// drops its branch and/or time lane before the name, so a name that fits the
+    /// glyph-plus-name lane is no longer a fixed-lane truncation. Any slim name
+    /// that truly outruns that final line would still belong here, but the corpus
+    /// has no such witness. Card-only entries remain the last rung of the name
+    /// ladder, and `expectRowBandsAndSacrificeOrder` continues to scope itself to
+    /// card rows because slim rows use their own measured tier vocabulary.
     private static let namesLongerThanTheRow: Set<String> = [
         "row14.title@min", "row16.title@min", "row17.title@min", "row18.title@min", "row19.title@min",
         "row20.title@min", "row21.title@min", "row22.title@min", "row23.title@min", "row24.title@min",
@@ -2237,8 +2697,7 @@ enum UIProbeGeometry {
         "row30.title@min", "row31.title@min", "row32.title@min", "row33.title@min", "row34.title@min",
         "row35.title@min", "row36.title@min", "row37.title@min", "row38.title@min", "row39.title@min",
         "row4.title@min", "row40.title@min", "row41.title@min", "row42.title@min", "row43.title@min",
-        "row44.title@min", "row47.title@min", "row50.title@default", "row50.title@min", "row50.title@wide",
-        "row51.title@default", "row51.title@min",
+        "row44.title@min", "row47.title@min",
     ]
 
     /// What gave way so the name did not have to, keyed the same way. Every
@@ -2271,16 +2730,13 @@ enum UIProbeGeometry {
         "row33.branch@min", "row34.branch@min", "row35.branch@min", "row36.branch@min", "row37.branch@min",
         "row38.branch@min", "row39.branch@min", "row40.branch@min", "row41.branch@min", "row42.branch@min",
         "row43.branch@min", "row44.branch@min", "row46.branch@min", "row47.branch@min",
-        "row50.branch@default", "row50.branch@min", "row50.branch@wide",
-        "row51.branch@default", "row51.branch@min",
     ]
 
-    /// P2.5 DELTA: the four `row50` keys at default/wide are real slim-row
-    /// elisions from reserving the formatter-sized relative-time lane (that row's
-    /// pinned value is `in 3h 45m`); they are not a card-probe artifact. The old
-    /// `row51.branch@wide` key is deliberately absent: row51 settles at epoch+63m
-    /// while `LabFixtures.inboxNow` is epoch+75m, so the pinned value is `12m ago`,
-    /// not the machine-date `~993d` value the unpinned gate used to measure.
+    /// P2.5/P2.6 DELTA: the gate pins `LabFixtures.inboxNow`, so row50's time is
+    /// `in 3h 45m` and row51's is `12m ago`, never the machine-date value an
+    /// unpinned probe would measure. P2.6 then drops the slim branch before the
+    /// name when that measured line does not fit; the two slim names and branches
+    /// therefore leave this table rather than being excused as truncations.
     /// What may truncate today: the two recorded sets and nothing else.
     private static var expectedSidebarTruncations: Set<String> {
         namesLongerThanTheRow.union(sacrificedByOrder)

@@ -87,3 +87,17 @@ row rather than *through* it. Those comments becoming false is the ticket succee
   the built-in Retina and Dylan.
 - **True code dependencies only.** Gate-ordering deps in `Depends on:` are loop artifacts. Every
   gate survives as a review seam.
+
+## R6 — the loop runs at medium thinking (2026-08-04, owner-directed)
+
+Dylan directed a rethink of loop pace after P2.6 consumed three hours. The evidence:
+`agent-tile-ux-loop.sh` — the queue-91 loop that landed ten tickets on 07-30 — runs
+`PI_THINKING=medium` for worker and review alike, with the same worker→review→matrix→commit
+structure and the same REWORK protocol. This queue's loop copied the structure and set `max`,
+which taxed every pass 3-4x in wall clock (25-35 min worker passes, 15-25 min reviews, twice per
+ticket) without preventing the defects the reviews then caught anyway (the widened resize gate and
+the self-agreeing slim oracle were both produced AT max).
+
+Both loop defaults are now `medium`; the program guard holds the new deliberate setting against
+silent drift, exactly as it held the old one. Review structure, repair budget, fences, the final
+matrix, and every quality gate are unchanged — the enforcement was never the latency.

@@ -63,7 +63,11 @@ check_program() {
 
   # Implementation model is an owner decision, not a loop default to drift.
   grep -Fq 'PI_WORKER_MODELS="${PI_WORKER_MODELS:-openai-codex/gpt-5.6-luna}"' scripts/sidebar-native-ux-loop.sh || fail "loop lost the pinned Luna implementation model"
-  grep -Fq 'PI_THINKING="${PI_THINKING:-max}"' scripts/sidebar-native-ux-loop.sh || fail "loop lost max thinking for implementation"
+  # 2026-08-04, owner decision (ruling R6): medium, matching agent-tile-ux-loop.sh,
+  # after max was measured to cost 3-4x wall clock per pass without preventing the
+  # defects the reviews caught anyway. The pin stays a pin — the guard holds the
+  # DELIBERATE setting, whatever it is, against silent drift.
+  grep -Fq 'PI_THINKING="${PI_THINKING:-medium}"' scripts/sidebar-native-ux-loop.sh || fail "loop lost the owner-set thinking level (R6: medium)"
   grep -Fq 'openai-codex/gpt-5.6-sol' scripts/sidebar-native-ux-loop.sh || fail "loop lost the opposite-model reviewer"
   grep -Fq 'MAX_REPAIR_PASSES="${MAX_REPAIR_PASSES:-2}"' scripts/sidebar-native-ux-loop.sh || fail "loop lost bounded repair budget"
   grep -Fq 'DECISION: APPROVE' scripts/sidebar-native-ux-loop.sh || fail "loop lost independent review gate"

@@ -3324,6 +3324,118 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
     }
 
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P2.6-slim-variant-parity.md
+    /// A non-baseline live-tree witness for the slim row. The Component Lab owns
+    /// the rendered catalogue, so this deliberately builds a small synthetic
+    /// pair instead of changing a committed fixture: one caller requests the
+    /// wrong variant for each lifecycle, and the model plus the real cells must
+    /// correct both choices at every shipped width and appearance.
+    private static func runSlimVariantParityCheck(fail: (String) -> Error) throws {
+        let previousAppearance = NSApp.appearance
+        defer { NSApp.appearance = previousAppearance }
+        let epoch = Date(timeIntervalSinceReferenceDate: 800_900_000)
+        let settled = AgentInboxRow(
+            id: UUID(uuidString: "5C000000-0000-4000-8000-000000000001")!,
+            title: "Parked migration review", projectName: "continuum",
+            state: .ready, lifecycle: .settled(at: epoch.addingTimeInterval(60)),
+            model: "gpt-5.6-sol", branch: "agent/parked-migration-review",
+            variant: .card, createdAt: epoch)
+        let active = AgentInboxRow(
+            id: UUID(uuidString: "5C000000-0000-4000-8000-000000000002")!,
+            title: "Live build", projectName: "continuum", state: .working,
+            model: "claude-opus-5", branch: "main", elapsed: 65,
+            variant: .slim, createdAt: epoch.addingTimeInterval(1))
+        guard settled.variant == .slim, active.variant == .card else {
+            throw fail("slim parity: a caller-supplied variant overrode lifecycle-derived density")
+        }
+
+        let now = epoch.addingTimeInterval(600)
+        func rgba(_ color: CGColor?) -> [CGFloat]? {
+            guard let color,
+                  let srgb = NSColor(cgColor: color)?.usingColorSpace(.sRGB) else { return nil }
+            return [srgb.redComponent, srgb.greenComponent, srgb.blueComponent, srgb.alphaComponent]
+        }
+        let widths: [CGFloat] = [
+            CGFloat(WorkspaceSidebarConfig.minWidth),
+            CGFloat(WorkspaceSidebarConfig.defaultWidth),
+            320,
+        ]
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            NSApp.appearance = NSAppearance(named: appearanceName)
+            for width in widths {
+                let size = NSSize(width: width, height: 220)
+                let host = NSView(frame: NSRect(origin: .zero, size: size))
+                let window = NSWindow(
+                    contentRect: NSRect(origin: .zero, size: size),
+                    styleMask: [.borderless], backing: .buffered, defer: false)
+                window.appearance = NSAppearance(named: appearanceName)
+                window.contentView = host
+                let inbox = AgentInboxView(frame: host.bounds)
+                inbox.autoresizingMask = [.width, .height]
+                host.addSubview(inbox)
+                inbox.pinScrollerStyleForQA()
+                host.layoutSubtreeIfNeeded()
+                inbox.clock = { now }
+                inbox.reload(rows: [settled, active])
+                inbox.layoutForQA()
+                host.layoutSubtreeIfNeeded()
+                inbox.layoutForQA()
+
+                let geometries = Dictionary(
+                    uniqueKeysWithValues: inbox.qaRowGeometriesForQA.compactMap { geometry in
+                        geometry.agentID.map { ($0, geometry) }
+                    })
+                guard let slimGeometry = geometries[settled.id],
+                      let cardGeometry = geometries[active.id],
+                      let slimTitle = slimGeometry.labels.first(where: { $0.element == "title" }) else {
+                    throw fail("slim parity @\(Int(width))pt.\(appearanceName.rawValue): live card/slim pair did not materialize")
+                }
+                guard slimGeometry.variant == .slim,
+                      slimGeometry.slimFitTier != nil,
+                      slimTitle.drawableWidth + 0.5 >= slimTitle.neededWidth else {
+                    throw fail("slim parity @\(Int(width))pt.\(appearanceName.rawValue): parked name elided before optional branch/time content yielded")
+                }
+                for geometry in [slimGeometry, cardGeometry] {
+                    guard geometry.paintedBorderWidth == 0,
+                          geometry.paintedLines["card.border"] == 0,
+                          geometry.paintedLines["card.shadowOpacity"] == 0,
+                          geometry.surfaceRole == .resting else {
+                        throw fail("slim parity @\(Int(width))pt.\(appearanceName.rawValue): card/slim resting chrome diverged")
+                    }
+                }
+                guard inbox.selectRowsForQA(ids: [settled.id, active.id]) else {
+                    throw fail("slim parity @\(Int(width))pt.\(appearanceName.rawValue): card/slim pair was not selectable")
+                }
+                inbox.rebuildRowsForQA()
+                let selected = Dictionary(
+                    uniqueKeysWithValues: inbox.qaRowGeometriesForQA.compactMap { geometry in
+                        geometry.agentID.map { ($0, geometry) }
+                    })
+                guard let selectedSlim = selected[settled.id],
+                      let selectedCard = selected[active.id],
+                      selectedSlim.surfaceRole == .selected,
+                      selectedCard.surfaceRole == .selected,
+                      rgba(selectedSlim.resolvedFill) == rgba(selectedCard.resolvedFill),
+                      selectedSlim.paintedLines["card.border"] == 0 else {
+                    throw fail("slim parity @\(Int(width))pt.\(appearanceName.rawValue): selection chrome did not use the shared card treatment")
+                }
+                guard inbox.focusRowByKeyboardForQA(id: settled.id) else {
+                    throw fail("slim parity @\(Int(width))pt.\(appearanceName.rawValue): slim row could not take keyboard focus")
+                }
+                inbox.rebuildRowsForQA()
+                guard let focusedSlim = inbox.qaRowGeometriesForQA.first(where: { $0.agentID == settled.id }),
+                      focusedSlim.isFocusRingVisible,
+                      focusedSlim.surfaceRole == .selected,
+                      focusedSlim.paintedLines["focusRing.border"] == LineWidth.hairline,
+                      focusedSlim.paintedLines["card.border"] == 0,
+                      focusedSlim.paintedLines["card.shadowOpacity"] == 0 else {
+                    throw fail("slim parity @\(Int(width))pt.\(appearanceName.rawValue): focus treatment did not use the shared hairline ring without a card border")
+                }
+                window.close()
+            }
+        }
+    }
+
     static func runSelfCheck() throws {
         func fail(_ message: String) -> Error {
             NSError(domain: "ComponentLab", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
@@ -3337,6 +3449,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         let entries = panel.qaEntries()
         panel.close()
         guard !entries.isEmpty else { throw fail("component lab catalog is empty") }
+        try runSlimVariantParityCheck(fail: fail)
         // Launcher entries are launch-only (they open real panels needing a run
         // loop), so just assert they're catalogued.
         for id in ["panel.palette", "panel.settings", "panel.projectPicker"] {

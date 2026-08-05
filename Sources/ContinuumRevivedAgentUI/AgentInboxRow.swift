@@ -613,7 +613,10 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         isIsolated: Bool = false,
         elapsed: TimeInterval? = nil,
         depth: Int = 0,
-        variant: RowVariant = .card,
+        // Kept as a source-compatible argument for the older row producers. It
+        // is deliberately ignored: density is a lifecycle fact, not a
+        // presentation choice a caller can disagree with.
+        variant: RowVariant? = nil,
         createdAt: Date,
         parentId: UUID? = nil
     ) {
@@ -630,7 +633,10 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.isIsolated = isIsolated
         self.elapsed = elapsed
         self.depth = depth
-        self.variant = variant
+        // Derive this at the model boundary so even a legacy caller that passes
+        // the wrong compatibility value cannot make settled/snoozed work render
+        // as a card (or active work collapse as a slim row).
+        self.variant = RowVariant.forLifecycle(lifecycle)
         self.createdAt = createdAt
         self.parentId = parentId
     }
