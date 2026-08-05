@@ -3277,7 +3277,7 @@ enum UIProbeGeometry {
         let items = [
             ChoiceItem(id: "fast", title: "Fast", detail: "Lower latency"),
             ChoiceItem(id: "balanced", title: "Balanced", detail: "Recommended"),
-            ChoiceItem(id: "legacy", title: "Legacy", detail: "Unavailable", enabled: false),
+            ChoiceItem(id: "legacy", title: "Legacy", detail: "Unavailable", enabled: false, destructive: true),
             ChoiceItem(id: "deep", title: "Deep", detail: "More reasoning"),
         ]
         let list = ChoiceListView(items: items, selectedID: "balanced")
@@ -3299,6 +3299,9 @@ enum UIProbeGeometry {
         }
         guard list.qaRowStates.allSatisfy({ $0.borderWidth == 0 }) else {
             throw fail("choice popover: a row painted a permanent perimeter border")
+        }
+        guard list.qaDestructiveIDs == Set(["legacy"]) else {
+            throw fail("choice popover: destructive choice lost its semantic marker")
         }
         guard (34...36).contains(ChoiceListView.rowHeight) else {
             throw fail("choice popover: row height \(ChoiceListView.rowHeight) left the approved 34–36pt density band")

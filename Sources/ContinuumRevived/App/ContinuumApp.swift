@@ -23525,7 +23525,7 @@ extension AppDelegate {
     menuWindow.contentView = menuView
     menuView.layoutForQA()
     try expect(menuView.isRowMenuWiredForQA,
-               "the TABLE carries the menu, this view fills it in, and AppKit may not re-enable its items")
+               "the table routes context gestures to the custom choice family and carries no stock NSMenu")
 
     // A right-click below the last row is a no-op, not a menu about nobody. This goes
     // through the shipped `menuNeedsUpdate` unchanged — `clickedRow` is -1 headlessly,
@@ -23537,14 +23537,31 @@ extension AppDelegate {
     // ONE ROW, nothing selected: the capability-dependent items an active agent gets,
     // uncounted.
     try expect(menuView.openRowMenuForQA(clickedRowId: quietRow.id), "a row must be right-clickable")
-    try expect(menuView.rowMenuTitlesForQA
-                == InboxRowAction.menuItems(
-                    for: [quietRow],
-                    includeGeneratedName: AgentSupervisor.nameGenerationCapabilityAvailable)
-                    .map { $0.title(forCount: 1) },
+    let expectedQuietMenu = InboxRowAction.menuItems(
+        for: [quietRow],
+        includeGeneratedName: AgentSupervisor.nameGenerationCapabilityAvailable)
+        .filter { action in
+            action == .openInTile || action == .rename
+                ? action.isAvailable(for: quietRow)
+                : menuView.isRowActionWiredForQA(action)
+                    && action.isAvailable(for: quietRow)
+        }
+    // P5.1 migration: the production choice list hides unavailable or unwired
+    // capabilities; this expected set deliberately follows that shipped seam.
+    try expect(menuView.rowMenuTitlesForQA == expectedQuietMenu.map { $0.title(forCount: 1) },
                "the menu is what this ONE row can be asked — got \(menuView.rowMenuTitlesForQA)")
     try expect(!menuView.rowMenuTitlesForQA.contains { $0.contains("(") },
                "…and nothing is counted for a single row — got \(menuView.rowMenuTitlesForQA)")
+    try expect(menuView.rowMenuPresentationAnnouncementForQA == "Agent actions menu",
+               "right-click announces the custom menu to VoiceOver")
+    let rightClickTitles = menuView.rowMenuTitlesForQA
+    try expect(menuView.controlClickRowMenuForQA(clickedRowId: quietRow.id)
+                && menuView.rowMenuTitlesForQA == rightClickTitles,
+               "Control-click dispatches through the same production menu path")
+    try expect(menuView.performRowMenuCommandForQA(.next),
+               "the presented menu accepts keyboard traversal")
+    try expect(menuView.rowMenuFocusAnnouncementForQA == menuView.rowMenuFocusedTitleForQA,
+               "keyboard focus announces the newly focused action — got \(String(describing: menuView.rowMenuFocusAnnouncementForQA))")
     guard let openIndex = InboxRowAction.menuItems(
         for: [quietRow],
         includeGeneratedName: AgentSupervisor.nameGenerationCapabilityAvailable)
@@ -23559,6 +23576,17 @@ extension AppDelegate {
                "picking it reveals that agent through onRevealRow — got \(menuRevealed.count) reveal(s)")
     try expect(menuCalls.isEmpty,
                "…and NOT through onRowAction, which would be a second definition of a reveal — got \(menuCalls.map(\.0.baseTitle))")
+    try expect(menuView.isTableFirstResponderForQA,
+               "dismissing the menu returns keyboard focus to its originating row table")
+
+    // Rename must travel through the rendered ChoiceItem, not an independent rename
+    // helper that could stay green while the context-menu callback is disconnected.
+    try expect(menuView.openRowMenuForQA(clickedRowId: quietRow.id)
+                && menuView.pickRowMenuItemForQA(.rename),
+               "Rename must be pickable through the rendered row menu")
+    try expect(menuView.renamingRowIdForQA == quietRow.id && menuView.isRenameEditingForQA,
+               "the menu's Rename item opens the inline editor on its target")
+    _ = menuView.pressKeyInRenameForQA(#selector(NSResponder.cancelOperation(_:)))
 
     // A CLICK OUTSIDE THE SELECTION IS ABOUT THE ROW UNDER THE MOUSE, whatever is
     // selected elsewhere — otherwise a right-click on row 7 would act on rows 1 and 2.
@@ -23574,6 +23602,11 @@ extension AppDelegate {
     try expect(menuCalls.count == 1 && menuCalls[0].1 == [quietRow.id],
                "…and it lands on the clicked row alone — got \(menuCalls.map { ($0.0.baseTitle, $0.1.count) })")
 
+    // Restore the pre-existing multi-selection after the outside click retargeted it;
+    // the next gesture proves the inside-selection preservation contract independently.
+    try expect(menuView.selectRowsForQA(ids: [failedRow.id, blockedRow.id]),
+               "the existing selection can be restored for the inside-click witness")
+    menuView.layoutForQA()
     // A CLICK INSIDE IT ACTS ON THE SELECTION AND SAYS SO, which is the packet's rule.
     try expect(menuView.openRowMenuForQA(clickedRowId: failedRow.id),
                "a selected row must be right-clickable")
@@ -23581,29 +23614,14 @@ extension AppDelegate {
     try expect(selectedTargets.count == 2, "setup: the selection must still be two rows — got \(selectedTargets.count)")
     try expect(menuView.rowMenuTitlesForQA.contains(InboxRowAction.archive.title(forCount: 2)),
                "a menu raised inside a selection counts its items — got \(menuView.rowMenuTitlesForQA)")
-    guard let selectedOpenIndex = InboxRowAction.menuItems(
-        for: [failedRow, blockedRow],
-        includeGeneratedName: AgentSupervisor.nameGenerationCapabilityAvailable)
-            .firstIndex(of: .openInTile) else {
-        throw CheckError.failed("setup: Open in Tile must be in the selection's menu too")
-    }
-    try expect(!menuView.rowMenuEnabledForQA[selectedOpenIndex]
-                && menuView.rowMenuTooltipsForQA[selectedOpenIndex] == InboxRowAction.oneAtATimeReason,
-               "…and Open in Tile is greyed with its reason, because a reveal has no plural — tooltip '\(menuView.rowMenuTooltipsForQA[selectedOpenIndex])'")
-    // The AND across members, through the RENDERED menu: the blocked row takes Settle away
-    // from the pair and says which agent did it.
-    guard let settleIndex = InboxRowAction.menuItems(
-        for: [failedRow, blockedRow],
-        includeGeneratedName: AgentSupervisor.nameGenerationCapabilityAvailable)
-            .firstIndex(of: .settle) else {
-        throw CheckError.failed("setup: Settle must be in the selection's menu")
-    }
-    try expect(!menuView.rowMenuEnabledForQA[settleIndex],
-               "one blocked member greys Settle for the whole selection")
-    try expect(menuView.rowMenuTooltipsForQA[settleIndex] == "\(blockedRow.title) is waiting on you.",
-               "…and the tooltip answers 'which of my two?' — got '\(menuView.rowMenuTooltipsForQA[settleIndex])'")
+    // P5.1 migration: plural Open and blocked Settle are capability-absent in the
+    // rendered choice list, rather than disabled rows with stale stock-menu tooltips.
+    try expect(!menuView.rowMenuTitlesForQA.contains(InboxRowAction.openInTile.title(forCount: 2)),
+               "Open in Tile is hidden for a plural target")
+    try expect(!menuView.rowMenuTitlesForQA.contains(InboxRowAction.settle.title(forCount: 2)),
+               "blocked Settle is hidden for the whole selection")
     menuCalls.removeAll()
-    try expect(!menuView.pickRowMenuItemForQA(.settle), "a greyed item is not pickable")
+    try expect(!menuView.pickRowMenuItemForQA(.settle), "an absent item is not pickable")
     try expect(menuCalls.isEmpty, "…and reports nothing — got \(menuCalls.count) call(s)")
     // What the pair CAN take lands on both, in screen order.
     try expect(menuView.pickRowMenuItemForQA(.delete), "Delete must be pickable for two stopped agents")
@@ -23614,11 +23632,8 @@ extension AppDelegate {
     // is chosen, so an agent that started working between the two cannot be deleted by an
     // item that was live when the menu appeared.
     try expect(menuView.openRowMenuForQA(clickedRowId: quietRow.id), "one row again")
-    guard let staleDeleteIndex = InboxRowAction.menuItems(
-        for: [quietRow],
-        includeGeneratedName: AgentSupervisor.nameGenerationCapabilityAvailable)
-        .firstIndex(of: .delete) else {
-        throw CheckError.failed("setup: Delete must be in the row's menu")
+    guard let staleDeleteIndex = menuView.rowMenuTitlesForQA.firstIndex(of: InboxRowAction.delete.title(forCount: 1)) else {
+        throw CheckError.failed("setup: Delete must be in the rendered row menu")
     }
     try expect(menuView.rowMenuEnabledForQA[staleDeleteIndex],
                "setup: Delete must be live before the push, or the refusal below is vacuous")
@@ -23653,18 +23668,18 @@ extension AppDelegate {
     unwiredMenu.layoutForQA()
     try expect(unwiredMenu.openRowMenuForQA(clickedRowId: quietRow.id), "a row must be right-clickable unwired")
     let unwiredItems = InboxRowAction.menuItems(for: [quietRow], includeGeneratedName: false)
-    try expect(unwiredMenu.rowMenuTitlesForQA == unwiredItems.map { $0.title(forCount: 1) },
-               "the menu's SHAPE does not depend on what is wired — got \(unwiredMenu.rowMenuTitlesForQA)")
-    for (index, action) in unwiredItems.enumerated() where action != .openInTile {
-        try expect(!unwiredMenu.rowMenuEnabledForQA[index],
-                   "\(action.baseTitle) has no host to perform it, so it must not answer a click")
-        try expect(unwiredMenu.rowMenuTooltipsForQA[index] == InboxRowAction.notWiredReason,
-                   "…and must say so rather than grey silently — got '\(unwiredMenu.rowMenuTooltipsForQA[index])'")
+    let expectedUnwiredTitles = unwiredItems.filter { $0 == .openInTile || $0 == .rename }
+        .map { $0.title(forCount: 1) }
+    try expect(unwiredMenu.rowMenuTitlesForQA == expectedUnwiredTitles,
+               "the menu hides capabilities without a host — got \(unwiredMenu.rowMenuTitlesForQA)")
+    for action in unwiredItems where action != .openInTile && action != .rename {
+        try expect(!unwiredMenu.rowMenuTitlesForQA.contains(action.title(forCount: 1)),
+                   "\(action.baseTitle) has no host to perform it, so it must be hidden")
     }
-    guard let unwiredOpenIndex = unwiredItems.firstIndex(of: .openInTile) else {
+    guard unwiredItems.contains(.openInTile) else {
         throw CheckError.failed("setup: Open in Tile must be in the unwired menu")
     }
-    try expect(unwiredMenu.rowMenuEnabledForQA[unwiredOpenIndex],
+    try expect(unwiredMenu.rowMenuTitlesForQA.contains(InboxRowAction.openInTile.title(forCount: 1)),
                "Open in Tile rides P3.9's callback, which IS wired")
     try expect(!unwiredMenu.pickRowMenuItemForQA(.settle), "…and nothing else is pickable")
     try expect(unwiredMenu.pickRowMenuItemForQA(.openInTile) && unwiredRevealed == [quietRow.id],
@@ -23853,8 +23868,8 @@ extension AppDelegate {
     var gatedCalls: [(InboxRowAction, [UUID])] = []
     gated.onRowAction = { gatedCalls.append(($0, $1)) }
     gated.onBulkAction = { _, _ in }
-    try expect(InboxRowAction.allCases.allSatisfy { $0 == .openInTile || !gated.isRowActionWiredForQA($0) },
-               "a callback with no capability set wires NOTHING — got \(InboxRowAction.allCases.filter { gated.isRowActionWiredForQA($0) }.map(\.baseTitle))")
+    try expect(InboxRowAction.allCases.allSatisfy { $0 == .openInTile || $0 == .rename || !gated.isRowActionWiredForQA($0) },
+               "a callback with no capability set wires only the row-local rename route — got \(InboxRowAction.allCases.filter { gated.isRowActionWiredForQA($0) }.map(\.baseTitle))")
     gated.wiredRowActions = AppDelegate.wiredInboxRowActions
     gated.wiredBulkActions = AppDelegate.wiredInboxBulkActions
     for action in [InboxRowAction.delete, .archive, .stopAgent] {
@@ -23870,8 +23885,8 @@ extension AppDelegate {
                     == InboxRowAction.notWiredReason,
                    "…and say so — got \(String(describing: action.disabledReason(for: [quietRow], isWired: false)))")
     }
-    // The four with destinations that this ticket deliberately did NOT take (P3.16).
-    for action in [InboxRowAction.settle, .unsettle, .markUnread, .rename] {
+    // The three with destinations that this ticket deliberately did NOT take (P3.16).
+    for action in [InboxRowAction.settle, .unsettle, .markUnread] {
         try expect(!gated.isRowActionWiredForQA(action),
                    "\(action.baseTitle) is P3.16's to wire, not this ticket's — got wired")
     }
@@ -24518,9 +24533,11 @@ extension AppDelegate {
     advanceElsewhere.layoutForQA()
     try expect(advanceRowCalls.last?.1 == [advance4.id],
                "setup: the menu must act on the clicked row and not on the selection — got \(String(describing: advanceRowCalls.last?.1))")
-    try expect(!elsewhereArmed, "an action on a row that is not the cursor arms nothing")
-    try expect(advanceElsewhere.selectedRowIdsForQA == [advance0.id],
-               "…so the cursor is left on the row being read — got \(advanceElsewhere.selectedRowIdsForQA)")
+    // P5.1 migration: clicking outside the prior selection retargets the cursor to
+    // the clicked row before dispatch, so the lifecycle advance is intentionally armed.
+    try expect(elsewhereArmed, "an outside right-click retargets the cursor before filing")
+    try expect(advanceElsewhere.selectedRowIdsForQA == [advance3.id],
+               "…and advances from the retargeted last row to its exact predecessor — got \(advanceElsewhere.selectedRowIdsForQA)")
 
     // J8 · A CANCELLED ACTION WHOSE ROW MERELY TICKED OVER IS NOT A COMPLETED ONE.
     // Filed is a LIFECYCLE fact, not "the row's value changed" — otherwise a token
@@ -24861,9 +24878,8 @@ extension AppDelegate {
     try expect(undoUnwired.undoToastTextForQA.isEmpty && undoUnwired.pendingUndoForQA == nil,
                "a host that cannot restore is offered no Undo button — got '\(undoUnwired.undoToastTextForQA)'")
 
-    // K9 · THE TWO CARDS DO NOT OVERLAP. Both float over the bottom of the same list and
-    // both can be up at once: a right-click OUTSIDE the selection acts on the clicked row
-    // (P3.12) while two rows stay selected, so the bar is still up when the toast arrives.
+    // K9 · THE TWO CARDS DO NOT OVERLAP. A context gesture outside the selection
+    // retargets it to one row, so the toast remains visible without a stale bulk bar.
     undoStore = [undoNeutralRow.id: InboxLifecycleSnapshot()]
     let undoStacked = makeUndoView(rows: advanceFixture)
     let undoOtherPair = [try advanceRow(0).id, try advanceRow(2).id]
@@ -24879,7 +24895,7 @@ extension AppDelegate {
     try expect(undoStacked.pickRowMenuItemForQA(.snooze), "Snooze must be live")
     undoStacked.layoutForQA()
     try expect(!undoStacked.undoToastTextForQA.isEmpty, "setup: the toast must be up")
-    try expect(undoStacked.isBulkBarVisibleForQA, "setup: and the bar must still be up beside it")
+    try expect(!undoStacked.isBulkBarVisibleForQA, "the outside click retargets and dismisses the bulk bar")
     try expect(!undoStacked.undoToastFrameForQA.intersects(undoStacked.bulkBarFrameForQA),
                "the toast must clear the bulk bar — toast \(undoStacked.undoToastFrameForQA) over bar \(undoStacked.bulkBarFrameForQA)")
     try expect(undoStacked.undoToastFrameForQA.minY >= undoStacked.bulkBarFrameForQA.maxY,
@@ -25127,7 +25143,7 @@ extension AppDelegate {
     fadeWindows.removeAll()
 
     NSApplication.shared.dockTile.badgeLabel = nil
-    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; a FOLDED parent still naming what it hid, transitively and ahead of its own role ('\(foldedTopLine)' at the top of the chain, '\(waitingLine)' over an approval), with the line gone the moment the group is open and the card's height unmoved at \(AgentInboxView.rowHeight)pt, and SETTLE REFUSED on that parent by the same predicates the bar and the menu use ('\(settleReason ?? "")'), offered again once only a failed child is left, and swept over all \(InboxState.allCases.count) states with \(holdsOpenStates.count) of them holding a parent open; and through the app, the sidebar's default content is \(ids.count) agent rows — a headless one, a tiled one and an orchestrator child — with the plain shell filtered out, the terminal-hosted agent listed for every other surface but not here (P3.16, force-included as the focused tile and still not a row), a legacy managed session no AgentRecord claims left out too, the count of the terminal-hosted ones reaching the list's empty state, and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a ROW CONTEXT MENU of \(InboxRowAction.allCases.count) actions, \(InboxRowAction.menuItems(for: [quietRow], includeGeneratedName: AgentSupervisor.nameGenerationCapabilityAvailable).count) of them offered to any one row (Un-settle replacing Settle on a settled one, the only either/or, with Snooze and Wake both kept), the five shared with the bulk bar spelled the same and answering its own capability rules on all \(menuCandidates.count) candidate rows, a right-click on the background offering nothing, a click outside a selection acting on the clicked row and one inside it on all of it with every title counted, Open in Tile greyed for a plural and live through P3.9's own callback, a blocked member greying Settle with a tooltip naming it, a greyed item unpickable and silent, a stale item refused when the agent started working under the open menu, and the \(InboxRowAction.menuItems(for: [quietRow], includeGeneratedName: AgentSupervisor.nameGenerationCapabilityAvailable).count - 1) actions no host performs yet greyed with 'Not available yet.' rather than wired to nothing; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary; and the DESTRUCTIVE ACTIONS WIRED (P3.15): the gate is per-action, so \(AppDelegate.wiredInboxRowActions.count) row items and \(AppDelegate.wiredInboxBulkActions.count) bar items are live while Snooze and Wake stay greyed with 'Not available yet.', the shipped sidebar's own list agrees and the production configureWorkspaceSidebar is source-scanned for the assignment that was missing for eleven tickets, a cancelled confirmation leaves the record file on disk, a confirmed one takes it off disk and off the list and a relaunched supervisor does not restore it, a deleted agent's TILE survives while its respawn is durably suppressed so re-wiring mints nothing (and a prompt in that tile deliberately revives it), a mid-turn delete stops the runner first and the record stays gone, a selection holding a row that is not a managed agent performs on the ones that are and says the other was left alone, and a kept branch is named in what the user is told ('\(strandedMessage)'); and a PAGED settled tail (P4.8): \(InboxSort.settledPageSize) of 30 finished agents on screen under a footer reading '\(pagedFooterTitle)', one press bringing the rest and taking the footer away, and the agent open in the focused tile drawn at 27 of 30 where the page would have ended; and READING IS FREE (P4.9): a settled agent opened by a real click keeps its override, its clear reason, its settle date and its stored record, and survives a second open — while a prompt through the tile's own closure un-settles it in memory and on disk; its SECTION is asserted through `InboxLifecycle.resolve` + `InboxSort.partition` over those records and NOT off the shipped row (`AgentInboxRowBuilder` still hardcodes `.active` — the open finding on P4.3), tail \(afterOpening.settled.count) / active \(afterOpening.active.count) while open, still drawn with the page closed because it is the one you have open, and active \(afterPrompt.active.count) after the prompt; and the POST-ACTION ADVANCE (P4.10): \(advancingRowActions.count) of \(InboxRowAction.allCases.count) row verbs move the cursor, settling row 2 of 5 through its own menu lands on the row that was 3 — with an unrelated push landing first, moving nothing and leaving the advance armed for the one that files — settling the last row falls back to the previous one, a pair settled together clears the whole affected set rather than stopping after the first, a one-row list lands on no selection, Mark Unread arms nothing, a refused action leaves the cursor where it was and is spent rather than firing on the next push, an action on a row that is NOT the cursor arms nothing, a cancelled one whose row merely ticked over is not read as completed, a partial completion that left one target unfiled moves nothing, and — the witness — a person who selected another row while the settle was in flight is left exactly there; and an UNDO TOAST (P4.11): \(undoableRowActions.count) of \(InboxRowAction.allCases.count) row verbs may raise one, a snooze on a keep-active PINNED agent saying '\(undoToastText)' and putting all four stored facts back exactly as captured (the pin included, which a reconstructed undo flattens), a bulk snooze of 3 reporting its count and undoing as ONE call with an already-settled member settled again on its own date, no toast for a refused action, for an archive whose record is gone, for a verb that moves no lifecycle fact, or for a host with no restore path, the second action replacing the first rather than queueing behind it, the card dismissing itself and taking the restore with it, a later lifecycle action retiring a stale card even when it earns none of its own while a non-lifecycle one leaves it alone, and toast and bulk bar laid out clear of each other; and a LIFECYCLE MOVE CROSSFADING IN PLACE (P4.12): a settle holding the outgoing card at the exact rect it was drawn at (\(fadeWasAt)) while the slim row arrives at its settled position and fades up, one view per id:variant throughout, no orphaned card once the \(AgentInboxView.crossfadeDuration)s fade ends, three moves in a row replacing the ghost rather than stacking, Reduce Motion swapping instantly with nothing lifted, and neither a full reload, a first render nor a row that merely ticked over animating anything")
+    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; a FOLDED parent still naming what it hid, transitively and ahead of its own role ('\(foldedTopLine)' at the top of the chain, '\(waitingLine)' over an approval), with the line gone the moment the group is open and the card's height unmoved at \(AgentInboxView.rowHeight)pt, and SETTLE REFUSED on that parent by the same predicates the bar and the menu use ('\(settleReason ?? "")'), offered again once only a failed child is left, and swept over all \(InboxState.allCases.count) states with \(holdsOpenStates.count) of them holding a parent open; and through the app, the sidebar's default content is \(ids.count) agent rows — a headless one, a tiled one and an orchestrator child — with the plain shell filtered out, the terminal-hosted agent listed for every other surface but not here (P3.16, force-included as the focused tile and still not a row), a legacy managed session no AgentRecord claims left out too, the count of the terminal-hosted ones reaching the list's empty state, and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a CUSTOM ROW CONTEXT MENU showing \(expectedQuietMenu.count) live capabilities through the tile's choice family, both right-click and Control-click taking the production event path, a background click offering nothing, a click outside a selection retargeting to that row and one inside preserving all selected targets, plural Open and blocked Settle absent rather than dead, Open live through P3.9's callback, Rename opening the targeted inline editor, stale actions refused after a push, keyboard focus announced to VoiceOver, and dismissal returning focus to the originating table; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary; and the DESTRUCTIVE ACTIONS WIRED (P3.15): the gate is per-action, so \(AppDelegate.wiredInboxRowActions.count) row items and \(AppDelegate.wiredInboxBulkActions.count) bar items are live while unwired Snooze and Wake are absent from the custom row menu, the shipped sidebar's own list agrees and the production configureWorkspaceSidebar is source-scanned for the assignment that was missing for eleven tickets, a cancelled confirmation leaves the record file on disk, a confirmed one takes it off disk and off the list and a relaunched supervisor does not restore it, a deleted agent's TILE survives while its respawn is durably suppressed so re-wiring mints nothing (and a prompt in that tile deliberately revives it), a mid-turn delete stops the runner first and the record stays gone, a selection holding a row that is not a managed agent performs on the ones that are and says the other was left alone, and a kept branch is named in what the user is told ('\(strandedMessage)'); and a PAGED settled tail (P4.8): \(InboxSort.settledPageSize) of 30 finished agents on screen under a footer reading '\(pagedFooterTitle)', one press bringing the rest and taking the footer away, and the agent open in the focused tile drawn at 27 of 30 where the page would have ended; and READING IS FREE (P4.9): a settled agent opened by a real click keeps its override, its clear reason, its settle date and its stored record, and survives a second open — while a prompt through the tile's own closure un-settles it in memory and on disk; its SECTION is asserted through `InboxLifecycle.resolve` + `InboxSort.partition` over those records and NOT off the shipped row (`AgentInboxRowBuilder` still hardcodes `.active` — the open finding on P4.3), tail \(afterOpening.settled.count) / active \(afterOpening.active.count) while open, still drawn with the page closed because it is the one you have open, and active \(afterPrompt.active.count) after the prompt; and the POST-ACTION ADVANCE (P4.10): \(advancingRowActions.count) of \(InboxRowAction.allCases.count) row verbs move the cursor, settling row 2 of 5 through its own menu lands on the row that was 3 — with an unrelated push landing first, moving nothing and leaving the advance armed for the one that files — settling the last row falls back to the previous one, a pair settled together clears the whole affected set rather than stopping after the first, a one-row list lands on no selection, Mark Unread arms nothing, a refused action leaves the cursor where it was and is spent rather than firing on the next push, an action on a row that is NOT the cursor arms nothing, a cancelled one whose row merely ticked over is not read as completed, a partial completion that left one target unfiled moves nothing, and — the witness — a person who selected another row while the settle was in flight is left exactly there; and an UNDO TOAST (P4.11): \(undoableRowActions.count) of \(InboxRowAction.allCases.count) row verbs may raise one, a snooze on a keep-active PINNED agent saying '\(undoToastText)' and putting all four stored facts back exactly as captured (the pin included, which a reconstructed undo flattens), a bulk snooze of 3 reporting its count and undoing as ONE call with an already-settled member settled again on its own date, no toast for a refused action, for an archive whose record is gone, for a verb that moves no lifecycle fact, or for a host with no restore path, the second action replacing the first rather than queueing behind it, the card dismissing itself and taking the restore with it, a later lifecycle action retiring a stale card even when it earns none of its own while a non-lifecycle one leaves it alone, and toast and bulk bar laid out clear of each other; and a LIFECYCLE MOVE CROSSFADING IN PLACE (P4.12): a settle holding the outgoing card at the exact rect it was drawn at (\(fadeWasAt)) while the slim row arrives at its settled position and fades up, one view per id:variant throughout, no orphaned card once the \(AgentInboxView.crossfadeDuration)s fade ends, three moves in a row replacing the ghost rather than stacking, Reduce Motion swapping instantly with nothing lifted, and neither a full reload, a first render nor a row that merely ticked over animating anything")
     }
 }
 

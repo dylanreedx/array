@@ -6,12 +6,14 @@ struct ChoiceItem: Identifiable, Equatable {
     let title: String
     let detail: String?
     let enabled: Bool
+    let destructive: Bool
 
-    init(id: String, title: String, detail: String? = nil, enabled: Bool = true) {
+    init(id: String, title: String, detail: String? = nil, enabled: Bool = true, destructive: Bool = false) {
         self.id = id
         self.title = title
         self.detail = detail
         self.enabled = enabled
+        self.destructive = destructive
     }
 }
 
@@ -28,6 +30,7 @@ final class ChoiceListView: NSView, TokenThemed {
     private(set) var focusedID: String?
     var onSelection: ((ChoiceItem) -> Void)?
     var onDismiss: (() -> Void)?
+    private(set) var lastAccessibilityAnnouncementForQA: String?
 
     private var rows: [ChoiceRowView] = []
     private var typeahead = ""
@@ -118,12 +121,15 @@ final class ChoiceListView: NSView, TokenThemed {
             let base = current ?? (delta > 0 ? -1 : enabled.count)
             focusedID = enabled[(base + delta + enabled.count) % enabled.count].id
             updateRows()
+            announceFocusedChoice()
         case .first:
             focusedID = enabled.first?.id
             updateRows()
+            announceFocusedChoice()
         case .last:
             focusedID = enabled.last?.id
             updateRows()
+            announceFocusedChoice()
         case .accept:
             guard let item = items.first(where: { $0.id == focusedID && $0.enabled }) else { return }
             choose(item)
@@ -141,6 +147,9 @@ final class ChoiceListView: NSView, TokenThemed {
         }) else { return }
         choose(item)
     }
+
+    var qaItems: [ChoiceItem] { items }
+    var qaDestructiveIDs: Set<String> { Set(items.filter(\.destructive).map(\.id)) }
 
     var qaRowStates: [(id: String, selected: Bool, focused: Bool, enabled: Bool, checkVisible: Bool, borderWidth: CGFloat)] {
         rows.map {
@@ -178,7 +187,21 @@ final class ChoiceListView: NSView, TokenThemed {
         }) {
             focusedID = match.id
             updateRows()
+            announceFocusedChoice()
         }
+    }
+
+    private func announceFocusedChoice() {
+        guard let focusedID,
+              let item = items.first(where: { $0.id == focusedID }) else { return }
+        let announcement = item.destructive ? "Destructive action, \(item.title)" : item.title
+        // The recorded value and accessibility post share this one seam so the
+        // deterministic check goes red if keyboard focus stops announcing.
+        lastAccessibilityAnnouncementForQA = announcement
+        NSAccessibility.post(
+            element: self,
+            notification: .announcementRequested,
+            userInfo: [.announcement: announcement])
     }
 
     private func rebuildRows() {
@@ -243,7 +266,8 @@ private final class ChoiceRowView: NSControl, TokenThemed {
         addSubview(detailLabel)
         setAccessibilityRole(.row)
         setAccessibilityLabel(item.title)
-        setAccessibilityHelp(item.detail)
+        let help = item.destructive ? "Destructive action. \(item.detail ?? "")" : item.detail
+        setAccessibilityHelp(help)
         setAccessibilityEnabled(item.enabled)
         applyTokens()
     }
@@ -307,6 +331,8 @@ private final class ChoiceRowView: NSControl, TokenThemed {
         }
         layer?.borderWidth = 0
         checkView.isHidden = !selected
+        // Destructive choices retain the same token-painted vocabulary; the semantic
+        // flag is exposed to accessibility and QA without inventing stock AppKit red.
         let foreground = item.enabled ? TextToken.textPrimary.color : TextToken.textSecondary.color
         titleLabel.textColor = foreground.nsColor(for: theme)
         detailLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)

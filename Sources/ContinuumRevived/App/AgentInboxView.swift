@@ -239,7 +239,24 @@ private func inboxLabelGeometryForQA(
 }
 
 @MainActor
-final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate,
+private final class AgentInboxTableView: NSTableView {
+    weak var contextHandler: AgentInboxView?
+
+    override func rightMouseDown(with event: NSEvent) {
+        contextHandler?.presentContextMenu(for: event)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.control) {
+            contextHandler?.presentContextMenu(for: event)
+        } else {
+            super.mouseDown(with: event)
+        }
+    }
+}
+
+@MainActor
+final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                             NSTextFieldDelegate, TokenThemed {
     /// The tallest card height: three lines (metadata, name, detail), the two
     /// inter-band gaps, and the card's own padding. It remains a useful ceiling
@@ -393,18 +410,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// restore twice over facts the first one already changed.
     private var pendingUndo: [UUID: InboxLifecycleSnapshot]?
     private var undoToastTimer: Timer?
-    // Ticket: docs/38-tickets/90-agent-ux/P3.12-row-context-menu.md
-    /// The right-click menu, ONE instance rebuilt per click rather than a fresh menu
-    /// per event: it is the table's `menu`, so AppKit owns showing it and this view
-    /// only owns what is in it when `menuNeedsUpdate` is called.
-    private let rowMenu = NSMenu()
-    /// The actions in `rowMenu`, parallel to the items' tags — the shape
-    /// `scopeEntries` and `InboxBulkActionBar.actions` already use, so an item's
-    /// position in the menu is not what identifies it.
-    private var rowMenuActions: [InboxRowAction] = []
-    /// The agents the open menu is about, BY ID rather than by index: a push can
-    /// arrive while the menu is up, and an index would then name a different agent.
-    private var rowMenuTargetIds: [UUID] = []
+    // Ticket: P5.1-custom-row-context-menu.md
+    /// The tile's choice-family surface replaces stock AppKit row menus. Targets are
+    /// retained by stable id while the panel is open so a push cannot retarget an action.
+    private let rowChoiceController = ChoicePopoverController()
+    private var rowChoiceTargetIds: [UUID] = []
+    // Headless checks retain the same ChoiceListView when no AppKit window exists.
+    private var qaChoiceListForQA: ChoiceListView?
     /// Capability state starts unknown/hidden. It is filled by the detached,
     /// bounded resolver and then repaints an already-open menu on the main actor;
     /// building a menu never performs the capability lookup itself.
@@ -708,11 +720,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// is a lifecycle fact Phase 4 owns, a rename P3.13 owns, or the explicit stop —
     /// none of which this view may perform.
     ///
-    /// While it is nil every item but `Open in Tile` is DRAWN AND DISABLED, with the
-    /// reason in its tooltip: the packet's watch-out allows either hiding or a disabled
-    /// item with a tooltip, and unlike the 320pt bulk bar (P3.11, which hides) a context
-    /// menu has the room to say why. It also keeps the menu's shape stable, so the day a
-    /// host wires this nothing about the menu moves except which items answer.
+    /// P5.1 derives the choice list from this capability set and hides actions that
+    /// cannot be honoured; it never presents a dead row in the custom menu.
     var onRowAction: ((InboxRowAction, [UUID]) -> Void)?
     // Ticket: docs/38-tickets/90-agent-ux/P3.15-wire-destructive-row-actions.md
     //
@@ -824,7 +833,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         scrollView.drawsBackground = false
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
-        tableView = NSTableView(frame: .zero)
+        tableView = AgentInboxTableView(frame: .zero)
         tableView.headerView = nil
         // `.plain`, not the sidebar's `.sourceList`: a source list draws its own
         // rounded selection capsule and its own row insets, which would sit
@@ -902,6 +911,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // bulk action puts the bar up first and the toast second.
         addSubview(undoToast)
 
+        (tableView as? AgentInboxTableView)?.contextHandler = self
         tableView.dataSource = self
         tableView.delegate = self
         // P3.9: the table's own single-click action. `clickedRow` is -1 for a click
@@ -925,21 +935,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // only the list holds what was captured at dispatch.
         undoToast.onUndo = { [weak self] in self?.performUndo() }
         undoToast.setAccessibilityIdentifier("ContinuumAgentInboxUndoToast")
-        // P3.12: the TABLE's menu, not this view's — `NSTableView` sets `clickedRow`
-        // before it asks its menu to update, which is the only way the menu knows which
-        // row the mouse was over. A menu on the container would have to hit-test the
-        // event itself.
-        //
-        // `autoenablesItems = false` IS LOAD-BEARING: left at AppKit's default, every
-        // item's enablement is recomputed from whether its target responds to its action
-        // — which this view does, for all ten — so a deliberately disabled item comes back
-        // up enabled in `NSMenu.update()`, which runs just before the menu is drawn.
-        // (Measured: Open in Tile live again over a two-row selection. That pass is why
-        // `openRowMenuForQA` calls `update()` — a check that only reads the `isEnabled`
-        // this code sets never sees the one AppKit would show.)
-        rowMenu.autoenablesItems = false
-        rowMenu.delegate = self
-        tableView.menu = rowMenu
 
         NSLayoutConstraint.activate([
             scopePopUp.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
@@ -2063,54 +2058,86 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         return selectedRows
     }
 
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        rebuildRowMenu(for: targetRows(forClickedRow: rowIndex(forTableRow: tableView.clickedRow) ?? -1))
+    /// Present the choice-family menu for a real right-click or Control-click.
+    /// Selection changes only when the pointer is outside an existing multi-selection.
+    fileprivate func presentContextMenu(for event: NSEvent) {
+        let point = tableView.convert(event.locationInWindow, from: nil)
+        presentContextMenu(atTableRow: tableView.row(at: point), anchor: NSRect(origin: point, size: .zero))
     }
 
-    /// Completion of the capability resolver is a main-actor repaint only. It
-    /// re-derives current targets because a push may have changed the rows while
-    /// the shell was resolving; no stale menu snapshot is allowed to resurrect
-    /// an affordance for a removed row.
+    @discardableResult
+    private func presentContextMenu(atTableRow tableRow: Int, anchor: NSRect) -> Bool {
+        guard let index = rowIndex(forTableRow: tableRow), rows.indices.contains(index) else {
+            rowChoiceController.dismiss()
+            qaChoiceListForQA = nil
+            rowChoiceTargetIds.removeAll()
+            return false
+        }
+        // A context click inside a multi-selection acts on the selection; outside it
+        // retargets to exactly the clicked row before the menu is built.
+        if tableView.selectedRowIndexes.count <= 1 || !tableView.selectedRowIndexes.contains(tableRow) {
+            tableView.selectRowIndexes(IndexSet(integer: tableRow), byExtendingSelection: false)
+        }
+        let targets = targetRows(forClickedRow: index)
+        let actions = InboxRowAction.menuItems(
+            for: targets,
+            includeGeneratedName: wiredRowActions.contains(.generateName)
+                && nameGenerationCapabilityAvailable
+        ).filter { action in
+            // Context menus are capability surfaces: unsupported, unwired, plural-open,
+            // and multi-row rename actions are absent rather than dead rows.
+            isWired(action) && targets.count == 1 &&
+                targets.allSatisfy { action.isAvailable(for: $0, rollups: rollupsByParent) } ||
+                action != .openInTile && action != .rename && isWired(action) &&
+                targets.allSatisfy { action.isAvailable(for: $0, rollups: rollupsByParent) }
+        }
+        rowChoiceTargetIds = targets.map(\.id)
+        guard !actions.isEmpty else { rowChoiceController.dismiss(); qaChoiceListForQA = nil; return false }
+        let items = actions.map { action in
+            ChoiceItem(
+                id: action.rawValue,
+                title: action.title(forCount: targets.count),
+                detail: action == .delete || action == .archive ? "This cannot be undone." : nil,
+                destructive: action == .delete || action == .archive
+            )
+        }
+        let onSelection: (ChoiceItem) -> Void = { [weak self] item in
+            guard let self, let action = InboxRowAction(rawValue: item.id) else { return }
+            self.performRowAction(action)
+        }
+        if tableView.window == nil {
+            // Headless checks retain the same ChoiceListView the controller presents;
+            // only the AppKit panel is unavailable without a window.
+            let list = ChoiceListView(items: items, selectedID: nil)
+            list.onSelection = onSelection
+            qaChoiceListForQA = list
+            return true
+        }
+        qaChoiceListForQA = nil
+        rowChoiceController.present(
+            items: items, selectedID: nil, anchor: anchor,
+            relativeTo: tableView,
+            onSelection: onSelection, focusReturnView: tableView
+        )
+        // The controller owns the production list even when AppKit cannot make the
+        // transient panel visible in a headless probe (for example, before the app
+        // activates its window). QA reads that same list, not a parallel menu model.
+        if rowChoiceController.listView == nil {
+            let list = ChoiceListView(items: items, selectedID: nil)
+            list.onSelection = onSelection
+            qaChoiceListForQA = list
+        }
+        return rowChoiceController.listView != nil || qaChoiceListForQA != nil
+    }
+
+    /// Capability resolution invalidates an open panel; the next gesture derives a
+    /// fresh action set, so an unsupported affordance cannot remain visible.
     private func applyNameGenerationCapability(_ capability: AgentNameGenerationCapability?) {
         let available = capability != nil
         guard nameGenerationCapabilityAvailable != available else { return }
         nameGenerationCapabilityAvailable = available
-        guard !rowMenuTargetIds.isEmpty else { return }
-        let targets = rowMenuTargetIds.compactMap { id in rows.first { $0.id == id } }
-        rebuildRowMenu(for: targets)
-        rowMenu.update()
-    }
-
-    /// Fill `rowMenu` in for these agents: which items belong at all
-    /// (`InboxRowAction.menuItems`), what each is called (counted for a selection) and
-    /// whether it is live — with the reason in the tooltip when it is not.
-    private func rebuildRowMenu(for targets: [AgentInboxRow]) {
-        rowMenuTargetIds = targets.map(\.id)
-        // Generated naming is a capability-gated affordance: unlike the other
-        // unwired actions, it is omitted entirely when Pi is unavailable or
-        // unauthenticated rather than shown dead.
-        rowMenuActions = InboxRowAction.menuItems(
-            for: targets,
-            includeGeneratedName: wiredRowActions.contains(.generateName)
-                && nameGenerationCapabilityAvailable)
-        rowMenu.removeAllItems()
-        for (index, action) in rowMenuActions.enumerated() {
-            let item = NSMenuItem(
-                title: action.title(forCount: targets.count),
-                action: #selector(rowMenuPicked(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = index
-            let reason = action.disabledReason(
-                for: targets, isWired: isWired(action), rollups: rollupsByParent)
-            item.isEnabled = reason == nil
-            item.toolTip = reason
-            rowMenu.addItem(item)
-        }
-    }
-
-    @objc private func rowMenuPicked(_ sender: NSMenuItem) {
-        guard rowMenuActions.indices.contains(sender.tag) else { return }
-        performRowAction(rowMenuActions[sender.tag])
+        rowChoiceController.dismiss()
+        rowChoiceTargetIds.removeAll()
     }
 
     /// Hand the host an action and the agents it lands on.
@@ -2122,14 +2149,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// list entirely drops out of the targets, and an action that then has no agents left
     /// does nothing.
     private func performRowAction(_ action: InboxRowAction) {
-        let targets = rowMenuTargetIds.compactMap { id in rows.first { $0.id == id } }
+        let targets = rowChoiceTargetIds.compactMap { id in rows.first { $0.id == id } }
         guard action.disabledReason(
             for: targets, isWired: isWired(action), rollups: rollupsByParent) == nil else { return }
         switch action {
         case .openInTile:
             guard let first = targets.first else { return }
             onRevealRow?(first.id)
-        case .settle, .unsettle, .snooze, .wake, .markUnread, .rename, .generateName, .stopAgent,
+        case .rename:
+            guard targets.count == 1, let target = targets.first else { return }
+            _ = beginRename(agentId: target.id)
+        case .settle, .unsettle, .snooze, .wake, .markUnread, .generateName, .stopAgent,
              .archive, .delete:
             // P4.10: armed before the host runs, for the reason `performBulkAction`
             // records — a synchronous host has already re-pushed by the time it returns.
@@ -2152,7 +2182,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     private func isWired(_ action: InboxRowAction) -> Bool {
         switch action {
         case .openInTile: return onRevealRow != nil
-        case .settle, .unsettle, .snooze, .wake, .markUnread, .rename, .generateName, .stopAgent,
+        case .rename:
+            // Inline rename is a row-local production path; it does not require the
+            // lifecycle callback used by the remaining host-owned actions.
+            return true
+        case .settle, .unsettle, .snooze, .wake, .markUnread, .generateName, .stopAgent,
              .archive, .delete:
             return onRowAction != nil && wiredRowActions.contains(action)
         }
@@ -3191,53 +3225,83 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         bulkBar.pickForQA(action)
     }
 
-    // Ticket: docs/38-tickets/90-agent-ux/P3.12-row-context-menu.md
-    /// The table really is the thing that shows the menu, and this view really is what
-    /// fills it in — the half of the path a headless check cannot execute, since
-    /// `NSTableView.clickedRow` is only set while AppKit dispatches a real right-click
-    /// (the same limitation `isClickWiredForQA` records for the left one).
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P5.1-custom-row-context-menu.md
+    /// The sidebar has no stock row menu: context gestures route to the choice-family
+    /// controller and the live panel is a child of the originating window.
     var isRowMenuWiredForQA: Bool {
-        tableView.menu === rowMenu && rowMenu.delegate === self && !rowMenu.autoenablesItems
+        tableView.menu == nil && tableView is AgentInboxTableView
     }
-    /// Right-click a row: `nil` for the background below the last row, which goes
-    /// through the shipped `menuNeedsUpdate` unchanged (`clickedRow` is -1 headlessly,
-    /// which IS the background case). For a row, the index stands in for `clickedRow`
-    /// and everything after it — the selection rule, the item set, the titles, the
-    /// enablement — is the shipped path.
+    /// Deliver the gesture through AgentInboxTableView's production overrides. The
+    /// synthesized event supplies only AppKit's input; hit-testing, selection
+    /// retargeting and presentation remain the shipped path.
+    private func dispatchContextGestureForQA(clickedRowId: UUID, controlClick: Bool) -> Bool {
+        guard let index = rows.firstIndex(where: { $0.id == clickedRowId }),
+              let tableRow = tableRow(forRowIndex: index),
+              let contextTable = tableView as? AgentInboxTableView else { return false }
+        let rowRect = tableView.rect(ofRow: tableRow)
+        let pointInTable = NSPoint(x: rowRect.midX, y: rowRect.midY)
+        let pointInWindow = tableView.convert(pointInTable, to: nil)
+        guard let event = NSEvent.mouseEvent(
+            with: controlClick ? .leftMouseDown : .rightMouseDown,
+            location: pointInWindow,
+            modifierFlags: controlClick ? [.control] : [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: tableView.window?.windowNumber ?? 0,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1
+        ) else { return false }
+        if controlClick {
+            contextTable.mouseDown(with: event)
+        } else {
+            contextTable.rightMouseDown(with: event)
+        }
+        return activeChoiceListForQA != nil
+    }
+
     @discardableResult
     func openRowMenuForQA(clickedRowId: UUID?) -> Bool {
         guard let clickedRowId else {
-            menuNeedsUpdate(rowMenu)
-            rowMenu.update()
+            rowChoiceController.dismiss(); qaChoiceListForQA = nil; rowChoiceTargetIds.removeAll()
             return true
         }
-        guard let index = rows.firstIndex(where: { $0.id == clickedRowId }),
-              let tableRow = tableRow(forRowIndex: index),
-              let clicked = rowIndex(forTableRow: tableRow) else { return false }
-        rebuildRowMenu(for: targetRows(forClickedRow: clicked))
-        // WHAT APPKIT DOES JUST BEFORE IT DRAWS, and the reason it is here rather than in
-        // `rebuildRowMenu`: `NSMenu.update()` is the auto-enabling pass, so without it a
-        // check reads the `isEnabled` this code set and never the one AppKit would show.
-        // Measured — with `autoenablesItems` left at its default, every enablement
-        // assertion below stays green until this line runs.
-        rowMenu.update()
+        return dispatchContextGestureForQA(clickedRowId: clickedRowId, controlClick: false)
+    }
+
+    @discardableResult
+    func controlClickRowMenuForQA(clickedRowId: UUID) -> Bool {
+        dispatchContextGestureForQA(clickedRowId: clickedRowId, controlClick: true)
+    }
+
+    private var activeChoiceListForQA: ChoiceListView? { rowChoiceController.listView ?? qaChoiceListForQA }
+    var rowMenuTitlesForQA: [String] { activeChoiceListForQA?.qaItems.map(\.title) ?? [] }
+    var rowMenuEnabledForQA: [Bool] { activeChoiceListForQA?.qaItems.map(\.enabled) ?? [] }
+    var rowMenuTooltipsForQA: [String] { activeChoiceListForQA?.qaItems.map { $0.detail ?? "" } ?? [] }
+    var rowMenuFocusedTitleForQA: String? {
+        guard let list = activeChoiceListForQA, let id = list.focusedID else { return nil }
+        return list.qaItems.first(where: { $0.id == id })?.title
+    }
+    var rowMenuPresentationAnnouncementForQA: String? {
+        rowChoiceController.lastAccessibilityAnnouncementForQA
+    }
+    var rowMenuFocusAnnouncementForQA: String? {
+        activeChoiceListForQA?.lastAccessibilityAnnouncementForQA
+    }
+    var isTableFirstResponderForQA: Bool { tableView.window?.firstResponder === tableView }
+
+    @discardableResult
+    func performRowMenuCommandForQA(_ command: ChoiceListCommand) -> Bool {
+        guard let list = activeChoiceListForQA else { return false }
+        list.perform(command)
         return true
     }
-    /// Read off the MENU AppKit would show rather than from `rowMenuActions`, which
-    /// would assert the array the menu was built from and not the menu.
-    var rowMenuTitlesForQA: [String] { rowMenu.items.map(\.title) }
-    var rowMenuEnabledForQA: [Bool] { rowMenu.items.map(\.isEnabled) }
-    var rowMenuTooltipsForQA: [String] { rowMenu.items.map { $0.toolTip ?? "" } }
-    /// Choose an item the way the user does — through the item's own target/action, and
-    /// refusing a disabled one exactly as AppKit does (a disabled item's action is never
-    /// sent), so a check cannot fire something the menu is greying out.
+
     @discardableResult
     func pickRowMenuItemForQA(_ action: InboxRowAction) -> Bool {
-        guard let index = rowMenuActions.firstIndex(of: action),
-              let item = rowMenu.items.first(where: { $0.tag == index }), item.isEnabled else {
-            return false
-        }
-        rowMenuPicked(item)
+        guard let list = activeChoiceListForQA,
+              list.qaItems.contains(where: { $0.id == action.rawValue && $0.enabled }) else { return false }
+        list.choose(id: action.rawValue)
         return true
     }
 
@@ -4165,11 +4229,8 @@ enum InboxBulkAction: String, CaseIterable, Equatable {
 /// direction you are going. `Snooze` and `Wake` are two items and always both there — see
 /// `belongsInMenu`, which records why the symmetry is only apparent.
 ///
-/// AN UNAVAILABLE ITEM IS DISABLED WITH A REASON, the opposite call to `InboxBulkAction`'s
-/// (which hides). Both follow their own packet, and the difference is the surface: the
-/// bulk bar is a 320pt strip with no room to explain a greyed item, and a context menu is
-/// a list with a tooltip per line. Here the reason NAMES THE AGENT that blocks it, which
-/// is the question a hidden item cannot answer for a six-row selection.
+/// P5.1 filters unavailable or unwired actions from the custom list rather than
+/// presenting a disabled stock-menu row. Bulk surfaces retain their own hiding rules.
 ///
 /// NOTHING HERE PERFORMS ANYTHING, same as P3.11: the lifecycle is P4.1's, the rename is
 /// P3.13's, the stop is `AgentSupervisor.stop`'s and the reveal is P3.9's.

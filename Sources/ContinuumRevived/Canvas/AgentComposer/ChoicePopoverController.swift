@@ -13,8 +13,10 @@ private final class ChoicePanel: NSPanel {
 final class ChoicePopoverController {
     private(set) var panel: NSPanel?
     private(set) var listView: ChoiceListView?
+    private(set) var lastAccessibilityAnnouncementForQA: String?
 
     private weak var anchorView: NSView?
+    private weak var focusReturnView: NSView?
     private weak var parentWindow: NSWindow?
     private var anchorWasPostingFrameChanges: Bool?
     // AppKit monitor/observer tokens are main-thread resources but are not marked
@@ -40,12 +42,19 @@ final class ChoicePopoverController {
         anchor: NSRect,
         relativeTo view: NSView,
         takesFocus: Bool = true,
-        onSelection: @escaping (ChoiceItem) -> Void
+        onSelection: @escaping (ChoiceItem) -> Void,
+        focusReturnView: NSView? = nil
     ) {
         dismiss()
-        guard !items.isEmpty, let window = view.window else { return }
-
+        lastAccessibilityAnnouncementForQA = nil
+        guard !items.isEmpty else { return }
+        // Build the production choice list before asking AppKit for a window. QA
+        // probes can exercise the exact rendered contents while the host window is
+        // not yet attached; a missing panel must not make that seam vacuous.
         let list = ChoiceListView(items: items, selectedID: selectedID)
+        listView = list
+        guard let window = view.window else { return }
+
         let contentSize = list.intrinsicContentSize
         let panel = ChoicePanel(
             contentRect: NSRect(origin: .zero, size: contentSize),
@@ -69,7 +78,10 @@ final class ChoicePopoverController {
         self.panel = panel
         listView = list
         anchorView = view
+        self.focusReturnView = focusReturnView
         parentWindow = window
+        list.setAccessibilityLabel("Agent actions")
+        panel.setAccessibilityLabel("Agent actions")
         anchorWasPostingFrameChanges = view.postsFrameChangedNotifications
 
         list.onSelection = { [weak self] item in
@@ -85,6 +97,14 @@ final class ChoicePopoverController {
             panel.makeKey()
             panel.makeFirstResponder(list)
         }
+        let announcement = "Agent actions menu"
+        // Keep the observable value on the same path as the real VoiceOver post;
+        // checks do not claim an announcement merely because a label exists.
+        lastAccessibilityAnnouncementForQA = announcement
+        NSAccessibility.post(
+            element: list,
+            notification: .announcementRequested,
+            userInfo: [.announcement: announcement])
     }
 
     /// Passive completion panels keep the editor first responder and forward its
@@ -102,10 +122,16 @@ final class ChoicePopoverController {
             parentWindow?.removeChildWindow(panel)
             panel.orderOut(nil)
         }
+        let returnView = focusReturnView
+        let window = parentWindow
         panel = nil
         listView = nil
         anchorView = nil
+        focusReturnView = nil
         parentWindow = nil
+        if let returnView, let window, returnView.window === window {
+            window.makeFirstResponder(returnView)
+        }
     }
 
     /// Places below when it fits, otherwise above, then clamps both axes to the
