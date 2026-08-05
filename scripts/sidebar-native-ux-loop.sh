@@ -172,10 +172,25 @@ validate_scope() {
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     count=$((count + 1))
-    path_allowed "$path" "$ticket" || {
-      echo "out-of-fence path: $path" >&2
-      return 1
-    }
+    if ! path_allowed "$path" "$ticket"; then
+      # The R2 fence allowance (scripts/sidebar-native-ux-prompt.md): ContinuumApp
+      # and AgentSupervisor may carry a forced call site, a deliberately-moved
+      # assertion, or a false summary line. The allowance was written into the
+      # PROMPT on 2026-08-04 but never into this validator, so the first worker to
+      # use it correctly (P3.4) was scope-failed for following instructions. The
+      # validator cannot judge PURPOSE — the independent review does that, and the
+      # review request names these paths so the reviewer holds them to the three
+      # allowed purposes rather than waving them through.
+      case "$path" in
+        Sources/ContinuumRevived/App/ContinuumApp.swift|Sources/ContinuumRevived/App/AgentSupervisor.swift)
+          echo "fence allowance R2 path accepted: $path (review must verify purpose)" >&2
+          ;;
+        *)
+          echo "out-of-fence path: $path" >&2
+          return 1
+          ;;
+      esac
+    fi
   done <<EOF
 $(changed_paths)
 EOF
@@ -304,6 +319,12 @@ Be strict about correctness, packet architecture, privacy, file scope, determini
 weakening. Report only blocking issues: behavior that can be wrong, architecture that violates a
 locked decision, unsafe handling, or a named done criterion left unproved. Do not request stylistic
 cleanup or unrelated hardening. Give at most five blocking findings. You are read-only.
+
+If the diff touches ContinuumApp.swift or AgentSupervisor.swift outside the packet's fence, the
+fence allowance (scripts/sidebar-native-ux-prompt.md) permits exactly three purposes there: a call
+site a compile error forces, an existing assertion whose expected value the packet deliberately
+moves, or a printed summary the change would otherwise make false. An edit in those files serving
+any OTHER purpose is a blocking scope finding.
 
 End with exactly DECISION: APPROVE or DECISION: REWORK.
 EOF
