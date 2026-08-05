@@ -413,7 +413,8 @@ final class AgentSupervisor {
         // the first name, and a manual rename disarms the gate even if somebody
         // deliberately types the sentinel. No model call, spawn path, or worktree
         // slug participates in display naming.
-        if record.displayName == AgentRecord.defaultAgentName,
+        if record.namingRequest == nil,
+           record.displayName == AgentRecord.defaultAgentName,
            record.displayNameSource == .sentinel,
            let name = AgentName.fromPrompt(prompt),
            !AgentName.isIdentifier(name, model: record.model, role: record.role, id: record.id.rawValue) {
@@ -1142,9 +1143,9 @@ final class AgentSupervisor {
     /// (`AgentContextIndex`, `AgentInboxRowBuilder`, `AgentInventory`).
     ///
     /// Returns whether anything changed: false for an agent this supervisor does not
-    /// have, for a name that sanitises to nothing, and for an already-manual name.
-    /// An explicit rename to the unchanged sentinel still changes provenance: it
-    /// disarms first-prompt naming so the human choice cannot be clobbered.
+    /// have or for a name that sanitises to nothing. A valid manual rename always
+    /// disarms the in-flight automatic proposal, including an explicit choice of the
+    /// unchanged sentinel; a late completion must then fail its request marker check.
     @discardableResult
     func rename(agentID id: AgentID, to name: String) -> Bool {
         guard var record = records[id] else {
@@ -1152,16 +1153,89 @@ final class AgentSupervisor {
             return false
         }
         guard let label = AgentSupervisor.sanitizedDisplayName(name) else { return false }
-        if record.displayName == label {
-            guard record.displayNameSource != .manual else { return false }
-            record.displayNameSource = .manual
-        } else {
-            record.displayName = label
-            record.displayNameSource = .manual
+        let changed = record.displayName != label
+            || record.displayNameSource != .manual
+            || record.namingRequest != nil
+        guard changed else { return false }
+        record.displayName = label
+        record.displayNameSource = .manual
+        // A human title owns the record again. Clear the marker before persisting
+        // so no already-started provider completion can find a live request.
+        record.namingRequest = nil
+        records[id] = record
+        persist(record)
+        return true
+    }
+
+    /// Start an automatic name proposal without doing any provider work. The
+    /// caller keeps the returned token and must hand it back to
+    /// `applyGeneratedName` after its best-effort work finishes.
+    @discardableResult
+    func beginNameGeneration(agentID id: AgentID) -> NamingRequest? {
+        guard var record = records[id] else {
+            warn("AgentSupervisor.beginNameGeneration: no agent \(id.rawValue.uuidString)")
+            return nil
+        }
+        let request = record.beginNamingRequest()
+        records[id] = record
+        persist(record)
+        return request
+    }
+
+    /// Land a generated title through the record's compare-and-swap. The
+    /// request id and expected title are both checked on the completion path;
+    /// checking only the id before starting work would let a rename race win.
+    @discardableResult
+    func applyGeneratedName(_ name: String, for request: NamingRequest, agentID id: AgentID) -> Bool {
+        guard var record = records[id] else {
+            warn("AgentSupervisor.applyGeneratedName: no agent \(id.rawValue.uuidString)")
+            return false
+        }
+        guard record.namingRequest?.id == request.id,
+              record.displayName == request.expectedName else { return false }
+        guard let label = AgentSupervisor.sanitizedDisplayName(name) else {
+            // The request was current but its result was unusable. Consume the
+            // marker without changing the existing title; failure is best-effort.
+            record.namingRequest = nil
+            records[id] = record
+            persist(record)
+            return false
+        }
+        guard record.applyGeneratedName(label, for: request) else {
+            // `AgentRecord` also validates identifier-shaped output. Persist only
+            // when it consumed this current request, never for a stale completion.
+            if record.namingRequest == nil {
+                records[id] = record
+                persist(record)
+            }
+            return false
         }
         records[id] = record
         persist(record)
         return true
+    }
+
+    /// The request boundary used by the later one-shot generator. An explicit
+    /// name and regenerate intent are mutually exclusive: rejecting the combined
+    /// request is safer than silently choosing one side and surprising the caller.
+    /// Explicit names use the normal manual rename path; regenerate returns the
+    /// persisted CAS token. Neither intent creates a provider process here.
+    @discardableResult
+    func requestName(
+        agentID id: AgentID,
+        explicitName: String? = nil,
+        regenerate: Bool = false
+    ) -> NamingRequest? {
+        guard !(explicitName != nil && regenerate) else {
+            warn("AgentSupervisor.requestName: explicit name and regenerate intent are mutually exclusive; refusing")
+            return nil
+        }
+        if let explicitName {
+            _ = rename(agentID: id, to: explicitName)
+            return nil
+        }
+        guard regenerate else { return nil }
+        return beginNameGeneration(agentID: id)
     }
 
     // MARK: - Model and thinking level (P6.1)
@@ -2780,6 +2854,68 @@ private func checkAgentNameContract<Failure: Error>(
         throw fail("a manual sentinel rename was overwritten by the next prompt")
     }
 
+    // P4.3: the generation marker is durable, and both halves of the CAS are
+    // checked on completion. A manual rename during the pending request must
+    // survive a late generated result.
+    let raceRequest = supervisor.beginNameGeneration(agentID: id)
+    guard let raceRequest,
+          try store.load(id: id)?.namingRequest == raceRequest,
+          supervisor.rename(agentID: id, to: "Human chosen after generation"),
+          supervisor.records[id]?.namingRequest == nil,
+          !supervisor.applyGeneratedName("late generated title", for: raceRequest, agentID: id),
+          supervisor.records[id]?.displayName == "Human chosen after generation" else {
+        throw fail("a manual rename during pending generation did not win the completion CAS")
+    }
+
+    // A current request can land, but an older request cannot land after it is
+    // superseded. The expected-name half is also exercised directly on a record
+    // whose title changed without going through the supervisor.
+    let generatedID = supervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, model: config.model, thinking: config.thinking)
+    guard let generatedRequest = supervisor.beginNameGeneration(agentID: generatedID),
+          generatedRequest.expectedName == AgentRecord.defaultAgentName,
+          supervisor.applyGeneratedName("Generated title", for: generatedRequest, agentID: generatedID),
+          supervisor.records[generatedID]?.displayName == "Generated title",
+          supervisor.records[generatedID]?.displayNameSource == .prompt,
+          supervisor.records[generatedID]?.namingRequest == nil else {
+        throw fail("a current generated name did not pass the marker CAS and persist")
+    }
+    let supersededID = supervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, model: config.model, thinking: config.thinking)
+    guard let firstRequest = supervisor.beginNameGeneration(agentID: supersededID),
+          let secondRequest = supervisor.beginNameGeneration(agentID: supersededID),
+          firstRequest.id != secondRequest.id,
+          !supervisor.applyGeneratedName("old result", for: firstRequest, agentID: supersededID),
+          supervisor.applyGeneratedName("new result", for: secondRequest, agentID: supersededID) else {
+        throw fail("a superseded generated-name request landed after a newer request")
+    }
+    var directCAS = supervisor.records[generatedID]!
+    let directRequest = directCAS.beginNamingRequest()
+    directCAS.displayName = "Concurrent human title"
+    guard !directCAS.applyGeneratedName("must not clobber", for: directRequest),
+          directCAS.displayName == "Concurrent human title",
+          directCAS.namingRequest?.id == directRequest.id else {
+        throw fail("the generated-name CAS did not reject a changed expected title")
+    }
+    let persistedCAS = try JSONCodec.makeDecoder().decode(
+        AgentRecord.self, from: JSONCodec.makeEncoder().encode(directCAS))
+    guard persistedCAS.namingRequest == directRequest,
+          persistedCAS.displayName == "Concurrent human title" else {
+        throw fail("the in-flight naming marker did not round-trip through AgentRecord persistence")
+    }
+
+    // The request boundary is exclusive. Do not silently choose explicit text or
+    // regeneration when a caller supplies both.
+    let conflictingID = supervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, model: config.model, thinking: config.thinking)
+    guard let beforeConflict = supervisor.records[conflictingID],
+          supervisor.requestName(
+              agentID: conflictingID, explicitName: "explicit", regenerate: true) == nil,
+          supervisor.records[conflictingID] == beforeConflict,
+          supervisor.records[conflictingID]?.namingRequest == nil else {
+        throw fail("a request carrying both explicit name and regenerate intent was not rejected")
+    }
+
     // Deterministic edge corpus: empty/whitespace stay displayable through the
     // sentinel; all other cases preserve human text, including marks and RTL.
     let combiningOnly = "\u{301}\u{302}"
@@ -2916,7 +3052,7 @@ private func checkAgentNameContract<Failure: Error>(
         throw fail("prompt-derived display text crossed the companion payload")
     }
 
-    return "agent naming: sentinel-only spawn, first-send seed, repeat/manual no-clobber incl. manual sentinel disarm, identifier prompt held at sentinel, edge corpus \(edgeCases.count), \(AgentName.maximumLength)-character cap, model/role/UUID migration with manual provenance, row defensive read, \(sourceReport), and prompt I5 boundary"
+    return "agent naming: sentinel-only spawn, first-send seed, repeat/manual no-clobber incl. manual sentinel disarm, P4.3 durable request CAS (manual race, current/superseded completion, expected-name mismatch, round-trip, explicit+regenerate rejection), identifier prompt held at sentinel, edge corpus \(edgeCases.count), \(AgentName.maximumLength)-character cap, model/role/UUID migration with manual provenance, row defensive read, \(sourceReport), and prompt I5 boundary"
 }
 
 private struct AgentNameSentinelSourceMatch {

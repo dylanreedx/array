@@ -2602,6 +2602,132 @@ enum UIProbeGeometry {
         return assertions
     }
 
+    // MARK: - P4.3 — live rename event path
+
+    /// Exercise the actual row-cell/editor path at every shipping width and both
+    /// appearances. The helpers below only stand in for NSEvent delivery; the
+    /// editor, delegate, hit test, table activation path and callback are live.
+    private static func checkSidebarRenameInteraction() throws -> Int {
+        let rows = LabFixtures.inboxRows()
+        guard let target = rows.first(where: { row in rows.contains { $0.parentId == row.id } }) else {
+            throw fail("sidebar-ux-check.rename: fixture has no parent row with a live nested control")
+        }
+        let widths: [CGFloat] = [
+            CGFloat(WorkspaceSidebarConfig.minWidth),
+            CGFloat(WorkspaceSidebarConfig.defaultWidth),
+            320,
+        ]
+        let height = CGFloat(
+            (Double(rows.count + 2) * (AgentInboxView.rowHeight + Space.s)
+                + AgentInboxView.scopeControlHeight + 120).rounded(.up))
+        var assertions = 0
+
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            for width in widths {
+                let label = "sidebar-ux-check.rename@\(Int(width))pt.\(appearanceName.rawValue)"
+                let probe = try makeSidebarProbeHost(
+                    width: width, height: height, appearanceName: appearanceName)
+                probe.host.layoutSubtreeIfNeeded()
+                probe.inbox.reload(rows: rows)
+                probe.inbox.layoutForQA()
+                probe.host.layoutSubtreeIfNeeded()
+                probe.inbox.layoutForQA()
+
+                var reveals: [UUID] = []
+                probe.inbox.onRevealRow = { reveals.append($0) }
+
+                // A modified double-click is a selection gesture, never an edit.
+                guard !probe.inbox.doubleClickRowForQA(
+                    id: target.id, onTitle: true, modifiers: [.command]),
+                      !probe.inbox.isRenameEditingForQA else {
+                    throw fail("\(label): modified double-click opened the live rename editor")
+                }
+                assertions += 1
+
+                // The disclosure button is a real nested control. Its live frame is
+                // required; a row without one cannot make this negative assertion.
+                guard let nestedControlFrame = probe.inbox.renameNestedControlFrameForQA(id: target.id),
+                      nestedControlFrame.width > 0, nestedControlFrame.height > 0,
+                      !probe.inbox.doubleClickNestedControlForQA(id: target.id),
+                      !probe.inbox.isRenameEditingForQA else {
+                    throw fail("\(label): double-clicking the live disclosure control opened rename")
+                }
+                assertions += 1
+
+                // Body hit, not only title hit, must open the real field. A second
+                // double-click while it is open is refused and leaves typed text in
+                // that same field rather than committing/switching rows.
+                guard probe.inbox.doubleClickRowForQA(id: target.id, onTitle: false),
+                      probe.inbox.isRenameEditingForQA,
+                      probe.inbox.typeRenameForQA("still editing"),
+                      !probe.inbox.doubleClickRowForQA(id: target.id, onTitle: true),
+                      probe.inbox.renameFieldTextForQA == "still editing" else {
+                    throw fail("\(label): body edit or already-editing guard did not use the live field")
+                }
+                assertions += 2
+
+                // The pending table action is the trailing click of that same
+                // double-click. It must not reach the reveal callback.
+                guard !probe.inbox.trailingClickForQA(id: target.id), reveals.isEmpty else {
+                    throw fail("\(label): trailing double-click action activated the row")
+                }
+                assertions += 1
+                guard probe.inbox.pressKeyInRenameForQA(#selector(NSResponder.cancelOperation(_:))),
+                      !probe.inbox.isRenameEditingForQA else {
+                    throw fail("\(label): Escape did not cancel the live editor")
+                }
+                assertions += 1
+
+                let initialCommits = probe.inbox.renameCommitCountForQA
+                let initialCancels = probe.inbox.renameCancelCountForQA
+                guard probe.inbox.doubleClickRowForQA(id: target.id, onTitle: true),
+                      probe.inbox.typeRenameForQA("Return name"),
+                      probe.inbox.pressKeyInRenameForQA(#selector(NSResponder.insertNewline(_:))),
+                      probe.inbox.renameCommitCountForQA == initialCommits + 1,
+                      !probe.inbox.isRenameEditingForQA else {
+                    throw fail("\(label): Return did not commit exactly one live rename")
+                }
+                assertions += 2
+                // AppKit may report blur after Return. Send that real notification
+                // from the ended field and prove the callback count stays single.
+                guard probe.inbox.blurAfterReturnForQA(),
+                      probe.inbox.renameCommitCountForQA == initialCommits + 1 else {
+                    throw fail("\(label): blur after Return double-committed the live rename")
+                }
+                assertions += 1
+
+                guard probe.inbox.doubleClickRowForQA(id: target.id, onTitle: false),
+                      probe.inbox.typeRenameForQA("discarded"),
+                      probe.inbox.pressKeyInRenameForQA(#selector(NSResponder.cancelOperation(_:))),
+                      probe.inbox.renameCommitCountForQA == initialCommits + 1,
+                      probe.inbox.renameCancelCountForQA == initialCancels + 1 else {
+                    throw fail("\(label): Escape changed the live name or did not cancel exactly once")
+                }
+                assertions += 2
+
+                guard probe.inbox.doubleClickRowForQA(id: target.id, onTitle: false),
+                      probe.inbox.typeRenameForQA("blur name"),
+                      probe.inbox.blurRenameForQA(),
+                      probe.inbox.renameCommitCountForQA == initialCommits + 2,
+                      !probe.inbox.isRenameEditingForQA else {
+                    throw fail("\(label): blur did not commit exactly once through the live field")
+                }
+                assertions += 2
+
+                // Empty input closes the editor but dispatches no rename callback.
+                guard probe.inbox.doubleClickRowForQA(id: target.id, onTitle: true),
+                      probe.inbox.typeRenameForQA("   "),
+                      probe.inbox.pressKeyInRenameForQA(#selector(NSResponder.insertNewline(_:))),
+                      probe.inbox.renameCommitCountForQA == initialCommits + 2,
+                      !probe.inbox.isRenameEditingForQA else {
+                    throw fail("\(label): empty rename dispatched or failed to close the live editor")
+                }
+                assertions += 2
+            }
+        }
+        return assertions
+    }
+
     /// P0.2's additive sidebar leg. It deliberately observes today's paint rather
     /// than blessing the later surface, truncation, or row-height decisions: those
     /// packets consume these live accessors and tighten the assertion in their own
@@ -2702,6 +2828,7 @@ enum UIProbeGeometry {
         let tierAssertions = try checkSidebarFitTierLadder()
         let elapsedAssertions = try checkElapsedFormatterAndColumns()
         let unconfirmedAssertions = try checkUnconfirmedFrozenClock(rows: rows)
+        let renameAssertions = try checkSidebarRenameInteraction()
         // Both ENDS of the ladder are reached by real rows at shipping widths. The
         // middle rung is reached too, at a width derived from a row's own
         // measurements inside `checkSidebarFitTierLadder` — see the note there for
@@ -2717,6 +2844,7 @@ enum UIProbeGeometry {
         ))
         print("UIProbeGeometry: unconfirmed rows held \(unconfirmedAssertions) live status/frozen-clock assertions at 220/280/320pt in both appearances")
         print("UIProbeGeometry: elapsed formatter table and fixed sidebar/tile column held in \(elapsedAssertions) live assertions")
+        print("UIProbeGeometry: live rename editor held \(renameAssertions) body/control/modifier/active-editor/trailing-click/Return/Escape/blur/empty assertions at 220/280/320pt in both appearances")
     }
 
     // MARK: - P0.4 — the inbox truncation gate at the widths that ship

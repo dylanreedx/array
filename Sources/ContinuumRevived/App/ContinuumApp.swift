@@ -23692,12 +23692,15 @@ extension AppDelegate {
         throw CheckError.failed("setup: the rename fixture must have a row")
     }
     try expect(renameView.renamingRowIdForQA == nil, "setup: nothing is being renamed yet")
-    // A double-click OFF the name is not a rename: the rest of the row still means
-    // "take me to this agent" (the zone header / zone body split, on a row).
-    try expect(!renameView.doubleClickRowForQA(id: renameTarget.id, onTitle: false),
-               "double-clicking the row's meta line must not start editing its name")
-    try expect(renameView.renamingRowIdForQA == nil,
-               "…and must leave no field behind — \(String(describing: renameView.renamingRowIdForQA))")
+    // P4.3 deliberately moves the rename surface from only the title label to the
+    // row body. The packet's nested-control guard owns the exception; this existing
+    // expectation moves with that contract so the check still drives production's
+    // live event path rather than preserving the old title-only rule.
+    try expect(renameView.doubleClickRowForQA(id: renameTarget.id, onTitle: false),
+               "double-clicking the row body begins editing its name")
+    try expect(renameView.renamingRowIdForQA == renameTarget.id,
+               "…and leaves the body rename open on that row — \(String(describing: renameView.renamingRowIdForQA))")
+    _ = renameView.pressKeyInRenameForQA(#selector(NSResponder.cancelOperation(_:)))
     try expect(renameView.doubleClickRowForQA(id: renameTarget.id, onTitle: true),
                "double-clicking the NAME begins the rename")
     try expect(renameView.renamingRowIdForQA == renameTarget.id,

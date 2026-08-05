@@ -60,6 +60,24 @@ public enum AgentDisplayNameSource: String, Codable, Sendable {
     case prompt
 }
 
+/// The compare-and-swap token for one automatic name proposal.
+///
+/// `expectedName` is captured when the proposal starts, not when it finishes.
+/// The request id prevents an older completion from winning after a newer request
+/// superseded it; the expected name prevents any other name mutation from being
+/// overwritten even if that mutation did not come through the supervisor's
+/// request path. It is persisted with the host-bound record so a restored record
+/// never loses the ownership marker that a completion must prove.
+public struct NamingRequest: Codable, Equatable, Sendable {
+    public let id: UUID
+    public let expectedName: String
+
+    public init(id: UUID = UUID(), expectedName: String) {
+        self.id = id
+        self.expectedName = expectedName
+    }
+}
+
 public struct AgentRecord: Codable, Equatable, Sendable {
     public static let currentSchemaVersion = 1
     /// Compatibility spelling for callers that need the sentinel beside the
@@ -74,6 +92,9 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// Provenance is local bookkeeping: prompt-derived names are replaced by the
     /// sentinel before `AgentInventory` constructs a companion snapshot.
     public var displayNameSource: AgentDisplayNameSource
+    /// One in-flight automatic proposal, or nil when a human rename (or a
+    /// completed proposal) owns the title again.
+    public var namingRequest: NamingRequest?
     /// Id matching a `.pi/agents/<role>.md`. An id, never shown as a title.
     public var role: String?
     /// Fully-qualified model id — the exact catalogue entry, per P0.10's
@@ -147,6 +168,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         id: AgentID,
         displayName: String,
         displayNameSource: AgentDisplayNameSource = .manual,
+        namingRequest: NamingRequest? = nil,
         role: String? = nil,
         model: String,
         thinking: String,
@@ -168,6 +190,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         self.id = id
         self.displayName = displayName
         self.displayNameSource = displayNameSource
+        self.namingRequest = namingRequest
         self.role = role
         self.model = model
         self.thinking = thinking
@@ -230,6 +253,35 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         return true
     }
 
+    /// Arm one automatic name proposal and capture the exact title it is allowed
+    /// to replace. A later call supersedes the earlier request by id.
+    @discardableResult
+    public mutating func beginNamingRequest(id: UUID = UUID()) -> NamingRequest {
+        let request = NamingRequest(id: id, expectedName: displayName)
+        namingRequest = request
+        return request
+    }
+
+    /// Complete an automatic proposal only through the request's compare-and-swap.
+    /// The marker and the expected title are checked together on the way out; a
+    /// check made only before starting the work leaves a human rename vulnerable
+    /// to a late completion. Generated names are prompt-derived for the sync
+    /// boundary even though they were authored by a provider.
+    @discardableResult
+    public mutating func applyGeneratedName(_ generatedName: String, for request: NamingRequest) -> Bool {
+        guard namingRequest?.id == request.id,
+              displayName == request.expectedName else { return false }
+        guard let normalized = AgentName.normalizedLabel(generatedName),
+              !AgentName.isIdentifier(normalized, model: model, role: role, id: id.rawValue) else {
+            namingRequest = nil
+            return false
+        }
+        displayName = normalized
+        displayNameSource = .prompt
+        namingRequest = nil
+        return true
+    }
+
     // Dates are encoded as `timeIntervalSinceReferenceDate` Doubles, following
     // `AgentActivityEvent`'s precedent and for the same two reasons recorded
     // there: `JSONCodec.makeEncoder` uses `.iso8601` with no fractional-second
@@ -239,7 +291,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     // `timeIntervalSinceReferenceDate` IS Date's storage, so no arithmetic
     // conversion happens and the round-trip is exact.
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, id, displayName, displayNameSource, role, model, thinking, cwd
+        case schemaVersion, id, displayName, displayNameSource, namingRequest, role, model, thinking, cwd
         case worktreeBranch, projectId, parentAgentID, sourceItemId
         case createdAtReferenceInterval, lastActivityAtReferenceInterval
         case tileId
@@ -270,6 +322,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
                 || AgentName.isIdentifier(displayName, model: model, role: role, id: id.rawValue)
                 ? .sentinel
                 : .manual)
+        namingRequest = try container.decodeIfPresent(NamingRequest.self, forKey: .namingRequest)
         thinking = try container.decode(String.self, forKey: .thinking)
         cwd = try container.decode(String.self, forKey: .cwd)
         worktreeBranch = try container.decodeIfPresent(String.self, forKey: .worktreeBranch)
@@ -304,6 +357,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         try container.encode(id, forKey: .id)
         try container.encode(displayName, forKey: .displayName)
         try container.encode(displayNameSource, forKey: .displayNameSource)
+        try container.encodeIfPresent(namingRequest, forKey: .namingRequest)
         try container.encodeIfPresent(role, forKey: .role)
         try container.encode(model, forKey: .model)
         try container.encode(thinking, forKey: .thinking)

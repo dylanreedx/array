@@ -556,6 +556,22 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// event.
     private var renameField: NSTextField?
     private var renamingRowId: UUID?
+    /// A field can post end-editing more than once: Return ends the command and
+    /// AppKit may then report the field editor's blur. This flag is set before
+    /// teardown so the second notification cannot dispatch the same rename.
+    private var didCommitRename = false
+    /// The last torn-down field is retained only as a deterministic witness for
+    /// the blur-after-Return notification. Production delivery simply ignores
+    /// that stale field because it is no longer the active editor.
+    private var lastEndedRenameFieldForQA: NSTextField?
+    /// The table can still send its ordinary action for the second click after a
+    /// double-action. Keep the row id so that trailing activation is consumed,
+    /// not routed to the host after the editor opens.
+    private var suppressedTrailingActivationAgentId: UUID?
+    /// Counts the actual callback dispatches from the live field editor. These
+    /// are QA observability, not a second rename path.
+    private(set) var qaRenameCommitCount = 0
+    private(set) var qaRenameCancelCount = 0
     /// True only while `beginRename` is installing + selecting the field.
     /// `selectText(_:)` ends current editing via `-[NSWindow endEditingFor:]`, which
     /// posts a synchronous end-editing notification for the field editor just
@@ -1653,17 +1669,36 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.9-reveal-on-click.md
     @objc private func rowClicked(_ sender: Any?) {
-        // P3.11: a shift- or ⌘-click is a SELECTION gesture, not navigation. Without
-        // this, building a range would reveal — and revealing switches workspace and
-        // focuses a tile (P3.9), so triaging six agents would drag the canvas through
-        // all six on the way to acting on them.
-        let modifiers = NSApp.currentEvent?.modifierFlags.intersection(.deviceIndependentFlagsMask) ?? []
-        guard AgentInboxView.revealsOnClick(modifiers: modifiers) else { return }
-        // P4.7: `clickedRow` is a TABLE row, and the shelf header is one of those —
-        // `rowIndex(forTableRow:)` answers nil for it, so clicking the heading folds
-        // the shelf (its own button) and never reveals an agent.
-        guard let index = rowIndex(forTableRow: tableView.clickedRow) else { return }
+        _ = activateRow(
+            atTableRow: tableView.clickedRow,
+            event: NSApp.currentEvent)
+    }
+
+    /// The one activation path for the table's ordinary click action. Keeping the
+    /// trailing-double-click guard here, next to the host callback, is what makes
+    /// the event proof non-vacuous: a field may open and the table may still send
+    /// an action, but that action cannot reveal the row.
+    @discardableResult
+    private func activateRow(atTableRow tableRow: Int, event: NSEvent?) -> Bool {
+        guard let index = rowIndex(forTableRow: tableRow), rows.indices.contains(index) else {
+            return false
+        }
+        let agentId = rows[index].id
+        if let event, event.clickCount > 1 {
+            // AppKit may deliver the table action for the second click as well as
+            // the doubleAction. It is the trailing click, never a new navigation.
+            suppressedTrailingActivationAgentId = nil
+            return false
+        }
+        if let suppressed = suppressedTrailingActivationAgentId {
+            suppressedTrailingActivationAgentId = nil
+            guard suppressed != agentId else { return false }
+        }
+        // P3.11: a shift- or ⌘-click is a SELECTION gesture, not navigation.
+        let modifiers = event?.modifierFlags.intersection(.deviceIndependentFlagsMask) ?? []
+        guard AgentInboxView.revealsOnClick(modifiers: modifiers) else { return false }
         reveal(rowAt: index)
+        return true
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.11-multi-select-bulk.md
@@ -1732,29 +1767,44 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
 
     // MARK: - Inline rename (P3.13)
 
-    /// The second click of a plain double-click. Only the NAME opens a rename: a
-    /// double-click anywhere else on the row is left alone, so the meta line, the
-    /// branch line and the empty space keep meaning "reveal" (the zone header /
-    /// zone body split `--zone-rename-inline-check` already draws).
+    /// The second click of a plain double-click. The entire row BODY is a rename
+    /// target, but a nested control keeps its own gesture. The event guard is kept
+    /// here and in `doubleClick(rowAt:pointInCell:modifiers:)` so neither AppKit nor
+    /// a headless probe can bypass the modifier/active-editor rules.
     @objc private func rowDoubleClicked(_ sender: Any?) {
         guard let event = NSApp.currentEvent else { return }
-        // Any modifier means something else: ⇧/⌘ are the selection gestures
-        // (`revealsOnClick`), and a modified double-click must not start editing a
-        // name in the middle of building a range.
-        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty else { return }
         guard let index = rowIndex(forTableRow: tableView.clickedRow),
               let cell = cellForRow(index) else { return }
-        doubleClick(rowAt: index, pointInCell: cell.convert(event.locationInWindow, from: nil))
+        _ = doubleClick(
+            rowAt: index,
+            pointInCell: cell.convert(event.locationInWindow, from: nil),
+            modifiers: event.modifierFlags)
     }
 
     /// The routing half of the gesture, taking the point in the CELL's coordinates
     /// rather than an `NSEvent` — a headless check can call this, and it is the same
     /// code the real double-click runs (`rowDoubleClicked` only unpacks the event).
+    /// The row body is deliberately broader than the title label: name, metadata
+    /// and empty body are all the row's surface; only a nested control is excluded.
     @discardableResult
-    func doubleClick(rowAt index: Int, pointInCell point: NSPoint) -> Bool {
-        guard rows.indices.contains(index), let cell = cellForRow(index),
-              cell.titleFrame.contains(point) else { return false }
-        return beginRename(rowAt: index)
+    func doubleClick(
+        rowAt index: Int,
+        pointInCell point: NSPoint,
+        modifiers: NSEvent.ModifierFlags = []
+    ) -> Bool {
+        let deviceModifiers = modifiers.intersection(.deviceIndependentFlagsMask)
+        guard deviceModifiers.isEmpty,
+              rows.indices.contains(index),
+              let cell = cellForRow(index),
+              cell.acceptsRenameDoubleClick(at: point),
+              renameField == nil,
+              renamingRowId == nil else { return false }
+        guard beginRename(rowAt: index) else { return false }
+        // NSTableView can still deliver its normal action for this same second
+        // click. Consume that trailing action in `activateRow` so opening an editor
+        // never also reveals the row.
+        suppressedTrailingActivationAgentId = rows[index].id
+        return true
     }
 
     /// Open the inline rename for this agent. Returns false for an agent that is not
@@ -1767,14 +1817,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
 
     @discardableResult
     private func beginRename(rowAt index: Int) -> Bool {
-        // A rename already open on another row commits, the way clicking away from it
-        // would — there is one field, so opening a second is leaving the first.
-        endRename(commit: true)
+        // A second double-click while an editor is open is still part of the
+        // current edit, not an implicit commit-and-switch. Returning here is what
+        // lets the active field keep the text the human is typing.
+        guard renameField == nil, renamingRowId == nil else { return false }
         guard let field = installRenameField(rowAt: index) else { return false }
         isOpeningRename = true
+        defer { isOpeningRename = false }
         window?.makeFirstResponder(field)
         field.selectText(nil)
-        isOpeningRename = false
         return true
     }
 
@@ -1814,6 +1865,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         field.delegate = self
         field.setAccessibilityIdentifier("ContinuumAgentInboxRenameField")
         addSubview(field, positioned: .above, relativeTo: nil)
+        didCommitRename = false
+        lastEndedRenameFieldForQA = nil
         renameField = field
         renamingRowId = rows[index].id
         return field
@@ -1830,24 +1883,36 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// case: an agent with no name is a row you cannot find again.
     private func endRename(commit: Bool) {
         guard let rowId = renamingRowId, let field = renameField else { return }
+        // Return and blur can describe the same end of editing. The first path
+        // owns the commit; every later notification is an acknowledgement only.
+        guard !didCommitRename else { return }
+        didCommitRename = true
         let typed = field.stringValue
         // STATE FIRST, THEN THE VIEW: removing a field that holds the field editor
-        // posts `controlTextDidEndEditing` SYNCHRONOUSLY, so with the state still set
-        // the delegate re-enters here and commits the same name a second time
-        // (measured: `Enter commits the typed name once — got ["Migration reviewer",
-        // "Migration reviewer"]`). Cleared first, that re-entrant notification finds no
-        // rename to end.
+        // posts `controlTextDidEndEditing` SYNCHRONOUSLY. Clearing the active field
+        // before removal makes that re-entrant notification harmless; the explicit
+        // did-commit flag also covers a later blur notification for the same field.
         renameField = nil
         renamingRowId = nil
+        lastEndedRenameFieldForQA = field
         field.removeFromSuperview()
-        guard commit else { return }
+        // If AppKit did not send the trailing table action, do not carry its
+        // suppression into the next ordinary click after editing ends. A real
+        // second-click event is independently rejected by clickCount above.
+        suppressedTrailingActivationAgentId = nil
+        guard commit else {
+            qaRenameCancelCount += 1
+            return
+        }
         let trimmed = typed.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed != rows.first(where: { $0.id == rowId })?.title else { return }
+        guard !trimmed.isEmpty,
+              trimmed != rows.first(where: { $0.id == rowId })?.title else { return }
+        qaRenameCommitCount += 1
         onRenameRow?(rowId, trimmed)
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        guard control === renameField else { return false }
+        guard control === renameField, !didCommitRename else { return false }
         if commandSelector == #selector(NSResponder.insertNewline(_:)) {
             endRename(commit: true)
             return true
@@ -1861,8 +1926,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
 
     func controlTextDidEndEditing(_ obj: Notification) {
         // Ignore the transient end `selectText(_:)` posts while the field is still
-        // being installed (see `isOpeningRename`).
-        guard !isOpeningRename, (obj.object as? NSTextField) === renameField else { return }
+        // being installed (see `isOpeningRename`), and ignore any stale field after
+        // Return/Escape has already finished the edit.
+        guard !isOpeningRename,
+              !didCommitRename,
+              (obj.object as? NSTextField) === renameField else { return }
         endRename(commit: true)
     }
 
@@ -3148,12 +3216,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
             && tableView.doubleAction == #selector(rowDoubleClicked(_:))
             && tableView.doubleAction != tableView.action
     }
-    /// Double-click a row ON ITS NAME (`onTitle: true`) or on the row's bottom-left
-    /// corner, which is the meta line on a card and empty space on a parked row.
-    /// Everything downstream — the hit test, the field, its delegate — is the shipped
-    /// path; only the `NSEvent` is stood in for.
+    /// Double-click a row ON ITS NAME (`onTitle: true`) or on the row body
+    /// (`onTitle: false`). Both use the production hit test; only the NSEvent is
+    /// stood in for. `modifiers` is explicit so a selection-modified double-click
+    /// cannot accidentally pass through this QA seam.
     @discardableResult
-    func doubleClickRowForQA(id: UUID, onTitle: Bool) -> Bool {
+    func doubleClickRowForQA(
+        id: UUID,
+        onTitle: Bool,
+        modifiers: NSEvent.ModifierFlags = []
+    ) -> Bool {
         guard let index = rows.firstIndex(where: { $0.id == id }),
               let tableRow = tableRow(forRowIndex: index),
               // P4.7: the same table-row round trip `rowDoubleClicked` makes.
@@ -3164,9 +3236,50 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         let point = onTitle
             ? NSPoint(x: cell.titleFrame.midX, y: cell.titleFrame.midY)
             : NSPoint(x: cell.bounds.minX + 1, y: cell.bounds.minY + 1)
-        return doubleClick(rowAt: clicked, pointInCell: point)
+        return doubleClick(rowAt: clicked, pointInCell: point, modifiers: modifiers)
     }
+
+    /// The live nested-control frame used by the event witness, or nil when this
+    /// row has no nested control. Keeping this separate makes the negative test
+    /// fail closed instead of passing because there was no control to hit.
+    func renameNestedControlFrameForQA(id: UUID) -> NSRect? {
+        guard let index = rows.firstIndex(where: { $0.id == id }),
+              let tableRow = tableRow(forRowIndex: index),
+              let clicked = rowIndex(forTableRow: tableRow),
+              let cell = cellForRow(clicked) else { return nil }
+        return cell.renameNestedControlFrameForQA
+    }
+
+    /// Send the double-click through a real nested control's live frame. A row
+    /// without a control has no fabricated point and therefore returns false.
+    @discardableResult
+    func doubleClickNestedControlForQA(id: UUID) -> Bool {
+        guard let index = rows.firstIndex(where: { $0.id == id }),
+              let tableRow = tableRow(forRowIndex: index),
+              let clicked = rowIndex(forTableRow: tableRow),
+              let cell = cellForRow(clicked),
+              let controlFrame = cell.renameNestedControlFrameForQA else {
+            return false
+        }
+        return doubleClick(
+            rowAt: clicked,
+            pointInCell: NSPoint(x: controlFrame.midX, y: controlFrame.midY))
+    }
+
+    /// Exercise the table's ordinary action after a successful double-action.
+    /// This stands in for AppKit's trailing click while keeping the production
+    /// `activateRow` path and its host callback intact.
+    @discardableResult
+    func trailingClickForQA(id: UUID) -> Bool {
+        guard let index = rows.firstIndex(where: { $0.id == id }),
+              let tableRow = tableRow(forRowIndex: index) else { return false }
+        return activateRow(atTableRow: tableRow, event: nil)
+    }
+
     var renamingRowIdForQA: UUID? { renamingRowId }
+    var isRenameEditingForQA: Bool { renameField != nil && renamingRowId != nil }
+    var renameCommitCountForQA: Int { qaRenameCommitCount }
+    var renameCancelCountForQA: Int { qaRenameCancelCount }
     /// The field really does report to this view. Asserted separately because the two
     /// key helpers below CALL the delegate methods — AppKit's own delivery needs a live
     /// field editor in a key window, which a headless check has no way to drive — so
@@ -3209,6 +3322,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         guard let renameField else { return false }
         controlTextDidEndEditing(Notification(
             name: NSControl.textDidEndEditingNotification, object: renameField))
+        return true
+    }
+
+    /// Deliver the blur notification from the field that Return already ended.
+    /// The notification is real, but the active-editor identity and did-commit
+    /// guard must make it a no-op.
+    @discardableResult
+    func blurAfterReturnForQA() -> Bool {
+        guard let field = lastEndedRenameFieldForQA else { return false }
+        controlTextDidEndEditing(Notification(
+            name: NSControl.textDidEndEditingNotification, object: field))
         return true
     }
 
@@ -3644,9 +3768,15 @@ protocol AgentInboxRowCell: NSTableCellView {
     var qaStatusFrame: NSRect { get }
     // Ticket: docs/38-tickets/90-agent-ux/P3.13-inline-rename.md
     /// The frame of the row's NAME in the cell's own coordinates. A production
-    /// accessor, not a `qa` one: it is what decides whether a double-click was on the
-    /// name, and where the rename field is placed.
+    /// accessor, not a `qa` one: it is where the rename field is placed.
     var titleFrame: NSRect { get }
+    /// A double-click may begin editing only in the row body. Nested controls
+    /// (currently the disclosure button) remain owned by their own target/action.
+    func acceptsRenameDoubleClick(at point: NSPoint) -> Bool
+    /// A live nested-control frame for the event witness, or nil for a row with
+    /// no nested control. The check uses the same point the production hit test
+    /// receives rather than asserting a private button exists.
+    var renameNestedControlFrameForQA: NSRect? { get }
     @discardableResult
     func clickDisclosureForQA() -> Bool
 }
@@ -5500,6 +5630,23 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     var qaJumpHint: String { jumpHint.qaChord }
     var qaStatusFrame: NSRect { stateLabel.convert(stateLabel.bounds, to: self) }
     var titleFrame: NSRect { titleLabel.convert(titleLabel.bounds, to: self) }
+
+    /// The row body is the rename surface. The disclosure button is the only
+    /// nested interactive control in this cell, so a double-click there belongs
+    /// to folding rather than naming.
+    func acceptsRenameDoubleClick(at point: NSPoint) -> Bool {
+        guard bounds.contains(point) else { return false }
+        guard !disclosureButton.isHidden,
+              disclosureButton.isDescendant(of: self),
+              disclosureButton.bounds.contains(convert(point, to: disclosureButton))
+        else { return true }
+        return false
+    }
+
+    var renameNestedControlFrameForQA: NSRect? {
+        guard !disclosureButton.isHidden else { return nil }
+        return disclosureButton.convert(disclosureButton.bounds, to: self)
+    }
 }
 
 // Ticket: docs/38-tickets/90-agent-ux/P3.7-slim-rows.md
@@ -5993,4 +6140,18 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     /// that is the frame the pill must not move.
     var qaStatusFrame: NSRect { glyphLabel.convert(glyphLabel.bounds, to: self) }
     var titleFrame: NSRect { titleLabel.convert(titleLabel.bounds, to: self) }
+
+    func acceptsRenameDoubleClick(at point: NSPoint) -> Bool {
+        guard bounds.contains(point) else { return false }
+        guard !disclosureButton.isHidden,
+              disclosureButton.isDescendant(of: self),
+              disclosureButton.bounds.contains(convert(point, to: disclosureButton))
+        else { return true }
+        return false
+    }
+
+    var renameNestedControlFrameForQA: NSRect? {
+        guard !disclosureButton.isHidden else { return nil }
+        return disclosureButton.convert(disclosureButton.bounds, to: self)
+    }
 }
