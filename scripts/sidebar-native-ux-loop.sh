@@ -16,6 +16,11 @@ MAX_ITER="${MAX_ITER:-60}"
 MAX_REPAIR_PASSES="${MAX_REPAIR_PASSES:-2}"
 PI_WORKER_MODELS="${PI_WORKER_MODELS:-openai-codex/gpt-5.6-luna}"
 PI_THINKING="${PI_THINKING:-max}"
+# Reviews read a diff; they do not design anything. Every real catch this program
+# has produced (a widened gate, a self-agreeing assertion, a clipped header lane)
+# was visible in the diff, and max-thinking review rounds were costing 15-25 min
+# each — the single largest latency in a ticket. Worker stays at max.
+PI_REVIEW_THINKING="${PI_REVIEW_THINKING:-high}"
 ROOT_PI_DIR="${ROOT_PI_DIR:-$HOME/.pi}"
 CONTROL_DIR="${CONTROL_DIR:-$ROOT_PI_DIR/sidebar-native-ux-loop-control/$(basename "$(git rev-parse --show-toplevel)")}"
 RUN_ROOT="${RUN_ROOT:-$ROOT_PI_DIR/sidebar-native-ux-runs/$(basename "$(git rev-parse --show-toplevel)")}"
@@ -303,7 +308,7 @@ End with exactly DECISION: APPROVE or DECISION: REWORK.
 EOF
   mkdir -p "$session"
   log "$ticket review round $round ($model)"
-  pi --no-approve --model "$model" --thinking "$PI_THINKING" --tools read,grep,find,ls \
+  pi --no-approve --model "$model" --thinking "$PI_REVIEW_THINKING" --tools read,grep,find,ls \
     --session-dir "$session" --name "sidebar-$ITERATION-review-$round" --mode text -p "@$request" \
     > "$output" 2> "$task_dir/review-$round.stderr" &
   CURRENT_CHILD=$!
