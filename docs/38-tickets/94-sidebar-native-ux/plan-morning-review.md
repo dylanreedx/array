@@ -6,7 +6,7 @@ marked done and no approval was inferred from silence.**
 ## Current state
 
 - Branch: `overnight/agent-ux`
-- HEAD: `83b10a9` (`feat(sidebar): P4.5 generate names with Pi one-shot`)
+- Latest implementation commit: `83b10a9` (`feat(sidebar): P4.5 generate names with Pi one-shot`); the branch tip after it adds only morning handoff docs
 - Ledger: **26 of 40 done** (20 at night start; 6 landed overnight)
 - Remaining: P3.6; P5.1–P5.6; P6.1–P6.6; P7.1
 - Loop: stopped; `docs/38-tickets/94-sidebar-native-ux/STOP` remains armed
