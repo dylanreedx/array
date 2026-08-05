@@ -2012,11 +2012,23 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// (`apply(rows:changed:)` repaints in place without touching the selection) while
     /// the menu is open — and an action that became unavailable under an open menu must
     /// not fire.
+    /// Only coalesce a callback that re-enters while the same activation is still
+    /// executing. The host owns confirmation and may cancel it; a permanent key
+    /// would consume that canceled action and also suppress a later legitimate
+    /// activation after the rows changed.
+    private var activeBulkActions: Set<String> = []
+
     private func performBulkAction(_ action: InboxBulkAction) {
         let selected = selectedRows
         guard selected.count >= AgentInboxView.minimumBulkSelection,
               offeredBulkActions(for: selected).contains(action)
         else { return }
+        // A duplicate callback is suppressed only while this activation is in flight.
+        // This is intentionally cleared on return so host cancellation and a later
+        // action on the same IDs remain eligible.
+        let key = action.rawValue + ":" + selected.map(\.id.uuidString).joined(separator: ",")
+        guard activeBulkActions.insert(key).inserted else { return }
+        defer { activeBulkActions.remove(key) }
         // P4.10: armed BEFORE the host runs, because a synchronous host pushes the new
         // rows from inside this call — by the time it returns the affected rows have
         // already left the places the advance is measured from.
@@ -3224,6 +3236,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var bulkActionTitlesForQA: [String] { bulkBar.qaActionTitles }
     var bulkSelectionTextForQA: String { bulkBar.qaSelectionText }
     var bulkKeptBranchesTextForQA: String { bulkBar.qaKeptText }
+    var bulkCountFrameForQA: NSRect { bulkBar.convert(bulkBar.qaCountFrame, to: self) }
+    var bulkActionTriggerFrameForQA: NSRect { bulkBar.convert(bulkBar.qaActionFrame, to: self) }
+    var bulkCountDrawsWithoutTruncationForQA: Bool { bulkBar.qaCountDrawsWithoutTruncation }
+    var bulkActionTitleDrawsWithoutTruncationForQA: Bool { bulkBar.qaActionTitleDrawsWithoutTruncation }
+    var bulkActionTriggerTitleForQA: String { bulkBar.qaActionTriggerTitle }
+    var bulkActionTriggerAccessibilityValueForQA: String? { bulkBar.qaActionAccessibilityValue }
 
     /// Choose a bulk action the way the user does — through the pull-down's own
     /// target/action, so the check exercises the wiring and not just
@@ -4482,15 +4500,10 @@ enum InboxRowAction: String, CaseIterable, Equatable {
 /// rather than taking height off the list for the reason recorded at its constraints —
 /// a bar that pushed the rows would make the list's geometry depend on the selection.
 final class InboxBulkActionBar: NSView, TokenThemed {
-    /// The pull-down's own title, which is item 0 of its menu and never an action.
     static let menuTitle = "Actions"
-
     private let countLabel = NSTextField(labelWithString: "")
-    private let actionPopUp = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let actionButton = ChoiceButton(title: menuTitle)
     private let keptLabel = NSTextField(labelWithString: "")
-    /// The actions in the menu, parallel to the menu items' tags — the same shape
-    /// `AgentInboxView.scopeEntries` uses, and for the same reason: a tag carries the
-    /// index, so an item's position in the menu is not what identifies it.
     private var actions: [InboxBulkAction] = []
     var onAction: ((InboxBulkAction) -> Void)?
 
@@ -4498,143 +4511,103 @@ final class InboxBulkActionBar: NSView, TokenThemed {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
-        // P1.3's shared hairline (was a 1pt literal).
         layer?.borderWidth = LineWidth.hairline
         layer?.cornerRadius = Radius.card
         isHidden = true
-
         countLabel.font = .token(.label)
         countLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         countLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        actionPopUp.font = .token(.label)
-        actionPopUp.translatesAutoresizingMaskIntoConstraints = false
-        actionPopUp.target = self
-        actionPopUp.action = #selector(actionPicked(_:))
-
-        // Middle truncation, the vocabulary the row's own branch line uses: an
-        // `agent/<role>-<slug>` branch is identified by both ends.
+        actionButton.translatesAutoresizingMaskIntoConstraints = false
+        actionButton.preferredPopoverWidth = 150
+        // An action is a command, not the trigger's selected value. Keeping the
+        // neutral title here also keeps it stable while the host owns a modal confirm.
+        actionButton.keepsSelectionForItem = { _ in true }
+        actionButton.onSelection = { [weak self] item in self?.choose(item) }
         keptLabel.font = .token(.caption)
         keptLabel.lineBreakMode = .byTruncatingMiddle
         keptLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        addSubview(countLabel)
-        addSubview(actionPopUp)
-        addSubview(keptLabel)
+        addSubview(countLabel); addSubview(actionButton); addSubview(keptLabel)
         NSLayoutConstraint.activate([
             countLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Inset.row.left),
-            // The POPUP owns the vertical, and the label centres on it — the control is
-            // the taller of the two, so pinning the label's top and centring the popup on
-            // it made the bezel stand 1pt above the bar's own top edge
-            // (`--component-lab-check`: `NSPopUpButton spills vertically — frame y
-            // 17.0…41.0 outside parent 0…40.0`).
-            countLabel.centerYAnchor.constraint(equalTo: actionPopUp.centerYAnchor),
-
-            actionPopUp.leadingAnchor.constraint(greaterThanOrEqualTo: countLabel.trailingAnchor, constant: Space.m),
-            actionPopUp.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Inset.row.right),
-            actionPopUp.topAnchor.constraint(equalTo: topAnchor, constant: Space.s),
-
+            countLabel.centerYAnchor.constraint(equalTo: actionButton.centerYAnchor),
+            actionButton.leadingAnchor.constraint(greaterThanOrEqualTo: countLabel.trailingAnchor, constant: Space.m),
+            actionButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Inset.row.right),
+            actionButton.topAnchor.constraint(equalTo: topAnchor, constant: Space.s),
             keptLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Inset.row.left),
             keptLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Inset.row.right),
-            keptLabel.topAnchor.constraint(equalTo: actionPopUp.bottomAnchor, constant: Space.xs),
+            keptLabel.topAnchor.constraint(equalTo: actionButton.bottomAnchor, constant: Space.xs),
             keptLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Space.s),
         ])
         applyTokens()
     }
-
     required init?(coder: NSCoder) { return nil }
 
-    /// Put the bar up for this selection.
-    ///
-    /// The menu is rebuilt every time rather than diffed: it is at most five items, and
-    /// the alternative is a stale item that fires an action the selection can no longer
-    /// take.
     func show(_ actions: [InboxBulkAction], selectionCount: Int, keptBranches: [String]) {
         self.actions = actions
-        let menu = NSMenu()
-        // Item 0 is a pull-down's TITLE and is never chosen — without it the first
-        // action would be the button's label and unpickable. Its tag is -1 because
-        // `NSMenuItem`'s default tag is 0, which is the FIRST ACTION's tag: left at the
-        // default, `selectItem(withTag: 0)` finds this title item instead and the first
-        // action in the menu becomes unreachable.
-        let title = NSMenuItem(title: InboxBulkActionBar.menuTitle, action: nil, keyEquivalent: "")
-        title.tag = -1
-        menu.addItem(title)
-        for (index, action) in actions.enumerated() {
-            let item = NSMenuItem(title: action.title, action: nil, keyEquivalent: "")
-            item.tag = index
-            menu.addItem(item)
+        actionButton.items = actions.map {
+            ChoiceItem(id: $0.rawValue, title: $0.title,
+                       destructive: $0 == .delete || $0 == .archive)
         }
-        actionPopUp.menu = menu
-        // A selection whose members share nothing can take nothing — say the count and
-        // offer no control, rather than an empty menu that reads as a broken one.
-        actionPopUp.isHidden = actions.isEmpty
-        countLabel.stringValue = InboxBulkActionBar.selectionText(count: selectionCount)
-        keptLabel.stringValue = InboxBulkActionBar.keptText(branches: keptBranches)
+        // Installing items can select the first enabled item. Reset the presentation
+        // afterward so the trigger title remains the stable "Actions" label.
+        actionButton.setPresentationTitle(Self.menuTitle)
+        actionButton.isHidden = actions.isEmpty
+        countLabel.stringValue = Self.selectionText(count: selectionCount)
+        keptLabel.stringValue = Self.keptText(branches: keptBranches)
         keptLabel.isHidden = keptLabel.stringValue.isEmpty
         isHidden = false
         applyTokens()
     }
 
     func hide() {
-        isHidden = true
-        actions = []
+        isHidden = true; actions = []
+        actionButton.setPresentationTitle(Self.menuTitle)
+    }
+
+    private func choose(_ item: ChoiceItem) {
+        guard let action = InboxBulkAction(rawValue: item.id), actions.contains(action) else { return }
+        // Destructive confirmation belongs to the host callback. Keeping one owner
+        // avoids a fake intermediate confirmation surface and leaves this trigger
+        // stable if the host cancels or refreshes the rows.
+        onAction?(action)
+        actionButton.setPresentationTitle(Self.menuTitle)
     }
 
     static func selectionText(count: Int) -> String { "\(count) selected" }
-
-    /// `Unmerged work kept: ⎇ agent/one, ⎇ agent/two` — in `BranchChipNSView`'s glyph
-    /// rather than a second vocabulary, so a branch looks the same here as on the row
-    /// above it. Empty for a selection with no isolated agent in it, which hides the line.
-    ///
-    /// The wording is the exact guarantee `AgentSupervisor.cleanUpWorktree` gives — see
-    /// `InboxBulkAction.keptBranches`, which records why the stronger "keeps these
-    /// branches" would be a claim this list cannot make.
     static func keptText(branches: [String]) -> String {
         guard !branches.isEmpty else { return "" }
-        return "Unmerged work kept: "
-            + branches.map { "\(BranchChipNSView.branchGlyph) \($0)" }.joined(separator: ", ")
+        return "Unmerged work kept: " + branches.map { "\(BranchChipNSView.branchGlyph) \($0)" }.joined(separator: ", ")
     }
-
-    @objc private func actionPicked(_ sender: NSPopUpButton) {
-        guard let tag = sender.selectedItem?.tag, actions.indices.contains(tag) else { return }
-        onAction?(actions[tag])
-    }
-
     func applyTokens() {
         let theme = effectiveTokenTheme
         layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: theme)
-        // P1.3: the ROLE, not the raw token — an overlay card that holds
-        // controls is a control boundary, and the role is what carries the 3.0
-        // line floor into the contrast gate. Same resolved value as the
-        // `LineToken.border` this line used to name, so no pixel moves.
         layer?.borderColor = AgentLineRole.controlBoundary.color.cgColor(for: theme)
         countLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
         keptLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
     }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        applyTokens()
-    }
-
-    /// The items the MENU is really carrying, less its title item — rather than
-    /// `actions.map(\.title)`, which would assert the array the menu was built from and
-    /// not the menu.
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); applyTokens() }
     var qaActionTitles: [String] {
-        guard !isHidden, !actionPopUp.isHidden else { return [] }
-        return (actionPopUp.menu?.items ?? []).dropFirst().map(\.title)
+        guard !isHidden, !actionButton.isHidden else { return [] }
+        return actionButton.items.map(\.title)
     }
     var qaSelectionText: String { countLabel.stringValue }
     var qaKeptText: String { keptLabel.isHidden ? "" : keptLabel.stringValue }
-
-    /// Choose an action through the control's own target/action.
+    var qaCountFrame: NSRect { countLabel.frame }
+    var qaActionFrame: NSRect { actionButton.frame }
+    var qaCountDrawsWithoutTruncation: Bool {
+        let needed = ceil((countLabel.stringValue as NSString).size(
+            withAttributes: [.font: countLabel.font ?? NSFont.token(.label)]).width) + 4
+        return countLabel.frame.width + 0.5 >= needed
+    }
+    var qaActionTitleDrawsWithoutTruncation: Bool { actionButton.qaTitleDrawsWithoutTruncation }
+    var qaActionTriggerTitle: String { actionButton.qaRenderedTitle }
+    var qaActionAccessibilityValue: String? { actionButton.accessibilityValue() as? String }
     @discardableResult
     func pickForQA(_ action: InboxBulkAction) -> Bool {
-        guard !isHidden, !actionPopUp.isHidden, let index = actions.firstIndex(of: action),
-              actionPopUp.selectItem(withTag: index) else { return false }
-        actionPicked(actionPopUp)
-        return true
+        guard !isHidden, !actionButton.isHidden, actions.contains(action) else { return false }
+        // QA's pick means exactly one user activation. Destructive confirmation is
+        // owned by the host callback, not simulated by a second fake press here.
+        return actionButton.chooseForQA(id: action.rawValue)
     }
 }
 

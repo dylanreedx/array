@@ -25,6 +25,18 @@ final class ChoiceButton: NSControl, TokenThemed {
         didSet { updatePresentation() }
     }
     var onSelection: ((ChoiceItem) -> Void)?
+    /// Restore the trigger's neutral label after a transient action/confirmation.
+    /// This keeps the visible control title owned by the custom button rather than
+    /// leaking a stock menu's selected-item state into the sidebar.
+    func setPresentationTitle(_ title: String) {
+        selectedID = nil
+        titleLabel.stringValue = title
+        setAccessibilityLabel(title)
+        setAccessibilityValue(title)
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+        applyTokens()
+    }
     /// Some clients include visible management commands that must not replace
     /// the selected value shown by the trigger.
     var keepsSelectionForItem: ((ChoiceItem) -> Bool)?

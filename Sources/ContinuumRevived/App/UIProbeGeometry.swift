@@ -329,7 +329,10 @@ enum UIProbeGeometry {
     /// offscreen NSTableView otherwise has no viewport in which to materialize
     /// cells, and a check that only reads the row model would pass vacuously.
     private static func makeSidebarProbeHost(
-        width: CGFloat, height: CGFloat, appearanceName: NSAppearance.Name
+        width: CGFloat,
+        height: CGFloat,
+        appearanceName: NSAppearance.Name,
+        framePinnedInbox: Bool = false
     ) throws -> SidebarProbeHost {
         guard width > 0, height > 0 else {
             throw fail("sidebar-ux-check: probe host must have nonzero size (width=\(width), height=\(height))")
@@ -346,20 +349,34 @@ enum UIProbeGeometry {
         )
         window.appearance = appearance
         window.contentView = host
+        // Keep the probe at the requested shipping size even after a conditional
+        // overlay becomes visible. Without both bounds AppKit may grow the offscreen
+        // window to its updated fitting size and a purported 220pt assertion quietly
+        // measures the 280pt default instead.
+        window.contentMinSize = size
+        window.contentMaxSize = size
+        window.setContentSize(size)
         // A borderless window may adjust its content view while it is being
         // installed. Re-assert the probe size before Auto Layout gets its first
         // chance to calculate the inbox subtree.
         host.frame = NSRect(origin: .zero, size: size)
 
-        let inbox = AgentInboxView(frame: .zero)
-        inbox.translatesAutoresizingMaskIntoConstraints = false
+        let inbox = AgentInboxView(frame: framePinnedInbox ? host.bounds : .zero)
         host.addSubview(inbox)
-        NSLayoutConstraint.activate([
-            inbox.leadingAnchor.constraint(equalTo: host.leadingAnchor),
-            inbox.trailingAnchor.constraint(equalTo: host.trailingAnchor),
-            inbox.topAnchor.constraint(equalTo: host.topAnchor),
-            inbox.bottomAnchor.constraint(equalTo: host.bottomAnchor),
-        ])
+        if framePinnedInbox {
+            // Conditional overlays change fitting size. A frame-pinned full inbox is
+            // the deterministic equivalent of the split-view lane that owns its width
+            // in production, so 220pt cannot silently inflate to the 280pt default.
+            inbox.autoresizingMask = [.width, .height]
+        } else {
+            inbox.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                inbox.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+                inbox.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+                inbox.topAnchor.constraint(equalTo: host.topAnchor),
+                inbox.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+            ])
+        }
         host.layoutSubtreeIfNeeded()
         guard abs(host.bounds.width - width) <= 0.5,
               abs(host.bounds.height - height) <= 0.5,
@@ -2830,6 +2847,7 @@ enum UIProbeGeometry {
         let unconfirmedAssertions = try checkUnconfirmedFrozenClock(rows: rows)
         let renameAssertions = try checkSidebarRenameInteraction()
         let filterBandAssertions = try checkSidebarFilterBand(rows: rows, probeHeight: probeHeight)
+        let bulkAssertions = try checkSidebarBulkActionBar(rows: rows, probeHeight: probeHeight)
         // Both ENDS of the ladder are reached by real rows at shipping widths. The
         // middle rung is reached too, at a width derived from a row's own
         // measurements inside `checkSidebarFitTierLadder` — see the note there for
@@ -2847,6 +2865,7 @@ enum UIProbeGeometry {
         print("UIProbeGeometry: elapsed formatter table and fixed sidebar/tile column held in \(elapsedAssertions) live assertions")
         print("UIProbeGeometry: live rename editor held \(renameAssertions) body/control/modifier/active-editor/trailing-click/Return/Escape/blur/empty assertions at 220/280/320pt in both appearances")
         print("UIProbeGeometry: filter band held \(filterBandAssertions) production-path scope/search/accessibility assertions at 220/280/320pt, including visible-disabled management and active-scope restoration")
+        print("UIProbeGeometry: bulk bar held \(bulkAssertions) production-path scope/search targeting, host-owned confirmation, reentrant idempotence, later repeatability, and 220/280/320 control geometry assertions")
     }
 
     /// P5.2 production filter-band gate. It materializes the real ChoiceButton
@@ -2989,6 +3008,126 @@ enum UIProbeGeometry {
                     throw fail("\(label): no-result search did not clear selection and name its active scope")
                 }
                 assertions += 15
+            }
+        }
+        return assertions
+    }
+
+    /// P5.3 production bulk-action gate. The probe keeps scope and search active
+    /// while selecting, then drives the rendered ChoiceButton exactly once. The
+    /// callback is also re-entered to prove only a true duplicate activation is
+    /// coalesced; a later activation must still reach the host.
+    private static func checkSidebarBulkActionBar(rows: [AgentInboxRow], probeHeight: CGFloat) throws -> Int {
+        let deletableRows = rows.filter { InboxBulkAction.delete.isAvailable(for: $0) }
+        let grouped = Dictionary(grouping: deletableRows, by: { $0.projectName ?? "" })
+        guard let (project, projectRows) = grouped.first(where: { !$0.key.isEmpty && $0.value.count >= 2 }) else {
+            throw fail("sidebar-ux-check.bulk: corpus has no two-row deletable project witness")
+        }
+        var assertions = 0
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            for width in [CGFloat(220), 280, 320] {
+                let label = "sidebar-ux-check.bulk@\(Int(width))pt.\(appearanceName.rawValue)"
+                let probe = try makeSidebarProbeHost(
+                    width: width, height: probeHeight, appearanceName: appearanceName,
+                    framePinnedInbox: true)
+                probe.inbox.onBulkAction = { _, _ in }
+                probe.inbox.wiredBulkActions = Set(InboxBulkAction.allCases)
+                probe.inbox.reload(rows: rows)
+                probe.inbox.layoutForQA()
+                probe.host.layoutSubtreeIfNeeded()
+                probe.window.orderFront(nil)
+                defer { probe.inbox.dismissScopePopoverForQA(); probe.window.orderOut(nil) }
+
+                guard probe.inbox.pickScopeForQA(.project(project)) else {
+                    throw fail("\(label): active project scope could not be selected")
+                }
+                let query = project
+                probe.inbox.setSearchForQA(query)
+                probe.inbox.layoutForQA()
+                let visible = probe.inbox.rowIdsForQA
+                let expected = projectRows.map(\.id).filter { visible.contains($0) }
+                guard expected.count >= 2,
+                      probe.inbox.selectRowsForQA(ids: Array(expected.prefix(2))) else {
+                    throw fail("\(label): active scope/search did not expose two selectable rows")
+                }
+                probe.host.layoutSubtreeIfNeeded()
+                // Showing the conditional overlay changes the content view's fitting
+                // size. Reassert the requested shipping viewport after that transition
+                // before reading any frame; otherwise AppKit silently measures 280.
+                let requestedSize = NSSize(width: width, height: probeHeight)
+                probe.window.contentMinSize = .zero
+                probe.window.contentMaxSize = requestedSize
+                probe.window.minSize = .zero
+                probe.window.maxSize = requestedSize
+                probe.window.setContentSize(requestedSize)
+                probe.host.frame = NSRect(origin: .zero, size: requestedSize)
+                probe.host.layoutSubtreeIfNeeded()
+                // AppKit may still enlarge an offscreen content window to its fitting
+                // size. The split view owns the inbox lane in production, so pin the
+                // full production inbox itself after materialization and then lay out
+                // its real filter/list/bar subtree at the requested width.
+                probe.inbox.autoresizingMask = []
+                probe.inbox.frame = NSRect(origin: .zero, size: requestedSize)
+                probe.inbox.layoutForQA()
+                let barFrame = probe.inbox.bulkBarFrameForQA
+                let countFrame = probe.inbox.bulkCountFrameForQA
+                let actionFrame = probe.inbox.bulkActionTriggerFrameForQA
+                guard abs(probe.inbox.bounds.width - width) < 0.5,
+                      probe.inbox.isBulkBarVisibleForQA,
+                      probe.inbox.bulkSelectionTextForQA == "2 selected",
+                      probe.inbox.bounds.contains(barFrame),
+                      probe.inbox.bounds.contains(countFrame),
+                      probe.inbox.bounds.contains(actionFrame),
+                      barFrame.maxY <= probe.inbox.searchFieldFrameForQA.minY + 0.5,
+                      countFrame.maxX <= actionFrame.minX + 0.5,
+                      probe.inbox.bulkCountDrawsWithoutTruncationForQA,
+                      probe.inbox.bulkActionTitleDrawsWithoutTruncationForQA else {
+                    throw fail("\(label): rendered count/action geometry escaped, overlapped, or truncated in the exact \(Int(width))pt inbox (window=\(probe.window.contentView?.bounds ?? .zero), host=\(probe.host.bounds), inbox=\(probe.inbox.bounds), bar=\(barFrame), count=\(countFrame), action=\(actionFrame), search=\(probe.inbox.searchFieldFrameForQA), countDraws=\(probe.inbox.bulkCountDrawsWithoutTruncationForQA), actionDraws=\(probe.inbox.bulkActionTitleDrawsWithoutTruncationForQA))")
+                }
+                let offered = probe.inbox.bulkActionTitlesForQA
+                guard offered.contains(InboxBulkAction.delete.title),
+                      !offered.contains(where: { $0.hasPrefix("Confirm ") }),
+                      probe.inbox.bulkActionTriggerTitleForQA == InboxBulkActionBar.menuTitle,
+                      probe.inbox.bulkActionTriggerAccessibilityValueForQA == InboxBulkActionBar.menuTitle else {
+                    throw fail("\(label): rendered bar did not offer Delete or leaked selected/confirmation state into its trigger")
+                }
+                let action = InboxBulkAction.delete
+
+                var callbackCount = 0
+                var callbackIDs: [[UUID]] = []
+                var reentered = false
+                var confirmationAllowsAction = false
+                var performedCount = 0
+                var triggerSnapshots: [(String, String?)] = []
+                probe.inbox.onBulkAction = { receivedAction, ids in
+                    callbackCount += 1
+                    callbackIDs.append(ids)
+                    triggerSnapshots.append((
+                        probe.inbox.bulkActionTriggerTitleForQA,
+                        probe.inbox.bulkActionTriggerAccessibilityValueForQA))
+                    if !reentered {
+                        reentered = true
+                        _ = probe.inbox.pickBulkActionForQA(receivedAction)
+                    }
+                    if confirmationAllowsAction { performedCount += 1 }
+                }
+                // First host confirmation declines: one synchronous duplicate is
+                // coalesced, no action performs, and the trigger stays neutral while
+                // the host callback owns its modal decision.
+                guard probe.inbox.pickBulkActionForQA(action), callbackCount == 1,
+                      callbackIDs == [Array(expected.prefix(2))], performedCount == 0,
+                      triggerSnapshots.allSatisfy({ $0.0 == InboxBulkActionBar.menuTitle && $0.1 == InboxBulkActionBar.menuTitle }),
+                      probe.inbox.bulkActionTriggerTitleForQA == InboxBulkActionBar.menuTitle,
+                      probe.inbox.bulkActionTriggerAccessibilityValueForQA == InboxBulkActionBar.menuTitle else {
+                    throw fail("\(label): canceled destructive dispatch retargeted, double-fired, performed, or changed trigger state")
+                }
+                // A later retry after cancellation is legitimate and reaches the host.
+                confirmationAllowsAction = true
+                guard probe.inbox.pickBulkActionForQA(action), callbackCount == 2,
+                      performedCount == 1 else {
+                    throw fail("\(label): later confirmed retry was suppressed")
+                }
+                assertions += 7
             }
         }
         return assertions

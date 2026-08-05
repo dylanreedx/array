@@ -23969,18 +23969,37 @@ extension AppDelegate {
     // measured trap: a provider that returns nil does NOT decline, it falls through to
     // `NSAlert.runModal()` and wedges a headless run — so every case here answers.
     var deleteRequests: [AgentDeleteConfirmationRequest] = []
+    var triggerDuringConfirmation: [(String, String?)] = []
     revealApp.agentDeleteConfirmationProvider = { request in
         deleteRequests.append(request)
+        triggerDuringConfirmation.append((
+            revealInbox.bulkActionTriggerTitleForQA,
+            revealInbox.bulkActionTriggerAccessibilityValueForQA))
         return false
     }
-    try expect(!revealApp.performInboxRowAction(.delete, on: [noTileAgent.rawValue]),
-               "a cancelled delete reports that it did not happen")
+    // P5.3 migration: drive the existing host confirmation through the shipped
+    // sidebar callback and rendered custom bulk control, not a direct app helper.
+    try expect(revealInbox.selectRowsForQA(ids: [hereAgent.rawValue, noTileAgent.rawValue]),
+               "two stopped agents must be selectable for destructive bulk confirmation")
+    revealInbox.layoutForQA()
+    try expect(revealInbox.bulkActionTitlesForQA.contains(InboxBulkAction.delete.title),
+               "the rendered bulk bar must offer Delete for the stopped pair")
+    try expect(revealInbox.pickBulkActionForQA(.delete),
+               "the custom bulk control must reach the host-owned delete confirmation")
     try expect(deleteRequests.count == 1 && deleteRequests[0].verb == "Delete"
-                && deleteRequests[0].agentNames == ["no-tile agent"],
-               "…having asked about that agent by name — got \(deleteRequests.map { ($0.verb, $0.agentNames) })")
-    try expect(recordFileOnDisk(noTileAgent),
-               "AND THE RECORD IS STILL ON DISK — a destructive action must not fire unconfirmed")
-    try expect(revealSupervisor.records[noTileAgent] != nil, "…and the agent is still here")
+                && Set(deleteRequests[0].agentNames) == Set(["here agent", "no-tile agent"]),
+               "…having asked about both agents by name — got \(deleteRequests.map { ($0.verb, $0.agentNames) })")
+    try expect(triggerDuringConfirmation.allSatisfy {
+        $0.0 == InboxBulkActionBar.menuTitle && $0.1 == InboxBulkActionBar.menuTitle
+    }, "the trigger title and accessibility value must remain neutral while confirmation is open")
+    try expect(recordFileOnDisk(hereAgent) && recordFileOnDisk(noTileAgent),
+               "AND BOTH RECORDS ARE STILL ON DISK — a destructive action must not fire unconfirmed")
+    try expect(revealSupervisor.records[hereAgent] != nil && revealSupervisor.records[noTileAgent] != nil,
+               "…and both agents are still here")
+    // Cancel did not burn an idempotence key: the same rendered selection may retry
+    // and must reach the one real host confirmation again.
+    try expect(revealInbox.pickBulkActionForQA(.delete) && deleteRequests.count == 2,
+               "a canceled bulk delete must be immediately retryable through the same control")
 
     // H4 · A CONFIRMED DELETE REMOVES THE RECORD FROM DISK, and the row with it.
     revealApp.agentDeleteConfirmationProvider = { request in
