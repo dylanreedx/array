@@ -58,6 +58,27 @@ public enum AgentDisplayNameSource: String, Codable, Sendable {
     /// The title came from a user's prompt and is therefore tainted at sync
     /// boundaries even after it has been shortened for the sidebar.
     case prompt
+    /// The title came from a ticket/queue source. Keep this provenance separate
+    /// from prompt text so the companion projection can scrub either automatic
+    /// source without guessing from the rendered words.
+    case sourceItem
+    /// The title was derived from the parent's human-facing name and a stable
+    /// child ordinal. It is still automatic text at the sync boundary: a parent
+    /// name may itself have come from a prompt or source item.
+    case parent
+}
+
+/// The result of the one precedence ladder used by every derived spawn path.
+/// Keeping the source beside the rendered value is what lets local presentation
+/// be useful without allowing prompt/source/parent text into the companion payload.
+public struct AgentDisplayNameProposal: Equatable, Sendable {
+    public let name: String
+    public let source: AgentDisplayNameSource
+
+    public init(name: String, source: AgentDisplayNameSource) {
+        self.name = name
+        self.source = source
+    }
 }
 
 /// The compare-and-swap token for one automatic name proposal.
@@ -89,8 +110,9 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     public let id: AgentID
     /// User-facing and renameable. NOT an identifier — see `role`.
     public var displayName: String
-    /// Provenance is local bookkeeping: prompt-derived names are replaced by the
-    /// sentinel before `AgentInventory` constructs a companion snapshot.
+    /// Provenance is local bookkeeping: prompt/source/parent-derived names are
+    /// replaced by the sentinel before `AgentInventory` constructs a companion
+    /// snapshot.
     public var displayNameSource: AgentDisplayNameSource
     /// One in-flight automatic proposal, or nil when a human rename (or a
     /// completed proposal) owns the title again.
@@ -108,6 +130,15 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     public var projectId: UUID?
     /// Set by the orchestrator when this agent was spawned by another (P2D).
     public var parentAgentID: AgentID?
+    /// The durable slot this child owns in its parent's name space. It is
+    /// assigned at spawn, including for children whose final name uses a higher
+    /// precedence rung, so a later ordinal fallback can never reuse a learned
+    /// sibling number after deletion.
+    public var parentRelativeOrdinal: Int?
+    /// The next unused child slot for this parent. It is persisted on the parent
+    /// rather than recomputed from current siblings, because archiving a sibling
+    /// must not renumber the names a human has already seen.
+    public var nextChildOrdinal: Int
     /// P2D.6 — the queue item this agent was fanned out FOR, if any (a Linear
     /// row's `identifier`, e.g. `ENG-214`). Stored rather than kept in a runtime
     /// map because the mapping has to survive a relaunch: without it an agent
@@ -163,6 +194,42 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// list, slim and readable; archived is gone from it.
     public var archivedAt: Date?
 
+    /// Resolve the display title for a derived spawn. This is the only precedence
+    /// ladder: explicit name, first prompt, source item, then parent-relative
+    /// ordinal. Identifier-shaped automatic candidates are skipped rather than
+    /// promoted into the subject line; model, role, and UUID remain metadata.
+    public static func resolveDerivedDisplayName(
+        explicitName: String? = nil,
+        firstPrompt: String? = nil,
+        sourceItemId: String? = nil,
+        parentName: String? = nil,
+        parentRelativeOrdinal: Int? = nil,
+        model: String? = nil,
+        role: String? = nil,
+        id: UUID? = nil
+    ) -> AgentDisplayNameProposal? {
+        if let explicitName,
+           let name = AgentName.fromExplicitName(explicitName),
+           !AgentName.isIdentifier(name, model: model, role: role, id: id) {
+            return AgentDisplayNameProposal(name: name, source: .manual)
+        }
+        if let firstPrompt,
+           let name = AgentName.fromPrompt(firstPrompt),
+           !AgentName.isIdentifier(name, model: model, role: role, id: id) {
+            return AgentDisplayNameProposal(name: name, source: .prompt)
+        }
+        if let sourceItemId,
+           let name = AgentName.fromSourceItem(sourceItemId),
+           !AgentName.isIdentifier(name, model: model, role: role, id: id) {
+            return AgentDisplayNameProposal(name: name, source: .sourceItem)
+        }
+        if let parentRelativeOrdinal,
+           let name = AgentName.fromParent(parentName, ordinal: parentRelativeOrdinal) {
+            return AgentDisplayNameProposal(name: name, source: .parent)
+        }
+        return nil
+    }
+
     public init(
         schemaVersion: Int = AgentRecord.currentSchemaVersion,
         id: AgentID,
@@ -177,6 +244,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         projectId: UUID? = nil,
         parentAgentID: AgentID? = nil,
         sourceItemId: String? = nil,
+        parentRelativeOrdinal: Int? = nil,
+        nextChildOrdinal: Int = 1,
         createdAt: Date,
         lastActivityAt: Date,
         tileId: UUID? = nil,
@@ -199,6 +268,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         self.projectId = projectId
         self.parentAgentID = parentAgentID
         self.sourceItemId = sourceItemId
+        self.parentRelativeOrdinal = parentRelativeOrdinal
+        self.nextChildOrdinal = max(1, nextChildOrdinal)
         self.createdAt = createdAt
         self.lastActivityAt = lastActivityAt
         self.tileId = tileId
@@ -226,11 +297,19 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         return label
     }
 
-    /// The only name projection allowed into an activity/sync snapshot. A prompt
-    /// name is useful locally but is prompt-derived text, so the payload gets the
-    /// non-sensitive sentinel instead.
+    /// The only name projection allowed into an activity/sync snapshot. Prompt,
+    /// source-item, and parent-derived names are useful locally but remain
+    /// automatic/tainted text at the boundary; the payload gets the sentinel.
     public var syncDisplayName: String {
-        displayNameSource == .prompt ? Self.defaultAgentName : humanDisplayName
+        switch displayNameSource {
+        case .prompt, .sourceItem, .parent, .sentinel:
+            // `.sentinel` means the provenance is not permissioned for a human
+            // title. Keep even a malformed sentinel record redacted at the
+            // boundary; a decoded unknown source is normalized to this case.
+            return Self.defaultAgentName
+        case .manual:
+            return humanDisplayName
+        }
     }
 
     /// Normalize one record read from disk and report whether its bytes should be
@@ -265,8 +344,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// Complete an automatic proposal only through the request's compare-and-swap.
     /// The marker and the expected title are checked together on the way out; a
     /// check made only before starting the work leaves a human rename vulnerable
-    /// to a late completion. Generated names are prompt-derived for the sync
-    /// boundary even though they were authored by a provider.
+    /// to a late completion. Generated names are automatic/prompt-derived for the
+    /// sync boundary even though they were authored by a provider.
     @discardableResult
     public mutating func applyGeneratedName(_ generatedName: String, for request: NamingRequest) -> Bool {
         guard namingRequest?.id == request.id,
@@ -293,6 +372,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, id, displayName, displayNameSource, namingRequest, role, model, thinking, cwd
         case worktreeBranch, projectId, parentAgentID, sourceItemId
+        case parentRelativeOrdinal, nextChildOrdinal
         case createdAtReferenceInterval, lastActivityAtReferenceInterval
         case tileId
         // P4.1. The three lifecycle dates take reference intervals for exactly
@@ -317,11 +397,21 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         // blank legacy seeds were automatic, while every other old title is
         // treated as a human name. A record that carries `.manual` is explicit
         // provenance and must win even when its text happens to equal metadata.
-        displayNameSource = try container.decodeIfPresent(AgentDisplayNameSource.self, forKey: .displayNameSource)
-            ?? (AgentName.normalizedLabel(displayName) == nil
+        // A PRESENT but unknown source is different: its text has no trusted
+        // provenance, so both the source and the rendered value fail closed.
+        if let rawSource = try container.decodeIfPresent(String.self, forKey: .displayNameSource) {
+            if let decodedSource = AgentDisplayNameSource(rawValue: rawSource) {
+                displayNameSource = decodedSource
+            } else {
+                displayName = Self.defaultAgentName
+                displayNameSource = .sentinel
+            }
+        } else {
+            displayNameSource = AgentName.normalizedLabel(displayName) == nil
                 || AgentName.isIdentifier(displayName, model: model, role: role, id: id.rawValue)
                 ? .sentinel
-                : .manual)
+                : .manual
+        }
         namingRequest = try container.decodeIfPresent(NamingRequest.self, forKey: .namingRequest)
         thinking = try container.decode(String.self, forKey: .thinking)
         cwd = try container.decode(String.self, forKey: .cwd)
@@ -329,6 +419,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         projectId = try container.decodeIfPresent(UUID.self, forKey: .projectId)
         parentAgentID = try container.decodeIfPresent(AgentID.self, forKey: .parentAgentID)
         sourceItemId = try container.decodeIfPresent(String.self, forKey: .sourceItemId)
+        parentRelativeOrdinal = try container.decodeIfPresent(Int.self, forKey: .parentRelativeOrdinal)
+        nextChildOrdinal = max(1, try container.decodeIfPresent(Int.self, forKey: .nextChildOrdinal) ?? 1)
         createdAt = Date(timeIntervalSinceReferenceDate:
             try container.decode(Double.self, forKey: .createdAtReferenceInterval))
         lastActivityAt = Date(timeIntervalSinceReferenceDate:
@@ -366,6 +458,10 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         try container.encodeIfPresent(projectId, forKey: .projectId)
         try container.encodeIfPresent(parentAgentID, forKey: .parentAgentID)
         try container.encodeIfPresent(sourceItemId, forKey: .sourceItemId)
+        try container.encodeIfPresent(parentRelativeOrdinal, forKey: .parentRelativeOrdinal)
+        if nextChildOrdinal != 1 {
+            try container.encode(nextChildOrdinal, forKey: .nextChildOrdinal)
+        }
         try container.encode(createdAt.timeIntervalSinceReferenceDate, forKey: .createdAtReferenceInterval)
         try container.encode(lastActivityAt.timeIntervalSinceReferenceDate, forKey: .lastActivityAtReferenceInterval)
         try container.encodeIfPresent(tileId, forKey: .tileId)

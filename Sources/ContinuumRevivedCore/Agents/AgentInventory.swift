@@ -25,9 +25,11 @@ import Foundation
 //
 // I5 (sync-boundary purity): `ActivityLogSnapshot` crosses to the phone, and
 // `AgentRecord` is host-bound (`cwd`, `worktreeBranch`). This function reads
-// only `id`, `displayName`, `tileId` and `lastActivityAt` off a record —
-// never a host path. `AgentInventoryChecks` witnesses that with the taint
-// scanner over a record whose cwd and branch are deliberately distinctive.
+// only `id`, the boundary-safe `syncDisplayName`, `tileId` and `lastActivityAt`
+// off a record — never a host path. `syncDisplayName` also scrubs
+// prompt/source/parent-derived names by provenance, not by guessing from their
+// rendered text. `AgentInventoryChecks` witnesses that with the taint scanner
+// over a record whose cwd and branch are deliberately distinctive.
 public enum AgentInventory {
     /// Fold every agent the desktop knows about — terminal sessions and
     /// `AgentRecord`-backed agents, tiled or headless — into the one snapshot
@@ -137,9 +139,10 @@ public enum AgentInventory {
             tone: status == .needsAttention ? .approval : .info,
             kind: "desktop.managedStatus",
             status: status,
-            // The local record is host-bound and a prompt-derived display name
-            // is prompt text. Only the boundary-safe projection crosses here —
-            // never cwd, branch, or the raw prompt-derived title (I5).
+            // The local record is host-bound and automatic names can carry
+            // prompt/source/parent-derived text. Only the provenance-aware
+            // projection crosses here — never cwd, branch, or the raw local title
+            // (I5).
             summary: safeSummary(name: record.syncDisplayName, status: status),
             occurredAt: record.lastActivityAt
         )

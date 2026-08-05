@@ -19,6 +19,41 @@ public enum AgentName {
         normalizedLabel(prompt)
     }
 
+    /// A source ticket/queue identifier is a name seed, not an opaque fallback.
+    /// Keep it on the same normalization path as prompts, but refuse path-shaped
+    /// and UUID-shaped values so a malformed source cannot turn host metadata or
+    /// an identifier into the row subject.
+    public static func fromSourceItem(_ sourceItem: String) -> String? {
+        let trimmed = sourceItem.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.hasPrefix("/"), !trimmed.hasPrefix("~"),
+              UUID(uuidString: trimmed) == nil else {
+            return nil
+        }
+        return normalizedLabel(trimmed)
+    }
+
+    /// Explicit spawn names use the same path-safe treatment as inline renames.
+    /// This is intentionally separate from `fromPrompt`: a human may enter a
+    /// path-like string, but a display title must not preserve the host path.
+    public static func fromExplicitName(_ raw: String) -> String? {
+        var label = raw.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).joined(separator: " ")
+        if label.hasPrefix("/") || label.hasPrefix("~") {
+            label = (label as NSString).lastPathComponent
+        }
+        return normalizedLabel(label)
+    }
+
+    /// Last-resort child title. The ordinal is part of the name and is kept at
+    /// the right edge so a long parent cannot make sibling names collide after
+    /// the shared cap is applied.
+    public static func fromParent(_ parentName: String?, ordinal: Int) -> String? {
+        let base = fromExplicitName(parentName ?? "") ?? defaultName
+        let suffix = " agent \(max(1, ordinal))"
+        let available = max(1, maximumLength - Array(suffix).count)
+        let prefix = String(Array(base).prefix(available))
+        return normalizedLabel(prefix + suffix)
+    }
+
     /// Normalize a label without deriving anything from it. Grapheme-aware
     /// prefixing keeps combining marks and emoji clusters intact.
     public static func normalizedLabel(_ raw: String) -> String? {

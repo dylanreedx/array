@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
@@ -66,6 +67,10 @@ final class AgentSupervisor {
     private let store: AgentStore
     private let makeRunner: (AgentRecord) -> AgentRunning
     private let warn: (String) -> Void
+    /// The production writer is `AgentStore.upsert`. The optional seam exists only
+    /// for deterministic checks that need to model an AtomicWriter throw before or
+    /// after rename; every real write still goes through AgentStore unchanged.
+    private let upsertRecord: (AgentRecord) throws -> Void
     /// P2C.1's `git worktree` wrapper, used only by the isolated `spawn`. Not
     /// injectable: the checks exercise the failure path with a real failure (a `cwd`
     /// that is not a repository), so a fake would test less than the real thing.
@@ -107,11 +112,13 @@ final class AgentSupervisor {
     init(
         store: AgentStore,
         makeRunner: @escaping (AgentRecord) -> AgentRunning = AgentSupervisor.piRunner,
-        warn: @escaping (String) -> Void = { fputs($0 + "\n", stderr) }
+        warn: @escaping (String) -> Void = { fputs($0 + "\n", stderr) },
+        upsertRecord: ((AgentRecord) throws -> Void)? = nil
     ) {
         self.store = store
         self.makeRunner = makeRunner
         self.warn = warn
+        self.upsertRecord = upsertRecord ?? { record in try store.upsert(record) }
     }
 
     // MARK: - Identity
@@ -277,7 +284,8 @@ final class AgentSupervisor {
         projectId: UUID? = nil,
         parentAgentID: AgentID? = nil,
         sourceItemId: String? = nil,
-        tileId: UUID? = nil
+        tileId: UUID? = nil,
+        displayName: String? = nil
     ) -> AgentID {
         makeAgent(
             id: AgentID(rawValue: UUID()),
@@ -290,7 +298,8 @@ final class AgentSupervisor {
             projectId: projectId,
             parentAgentID: parentAgentID,
             sourceItemId: sourceItemId,
-            tileId: tileId
+            tileId: tileId,
+            displayName: displayName
         )
     }
 
@@ -316,7 +325,8 @@ final class AgentSupervisor {
         parentAgentID: AgentID? = nil,
         sourceItemId: String? = nil,
         tileId: UUID? = nil,
-        isolated: Bool
+        isolated: Bool,
+        displayName: String? = nil
     ) throws -> AgentID {
         // The id is minted HERE, before anything is created, because the slug is
         // derived from it — `WorktreeManager.slug` id-suffixes so two agents given the
@@ -343,7 +353,8 @@ final class AgentSupervisor {
             projectId: projectId,
             parentAgentID: parentAgentID,
             sourceItemId: sourceItemId,
-            tileId: tileId
+            tileId: tileId,
+            displayName: displayName
         )
     }
 
@@ -358,34 +369,322 @@ final class AgentSupervisor {
         projectId: UUID?,
         parentAgentID: AgentID? = nil,
         sourceItemId: String? = nil,
-        tileId: UUID?
+        tileId: UUID?,
+        displayName: String? = nil
     ) -> AgentID {
         let now = Date()
-        let record = AgentRecord(
-            id: id,
-            // A spawn path creates only the shared permission sentinel. The
-            // first prompt is named later, inside `send(_:to:)`, so no alternate
-            // spawn path can accidentally derive a title from model or role.
-            displayName: AgentRecord.defaultAgentName,
-            displayNameSource: .sentinel,
-            role: role,
-            model: model,
-            thinking: thinking,
-            cwd: cwd.path,
-            worktreeBranch: worktreeBranch,
-            projectId: projectId,
-            parentAgentID: parentAgentID,
-            sourceItemId: sourceItemId,
-            createdAt: now,
-            lastActivityAt: now,
-            tileId: tileId
-        )
-        records[id] = record
-        persist(record)
+        if let parentAgentID {
+            // The child and its parent's counter are committed as one
+            // store-locked transaction. A stale restored supervisor therefore
+            // cannot reserve the same slot, and a child write failure leaves the
+            // durable counter untouched instead of burning an ordinal.
+            guard let child = persistChildSpawn(
+                id: id,
+                role: role,
+                cwd: cwd,
+                worktreeBranch: worktreeBranch,
+                model: model,
+                thinking: thinking,
+                projectId: projectId,
+                parentAgentID: parentAgentID,
+                sourceItemId: sourceItemId,
+                tileId: tileId,
+                displayName: displayName,
+                createdAt: now
+            ) else {
+                warn("AgentSupervisor.makeAgent: child \(id.rawValue.uuidString) was not persisted; no ordinal was committed")
+                return id
+            }
+            records[id] = child
+        } else {
+            var record = AgentRecord(
+                id: id,
+                // A spawn path starts with the shared permission sentinel. The
+                // prompt remains named inside `send(_:to:)`; source and parent
+                // fallbacks are applied below only when no prompt will be sent.
+                displayName: AgentRecord.defaultAgentName,
+                displayNameSource: .sentinel,
+                role: role,
+                model: model,
+                thinking: thinking,
+                cwd: cwd.path,
+                worktreeBranch: worktreeBranch,
+                projectId: projectId,
+                parentAgentID: nil,
+                sourceItemId: sourceItemId,
+                createdAt: now,
+                lastActivityAt: now,
+                tileId: tileId
+            )
+            // An explicit name is the only rung allowed to land before `send`; a
+            // valid first prompt must still pass through that single funnel.
+            if let proposal = AgentRecord.resolveDerivedDisplayName(
+                explicitName: displayName,
+                model: model,
+                role: role,
+                id: id.rawValue
+            ) {
+                record.displayName = proposal.name
+                record.displayNameSource = proposal.source
+            }
+            records[id] = record
+            persist(record)
+        }
         if let prompt, !prompt.isEmpty {
             send(prompt, to: id)
+        } else {
+            applyDerivedNameIfNeeded(to: id, firstPrompt: nil)
         }
         return id
+    }
+
+    /// Commit one child allocation against the durable `AgentStore`, not a
+    /// supervisor's restored in-memory parent. The lock is a shared filesystem
+    /// lock in the store, so independently restored supervisors and separate
+    /// processes use the same exclusion. AgentStore still performs every record
+    /// write through its AtomicWriter; the lock makes the read/child/parent
+    /// sequence a store-level transaction.
+    private func persistChildSpawn(
+        id: AgentID,
+        role: String?,
+        cwd: URL,
+        worktreeBranch: String?,
+        model: String,
+        thinking: String,
+        projectId: UUID?,
+        parentAgentID: AgentID,
+        sourceItemId: String?,
+        tileId: UUID?,
+        displayName: String?,
+        createdAt: Date
+    ) -> AgentRecord? {
+        do {
+            return try withAgentStoreLock {
+                // The durable parent is authoritative. Falling back to the
+                // restored copy would reopen the exact collision this lock closes.
+                guard let parent = try store.load(id: parentAgentID) else {
+                    warn("AgentSupervisor: cannot reserve a child ordinal; parent \(parentAgentID.rawValue.uuidString) is absent from AgentStore")
+                    return nil
+                }
+                let durableChildren = try store.loadAll()
+                    .filter { $0.parentAgentID == parentAgentID }
+                    .compactMap(\.parentRelativeOrdinal)
+                    .filter { $0 > 0 }
+                let highestChildOrdinal = durableChildren.max() ?? 0
+                let minimumNextOrdinal = highestChildOrdinal == Int.max
+                    ? Int.max
+                    : highestChildOrdinal + 1
+                let ordinal = max(1, max(parent.nextChildOrdinal, minimumNextOrdinal))
+                // Do not wrap the counter. A wrapped ordinal could collide with
+                // an old child and is a failed spawn, not a reason to reuse it.
+                guard ordinal < Int.max else {
+                    warn("AgentSupervisor: child ordinal space exhausted for parent \(parentAgentID.rawValue.uuidString)")
+                    return nil
+                }
+
+                var child = AgentRecord(
+                    id: id,
+                    displayName: AgentRecord.defaultAgentName,
+                    displayNameSource: .sentinel,
+                    role: role,
+                    model: model,
+                    thinking: thinking,
+                    cwd: cwd.path,
+                    worktreeBranch: worktreeBranch,
+                    projectId: projectId,
+                    parentAgentID: parentAgentID,
+                    sourceItemId: sourceItemId,
+                    parentRelativeOrdinal: ordinal,
+                    createdAt: createdAt,
+                    lastActivityAt: createdAt,
+                    tileId: tileId
+                )
+                // Only the explicit rung may land before the first prompt. The
+                // common send/headless funnel applies the remaining rungs below.
+                if let proposal = AgentRecord.resolveDerivedDisplayName(
+                    explicitName: displayName,
+                    model: model,
+                    role: role,
+                    id: id.rawValue
+                ) {
+                    child.displayName = proposal.name
+                    child.displayNameSource = proposal.source
+                }
+
+                var updatedParent = parent
+                updatedParent.nextChildOrdinal = ordinal + 1
+
+                // Write the child first. Re-read after a throw to distinguish an
+                // AtomicWriter failure before rename from one after rename (for
+                // example, backup pruning). A durable child is a committed claim
+                // and must become visible instead of a phantom failure.
+                let committedChild: AgentRecord
+                do {
+                    try upsertRecord(child)
+                    committedChild = child
+                } catch {
+                    let durableChild: AgentRecord?
+                    do {
+                        durableChild = try store.load(id: id)
+                    } catch {
+                        warn("AgentSupervisor: could not re-read child \(id.rawValue.uuidString) after its write threw; refusing to hide possible corruption: \(error)")
+                        return nil
+                    }
+                    guard let durableChild else {
+                        warn("AgentSupervisor: child \(id.rawValue.uuidString) was absent after its write threw before commit at ordinal \(ordinal): \(error)")
+                        return nil
+                    }
+                    guard durableChild.parentAgentID == parentAgentID,
+                          durableChild.parentRelativeOrdinal == ordinal else {
+                        warn("AgentSupervisor: child \(id.rawValue.uuidString) changed unexpectedly after its write threw; refusing unrelated durable state")
+                        return nil
+                    }
+                    warn("AgentSupervisor: child \(id.rawValue.uuidString) was durable after its write threw; treating the post-commit claim as success: \(error)")
+                    committedChild = durableChild
+                }
+
+                // The parent is the second half of the claim. Its own write uses
+                // the same read-after-throw rule and a bounded repair attempt, so
+                // success is reported only when the durable high-water is visible.
+                let durableParent = try persistParentHighWater(
+                    updatedParent,
+                    requiredNextOrdinal: ordinal + 1,
+                    childID: id
+                )
+                records[parentAgentID] = durableParent
+                return committedChild
+            }
+        } catch {
+            warn("AgentSupervisor: could not reserve a durable child ordinal for parent \(parentAgentID.rawValue.uuidString): \(error)")
+            return nil
+        }
+    }
+
+    /// Persist the parent half of a child claim and re-read after every throwing
+    /// upsert. `AtomicWriter` is intentionally unchanged: this supervisor owns the
+    /// recovery decision because only it knows which child claim requires which
+    /// parent high-water.
+    private func persistParentHighWater(
+        _ desiredParent: AgentRecord,
+        requiredNextOrdinal: Int,
+        childID: AgentID
+    ) throws -> AgentRecord {
+        do {
+            try upsertRecord(desiredParent)
+            return desiredParent
+        } catch {
+            let reread: AgentRecord?
+            do {
+                reread = try store.load(id: desiredParent.id)
+            } catch {
+                warn("AgentSupervisor: could not re-read parent \(desiredParent.id.rawValue.uuidString) after child \(childID.rawValue.uuidString)'s parent write threw; refusing unrelated corruption: \(error)")
+                throw error
+            }
+            if let reread, reread.nextChildOrdinal >= requiredNextOrdinal {
+                warn("AgentSupervisor: parent \(desiredParent.id.rawValue.uuidString) was durable after its write threw; treating child \(childID.rawValue.uuidString) as a coherent success: \(error)")
+                return reread
+            }
+
+            guard var repair = reread else {
+                warn("AgentSupervisor: parent \(desiredParent.id.rawValue.uuidString) disappeared after child \(childID.rawValue.uuidString)'s write; refusing an orphaned child")
+                throw error
+            }
+            repair.nextChildOrdinal = max(repair.nextChildOrdinal, requiredNextOrdinal)
+            do {
+                try upsertRecord(repair)
+                return repair
+            } catch {
+                let repaired: AgentRecord?
+                do {
+                    repaired = try store.load(id: desiredParent.id)
+                } catch {
+                    warn("AgentSupervisor: could not re-read parent \(desiredParent.id.rawValue.uuidString) after its high-water repair threw: \(error)")
+                    throw error
+                }
+                guard let repaired, repaired.nextChildOrdinal >= requiredNextOrdinal else {
+                    warn("AgentSupervisor: parent \(desiredParent.id.rawValue.uuidString) high-water remained below \(requiredNextOrdinal) after child \(childID.rawValue.uuidString) became durable; refusing an incoherent success")
+                    throw error
+                }
+                warn("AgentSupervisor: parent \(desiredParent.id.rawValue.uuidString) high-water repair was durable after its write threw; child \(childID.rawValue.uuidString) is coherent: \(error)")
+                return repaired
+            }
+        }
+    }
+
+    /// A shared advisory lock, rooted beside the AgentStore records. This is
+    /// deliberately not an `NSLock`: another restored supervisor or process must
+    /// be excluded by the same durable store-level primitive. Every parent write,
+    /// not only allocation, uses this lock before it reads and writes the record.
+    private func withAgentStoreLock<T>(_ body: () throws -> T) throws -> T {
+        let directory = store.layout.agentsDirectory
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            warn("AgentSupervisor: could not create the AgentStore lock directory: \(error)")
+            throw error
+        }
+        let lockURL = directory.appendingPathComponent(".child-ordinal-reservation.lock", isDirectory: false)
+        let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR, 0o600)
+        guard descriptor >= 0 else {
+            let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            warn("AgentSupervisor: could not open the AgentStore child-ordinal lock: \(error)")
+            throw error
+        }
+        var locked: CInt = -1
+        repeat {
+            locked = flock(descriptor, LOCK_EX)
+        } while locked != 0 && errno == EINTR
+        guard locked == 0 else {
+            let code = errno
+            Darwin.close(descriptor)
+            let error = POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+            warn("AgentSupervisor: could not lock the AgentStore child-ordinal lock: \(error)")
+            throw error
+        }
+        defer {
+            flock(descriptor, LOCK_UN)
+            Darwin.close(descriptor)
+        }
+        return try body()
+    }
+
+    /// A child may inherit a parent's human name, but never a legacy model/role/
+    /// UUID title that happened to be provenance-marked manual. The defensive
+    /// projection deliberately differs from `humanDisplayName`, whose job is to
+    /// preserve an explicit human rename for the existing row.
+    private func parentDisplayName(for child: AgentRecord) -> String? {
+        guard let parentId = child.parentAgentID, let parent = records[parentId] else { return nil }
+        return AgentName.displayTitle(
+            parent.displayName,
+            model: parent.model,
+            role: parent.role,
+            id: parent.id.rawValue
+        )
+    }
+
+    /// The shared production naming funnel after the explicit-name rung. It is
+    /// called by both prompted and headless spawns, including role-based and
+    /// source-item fan-out children.
+    private func applyDerivedNameIfNeeded(to id: AgentID, firstPrompt: String?) {
+        guard var record = records[id],
+              record.namingRequest == nil,
+              record.displayName == AgentRecord.defaultAgentName,
+              record.displayNameSource == .sentinel,
+              let proposal = AgentRecord.resolveDerivedDisplayName(
+                firstPrompt: firstPrompt,
+                sourceItemId: record.sourceItemId,
+                parentName: parentDisplayName(for: record),
+                parentRelativeOrdinal: record.parentRelativeOrdinal,
+                model: record.model,
+                role: record.role,
+                id: record.id.rawValue
+              ) else {
+            return
+        }
+        record.displayName = proposal.name
+        record.displayNameSource = proposal.source
+        records[id] = record
+        persist(record)
     }
 
     /// Runs `prompt` on the agent's own runner, off the main thread (`run` blocks).
@@ -409,17 +708,25 @@ final class AgentSupervisor {
             warn("AgentSupervisor.send: agent \(id.rawValue.uuidString) already has a prompt in flight (\(type(of: inFlight))); dropping \(prompt.count) chars")
             return
         }
-        // This is the ONE automatic naming funnel. A later prompt cannot clobber
-        // the first name, and a manual rename disarms the gate even if somebody
-        // deliberately types the sentinel. No model call, spawn path, or worktree
-        // slug participates in display naming.
+        // This is the ONE automatic naming funnel. The shared resolver applies
+        // prompt, source-item, then parent-relative ordinal precedence; a later
+        // prompt cannot clobber an earlier rung, and a manual rename disarms the
+        // gate even if somebody deliberately types the sentinel. No model call,
+        // role id, UUID, or worktree slug participates in display naming.
         if record.namingRequest == nil,
            record.displayName == AgentRecord.defaultAgentName,
            record.displayNameSource == .sentinel,
-           let name = AgentName.fromPrompt(prompt),
-           !AgentName.isIdentifier(name, model: record.model, role: record.role, id: record.id.rawValue) {
-            record.displayName = name
-            record.displayNameSource = .prompt
+           let proposal = AgentRecord.resolveDerivedDisplayName(
+               firstPrompt: prompt,
+               sourceItemId: record.sourceItemId,
+               parentName: parentDisplayName(for: record),
+               parentRelativeOrdinal: record.parentRelativeOrdinal,
+               model: record.model,
+               role: record.role,
+               id: record.id.rawValue
+           ) {
+            record.displayName = proposal.name
+            record.displayNameSource = proposal.source
         }
         record.lastActivityAt = Date()
         // P4.4: a user message is the plainest real activity there is, so a settle
@@ -660,10 +967,14 @@ final class AgentSupervisor {
     struct FanOutItem: Equatable {
         let id: String
         let prompt: String
+        /// Optional explicit title supplied by the source surface. When absent,
+        /// the shared spawn ladder falls through prompt → source item → parent.
+        let displayName: String?
 
-        init(id: String, prompt: String) {
+        init(id: String, prompt: String, displayName: String? = nil) {
             self.id = id
             self.prompt = prompt
+            self.displayName = displayName
         }
     }
 
@@ -808,7 +1119,8 @@ final class AgentSupervisor {
                     projectId: projectId,
                     parentAgentID: parentAgentID,
                     sourceItemId: item.id,
-                    isolated: isolated
+                    isolated: isolated,
+                    displayName: item.displayName
                 )
                 report.launched.append((item.id, id))
             } catch {
@@ -1130,11 +1442,7 @@ final class AgentSupervisor {
     /// nil for a name with nothing left in it, which the caller must read as "keep the
     /// previous one".
     static func sanitizedDisplayName(_ raw: String) -> String? {
-        var label = raw.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).joined(separator: " ")
-        if label.hasPrefix("/") || label.hasPrefix("~") {
-            label = (label as NSString).lastPathComponent
-        }
-        return AgentName.normalizedLabel(label)
+        AgentName.fromExplicitName(raw)
     }
 
     /// Give an agent a human name. The name is the RECORD's (`AgentRecord.displayName`),
@@ -1771,7 +2079,24 @@ final class AgentSupervisor {
 
     private func persist(_ record: AgentRecord) {
         do {
-            try store.upsert(record)
+            let merged = try withAgentStoreLock {
+                var candidate = record
+                // Ordinary mutations (rename, tile binding, lifecycle, and
+                // activity) may come from a supervisor restored before another
+                // supervisor allocated a child. Read the durable parent while the
+                // same store-level lock is held and never lower its high-water.
+                if let durable = try store.load(id: record.id) {
+                    candidate.nextChildOrdinal = max(
+                        candidate.nextChildOrdinal,
+                        durable.nextChildOrdinal
+                    )
+                }
+                try upsertRecord(candidate)
+                return candidate
+            }
+            // Keep the live copy coherent too: a stale parent write that was
+            // merged upward must not leave this supervisor holding the old value.
+            records[record.id] = merged
         } catch {
             warn("AgentSupervisor: could not persist agent \(record.id.rawValue.uuidString): \(error)")
         }
@@ -1802,6 +2127,17 @@ private final class ScriptedTileActionSink: AgentTileActionSink {
         intents.append((intent, agentID))
         return acceptance
     }
+}
+
+/// Deterministic write faults for the child-claim recovery witness. The production
+/// initializer leaves this seam nil, so the real path remains AgentStore/AtomicWriter.
+private enum AgentSupervisorCheckWriteFault: Error {
+    case beforeRename
+    case afterRename
+}
+
+private final class AgentSupervisorCheckWriteState {
+    var didInjectPostCommitFault = false
 }
 
 /// A runner that emits a fixed script instead of spawning Pi. `holdUntilStopped`
@@ -2916,6 +3252,359 @@ private func checkAgentNameContract<Failure: Error>(
         throw fail("a request carrying both explicit name and regenerate intent was not rejected")
     }
 
+    // P4.4: exercise the actual spawn funnels, not just the resolver. An explicit
+    // title beats even an identifier-shaped first prompt, while an ordinary prompt
+    // beats its source item.
+    let explicitRuns = runner.runCount
+    let explicitChild = supervisor.spawn(
+        role: "operator",
+        prompt: config.model,
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking,
+        displayName: "Explicit child"
+    )
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        runner.runCount > explicitRuns && !supervisor.isRunning(explicitChild)
+    }),
+          let explicitRecord = supervisor.records[explicitChild],
+          explicitRecord.displayName == "Explicit child",
+          explicitRecord.displayNameSource == .manual,
+          explicitRecord.tileId == nil else {
+        throw fail("an explicit headless spawn did not win over its first prompt: \(String(describing: supervisor.records[explicitChild]?.displayName))")
+    }
+
+    let promptRuns = runner.runCount
+    let promptChild = supervisor.spawn(
+        role: "operator",
+        prompt: "Prompt child",
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking,
+        sourceItemId: "QUEUE-PROMPT"
+    )
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        runner.runCount > promptRuns && !supervisor.isRunning(promptChild)
+    }),
+          let promptNamedRecord = supervisor.records[promptChild],
+          promptNamedRecord.displayName == "Prompt child",
+          promptNamedRecord.displayNameSource == .prompt else {
+        throw fail("a first prompt did not beat its source item in the real spawn funnel")
+    }
+
+    // A fan-out is the source-item funnel used by the ticket queue. Give it an
+    // identifier-shaped prompt so the source rung is forced, and keep it headless
+    // while retaining its real role-based provider path.
+    let fanOutNaming = supervisor.fanOut(
+        items: [AgentSupervisor.FanOutItem(id: "QUEUE-SOURCE-42", prompt: config.model)],
+        role: "code-scout",
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking,
+        isolated: false
+    )
+    guard fanOutNaming.launched.count == 1,
+          let sourceChild = fanOutNaming.launched.first?.agentId,
+          await waitUntil(timeout: 5, pollInterval: 0.02, { !supervisor.isRunning(sourceChild) }),
+          let sourceRecord = supervisor.records[sourceChild],
+          sourceRecord.displayName == "QUEUE-SOURCE-42",
+          sourceRecord.displayNameSource == .sourceItem,
+          sourceRecord.role == "code-scout",
+          sourceRecord.tileId == nil else {
+        throw fail("the real headless role-based fan-out did not use its source item after an identifier prompt")
+    }
+
+    // A role-based child with no usable prompt falls to a durable parent-relative
+    // slot. The parent deliberately remains the sentinel, so the result must still
+    // be readable and must not simply copy the parent's title.
+    let sentinelParent = supervisor.spawn(
+        role: "operator",
+        prompt: nil,
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking
+    )
+    guard supervisor.records[sentinelParent]?.displayName == AgentRecord.defaultAgentName else {
+        throw fail("the ordinal witness parent did not remain on the shared sentinel")
+    }
+    let roleNamingModel = try RoleRegistry(projectRoot: cwd).resolve(
+        roleId: "code-scout",
+        inheriting: AgentModelConfig.Resolution(model: config.model, thinking: config.thinking)
+    ).model
+    guard let roleChild = supervisor.handleSpawnRequest(
+        SpawnRequest(role: "code-scout", prompt: roleNamingModel, isolated: false),
+        from: sentinelParent
+    ),
+          await waitUntil(timeout: 5, pollInterval: 0.02, { !supervisor.isRunning(roleChild) }),
+          let roleRecord = supervisor.records[roleChild],
+          roleRecord.displayName == "New agent agent 1",
+          roleRecord.displayNameSource == .parent,
+          roleRecord.parentRelativeOrdinal == 1,
+          roleRecord.role == "code-scout",
+          roleRecord.displayName != supervisor.records[sentinelParent]?.displayName else {
+        throw fail("a headless role-based child did not receive the parent-relative ordinal fallback")
+    }
+    let siblingTwo = supervisor.spawn(
+        role: "code-scout", prompt: nil, cwd: cwd, model: config.model,
+        thinking: config.thinking, parentAgentID: sentinelParent)
+    let siblingThree = supervisor.spawn(
+        role: "code-scout", prompt: nil, cwd: cwd, model: config.model,
+        thinking: config.thinking, parentAgentID: sentinelParent)
+    let siblingFour = supervisor.spawn(
+        role: "code-scout", prompt: nil, cwd: cwd, model: config.model,
+        thinking: config.thinking, parentAgentID: sentinelParent)
+    guard supervisor.records[siblingTwo]?.displayName == "New agent agent 2",
+          supervisor.records[siblingThree]?.displayName == "New agent agent 3",
+          supervisor.records[siblingFour]?.displayName == "New agent agent 4",
+          try store.load(id: sentinelParent)?.nextChildOrdinal == 5 else {
+        throw fail("parent-relative child ordinals were not unique and durable: \(String(describing: supervisor.records[siblingTwo]?.displayName)), \(String(describing: supervisor.records[siblingThree]?.displayName)), \(String(describing: supervisor.records[siblingFour]?.displayName))")
+    }
+
+    // Delete the second sibling, then restore the parent from disk before creating
+    // another child. The learned ordinal must advance to 5, not reuse 2 or count
+    // the currently visible siblings.
+    guard supervisor.archive(siblingTwo).recordDeleted else {
+        throw fail("the sibling deletion witness could not archive the second child")
+    }
+    let restoredNamingSupervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+    _ = restoredNamingSupervisor.restore()
+    let siblingFive = restoredNamingSupervisor.spawn(
+        role: "code-scout", prompt: nil, cwd: cwd, model: config.model,
+        thinking: config.thinking, parentAgentID: sentinelParent)
+    guard restoredNamingSupervisor.records[siblingFive]?.displayName == "New agent agent 5",
+          restoredNamingSupervisor.records[siblingFive]?.parentRelativeOrdinal == 5,
+          restoredNamingSupervisor.records[siblingFive]?.displayNameSource == .parent,
+          try store.load(id: sentinelParent)?.nextChildOrdinal == 6 else {
+        throw fail("a restored parent reused a deleted sibling ordinal: \(String(describing: restoredNamingSupervisor.records[siblingFive]?.displayName))")
+    }
+
+    // Two supervisors restore the same parent BEFORE either allocates. Their
+    // stale in-memory counters are the deterministic interleaving that caught
+    // the first candidate; allocation must consult the shared durable store and
+    // commit the child/counter pair under its store-level lock.
+    let interleavedParent = supervisor.spawn(
+        role: "operator", prompt: nil, cwd: cwd, model: config.model, thinking: config.thinking)
+    let firstRestored = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+    let secondRestored = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+    _ = firstRestored.restore()
+    _ = secondRestored.restore()
+    guard firstRestored.records[interleavedParent] != nil,
+          secondRestored.records[interleavedParent] != nil,
+          try store.load(id: interleavedParent)?.nextChildOrdinal == 1 else {
+        throw fail("the two-supervisor ordinal witness did not begin from one shared durable counter")
+    }
+    let firstInterleavedChild = firstRestored.spawn(
+        role: "code-scout", prompt: nil, cwd: cwd, model: config.model,
+        thinking: config.thinking, parentAgentID: interleavedParent)
+    let secondInterleavedChild = secondRestored.spawn(
+        role: "code-scout", prompt: nil, cwd: cwd, model: config.model,
+        thinking: config.thinking, parentAgentID: interleavedParent)
+    let firstOrdinal = firstRestored.records[firstInterleavedChild]?.parentRelativeOrdinal
+    let secondOrdinal = secondRestored.records[secondInterleavedChild]?.parentRelativeOrdinal
+    let durableInterleavedChildren = try store.loadAll().filter {
+        $0.parentAgentID == interleavedParent
+    }
+    guard firstInterleavedChild != secondInterleavedChild,
+          firstOrdinal != nil,
+          secondOrdinal != nil,
+          Set([firstOrdinal!, secondOrdinal!]) == Set([1, 2]),
+          Set(durableInterleavedChildren.compactMap(\.parentRelativeOrdinal)) == Set([1, 2]),
+          try store.load(id: interleavedParent)?.nextChildOrdinal == 3 else {
+        throw fail("independently restored supervisors duplicated a child ordinal or counter: \(String(describing: firstOrdinal)), \(String(describing: secondOrdinal)), next=\(String(describing: try store.load(id: interleavedParent)?.nextChildOrdinal))")
+    }
+
+    // A stale supervisor's ordinary parent mutation must not lower the durable
+    // high-water. Delete the only child after that write, then allocate again:
+    // without the merge in persist(_:) the new child would visibly reuse label 1.
+    let staleWriteParent = supervisor.spawn(
+        role: "operator", prompt: nil, cwd: cwd, model: config.model, thinking: config.thinking)
+    let staleSupervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+    let currentSupervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+    _ = staleSupervisor.restore()
+    _ = currentSupervisor.restore()
+    let staleFirstChild = currentSupervisor.spawn(
+        role: "code-scout", prompt: nil, cwd: cwd, model: config.model,
+        thinking: config.thinking, parentAgentID: staleWriteParent)
+    guard currentSupervisor.records[staleFirstChild]?.parentRelativeOrdinal == 1,
+          try store.load(id: staleWriteParent)?.nextChildOrdinal == 2,
+          staleSupervisor.records[staleWriteParent]?.nextChildOrdinal == 1 else {
+        throw fail("the stale-parent witness did not establish distinct in-memory and durable counters")
+    }
+    guard staleSupervisor.rename(agentID: staleWriteParent, to: "Stale parent write") else {
+        throw fail("the stale supervisor could not perform an ordinary parent mutation")
+    }
+    guard try store.load(id: staleWriteParent)?.nextChildOrdinal == 2 else {
+        throw fail("an ordinary stale parent write lowered the durable child high-water")
+    }
+    guard currentSupervisor.archive(staleFirstChild).recordDeleted else {
+        throw fail("the stale-parent witness could not delete the first child")
+    }
+    let staleRetryChild = staleSupervisor.spawn(
+        role: "code-scout", prompt: nil, cwd: cwd, model: config.model,
+        thinking: config.thinking, parentAgentID: staleWriteParent)
+    guard staleSupervisor.records[staleRetryChild]?.parentRelativeOrdinal == 2,
+          staleSupervisor.records[staleRetryChild]?.displayName == "Stale parent write agent 2",
+          try store.load(id: staleWriteParent)?.nextChildOrdinal == 3 else {
+        throw fail("stale parent persistence allowed a deleted child label to be reused: \(String(describing: staleSupervisor.records[staleRetryChild]?.displayName))")
+    }
+
+    // A worktree failure happens before the child transaction. It must leave the
+    // parent's counter and child set unchanged, rather than reserving a slot for
+    // an agent that never existed.
+    let failedSpawnParent = supervisor.spawn(
+        role: "operator", prompt: nil, cwd: cwd, model: config.model, thinking: config.thinking)
+    let failedCounter = try store.load(id: failedSpawnParent)?.nextChildOrdinal
+    let failedRoot = root.appendingPathComponent("failed-child-not-a-repository", isDirectory: true)
+    try FileManager.default.createDirectory(at: failedRoot, withIntermediateDirectories: true)
+    var failedSpawnThrew = false
+    do {
+        _ = try supervisor.spawn(
+            role: "code-scout", prompt: nil, cwd: failedRoot, model: config.model,
+            thinking: config.thinking, parentAgentID: failedSpawnParent, isolated: true)
+    } catch {
+        failedSpawnThrew = true
+    }
+    guard failedSpawnThrew,
+          try store.load(id: failedSpawnParent)?.nextChildOrdinal == failedCounter,
+          try store.loadAll().allSatisfy({ $0.parentAgentID != failedSpawnParent }) else {
+        throw fail("a failed isolated child spawn burned or reused its parent's ordinal")
+    }
+
+    // Force the child AtomicWriter write to fail after the shared lock file has
+    // been created. The parent counter must remain unchanged and no in-memory
+    // child may pretend that a failed durable spawn succeeded.
+    let failedWriteRoot = root.appendingPathComponent("failed-child-write", isDirectory: true)
+    let failedWriteStore = AgentStore(applicationSupportDirectory: failedWriteRoot)
+    let failedWriteSupervisor = AgentSupervisor(
+        store: failedWriteStore, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+    let failedWriteParent = failedWriteSupervisor.spawn(
+        role: "operator", prompt: nil, cwd: cwd, model: config.model, thinking: config.thinking)
+    guard let failedWriteCounter = try failedWriteStore.load(id: failedWriteParent)?.nextChildOrdinal else {
+        throw fail("the failed-child-write witness lost its parent before the write failure")
+    }
+    let failedWriteDirectory = failedWriteStore.layout.agentsDirectory
+    let failedWriteLock = failedWriteDirectory.appendingPathComponent(
+        ".child-ordinal-reservation.lock", isDirectory: false)
+    guard FileManager.default.createFile(atPath: failedWriteLock.path, contents: Data()) else {
+        throw fail("the failed-child-write witness could not create the shared lock file")
+    }
+    try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: failedWriteDirectory.path)
+    let failedWriteChild = failedWriteSupervisor.spawn(
+        role: "code-scout", prompt: nil, cwd: cwd, model: config.model,
+        thinking: config.thinking, parentAgentID: failedWriteParent)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: failedWriteDirectory.path)
+    guard failedWriteSupervisor.records[failedWriteChild] == nil,
+          try failedWriteStore.load(id: failedWriteParent)?.nextChildOrdinal == failedWriteCounter,
+          try failedWriteStore.loadAll().allSatisfy({ $0.parentAgentID != failedWriteParent }) else {
+        throw fail("a failed child AtomicWriter write burned the parent ordinal or left a phantom child")
+    }
+
+    // Deterministic seam for both sides of AtomicWriter's commit boundary. The
+    // pre-commit fault never writes the child, so it remains a real failure; the
+    // post-commit fault writes it and then throws, so re-reading must promote it
+    // into a visible child and persist the parent high-water before returning.
+    let preCommitRoot = root.appendingPathComponent("pre-commit-child-write", isDirectory: true)
+    let preCommitStore = AgentStore(applicationSupportDirectory: preCommitRoot)
+    let preCommitSupervisor = AgentSupervisor(
+        store: preCommitStore,
+        makeRunner: { _ in ScriptedAgentRunner(script: []) },
+        upsertRecord: { record in
+            guard record.parentAgentID != nil else {
+                try preCommitStore.upsert(record)
+                return
+            }
+            throw AgentSupervisorCheckWriteFault.beforeRename
+        })
+    let preCommitParent = preCommitSupervisor.spawn(
+        role: "operator", prompt: nil, cwd: cwd, model: config.model, thinking: config.thinking)
+    let preCommitChild = preCommitSupervisor.spawn(
+        role: "code-scout", prompt: nil, cwd: cwd, model: config.model,
+        thinking: config.thinking, parentAgentID: preCommitParent)
+    guard preCommitSupervisor.records[preCommitChild] == nil,
+          try preCommitStore.load(id: preCommitChild) == nil,
+          try preCommitStore.load(id: preCommitParent)?.nextChildOrdinal == 1 else {
+        throw fail("a pre-commit child write was reported or persisted as a success")
+    }
+
+    let postCommitRoot = root.appendingPathComponent("post-commit-child-write", isDirectory: true)
+    let postCommitStore = AgentStore(applicationSupportDirectory: postCommitRoot)
+    let postCommitState = AgentSupervisorCheckWriteState()
+    let postCommitSupervisor = AgentSupervisor(
+        store: postCommitStore,
+        makeRunner: { _ in ScriptedAgentRunner(script: []) },
+        upsertRecord: { record in
+            if record.parentAgentID != nil && !postCommitState.didInjectPostCommitFault {
+                try postCommitStore.upsert(record)
+                postCommitState.didInjectPostCommitFault = true
+                throw AgentSupervisorCheckWriteFault.afterRename
+            }
+            try postCommitStore.upsert(record)
+        })
+    let postCommitParent = postCommitSupervisor.spawn(
+        role: "operator", prompt: nil, cwd: cwd, model: config.model, thinking: config.thinking)
+    let postCommitChild = postCommitSupervisor.spawn(
+        role: "code-scout", prompt: nil, cwd: cwd, model: config.model,
+        thinking: config.thinking, parentAgentID: postCommitParent)
+    guard postCommitState.didInjectPostCommitFault,
+          let durablePostCommitChild = try postCommitStore.load(id: postCommitChild),
+          postCommitSupervisor.records[postCommitChild] == durablePostCommitChild,
+          durablePostCommitChild.parentRelativeOrdinal == 1,
+          postCommitSupervisor.records[postCommitParent]?.nextChildOrdinal == 2,
+          try postCommitStore.load(id: postCommitParent)?.nextChildOrdinal == 2 else {
+        throw fail("a post-commit child write was not re-read into a coherent visible success")
+    }
+    let postCommitRetry = postCommitSupervisor.spawn(
+        role: "code-scout", prompt: nil, cwd: cwd, model: config.model,
+        thinking: config.thinking, parentAgentID: postCommitParent)
+    guard postCommitSupervisor.records[postCommitRetry]?.parentRelativeOrdinal == 2,
+          try postCommitStore.load(id: postCommitParent)?.nextChildOrdinal == 3 else {
+        throw fail("a durable post-commit child was hidden or its ordinal was burned on retry")
+    }
+
+    // Automatic provenance is retained locally but scrubbed before the real
+    // companion-shaped inventory is encoded. This covers prompt, source, and the
+    // parent fallback; the sentinel substring itself is expected in safe output.
+    let namingInventory = AgentInventory.snapshot(
+        terminalDescriptors: [], liveStatuses: [:],
+        agents: [promptNamedRecord, sourceRecord, roleRecord],
+        activityByAgent: [:], replicaId: UUID(), now: Date()
+    )
+    let namingPayload = String(decoding: try JSONCodec.makeEncoder().encode(namingInventory), as: UTF8.self)
+    guard !namingPayload.contains("Prompt child"),
+          !namingPayload.contains("QUEUE-SOURCE-42"),
+          !namingPayload.contains("New agent agent 1") else {
+        throw fail("prompt/source/parent-derived child text crossed the companion boundary")
+    }
+
+    // A future provenance value carrying ordinary text must fail closed during
+    // record decoding, and the witness must use the actual encoded companion
+    // payload rather than a source scan or a hand-written string filter.
+    let unknownNameToken = "ordinary-unknown-provenance-\(UUID().uuidString)"
+    let unknownSeed = AgentRecord(
+        id: AgentID(rawValue: UUID()), displayName: unknownNameToken, displayNameSource: .manual,
+        model: config.model, thinking: config.thinking, cwd: cwd.path,
+        createdAt: Date(), lastActivityAt: Date())
+    guard var unknownObject = try JSONSerialization.jsonObject(
+        with: JSONCodec.makeEncoder().encode(unknownSeed)) as? [String: Any] else {
+        throw fail("the unknown-provenance fixture did not encode as an AgentRecord object")
+    }
+    unknownObject["displayNameSource"] = "future-ordinary-provenance"
+    let unknownRecordData = try JSONSerialization.data(withJSONObject: unknownObject, options: [.sortedKeys])
+    let unknownRecord = try JSONCodec.makeDecoder().decode(AgentRecord.self, from: unknownRecordData)
+    guard unknownRecord.displayName == AgentRecord.defaultAgentName,
+          unknownRecord.displayNameSource == .sentinel,
+          unknownRecord.syncDisplayName == AgentRecord.defaultAgentName else {
+        throw fail("unknown display-name provenance was not redacted at decode: \(unknownRecord.displayName), \(unknownRecord.displayNameSource.rawValue)")
+    }
+    let unknownInventory = AgentInventory.snapshot(
+        terminalDescriptors: [], liveStatuses: [:], agents: [unknownRecord],
+        activityByAgent: [:], replicaId: UUID(), now: Date())
+    let unknownPayload = String(decoding: try JSONCodec.makeEncoder().encode(unknownInventory), as: UTF8.self)
+    guard !unknownPayload.contains(unknownNameToken),
+          unknownPayload.contains(AgentRecord.defaultAgentName) else {
+        throw fail("unknown-provenance text crossed the encoded companion payload")
+    }
+
     // Deterministic edge corpus: empty/whitespace stay displayable through the
     // sentinel; all other cases preserve human text, including marks and RTL.
     let combiningOnly = "\u{301}\u{302}"
@@ -3052,7 +3741,7 @@ private func checkAgentNameContract<Failure: Error>(
         throw fail("prompt-derived display text crossed the companion payload")
     }
 
-    return "agent naming: sentinel-only spawn, first-send seed, repeat/manual no-clobber incl. manual sentinel disarm, P4.3 durable request CAS (manual race, current/superseded completion, expected-name mismatch, round-trip, explicit+regenerate rejection), identifier prompt held at sentinel, edge corpus \(edgeCases.count), \(AgentName.maximumLength)-character cap, model/role/UUID migration with manual provenance, row defensive read, \(sourceReport), and prompt I5 boundary"
+    return "agent naming: sentinel-only spawn, P4.4 explicit→prompt→source→parent ordinal funnels across headless/role-based children with deletion/restore stability, prompt/source/parent I5 scrubbing, first-send seed, repeat/manual no-clobber incl. manual sentinel disarm, P4.3 durable request CAS (manual race, current/superseded completion, expected-name mismatch, round-trip, explicit+regenerate rejection), identifier prompt held at sentinel, edge corpus \(edgeCases.count), \(AgentName.maximumLength)-character cap, model/role/UUID migration with manual provenance, row defensive read, \(sourceReport), and prompt I5 boundary"
 }
 
 private struct AgentNameSentinelSourceMatch {
