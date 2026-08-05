@@ -346,10 +346,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// laid-out height is this same intrinsic height: the popup is pinned by its top
     /// and its leading edge only, so nothing stretches it.
     static var scopeControlHeight: Double {
-        let probe = NSPopUpButton(frame: .zero, pullsDown: false)
-        probe.font = .token(.label)
-        probe.addItem(withTitle: InboxScope.allTitle)
-        return (2 * Space.s + Double(probe.fittingSize.height)).rounded(.up)
+        (2 * Space.s + Double(ChoiceButton.controlHeight)).rounded(.up)
     }
 
     /// How far one nesting level indents a child row (P2D.4 draws the nesting;
@@ -396,7 +393,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         }
     }
 
-    private let scopePopUp: NSPopUpButton
+    private let scopeButton: ChoiceButton
+    private let searchField: NSTextField
     private let scrollView: NSScrollView
     private let tableView: NSTableView
     private let column: NSTableColumn
@@ -437,11 +435,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private var allRows: [AgentInboxRow] = []
     /// The entries in the popup, parallel to the menu items' tags.
     private var scopeEntries: [InboxScope] = []
+    /// Search is view-local filter state. It never participates in ordering or persistence.
+    private var searchQuery = ""
     // Ticket: docs/38-tickets/90-agent-ux/P3.14-preserve-workspace-management.md
-    /// The management items in the menu as BUILT — rebuilt with the menu, because an
-    /// `NSMenuItem` may only belong to one `NSMenu` and `updateScopeMenu` replaces
-    /// the whole menu whenever the scope set changes.
-    private var managementItems: [WorkspaceManagementAction: NSMenuItem] = [:]
+    /// Management actions remain in the same choice vocabulary as scopes.
+    private var managementItems: [WorkspaceManagementAction: ChoiceItem] = [:]
     /// Enablement, told by the host: whether there is a workspace to act on at all,
     /// and whether it may be deleted (the last workspace may not). `create` is
     /// always available, which is the guard the header buttons had too.
@@ -815,17 +813,23 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     override init(frame frameRect: NSRect) {
-        // A popup, not a segmented control or a row of chips: the entry count is
-        // the number of projects and workspaces you have open, so anything that
-        // lays its choices out side by side puts the sidebar's width back under the
-        // control of your project names — which is the exact coupling this ticket
-        // removes from group headers.
-        scopePopUp = NSPopUpButton(frame: .zero, pullsDown: false)
-        scopePopUp.font = .token(.label)
-        scopePopUp.translatesAutoresizingMaskIntoConstraints = false
-        // Lets the popup shrink with a narrow sidebar rather than force the whole
-        // view wider than the split-view divider allows.
-        scopePopUp.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // The scope is a fixed-width ChoiceButton: project names can never resize the band.
+        scopeButton = ChoiceButton(title: InboxScope.allTitle)
+        scopeButton.translatesAutoresizingMaskIntoConstraints = false
+        scopeButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        scopeButton.preferredPopoverWidth = 124
+        scopeButton.setAccessibilityLabel("Agent scope")
+        searchField = NSTextField(frame: .zero)
+        searchField.translatesAutoresizingMaskIntoConstraints = false
+        searchField.isEditable = true
+        searchField.isSelectable = true
+        searchField.isBordered = false
+        searchField.drawsBackground = false
+        searchField.focusRingType = .none
+        searchField.font = .token(.label)
+        searchField.placeholderString = "Search agents"
+        searchField.setAccessibilityRole(.textField)
+        searchField.setAccessibilityLabel("Search agents")
 
         scrollView = NSScrollView(frame: .zero)
         scrollView.borderType = .noBorder
@@ -900,9 +904,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         setAccessibilityIdentifier("ContinuumAgentInboxRoot")
         tableView.setAccessibilityIdentifier("ContinuumAgentInboxList")
         emptyLabel.setAccessibilityIdentifier("ContinuumAgentInboxEmpty")
-        scopePopUp.setAccessibilityIdentifier("ContinuumAgentInboxScope")
+        scopeButton.setAccessibilityIdentifier("ContinuumAgentInboxScope")
+        searchField.setAccessibilityIdentifier("ContinuumAgentInboxSearch")
 
-        addSubview(scopePopUp)
+        addSubview(scopeButton)
+        addSubview(searchField)
         addSubview(scrollView)
         addSubview(emptyLabel)
         // P3.11: added LAST, so it draws over the bottom of the list.
@@ -924,8 +930,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // again (measured — see `isClickWiredForQA`). The first click still reveals;
         // that is the same idempotent reveal a second single click makes.
         tableView.doubleAction = #selector(rowDoubleClicked(_:))
-        scopePopUp.target = self
-        scopePopUp.action = #selector(scopePicked(_:))
+        searchField.delegate = self
+        scopeButton.keepsSelectionForItem = { $0.id.hasPrefix("management:") }
+        scopeButton.onSelection = { [weak self] item in self?.choicePicked(item) }
         updateScopeMenu()
         // P3.11: the bar reports the action; resolving WHICH agents it lands on is the
         // list's, because only the list knows the selection.
@@ -937,13 +944,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         undoToast.setAccessibilityIdentifier("ContinuumAgentInboxUndoToast")
 
         NSLayoutConstraint.activate([
-            scopePopUp.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
-            scopePopUp.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -Space.m),
-            scopePopUp.topAnchor.constraint(equalTo: topAnchor, constant: Space.s),
+            scopeButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
+            scopeButton.topAnchor.constraint(equalTo: topAnchor, constant: Space.s),
+            scopeButton.widthAnchor.constraint(equalToConstant: 124),
+            scopeButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
+            searchField.leadingAnchor.constraint(equalTo: scopeButton.trailingAnchor, constant: Space.s),
+            searchField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.m),
+            searchField.centerYAnchor.constraint(equalTo: scopeButton.centerYAnchor),
+            searchField.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
 
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: scopePopUp.bottomAnchor, constant: Space.s),
+            scrollView.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
 
             emptyLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.l),
@@ -991,6 +1003,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     func applyTokens() {
         layer?.backgroundColor = SurfaceToken.panel.color.cgColor(in: self)
         emptyLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        searchField.textColor = TextToken.textPrimary.color.nsColor(in: self)
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -1231,8 +1244,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// already hidden under its parent, and the header would say it is holding a row
     /// that unfolding it does not produce.
     private func display(from newRows: [AgentInboxRow]) -> [InboxListItem] {
-        let sorted = InboxSort.sortForInbox(
-            rows: InboxScope.filter(rows: newRows, scope: scope, openAgentId: openAgentId))
+        let scoped = InboxScope.filter(rows: newRows, scope: scope, openAgentId: openAgentId)
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
+        let searched = query.isEmpty ? scoped : scoped.filter { row in
+            [row.title, row.projectName, row.workspaceName, row.model, row.branch]
+                .compactMap { $0?.localizedLowercase }
+                .contains { $0.localizedCaseInsensitiveContains(query) }
+        }
+        let sorted = InboxSort.sortForInbox(rows: searched)
         // P2D.4: measured on the SORTED list, before the fold — a collapsed parent
         // has no children on screen, and a triangle derived from what is on screen
         // would vanish the moment you used it.
@@ -1432,21 +1451,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         if notify { onScopeChange?(next) }
     }
 
-    @objc private func scopePicked(_ sender: NSPopUpButton) {
-        guard let tag = sender.selectedItem?.tag else { return }
-        // P3.14: the management block shares the popup's action rather than carrying
-        // its own. A popup sends BOTH its own action and a selected item's action, so
-        // an item-level selector would have to be reconciled with this one; a tag
-        // range is the same dispatch `scopeEntries` already uses.
-        if let action = AgentInboxView.managementAction(forTag: tag) {
-            // The scope did not change, so the button must not read as if it had:
-            // `pullsDown: false` titles the popup with whatever was last selected.
-            restoreScopeSelection()
-            onWorkspaceManagementAction?(action)
-            return
-        }
-        guard scopeEntries.indices.contains(tag) else { return }
-        setScope(scopeEntries[tag], notify: true)
+    func controlTextDidChange(_ obj: Notification) {
+        guard (obj.object as? NSTextField) === searchField else { return }
+        let next = searchField.stringValue
+        guard next != searchQuery else { return }
+        searchQuery = next
+        tableView.deselectAll(nil)
+        selectedRowsForEmphasis = IndexSet()
+        hoveredAgentId = nil
+        keyboardFocusIntent = nil
+        render(display(from: allRows))
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.14-preserve-workspace-management.md
@@ -1473,14 +1487,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     private func applyManagementEnablement() {
-        managementItems[.create]?.isEnabled = true
-        managementItems[.rename]?.isEnabled = canRenameWorkspace
-        managementItems[.delete]?.isEnabled = canDeleteWorkspace
+        updateScopeMenu()
     }
 
     private func restoreScopeSelection() {
-        guard let index = scopeEntries.firstIndex(of: scope) else { return }
-        scopePopUp.selectItem(withTag: index)
+        let id = scope.storageValue
+        scopeButton.selectedID = id
     }
 
     /// Rebuild the popup's menu when the set of scopes changed, and point it at the
@@ -1494,41 +1506,31 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// separator between the two blocks costs nothing.
     private func updateScopeMenu() {
         let entries = InboxScope.entries(for: allRows, catalog: scopeCatalog, including: scope)
-        if entries != scopeEntries {
-            scopeEntries = entries
-            let menu = NSMenu()
-            for (index, entry) in entries.enumerated() {
-                if index > 0, case .workspace = entry, case .project = entries[index - 1] {
-                    menu.addItem(.separator())
-                }
-                let item = NSMenuItem(title: entry.title, action: nil, keyEquivalent: "")
-                item.tag = index
-                // Explicit, because `autoenablesItems` is turned off below.
-                item.isEnabled = true
-                menu.addItem(item)
-            }
-            // P3.14: the workspace verbs, below a separator, so the menu reads as
-            // "which agents" first and "this workspace" second.
-            //
-            // `autoenablesItems = false` IS LOAD-BEARING, for the reason P3.12 wrote
-            // down for `rowMenu`: left at AppKit's default, `NSMenu.update()` re-derives
-            // every item's enablement from whether a target responds to its action just
-            // before the menu is drawn, so the disabled Delete on a one-workspace
-            // registry would come back up live. The scope items are enabled explicitly
-            // here because turning the flag off means nothing enables them for us.
-            menu.autoenablesItems = false
-            menu.addItem(.separator())
-            managementItems.removeAll()
-            for action in WorkspaceManagementAction.allCases {
-                let item = NSMenuItem(title: action.title, action: nil, keyEquivalent: "")
-                item.tag = AgentInboxView.tag(for: action)
-                menu.addItem(item)
-                managementItems[action] = item
-            }
-            applyManagementEnablement()
-            scopePopUp.menu = menu
+        scopeEntries = entries
+        var items = entries.map { ChoiceItem(id: $0.storageValue, title: $0.title) }
+        managementItems.removeAll()
+        // Keep every management affordance visible. Unsupported actions are
+        // disabled in place, rather than disappearing and making the menu's
+        // contract depend on the current workspace count.
+        items.append(ChoiceItem(id: "management-separator", title: "────────", enabled: false))
+        for action in WorkspaceManagementAction.allCases {
+            let item = ChoiceItem(id: "management:\(action.title)", title: action.title,
+                                  enabled: action == .create || (action == .rename ? canRenameWorkspace : canDeleteWorkspace))
+            managementItems[action] = item
+            items.append(item)
         }
+        scopeButton.items = items
         restoreScopeSelection()
+    }
+
+    private func choicePicked(_ item: ChoiceItem) {
+        if let entry = scopeEntries.first(where: { $0.storageValue == item.id }) {
+            setScope(entry, notify: true)
+            return
+        }
+        guard let action = WorkspaceManagementAction.allCases.first(where: { item.id == "management:\($0.title)" }) else { return }
+        restoreScopeSelection()
+        onWorkspaceManagementAction?(action)
     }
 
     /// The empty state, and WHICH empty state. An inbox with agents in it that are
@@ -1541,7 +1543,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// with no managed agents in front of a running terminal agent says so.
     private func updateEmptyState() {
         if !allRows.isEmpty {
-            emptyLabel.stringValue = AgentInboxView.scopedEmptyMessage
+            if !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                emptyLabel.stringValue = "No agents matching \"\(searchQuery)\" in \(scope.title)"
+            } else {
+                emptyLabel.stringValue = AgentInboxView.scopedEmptyMessage
+            }
         } else if excludedTerminalAgentCount > 0 {
             emptyLabel.stringValue = AgentInboxView.terminalHostedEmptyMessage
         } else {
@@ -2939,23 +2945,36 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// the verbs have `workspaceManagementTitlesForQA`. Filtered by tag rather than
     /// by position, for the same reason the tags exist at all: a workspace and a
     /// project may share a title.
-    var scopeTitlesForQA: [String] {
-        (scopePopUp.menu?.items ?? [])
-            .filter { !$0.isSeparatorItem && AgentInboxView.managementAction(forTag: $0.tag) == nil }
-            .map(\.title)
-            .filter { !$0.isEmpty }
+    var scopeTitlesForQA: [String] { scopeEntries.map(\.title) }
+    var selectedScopeTitleForQA: String { scope.title }
+    var searchQueryForQA: String { searchQuery }
+    var searchResultCountForQA: Int { rows.count }
+    var scopeControlWidthForQA: CGFloat { scopeButton.bounds.width }
+    var scopeButtonForQA: ChoiceButton { scopeButton }
+    var searchFieldViewForQA: NSTextField { searchField }
+    var searchFieldFrameForQA: NSRect { searchField.frame }
+    var scopePopoverItemsForQA: [ChoiceItem] { scopeButton.qaPresentedItems }
+    var scopePopoverWidthForQA: CGFloat? { scopeButton.qaPopoverWidth }
+    var isScopePopoverPresentedForQA: Bool { scopeButton.qaIsPopoverPresented }
+    func dismissScopePopoverForQA() { scopeButton.dismissPopoverForQA() }
+    @discardableResult
+    func pickPresentedScopeItemForQA(id: String) -> Bool {
+        scopeButton.choosePresentedItemForQA(id: id)
     }
-    var selectedScopeTitleForQA: String { scopePopUp.titleOfSelectedItem ?? "" }
+
+    /// Drive the live field/delegate path in deterministic probes.
+    func setSearchForQA(_ text: String) {
+        searchField.stringValue = text
+        controlTextDidChange(Notification(name: NSSearchField.textDidChangeNotification, object: searchField))
+    }
     var selectedRowCountForQA: Int { tableView.selectedRowIndexes.count }
 
     /// Pick a scope the way the user does — through the popup's own action, so the
     /// check exercises the target/action wiring and not just `setScope`.
     @discardableResult
     func pickScopeForQA(_ scope: InboxScope) -> Bool {
-        guard let index = scopeEntries.firstIndex(of: scope),
-              scopePopUp.selectItem(withTag: index) else { return false }
-        scopePicked(scopePopUp)
-        return true
+        guard scopeEntries.contains(scope) else { return false }
+        return scopeButton.chooseForQA(id: scope.storageValue)
     }
     // Ticket: docs/38-tickets/90-agent-ux/P3.14-preserve-workspace-management.md
     /// The management block as RENDERED: the titles in the menu below the separator,
@@ -2963,35 +2982,24 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// `NSMenu.update()`, because a check that only reads back the `isEnabled` this
     /// file set never sees the pass that used to re-enable a disabled item.
     var workspaceManagementTitlesForQA: [String] {
-        guard let menu = scopePopUp.menu else { return [] }
-        menu.update()
-        return menu.items
-            .filter { AgentInboxView.managementAction(forTag: $0.tag) != nil }
-            .map(\.title)
+        WorkspaceManagementAction.allCases.map(\.title)
     }
 
     func isWorkspaceManagementEnabledForQA(_ action: WorkspaceManagementAction) -> Bool {
-        scopePopUp.menu?.update()
-        return managementItems[action]?.isEnabled ?? false
+        managementItems[action]?.enabled ?? false
     }
 
     /// Whether the separator really sits between the scopes and the verbs — the
     /// packet's "separated section", asserted on the menu rather than by eye.
     var isWorkspaceManagementSeparatedForQA: Bool {
-        guard let items = scopePopUp.menu?.items,
-              let firstManagement = items.firstIndex(where: { AgentInboxView.managementAction(forTag: $0.tag) != nil }),
-              firstManagement > 0 else { return false }
-        return items[firstManagement - 1].isSeparatorItem
+        scopeButton.items.contains(where: { $0.id == "management-separator" && !$0.enabled })
     }
 
-    /// Pick a workspace verb the way the user does — through the popup's own action,
-    /// and only if the item is one AppKit would let them hit.
+    /// Pick a workspace verb through the same ChoiceButton selection path as production.
     @discardableResult
     func pickWorkspaceManagementForQA(_ action: WorkspaceManagementAction) -> Bool {
-        guard isWorkspaceManagementEnabledForQA(action),
-              scopePopUp.selectItem(withTag: AgentInboxView.tag(for: action)) else { return false }
-        scopePicked(scopePopUp)
-        return true
+        guard isWorkspaceManagementEnabledForQA(action) else { return false }
+        return scopeButton.chooseForQA(id: "management:\(action.title)")
     }
     /// P3.7, read off the RENDERED table rather than recomputed: the variant of
     /// the cell class AppKit actually built, the height it actually laid the row

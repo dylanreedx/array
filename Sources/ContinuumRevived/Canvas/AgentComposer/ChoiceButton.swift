@@ -25,6 +25,12 @@ final class ChoiceButton: NSControl, TokenThemed {
         didSet { updatePresentation() }
     }
     var onSelection: ((ChoiceItem) -> Void)?
+    /// Some clients include visible management commands that must not replace
+    /// the selected value shown by the trigger.
+    var keepsSelectionForItem: ((ChoiceItem) -> Bool)?
+    /// Optional per-client width for anchored menus. Nil preserves the intrinsic
+    /// sizing used by composer pickers; fixed-width clients can pin the panel.
+    var preferredPopoverWidth: CGFloat?
 
     static let controlHeight: CGFloat = 32
     static let horizontalPadding = CGFloat(Space.l)
@@ -184,18 +190,56 @@ final class ChoiceButton: NSControl, TokenThemed {
             applyTokens()
             return
         }
+        presentPopover()
+        applyTokens()
+    }
+
+    /// Deterministic probe entry point for the live popover path. It presents the
+    /// same controller/list used by a click, then accepts through ChoiceListView;
+    /// it is intentionally not a selectedID setter.
+    @discardableResult
+    func chooseForQA(id: String) -> Bool {
+        guard let item = items.first(where: { $0.id == id && $0.enabled }) else { return false }
+        guard window != nil else {
+            handleSelection(item)
+            _ = sendAction(action, to: target)
+            return true
+        }
+        presentPopover()
+        popoverController.listView?.choose(id: item.id)
+        return true
+    }
+
+    /// One presentation seam for mouse, keyboard, VoiceOver, and deterministic
+    /// selection. Client-specific width is applied here, never in a QA-only branch.
+    private func presentPopover() {
         popoverController.present(
-            items: items,
-            selectedID: selectedID,
-            anchor: bounds,
-            relativeTo: self
+            items: items, selectedID: selectedID, anchor: bounds, relativeTo: self
         ) { [weak self] item in
             guard let self else { return }
-            self.selectedID = item.id
-            self.onSelection?(item)
+            self.handleSelection(item)
             _ = self.sendAction(self.action, to: self.target)
-            self.applyTokens()
         }
+        pinPopoverWidthIfNeeded()
+    }
+
+    private func pinPopoverWidthIfNeeded() {
+        guard let preferredPopoverWidth,
+              let panel = popoverController.panel,
+              let list = popoverController.listView else { return }
+        var frame = panel.frame
+        frame.size.width = preferredPopoverWidth
+        panel.setFrame(frame, display: false)
+        list.frame = NSRect(origin: .zero, size: frame.size)
+        list.needsLayout = true
+        list.layoutSubtreeIfNeeded()
+    }
+
+    private func handleSelection(_ item: ChoiceItem) {
+        if keepsSelectionForItem?(item) != true {
+            selectedID = item.id
+        }
+        onSelection?(item)
         applyTokens()
     }
 
@@ -205,6 +249,19 @@ final class ChoiceButton: NSControl, TokenThemed {
     // strings is vacuous by construction.
     var qaRenderedTitle: String { titleLabel.stringValue }
     var qaSelectedTitle: String? { items.first(where: { $0.id == selectedID })?.title }
+    var qaPresentedItems: [ChoiceItem] { popoverController.listView?.qaItems ?? [] }
+    var qaPopoverWidth: CGFloat? { popoverController.panel?.frame.width }
+    var qaIsPopoverPresented: Bool { popoverController.isPresented }
+    func dismissPopoverForQA() { popoverController.dismiss(); applyTokens() }
+    @discardableResult
+    func choosePresentedItemForQA(id: String) -> Bool {
+        guard popoverController.isPresented,
+              popoverController.listView?.qaItems.contains(where: { $0.id == id && $0.enabled }) == true else {
+            return false
+        }
+        popoverController.listView?.choose(id: id)
+        return true
+    }
     var qaTitleDrawsWithoutTruncation: Bool {
         let needed = ceil((titleLabel.stringValue as NSString).size(withAttributes: [.font: NSFont.token(.label)]).width) + 4
         return titleLabel.frame.width + 0.5 >= needed

@@ -2829,6 +2829,7 @@ enum UIProbeGeometry {
         let elapsedAssertions = try checkElapsedFormatterAndColumns()
         let unconfirmedAssertions = try checkUnconfirmedFrozenClock(rows: rows)
         let renameAssertions = try checkSidebarRenameInteraction()
+        let filterBandAssertions = try checkSidebarFilterBand(rows: rows, probeHeight: probeHeight)
         // Both ENDS of the ladder are reached by real rows at shipping widths. The
         // middle rung is reached too, at a width derived from a row's own
         // measurements inside `checkSidebarFitTierLadder` — see the note there for
@@ -2845,6 +2846,152 @@ enum UIProbeGeometry {
         print("UIProbeGeometry: unconfirmed rows held \(unconfirmedAssertions) live status/frozen-clock assertions at 220/280/320pt in both appearances")
         print("UIProbeGeometry: elapsed formatter table and fixed sidebar/tile column held in \(elapsedAssertions) live assertions")
         print("UIProbeGeometry: live rename editor held \(renameAssertions) body/control/modifier/active-editor/trailing-click/Return/Escape/blur/empty assertions at 220/280/320pt in both appearances")
+        print("UIProbeGeometry: filter band held \(filterBandAssertions) production-path scope/search/accessibility assertions at 220/280/320pt, including visible-disabled management and active-scope restoration")
+    }
+
+    /// P5.2 production filter-band gate. It materializes the real ChoiceButton
+    /// panel and drives its keyboard, accessibility, and rendered-item paths;
+    /// search goes through the live field delegate and compares exact row identity.
+    private static func checkSidebarFilterBand(rows: [AgentInboxRow], probeHeight: CGFloat) throws -> Int {
+        let rowsByID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+        guard let longestProject = rows.compactMap(\.projectName).max(by: { $0.count < $1.count }) else {
+            throw fail("sidebar-ux-check.filter-band: corpus has no project-name width witness")
+        }
+        var assertions = 0
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            for width in [CGFloat(220), 280, 320] {
+                let label = "sidebar-ux-check.filter-band@\(Int(width))pt.\(appearanceName.rawValue)"
+                let probe = try makeSidebarProbeHost(width: width, height: probeHeight, appearanceName: appearanceName)
+                probe.inbox.reload(rows: rows)
+                probe.inbox.layoutForQA()
+                probe.host.layoutSubtreeIfNeeded()
+                probe.window.orderFront(nil)
+                defer { probe.inbox.dismissScopePopoverForQA(); probe.window.orderOut(nil) }
+
+                let scopeButton = probe.inbox.scopeButtonForQA
+                let searchField = probe.inbox.searchFieldViewForQA
+                let scopePopup = firstDescendant(NSPopUpButton.self, in: scopeButton)
+                let visibleStockPopup = firstDescendant(NSPopUpButton.self, in: probe.inbox).flatMap {
+                    $0.isHiddenOrHasHiddenAncestor ? nil : $0
+                }
+                let stockSearch = firstDescendant(NSSearchField.self, in: probe.inbox)
+                guard scopePopup == nil, visibleStockPopup == nil, stockSearch == nil,
+                      !searchField.isBordered, !searchField.drawsBackground,
+                      searchField.focusRingType == .none else {
+                    throw fail("\(label): visible stock popup/search chrome remains in the live filter band")
+                }
+                guard abs(probe.inbox.scopeControlWidthForQA - 124) < 0.5,
+                      probe.inbox.searchFieldFrameForQA.width > 0,
+                      probe.inbox.searchFieldFrameForQA.minX > probe.inbox.scopeControlWidthForQA else {
+                    throw fail("\(label): fixed trigger/search sibling geometry escaped the 124pt band contract")
+                }
+                let acceptedSearchFocus = probe.window.makeFirstResponder(searchField)
+                let searchHasFocus = probe.window.firstResponder === searchField || searchField.currentEditor() != nil
+                guard scopeButton.accessibilityLabel() == "Agent scope",
+                      searchField.accessibilityLabel() == "Search agents",
+                      searchField.accessibilityRole() == .textField,
+                      acceptedSearchFocus, searchHasFocus else {
+                    throw fail("\(label): filter controls lost invariant accessibility labels or keyboard focus")
+                }
+
+                // Return opens the same production panel as mouseDown. Its frame must
+                // remain trigger-owned even with the longest project title rendered.
+                guard let returnKey = NSEvent.keyEvent(
+                    with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                    windowNumber: probe.window.windowNumber, context: nil,
+                    characters: "\r", charactersIgnoringModifiers: "\r",
+                    isARepeat: false, keyCode: 36
+                ), probe.window.makeFirstResponder(scopeButton) else {
+                    throw fail("\(label): could not materialize the scope keyboard path")
+                }
+                scopeButton.keyDown(with: returnKey)
+                let keyboardItems = probe.inbox.scopePopoverItemsForQA
+                guard probe.inbox.isScopePopoverPresentedForQA,
+                      abs((probe.inbox.scopePopoverWidthForQA ?? -1) - probe.inbox.scopeControlWidthForQA) < 0.5,
+                      keyboardItems.contains(where: {
+                          $0.id == InboxScope.project(longestProject).storageValue && $0.title == longestProject
+                      }) else {
+                    throw fail("\(label): production keyboard popover was not 124pt or omitted the longest project name")
+                }
+                probe.inbox.dismissScopePopoverForQA()
+
+                // VoiceOver opens that same panel. Read management rows and their
+                // separator from the rendered ChoiceListView, then activate Create
+                // through its rendered ChoiceItem and prove scope restoration.
+                probe.inbox.setWorkspaceManagement(canRename: false, canDelete: false)
+                var managementPicked: [String] = []
+                probe.inbox.onWorkspaceManagementAction = { managementPicked.append($0.title) }
+                guard scopeButton.accessibilityPerformPress(), probe.inbox.isScopePopoverPresentedForQA else {
+                    throw fail("\(label): accessibility press did not open the scope popover")
+                }
+                let renderedItems = probe.inbox.scopePopoverItemsForQA
+                let renderedManagement = renderedItems.filter { $0.id.hasPrefix("management:") }
+                guard renderedManagement.map(\.title) == ["New Workspace…", "Rename Workspace…", "Delete Workspace…"],
+                      renderedManagement.map(\.enabled) == [true, false, false],
+                      renderedItems.contains(where: { $0.id == "management-separator" && !$0.enabled }) else {
+                    throw fail("\(label): rendered management section lost visible-disabled rows or separator")
+                }
+                let scopeBeforeManagement = probe.inbox.selectedScopeTitleForQA
+                guard probe.inbox.pickPresentedScopeItemForQA(id: "management:New Workspace…"),
+                      managementPicked == ["New Workspace…"],
+                      probe.inbox.selectedScopeTitleForQA == scopeBeforeManagement else {
+                    throw fail("\(label): rendered management action replaced the active scope")
+                }
+
+                // Scope selection clears an existing selection through the live
+                // ChoiceButton list-selection callback.
+                guard let first = rows.first,
+                      probe.inbox.selectRowForQA(id: first.id),
+                      probe.inbox.selectedRowCountForQA == 1 else {
+                    throw fail("\(label): live selection witness did not materialize")
+                }
+                let scopes = InboxScope.entries(for: rows)
+                guard let alternate = scopes.first(where: { $0 != .all }),
+                      probe.inbox.pickScopeForQA(alternate),
+                      probe.inbox.selectedRowCountForQA == 0,
+                      scopeButton.accessibilityValue() as? String == alternate.title else {
+                    throw fail("\(label): production scope selection did not clear selection or update accessibility value")
+                }
+
+                // Search narrows the already-frozen row sequence; it may not rank it.
+                let beforeSearch = probe.inbox.rowIdsForQA
+                guard let searchTargetID = beforeSearch.first,
+                      let searchTarget = rowsByID[searchTargetID],
+                      probe.inbox.selectRowForQA(id: searchTargetID) else {
+                    throw fail("\(label): scoped search fixture has no visible row")
+                }
+                let query = searchTarget.title
+                let expectedSearchOrder = beforeSearch.filter { id in
+                    guard let row = rowsByID[id] else { return false }
+                    return [row.title, row.projectName, row.workspaceName, row.model, row.branch]
+                        .compactMap { $0 }
+                        .contains { $0.localizedCaseInsensitiveContains(query) }
+                }
+                probe.inbox.setSearchForQA(query)
+                probe.inbox.layoutForQA()
+                guard !expectedSearchOrder.isEmpty,
+                      probe.inbox.rowIdsForQA == expectedSearchOrder,
+                      probe.inbox.selectedRowCountForQA == 0 else {
+                    throw fail("\(label): search reordered results or retained a hidden bulk selection")
+                }
+
+                guard let filteredID = expectedSearchOrder.first,
+                      probe.inbox.selectRowForQA(id: filteredID) else {
+                    throw fail("\(label): filtered selection witness did not materialize")
+                }
+                probe.inbox.setSearchForQA("__no_such_agent__")
+                probe.inbox.layoutForQA()
+                guard probe.inbox.searchResultCountForQA == 0,
+                      probe.inbox.selectedRowCountForQA == 0,
+                      probe.inbox.isEmptyMessageVisibleForQA,
+                      probe.inbox.emptyMessageForQA.contains(alternate.title),
+                      probe.inbox.emptyMessageForQA.contains("__no_such_agent__") else {
+                    throw fail("\(label): no-result search did not clear selection and name its active scope")
+                }
+                assertions += 15
+            }
+        }
+        return assertions
     }
 
     // MARK: - P0.4 — the inbox truncation gate at the widths that ship
