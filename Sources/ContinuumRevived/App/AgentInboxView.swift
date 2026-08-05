@@ -242,6 +242,15 @@ private func inboxLabelGeometryForQA(
 private final class AgentInboxTableView: NSTableView {
     weak var contextHandler: AgentInboxView?
 
+    override func keyDown(with event: NSEvent) {
+        // Keep ordinary traversal in NSTableView so its native type-select,
+        // range-selection and modifier semantics remain intact. The inbox only
+        // owns the two activation keys and the post-traversal visibility guarantee.
+        if contextHandler?.handleTableActivationKey(event) == true { return }
+        super.keyDown(with: event)
+        contextHandler?.didTraverseWithKeyboard(event)
+    }
+
     override func rightMouseDown(with event: NSEvent) {
         contextHandler?.presentContextMenu(for: event)
     }
@@ -698,6 +707,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// selection would switch workspaces under every arrow key. Arrow-key
     /// navigation is P3.10's ticket and gets its own decision.
     var onRevealRow: ((UUID) -> Void)?
+    /// Space previews the focused row without changing the active canvas tile.
+    /// The host owns what preview means; the list only supplies the on-screen id.
+    var onPreviewRow: ((UUID) -> Void)?
     // Ticket: docs/38-tickets/90-agent-ux/P3.11-multi-select-bulk.md
     /// A bulk action was chosen for these agents, in the order they are on screen.
     ///
@@ -1588,6 +1600,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         item(at: row)?.agentRow != nil
     }
 
+    /// Native NSTableView type-select asks its delegate for the row's searchable
+    /// text. Headings return nil so typing can never focus a non-agent section row.
+    func tableView(
+        _ tableView: NSTableView,
+        typeSelectStringFor tableColumn: NSTableColumn?,
+        row: Int
+    ) -> String? {
+        item(at: row)?.agentRow?.displayTitle
+    }
+
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard let item = item(at: row) else { return nil }
         guard let model = item.agentRow else {
@@ -1733,6 +1755,90 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private func reveal(rowAt index: Int) {
         guard rows.indices.contains(index) else { return }
         onRevealRow?(rows[index].id)
+    }
+
+    // MARK: - Keyboard traversal
+
+    /// Handle keys whose meaning belongs to the inbox rather than NSTableView.
+    /// Return opens the focused row and Space previews it; both are deliberately
+    /// no-ops for headings and an empty selection. Native table navigation keeps
+    /// ownership of arrows, Home/End, page keys, type-select, and modifier range
+    /// selection.
+    @discardableResult
+    func handleTableActivationKey(_ event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        switch event.keyCode {
+        case 115 where modifiers.isEmpty: // Home
+            return moveKeyboardSelection(toAgentPosition: 0)
+        case 119 where modifiers.isEmpty: // End
+            return moveKeyboardSelection(toAgentPosition: rows.count - 1)
+        case 116 where modifiers.isEmpty: // Page Up
+            return moveKeyboardSelectionByPage(-1)
+        case 121 where modifiers.isEmpty: // Page Down
+            return moveKeyboardSelectionByPage(1)
+        default:
+            break
+        }
+        guard modifiers.isEmpty,
+              let id = agentIdForTableRow(tableView.selectedRow) else { return false }
+        switch event.keyCode {
+        case 36: // Return
+            reveal(rowAt: rows.firstIndex(where: { $0.id == id }) ?? -1)
+            return true
+        case 49: // Space
+            onPreviewRow?(id)
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func moveKeyboardSelection(toAgentPosition position: Int) -> Bool {
+        guard rows.indices.contains(position), let tableRow = tableRow(forRowIndex: position) else { return false }
+        tableView.selectRowIndexes(IndexSet(integer: tableRow), byExtendingSelection: false)
+        tableView.scrollRowToVisible(tableRow)
+        return true
+    }
+
+    private func moveKeyboardSelectionByPage(_ direction: Int) -> Bool {
+        guard !rows.isEmpty else { return false }
+        let visibleRows = tableView.rows(in: tableView.visibleRect)
+        let stride = max(1, visibleRows.length - 1)
+        let currentPosition = rowIndex(forTableRow: tableView.selectedRow)
+            ?? (direction > 0 ? 0 : rows.count - 1)
+        let target = min(max(0, currentPosition + direction * stride), rows.count - 1)
+        return moveKeyboardSelection(toAgentPosition: target)
+    }
+
+    /// Make every native traversal key a visibility operation as well. AppKit
+    /// changes the selection during `super.keyDown`; scrolling afterwards avoids
+    /// a one-event lag where Return could act on a row that is still off-screen.
+    func didTraverseWithKeyboard(_ event: NSEvent) {
+        let traversalKeys: Set<UInt16> = [115, 116, 121, 119, 126, 125]
+        let row = tableView.selectedRow
+        guard traversalKeys.contains(event.keyCode), row >= 0 else { return }
+        tableView.scrollRowToVisible(row)
+    }
+
+    /// Global shortcuts must yield to text entry. The search field and inline
+    /// rename editor are descendants of the inbox, but typing in either must not
+    /// make ⌘1–⌘9 (or another reserved shortcut) act on the list.
+    func allowsGlobalShortcuts(for responder: NSResponder?) -> Bool {
+        guard let view = responder as? NSView else { return true }
+        if view === searchField || view.isDescendant(of: searchField)
+            || searchField.currentEditor() === view { return false }
+        if let renameField,
+           view === renameField || view.isDescendant(of: renameField)
+            || renameField.currentEditor() === view { return false }
+        return true
+    }
+
+    /// The responder is a live text editor, not merely a descendant of the
+    /// sidebar. AppDelegate uses this before reserved dispatch so a rejected
+    /// inbox jump cannot turn into a global launch shortcut.
+    var isTextEditorFocusedForGlobalShortcutGate: Bool {
+        guard let responder = window?.firstResponder else { return false }
+        return !allowsGlobalShortcuts(for: responder)
     }
 
     // MARK: - Jump (P3.10)
@@ -3123,16 +3229,73 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// The chord each row is ADVERTISING ("" for a row with no pill), read off the
     /// rendered pill rather than recomputed from the index.
     var jumpHintsForQA: [String] { cells().map(\.qaJumpHint) }
+    var jumpHintHitTestPassesThroughForQA: Bool {
+        cells().allSatisfy(\.qaJumpHintHitTestPassesThrough)
+    }
     /// Where each row's status label actually sits, in its own cell's coordinates.
     /// The T3 regression this ticket names — holding ⌘ blanked out "Working" — is a
     /// LAYOUT fact, so it is caught by comparing this before and after the pills
     /// appear and by nothing else.
     var statusFramesForQA: [NSRect] { cells().map(\.qaStatusFrame) }
+    /// Every non-hint descendant frame in each rendered agent cell, in stable
+    /// tree order. The overlay itself may materialize a pill; no subject, status,
+    /// metadata, control, container, or other existing element may move for it.
+    var allRowElementFramesForQA: [[NSRect]] {
+        cells().map { cell in
+            var frames: [NSRect] = []
+            func visit(_ view: NSView) {
+                guard !(view is InboxJumpHintView) else { return }
+                frames.append(view.convert(view.bounds, to: cell))
+                view.subviews.forEach(visit)
+            }
+            visit(cell)
+            return frames
+        }
+    }
     /// Make the list itself first responder, which is the scope the jump is confined
     /// to — so a check can put the app in the state a click on a row leaves it in.
     @discardableResult
     func focusListForQA() -> Bool {
         window?.makeFirstResponder(tableView) ?? false
+    }
+    @discardableResult
+    func sendTableKeyForQA(
+        keyCode: UInt16,
+        characters: String? = nil,
+        modifiers: NSEvent.ModifierFlags = []
+    ) -> Bool {
+        guard let table = tableView as? AgentInboxTableView else { return false }
+        let defaultCharacters: String
+        switch keyCode {
+        case 126: defaultCharacters = "\u{F700}" // Up
+        case 125: defaultCharacters = "\u{F701}" // Down
+        case 115: defaultCharacters = "\u{F729}" // Home
+        case 119: defaultCharacters = "\u{F72B}" // End
+        case 116: defaultCharacters = "\u{F72C}" // Page Up
+        case 121: defaultCharacters = "\u{F72D}" // Page Down
+        case 36: defaultCharacters = "\r"
+        case 49: defaultCharacters = " "
+        default: defaultCharacters = ""
+        }
+        let text = characters ?? defaultCharacters
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: modifiers,
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: tableView.window?.windowNumber ?? 0, context: nil,
+            characters: text, charactersIgnoringModifiers: text,
+            isARepeat: false, keyCode: keyCode
+        ) else { return false }
+        table.keyDown(with: event)
+        return true
+    }
+    var selectedRowIsVisibleForQA: Bool {
+        let row = tableView.selectedRow
+        return row >= 0 && tableView.visibleRect.intersects(tableView.rect(ofRow: row))
+    }
+    var selectedRowAccessibilityLabelForQA: String? {
+        let row = tableView.selectedRow
+        guard row >= 0 else { return nil }
+        return cellsByRow[row]?.accessibilityLabel()
     }
     /// Whether the pills are UP, for the app-level check that drives the real
     /// modifier monitor — the paint itself is asserted by `jumpHintsForQA`.
@@ -3888,6 +4051,7 @@ protocol AgentInboxRowCell: NSTableCellView {
     var qaIndent: Double { get }
     var qaDisclosureGlyph: String { get }
     var qaJumpHint: String { get }
+    var qaJumpHintHitTestPassesThrough: Bool { get }
     /// The frame of whatever this variant paints the state with — the word on a
     /// card, the glyph on a parked row — in the cell's own coordinates.
     var qaStatusFrame: NSRect { get }
@@ -4038,6 +4202,8 @@ final class InboxJumpHintView: NSView, TokenThemed {
 
     /// nil hides the pill. An empty string would leave a bordered box with no glyph
     /// in it, which `UIProbePixels` is right to call flat.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
     func show(_ chord: String?) {
         guard let chord, !chord.isEmpty else {
             isHidden = true
@@ -5715,6 +5881,9 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     var qaIndent: Double { Double(leadingInset?.constant ?? 0) }
     var qaDisclosureGlyph: String { disclosureButton.qaGlyph }
     var qaJumpHint: String { jumpHint.qaChord }
+    var qaJumpHintHitTestPassesThrough: Bool {
+        jumpHint.hitTest(NSPoint(x: jumpHint.bounds.midX, y: jumpHint.bounds.midY)) == nil
+    }
     var qaStatusFrame: NSRect { stateLabel.convert(stateLabel.bounds, to: self) }
     var titleFrame: NSRect { titleLabel.convert(titleLabel.bounds, to: self) }
 
@@ -6223,6 +6392,9 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     var qaIndent: Double { Double(leadingInset?.constant ?? 0) }
     var qaDisclosureGlyph: String { disclosureButton.qaGlyph }
     var qaJumpHint: String { jumpHint.qaChord }
+    var qaJumpHintHitTestPassesThrough: Bool {
+        jumpHint.hitTest(NSPoint(x: jumpHint.bounds.midX, y: jumpHint.bounds.midY)) == nil
+    }
     /// The GLYPH is this variant's status (`qaStateLabel` is empty by design), so
     /// that is the frame the pill must not move.
     var qaStatusFrame: NSRect { glyphLabel.convert(glyphLabel.bounds, to: self) }

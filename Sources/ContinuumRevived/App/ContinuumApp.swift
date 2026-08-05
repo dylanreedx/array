@@ -5129,6 +5129,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         let shortcut = focusBroker.reservedShortcut(for: event)
+        // Text entry owns ordinary typing, while every app-reserved command and
+        // inbox jump is withheld before it can open a modal, spawn, or navigate.
+        // Unmatched keys still return false below and reach the field editor.
+        if let inbox = workspaceSidebarView?.agentInbox,
+           inbox.isTextEditorFocusedForGlobalShortcutGate,
+           shortcut != nil || InboxJump.rowIndex(
+               keyCode: event.keyCode,
+               modifiers: FocusKeyModifiers(modifierFlags: event.modifierFlags)) != nil {
+            return true
+        }
         if shortcut == .navModeLeader {
             openNavMode()
             return true
@@ -5198,7 +5208,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let inbox = workspaceSidebarView?.agentInbox,
               !inbox.isHiddenOrHasHiddenAncestor,
               let responder = inbox.window?.firstResponder as? NSView,
-              responder === inbox || responder.isDescendant(of: inbox) else { return nil }
+              responder === inbox || responder.isDescendant(of: inbox),
+              inbox.allowsGlobalShortcuts(for: responder) else { return nil }
         return inbox
     }
 
@@ -6626,6 +6637,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         sidebar.configureInboxReveal { [weak self] agentId in
             self?.revealAgentFromInbox(agentId)
         }
+        // P5.4: Space frames an existing tile without switching workspace,
+        // changing tile focus, attaching a tile, or clearing the unread mark.
+        sidebar.agentInbox.onPreviewRow = { [weak self] agentId in
+            _ = self?.previewAgentFromInbox(agentId)
+        }
         sidebar.configureInboxRename { [weak self] agentId, name in
             self?.renameAgentFromInbox(agentId, to: name)
         }
@@ -6965,6 +6981,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         jumpToTileFromPalette(tileId)
         navSelectedZoneId = zoneContainingTile(tileId)
         return focusBroker.activeSurface == .tile(tileId) || canvasView.canvasState.lastActiveTileId == tileId
+    }
+
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P5.4-keyboard-traversal-jump-hints.md
+    /// Space previews only a tile already present in the active canvas. Unlike
+    /// reveal it never switches workspaces, attaches a tile, changes focus, or
+    /// clears attention; it changes only the camera framing.
+    @discardableResult
+    func previewAgentFromInbox(_ rowId: UUID) -> Bool {
+        let record = agentSupervisor.records[AgentID(rawValue: rowId)]
+        let tileId = record?.tileId ?? (record == nil ? rowId : nil)
+        guard let tileId, let canvasView,
+              canvasView.navigationTileSnapshot(for: tileId) != nil else { return false }
+        canvasView.centerOnTile(tileId)
+        return true
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.9-reveal-on-click.md
@@ -22937,7 +22967,9 @@ extension AppDelegate {
     let jumper = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 900))
     jumper.clock = { LabFixtures.inboxNow }
     var jumped: [UUID] = []
+    var previewed: [UUID] = []
     jumper.onRevealRow = { jumped.append($0) }
+    jumper.onPreviewRow = { previewed.append($0) }
     jumper.reload(rows: jumpFixture)
     let jumpWindow = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 320, height: 900),
@@ -22956,6 +22988,49 @@ extension AppDelegate {
     let statusBefore = jumper.statusFramesForQA
     try expect(statusBefore.contains { $0.width > 0 && $0.height > 0 },
                "some row must actually be drawing a status, or the frame comparison below measures nothing")
+    try expect(jumper.jumpHintHitTestPassesThroughForQA,
+               "jump-hint overlay must return nil from hit testing so row controls remain clickable")
+
+    // Matrix the overlay at every shipping width with BOTH non-agent index traps:
+    // a collapsed parent/child and a collapsed snoozed shelf header. Neither may
+    // consume a jump number, and showing pills may move no descendant frame.
+    let hintFixture = LabFixtures.inboxParkedRows() + (1...8).map { extra in
+        AgentInboxRow(
+            id: UUID(uuidString: String(format: "00000000-0000-0000-0000-0000000005%02X", extra))!,
+            title: "hint filler \(extra)", projectName: "continuum", state: .ready,
+            createdAt: LabFixtures.epoch.addingTimeInterval(Double(-extra - 20) * 60))
+    }
+    let hintParent = LabFixtures.inboxAgentIds[5]
+    let hiddenChild = LabFixtures.inboxAgentIds[6]
+    for width in [CGFloat(220), 280, 320] {
+        let widthView = AgentInboxView(frame: NSRect(x: 0, y: 0, width: width, height: 1_400))
+        widthView.clock = { LabFixtures.inboxNow }
+        widthView.reload(rows: hintFixture)
+        let widthWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 1_400),
+                                    styleMask: [.borderless], backing: .buffered, defer: false)
+        widthWindow.contentView = widthView
+        widthView.layoutForQA()
+        try expect(widthView.shelfHeaderTitleForQA != nil && !widthView.isShelfExpandedForQA,
+                   "jump hint matrix @\(Int(width))pt needs a collapsed shelf heading")
+        try expect(widthView.clickDisclosureForQA(id: hintParent),
+                   "jump hint matrix @\(Int(width))pt needs a collapsible rendered parent")
+        widthView.layoutForQA()
+        try expect(!widthView.rowIdsForQA.contains(hiddenChild),
+                   "collapsed child must be absent before rendered-row hint indexing")
+        let allFramesBefore = widthView.allRowElementFramesForQA
+        widthView.setJumpHintsVisible(true)
+        widthView.layoutForQA()
+        let expectedHints = (0..<widthView.rowCountForQA).map { index in
+            index < InboxJump.maximumRows ? "⌘\(index + 1)" : ""
+        }
+        try expect(widthView.jumpHintsForQA == expectedHints,
+                   "jump hint matrix @\(Int(width))pt indexed a heading/hidden child or exceeded nine — got \(widthView.jumpHintsForQA)")
+        try expect(widthView.allRowElementFramesForQA == allFramesBefore,
+                   "jump hint matrix @\(Int(width))pt moved a rendered row descendant")
+        try expect(widthView.jumpHintHitTestPassesThroughForQA,
+                   "jump hint matrix @\(Int(width))pt lost nil hit testing")
+        widthWindow.orderOut(nil)
+    }
 
     jumper.setJumpHintsVisible(true)
     jumper.layoutForQA()
@@ -22967,6 +23042,101 @@ extension AppDelegate {
     jumper.layoutForQA()
     try expect(jumper.jumpHintsForQA.allSatisfy(\.isEmpty),
                "releasing the modifier takes the pills away — got \(jumper.jumpHintsForQA)")
+
+    // Return and Space are both real activation paths. Space must not be a
+    // consumed no-op: the production seam receives the focused rendered row.
+    try expect(jumper.selectRowForQA(id: jumper.rowIdsForQA.first!),
+               "Space setup must select a rendered row")
+    try expect(jumper.handleTableActivationKey(NSEvent.keyEvent(
+        with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+        windowNumber: jumpWindow.windowNumber, context: nil, characters: " ",
+        charactersIgnoringModifiers: " ", isARepeat: false, keyCode: 49)!),
+               "Space must be consumed by the inbox activation path")
+    try expect(previewed == [jumper.rowIdsForQA.first!],
+               "Space must invoke the wired preview path for the focused rendered row")
+
+    // The native table path: every named traversal key, type-select, range
+    // selection, activation, accessibility, and scroll visibility on a viewport
+    // too short to hold the fixture.
+    let keyboardRows = (0..<20).map { index in
+        AgentInboxRow(
+            id: UUID(uuidString: String(format: "00000000-0000-0000-0000-0000000006%02X", index))!,
+            title: index == 12 ? "Zulu target" : String(format: "Agent %02d", index),
+            projectName: "continuum", state: .ready,
+            createdAt: LabFixtures.epoch.addingTimeInterval(Double(-index) * 60))
+    }
+    let keyboardView = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 260))
+    var keyboardOpened: [UUID] = []
+    var keyboardPreviewed: [UUID] = []
+    keyboardView.onRevealRow = { keyboardOpened.append($0) }
+    keyboardView.onPreviewRow = { keyboardPreviewed.append($0) }
+    keyboardView.reload(rows: keyboardRows)
+    let keyboardWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 260),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    keyboardWindow.contentView = keyboardView
+    keyboardView.layoutForQA()
+    let keyboardOrder = keyboardView.rowIdsForQA
+    try expect(keyboardOrder.count == 20 && keyboardView.focusListForQA(),
+               "keyboard traversal fixture must materialize twenty focusable rows")
+    try expect(keyboardView.selectRowForQA(id: keyboardOrder[0]), "keyboard fixture selects row one")
+    try expect(keyboardView.sendTableKeyForQA(keyCode: 125)
+                && keyboardView.selectedRowIdsForQA == [keyboardOrder[1]]
+                && keyboardView.selectedRowIsVisibleForQA,
+               "Down selects and scrolls row two into view")
+    try expect(keyboardView.sendTableKeyForQA(keyCode: 126)
+                && keyboardView.selectedRowIdsForQA == [keyboardOrder[0]],
+               "Up returns to row one")
+    try expect(keyboardView.sendTableKeyForQA(keyCode: 119)
+                && keyboardView.selectedRowIdsForQA == [keyboardOrder.last!]
+                && keyboardView.selectedRowIsVisibleForQA,
+               "End selects and scrolls the last row")
+    try expect(keyboardView.sendTableKeyForQA(keyCode: 115)
+                && keyboardView.selectedRowIdsForQA == [keyboardOrder[0]]
+                && keyboardView.selectedRowIsVisibleForQA,
+               "Home selects and scrolls the first row")
+    try expect(keyboardView.sendTableKeyForQA(keyCode: 121), "Page Down reaches the native table")
+    let pageDownID = keyboardView.selectedRowIdsForQA.first
+    try expect(pageDownID != nil && pageDownID != keyboardOrder.first
+                && keyboardView.selectedRowIsVisibleForQA,
+               "Page Down moves by a visible page and scrolls the cursor")
+    try expect(keyboardView.sendTableKeyForQA(keyCode: 116)
+                && keyboardView.selectedRowIsVisibleForQA,
+               "Page Up moves back and leaves the cursor visible")
+    try expect(keyboardView.sendTableKeyForQA(keyCode: 6, characters: "z")
+                && keyboardView.selectedRowIdsForQA == [keyboardRows[12].id]
+                && keyboardView.selectedRowIsVisibleForQA,
+               "type-select focuses and scrolls the matching rendered name")
+    try expect(!(keyboardView.selectedRowAccessibilityLabelForQA ?? "").isEmpty,
+               "the keyboard-focused row must retain an accessibility label")
+
+    try expect(keyboardView.selectRowForQA(id: keyboardOrder[0])
+                && keyboardView.sendTableKeyForQA(keyCode: 125, modifiers: [.shift])
+                && keyboardView.selectedRowIdsForQA == Array(keyboardOrder.prefix(2)),
+               "Shift-Down extends the selection exactly like a range click")
+    let rangeBeforeCommand = keyboardView.selectedRowIdsForQA
+    try expect(keyboardView.sendTableKeyForQA(keyCode: 125, modifiers: [.command])
+                && !keyboardView.selectedRowIdsForQA.isEmpty
+                && keyboardView.selectedRowIsVisibleForQA
+                && keyboardOpened.isEmpty && keyboardPreviewed.isEmpty,
+               "Command-modified traversal stays in the native selection path without activation")
+    try expect(rangeBeforeCommand.count == 2,
+               "command parity witness starts from a real two-row range")
+
+    try expect(keyboardView.selectRowForQA(id: keyboardRows[12].id)
+                && keyboardView.sendTableKeyForQA(keyCode: 36)
+                && keyboardOpened == [keyboardRows[12].id],
+               "Return opens the focused rendered row")
+    try expect(keyboardView.sendTableKeyForQA(keyCode: 49)
+                && keyboardPreviewed == [keyboardRows[12].id],
+               "Space previews the focused rendered row")
+    let activationCounts = (keyboardOpened.count, keyboardPreviewed.count)
+    _ = keyboardView.sendTableKeyForQA(keyCode: 36, modifiers: [.command])
+    _ = keyboardView.sendTableKeyForQA(keyCode: 49, modifiers: [.shift])
+    try expect(keyboardOpened.count == activationCounts.0
+                && keyboardPreviewed.count == activationCounts.1,
+               "modified Return/Space do not activate a row")
+    keyboardWindow.orderOut(nil)
 
     // The jump itself, against the ORDER ON SCREEN (frozen, P3.4) rather than the
     // order the rows were handed in.
@@ -23066,6 +23236,86 @@ extension AppDelegate {
     try expect(revealCanvas.canvasState.tiles.count == tilesBeforeJump,
                "…and spawn nothing: profile 2 would have added a terminal — \(revealCanvas.canvasState.tiles.count) tiles, was \(tilesBeforeJump)")
 
+    // Space PREVIEWS rather than reveals: frame an existing tile in the current
+    // canvas while workspace, focus, tile identity, and unread state stay put.
+    guard let previewCanvas = revealApp.canvasView,
+          let previewTile = revealSupervisor.records[thereAgent]?.tileId,
+          previewCanvas.navigationTileSnapshot(for: previewTile) != nil else {
+        throw CheckError.failed("preview setup needs the current workspace's managed-agent tile")
+    }
+    let previewWorkspaceBefore = revealApp.currentWorkspaceIdForSidebar()
+    let previewFocusBefore = revealApp.focusBroker.activeSurface
+    let previewLastActiveBefore = previewCanvas.canvasState.lastActiveTileId
+    let previewAttentionBefore = revealSupervisor.attention(for: thereAgent)
+    let previewTileCountBefore = previewCanvas.canvasState.tiles.count
+    previewCanvas.setViewport(CanvasViewport(x: 1_234, y: -987, zoom: 1))
+    guard let expectedPreviewViewport = previewCanvas.framedViewportForTileJump(previewTile) else {
+        throw CheckError.failed("preview setup could not calculate tile framing")
+    }
+    try expect(revealInbox.selectRowForQA(id: thereAgent.rawValue) && revealInbox.focusListForQA(),
+               "preview target must be keyboard-selected in the inbox")
+    try expect(revealInbox.sendTableKeyForQA(keyCode: 49),
+               "Space must travel through the production inbox table")
+    try expect(previewCanvas.canvasState.viewport == expectedPreviewViewport,
+               "Space frames the existing tile without using reveal")
+    try expect(revealApp.currentWorkspaceIdForSidebar() == previewWorkspaceBefore
+                && revealApp.focusBroker.activeSurface == previewFocusBefore
+                && previewCanvas.canvasState.lastActiveTileId == previewLastActiveBefore
+                && revealSupervisor.attention(for: thereAgent) == previewAttentionBefore
+                && previewCanvas.canvasState.tiles.count == previewTileCountBefore,
+               "preview must not switch workspace, focus/activate, clear attention, or attach a tile")
+
+    // Text-entry gate: every reserved category plus jump-only ⌘5 is withheld
+    // BEFORE global dispatch, while unmatched typing still reaches the editor.
+    func textGateEvent(
+        keyCode: UInt16, modifiers: NSEvent.ModifierFlags, characters: String
+    ) throws -> NSEvent {
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0,
+            windowNumber: sidebarJumpWindow.windowNumber, context: nil,
+            characters: characters, charactersIgnoringModifiers: characters,
+            isARepeat: false, keyCode: keyCode
+        ) else { throw CheckError.failed("could not synthesize text-gate key \(keyCode)") }
+        return event
+    }
+    let textGateEvents: [(String, NSEvent)] = [
+        ("profile/jump", jumpChord2),
+        ("jump-only", try textGateEvent(keyCode: 23, modifiers: [.command], characters: "5")),
+        ("focus mode", try textGateEvent(keyCode: 3, modifiers: [.command], characters: "f")),
+        ("palette", try textGateEvent(keyCode: 40, modifiers: [.command], characters: "k")),
+        ("settings", try textGateEvent(keyCode: 43, modifiers: [.command], characters: ",")),
+        ("nav leader", try textGateEvent(keyCode: 49, modifiers: [.control], characters: " ")),
+    ]
+    let ordinaryTyping = try textGateEvent(keyCode: 0, modifiers: [], characters: "a")
+    func assertTextEntryGate(_ label: String) throws {
+        let surfaceBefore = revealApp.focusBroker.activeSurface
+        let workspaceBefore = revealApp.currentWorkspaceIdForSidebar()
+        let tilesBefore = revealApp.canvasView?.canvasState.tiles.count
+        let paletteBefore = revealApp.profilePalette.map(ObjectIdentifier.init)
+        let settingsBefore = revealApp.settingsPanel.map(ObjectIdentifier.init)
+        for (name, event) in textGateEvents {
+            try expect(revealApp.handleHotkey(event),
+                       "\(name) must be withheld while \(label) owns text focus")
+            try expect(revealApp.focusBroker.activeSurface == surfaceBefore
+                        && revealApp.currentWorkspaceIdForSidebar() == workspaceBefore
+                        && revealApp.canvasView?.canvasState.tiles.count == tilesBefore
+                        && revealApp.profilePalette.map(ObjectIdentifier.init) == paletteBefore
+                        && revealApp.settingsPanel.map(ObjectIdentifier.init) == settingsBefore,
+                       "\(name) escaped the \(label) text gate")
+        }
+        try expect(!revealApp.handleHotkey(ordinaryTyping),
+                   "ordinary typing must pass through to the \(label) editor")
+    }
+
+    try expect(sidebarJumpWindow.makeFirstResponder(revealInbox.searchFieldViewForQA),
+               "search field must take first responder for the global gate witness")
+    try assertTextEntryGate("search")
+    try expect(revealInbox.focusListForQA(), "inbox table must regain focus after search witness")
+    try expect(revealInbox.beginRename(agentId: jumpTargetRow),
+               "rename field must install for the global focus gate witness")
+    try assertTextEntryGate("rename")
+    _ = revealInbox.pressKeyInRenameForQA(#selector(NSResponder.cancelOperation(_:)))
+
     // D3 · THE PILLS, through the production path: `handleFlagsChanged` is what the
     // app's `.flagsChanged` monitor calls, so this is the real observer and not a
     // view-local override. Driving it here is what closes the cross-review's gap —
@@ -23084,9 +23334,11 @@ extension AppDelegate {
     revealApp.handleFlagsChanged(try flags([.command]))
     try expect(revealInbox.areJumpHintsVisibleForQA,
                "⌘ held with the inbox focused raises the hint pills")
-    revealApp.handleFlagsChanged(try flags([.command, .shift]))
-    try expect(!revealInbox.areJumpHintsVisibleForQA,
-               "⌘⇧ is not a jump, so it must not advertise rows — pills still up")
+    for modifiers: NSEvent.ModifierFlags in [[.command, .shift], [.command, .option], [.command, .control], []] {
+        revealApp.handleFlagsChanged(try flags(modifiers))
+        try expect(!revealInbox.areJumpHintsVisibleForQA,
+                   "only exact ⌘ may advertise jumps — pills up for \(modifiers)")
+    }
     // FOCUS LOST WITH ⌘ STILL DOWN — the case a `flagsChanged` override on the list
     // could not see, because the release would go to whatever took focus. Found in
     // cross-review; the fix was to put the hints on the app's existing global monitor.
