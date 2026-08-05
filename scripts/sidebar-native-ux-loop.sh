@@ -377,7 +377,8 @@ preflight() {
   [ ! -f "$STOP_FILE" ] || { echo "STOP is present" >&2; return 1; }
   [ -z "$(unexpected_status)" ] || { echo "tracked/non-authorized changes present" >&2; unexpected_status >&2; return 1; }
   [ "$PI_WORKER_MODELS" = 'openai-codex/gpt-5.6-luna' ] || return 1
-  [ "$PI_THINKING" = max ] || return 1
+  # R6 (plan-session-rulings.md): medium is the owner-set level.
+  [ "$PI_THINKING" = medium ] || return 1
   # The owner's own instance shares this checkout's store and tmux, and the boot
   # probe hangs against a live one. Refuse rather than corrupt a live session.
   if pgrep -f 'Continuum Revived.app/Contents/MacOS' >/dev/null 2>&1; then
