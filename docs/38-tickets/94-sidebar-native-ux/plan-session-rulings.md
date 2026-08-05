@@ -101,3 +101,12 @@ the self-agreeing slim oracle were both produced AT max).
 Both loop defaults are now `medium`; the program guard holds the new deliberate setting against
 silent drift, exactly as it held the old one. Review structure, repair budget, fences, the final
 matrix, and every quality gate are unchanged — the enforcement was never the latency.
+
+## R7 — P4.5 implements against `pi` (2026-08-05, owner-directed)
+
+R3 blocked P4.5 on compiled reality: its specified `codex exec` CLI is never spawned anywhere in
+this repo. The owner has directed that all 40 tickets be completed, which is a decision on exactly
+the question R3 deferred. P4.5 therefore ships using a short-lived `pi` one-shot as the generation
+vehicle — no session persistence, output parsed as the candidate name, sanitized through P4.3's
+rename guard, best-effort per design decision 9 (a failure degrades to P4.2's deterministic seed
+and never blocks). The vehicle changes; the contract does not.
