@@ -7,7 +7,8 @@ func runLocationSessionIndexP5Checks() throws {
     try runLocationSessionIndexP5R3MatchingChecks()
     try runLocationSessionIndexP5R4DiscoveryChecks()
     try runLocationSessionIndexP5R5PreviewChecks()
-    print("LocationSessionIndex P5 checks passed: P5.R1-P5.R5")
+    try runLocationSwitcherFoundationChecks()
+    print("LocationSessionIndex P5 checks passed: P5.R1-P5.R5 + LocationSwitcher foundation")
 }
 
 func runLocationSessionIndexP5R1RankingChecks() throws {
