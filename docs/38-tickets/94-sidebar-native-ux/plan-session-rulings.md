@@ -110,3 +110,16 @@ the question R3 deferred. P4.5 therefore ships using a short-lived `pi` one-shot
 vehicle — no session persistence, output parsed as the candidate name, sanitized through P4.3's
 rename guard, best-effort per design decision 9 (a failure degrades to P4.2's deterministic seed
 and never blocks). The vehicle changes; the contract does not.
+
+## R8 — the gate packets' baseline fence path does not exist (2026-08-06, mechanical)
+
+P3.6, P5.6 and P7.1 each fence `docs/38-tickets/94-sidebar-native-ux/baselines/`. **That directory has
+never existed.** This program's 60 baseline PNGs live in `docs/38-tickets/90-agent-ux/baselines/`,
+which is where `UIProbeBaseline` reads and writes them. Read the fence as the 90 path; no judgment is
+involved and no work is blocked by the authoring slip.
+
+Recorded alongside it, for the owner rather than as a ruling: blessing the twelve new
+`chrome.agentInbox*-320x660-*` renders leaves the twelve `-320x652-*` files as permanent orphans,
+because `84a4d16` moved the scope band onto a 32pt `ChoiceButton` (620 + 40 = 660) and no probe will
+ever request 652 again. Those twelve should be DELETED in the same supervised commit that blesses
+their replacements. That is a decision for the gate, not for a harness.
