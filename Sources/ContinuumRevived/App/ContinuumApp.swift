@@ -9569,14 +9569,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// root and id, and the configured model/thinking level. `tileId` is a view
     /// binding, not identity, so `nil` is a headless agent; a non-nil `prompt` runs
     /// on spawn (`AgentSupervisor.spawn`'s own parameter).
-    private func spawnSupervisedAgent(
+    private func spawnSupervisedAgent(tileId: UUID?, prompt: String? = nil) -> AgentID {
+        let cwd = URL(
+            fileURLWithPath: activeProject?.rootPath ?? FileManager.default.currentDirectoryPath,
+            isDirectory: true)
+        return spawnSupervisedAgentAtHome(
+            tileId: tileId,
+            prompt: prompt,
+            cwd: cwd,
+            projectId: activeProject?.id)
+    }
+
+    /// Explicit-Home variant used only after the owner chooses a registered
+    /// project or folder. Keeping it separate preserves the ordinary active-
+    /// project spawn contract and allows a deliberately unregistered folder to
+    /// carry a nil project id without falling back to the active project.
+    private func spawnSupervisedAgentAtHome(
         tileId: UUID?,
         prompt: String? = nil,
-        cwd overrideCWD: URL? = nil,
-        projectId overrideProjectId: UUID? = nil,
-        useOverrideProjectId: Bool = false
+        cwd: URL,
+        projectId: UUID?
     ) -> AgentID {
-        let cwd = overrideCWD ?? URL(fileURLWithPath: activeProject?.rootPath ?? FileManager.default.currentDirectoryPath, isDirectory: true)
         let model = AgentModelConfig.resolvedFromDefaults()
         return agentSupervisor.spawn(
             role: nil,
@@ -9584,7 +9597,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             cwd: cwd,
             model: model.model,
             thinking: model.thinking,
-            projectId: useOverrideProjectId ? overrideProjectId : (overrideProjectId ?? activeProject?.id),
+            projectId: projectId,
             tileId: tileId
         )
     }
@@ -9777,7 +9790,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let spawner = tileSpawner else { return }
         switch spawner.spawnManagedAgent() {
         case let .spawned(tileId):
-            let agentID = spawnSupervisedAgent(tileId: tileId, cwd: cwd, projectId: projectId, useOverrideProjectId: true)
+            let agentID = spawnSupervisedAgentAtHome(
+                tileId: tileId,
+                cwd: cwd,
+                projectId: projectId)
             wireManagedAgentTile(tileId, agentID: agentID)
             focusSpawnedTile(tileId)
             scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "location-new-agent-here", debounce: 0.2)

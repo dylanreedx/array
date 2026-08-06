@@ -490,7 +490,11 @@ final class ManagedAgentTileNSView: TileNSView {
     static func runLocationActionSurfaceSelfCheck() throws -> URL {
         enum CheckError: Error, CustomStringConvertible {
             case failed(String)
-            var description: String { if case let .failed(message) = self { return message } }
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
         }
         func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
             if !condition() { throw CheckError.failed(message) }

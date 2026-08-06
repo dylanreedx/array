@@ -76,7 +76,10 @@ final class AgentLocationStatusView: NSView, TokenThemed {
 
         setAccessibilityRole(.group)
         setAccessibilityLabel("Agent location and observed activity")
-        setAccessibilityChildren([locationLabel, whatLabel, actionButton])
+        // Keep the location group at exactly two semantic facts; the native
+        // action button is independently keyboard/accessibility reachable and
+        // must not be announced as a third location/status value.
+        setAccessibilityChildren([locationLabel, whatLabel])
         isHidden = true
         applyTokens()
     }
