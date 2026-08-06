@@ -154,13 +154,22 @@ private func runCanvasEntityIndexAdapterIdentitySeparationCheck() {
 }
 
 private func runCanvasEntityIndexAdapterNoPathLeakageCheck() {
-    let index = CanvasEntityIndexSnapshotAdapter.buildIndex(from: adapterSnapshot(tiles: [
-        adapterTile(adapterTileA, kind: .terminal, x: 0, y: 0, relativeWorkingDirectory: "/Users/qa/private/continuum"),
+    var pathLabelTile = adapterTile(
+        adapterTileA,
+        kind: .terminal,
+        x: 0,
+        y: 0,
+        relativeWorkingDirectory: "/Users/qa/private/continuum")
+    pathLabelTile.label = "Terminal /Users/qa/private/continuum"
+    let index = CanvasEntityIndexSnapshotAdapter.buildIndex(from: adapterSnapshot(zones: [
+        CanvasEntityIndexZoneSnapshot(id: adapterZone, label: "/Users/qa/private/zone")
+    ], tiles: [
+        pathLabelTile,
         adapterTile(adapterTileB, kind: .note, x: 50, y: 0, relativeWorkingDirectory: "/Users/qa/private/notes"),
         CanvasEntityIndexTileSnapshot(
             id: adapterTileDuplicate,
             kind: .browser,
-            label: "browser",
+            label: "file:///Users/qa/private/browser",
             worldFrame: CanvasWorldRect(x: 100, y: 0, width: 25, height: 15),
             projectId: adapterProject,
             relativeWorkingDirectory: "../secret",
@@ -169,7 +178,7 @@ private func runCanvasEntityIndexAdapterNoPathLeakageCheck() {
     ], agents: [
         CanvasEntityIndexAgentSnapshot(
             id: adapterAgent,
-            label: "agent",
+            label: "Agent ~/private/worktree",
             projectId: adapterProject,
             relativeWorkingDirectory: "/Users/qa/private/agent-cwd",
             checkoutHandle: "/Users/qa/private/worktree"
@@ -179,8 +188,8 @@ private func runCanvasEntityIndexAdapterNoPathLeakageCheck() {
     for entity in index.allEntities {
         switch entity.scopeRole {
         case .contextOnly:
-            expect(entity.kind == .note || entity.kind == .browser,
-                   "P7 adapter no path leakage: only note/browser fixture should be context-only here, got \(entity.kind)")
+            expect(entity.kind == .zone || entity.kind == .note || entity.kind == .browser,
+                   "P7 adapter no path leakage: only zone/note/browser fixtures should be context-only here, got \(entity.kind)")
         case .emitsScope(_, let relativeWorkingDirectory, let checkoutHandle):
             expect(relativeWorkingDirectory == nil || relativeWorkingDirectory == "Sources",
                    "P7 adapter no path leakage: absolute/parent relative directory leaked: \(relativeWorkingDirectory ?? "nil")")
@@ -196,7 +205,13 @@ private func runCanvasEntityIndexAdapterNoPathLeakageCheck() {
     let dump = index.allEntities.map { entity in
         "\(entity.id.rawValue)|\(entity.label)|\(entity.evidence.joined(separator: ","))"
     }.joined(separator: "\n")
-    for forbidden in ["/Users/qa/private", "agent-cwd", "worktree", "cwd"] {
+    for forbidden in ["/Users/qa/private", "agent-cwd", "worktree", "cwd", "file://", "~/private"] {
         expect(!dump.contains(forbidden), "P7 adapter no path leakage: output dump leaked \(forbidden)")
     }
+    expect(index.allEntities.first(where: { $0.id == .zone(adapterZone) })?.label == "Zone",
+           "P7 adapter no path leakage: absolute zone labels should fall back")
+    expect(index.allEntities.first(where: { $0.id == .tile(adapterTileA) })?.label == "Tile",
+           "P7 adapter no path leakage: embedded absolute tile labels should fall back")
+    expect(index.allEntities.first(where: { $0.id == .agent(adapterAgent) })?.label == "Agent",
+           "P7 adapter no path leakage: tilde agent labels should fall back")
 }

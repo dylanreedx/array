@@ -202,7 +202,7 @@ public enum CanvasEntityIndexSnapshotAdapter {
         CanvasEntity(
             id: .zone(zone.id),
             kind: .zone,
-            label: zone.label,
+            label: safeLabel(zone.label, fallback: "Zone"),
             frame: zone.frame,
             visibility: zone.visibility,
             freshness: zone.freshness ?? fallbackFreshness,
@@ -235,7 +235,7 @@ public enum CanvasEntityIndexSnapshotAdapter {
         return CanvasEntity(
             id: .tile(tile.id),
             kind: entityKind,
-            label: tile.label,
+            label: safeLabel(tile.label, fallback: "Tile"),
             frame: tile.worldFrame,
             visibility: forceHiddenBecauseZone && tile.visibility == .visible ? .hidden : tile.visibility,
             freshness: tile.freshness ?? fallbackFreshness,
@@ -261,7 +261,7 @@ public enum CanvasEntityIndexSnapshotAdapter {
         return CanvasEntity(
             id: .agent(agent.id),
             kind: .agent,
-            label: agent.label,
+            label: safeLabel(agent.label, fallback: "Agent"),
             frame: nil,
             visibility: agent.visibility,
             freshness: agent.freshness ?? fallbackFreshness,
@@ -278,6 +278,21 @@ public enum CanvasEntityIndexSnapshotAdapter {
         if safeRelative(tile.relativeWorkingDirectory) == nil, tile.relativeWorkingDirectory != nil { evidence.append("relative-scope-dropped") }
         if safeOpaqueHandle(tile.checkoutHandle) == nil, tile.checkoutHandle != nil { evidence.append("checkout-handle-dropped") }
         return evidence.sorted()
+    }
+
+    private static func safeLabel(_ value: String, fallback: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }),
+              !trimmed.contains("://"),
+              !trimmed.split(whereSeparator: { $0.isWhitespace }).contains(where: { token in
+                  token.hasPrefix("/") || token.hasPrefix("~/") ||
+                      token.range(of: #"^[A-Za-z]:[\\/]"#, options: .regularExpression) != nil
+              }),
+              !trimmed.split(separator: "/").contains("..") else {
+            return fallback
+        }
+        return trimmed
     }
 
     private static func safeRelative(_ value: String?) -> String? {
