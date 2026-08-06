@@ -1,55 +1,65 @@
 # P5.6 gate prep — native interaction
 
-Prepared 2026-08-05 after night 2. **Status: NOT READY; P5.6 remains pending.**
+Refreshed 2026-08-06 after night 3 at implementation commit `fe7257d`.
+**Status: READY FOR OWNER REVIEW; P5.6 remains pending.** No approval was inferred, no app was
+launched, and no baseline was blessed.
 
-## Why it is not ready
+## What is ready now
 
-P4.1–P4.5 landed, including inline rename and the R7 Pi one-shot. None of P5.1–P5.5 landed. The
-night's cut order dropped P5.5, then P5.4, then P5.2; P5.1/P5.3 were not started before the 05:15
-cutoff. A supervised review cannot honestly judge menu, filter, bulk bar, keyboard traversal, and
-resize as one native whole while those implementations are absent.
+P5.1–P5.5 are all complete. The gate can now judge the native interaction surface as one whole:
 
-Do not create or bless a P5.6 baseline set and do not mark the gate done until all five autonomous
-P5 rows are complete. There is intentionally no `qa-runs/p5.6-gate/` yet.
+- custom ChoiceList row context menu and capability gating;
+- fixed scope/search filter band and workspace-management choices;
+- multi-selection custom bulk bar and host-owned destructive confirmation;
+- native keyboard traversal, preview, jump hints, and text-editor shortcut withholding;
+- dynamic divider resize and mouse-up persistence above the old 420pt ceiling;
+- P4 inline/manual/derived/generated naming, including request CAS;
+- P6.6 VoiceOver hierarchy, Reduce Motion, and Increase Contrast behavior.
 
-## What is already available to review later
+The final focused checks and headless matrix passed. All five Phase-5 tickets exhausted two review
+rounds and ended with supervisor-only repairs; P5.6 must inspect those repairs together rather than
+treating green unit checks as visual evidence.
 
-- P4.3 live inline rename: body-only double click, Return/Escape/blur, no trailing activation, CAS.
-- P4.4 stable derived/child naming precedence.
-- P4.5 explicit Generate Name action through a bounded `pi --no-session` one-shot.
-- Final headless matrix green at `83b10a9`.
-- Current UI baseline inventory: 22 changed / 38 matched; none blessed.
+Prepared owner materials are in `qa-runs/p5.6-gate/`:
 
-## Build the gate only after P5 lands
+- `REVIEW.md` — the exact live walk and owner questions;
+- `gate.sh` — preflight, deterministic checks, and non-blessing baseline comparison;
+- `preflight-night3.log` — owner instance clear, STOP/loop state, candidate identity, Retina Main.
 
-1. Confirm STOP is armed and the loop is stopped.
-2. Quit the owner's Continuum instance before any build/probe/relaunch.
-3. Require a clean tracked tree and run the program guard.
-4. Build an installed candidate from the exact reviewed HEAD.
-5. At 220/280/320 in both appearances, drive:
-   - custom row context menu and capability/tooltips;
-   - scope/filter/search band;
-   - multi-selection and custom bulk bar;
-   - full keyboard traversal and jump hints;
-   - divider resize/persistence;
-   - inline rename and generated-name race.
-6. Exercise VoiceOver, Reduce Motion, and full keyboard access on every new surface.
-7. Structurally confirm no stock `NSMenu`, `NSPopUpButton`, bezeled `NSTextField`, or default focus
-   ring is reachable.
-8. Run both baseline legs with Retina Main green; inspect before blessing.
-9. Ask for explicit owner approval. Corrections become tickets; silence is not approval.
+## Candidate caveat
 
-## Mechanical commands when ready
+The requested **release** build was attempted from
+`fe7257d1db93448a335f60a3faaf909dcfb1fb1a` and failed on strict-concurrency errors in check-only
+closures in `ContinuumApp.swift`; the complete log is `qa-runs/night3-candidate/build.log`. Per the
+night-3 handoff, source was not patched for packaging. A debug fallback bundle now exists at
+`qa-runs/night3-candidate/Continuum Revived.app`; it was assembled from `.build/debug`, ad-hoc signed,
+verified on disk, and not launched. `qa-runs/night3-candidate/STATUS` records the exact commit,
+configuration, hashes, and verification state. Dylan must deliberately choose that fallback or
+repair/rebuild release before the live owner walk.
 
-```bash
-swift build
-.build/debug/continuum-revived --sidebar-ux-check
-.build/debug/continuum-revived --ui-geometry-check
-.build/debug/continuum-revived --ui-contrast-check
-.build/debug/continuum-revived --component-lab-check
-.build/debug/continuum-revived --ui-baseline-check
-swift scripts/check-retina-main.swift
-CONTINUUM_SKIP_SURFACE_CHECKS=1 ./scripts/run-matrix.sh
-```
+## Owner gate
 
-Do not lower a floor/tolerance/count or bless merely to pass.
+1. Confirm STOP is armed, the loop is stopped, the owner instance is quit, and the reviewed commit
+   matches the candidate.
+2. Run `qa-runs/p5.6-gate/gate.sh preflight`, then `gate.sh checks`.
+3. In an installed candidate, drive menu, filter/search, bulk actions, traversal/jumps, resize,
+   inline rename, first-prompt naming, manual rename, generation, and rename-vs-generation race at
+   220/280/320 in Aqua and Dark Aqua.
+4. Exercise VoiceOver, Reduce Motion, Increase Contrast, and full keyboard access on every new
+   surface. Confirm no stock `NSMenu`, `NSPopUpButton`, bezeled `NSTextField`, or default focus ring
+   is visible or reachable.
+5. Run `gate.sh baselines` only with built-in Retina Main green. Inspect every actual/diff image
+   before any explicit blessing.
+6. Ask whether the menu feels like Continuum, the whole sidebar works without a mouse, the names
+   read as human names, and any stock AppKit remains.
+
+Corrections become tickets; silence is not approval. Do not mark P5.6 done until Dylan explicitly
+approves or records corrections.
+
+## Known baseline inventory
+
+No baseline has been blessed since P1.5. The current chrome worksheet has 60 PNGs: 38
+byte-identical, 12 obsolete 320×652 agent-inbox keys to delete, 12 new 320×660 renders without a
+committed baseline, and 10 real sidebar/activity-dock diffs. The separate Component Lab leg retains
+five last-known managed-agent tile candidates whose cause remains unproved. Never use external-
+display 1× results or raise a tolerance to make the gate green.

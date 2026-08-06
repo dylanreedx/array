@@ -1,142 +1,170 @@
-# Sidebar — morning review (night 2)
+# Sidebar — morning review (night 3)
 
-Updated 2026-08-05 after the unattended night-2 hand-drive. Start here. **No owner gate was
-marked done and no approval was inferred from silence.**
+Updated 2026-08-06 after the hand-driven night-3 completion. Start here. **No supervised gate was
+marked done, no owner approval was inferred, no baseline was blessed, and no app was launched.**
 
 ## Current state
 
 - Branch: `overnight/agent-ux`
-- Latest implementation commit: `83b10a9` (`feat(sidebar): P4.5 generate names with Pi one-shot`); the branch tip after it adds only morning handoff docs
-- Ledger: **26 of 40 done** (20 at night start; 6 landed overnight)
-- Remaining: P3.6; P5.1–P5.6; P6.1–P6.6; P7.1
+- Latest implementation commit: `fe7257d1db93448a335f60a3faaf909dcfb1fb1a`
+  (`feat(sidebar): complete accessibility sweep`)
+- Ledger: **37 of 40 done**
+- Pending: supervised gates P3.6, P5.6, and P7.1 only
 - Loop: stopped; `docs/38-tickets/94-sidebar-native-ux/STOP` remains armed
 - Pushes: none
 - Baselines blessed overnight: none
 - Owner app launched overnight: no
+- Program guard and final headless matrix: green
 
-The loop-control status still reports its interrupted P3.5 run and old `758b7f0` head. That metadata
-is stale because night 2 deliberately ran in hand-drive mode; Git and `_LEDGER.md` are authoritative.
-Do not remove STOP or restart the loop until you choose the day plan.
+Authorized pre-existing untracked work remains untouched: `website/`, root `array-logo*.svg`, and
+Queue 92's small-team-relay docs/scripts. The loop-control run metadata still points at the old P3.6
+stop; Git and `_LEDGER.md` are authoritative.
+
+## Important: release build failed; a verified debug fallback is available
+
+The required final command was attempted from exact implementation commit
+`fe7257d1db93448a335f60a3faaf909dcfb1fb1a`:
+
+```bash
+./scripts/make-app-bundle.sh --configuration release \
+  --output "qa-runs/night3-candidate/Continuum Revived.app"
+```
+
+`swift build -c release` failed. The complete log is `qa-runs/night3-candidate/build.log`. The
+failures are Swift strict-concurrency `SendingRisksDataRace` diagnostics in check-only closures at
+`ContinuumApp.swift:24801-24802` (`advanceRowCalls`, `advanceBulkCalls`, `advanceHostScript`) and
+`:25077-25084` (`undoStore`, `undoRestores`, `undoHostScript`). Per the handoff, source was not
+patched for packaging.
+
+A **debug fallback bundle** now exists at the required path:
+
+```text
+/Users/dylan/Documents/personal/continuum-overnight/qa-runs/night3-candidate/Continuum Revived.app
+```
+
+It was assembled from `.build/debug/continuum-revived`, ad-hoc signed, passed strict deep codesign
+verification and plist lint, and was **not launched**. It is not a release build and has no CloudKit
+proof. `qa-runs/night3-candidate/STATUS` records its implementation commit, configuration, hashes,
+signing state, and `launched=no`.
+
+If Dylan deliberately chooses the debug fallback, the open command is:
+
+```bash
+open "/Users/dylan/Documents/personal/continuum-overnight/qa-runs/night3-candidate/Continuum Revived.app"
+```
+
+Otherwise fix the release-only diagnostics and rerun the required release command first. Do not
+mistake the fallback's presence for release-build evidence.
+
+## What landed in night 3
+
+| Commit | Ticket(s) | Result |
+|---|---|---|
+| `e2c58fe` | P6.1 | Production row construction now derives lifecycle/variant from records, read-time blockers, descendant hold-open, and the one settlement predicate |
+| `ede068c` | P6.2–P6.4 | Real-activity auto-settle, durable snooze/wake, earliest-wake timer, durable read watermarks, production row/menu/bulk actions |
+| `13848b3` | P6.5 | Max-8 child fan-out, need-priority survivor exception, explicit expandable remainder, separate descendant attention, nested-fold re-anchoring, full resource accounting |
+| `fe7257d` | P6.6 | Native virtual AX hierarchy, exact fact/status ownership, model-boundary announcements, Reduce Motion, Increase Contrast with preserved foreground floors, all new surfaces audited |
+
+P6.1 received a final Sol approval. Slice A, P6.5, and P6.6 each reached the two-review maximum and
+ended with narrowly scoped supervisor repairs followed by mutation witnesses and a fresh green full
+headless matrix; there was no third review. Their ledger rows record every finding, final repair,
+source hash, and exact red witness. P6.6's final matrix-wired accessibility sweep held 2,226 live
+assertions across 220/280/320 in Aqua and Dark Aqua.
+
+## Evidence level
+
+At final implementation HEAD, these passed:
+
+- `swift build`
+- AgentUI/Core/supervisor/observer/inbox focused checks
+- `--sidebar-ux-check`, `--ui-geometry-check`, `--ui-contrast-check`, `--ui-probe-check`, and
+  `--agent-inbox-check`
+- queue-94 program guard
+- `CONTINUUM_SKIP_SURFACE_CHECKS=1 CONTINUUM_SKIP_UI_BASELINES=1 ./scripts/run-matrix.sh`
+
+That is deterministic and headless evidence. It is **not** a live owner-route inspection, an
+unskipped GUI matrix, a VoiceOver session, baseline approval, or release-build evidence. The release
+build is explicitly red as described above.
+
+## The first real Phase-6 launch is expected to find things
+
+The first launch with Phase 6 wired is the **first time** `.settled`, `.snoozed` and the slim
+variant have rendered in the real app rather than in fixtures — two phases of work coming out of the
+dark at once. Expect to find things. That is what P3.6 and P5.6 exist to catch, and finding
+something there is the gates working, not the night failing.
+
+Do not describe any of those live states as visually verified until Dylan launches and inspects the
+exact candidate.
+
+## Owner gates
+
+### P3.6 — materials refreshed; owner walk still pending
+
+Use `qa-runs/p3.6-gate/REVIEW.md` and `gate.sh`. The seven-record stale real-store snapshot remains
+preserved, but there is still no `store-after1`, `store-after2`, backup-count pair, or idempotency
+output. The exact two-launch stale-store walk, taste questions, and both baseline legs remain owner
+work. P3.6 is pending.
+
+### P5.6 — materials now exist; owner walk still pending
+
+All P5.1–P5.5 implementations are present. New materials are in `qa-runs/p5.6-gate/`, and the
+tracked overview is `plan-P5.6-gate-prep.md`. The gate must hand-drive menu, filter/search, bulk bar,
+keyboard/jumps, resize persistence, naming races, VoiceOver, Reduce Motion, Increase Contrast, and
+full keyboard access. P5.6 is pending.
+
+### P7.1 — blocked on P3.6 and P5.6
+
+`plan-P7.1-gate-prep.md` now reflects 37/40 done. Final acceptance still requires an exact installed
+candidate, the **unskipped** full matrix, each focused leg five consecutive times, baseline judgment,
+and explicit owner acceptance. P7.1 is pending.
+
+## Baseline worksheet
+
+Nothing has been blessed since P1.5. The truthful current worksheet is:
+
+| Action | Count | What |
+|---|---:|---|
+| Delete after review | 12 | Dead `chrome.agentInbox*-320x652-*` keys; the scope band moved the live height to 660 |
+| Judge/bless if approved | 12 | New `320x660` keys with no committed baseline |
+| Judge from magenta diff | 10 | `chrome.sidebar*` and `chrome.activityDock*` real changes |
+| No action | 38 | Byte-identical chrome renders |
+
+The separate Component Lab leg has five last-known `managed-agent.*` tile candidates; the hairline
+explanation remains a hypothesis, not proof. Run both baseline legs again. Bless only after
+`swift scripts/check-retina-main.swift` is green on the built-in panel and every candidate is
+inspected. Never use the old external-display 1× “38 mismatched” runs as evidence.
+
+## Honest limits to carry forward
+
+- P2.4 was never independently reviewed because protocol failure preceded review.
+- Every Phase-5 ticket ended on a supervisor-only repair after the two-review maximum.
+- P2.2's `.abbreviated` tier remains unreachable in the P0.3 corpus.
+- P3.1's N3 read-only-reinterpret witness was not run.
+- No `AgentStatus.failed` exists, so the phone says `idle` where tile/sidebar say `Failed`.
+- Several Phase 1–3 checks exercised fixture-only states until Phase 6 made them production-reachable.
+- The final release build is red even though the debug build and headless matrix are green.
 
 ## First commands
 
 ```bash
 cd /Users/dylan/Documents/personal/continuum-overnight
-git log --oneline 758b7f0..HEAD
-./scripts/check-sidebar-native-ux-program.sh --check
-grep -c '| done |' docs/38-tickets/94-sidebar-native-ux/_LEDGER.md   # 26
+git log --oneline caea5b9..HEAD
+./scripts/check-sidebar-native-ux-program.sh
+grep -c '| done |' docs/38-tickets/94-sidebar-native-ux/_LEDGER.md   # 37
 git status --porcelain
+sed -n '820,915p' qa-runs/night3-candidate/build.log
 ```
 
-Authorized pre-existing untracked work remains: `website/`, root `array-logo*.svg`, Queue 92's
-small-team-relay docs/scripts. Night 2 did not touch it.
+Then decide whether to fix the release-only concurrency diagnostics before starting P3.6. Do not
+remove STOP or restart the loop: the remaining work is explicitly supervised.
 
-## What landed
+## Temporary retry setting from night 2
 
-| Commit | Ticket(s) | Result |
-|---|---|---|
-| `2a6588d` | P3.5 | One status vocabulary across chip/sidebar/tile/phone paths, encoded phone schema and I5 proof, Woke priority preserved |
-| `109c17f` | P4.1 + P4.2 | One `New agent` sentinel, identifier migration/defensive read, deterministic first-prompt naming and provenance-safe sync |
-| `473a5ad` | P4.3 | Live inline rename behavior plus durable request-id/expected-name compare-and-swap |
-| `762c48c` | P4.4 | Explicit → prompt → source item → stable parent-relative ordinal naming across real child-spawn paths |
-| `83b10a9` | P4.5 | Ruling R7: explicit generated naming through a bounded, no-session Pi one-shot |
-
-Every final candidate passed the full headless matrix with
-`CONTINUUM_SKIP_SURFACE_CHECKS=1 CONTINUUM_SKIP_UI_BASELINES=1`. P4.4 and P4.5 each exhausted the
-two-review limit and received a final Luna repair after review round 2; those final repairs have
-focused checks plus a green final matrix, **but no third independent review**. Their ledger rows name
-the exact findings and witnesses. Those two large persistence/process changes deserve the closest
-morning code read.
-
-## Schedule cuts and unfinished work
-
-P4.4's cross-supervisor ordinal persistence and P4.5's bounded-process work took the remaining
-schedule. The required cut order was applied rather than weakening checks:
-
-1. P5.5 cut at the 03:30 boundary.
-2. P5.4 cut after P4.5 review round 1.
-3. P5.2 cut at the 04:15 boundary.
-
-P5.1 and P5.3 were the protected tickets in the schedule, but neither was started before the 05:15
-no-new-ticket cutoff. “Cut” means not attempted; all five autonomous P5 ledger rows remain pending.
-There is therefore no `qa-runs/p5.6-gate/` yet. See `plan-P5.6-gate-prep.md`.
-
-## Owner gates
-
-### P3.6 — ready for owner review, still pending
-
-Use `qa-runs/p3.6-gate/REVIEW.md` and `qa-runs/p3.6-gate/gate.sh`. Night 2 re-ran:
-
-- preflight: owner instance clear, loop stopped, built-in Retina Main (`display=1`, scale 2.0)
-- `swift build`
-- `--agent-status-check`
-- `--sidebar-ux-check`
-- `--agent-inbox-check`
-- `--ui-geometry-check`
-- `--ui-contrast-check`
-- Retina-main check
-
-All mechanical checks were green after P3.5. The real stale-record launch/idempotency walk and taste
-questions remain yours. Do not mark P3.6 done until you explicitly approve.
-
-### P5.6 — not ready
-
-P4 naming is present, but P5.1–P5.5 are not. The interaction gate cannot honestly review menu,
-filter, bulk, keyboard, and resize as one finished surface. Prep is in
-`plan-P5.6-gate-prep.md`; no gate folder or baseline blessing was created.
-
-### P7.1 — not ready
-
-P3.6/P5.6 and all of Phase 6 remain. Prep is in `plan-P7.1-gate-prep.md`.
-
-## Baselines awaiting owner judgment
-
-Nothing was blessed. The final explicit `--ui-baseline-check` reported **22 changed / 38 matched**:
-
-- `chrome.sidebar{,.observerFeed,.live,.selected}` in Aqua and Dark Aqua (8)
-- `chrome.activityDock` in both appearances (2)
-- `chrome.agentInbox{,.selected,.parked,.shelf,.jumpHints,.bulk}` in both appearances (12)
-
-P3.6's existing REVIEW also records five last-known Component Lab tile candidates:
-`managed-agent.approval-dock` (dark), `managed-agent.branch-chip` (both), and
-`managed-agent.provider-controls` (both). Re-run both baseline legs during the owner gate; the latest
-Component Lab invocation encountered the 22 pending chrome mismatches first, so do not assume the
-five tile candidates healed.
-
-Bless only after inspecting candidates with `swift scripts/check-retina-main.swift` green. Never
-raise tolerance or bless merely to turn the leg green.
-
-## P4.5 ruling and review focus
-
-R7 supersedes the old R3 block: P4.5 uses `pi`, not `codex exec`. It invokes a cheap model at low
-thinking with `--no-session --print --mode text`, no tools/extensions/skills/context, prompt on stdin,
-and a strict one-field JSON response. Capability resolution is asynchronous and cached; every shell,
-pipe, process-group, timeout, input-failure, and normal-exit path is bounded. Generated/source/prompt
-names are replaced by the sentinel at companion sync.
-
-Review especially:
-
-1. P4.4's store-level `flock`, stale-parent high-water merge, and post-rename AtomicWriter recovery.
-2. P4.5's `posix_spawn` group ownership, bounded pipe readers, capability cache, and fake-Pi
-   descendant/no-session/privacy fixtures.
-3. The narrow R2 edits in `ContinuumApp.swift`: wiring/expected-value migration only.
-
-## Retry setting to revert
-
-Night 2 added this temporary resilience block to `~/.pi/agent/settings.json`:
+`~/.pi/agent/settings.json` may still contain:
 
 ```json
 "retry": { "maxRetries": 5, "baseDelayMs": 4000 }
 ```
 
-`retry.provider.maxRetries` was left untouched. Revert the block when normal provider conditions
-return.
-
-## Morning decision order
-
-1. Review/decide P3.6 using `qa-runs/p3.6-gate/`.
-2. Choose the P5 implementation order; all P5 tickets remain pending despite the overnight cuts.
-3. Run and explicitly approve P5.6 only after P5 is complete.
-4. Complete Phase 6, then use `plan-P7.1-gate-prep.md` for final acceptance.
-
-Local commits only; nothing was pushed. The owner decides whether and when to continue.
+`retry.provider.maxRetries` was intentionally left untouched. Revert the temporary block when normal
+provider conditions return.
