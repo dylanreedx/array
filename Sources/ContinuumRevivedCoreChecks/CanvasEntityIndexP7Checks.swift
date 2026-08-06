@@ -14,7 +14,8 @@ func runCanvasEntityIndexP7Checks() {
     runCanvasEntityIndexP7R8MultipleTilesPerAgentCheck()
     runCanvasEntityIndexP7R9DuplicateRegistrationCheck()
     runCanvasEntityIndexP7R10StableQuerySnapshotCheck()
-    print("CanvasEntityIndex P7 checks: R1-R10 passed")
+    runCanvasEntityIndexAdapterP7Checks()
+    print("CanvasEntityIndex P7 checks: R1-R10 + adapter passed")
 }
 
 private let p7Now = Date(timeIntervalSinceReferenceDate: 910_000_000)
