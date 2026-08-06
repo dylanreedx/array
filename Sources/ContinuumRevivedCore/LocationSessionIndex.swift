@@ -260,9 +260,9 @@ public struct LocationSessionIndex: Sendable {
             if lhs.entry.activity.activeAgentCount != rhs.entry.activity.activeAgentCount {
                 return lhs.entry.activity.activeAgentCount > rhs.entry.activity.activeAgentCount
             }
-            if lhs.entry.label.localizedStandardCompare(rhs.entry.label) != .orderedSame {
-                return lhs.entry.label.localizedStandardCompare(rhs.entry.label) == .orderedAscending
-            }
+            let lhsLabel = LocationIndexMatcher.normalize(lhs.entry.label)
+            let rhsLabel = LocationIndexMatcher.normalize(rhs.entry.label)
+            if lhsLabel != rhsLabel { return lhsLabel < rhsLabel }
             return lhs.entry.id.rawValue < rhs.entry.id.rawValue
         }
     }

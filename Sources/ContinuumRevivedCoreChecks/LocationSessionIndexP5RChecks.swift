@@ -92,8 +92,8 @@ func runLocationSessionIndexP5R3MatchingChecks() throws {
     ])
 
     expect(index.search("", context: .init(mode: .globalNavigation)).map(\.entry.id.rawValue) == [
-        "agent:qa", "directory:core", "project:continuum"
-    ], "P5.R3 empty query should be deterministic by label/id after rank ties")
+        "project:continuum", "directory:core", "agent:qa"
+    ], "P5.R3 empty query should be deterministic by normalized label/id after rank ties")
     expect(index.search("src/core", context: .init(mode: .reference)).first?.entry.id == "directory:core", "P5.R3 partial path fragments should fuzzy-match display paths")
     expect(index.search("ovrn", context: .init(mode: .location)).first?.entry.id == "project:continuum", "P5.R3 aliases should participate in deterministic fuzzy matching")
 }
