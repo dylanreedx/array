@@ -253,6 +253,12 @@ public struct LocationSessionIndex: Sendable {
             return copy
         }.sorted { lhs, rhs in
             if lhs.rankBucket != rhs.rankBucket { return lhs.rankBucket < rhs.rankBucket }
+            let lhsSpatialRank = spatialRank(for: lhs.entry, bucket: lhs.rankBucket)
+            let rhsSpatialRank = spatialRank(for: rhs.entry, bucket: rhs.rankBucket)
+            if lhsSpatialRank != rhsSpatialRank { return lhsSpatialRank < rhsSpatialRank }
+            let lhsAnchorDistance = anchorDistance(for: lhs.entry, bucket: lhs.rankBucket)
+            let rhsAnchorDistance = anchorDistance(for: rhs.entry, bucket: rhs.rankBucket)
+            if lhsAnchorDistance != rhsAnchorDistance { return lhsAnchorDistance < rhsAnchorDistance }
             if lhs.fuzzyScore != rhs.fuzzyScore { return lhs.fuzzyScore > rhs.fuzzyScore }
             let lDate = lhs.entry.activity.lastActivityAt ?? lhs.entry.activity.lastUsedAt ?? .distantPast
             let rDate = rhs.entry.activity.lastActivityAt ?? rhs.entry.activity.lastUsedAt ?? .distantPast
@@ -276,6 +282,26 @@ public struct LocationSessionIndex: Sendable {
         if entry.workspace.isWorkspaceProject { return .workspaceProject }
         if entry.workspace.discoverySource == .boundedDiscovery { return .boundedDiscovery }
         return .other
+    }
+
+    private func spatialRank(for entry: LocationIndexEntry, bucket: LocationIndexRankBucket) -> Int {
+        switch bucket {
+        case .nearbyContext:
+            return entry.spatial.nearbyContextRank ?? Int.max
+        case .nearbyProject:
+            return entry.spatial.nearbyProjectRank ?? Int.max
+        default:
+            return 0
+        }
+    }
+
+    private func anchorDistance(for entry: LocationIndexEntry, bucket: LocationIndexRankBucket) -> Double {
+        switch bucket {
+        case .nearbyContext, .nearbyProject:
+            return entry.spatial.anchorDistance ?? .greatestFiniteMagnitude
+        default:
+            return 0
+        }
     }
 
     private func disambiguatedLabel(for entry: LocationIndexEntry, collides: Bool) -> String {
@@ -361,6 +387,7 @@ public struct LocationDiscoveryOptions: Sendable {
 
 public enum LocationDiscoveryError: Error, Equatable {
     case recursiveHomeScanRejected(URL)
+    case unsafeBroadRootRejected(URL)
 }
 
 public struct LocationDiscoveryStats: Equatable, Sendable {
@@ -390,10 +417,14 @@ public enum LocationIndexDiscovery {
         let home = options.homeDirectory.standardizedFileURL.resolvingSymlinksInPath().path
         for root in options.roots.sorted(by: { $0.url.path < $1.url.path }) {
             let rootURL = root.url.standardizedFileURL.resolvingSymlinksInPath()
+            guard root.maxEntries > 0 else { continue }
+            if root.maxDepth > 0 && isUnsafeBroadDiscoveryRoot(rootURL) {
+                throw LocationDiscoveryError.unsafeBroadRootRejected(root.url)
+            }
             if rootURL.path == home && root.maxDepth > 0 {
                 throw LocationDiscoveryError.recursiveHomeScanRejected(root.url)
             }
-            guard root.maxEntries > 0 else { continue }
+            let rootDisplayLabel = safeDiscoveryRootLabel(for: rootURL)
             var queue: [(url: URL, depth: Int)] = [(rootURL, 0)]
             while !queue.isEmpty && records.count < root.maxEntries {
                 if isCancelled() {
@@ -404,7 +435,7 @@ public enum LocationIndexDiscovery {
                 stats.visitedDirectories += 1
                 if current.depth > 0 {
                     let label = current.url.lastPathComponent.isEmpty ? current.url.path : current.url.lastPathComponent
-                    let displayPath = current.url.path.replacingOccurrences(of: rootURL.deletingLastPathComponent().path + "/", with: "")
+                    let displayPath = rootRelativeDisplayPath(for: current.url, rootURL: rootURL, rootDisplayLabel: rootDisplayLabel)
                     let entry = LocationIndexEntry(
                         id: LocationIndexID(rawValue: "directory:discovered:\(stablePathHash(current.url.path))"),
                         kind: .directory,
@@ -429,6 +460,29 @@ public enum LocationIndexDiscovery {
             }
         }
         return LocationDiscoveryResult(records: records, stats: stats)
+    }
+
+    private static func isUnsafeBroadDiscoveryRoot(_ url: URL) -> Bool {
+        let path = url.path
+        return path == "/" || path == "/Users"
+    }
+
+    private static func safeDiscoveryRootLabel(for url: URL) -> String {
+        let label = url.lastPathComponent
+        if !label.isEmpty { return label }
+        return "discovery-root-" + stablePathHash(url.path)
+    }
+
+    private static func rootRelativeDisplayPath(for url: URL, rootURL: URL, rootDisplayLabel: String) -> String {
+        let rootPath = rootURL.path
+        let path = url.path
+        let relativePath: String
+        if path.hasPrefix(rootPath + "/") {
+            relativePath = String(path.dropFirst(rootPath.count + 1))
+        } else {
+            relativePath = url.lastPathComponent
+        }
+        return relativePath.isEmpty ? rootDisplayLabel : "\(rootDisplayLabel)/\(relativePath)"
     }
 
     private static func stablePathHash(_ path: String) -> String {

@@ -31,6 +31,28 @@ func runLocationSessionIndexP5R1RankingChecks() throws {
         "id:workspace",
         "id:discovered"
     ], "P5.R1 ranking order must be anchor, nearby context, nearby projects, recency, active agents, workspace projects, discovery")
+
+    let spatialTieIndex = LocationSessionIndex(records: [
+        record("nearby-context-rank2-alpha", .tile, "Alpha", spatial: .init(anchorDistance: 1, nearbyContextRank: 2)),
+        record("nearby-context-rank1-zulu", .tile, "Zulu", spatial: .init(anchorDistance: 99, nearbyContextRank: 1)),
+        record("nearby-project-rank2-alpha", .project, "Alpha", spatial: .init(anchorDistance: 1, nearbyProjectRank: 2)),
+        record("nearby-project-rank1-zulu", .project, "Zulu", spatial: .init(anchorDistance: 99, nearbyProjectRank: 1))
+    ])
+    expect(spatialTieIndex.search("", context: .init(mode: .globalNavigation)).map(\.entry.id.rawValue) == [
+        "id:nearby-context-rank1-zulu",
+        "id:nearby-context-rank2-alpha",
+        "id:nearby-project-rank1-zulu",
+        "id:nearby-project-rank2-alpha"
+    ], "P5.R1 nearby-context/project buckets must sort by documented spatial rank before anchor distance and labels")
+
+    let anchorDistanceIndex = LocationSessionIndex(records: [
+        record("nearby-context-far-alpha", .tile, "Alpha", spatial: .init(anchorDistance: 20, nearbyContextRank: 1)),
+        record("nearby-context-near-zulu", .tile, "Zulu", spatial: .init(anchorDistance: 2, nearbyContextRank: 1))
+    ])
+    expect(anchorDistanceIndex.search("", context: .init(mode: .globalNavigation)).map(\.entry.id.rawValue) == [
+        "id:nearby-context-near-zulu",
+        "id:nearby-context-far-alpha"
+    ], "P5.R1 same spatial rank should sort by anchorDistance before label tie breakers")
 }
 
 func runLocationSessionIndexP5R2DisambiguationPrivacyChecks() throws {
@@ -107,6 +129,14 @@ func runLocationSessionIndexP5R4DiscoveryChecks() throws {
     let bounded = try LocationIndexDiscovery.discoverDirectories(options: .init(roots: [.init(url: temp, maxDepth: 1, maxEntries: 10)]))
     expect(bounded.records.map(\.entry.label) == ["A", "D"], "P5.R4 discovery should obey depth bounds deterministically")
     expect(!bounded.records.map(\.entry.label).contains("B"), "P5.R4 discovery must not descend past maxDepth")
+    expect(bounded.records.map(\.entry.displayPath) == [
+        "\(temp.lastPathComponent)/A",
+        "\(temp.lastPathComponent)/D"
+    ], "P5.R4 discovery display paths should be root-relative with a stable root label")
+    let boundedJSON = String(decoding: try JSONEncoder().encode(bounded.records.map(\.entry)), as: UTF8.self)
+    expect(!boundedJSON.contains(temp.path), "P5.R4 Codable discovery output must not contain absolute temp host roots")
+    expect(!boundedJSON.contains("/Users"), "P5.R4 Codable discovery output must not contain private /Users host roots")
+    expect(!boundedJSON.contains("/private"), "P5.R4 Codable discovery output must not contain private absolute host roots")
 
     let limited = try LocationIndexDiscovery.discoverDirectories(options: .init(roots: [.init(url: temp, maxDepth: 2, maxEntries: 1)]))
     expect(limited.records.count == 1, "P5.R4 discovery should obey maxEntries")
@@ -127,6 +157,20 @@ func runLocationSessionIndexP5R4DiscoveryChecks() throws {
         ))
         expect(false, "P5.R4 recursive HOME discovery should be rejected")
     } catch LocationDiscoveryError.recursiveHomeScanRejected {
+        // expected
+    }
+
+    do {
+        _ = try LocationIndexDiscovery.discoverDirectories(options: .init(roots: [.init(url: URL(fileURLWithPath: "/"), maxDepth: 1)]))
+        expect(false, "P5.R4 root filesystem discovery should be rejected before scanning")
+    } catch LocationDiscoveryError.unsafeBroadRootRejected {
+        // expected
+    }
+
+    do {
+        _ = try LocationIndexDiscovery.discoverDirectories(options: .init(roots: [.init(url: URL(fileURLWithPath: "/Users"), maxDepth: 1)]))
+        expect(false, "P5.R4 /Users discovery should be rejected before scanning")
+    } catch LocationDiscoveryError.unsafeBroadRootRejected {
         // expected
     }
 }
