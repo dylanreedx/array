@@ -1025,7 +1025,12 @@ final class AgentSupervisor {
     /// Used by the native Home action surface: zero-turn agents may be reassigned;
     /// anything with a prompt, history, or live runner must fork through New Agent Here.
     func hasUserWorkOrSessionHistory(_ id: AgentID) -> Bool {
-        firstPromptByAgent[id] != nil || !(history[id]?.isEmpty ?? true) || isRunning(id)
+        guard let record = records[id] else { return false }
+        return restoredIDs.contains(id)
+            || record.realActivityAt != nil
+            || firstPromptByAgent[id] != nil
+            || !(history[id]?.isEmpty ?? true)
+            || isRunning(id)
     }
 
     /// Explicitly changes authoritative Home for a provisional zero-turn agent.
@@ -1038,10 +1043,18 @@ final class AgentSupervisor {
         record.cwd = cwd.path
         record.projectId = projectId
         record.lastActivityAt = max(record.lastActivityAt, Date())
+        do {
+            // Durability is the commit point. Do not update the live record or
+            // projector first: a swallowed write failure would make the UI/next
+            // runner use one Home while relaunch restored another.
+            try upsertRecord(record)
+        } catch {
+            warn("AgentSupervisor.reassignProvisionalHome: could not persist Home for \(id.rawValue.uuidString): \(error)")
+            return false
+        }
         records[id] = record
         locationProjectors[id] = nil
         ensureLocationProjector(for: record)
-        persist(record)
         return true
     }
 
@@ -4081,6 +4094,53 @@ func runAgentSupervisorChecks() async throws {
         projectId: nil),
           homeSelectionSupervisor.records[homeSelectionAgent]?.cwd == selectedHome.path else {
         throw fail("agent with session history was silently retargeted instead of requiring New Agent Here")
+    }
+
+    // A relaunch has no in-memory prompt/event ring, so the durable activity
+    // facts and conservative restored marker must still close the retarget gate.
+    let restoredHomeSupervisor = AgentSupervisor(
+        store: homeSelectionStore,
+        makeRunner: { _ in ScriptedAgentRunner(script: []) })
+    let restoreReport = restoredHomeSupervisor.restore()
+    guard restoreReport.restored.contains(homeSelectionAgent),
+          restoredHomeSupervisor.hasUserWorkOrSessionHistory(homeSelectionAgent),
+          !restoredHomeSupervisor.reassignProvisionalHome(
+              agentID: homeSelectionAgent,
+              cwd: forbiddenHome,
+              projectId: nil),
+          restoredHomeSupervisor.records[homeSelectionAgent]?.cwd == selectedHome.path else {
+        throw fail("restored session history reopened provisional Home retargeting")
+    }
+
+    // A Home change is committed only after the injected production writer
+    // succeeds. A failed write must leave the in-memory record/projector and the
+    // durable record on the same old Home.
+    let failedWriteStore = AgentStore(
+        applicationSupportDirectory: root.appendingPathComponent("home-selection-write-failure", isDirectory: true))
+    var rejectHomeWrite = false
+    let failedWriteSupervisor = AgentSupervisor(
+        store: failedWriteStore,
+        makeRunner: { _ in ScriptedAgentRunner(script: []) },
+        upsertRecord: { record in
+            if rejectHomeWrite { throw CheckError(description: "injected Home write failure") }
+            try failedWriteStore.upsert(record)
+        })
+    let failedWriteAgent = failedWriteSupervisor.spawn(
+        role: nil,
+        prompt: nil,
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking,
+        projectId: originalProjectId)
+    rejectHomeWrite = true
+    guard !failedWriteSupervisor.reassignProvisionalHome(
+        agentID: failedWriteAgent,
+        cwd: selectedHome,
+        projectId: selectedProjectId),
+          failedWriteSupervisor.records[failedWriteAgent]?.cwd == cwd.path,
+          failedWriteSupervisor.locationSnapshot(for: failedWriteAgent)?.home.checkoutRoot.path == cwd.path,
+          try failedWriteStore.load(id: failedWriteAgent)?.cwd == cwd.path else {
+        throw fail("failed Home persistence left live and durable authority split")
     }
 
     // Queue 91 P2 — the runner's private observation reaches supervisor-owned

@@ -160,6 +160,11 @@ try runAsyncCheck {
 }
 
 try runCompanionFreshnessChecks()
+// Queue 91 P4/P5/P7 are part of the ordinary CoreChecks matrix as well as
+// focused hooks; keeping them here prevents pure-Core foundations from becoming
+// orphaned while their App integrations are built in later slices.
+runAgentContextGravityChecks()
+try runLocationSessionIndexP5Checks()
 runCanvasEntityIndexP7Checks()
 
 // Trap-testing hook: when invoked with this env var set, deliberately call

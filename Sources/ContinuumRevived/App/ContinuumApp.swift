@@ -9744,7 +9744,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     ) -> NSMenu {
         let menu = NSMenu(title: prefix)
         let projects = ((try? registryStore?.loadOrEmpty()) ?? Registry.empty()).projects
-            .filter { !$0.missing }
+            .filter {
+                !$0.missing
+                    && usableAgentHomeDirectory(
+                        URL(fileURLWithPath: $0.rootPath, isDirectory: true)) != nil
+            }
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         if projects.isEmpty {
             let item = NSMenuItem(title: "No registered projects", action: nil, keyEquivalent: "")
@@ -9771,11 +9775,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.prompt = "Choose Home"
-        return panel.runModal() == .OK ? panel.url : nil
+        guard panel.runModal() == .OK, let selected = panel.url else { return nil }
+        return usableAgentHomeDirectory(selected)
+    }
+
+    private func usableAgentHomeDirectory(_ url: URL) -> URL? {
+        guard url.isFileURL else { return nil }
+        let normalized = url.standardizedFileURL.resolvingSymlinksInPath()
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: normalized.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else { return nil }
+        return normalized
     }
 
     private func reassignHome(agentID: AgentID, cwd: URL, projectId: UUID?) {
-        guard agentSupervisor.reassignProvisionalHome(agentID: agentID, cwd: cwd, projectId: projectId) else {
+        guard let cwd = usableAgentHomeDirectory(cwd),
+              agentSupervisor.reassignProvisionalHome(
+                  agentID: agentID,
+                  cwd: cwd,
+                  projectId: projectId) else {
             NSSound.beep()
             return
         }
@@ -9787,7 +9805,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func spawnManagedAgentHere(cwd: URL, projectId: UUID?) {
-        guard let spawner = tileSpawner else { return }
+        guard let spawner = tileSpawner,
+              let cwd = usableAgentHomeDirectory(cwd) else {
+            NSSound.beep()
+            return
+        }
         switch spawner.spawnManagedAgent() {
         case let .spawned(tileId):
             let agentID = spawnSupervisedAgentAtHome(
@@ -9815,14 +9837,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(path, forType: .string)
         })
-        let exists = FileManager.default.fileExists(atPath: path)
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
         menu.addItem(ClosureMenuItem(title: "Reveal \(label) in Finder", enabled: exists) {
             NSWorkspace.shared.activateFileViewerSelecting([url])
         })
-        let terminalSupported = exists && NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") != nil
+        let terminalSupported = exists && isDirectory.boolValue
+            && NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") != nil
         menu.addItem(ClosureMenuItem(title: "Open Terminal at \(label)", enabled: terminalSupported) {
             self.openTerminal(at: url)
         })
+        menu.addItem(ClosureMenuItem(
+            title: "Open \(label) File Tree",
+            enabled: exists && isDirectory.boolValue
+        ) { [weak self] in
+            self?.openFileTree(at: url)
+        })
+    }
+
+    private func openFileTree(at url: URL) {
+        guard let spawner = tileSpawner else { return }
+        switch spawner.spawnFileTree(rootPath: url.path) {
+        case let .spawned(tileId, _):
+            if let view = canvasView?.tileView(for: tileId) as? FileTreeTileNSView {
+                fileTreeViews[tileId] = view
+            }
+            focusSpawnedTile(tileId)
+        case .invalidPath:
+            NSSound.beep()
+        case let .failure(error):
+            fputs("Location Open File Tree failed: \(error)\n", stderr)
+        }
     }
 
     private func openTerminal(at url: URL) {
