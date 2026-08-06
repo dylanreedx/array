@@ -984,6 +984,9 @@ private func runInboxLifecycleDerivationCheck() {
     stale.settledOverride = .neutral
     stale.settledAt = nil
     stale.lastActivityAt = inboxNow.addingTimeInterval(-threeDays)
+    // P6.2: auto-settle is driven by a real turn stamp, never the metadata
+    // timestamp above. The legacy nil-stamp case is covered separately as active.
+    stale.latestTurnAt = inboxNow.addingTimeInterval(-4 * 86_400)
     let liveBlocker = row(
         for: stale,
         facts: AgentLifecycleFacts(hasLiveRunner: true),
@@ -1104,11 +1107,25 @@ private func runInboxLifecycleDerivationCheck() {
                 unadoptedPromptAt: inboxNow.addingTimeInterval(offset),
                 graceWindow: 30),
             autoSettleAfter: threeDays)
-        expect(expired.lifecycle == .settled(at: stale.lastActivityAt),
+        expect(expired.lifecycle == .settled(at: stale.realActivityAt!),
                "a prompt \(offset < 0 ? "behind" : "ahead") outside grace is clock skew, not a permanent blocker — got \(expired.lifecycle)")
         expect(!expired.settlementBlocked && !expired.canSettle(),
                "the expired prompt has no blocker, while its settled lifecycle still makes the action a no-op")
     }
+
+    // P6.2 strict boundary: exactly one window is still eligible; only a
+    // genuinely older real prompt/turn settles. Metadata is intentionally newer
+    // in this fixture and must not change either answer.
+    var exactBoundary = stale
+    exactBoundary.latestPromptAt = inboxNow.addingTimeInterval(-threeDays)
+    exactBoundary.latestTurnAt = nil
+    let exactBoundaryRow = row(for: exactBoundary, autoSettleAfter: threeDays)
+    expect(exactBoundaryRow.lifecycle == .active,
+           "real activity exactly at the auto-settle window remains active under strict > — got \(exactBoundaryRow.lifecycle)")
+    exactBoundary.latestPromptAt = inboxNow.addingTimeInterval(-threeDays - 0.001)
+    let pastBoundaryRow = row(for: exactBoundary, autoSettleAfter: threeDays)
+    expect(pastBoundaryRow.lifecycle == .settled(at: exactBoundary.realActivityAt!),
+           "real activity older than the window settles — got \(pastBoundaryRow.lifecycle)")
 
     // The row and record consume the same shared settlement decision over the
     // matrix's own, blocked, snoozed and auto-settled cases.
@@ -1130,4 +1147,36 @@ private func runInboxLifecycleDerivationCheck() {
         expect(built.canSettle() == expected,
                "classifier/action agreement for \(name): row \(built.canSettle()) vs record \(expected), lifecycle \(built.lifecycle)")
     }
+
+    // P6.3: snooze is a visibility overlay, not a runner pause or a settle
+    // blocker. A working row can be snoozed; a pending human request cannot.
+    var workingSnooze = stale
+    workingSnooze.latestTurnAt = inboxNow.addingTimeInterval(-60)
+    workingSnooze.snoozedAt = inboxNow.addingTimeInterval(-30)
+    workingSnooze.snoozedUntil = inboxNow.addingTimeInterval(3_600)
+    let workingFacts = AgentLifecycleFacts(hasLiveRunner: true)
+    let workingRow = row(for: workingSnooze, facts: workingFacts, autoSettleAfter: threeDays)
+    expect(workingRow.lifecycle == .snoozed(until: workingSnooze.snoozedUntil!),
+           "a working row stays on the snoozed shelf without pausing its runner — got \(workingRow.lifecycle)")
+    expect(workingSnooze.canSnooze(facts: workingFacts, now: inboxNow)
+            && !workingSnooze.canSettle(facts: workingFacts, autoSettleAfter: threeDays, now: inboxNow),
+           "a working row is snoozable but not settleable")
+
+    let needsHumanFacts = AgentLifecycleFacts(attentionIsYours: true, hasLiveRunner: true)
+    let needsHumanRow = row(for: workingSnooze, facts: needsHumanFacts, autoSettleAfter: threeDays)
+    expect(needsHumanRow.lifecycle == .active && !workingSnooze.canSnooze(facts: needsHumanFacts, now: inboxNow),
+           "a snoozed request waiting on a human wakes visibly and refuses another snooze")
+
+    // Required negative witness: if the derived wake is not promoted to an
+    // active-placement timestamp, this old quiet turn falls straight back into
+    // auto-settled history even though the failure arrived after the snooze.
+    var woken = stale
+    woken.snoozedAt = inboxNow
+    woken.snoozedUntil = inboxNow.addingTimeInterval(3_600)
+    woken.failedAt = inboxNow.addingTimeInterval(1)
+    let wokenRow = row(for: woken, autoSettleAfter: threeDays)
+    expect(wokenRow.lifecycle == .active && wokenRow.attention == .woke,
+           "a post-snooze failure reopens an old quiet row as active/woke — got \(wokenRow.lifecycle)/\(wokenRow.attention)")
+    expect(woken.snoozedAt == inboxNow && woken.snoozedUntil == inboxNow.addingTimeInterval(3_600),
+           "derived wake leaves both stored snooze dates untouched")
 }

@@ -417,13 +417,30 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// restore twice over facts the first one already changed.
     private var pendingUndo: [UUID: InboxLifecycleSnapshot]?
     private var undoToastTimer: Timer?
+    // P6.3: wake is derived from the stored date. This single timer only asks the
+    // list/host to re-render when the earliest shelf entry may have expired; it
+    // never writes the record or schedules a daemon wake.
+    typealias WakeRerenderScheduler = (TimeInterval, @escaping () -> Void) -> (() -> Void)
+    private var wakeRerenderTimer: Timer?
+    private var wakeRerenderCancellation: (() -> Void)?
+    private var wakeScheduleGeneration = 0
+    private var scheduledWakeDelay: TimeInterval?
+    private(set) var qaWakeRerenderCount = 0
+    private static let wakeTimerMinimumDelay: TimeInterval = 0.05
+    private static let wakeTimerMaximumDelay: TimeInterval = 24 * 60 * 60
+    /// Production uses `Timer` when this is nil. The injected scheduler is a
+    /// bounded QA seam for the same callback, so timer expiry and clamping can be
+    /// checked without sleeping or running a parallel timer implementation.
+    var wakeRerenderScheduler: WakeRerenderScheduler?
     // Ticket: P5.1-custom-row-context-menu.md
     /// The tile's choice-family surface replaces stock AppKit row menus. Targets are
     /// retained by stable id while the panel is open so a push cannot retarget an action.
     private let rowChoiceController = ChoicePopoverController()
     private var rowChoiceTargetIds: [UUID] = []
+    private var snoozeTargetIds: [UUID] = []
     // Headless checks retain the same ChoiceListView when no AppKit window exists.
     private var qaChoiceListForQA: ChoiceListView?
+    private var qaSnoozeChoiceListForQA: ChoiceListView?
     /// Capability state starts unknown/hidden. It is filled by the detached,
     /// bounded resolver and then repaints an already-open menu on the main actor;
     /// building a menu never performs the capability lookup itself.
@@ -733,6 +750,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// P5.1 derives the choice list from this capability set and hides actions that
     /// cannot be honoured; it never presents a dead row in the custom menu.
     var onRowAction: ((InboxRowAction, [UUID]) -> Void)?
+    /// Snooze owns a second choice: the preset dates are resolved when this
+    /// submenu opens, then the selected absolute wake reaches the host. Keeping
+    /// it separate from `onRowAction` prevents a row action from silently
+    /// defaulting to a stale or recomputed preset.
+    var onSnoozeSelection: (([UUID], Date) -> Void)?
+    /// Called when the derived wake timer expires so the host can rebuild rows
+    /// from raw records. A headless view with no host callback falls back to its
+    /// own render, which keeps the timer seam observable without inventing a
+    /// second production data source.
+    var onWakeRerender: (() -> Void)?
     // Ticket: docs/38-tickets/90-agent-ux/P3.15-wire-destructive-row-actions.md
     //
     // WHICH ACTIONS THE HOST ACTUALLY PERFORMS, action by action. `onRowAction` used to
@@ -1114,6 +1141,65 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         completePendingAdvance(selectionOnEntry: selectionOnEntry)
     }
 
+    /// Keep one bounded re-render timer for the earliest derived wake. The view's
+    /// `clock()` remains the rendering clock; scheduling uses the real wall clock so
+    /// a shelf cannot linger for the rest of an injected minute in production.
+    private func scheduleWakeRerender() {
+        cancelWakeRerender()
+        let now = clock()
+        let earliest = allRows.compactMap { row -> Date? in
+            guard case .snoozed(let until) = row.lifecycle, until > now else { return nil }
+            return until
+        }.min()
+        guard let earliest else { return }
+        let delay = min(
+            Self.wakeTimerMaximumDelay,
+            max(Self.wakeTimerMinimumDelay, earliest.timeIntervalSince(now) + 0.01))
+        let generation = wakeScheduleGeneration
+        scheduledWakeDelay = delay
+        let fire: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.wakeRerenderFired(generation: generation)
+        }
+        if let wakeRerenderScheduler {
+            wakeRerenderCancellation = wakeRerenderScheduler(delay, fire)
+        } else {
+            let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { _ in fire() }
+            wakeRerenderTimer = timer
+            wakeRerenderCancellation = { timer.invalidate() }
+        }
+    }
+
+    private func cancelWakeRerender() {
+        wakeScheduleGeneration &+= 1
+        wakeRerenderCancellation?()
+        wakeRerenderCancellation = nil
+        wakeRerenderTimer?.invalidate()
+        wakeRerenderTimer = nil
+        scheduledWakeDelay = nil
+    }
+
+    private func wakeRerenderFired(generation: Int) {
+        guard generation == wakeScheduleGeneration else { return }
+        // Treat the fired registration like any other completed schedule before
+        // asking the list to render. This makes the one-timer invariant explicit:
+        // an injected scheduler can release its handle, and a subsequent reload
+        // can cancel/reschedule the next earliest wake without retaining the old one.
+        wakeRerenderCancellation?()
+        wakeRerenderCancellation = nil
+        wakeRerenderTimer?.invalidate()
+        wakeRerenderTimer = nil
+        scheduledWakeDelay = nil
+        qaWakeRerenderCount += 1
+        if let onWakeRerender {
+            onWakeRerender()
+        } else {
+            // This fallback is only for a view without its host; the shipped app
+            // supplies `onWakeRerender` so raw records are re-derived at expiry.
+            reload(rows: allRows)
+        }
+    }
+
     /// Draw this list whole. Takes rows that are ALREADY filtered and sorted, which
     /// is why it is private: `reload(rows:)` is the entry point for a fresh push and
     /// takes the unfiltered set, and handing it an already-filtered list would make
@@ -1144,6 +1230,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // REUSE half of "no row is left lit": `reloadData` rebuilt every cell,
         // and the agent under the mouse may now be a different one.
         refreshHoverFromPointer()
+        scheduleWakeRerender()
     }
 
     /// Apply a new set of rows knowing WHICH agents moved (P2B.7's change set).
@@ -1195,6 +1282,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // that first mentions it.
         allRows = newRows
         updateScopeMenu()
+        scheduleWakeRerender()
         // P2D.4: the disclosure is VIEW state, so it is not in `AgentInboxRow` and
         // the value comparison below cannot see it move. A first child arriving under
         // a folded parent — or the last one leaving — changes nothing visible about
@@ -2135,6 +2223,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let key = action.rawValue + ":" + selected.map(\.id.uuidString).joined(separator: ",")
         guard activeBulkActions.insert(key).inserted else { return }
         defer { activeBulkActions.remove(key) }
+        if action == .snooze, onSnoozeSelection != nil {
+            // Resolve the preset list now, not after a host confirmation or a
+            // later callback. This matters for wall-clock presets such as evening.
+            presentSnoozeOptions(
+                for: selected.map(\.id),
+                anchor: bulkBar.frame,
+                relativeTo: self)
+            return
+        }
         // P4.10: armed BEFORE the host runs, because a synchronous host pushes the new
         // rows from inside this call — by the time it returns the affected rows have
         // already left the places the advance is measured from.
@@ -2149,6 +2246,53 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // performs and re-pushes synchronously — so an advance still armed here is one
         // whose filing never happened (a cancelled Delete, a refusal, a partial run) and
         // it must not be left to fire on some later, unrelated push.
+        pendingAdvance = nil
+    }
+
+    /// Present the preset submenu from the same choice family as the row menu and
+    /// bulk bar. The absolute dates are computed once, when this menu opens.
+    private func presentSnoozeOptions(for ids: [UUID], anchor: NSRect, relativeTo view: NSView) {
+        let options = SnoozePreset.offered(at: clock(), calendar: Calendar.autoupdatingCurrent)
+        guard !ids.isEmpty, !options.isEmpty else { return }
+        snoozeTargetIds = ids
+        let items = options.map { option in
+            ChoiceItem(id: option.preset.rawValue, title: option.title)
+        }
+        let onSelection: (ChoiceItem) -> Void = { [weak self] item in
+            self?.commitSnoozePreset(item, options: options)
+        }
+        // Headless probes have no panel, but still need the same production list
+        // and callback rather than a second fake preset path.
+        guard view.window != nil else {
+            let list = ChoiceListView(items: items, selectedID: nil)
+            list.onSelection = onSelection
+            qaSnoozeChoiceListForQA = list
+            return
+        }
+        qaSnoozeChoiceListForQA = nil
+        rowChoiceController.present(
+            items: items,
+            selectedID: nil,
+            anchor: anchor,
+            relativeTo: view,
+            onSelection: onSelection,
+            focusReturnView: self)
+    }
+
+    private func commitSnoozePreset(_ item: ChoiceItem, options: [SnoozeOption]) {
+        guard let preset = SnoozePreset(rawValue: item.id),
+              let option = options.first(where: { $0.preset == preset }) else { return }
+        let ids = snoozeTargetIds
+        snoozeTargetIds.removeAll()
+        let targets = ids.compactMap { id in rows.first(where: { $0.id == id }) }
+        guard targets.count == ids.count,
+              targets.allSatisfy({ InboxRowAction.snooze.isAvailable(for: $0, rollups: rollupsByParent) }) else { return }
+        if AgentInboxView.advancesSelection(InboxRowAction.snooze) {
+            armAdvance(targetIds: ids)
+        }
+        let captured = captureLifecycle(ids)
+        onSnoozeSelection?(ids, option.wakeAt)
+        offerUndo(InboxUndoToast.snoozedVerb, capturedInOrder: captured)
         pendingAdvance = nil
     }
 
@@ -2276,6 +2420,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let targets = rowChoiceTargetIds.compactMap { id in rows.first { $0.id == id } }
         guard action.disabledReason(
             for: targets, isWired: isWired(action), rollups: rollupsByParent) == nil else { return }
+        if action == .snooze, onSnoozeSelection != nil,
+           let first = targets.first,
+           let tableRow = tableRow(forAgentId: first.id) {
+            presentSnoozeOptions(
+                for: targets.map(\.id),
+                anchor: tableView.rect(ofRow: tableRow),
+                relativeTo: tableView)
+            return
+        }
         switch action {
         case .openInTile:
             guard let first = targets.first else { return }
@@ -2763,6 +2916,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         for token in interactionObservers { center.removeObserver(token) }
         interactionObservers = []
         guard let window else {
+            cancelWakeRerender()
             setHovered(agentId: nil)
             setKeyboardFocus(agentId: nil)
             return
@@ -2788,6 +2942,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 }
             })
         }
+        scheduleWakeRerender()
     }
 
     /// The first visible agent not being changed by an incremental apply. The
@@ -3093,6 +3248,43 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     func pickScopeForQA(_ scope: InboxScope) -> Bool {
         guard scopeEntries.contains(scope) else { return false }
         return scopeButton.chooseForQA(id: scope.storageValue)
+    }
+
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P6.3-snooze-derived-wake.md
+    /// Timer state is read from the live production scheduler seam, not from a
+    /// second QA timer. The scheduler callback itself is injected only by the
+    /// deterministic check; production leaves it nil and uses Foundation.Timer.
+    var hasWakeRerenderTimerForQA: Bool {
+        wakeRerenderCancellation != nil || wakeRerenderTimer != nil
+    }
+    var scheduledWakeDelayForQA: TimeInterval? { scheduledWakeDelay }
+    var wakeRerenderCountForQA: Int { qaWakeRerenderCount }
+
+    /// Open the real snooze preset path without requiring an attached window. The
+    /// list and its callback are the same `presentSnoozeOptions` production builds
+    /// for a row or bulk action; only the panel chrome is absent offscreen.
+    @discardableResult
+    func openSnoozeMenuForQA(ids: [UUID]) -> Bool {
+        guard !ids.isEmpty,
+              ids.allSatisfy({ id in rows.contains { row in row.id == id } }) else { return false }
+        presentSnoozeOptions(for: ids, anchor: .zero, relativeTo: self)
+        return !(qaSnoozeChoiceListForQA?.qaItems.isEmpty ?? true)
+    }
+
+    var snoozeOptionTitlesForQA: [String] {
+        qaSnoozeChoiceListForQA?.qaItems.map(\.title)
+            ?? rowChoiceController.listView?.qaItems.map(\.title)
+            ?? []
+    }
+
+    @discardableResult
+    func pickSnoozePresetForQA(_ preset: SnoozePreset) -> Bool {
+        let list = qaSnoozeChoiceListForQA ?? rowChoiceController.listView
+        guard let list, list.qaItems.contains(where: { $0.id == preset.rawValue && $0.enabled }) else {
+            return false
+        }
+        list.choose(id: preset.rawValue)
+        return true
     }
     // Ticket: docs/38-tickets/90-agent-ux/P3.14-preserve-workspace-management.md
     /// The management block as RENDERED: the titles in the menu below the separator,
@@ -4324,7 +4516,14 @@ enum InboxBulkAction: String, CaseIterable, Equatable {
         case .settle:
             return row.canSettle(rollup: rollups[row.id])
         case .snooze:
+            // P6.3: a working row is a visibility target, but a pending human
+            // request is not. The descendant rollup is the parent equivalent of
+            // approval/input; the host re-checks the unadopted-prompt grace case
+            // against the live supervisor before writing either snooze date.
             return !InboxBulkAction.isArchived(row)
+                && row.state != .approval
+                && row.state != .input
+                && (rollups[row.id]?.needsYou ?? 0) == 0
         case .markUnread:
             return row.attention != .unread && !InboxBulkAction.isArchived(row)
         case .archive:
@@ -4608,7 +4807,12 @@ enum InboxRowAction: String, CaseIterable, Equatable {
             }
             return InboxBulkAction.isSettled(row) ? "is already settled." : "is archived."
         case .unsettle: return "is not settled."
-        case .snooze: return "is archived."
+        case .snooze:
+            if row.state == .approval || row.state == .input
+                || (rollups[row.id]?.needsYou ?? 0) > 0 {
+                return "is waiting on you."
+            }
+            return "is archived."
         case .wake: return "is not snoozed."
         case .markUnread:
             return row.attention == .unread ? "is already unread." : "is archived."

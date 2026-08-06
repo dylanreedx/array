@@ -200,7 +200,23 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// identifier the source surface already shows, so it is not new exposure.
     public var sourceItemId: String?
     public var createdAt: Date
+    /// Metadata activity: the store hears this for every runtime event. It is
+    /// intentionally not an auto-settle input.
     public var lastActivityAt: Date
+    /// The most recent prompt accepted by the agent. This is one of the two
+    /// real-activity stamps used by auto-settle; metadata writes never update it.
+    public var latestPromptAt: Date?
+    /// The most recent turn start. This is the second real-activity stamp used by
+    /// auto-settle; a turn ending does not keep quiet work alive.
+    public var latestTurnAt: Date?
+    /// The most recent failed run signal, used by snooze's derived raised hand.
+    public var failedAt: Date?
+    /// The most recent completed run, used both by the raised hand and the read
+    /// watermark. A missing value is a legacy/no-history record, not activity.
+    public var runCompletedAt: Date?
+    /// Desktop-local read watermark. It is persisted for this device only and is
+    /// never part of a companion payload.
+    public var lastVisitedAt: Date?
     /// VIEW BINDING, NOT IDENTITY. `nil` means the agent is headless — running
     /// with no tile rendering it. Closing a tile clears this; it never ends an
     /// agent. Anything that treats this as the agent's key reintroduces the
@@ -248,6 +264,43 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// list, slim and readable; archived is gone from it.
     public var archivedAt: Date?
 
+    /// The only timestamps that keep a neutral row out of auto-settle. A prompt
+    /// or a turn start is real work; `lastActivityAt` is deliberately absent.
+    public var realActivityAt: Date? {
+        [latestPromptAt, latestTurnAt].compactMap { $0 }.max()
+    }
+
+    /// The latest signal that can raise a row after a snooze. Completion and
+    /// failure are separate writers because either one is meaningful to a human.
+    public var wakeSignalAt: Date? {
+        [failedAt, runCompletedAt].compactMap { $0 }.max()
+    }
+
+    /// A completion later than the read watermark is unread. Never visiting is
+    /// intentionally treated as read so a relaunch does not light up history.
+    public var isUnread: Bool {
+        guard let runCompletedAt else { return false }
+        return runCompletedAt > (lastVisitedAt ?? .distantFuture)
+    }
+
+    /// A failure/completion signal that arrived after this snooze and after the
+    /// read watermark is woke. Without a snooze there is no raised-hand axis, so a
+    /// normal completion remains an unread mark instead of changing vocabulary.
+    /// The opposite distant-past default makes a never-visited raised hand visible.
+    public var isWoke: Bool {
+        guard let snoozedAt, let wakeSignalAt else { return false }
+        return wakeSignalAt > snoozedAt
+            && wakeSignalAt > (lastVisitedAt ?? .distantPast)
+    }
+
+    /// Derive the read-state axis from durable facts plus an optional live pending
+    /// request. The request only raises a hand while a snooze is still holding;
+    /// the lifecycle blocker itself handles an unsnoozed request.
+    public func attention(now: Date, pending: Bool = false) -> InboxAttention {
+        let pendingRaised = pending && (snoozedUntil.map { $0 > now } ?? false)
+        return InboxAttention.resolve(unread: isUnread, raisedHand: isWoke || pendingRaised)
+    }
+
     /// Derive lifecycle from persisted facts and current observations. No result
     /// is stored on `AgentRecord`; every reader gets a fresh answer.
     public func lifecycle(
@@ -255,16 +308,67 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         autoSettleAfter: TimeInterval? = nil,
         now: Date
     ) -> InboxLifecycle {
-        InboxLifecycle.resolve(
+        let snoozeHonoured = InboxLifecycle.snoozeHonoured(
+            record: SnoozedAgentFacts(
+                snoozedUntil: snoozedUntil,
+                snoozedAt: snoozedAt,
+                pending: facts.attentionIsYours ? .input : nil,
+                failedAt: failedAt,
+                runCompletedAt: runCompletedAt),
+            now: now)
+        var blockers = facts.lifecycleBlockers(now: now)
+        // Snooze is a visibility overlay, not a pause or a settle guard: a live
+        // runner may be hidden until its derived wake. Human blockers and an
+        // unadopted prompt remain visible, and therefore retain their blocker
+        // bits. InboxLifecycle.resolve itself stays untouched; P6.3 changes only
+        // the input facts supplied to its proven precedence ladder.
+        if snoozeHonoured != nil,
+           !facts.attentionIsYours,
+           !facts.hasUnadoptedPrompt(now: now) {
+            blockers.remove(.sessionRunning)
+        }
+        // A hand-up snooze withholds the shelf date; the stored dates remain
+        // untouched. A derived wake is active work for placement purposes, but
+        // does not rewrite the real-activity stamps or the metadata timestamp.
+        // Without this promotion an old running turn could immediately fall
+        // through the inactivity rung and put a newly raised hand back in the
+        // settled tail.
+        let wakeActivity: Date? = {
+            guard let snoozedUntil, snoozedUntil > now,
+                  let snoozedAt,
+                  let wakeSignalAt,
+                  wakeSignalAt > snoozedAt else { return nil }
+            return wakeSignalAt
+        }()
+        let effectiveRealActivityAt = [realActivityAt, wakeActivity].compactMap { $0 }.max()
+        let explicitSettledDate = settledAt
+            ?? (settledOverride == .settled ? lastActivityAt : nil)
+        // `resolve` owns a proven `>=` boundary. Advancing the supplied window by
+        // one representable step gives this adapter the packet's strict `>` rule
+        // without reopening that shared precedence function.
+        let strictWindow = autoSettleAfter.map(\.nextUp)
+        return InboxLifecycle.resolve(
             override: settledOverride,
-            blockers: facts.lifecycleBlockers(now: now),
-            settledAt: settledAt,
-            snoozedUntil: snoozedUntil,
+            blockers: blockers,
+            settledAt: explicitSettledDate,
+            snoozedUntil: snoozeHonoured,
             archivedAt: archivedAt,
-            lastActivityAt: lastActivityAt,
-            autoSettleAfter: autoSettleAfter,
+            lastActivityAt: effectiveRealActivityAt,
+            autoSettleAfter: strictWindow,
             now: now
         )
+    }
+
+    /// Snooze is a visibility action. A live runner is allowed; only a pending
+    /// human request or the unadopted-prompt grace window refuses it.
+    public func canSnooze(
+        facts: AgentLifecycleFacts = AgentLifecycleFacts(),
+        now: Date
+    ) -> Bool {
+        archivedAt == nil
+            && !facts.attentionIsYours
+            && !facts.descendantBlockers.contains(.pendingInput)
+            && !facts.hasUnadoptedPrompt(now: now)
     }
 
     /// The settle action uses the exact same blocker predicate and shared
@@ -337,6 +441,11 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         nextChildOrdinal: Int = 1,
         createdAt: Date,
         lastActivityAt: Date,
+        latestPromptAt: Date? = nil,
+        latestTurnAt: Date? = nil,
+        failedAt: Date? = nil,
+        runCompletedAt: Date? = nil,
+        lastVisitedAt: Date? = nil,
         tileId: UUID? = nil,
         settledOverride: SettledOverride = .default,
         settledAt: Date? = nil,
@@ -361,6 +470,11 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         self.nextChildOrdinal = max(1, nextChildOrdinal)
         self.createdAt = createdAt
         self.lastActivityAt = lastActivityAt
+        self.latestPromptAt = latestPromptAt
+        self.latestTurnAt = latestTurnAt
+        self.failedAt = failedAt
+        self.runCompletedAt = runCompletedAt
+        self.lastVisitedAt = lastVisitedAt
         self.tileId = tileId
         self.settledOverride = settledOverride
         self.settledAt = settledAt
@@ -463,6 +577,9 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         case worktreeBranch, projectId, parentAgentID, sourceItemId
         case parentRelativeOrdinal, nextChildOrdinal
         case createdAtReferenceInterval, lastActivityAtReferenceInterval
+        case latestPromptAtReferenceInterval, latestTurnAtReferenceInterval
+        case failedAtReferenceInterval, runCompletedAtReferenceInterval
+        case lastVisitedAtReferenceInterval
         case tileId
         // P4.1. The three lifecycle dates take reference intervals for exactly
         // the reason above — a settled-at that drifts on reload reorders
@@ -514,6 +631,24 @@ public struct AgentRecord: Codable, Equatable, Sendable {
             try container.decode(Double.self, forKey: .createdAtReferenceInterval))
         lastActivityAt = Date(timeIntervalSinceReferenceDate:
             try container.decode(Double.self, forKey: .lastActivityAtReferenceInterval))
+        // New lifecycle/attention dates are tolerant by design. A malformed
+        // optional timestamp is treated as absent so one bad field cannot drop
+        // the whole host-bound agent record during restore.
+        let latestPromptInterval = (try? container.decodeIfPresent(
+            Double.self, forKey: .latestPromptAtReferenceInterval)) ?? nil
+        let latestTurnInterval = (try? container.decodeIfPresent(
+            Double.self, forKey: .latestTurnAtReferenceInterval)) ?? nil
+        let failedInterval = (try? container.decodeIfPresent(
+            Double.self, forKey: .failedAtReferenceInterval)) ?? nil
+        let completedInterval = (try? container.decodeIfPresent(
+            Double.self, forKey: .runCompletedAtReferenceInterval)) ?? nil
+        let visitedInterval = (try? container.decodeIfPresent(
+            Double.self, forKey: .lastVisitedAtReferenceInterval)) ?? nil
+        latestPromptAt = latestPromptInterval.map(Date.init(timeIntervalSinceReferenceDate:))
+        latestTurnAt = latestTurnInterval.map(Date.init(timeIntervalSinceReferenceDate:))
+        failedAt = failedInterval.map(Date.init(timeIntervalSinceReferenceDate:))
+        runCompletedAt = completedInterval.map(Date.init(timeIntervalSinceReferenceDate:))
+        lastVisitedAt = visitedInterval.map(Date.init(timeIntervalSinceReferenceDate:))
         tileId = try container.decodeIfPresent(UUID.self, forKey: .tileId)
         // P4.1. Decoded through `SettledOverride(persistedRawValue:)` rather
         // than as the enum directly: a record written by a newer build with a
@@ -553,6 +688,16 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         }
         try container.encode(createdAt.timeIntervalSinceReferenceDate, forKey: .createdAtReferenceInterval)
         try container.encode(lastActivityAt.timeIntervalSinceReferenceDate, forKey: .lastActivityAtReferenceInterval)
+        try container.encodeIfPresent(latestPromptAt?.timeIntervalSinceReferenceDate,
+                                      forKey: .latestPromptAtReferenceInterval)
+        try container.encodeIfPresent(latestTurnAt?.timeIntervalSinceReferenceDate,
+                                      forKey: .latestTurnAtReferenceInterval)
+        try container.encodeIfPresent(failedAt?.timeIntervalSinceReferenceDate,
+                                      forKey: .failedAtReferenceInterval)
+        try container.encodeIfPresent(runCompletedAt?.timeIntervalSinceReferenceDate,
+                                      forKey: .runCompletedAtReferenceInterval)
+        try container.encodeIfPresent(lastVisitedAt?.timeIntervalSinceReferenceDate,
+                                      forKey: .lastVisitedAtReferenceInterval)
         try container.encodeIfPresent(tileId, forKey: .tileId)
         // P4.1. `.neutral` is written as ABSENCE, the same way a headless
         // record omits `tileId`: the default is "nobody has said anything", and

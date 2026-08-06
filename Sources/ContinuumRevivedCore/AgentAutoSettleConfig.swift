@@ -10,9 +10,10 @@ import Foundation
 /// `.neutral` override reaches, so the keep-active pin still suppresses it and
 /// a blocker still outranks it.
 ///
-/// INACTIVITY MEANS AGENT ACTIVITY. `resolve` measures the window against
-/// `lastActivityAt`, never against when the human last looked at the row —
-/// otherwise reading a row would keep it alive forever.
+/// INACTIVITY MEANS REAL AGENT ACTIVITY. The record adapter supplies `resolve`
+/// with the latest prompt/turn stamp, never with metadata `lastActivityAt` or
+/// when the human last looked at the row — otherwise a read or rename would
+/// keep a dead row alive forever.
 ///
 /// The window is DAYS × 86,400, deliberately calendar-free: `resolve` takes
 /// seconds and takes no `Calendar`, so a DST boundary shifts a threshold by an

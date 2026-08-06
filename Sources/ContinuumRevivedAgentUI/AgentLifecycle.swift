@@ -86,8 +86,8 @@ public enum SettledOverride: String, Codable, CaseIterable, Sendable {
 
 // Ticket: docs/38-tickets/90-agent-ux/P4.4-auto-unsettle.md
 //
-// An override must never go stale silently: a settled agent that genuinely starts
-// working again comes back on its own.
+// An override must never go stale silently: real activity clears either explicit
+// override, so a settled or pinned agent comes back on its own.
 
 /// Why an override went back to `.neutral` — the fact that lets the ledger and a
 /// debugging session tell the app's automatic clear from a human's own decision.
@@ -113,21 +113,12 @@ extension SettledOverride {
     /// What an override becomes when real activity arrives. TOTAL over the tri-state,
     /// and pure — the supervisor supplies the "was this real activity" half.
     ///
-    /// ONLY `.settled` CLEARS. The other two are deliberate:
-    ///
-    /// · `.active` is the keep-active PIN (P4.1), and its whole job is to suppress the
-    ///   auto-settle rung. Resetting it to `.neutral` on activity would discard a
-    ///   human decision in order to un-hide a row that the pin was already keeping
-    ///   visible — no visible gain now, and the agent silently auto-settles one
-    ///   inactivity window later, which is the exact "override goes stale silently"
-    ///   failure this ticket exists to prevent, inverted.
-    /// · `.neutral` has nothing to clear.
-    ///
-    /// So the packet's "clear `settledOverride` back to `.neutral`" is read as clearing
-    /// the SETTLE. A pin is not something activity can outvote; only the person who
-    /// pinned it can.
+    /// Real activity resets either explicit override. A settle becomes neutral so
+    /// the row is eligible for a later inactivity sweep; a keep-active pin has the
+    /// same lifetime boundary, so a fresh real turn does not leave a permanent
+    /// hidden state behind. `.neutral` has nothing to clear.
     public func afterActivity() -> SettledOverride {
-        self == .settled ? .neutral : self
+        .neutral
     }
 
     /// Whether `afterActivity()` would actually change anything — so a caller can

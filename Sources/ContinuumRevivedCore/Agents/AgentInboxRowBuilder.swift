@@ -171,6 +171,20 @@ public enum AgentInboxRowBuilder {
             case .ready, .failed, .restored: break
             }
         }
+        // P6.4: durable completion/wake stamps are the record-backed attention
+        // source. Keep the caller's value as a compatibility/live overlay (it is
+        // still needed for terminal rows and deterministic fixtures), but never
+        // let it erase a persisted mark.
+        let hasPendingHuman = observedFacts.attentionIsYours
+        let recordAttention = record?.attention(now: now, pending: hasPendingHuman) ?? .none
+        let resolvedAttention: InboxAttention
+        if record == nil {
+            resolvedAttention = attention
+        } else {
+            resolvedAttention = InboxAttention.resolve(
+                unread: attention == .unread || recordAttention == .unread,
+                raisedHand: attention == .woke || recordAttention == .woke)
+        }
         // Terminal sessions and legacy callers without a record retain the active
         // default; they have no persisted lifecycle facts to reinterpret here.
         let lifecycle = record?.lifecycle(
@@ -186,10 +200,10 @@ public enum AgentInboxRowBuilder {
             // filter is pure, so the row has to carry the name. Nothing draws it.
             workspaceName: context?.workspaceName,
             state: state,
-            // P3.3 owns read-state. It is local desktop state stored beside the
-            // agent record, so it is not visible from a snapshot and cannot be
-            // guessed from one — it arrives as an argument or not at all.
-            attention: attention,
+            // P3.3/P6.4 own read-state. It is local desktop state stored beside
+            // the agent record; the compatibility argument cannot erase a newer
+            // durable completion or wake signal.
+            attention: resolvedAttention,
             lifecycle: lifecycle,
             model: context?.model,
             role: context?.role,

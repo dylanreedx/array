@@ -865,6 +865,11 @@ final class AgentSupervisor {
     /// Prompt-derived naming context stays in memory only. It is deliberately not
     /// an AgentRecord field and never reaches AgentInventory or the companion.
     private var firstPromptByAgent: [AgentID: String] = [:]
+    /// Read-watermark persistence is deliberately less frequent than the visual
+    /// focus path. An unread-clearing visit is the exception: delaying that write
+    /// would let a relaunch resurrect the mark the person just cleared.
+    private var lastVisitedPersistAt: [AgentID: Date] = [:]
+    private static let lastVisitedPersistThrottle: TimeInterval = 10
     private var activeNameGenerations = 0
     private var nameGenerationTasks: [AgentID: Task<Void, Never>] = [:]
     private var nameGenerationRequestIDs: [AgentID: UUID] = [:]
@@ -1539,7 +1544,12 @@ final class AgentSupervisor {
             record.displayName = proposal.name
             record.displayNameSource = proposal.source
         }
-        record.lastActivityAt = Date()
+        let now = Date()
+        record.lastActivityAt = max(record.lastActivityAt, now)
+        // P6.2: this is real activity, unlike the metadata/event stamp above.
+        // Keep the two facts separate so a rename, read, or meter update cannot
+        // keep a dead agent out of the settled tail.
+        record.latestPromptAt = max(record.latestPromptAt ?? .distantPast, now)
         // P4.4: a user message is the plainest real activity there is, so a settle
         // does not survive it. Before the runner starts, because this write is the
         // same one `persist` below carries — the clear must not wait for the first
@@ -2032,10 +2042,10 @@ final class AgentSupervisor {
         for continuation in (subscribers[id] ?? [:]).values { continuation.finish() }
         subscribers.removeValue(forKey: id)
         restoredIDs.remove(id)
-        // P3.3: the read-state goes with the agent. A stale entry would make a
-        // recycled id read as unread, and a focused-then-archived agent would keep
-        // the focus armed against nothing.
-        unread.remove(id)
+        // P6.4: the in-memory watermark throttle goes with the agent. The durable
+        // watermark is deleted with the record, and a recycled id must not inherit
+        // this supervisor's write cadence.
+        lastVisitedPersistAt.removeValue(forKey: id)
         if focusedAgentID == id { focusedAgentID = nil }
         return report
     }
@@ -2691,26 +2701,11 @@ final class AgentSupervisor {
 
     // MARK: - Read state (P3.3)
 
-    /// Agents that finished a turn while you were looking somewhere else.
-    ///
-    /// LOCAL, AND DELIBERATELY NOT DURABLE OR SYNCED. Not synced because "have I
-    /// read this" is per-human and per-device — a phone opening a row is not this
-    /// Mac having looked at it — and it is I5-irrelevant, so it must never reach a
-    /// payload. Not persisted because nothing writes it to disk: it lives beside
-    /// `records` rather than in `AgentRecord`, which is the type both `AgentStore`
-    /// and the companion publisher serialize. A relaunch therefore starts with
-    /// nothing marked — every restored agent reads `.none` — which is the honest
-    /// answer for a mark that means "finished while you were not looking": nobody
-    /// was looking at anything before this launch, and the desktop transcript does
-    /// not survive either (P2A.7).
-    ///
-    /// WHO FILLS IT, and who does not yet: `deliver` marks, `focus`/`focusTile`
-    /// clear. Nothing in the app calls either yet — the inbox that reads this axis
-    /// is P3.6's list view and the open-a-row path is P3.9's, and the row builder
-    /// (Core) cannot reach a supervisor, so the value is fed to rows from the
-    /// desktop side when that list exists. This ticket owns the fact, not its
-    /// consumers.
-    private var unread: Set<AgentID> = []
+    /// Read-state is derived from the durable completion/failure signals and this
+    /// desktop-local watermark. The watermark is host-bound state on the record;
+    /// `AgentInventory` never publishes it. Keeping the derivation beside the
+    /// record means a relaunch preserves what this Mac has actually seen without
+    /// making a phone's read state part of the companion contract.
 
     /// The agent the human is looking at, or nil when that is nothing this
     /// supervisor owns. Read-state is cleared against THIS, not against a hover:
@@ -2718,15 +2713,27 @@ final class AgentSupervisor {
     private(set) var focusedAgentID: AgentID?
 
     /// A deliberate focus or open: the tile was activated, or the inbox row was
-    /// revealed (P3.9). Clears the agent's unread mark, and — the half that makes
-    /// the mark mean anything — arms it, so a turn that completes while you are here
-    /// never sets it.
+    /// revealed (P3.9). Record the maximum watermark for that agent. The in-memory
+    /// value moves immediately, while disk writes are throttled except when this
+    /// visit clears a completion that would otherwise be unread.
     ///
     /// Pass nil when focus leaves for something that is not an agent; from then on a
-    /// completed turn is unread again.
-    func focus(agentID id: AgentID?) {
+    /// later completion is unread again. `now` is injectable for deterministic
+    /// supervisor checks and defaults to the real visit instant in production.
+    func focus(agentID id: AgentID?, now: Date = Date()) {
         focusedAgentID = id
-        if let id { unread.remove(id) }
+        guard let id, var record = records[id] else { return }
+        let wasUnread = record.isUnread
+        let previous = record.lastVisitedAt
+        let visited = previous.map { max($0, now) } ?? now
+        guard visited != previous else { return }
+        record.lastVisitedAt = visited
+        records[id] = record
+        let elapsed = lastVisitedPersistAt[id].map { now.timeIntervalSince($0) } ?? .infinity
+        let shouldPersist = wasUnread || previous == nil || elapsed >= Self.lastVisitedPersistThrottle
+        guard shouldPersist else { return }
+        lastVisitedPersistAt[id] = now
+        persist(record)
     }
 
     /// The same thing keyed by TILE, which is how focus actually arrives on the
@@ -2736,14 +2743,19 @@ final class AgentSupervisor {
         focus(agentID: tileId.flatMap { agent(forTile: $0) })
     }
 
-    /// This agent's attention axis, resolved (`InboxAttention.resolve`).
-    ///
-    /// `raisedHand` is P4.6's fact — a snoozed agent putting its hand up — and this
-    /// supervisor does not own snooze, so it is a parameter rather than a nil
-    /// pretending to be an answer. The precedence between the two lives in
-    /// `InboxAttention`, not here.
-    func attention(for id: AgentID, raisedHand: Bool = false) -> InboxAttention {
-        InboxAttention.resolve(unread: unread.contains(id), raisedHand: raisedHand)
+    /// This agent's attention axis, resolved (`InboxAttention.resolve`). Durable
+    /// completion/failure stamps provide the two watermark comparisons; a live
+    /// pending request is passed only so a still-held snooze can raise its hand.
+    /// The explicit argument remains for non-record/fixture callers.
+    func attention(for id: AgentID, raisedHand: Bool = false, now: Date = Date()) -> InboxAttention {
+        guard let record = records[id] else {
+            return InboxAttention.resolve(unread: false, raisedHand: raisedHand)
+        }
+        let pending = turnFacts[id]?.pendingRequests.values.first != nil
+        let durable = record.attention(now: now, pending: pending)
+        return InboxAttention.resolve(
+            unread: durable == .unread,
+            raisedHand: raisedHand || durable == .woke)
     }
 
     // MARK: - Auto-unsettle (P4.4)
@@ -2767,39 +2779,30 @@ final class AgentSupervisor {
         warn("AgentSupervisor: cleared the settle on agent \(id.rawValue.uuidString) — reason \(reason.rawValue)")
     }
 
-    /// Whether this event means the agent is REALLY WORKING AGAIN, as opposed to
-    /// reporting on itself.
-    ///
-    /// The whole set, and why each side of the line sits where it does:
-    ///
-    /// · `.sessionStateChanged(.starting)`/`(.running)` — a session coming alive.
-    /// · `.turnStarted` — the same fact one level down; a turn does not begin unless
-    ///   something asked for one.
-    /// · `.requestOpened`/`.userInputRequested` — the agent is now waiting on a human,
-    ///   which is the case a stale settle hides most damagingly (it is also a P4.2
-    ///   blocker, so the row is already visible while the request is open; clearing the
-    ///   override is what keeps it visible AFTER the request is answered).
-    ///
-    /// NOT activity, deliberately:
-    ///
-    /// · **`.sessionStateChanged(.ready)`** — the packet's named watch-out. An agent
-    ///   settling into ready IS the normal end of work, so treating it as activity
-    ///   would undo every settle moments after it was made.
-    /// · `.waiting`, `.stopped`, `.error` — reports about work that is over or stalled.
-    /// · `.turnCompleted` — work ENDING, same reasoning as `.ready`.
-    /// · `.contentDelta`, `.itemStarted`, `.itemCompleted` — mid-turn traffic inside a
-    ///   turn whose `.turnStarted` has already cleared the settle, so they can only
-    ///   re-clear what is already `.neutral`; and `contentDelta` arrives per token, so
-    ///   admitting it would put this decision on the hottest path in the app.
-    /// · `.requestResolved`, `.userInputResolved` — a human answering, i.e. the far
-    ///   side of the request that already counted.
-    /// · `.tokenUsageUpdated` — a meter. This is the event-stream shape of the status
-    ///   poll the packet excludes by name.
+    /// Whether an event proves a genuine prompt/turn, the only activity allowed
+    /// to clear a keep-active pin. Session/process state and request bookkeeping
+    /// can add lifecycle blockers or wake signals, but they are not proof that a
+    /// new prompt or turn began.
     ///
     /// `nonisolated static` and a total switch over `AgentRuntimeEvent`, like
     /// `isPersistWorthy` beside it: a new event case is a compile error here rather
     /// than a silent default.
     nonisolated static func isRealActivity(_ event: AgentRuntimeEvent) -> Bool {
+        switch event {
+        case .turnStarted:
+            return true
+        case .sessionStateChanged, .turnCompleted, .itemStarted, .itemCompleted,
+             .contentDelta, .requestOpened, .requestResolved, .userInputRequested,
+             .userInputResolved, .tokenUsageUpdated, .runtimeError:
+            return false
+        }
+    }
+
+    /// The older settled override still clears when a session/request becomes
+    /// visible, preserving P4.4's restored-settle behavior. A keep-active pin does
+    /// not use this broader classification: `isRealActivity` above is the narrower
+    /// prompt/turn gate passed to `clearSettleOnActivity`.
+    nonisolated static func clearsSettledOverride(_ event: AgentRuntimeEvent) -> Bool {
         switch event {
         case let .sessionStateChanged(state):
             switch state {
@@ -2824,11 +2827,134 @@ final class AgentSupervisor {
     /// Takes the record `inout` rather than an id so it composes with the callers that
     /// are already holding a mutated copy (`send`, `deliver`); they own writing it back.
     @discardableResult
-    private func clearSettleOnActivity(_ record: inout AgentRecord) -> Bool {
-        guard record.settledOverride.clearsOnActivity else { return false }
-        record.settledOverride = record.settledOverride.afterActivity()
+    private func clearSettleOnActivity(
+        _ record: inout AgentRecord,
+        clearKeepActivePin: Bool = true
+    ) -> Bool {
+        // P6.2: a session/request event may clear a restored settle, but the
+        // keep-active pin is a stronger explicit instruction and survives every
+        // event except a genuine prompt/turn. `send` and `.turnStarted` pass the
+        // default true; `deliver` passes the narrower classifier above.
+        guard record.settledOverride != .neutral,
+              record.settledOverride != .active || clearKeepActivePin else { return false }
+        record.settledOverride = .neutral
         settledOverrideClearReasons[record.id] = .activity
         logSettleCleared(record.id, reason: .activity)
+        return true
+    }
+
+    /// The live lifecycle facts used by action writers. An unadopted prompt is a
+    /// real stored prompt stamp newer than the latest turn stamp — never merely an
+    /// idle persistent runner. Reusing `now` here would renew the grace window on
+    /// every menu open and make an ordinary ready session permanently unsnoozable.
+    private func currentLifecycleFacts(for id: AgentID, now: Date) -> AgentLifecycleFacts {
+        let turn = turnFacts[id] ?? TurnFacts()
+        let hasPendingRequest = !turn.pendingRequests.isEmpty
+        let record = records[id]
+        let unadoptedPromptAt: Date? = {
+            guard runners[id] != nil,
+                  let promptAt = record?.latestPromptAt,
+                  promptAt > (record?.latestTurnAt ?? .distantPast) else { return nil }
+            return promptAt
+        }()
+        return AgentLifecycleFacts(
+            attentionIsYours: hasPendingRequest,
+            hasLiveRunner: runners[id] != nil,
+            unadoptedPromptAt: unadoptedPromptAt,
+            graceWindow: 30)
+    }
+
+    /// Settle one agent at a point in time. The stored `settledAt` is written with
+    /// the override so history never falls back to a metadata timestamp.
+    @discardableResult
+    func settle(agentID id: AgentID, now: Date = Date()) -> Bool {
+        guard var record = records[id] else {
+            warn("AgentSupervisor.settle: no agent \(id.rawValue.uuidString)")
+            return false
+        }
+        guard record.settledOverride != .settled else { return false }
+        let facts = currentLifecycleFacts(for: id, now: now)
+        guard record.canSettle(facts: facts, autoSettleAfter: AgentAutoSettleConfig.resolvedFromDefaults().window, now: now) else {
+            warn("AgentSupervisor.settle: refusing blocked or already parked agent \(id.rawValue.uuidString)")
+            return false
+        }
+        record.settledOverride = .settled
+        record.settledAt = now
+        records[id] = record
+        persist(record)
+        return true
+    }
+
+    /// Explicit un-settle means keep this row active until real activity arrives;
+    /// it is not the neutral clear used by an activity or a deliberately neutral
+    /// human reset.
+    @discardableResult
+    func pinActive(agentID id: AgentID) -> Bool {
+        guard var record = records[id] else {
+            warn("AgentSupervisor.pinActive: no agent \(id.rawValue.uuidString)")
+            return false
+        }
+        guard record.settledOverride != .active else { return false }
+        record.settledOverride = .active
+        settledOverrideClearReasons[id] = nil
+        records[id] = record
+        persist(record)
+        return true
+    }
+
+    /// Store both snooze dates as one record mutation. A live turn is allowed to
+    /// hide; only a pending human request or an unadopted prompt refuses it.
+    @discardableResult
+    func snooze(agentID id: AgentID, until: Date, now: Date = Date()) -> Bool {
+        guard until > now else {
+            warn("AgentSupervisor.snooze: refusing non-future wake for \(id.rawValue.uuidString)")
+            return false
+        }
+        guard var record = records[id] else {
+            warn("AgentSupervisor.snooze: no agent \(id.rawValue.uuidString)")
+            return false
+        }
+        let facts = currentLifecycleFacts(for: id, now: now)
+        guard record.canSnooze(facts: facts, now: now) else {
+            warn("AgentSupervisor.snooze: refusing a human-blocked or unadopted agent \(id.rawValue.uuidString)")
+            return false
+        }
+        record.snoozedUntil = until
+        record.snoozedAt = now
+        records[id] = record
+        persist(record)
+        return true
+    }
+
+    /// Explicit Wake clears the stored visibility overlay. A derived raised hand
+    /// never calls this method, so early wake leaves both stored dates intact.
+    @discardableResult
+    func wake(agentID id: AgentID) -> Bool {
+        guard var record = records[id] else {
+            warn("AgentSupervisor.wake: no agent \(id.rawValue.uuidString)")
+            return false
+        }
+        guard record.snoozedUntil != nil || record.snoozedAt != nil else { return false }
+        record.snoozedUntil = nil
+        record.snoozedAt = nil
+        records[id] = record
+        persist(record)
+        return true
+    }
+
+    /// Deliberately rewind the read watermark. This is the one non-monotonic path;
+    /// ordinary focus always stores a maximum.
+    @discardableResult
+    func markUnread(agentID id: AgentID, now: Date = Date()) -> Bool {
+        guard var record = records[id] else {
+            warn("AgentSupervisor.markUnread: no agent \(id.rawValue.uuidString)")
+            return false
+        }
+        guard record.lastVisitedAt != .distantPast else { return false }
+        record.lastVisitedAt = .distantPast
+        lastVisitedPersistAt[id] = now
+        records[id] = record
+        persist(record)
         return true
     }
 
@@ -2850,8 +2976,8 @@ final class AgentSupervisor {
     /// is precisely what this ticket adds. The production caller it defends is Phase 5's
     /// persistent session: an rpc session comes alive, or an approval opens, without
     /// this app having just sent a prompt.
-    func qaDeliver(_ event: AgentRuntimeEvent, to id: AgentID) {
-        deliver(event, to: id)
+    func qaDeliver(_ event: AgentRuntimeEvent, to id: AgentID, now: Date = Date()) {
+        deliver(event, to: id, now: now)
     }
 
     @discardableResult
@@ -2860,8 +2986,8 @@ final class AgentSupervisor {
             warn("AgentSupervisor.clearSettle: no agent \(id.rawValue.uuidString)")
             return false
         }
-        guard record.settledOverride.clearsOnActivity else { return false }
-        record.settledOverride = record.settledOverride.afterActivity()
+        guard record.settledOverride != .neutral else { return false }
+        record.settledOverride = .neutral
         settledOverrideClearReasons[id] = .user
         logSettleCleared(id, reason: .user)
         records[id] = record
@@ -2897,15 +3023,8 @@ final class AgentSupervisor {
         if subscribers[id]?.isEmpty == true { subscribers.removeValue(forKey: id) }
     }
 
-    private func deliver(_ event: AgentRuntimeEvent, to id: AgentID) {
-        updateTurnFacts(with: event, for: id)
-        // P3.3: a COMPLETED TURN is what makes a row unread — the agent stopped and
-        // has something for you. Only that event, and only when you are not already
-        // looking: streamed tokens and item events are the turn still running, and a
-        // turn you watched finish has been read by definition.
-        if case .turnCompleted = event, focusedAgentID != id {
-            unread.insert(id)
-        }
+    private func deliver(_ event: AgentRuntimeEvent, to id: AgentID, now: Date = Date()) {
+        updateTurnFacts(with: event, for: id, now: now)
 
         var buffer = history[id] ?? []
         buffer.append(event)
@@ -2915,24 +3034,41 @@ final class AgentSupervisor {
         history[id] = buffer
 
         if var record = records[id] {
-            record.lastActivityAt = Date()
+            record.lastActivityAt = max(record.lastActivityAt, now)
+            // A completion watched in the focused agent is a visit at the moment
+            // it lands. Keep the watermark monotonic and persist this write even
+            // though ordinary focus writes are throttled; otherwise the just-read
+            // completion would reappear after a relaunch.
+            let watchedCompletion: Bool
+            if case .turnCompleted = event, focusedAgentID == id {
+                watchedCompletion = record.isUnread
+                let visited = record.lastVisitedAt.map { max($0, now) } ?? now
+                record.lastVisitedAt = visited
+                if watchedCompletion { lastVisitedPersistAt[id] = now }
+            } else {
+                watchedCompletion = false
+            }
             // P4.4: real work un-settles the agent. Narrower than the stamp above —
             // every event is activity for the purposes of "when did this last do
             // anything", but only the `isRealActivity` set means "it is working
             // again", and `.sessionStateChanged(.ready)` in particular must not
             // (it is how a turn ENDS).
-            let unsettled = Self.isRealActivity(event) && clearSettleOnActivity(&record)
+            let unsettled = Self.clearsSettledOverride(event)
+                && clearSettleOnActivity(
+                    &record,
+                    clearKeepActivePin: Self.isRealActivity(event))
             records[id] = record
             // Only lifecycle-shaped events reach the disk. `contentDelta` arrives
             // per token and every write is an AtomicWriter write (temp file +
             // fsync + read-back), so persisting all of them would put a synchronous
-            // fsync per token on the main thread.
+            // fsync per token on the main thread. A watched completion is a
+            // read-watermark exception, just like an unread-clearing focus.
             //
             // A clear forces the write regardless: `.requestOpened` and
             // `.userInputRequested` are not persist-worthy, so without this the
             // agent would read `.neutral` in memory and come back `.settled` on the
             // next launch.
-            if Self.isPersistWorthy(event) || unsettled { persist(record) }
+            if Self.isPersistWorthy(event) || unsettled || watchedCompletion { persist(record) }
         }
 
         for continuation in (subscribers[id] ?? [:]).values {
@@ -2965,11 +3101,27 @@ final class AgentSupervisor {
             // trailing working run starts at whatever synthetic draft a restore left
             // behind — which is the 158-hour reading the sidebar was showing.
             facts.turnStartedAt = now
+            if var record = records[id] {
+                // P6.2: a turn start is real activity; the surrounding event
+                // delivery may still update metadata for non-activity events.
+                record.latestTurnAt = max(record.latestTurnAt ?? .distantPast, now)
+                records[id] = record
+            }
         case let .turnCompleted(_, _, outcome, errorMessage):
             facts.execution = .ready
             facts.didFail = outcome == .failed
             facts.failureMessage = outcome == .failed ? errorMessage : nil
             facts.turnStartedAt = nil
+            if var record = records[id] {
+                // P6.3/P6.4: completion is both a possible raised hand and the
+                // durable source for the unread axis. It is stamped at the actual
+                // switch arm, not inferred from lastActivityAt.
+                record.runCompletedAt = max(record.runCompletedAt ?? .distantPast, now)
+                if outcome == .failed {
+                    record.failedAt = max(record.failedAt ?? .distantPast, now)
+                }
+                records[id] = record
+            }
         case let .sessionStateChanged(state):
             // `.running` is session/process state, not proof of an active turn.
             // Only turnStarted/turnCompleted move the execution fact.
@@ -2977,6 +3129,10 @@ final class AgentSupervisor {
                 facts.execution = .ready
                 facts.didFail = true
                 facts.turnStartedAt = nil
+                if var record = records[id] {
+                    record.failedAt = max(record.failedAt ?? .distantPast, now)
+                    records[id] = record
+                }
             } else if state == .stopped || state == .ready {
                 facts.execution = .ready
                 facts.turnStartedAt = nil
@@ -3016,6 +3172,10 @@ final class AgentSupervisor {
             facts.didFail = true
             facts.failureMessage = message
             facts.turnStartedAt = nil
+            if var record = records[id] {
+                record.failedAt = max(record.failedAt ?? .distantPast, now)
+                records[id] = record
+            }
         case .itemStarted, .itemCompleted, .contentDelta, .tokenUsageUpdated:
             break
         }
@@ -4033,24 +4193,29 @@ func runAgentSupervisorChecks() async throws {
 
     let unsettleReport = try await checkAutoUnsettle(config: config, cwd: cwd, fail: fail)
 
-    // MARK: 16 · the model and the effort level belong to the AGENT, not to Settings (P6.1)
+    // MARK: 16 · lifecycle writers preserve P6.2–P6.4 facts
+
+    let lifecycleReport = try await checkPhase6LifecycleWriters(config: config, cwd: cwd, fail: fail)
+    let inboxLifecycleReport = try checkPhase6InboxView(fail: fail)
+
+    // MARK: 17 · the model and the effort level belong to the AGENT, not to Settings (P6.1)
 
     let providerReport = try await checkPerAgentProviderSettings(cwd: cwd, fail: fail)
 
-    // MARK: 17 · a row's status is the TURN's state, not the process's (P4.14)
+    // MARK: 18 · a row's status is the TURN's state, not the process's (P4.14)
 
     let rowStatusReport = try await AppDelegate.checkRowStatusIsTurnState(config: config, cwd: cwd, fail: fail)
 
-    // MARK: 18 · every semantic kind has one frozen renderer, with a safe fallback (91/P3.1)
+    // MARK: 19 · every semantic kind has one frozen renderer, with a safe fallback (91/P3.1)
 
     let rendererReport = try checkAgentBlockRendererRegistry(fail: fail)
 
-    // MARK: 19 · tile state and actions follow turn facts/capabilities (91/P5.2)
+    // MARK: 20 · tile state and actions follow turn facts/capabilities (91/P5.2)
 
     let turnStateReport = try await checkCapabilityDrivenTurnStates(config: config, cwd: cwd, fail: fail)
 
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport)")
 }
 
 @MainActor
@@ -8508,9 +8673,9 @@ private func checkBranchChip(
 ///   4. Focus leaving re-arms it: the next turn is unread again.
 ///   5. `focusTile` clears through the tile binding, which is how focus arrives on
 ///      the desktop (`FocusBroker` speaks tile ids).
-///   6. IT IS NOT DURABLE AND NOT SYNCED: the agent's persisted record carries no
-///      read-state key, and a second supervisor restoring the same store reports
-///      `.none` for an agent this one holds as unread.
+///   6. The watermark IS durable but remains local and unsynced: the record carries
+///      a visit timestamp rather than a derived unread flag, and a second supervisor
+///      restoring the same store derives the same comparison.
 ///
 /// The precedence between `unread` and `woke` is the vocabulary's, checked in
 /// `ContinuumRevivedAgentUIChecks/AgentInboxRowChecks.swift`; what is checked here
@@ -8519,20 +8684,17 @@ private func checkBranchChip(
 ///
 /// Three negative tests observed red at exit 1 with the final code, each a
 /// production edit to the section above:
-/// · `focus(agentID:)` no longer calling `unread.remove(id)` →
+/// · `focus(agentID:)` no longer advances the durable watermark →
 ///   `FAIL: read-state: focusing the agent left it unread`
-/// · `deliver`'s `focusedAgentID != id` guard dropped, so any completed turn marks
-///   the row →
-///   `FAIL: read-state: a turn you watched finish was marked unread — the mark
-///   would then mean `has ever finished a turn``
-/// · `archive` no longer dropping the read-state →
-///   `FAIL: read-state: archiving left focus Optional(…AgentID…) / attention none
-///   behind for a gone agent`
+/// · `deliver`'s focused-completion watermark update dropped, so a watched turn
+///   reappears after relaunch →
+///   `FAIL: read-state: the completion/watermark comparison was lost across relaunch`
+/// · the completion timestamp was derived from `lastActivityAt` instead of the
+///   turn-completion arm → the mark moved when unrelated metadata arrived.
 ///
-/// WHAT HAS NO NEGATIVE TEST, honestly: property 6. The forbidden-key scan is
-/// vacuity-guarded on `id` instead — writing a witness for it means adding a
-/// persisted read-state field to `AgentRecord`, which is the bug it exists to
-/// forbid, and the relaunch leg would then be red for the same one reason.
+/// The forbidden-key scan is still vacuity-guarded on `id`, and explicitly
+/// requires `lastVisitedAtReferenceInterval`; a derived `unread`/`focus` boolean
+/// remains forbidden even though the local watermark is durable.
 @MainActor
 private func checkReadState(
     config: AgentModelConfig.Resolution,
@@ -8554,7 +8716,17 @@ private func checkReadState(
         ]
     }
     let queue = ScriptedRunnerQueue((1 ... 4).map { ScriptedAgentRunner(script: turn("t\($0)")) })
-    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0) })
+    var persistedWriteCount = 0
+    let supervisor = AgentSupervisor(
+        store: store,
+        makeRunner: { queue.next($0) },
+        // Count the actual production store writes, not an in-memory helper. The
+        // closure still delegates to AgentStore.upsert, so every count is a real
+        // AtomicWriter persistence that the readback below can observe.
+        upsertRecord: { record in
+            persistedWriteCount += 1
+            try store.upsert(record)
+        })
 
     let tileId = UUID()
     let agentId = supervisor.spawn(
@@ -8583,11 +8755,15 @@ private func checkReadState(
         turnsRun += 1
     }
 
-    // 1 · nothing is unread before anything has happened, and a turn you did not
-    //     watch makes it so.
+    // 1 · nothing is unread before anything has happened. Establish the local
+    // watermark once before leaving the agent; an older record with no watermark
+    // is intentionally treated as already-read, while a new completion after a
+    // real visit is unread.
     guard supervisor.attention(for: agentId) == .none else {
         throw fail("read-state: a freshly spawned agent is already \(supervisor.attention(for: agentId).rawValue)")
     }
+    supervisor.focus(agentID: agentId)
+    supervisor.focus(agentID: nil)
     try await runOneTurn("first prompt")
     guard supervisor.attention(for: agentId) == .unread else {
         throw fail("read-state: a turn completed while you were looking elsewhere and the agent reads \(supervisor.attention(for: agentId).rawValue), not unread")
@@ -8598,10 +8774,29 @@ private func checkReadState(
         throw fail("read-state: a raised hand on an unread agent reads \(supervisor.attention(for: agentId, raisedHand: true).rawValue), not woke")
     }
 
-    // 2 · a deliberate focus clears it.
+    // 2 · a deliberate focus advances the watermark and clears it, without
+    // touching the metadata timestamp used by the frozen inbox order.
+    let activityBeforeVisit = supervisor.records[agentId]?.lastActivityAt
     supervisor.focus(agentID: agentId)
     guard supervisor.attention(for: agentId) == .none else {
         throw fail("read-state: focusing the agent left it \(supervisor.attention(for: agentId).rawValue)")
+    }
+    guard supervisor.records[agentId]?.lastActivityAt == activityBeforeVisit else {
+        throw fail("read-state: focusing an agent changed lastActivityAt and can reorder the inbox")
+    }
+    guard let visitedAt = supervisor.records[agentId]?.lastVisitedAt else {
+        throw fail("read-state: focus did not leave a durable visit watermark")
+    }
+    supervisor.focus(agentID: agentId, now: visitedAt.addingTimeInterval(-1))
+    guard supervisor.records[agentId]?.lastVisitedAt == visitedAt else {
+        throw fail("read-state: an out-of-order visit rewound the monotonic watermark")
+    }
+    guard supervisor.markUnread(agentID: agentId) && supervisor.attention(for: agentId) == .unread else {
+        throw fail("read-state: explicit mark-unread did not rewind the watermark")
+    }
+    supervisor.focus(agentID: agentId)
+    guard supervisor.attention(for: agentId) == .none else {
+        throw fail("read-state: a focus after mark-unread did not clear the derived mark")
     }
 
     // 3 · a turn completing while you are here is not unread.
@@ -8636,6 +8831,123 @@ private func checkReadState(
         throw fail("read-state: a turn after focus moved to another tile reads \(supervisor.attention(for: agentId).rawValue)")
     }
 
+    // 5b · P6.4 production-seam ordering and persistence proof. Add two settled
+    // records whose end order falls back to lastActivityAt, then VISIT the older
+    // settled target. If focus restamps activity it jumps ahead of its peer — the
+    // exact settled-block regression an active-only ordering check cannot expose.
+    struct SortDateSnapshot: Equatable {
+        let id: UUID
+        let createdAt: Date
+        let settledAt: Date?
+        let lastActivityAt: Date
+    }
+    let sortProbeID = AgentID(rawValue: UUID(uuidString: "2B640000-0000-4000-8000-0000000000F1")!)
+    let sortPeerID = AgentID(rawValue: UUID(uuidString: "2B640000-0000-4000-8000-0000000000F2")!)
+    let sortNow = (supervisor.records[agentId]?.lastActivityAt ?? Date()).addingTimeInterval(1)
+    let sortProbeEndAt = sortNow.addingTimeInterval(-120)
+    let sortPeerEndAt = sortNow.addingTimeInterval(-60)
+    try store.upsert(AgentRecord(
+        id: sortProbeID,
+        displayName: "Older settled visit target",
+        role: "reviewer",
+        model: config.model,
+        thinking: config.thinking,
+        cwd: cwd.path,
+        createdAt: sortNow.addingTimeInterval(-240),
+        lastActivityAt: sortProbeEndAt,
+        settledOverride: .settled
+    ))
+    try store.upsert(AgentRecord(
+        id: sortPeerID,
+        displayName: "Newer settled peer",
+        role: "reviewer",
+        model: config.model,
+        thinking: config.thinking,
+        cwd: cwd.path,
+        createdAt: sortNow.addingTimeInterval(-180),
+        lastActivityAt: sortPeerEndAt,
+        settledOverride: .settled
+    ))
+    let sortRestore = supervisor.restore()
+    guard sortRestore.restored.contains(sortProbeID),
+          sortRestore.restored.contains(sortPeerID) else {
+        throw fail("read-state: both settled sort probes must reach the production supervisor seam")
+    }
+    func inboxSortSnapshot() -> (ids: [UUID], dates: [SortDateSnapshot]) {
+        let rows = supervisor.records.values
+            .filter { $0.archivedAt == nil }
+            .map { record in
+                AgentInboxRow(
+                    id: record.id.rawValue,
+                    title: record.humanDisplayName,
+                    state: .ready,
+                    attention: supervisor.attention(for: record.id, now: sortNow),
+                    lifecycle: record.lifecycle(now: sortNow),
+                    createdAt: record.createdAt)
+            }
+        let dates = supervisor.records.values
+            .filter { $0.archivedAt == nil }
+            .sorted(by: AgentStore.isOrderedBefore)
+            .map { record in
+                SortDateSnapshot(
+                    id: record.id.rawValue,
+                    createdAt: record.createdAt,
+                    settledAt: record.settledAt,
+                    lastActivityAt: record.lastActivityAt)
+            }
+        return (InboxSort.sortForInbox(rows: rows).map(\.id), dates)
+    }
+    let sortBeforeVisit = inboxSortSnapshot()
+    guard sortBeforeVisit.ids.count == supervisor.records.values.filter({ $0.archivedAt == nil }).count,
+          let peerIndex = sortBeforeVisit.ids.firstIndex(of: sortPeerID.rawValue),
+          let targetIndex = sortBeforeVisit.ids.firstIndex(of: sortProbeID.rawValue),
+          peerIndex < targetIndex else {
+        throw fail("read-state: the pre-visit settled tail did not order the newer peer before the fallback-dated target — ids \(sortBeforeVisit.ids)")
+    }
+    let sortTargetActivityBefore = supervisor.records[sortProbeID]?.lastActivityAt
+    supervisor.focus(agentID: sortProbeID, now: sortNow)
+    let sortAfterSettledVisit = inboxSortSnapshot()
+    guard sortAfterSettledVisit.ids == sortBeforeVisit.ids,
+          sortAfterSettledVisit.dates == sortBeforeVisit.dates,
+          supervisor.records[sortProbeID]?.lastActivityAt == sortTargetActivityBefore else {
+        throw fail("read-state: visiting the settled fallback-dated target reordered history or changed its activity stamp — before \(sortBeforeVisit.ids), after \(sortAfterSettledVisit.ids)")
+    }
+    let writesBeforeVisit = persistedWriteCount
+    let activityBeforePersistenceVisit = supervisor.records[agentId]?.lastActivityAt
+    guard let completionAt = supervisor.records[agentId]?.runCompletedAt else {
+        throw fail("read-state: the production completion seam did not stamp runCompletedAt")
+    }
+    let unreadClearingVisitAt = completionAt.addingTimeInterval(1)
+    supervisor.focus(agentID: agentId, now: unreadClearingVisitAt)
+    guard supervisor.attention(for: agentId, now: unreadClearingVisitAt) == .none else {
+        throw fail("read-state: an unread-clearing visit left the production row \(supervisor.attention(for: agentId, now: unreadClearingVisitAt).rawValue)")
+    }
+    let writesAfterUnreadClear = persistedWriteCount
+    guard writesAfterUnreadClear > writesBeforeVisit,
+          try store.load(id: agentId)?.lastVisitedAt == unreadClearingVisitAt else {
+        throw fail("read-state: unread-clearing visit was throttled or stayed in memory — writes \(writesBeforeVisit) -> \(writesAfterUnreadClear), disk watermark \(String(describing: try store.load(id: agentId)?.lastVisitedAt))")
+    }
+    // Ordinary visits inside the ten-second window still advance memory, but do
+    // not write. Read the file back to prove this is actual persistence throttling.
+    let throttledVisitAt = unreadClearingVisitAt.addingTimeInterval(1)
+    supervisor.focus(agentID: agentId, now: throttledVisitAt)
+    guard supervisor.records[agentId]?.lastVisitedAt == throttledVisitAt,
+          persistedWriteCount == writesAfterUnreadClear,
+          try store.load(id: agentId)?.lastVisitedAt == unreadClearingVisitAt else {
+        throw fail("read-state: a visit inside the throttle wrote unexpectedly or failed to advance memory — writes \(writesAfterUnreadClear) -> \(persistedWriteCount), disk watermark \(String(describing: try store.load(id: agentId)?.lastVisitedAt))")
+    }
+    let sortAfterVisit = inboxSortSnapshot()
+    guard sortAfterVisit.ids == sortBeforeVisit.ids,
+          sortAfterVisit.dates == sortBeforeVisit.dates,
+          supervisor.records[agentId]?.lastActivityAt == activityBeforePersistenceVisit else {
+        throw fail("read-state: visiting changed the complete InboxSort order or an activity/sort timestamp — before \(sortBeforeVisit.ids), after \(sortAfterVisit.ids)")
+    }
+    guard supervisor.markUnread(agentID: agentId, now: throttledVisitAt.addingTimeInterval(1)),
+          supervisor.attention(for: agentId) == .unread,
+          try store.load(id: agentId)?.lastVisitedAt == .distantPast else {
+        throw fail("read-state: explicit mark-unread did not durably rewind the watermark")
+    }
+
     // 6 · LOCAL ONLY. Read-state is per-human and per-device, so it may not be in
     //     the record — the type `AgentStore` writes and the companion publishes.
     guard let record = supervisor.records[agentId] else {
@@ -8650,23 +8962,26 @@ private func checkReadState(
     guard fields["id"] != nil else {
         throw fail("read-state: the encoded record has no `id` key, so this scan is blind: \(fields.keys.sorted())")
     }
-    let forbidden = ["unread", "read", "attention", "focus", "focused", "seen", "viewed"]
+    let forbidden = ["unread", "attention", "focused", "seen", "viewed"]
     for key in fields.keys {
         let lowered = key.lowercased()
         if let hit = forbidden.first(where: { lowered.contains($0) }) {
-            throw fail("read-state: AgentRecord carries `\(key)` (matches `\(hit)`) — read-state is per-human and per-device and must not be persisted or synced")
+            throw fail("read-state: AgentRecord carries `\(key)` (matches `\(hit)`) — the durable watermark must remain a local timestamp, not a derived unread/focus flag")
         }
     }
+    guard fields["lastVisitedAtReferenceInterval"] != nil else {
+        throw fail("read-state: the local watermark was not encoded, so a relaunch could not preserve this device's read boundary")
+    }
     // And the store round-trip says the same thing from the other side: a second
-    // supervisor over the SAME directory restores the agent and knows nothing about
-    // this session's reading.
+    // supervisor over the SAME directory restores the agent and derives the same
+    // unread mark from completion time versus the persisted local watermark.
     let relaunched = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root), makeRunner: { _ in ScriptedAgentRunner(script: []) })
     let report = relaunched.restore()
     guard report.restored.contains(agentId) else {
         throw fail("read-state: the relaunched supervisor did not restore the agent (restored \(report.restored.count), stale \(report.stale.count)), so the round-trip is untested")
     }
-    guard relaunched.attention(for: agentId) == .none else {
-        throw fail("read-state: an unread mark survived into a fresh supervisor as \(relaunched.attention(for: agentId).rawValue) — it reached the disk")
+    guard relaunched.attention(for: agentId) == .unread else {
+        throw fail("read-state: the completion/watermark comparison was lost across relaunch — fresh supervisor reads \(relaunched.attention(for: agentId).rawValue)")
     }
 
     // Archiving takes the read-state with it.
@@ -8676,7 +8991,203 @@ private func checkReadState(
         throw fail("read-state: archiving left focus \(String(describing: supervisor.focusedAgentID)) / attention \(supervisor.attention(for: agentId).rawValue) behind for a gone agent")
     }
 
-    return "read-state over \(turnsRun) real turns: unwatched turns read unread, focus (by agent and by tile) clears it, a watched turn never sets it, and it survives neither the record (\(fields.count) keys) nor a relaunch"
+    return "read-state over \(turnsRun) real turns: completions after a durable visit read unread, focus (by agent and by tile) advances the watermark, a watched turn stays read, and the completion/watermark comparison survives the record (\(fields.count) keys) and a relaunch"
+}
+
+// P6.2/P6.3/P6.4 production-writer check. These assertions deliberately use
+// injected instants for the writer APIs and a held scripted runner for the one
+// fact that must remain live. Negative witnesses observed red during the slice:
+// · treating a working runner as a snooze blocker refused a valid visibility action;
+// · allowing a pending request through wrote a snooze over work waiting on a human;
+// · accepting `until <= now` created an already-expired shelf entry;
+// · clearing derived wake by mutating the stored dates lost the original snooze.
+@MainActor
+private func checkPhase6LifecycleWriters<Failure: Error>(
+    config: AgentModelConfig.Resolution,
+    cwd: URL,
+    fail: (String) -> Failure
+) async throws -> String {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-phase6-writer-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let heldRunner = ScriptedAgentRunner(
+        script: [.turnStarted(threadId: "phase6", turnId: "working")],
+        holdUntilStopped: true)
+    var runners = [heldRunner]
+    let supervisor = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: root),
+        makeRunner: { _ in
+            runners.removeFirst()
+        })
+    let now = Date(timeIntervalSinceReferenceDate: 806_300_000)
+    let workingID = supervisor.spawn(
+        role: "reviewer", prompt: nil, cwd: cwd,
+        model: config.model, thinking: config.thinking)
+    supervisor.send("hold this turn", to: workingID)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.isRunning(workingID)
+            && supervisor.turnSnapshot(for: workingID)?.state == .working
+    }) else {
+        throw fail("phase6 writers: the held runner never became a working turn")
+    }
+
+    let wakeAt = now.addingTimeInterval(3_600)
+    guard supervisor.snooze(agentID: workingID, until: wakeAt, now: now) else {
+        throw fail("phase6 writers: a working runner was incorrectly refused snooze")
+    }
+    guard supervisor.isRunning(workingID),
+          supervisor.records[workingID]?.snoozedUntil == wakeAt,
+          supervisor.records[workingID]?.snoozedAt == now else {
+        throw fail("phase6 writers: snooze did not preserve the live runner and both durable dates")
+    }
+    guard !supervisor.snooze(agentID: workingID, until: now, now: now) else {
+        throw fail("phase6 writers: a non-future wake was accepted")
+    }
+
+    let pendingID = supervisor.spawn(
+        role: "reviewer", prompt: nil, cwd: cwd,
+        model: config.model, thinking: config.thinking)
+    supervisor.qaDeliver(
+        .requestOpened(threadId: "phase6", requestId: "human", kind: .toolUserInput),
+        to: pendingID, now: now)
+    guard !supervisor.snooze(agentID: pendingID, until: wakeAt, now: now) else {
+        throw fail("phase6 writers: a request waiting on a human was snoozed")
+    }
+
+    guard supervisor.wake(agentID: workingID),
+          supervisor.records[workingID]?.snoozedUntil == nil,
+          supervisor.records[workingID]?.snoozedAt == nil else {
+        throw fail("phase6 writers: explicit wake did not clear both stored snooze dates")
+    }
+    // A persistent runner can be idle between turns. Its adopted prompt is older
+    // than the stamped turn, so it is not an unadopted-prompt blocker and must not
+    // renew a 30-second grace window each time the menu asks.
+    let idleAt = Date().addingTimeInterval(1)
+    supervisor.qaDeliver(
+        .turnCompleted(threadId: "phase6", turnId: "working", outcome: .completed, errorMessage: nil),
+        to: workingID,
+        now: idleAt)
+    let idleWakeAt = idleAt.addingTimeInterval(3_600)
+    guard supervisor.isRunning(workingID),
+          supervisor.turnSnapshot(for: workingID)?.state == .ready,
+          supervisor.snooze(agentID: workingID, until: idleWakeAt, now: idleAt),
+          supervisor.records[workingID]?.snoozedUntil == idleWakeAt else {
+        throw fail("phase6 writers: an idle persistent runner renewed an unadopted-prompt grace window and refused snooze")
+    }
+
+    let pinnedID = supervisor.spawn(
+        role: "reviewer", prompt: nil, cwd: cwd,
+        model: config.model, thinking: config.thinking)
+    guard supervisor.settle(agentID: pinnedID, now: now),
+          supervisor.pinActive(agentID: pinnedID),
+          supervisor.records[pinnedID]?.settledOverride == .active else {
+        throw fail("phase6 writers: settle/pinActive did not write the explicit lifecycle facts")
+    }
+    supervisor.qaDeliver(.sessionStateChanged(.running), to: pinnedID, now: now.addingTimeInterval(1))
+    supervisor.qaDeliver(.requestOpened(
+        threadId: "phase6", requestId: "pin-request", kind: .commandExecutionApproval),
+        to: pinnedID, now: now.addingTimeInterval(2))
+    supervisor.qaDeliver(.userInputRequested(
+        threadId: "phase6", requestId: "pin-input", questions: []),
+        to: pinnedID, now: now.addingTimeInterval(3))
+    guard supervisor.records[pinnedID]?.settledOverride == .active else {
+        throw fail("phase6 writers: session/request bookkeeping cleared the keep-active pin before a prompt/turn")
+    }
+    // The actual turn event is the production clear seam; unlike session state or
+    // request bookkeeping it proves that a new prompt was adopted by the runner.
+    supervisor.qaDeliver(.turnStarted(threadId: "phase6", turnId: "actual-turn"), to: pinnedID, now: now.addingTimeInterval(4))
+    guard supervisor.records[pinnedID]?.settledOverride == .neutral,
+          supervisor.settledOverrideClearReasons[pinnedID] == .activity else {
+        throw fail("phase6 writers: an actual turn did not reset the active pin with an activity reason")
+    }
+
+    supervisor.stop(workingID)
+    return "working and idle-persistent runners remained snoozable, non-future/pending-human snoozes were refused, explicit wake cleared dates, and settle→pin→real-activity reset the pin"
+}
+
+// P6.3's executable AppKit seam. This lives beside the supervisor check so the
+// matrix invokes the actual AgentInboxView timer and ChoiceListView paths, not a
+// parallel date helper. The scheduler is injected only at the boundary; the view
+// still owns earliest-wake selection, clamping, cancellation and callback routing.
+@MainActor
+private func checkPhase6InboxView<Failure: Error>(fail: (String) -> Failure) throws -> String {
+    let base = Date(timeIntervalSinceReferenceDate: 806_600_000)
+    var now = base
+    let activeID = UUID(uuidString: "2B630000-0000-4000-8000-000000000001")!
+    let soonID = UUID(uuidString: "2B630000-0000-4000-8000-000000000002")!
+    let farID = UUID(uuidString: "2B630000-0000-4000-8000-000000000003")!
+    let settledID = UUID(uuidString: "2B630000-0000-4000-8000-000000000004")!
+    func row(_ id: UUID, _ title: String, _ lifecycle: InboxLifecycle, _ createdAt: TimeInterval) -> AgentInboxRow {
+        AgentInboxRow(
+            id: id,
+            title: title,
+            state: .ready,
+            lifecycle: lifecycle,
+            createdAt: Date(timeIntervalSinceReferenceDate: createdAt))
+    }
+    let soon = base.addingTimeInterval(0.001)
+    let far = base.addingTimeInterval(2 * 86_400)
+    let rows = [
+        row(activeID, "Active", .active, base.timeIntervalSinceReferenceDate - 10),
+        row(soonID, "Soon", .snoozed(until: soon), base.timeIntervalSinceReferenceDate - 20),
+        row(farID, "Far", .snoozed(until: far), base.timeIntervalSinceReferenceDate - 30),
+        row(settledID, "Settled", .settled(at: base.addingTimeInterval(-40)), base.timeIntervalSinceReferenceDate - 40),
+    ]
+    let view = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    view.clock = { now }
+    var scheduledDelays: [TimeInterval] = []
+    var scheduledFires: [() -> Void] = []
+    var cancellationCount = 0
+    view.wakeRerenderScheduler = { delay, fire in
+        scheduledDelays.append(delay)
+        scheduledFires.append(fire)
+        return { cancellationCount += 1 }
+    }
+    view.reload(rows: rows)
+    guard scheduledDelays.count == 1,
+          scheduledFires.count == 1,
+          abs(scheduledDelays[0] - 0.05) < 0.000_1,
+          view.hasWakeRerenderTimerForQA,
+          view.scheduledWakeDelayForQA == scheduledDelays[0] else {
+        throw fail("phase6 inbox: expected one clamped timer for the earliest wake, got delays \(scheduledDelays), timer=\(view.hasWakeRerenderTimerForQA)")
+    }
+    // Move the injected clock to the first wake and fire the callback captured
+    // from the live scheduler. The view's own reload must drop the expired wake
+    // and reschedule the remaining far wake at the maximum clamp.
+    now = soon
+    scheduledFires[0]()
+    guard view.wakeRerenderCountForQA == 1,
+          scheduledDelays.count == 2,
+          cancellationCount == 1,
+          abs(scheduledDelays[1] - 86_400) < 0.000_1,
+          view.hasWakeRerenderTimerForQA else {
+        throw fail("phase6 inbox: expiry did not rerender and reschedule one far wake with the maximum clamp — renders \(view.wakeRerenderCountForQA), delays \(scheduledDelays), cancellations \(cancellationCount)")
+    }
+
+    // Presets are captured by the same menu-open seam. Changing the injected
+    // clock before activation must not change the absolute date already carried
+    // by the menu item.
+    let presetView = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    let menuOpenedAt = base.addingTimeInterval(9_000)
+    var menuClock = menuOpenedAt
+    presetView.clock = { menuClock }
+    let presetID = UUID(uuidString: "2B630000-0000-4000-8000-000000000005")!
+    presetView.reload(rows: [row(presetID, "Preset target", .active, menuOpenedAt.timeIntervalSinceReferenceDate)])
+    var capturedSnooze: (ids: [UUID], wakeAt: Date)?
+    presetView.onSnoozeSelection = { ids, wakeAt in capturedSnooze = (ids, wakeAt) }
+    guard presetView.openSnoozeMenuForQA(ids: [presetID]),
+          presetView.snoozeOptionTitlesForQA.contains(SnoozePreset.inOneHour.title) else {
+        throw fail("phase6 inbox: the production snooze menu did not open through its choice list")
+    }
+    let expectedWake = SnoozePreset.inOneHour.wakeDate(
+        from: menuOpenedAt, calendar: Calendar.autoupdatingCurrent)
+    menuClock = menuOpenedAt.addingTimeInterval(7_200)
+    guard presetView.pickSnoozePresetForQA(.inOneHour),
+          capturedSnooze?.ids == [presetID],
+          capturedSnooze?.wakeAt == expectedWake else {
+        throw fail("phase6 inbox: preset activation recomputed from activation time — opened \(menuOpenedAt), activated \(menuClock), captured \(String(describing: capturedSnooze?.wakeAt)), expected \(expectedWake)")
+    }
+    return "AgentInboxView timer/preset seams: one earliest wake, expiry rerendered and rescheduled with 0.05s/86400s clamps, and in-one-hour captured from menu-open time"
 }
 
 // Ticket: docs/38-tickets/90-agent-ux/P4.4-auto-unsettle.md
@@ -8702,9 +9213,8 @@ private func checkReadState(
 ///      no-op reads (`focus`/`focusTile` is viewing, and reading is free per P4.9;
 ///      `branchContext` is the header refresh).
 ///   4. A user message (`send`) clears it.
-///   5. The keep-active `.active` PIN survives activity, per
-///      `SettledOverride.afterActivity()`'s reasoning: clearing it would discard a
-///      human decision and let the next inactivity sweep bury the row.
+///   5. The keep-active `.active` PIN lasts until the next real activity, then
+///      returns to `.neutral` so the normal inactivity rule can apply again.
 ///   6. The two clears are ATTRIBUTED: `.activity` for the app's, `.user` for
 ///      `clearSettle(agentID:)`, and `restore()` records neither.
 @MainActor
@@ -8722,13 +9232,11 @@ private func checkAutoUnsettle(
 
     let provider = "provider-thread"
     let activity: [AgentRuntimeEvent] = [
-        .sessionStateChanged(.starting),
-        .sessionStateChanged(.running),
-        .turnStarted(threadId: provider, turnId: "t1"),
-        .requestOpened(threadId: provider, requestId: "r1", kind: .commandExecutionApproval),
-        .userInputRequested(threadId: provider, requestId: "q1", questions: [])
+        .turnStarted(threadId: provider, turnId: "t1")
     ]
     let notActivity: [AgentRuntimeEvent] = [
+        .sessionStateChanged(.starting),
+        .sessionStateChanged(.running),
         .sessionStateChanged(.ready),
         .sessionStateChanged(.waiting),
         .sessionStateChanged(.stopped),
@@ -8737,20 +9245,22 @@ private func checkAutoUnsettle(
         .itemStarted(threadId: provider, itemId: "i1", kind: .commandExecution, title: "ls"),
         .itemCompleted(threadId: provider, itemId: "i1", kind: .commandExecution, status: .completed),
         .contentDelta(threadId: provider, turnId: "t1", streamKind: .assistant, delta: "…"),
+        .requestOpened(threadId: provider, requestId: "r1", kind: .commandExecutionApproval),
         .requestResolved(threadId: provider, requestId: "r1", decision: "approved"),
+        .userInputRequested(threadId: provider, requestId: "q1", questions: []),
         .userInputResolved(threadId: provider, requestId: "q1"),
         .tokenUsageUpdated(threadId: provider, snapshot: TokenUsageSnapshot(inputTokens: 1, outputTokens: 1, totalCostUsd: nil)),
         .runtimeError(threadId: provider, message: "boom")
     ]
     for event in activity where !AgentSupervisor.isRealActivity(event) {
-        throw fail("auto-unsettle: \(event) is real activity and the classifier says it is not")
+        throw fail("auto-unsettle: \(event) is genuine prompt/turn activity and the classifier says it is not")
     }
     for event in notActivity where AgentSupervisor.isRealActivity(event) {
-        throw fail("auto-unsettle: \(event) is not real activity and the classifier says it is — un-settling on it would undo a settle the moment it was made")
+        throw fail("auto-unsettle: \(event) is not a genuine prompt/turn and the pin classifier says it is — observer/bookkeeping traffic must not clear a keep-active pin")
     }
     // Both sides of the table cover every `AgentRuntimeEvent` case, which
-    // `isRealActivity`'s exhaustive switch keeps honest at compile time; the count
-    // guard is what catches a case dropped from THIS table.
+    // the exhaustive classifiers keep honest at compile time; the count guard
+    // catches a case dropped from THIS table.
     let caseCount = activity.count + notActivity.count
     guard caseCount == 17 else {
         throw fail("auto-unsettle: the classifier table covers \(caseCount) event shapes, expected 17 — a case was added or dropped without a decision")
@@ -8825,18 +9335,29 @@ private func checkAutoUnsettle(
         throw fail("auto-unsettle: an input request left the agent \(String(describing: supervisor.records[questionAgent]?.settledOverride.rawValue)) in memory / \(String(describing: try store.load(id: questionAgent)?.settledOverride.rawValue)) on disk")
     }
 
-    // 2c · a session coming alive does the same.
+    // 2c · a session coming alive still clears a restored SETTLE, but it must not
+    //      clear a keep-active PIN.
     let aliveAgent = try adoptAgent("alive", override: .settled)
     supervisor.qaDeliver(.sessionStateChanged(.running), to: aliveAgent)
     guard supervisor.records[aliveAgent]?.settledOverride == .neutral,
           try store.load(id: aliveAgent)?.settledOverride == .neutral else {
-        throw fail("auto-unsettle: a session coming alive left the agent \(String(describing: supervisor.records[aliveAgent]?.settledOverride.rawValue)) in memory / \(String(describing: try store.load(id: aliveAgent)?.settledOverride.rawValue)) on disk")
+        throw fail("auto-unsettle: a session coming alive left the restored settle \(String(describing: supervisor.records[aliveAgent]?.settledOverride.rawValue)) in memory / \(String(describing: try store.load(id: aliveAgent)?.settledOverride.rawValue)) on disk")
+    }
+    let pinnedSessionAgent = try adoptAgent("pinned session", override: .active)
+    supervisor.qaDeliver(.sessionStateChanged(.running), to: pinnedSessionAgent)
+    supervisor.qaDeliver(.requestOpened(threadId: provider, requestId: "pin-r1", kind: .commandExecutionApproval), to: pinnedSessionAgent)
+    supervisor.qaDeliver(.userInputRequested(threadId: provider, requestId: "pin-q1", questions: []), to: pinnedSessionAgent)
+    guard supervisor.records[pinnedSessionAgent]?.settledOverride == .active,
+          try store.load(id: pinnedSessionAgent)?.settledOverride == .active else {
+        throw fail("auto-unsettle: session/request bookkeeping cleared a keep-active pin — got \(String(describing: supervisor.records[pinnedSessionAgent]?.settledOverride.rawValue)) / \(String(describing: try store.load(id: pinnedSessionAgent)?.settledOverride.rawValue))")
     }
 
-    // MARK: 3 · the regression witness — a refresh does not un-settle
+    // MARK: 3 · the regression witness — observer/bookkeeping refreshes do not
+    // un-settle. Session/request events are intentionally excluded here because
+    // section 2 proves their older P4.4 settle-clearing behavior separately.
 
     let refreshAgent = try adoptAgent("refresh", override: .settled)
-    for event in notActivity {
+    for event in notActivity where !AgentSupervisor.clearsSettledOverride(event) {
         supervisor.qaDeliver(event, to: refreshAgent)
         guard supervisor.records[refreshAgent]?.settledOverride == .settled else {
             throw fail("auto-unsettle: \(event) un-settled the agent — an agent settling into ready, or reporting on itself, is the normal end of work and would undo every settle")
@@ -8880,16 +9401,19 @@ private func checkAutoUnsettle(
         throw fail("auto-unsettle: clearing the override also erased settledAt (\(String(describing: supervisor.records[promptAgent]?.settledAt)))")
     }
 
-    // MARK: 5 · the keep-active pin is not something activity may outvote
+    // MARK: 5 · a keep-active pin lasts until genuine prompt/turn activity
 
     let pinnedAgent = try adoptAgent("pinned", override: .active)
     supervisor.qaDeliver(.sessionStateChanged(.running), to: pinnedAgent)
-    supervisor.send("carry on", to: pinnedAgent)
     guard supervisor.records[pinnedAgent]?.settledOverride == .active else {
-        throw fail("auto-unsettle: activity reset the keep-active pin to \(String(describing: supervisor.records[pinnedAgent]?.settledOverride.rawValue)) — the next inactivity sweep would then bury a row the human deliberately kept")
+        throw fail("auto-unsettle: session-running cleared the keep-active pin before a prompt/turn — got \(String(describing: supervisor.records[pinnedAgent]?.settledOverride.rawValue))")
     }
-    guard supervisor.settledOverrideClearReasons[pinnedAgent] == nil else {
-        throw fail("auto-unsettle: a pin that did not move still recorded a clear reason \(String(describing: supervisor.settledOverrideClearReasons[pinnedAgent]?.rawValue))")
+    supervisor.send("carry on", to: pinnedAgent)
+    guard supervisor.records[pinnedAgent]?.settledOverride == .neutral else {
+        throw fail("auto-unsettle: send did not reset the keep-active pin — got \(String(describing: supervisor.records[pinnedAgent]?.settledOverride.rawValue))")
+    }
+    guard supervisor.settledOverrideClearReasons[pinnedAgent] == .activity else {
+        throw fail("auto-unsettle: resetting a pin did not record an activity clear reason — got \(String(describing: supervisor.settledOverrideClearReasons[pinnedAgent]?.rawValue))")
     }
 
     // MARK: 6 · the human's own path is separate, and says so
@@ -8915,7 +9439,7 @@ private func checkAutoUnsettle(
         throw fail("auto-unsettle: clearSettle reported a write for an agent this supervisor does not have")
     }
 
-    return "auto-unsettle over \(caseCount) event shapes: an approval, an input request and a session coming alive clear a restored settle (memory AND store), a user message clears it, \(notActivity.count) observer-shaped events + stop + focus + a branch refresh do not, the keep-active pin survives all of it, and the two clears are attributed activity vs user in \(warnings.lines.filter { $0.contains("cleared the settle") }.count) log lines"
+    return "auto-unsettle over \(caseCount) event shapes: approval/input/session traffic clears a restored settle but not a keep-active pin, send clears the pin, \(notActivity.count) observer/bookkeeping shapes + stop + focus + a branch refresh do not clear it, and the two clears are attributed activity vs user in \(warnings.lines.filter { $0.contains("cleared the settle") }.count) log lines"
 }
 
 // Ticket: docs/38-tickets/90-agent-ux/P6.1-per-agent-model-effort.md

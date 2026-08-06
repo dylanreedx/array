@@ -20,7 +20,8 @@ func runAgentRecordChecks() {
     runAgentRecordSyncBoundaryTaintWitness()
     // Ticket: docs/38-tickets/90-agent-ux/P4.1-lifecycle-state.md
     runAgentRecordLifecycleCheck()
-    print("AgentRecord checks: exact Date round-trip, decode-forward, headless view binding, I5 taint witness, and P4.1 lifecycle persistence passed")
+    runAgentRecordAttentionCheck()
+    print("AgentRecord checks: exact Date round-trip, decode-forward, headless view binding, I5 taint witness, P4.1 lifecycle persistence, and P6 attention/watermark derivation passed")
 }
 
 private func makeAgentRecordFixture(
@@ -28,6 +29,11 @@ private func makeAgentRecordFixture(
     tileId: UUID? = UUID(uuidString: "2A100000-0000-4000-8000-000000000009")!,
     createdAt: Date = Date(timeIntervalSinceReferenceDate: 806_000_000.25),
     lastActivityAt: Date = Date(timeIntervalSinceReferenceDate: 806_000_123.75),
+    latestPromptAt: Date? = nil,
+    latestTurnAt: Date? = nil,
+    failedAt: Date? = nil,
+    runCompletedAt: Date? = nil,
+    lastVisitedAt: Date? = nil,
     settledOverride: SettledOverride = .default,
     settledAt: Date? = nil,
     snoozedUntil: Date? = nil,
@@ -52,6 +58,11 @@ private func makeAgentRecordFixture(
         sourceItemId: "ENG-214",
         createdAt: createdAt,
         lastActivityAt: lastActivityAt,
+        latestPromptAt: latestPromptAt,
+        latestTurnAt: latestTurnAt,
+        failedAt: failedAt,
+        runCompletedAt: runCompletedAt,
+        lastVisitedAt: lastVisitedAt,
         tileId: tileId,
         settledOverride: settledOverride,
         settledAt: settledAt,
@@ -518,4 +529,99 @@ private func runAgentRecordLifecycleCheck() {
     }
     expect(taintCheck(taintJson).count == 1,
            "the lifecycle fields add nothing for the taint scanner to flag — found \(taintCheck(taintJson))")
+}
+
+// P6.2/P6.4 · the new optional dates are durable facts, but a malformed optional
+// field fails closed to nil rather than dropping an otherwise restorable agent.
+// NEGATIVE WITNESSES observed red before the final code:
+// · deriving inactivity from `lastActivityAt` kept a metadata-only stale fixture
+//   active/settled at the wrong boundary;
+// · decoding `lastVisitedAtReferenceInterval` strictly rejected the malformed
+//   payload instead of treating it as never visited and preserving a wake.
+private func runAgentRecordAttentionCheck() {
+    let encoder = JSONCodec.makeEncoder()
+    let decoder = JSONCodec.makeDecoder()
+    let now = Date(timeIntervalSinceReferenceDate: 806_200_000)
+    let record = makeAgentRecordFixture(
+        latestPromptAt: now.addingTimeInterval(-60),
+        latestTurnAt: now.addingTimeInterval(-30),
+        failedAt: now.addingTimeInterval(10),
+        runCompletedAt: now.addingTimeInterval(20),
+        lastVisitedAt: now)
+    guard let data = try? encoder.encode(record),
+          let text = String(data: data, encoding: .utf8),
+          let decoded = try? decoder.decode(AgentRecord.self, from: data)
+    else {
+        fputs("FAIL: P6 attention record failed to encode/decode\n", stderr)
+        Foundation.exit(1)
+    }
+    expect(decoded == record,
+           "P6 activity, wake, completion, and visit dates round-trip exactly")
+    for key in ["latestPromptAtReferenceInterval", "latestTurnAtReferenceInterval",
+                "failedAtReferenceInterval", "runCompletedAtReferenceInterval",
+                "lastVisitedAtReferenceInterval"] {
+        expect(text.contains(key), "P6 record writes the durable `\(key)` field")
+    }
+    expect(record.realActivityAt == now.addingTimeInterval(-30),
+           "auto-settle chooses the newer prompt/turn stamp, not metadata activity")
+    expect(record.isUnread,
+           "a completion after the local watermark is unread")
+
+    // Never visited has opposite defaults on purpose: old completions do not
+    // light up as unread, while a signal after a snooze still raises a hand.
+    var neverVisited = record
+    neverVisited.lastVisitedAt = nil
+    neverVisited.snoozedAt = now
+    neverVisited.snoozedUntil = now.addingTimeInterval(3_600)
+    expect(!neverVisited.isUnread && neverVisited.isWoke,
+           "a never-visited row is read but a post-snooze signal is woke")
+    expect(neverVisited.attention(now: now) == .woke,
+           "the derived attention axis reports woke for that never-visited signal")
+
+    // Visits are monotonic in the writer; the record-level comparison also makes
+    // an explicit mark-unread rewind visible without inventing an unread boolean.
+    var replayedVisit = record
+    replayedVisit.lastVisitedAt = now.addingTimeInterval(30)
+    expect(!replayedVisit.isUnread,
+           "a watermark newer than completion keeps the row read")
+    replayedVisit.lastVisitedAt = .distantPast
+    expect(replayedVisit.isUnread,
+           "mark-unread's deliberate distant-past rewind makes the completion unread")
+
+    let malformed = """
+    {
+      "schemaVersion": 1,
+      "id": "2A100000-0000-4000-8000-000000000041",
+      "displayName": "Malformed optional dates",
+      "model": "openai-codex/gpt-5.6-sol",
+      "thinking": "medium",
+      "cwd": "/Users/qa/malformed",
+      "createdAtReferenceInterval": 806000000.25,
+      "lastActivityAtReferenceInterval": 806000001.5,
+      "latestPromptAtReferenceInterval": "not-a-date",
+      "latestTurnAtReferenceInterval": {"bad": true},
+      "failedAtReferenceInterval": 806000020.0,
+      "runCompletedAtReferenceInterval": 806000030.0,
+      "snoozedAtReferenceInterval": 806000000.0,
+      "snoozedUntilReferenceInterval": 806004000.0,
+      "lastVisitedAtReferenceInterval": "not-a-date"
+    }
+    """
+    do {
+        let decoded = try decoder.decode(AgentRecord.self, from: Data(malformed.utf8))
+        expect(decoded.latestPromptAt == nil && decoded.latestTurnAt == nil
+                && decoded.failedAt == Date(timeIntervalSinceReferenceDate: 806000020.0)
+                && decoded.lastVisitedAt == nil,
+               "malformed optional P6 timestamps fail closed while valid facts survive")
+        expect(decoded.runCompletedAt == Date(timeIntervalSinceReferenceDate: 806000030.0)
+                && !decoded.isUnread && decoded.isWoke,
+               "a valid completion survives malformed optional fields, missing visit reads as history, and preserves a wake")
+        expect(decoded.lifecycle(
+            autoSettleAfter: 3 * 86_400,
+            now: Date(timeIntervalSinceReferenceDate: 806_400_000)) == .active,
+               "malformed/missing real-activity stamps fail toward active instead of auto-settling")
+    } catch {
+        fputs("FAIL: malformed optional P6 timestamps dropped the record: \(error)\n", stderr)
+        Foundation.exit(1)
+    }
 }

@@ -787,10 +787,10 @@ func runSnoozeRaisedHandChecks() {
 //       stated as an identity rather than as a separate list of cases: a
 //       descendant's blocker earns exactly the precedence the agent's own does, so
 //       a parent is not settleable while anything under it is blocked or running.
-//   3 · real activity has just arrived (P4.4) → the row for
+//   3 · real activity has just arrived (P4.4/P6.2) → the row for
 //       `override.afterActivity()` at this snooze's FRESH column, because activity
-//       both clears a settle and makes the agent fresh. Derived from the grid by a
-//       stated row-substitution, not by a second oracle.
+//       clears either explicit override and makes the agent fresh. Derived from the
+//       grid by a stated row-substitution, not by a second oracle.
 //   4 · the row is carrying a failure while snoozed (P4.6) → an OLD failure (one
 //       the human had already seen when they parked it) resolves as the grid says,
 //       and a NEW one resolves as this row's SNOOZE-ELAPSED column, because
@@ -821,16 +821,12 @@ func runSnoozeRaisedHandChecks() {
 //      "FAIL: P4.13 own blocker · override active · blocker none · snooze none ·
 //      inactivity stale — expected active, resolved settled(at: 2026-05-02 06:13:20
 //      +0000)".
-//   3. activity clears an override — `afterActivity()` reduced to `self` → red HERE
-//      FIRST in both runs; nothing earlier in the matrix catches it: "FAIL: P4.13
-//      activity clears a settle and only a settle · override settled · blocker none
-//      · snooze none · inactivity fresh — expected neutral, got settled".
-//   3b. …and the same rule from the other side, `afterActivity()` returning
-//      `.neutral` for everything, so activity outvotes the keep-active pin → "FAIL:
-//      P4.13 activity clears a settle and only a settle · override active · blocker
-//      none · snooze none · inactivity fresh — expected active, got neutral". Also
-//      red here first. This is the pair that made the expectation stop reading the
-//      substitution out of the function under test.
+//   3. activity clears both explicit overrides — `afterActivity()` reduced to
+//      `self` → red HERE FIRST in both runs; nothing earlier in the matrix catches
+//      the settled half: "FAIL: P4.13 activity clears an override · override settled
+//      · blocker none · snooze none · inactivity fresh — expected neutral, got settled".
+//      The active-pin half is the P6.2 extension and is asserted by the same literal
+//      row substitution rather than by a second supervisor oracle.
 //   4. a pre-snooze failure does not wake — the newness test dropped, so any
 //      recorded failure wakes → lands at P4.6's table ("a failure one second BEFORE
 //      the snooze was set stays snoozed — the human saw it and said not now —
@@ -998,16 +994,16 @@ private func runPrecedenceMatrixCheck() {
                 expect(rolled == expected,
                        "P4.13 child blocker · \(facts) — expected \(expected), resolved \(rolled)")
 
-                // 3 · Real activity has just arrived (P4.4): the settle is cleared,
-                // the pin is not, and the agent is fresh by definition — so the
-                // answer is this same table read at another row.
+                // 3 · Real activity has just arrived (P4.4/P6.2): either explicit
+                // override is cleared, and the agent is fresh by definition — so
+                // the answer is this same table read at another row.
                 //
                 // THE RULE IS WRITTEN ON THE EXPECTATION SIDE, not read from
                 // `afterActivity()`: taking the substitution from the function
                 // under test would move the expectation with the mutation, and the
                 // witness would then only catch it by a date coincidence (observed,
                 // before this line was written that way).
-                let clearedByRule: SettledOverride = rowSpec.override == .settled ? .neutral : rowSpec.override
+                let clearedByRule: SettledOverride = .neutral
                 expect(rowSpec.override.afterActivity() == clearedByRule,
                        "P4.13 activity clears a settle and only a settle · \(facts) — expected \(clearedByRule.rawValue), got \(rowSpec.override.afterActivity().rawValue)")
                 expect(rowSpec.override.clearsOnActivity == (clearedByRule != rowSpec.override),
@@ -1072,7 +1068,7 @@ private func printPrecedenceMatrix() {
 
 func runPrecedenceMatrixChecks() {
     runPrecedenceMatrixCheck()
-    print("Precedence-matrix checks: 90 combinations × 5 passes passed — a blocker (the agent's own or a child's) outranks \"I said done\", the keep-active pin outranks auto-settle, activity clears a settle and not a pin, and a snooze only breaks for a failure the human had not already seen")
+    print("Precedence-matrix checks: 90 combinations × 5 passes passed — a blocker (the agent's own or a child's) outranks \"I said done\", the keep-active pin outranks auto-settle until real activity, activity clears both explicit overrides, and a snooze only breaks for a failure the human had not already seen")
 }
 
 func runEffectiveLifecycleChecks() {
