@@ -16,6 +16,11 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+if CommandLine.arguments.contains("--location-session-index-p5-check") {
+    try runLocationSessionIndexP5Checks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--agent-status-vocabulary-check") {
     runStatusVocabularyUnificationChecks()
     Foundation.exit(0)
