@@ -21451,6 +21451,19 @@ extension AppDelegate {
 // never hidden") is asked to keep a row the source never produced. It is a no-op — the
 // scope decides what is VISIBLE, the row source decides what EXISTS — and the check
 // asserts both halves so the answer cannot drift into either rule silently.
+/// Mutable state shared by the main-actor callbacks in the inbox check harness.
+/// Keeping it behind an explicitly main-actor-owned reference avoids capturing
+/// task-local variables in escaping view callbacks under Swift 6 release checking.
+@MainActor
+private final class AgentInboxCheckHarnessState {
+    var advanceRowCalls: [(InboxRowAction, [UUID])] = []
+    var advanceBulkCalls: [(InboxBulkAction, [UUID])] = []
+    var advanceHostScript: (() -> Void)?
+    var undoStore: [UUID: InboxLifecycleSnapshot] = [:]
+    var undoRestores: [[UUID: InboxLifecycleSnapshot]] = []
+    var undoHostScript: (([UUID]) -> Void)?
+}
+
 extension AppDelegate {
     static func runAgentInboxChecks() async throws {
     enum CheckError: Error, CustomStringConvertible {
@@ -24785,8 +24798,7 @@ extension AppDelegate {
     let advance3 = try advanceRow(3)   // failed
     let advance4 = try advanceRow(4)   // ready, and LAST in the list
 
-    var advanceRowCalls: [(InboxRowAction, [UUID])] = []
-    var advanceBulkCalls: [(InboxBulkAction, [UUID])] = []
+    let checkState = AgentInboxCheckHarnessState()
     var advanceWindows: [NSWindow] = []
     /// WHAT THE HOST DOES WHILE THE ACTION RUNS, and the reason every scenario below
     /// scripts one instead of pushing after the dispatch returned: production performs
@@ -24794,12 +24806,11 @@ extension AppDelegate {
     /// → `refreshAgentSurfaces`, with a confirmation sheet in the middle of it). "While
     /// the action was in flight" is that closure, so that is where the mid-action pushes,
     /// the mid-action navigation and the mid-action reads happen here.
-    var advanceHostScript: (() -> Void)?
     func makeAdvanceView(rows: [AgentInboxRow]) -> AgentInboxView {
         let view = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
         view.clock = { LabFixtures.inboxNow }
-        view.onRowAction = { advanceRowCalls.append(($0, $1)); advanceHostScript?() }
-        view.onBulkAction = { advanceBulkCalls.append(($0, $1)); advanceHostScript?() }
+        view.onRowAction = { checkState.advanceRowCalls.append(($0, $1)); checkState.advanceHostScript?() }
+        view.onBulkAction = { checkState.advanceBulkCalls.append(($0, $1)); checkState.advanceHostScript?() }
         // Every action declared wired: the capability gate is section H's, and this
         // section is about where the cursor lands once one of them has run.
         view.wiredRowActions = Set(InboxRowAction.allCases)
@@ -24856,7 +24867,7 @@ extension AppDelegate {
                "setup: the cursor starts on the row being settled — got \(advanceMiddle.selectedRowIdsForQA.count) rows")
     var midFlightSelection: [UUID] = []
     var midFlightArmed = false
-    advanceHostScript = {
+    checkState.advanceHostScript = {
         advanceMiddle.apply(rows: advanceChurning(advance2.id), changed: .empty)
         midFlightSelection = advanceMiddle.selectedRowIdsForQA
         midFlightArmed = advanceMiddle.isAdvanceArmedForQA
@@ -24864,8 +24875,8 @@ extension AppDelegate {
     }
     try settleFromMenu(advanceMiddle, advance1)
     advanceMiddle.layoutForQA()
-    try expect(advanceRowCalls.last?.0 == .settle && advanceRowCalls.last?.1 == [advance1.id],
-               "the host is asked to settle exactly that agent — got \(String(describing: advanceRowCalls.last?.1.count))")
+    try expect(checkState.advanceRowCalls.last?.0 == .settle && checkState.advanceRowCalls.last?.1 == [advance1.id],
+               "the host is asked to settle exactly that agent — got \(String(describing: checkState.advanceRowCalls.last?.1.count))")
     try expect(midFlightSelection == [advance1.id],
                "a push that files nothing must not move the cursor — got \(midFlightSelection)")
     try expect(midFlightArmed,
@@ -24882,7 +24893,7 @@ extension AppDelegate {
     try expect(advanceLast.rowIdsForQA.last == advance4.id,
                "setup: agent 4 must be the last row — got \(advanceLast.rowIdsForQA.count) rows")
     try expect(advanceLast.selectRowForQA(id: advance4.id), "the last row must be selectable")
-    advanceHostScript = { advanceLast.apply(rows: advanceSettling([advance4.id]), changed: .empty) }
+    checkState.advanceHostScript = { advanceLast.apply(rows: advanceSettling([advance4.id]), changed: .empty) }
     try settleFromMenu(advanceLast, advance4)
     advanceLast.layoutForQA()
     try expect(advanceLast.rowIdsForQA == advanceOrder,
@@ -24896,7 +24907,7 @@ extension AppDelegate {
     let advanceAway = makeAdvanceView(rows: advanceFixture)
     try expect(advanceAway.selectRowForQA(id: advance4.id), "the last row must be selectable")
     var navigatedAway = false
-    advanceHostScript = {
+    checkState.advanceHostScript = {
         navigatedAway = advanceAway.selectRowForQA(id: advance0.id)
         advanceAway.apply(rows: advanceSettling([advance4.id]), changed: .empty)
     }
@@ -24915,12 +24926,12 @@ extension AppDelegate {
                "two rows must be selectable together")
     advanceBulk.layoutForQA()
     try expect(advanceBulk.isBulkBarVisibleForQA, "setup: two rows raise the bar")
-    advanceHostScript = { advanceBulk.apply(rows: advanceSettling([advance1.id, advance3.id]), changed: .empty) }
+    checkState.advanceHostScript = { advanceBulk.apply(rows: advanceSettling([advance1.id, advance3.id]), changed: .empty) }
     try expect(advanceBulk.pickBulkActionForQA(.settle),
                "Settle must be offered to the pair — got \(advanceBulk.bulkActionTitlesForQA)")
     advanceBulk.layoutForQA()
-    try expect(advanceBulkCalls.last?.1 == [advance1.id, advance3.id],
-               "the host is asked to settle both, in screen order — got \(String(describing: advanceBulkCalls.last?.1.count))")
+    try expect(checkState.advanceBulkCalls.last?.1 == [advance1.id, advance3.id],
+               "the host is asked to settle both, in screen order — got \(String(describing: checkState.advanceBulkCalls.last?.1.count))")
     try expect(advanceBulk.selectedRowIdsForQA == [advance4.id],
                "the cursor clears the whole affected set — got \(advanceBulk.selectedRowIdsForQA)")
     try expect(advanceBulk.selectedRowIdsForQA != [advance2.id],
@@ -24932,14 +24943,14 @@ extension AppDelegate {
     // than waiting to fire on some later push that finally does file the row.
     let advanceRefused = makeAdvanceView(rows: advanceFixture)
     try expect(advanceRefused.selectRowForQA(id: advance1.id), "the row must be selectable")
-    advanceHostScript = { advanceRefused.apply(rows: advanceFixture, changed: .empty) }
+    checkState.advanceHostScript = { advanceRefused.apply(rows: advanceFixture, changed: .empty) }
     try settleFromMenu(advanceRefused, advance1)
     advanceRefused.layoutForQA()
     try expect(advanceRefused.selectedRowIdsForQA == [advance1.id],
                "an action that changed nothing leaves the cursor on its row — got \(advanceRefused.selectedRowIdsForQA)")
     try expect(!advanceRefused.isAdvanceArmedForQA,
                "…and it is dropped, so the next unrelated push cannot move you off the row you are reading")
-    advanceHostScript = nil
+    checkState.advanceHostScript = nil
     advanceRefused.apply(rows: advanceSettling([advance1.id]), changed: .empty)
     advanceRefused.layoutForQA()
     try expect(advanceRefused.selectedRowIdsForQA != [advance2.id],
@@ -24949,7 +24960,7 @@ extension AppDelegate {
     let advanceMark = makeAdvanceView(rows: advanceFixture)
     try expect(advanceMark.selectRowForQA(id: advance4.id), "the row must be selectable")
     var markUnreadArmed = false
-    advanceHostScript = { markUnreadArmed = advanceMark.isAdvanceArmedForQA }
+    checkState.advanceHostScript = { markUnreadArmed = advanceMark.isAdvanceArmedForQA }
     try expect(advanceMark.openRowMenuForQA(clickedRowId: advance4.id), "the menu must open")
     try expect(advanceMark.pickRowMenuItemForQA(.markUnread),
                "Mark Unread must be live on a read row — got \(advanceMark.rowMenuTitlesForQA)")
@@ -24963,14 +24974,14 @@ extension AppDelegate {
     let advanceElsewhere = makeAdvanceView(rows: advanceFixture)
     try expect(advanceElsewhere.selectRowForQA(id: advance0.id), "the row being read must be selectable")
     var elsewhereArmed = false
-    advanceHostScript = {
+    checkState.advanceHostScript = {
         elsewhereArmed = advanceElsewhere.isAdvanceArmedForQA
         advanceElsewhere.apply(rows: advanceSettling([advance4.id]), changed: .empty)
     }
     try settleFromMenu(advanceElsewhere, advance4)
     advanceElsewhere.layoutForQA()
-    try expect(advanceRowCalls.last?.1 == [advance4.id],
-               "setup: the menu must act on the clicked row and not on the selection — got \(String(describing: advanceRowCalls.last?.1))")
+    try expect(checkState.advanceRowCalls.last?.1 == [advance4.id],
+               "setup: the menu must act on the clicked row and not on the selection — got \(String(describing: checkState.advanceRowCalls.last?.1))")
     // P5.1 migration: clicking outside the prior selection retargets the cursor to
     // the clicked row before dispatch, so the lifecycle advance is intentionally armed.
     try expect(elsewhereArmed, "an outside right-click retargets the cursor before filing")
@@ -24983,7 +24994,7 @@ extension AppDelegate {
     // cursor off it. (Raised in cross-review.)
     let advanceChurn = makeAdvanceView(rows: advanceFixture)
     try expect(advanceChurn.selectRowForQA(id: advance1.id), "the row must be selectable")
-    advanceHostScript = { advanceChurn.apply(rows: advanceChurning(advance1.id), changed: .empty) }
+    checkState.advanceHostScript = { advanceChurn.apply(rows: advanceChurning(advance1.id), changed: .empty) }
     try settleFromMenu(advanceChurn, advance1)
     advanceChurn.layoutForQA()
     try expect(advanceChurn.selectedRowIdsForQA == [advance1.id],
@@ -24998,7 +25009,7 @@ extension AppDelegate {
     try expect(advancePartial.selectRowsForQA(ids: [advance3.id, advance4.id]),
                "the last two rows must be selectable together")
     advancePartial.layoutForQA()
-    advanceHostScript = { advancePartial.apply(rows: advanceSettling([advance4.id]), changed: .empty) }
+    checkState.advanceHostScript = { advancePartial.apply(rows: advanceSettling([advance4.id]), changed: .empty) }
     try expect(advancePartial.pickBulkActionForQA(.settle),
                "Settle must be offered to the pair — got \(advancePartial.bulkActionTitlesForQA)")
     advancePartial.layoutForQA()
@@ -25016,7 +25027,7 @@ extension AppDelegate {
     let advanceRoute = makeAdvanceView(rows: advanceFixture)
     try expect(advanceRoute.selectRowForQA(id: advance4.id), "the last row must be selectable")
     var cursorAfterRouteChange: [UUID] = []
-    advanceHostScript = {
+    checkState.advanceHostScript = {
         advanceRoute.openAgentId = advance2.id
         cursorAfterRouteChange = advanceRoute.selectedRowIdsForQA
         advanceRoute.apply(rows: advanceSettling([advance4.id]), changed: .empty)
@@ -25033,7 +25044,7 @@ extension AppDelegate {
     // J11 · …THEN TO NO SELECTION: a one-row list settled has nowhere to go.
     let advanceOnly = makeAdvanceView(rows: [advance4])
     try expect(advanceOnly.selectRowForQA(id: advance4.id), "the only row must be selectable")
-    advanceHostScript = {
+    checkState.advanceHostScript = {
         advanceOnly.apply(
             rows: [lifecycled(advance4, .settled(at: LabFixtures.inboxNow.addingTimeInterval(-60)))],
             changed: .empty)
@@ -25042,7 +25053,7 @@ extension AppDelegate {
     advanceOnly.layoutForQA()
     try expect(advanceOnly.selectedRowIdsForQA.isEmpty,
                "with nothing before it and nothing after it the cursor lands nowhere — got \(advanceOnly.selectedRowIdsForQA)")
-    advanceHostScript = nil
+    checkState.advanceHostScript = nil
 
     // MARK: K · every lifecycle action is reversible, right there (P4.11)
 
@@ -25064,24 +25075,21 @@ extension AppDelegate {
     // The reader and the writer are the two seams production wires
     // (`lifecycleFacts` / `onUndoLifecycle`), driven here the way `AgentSupervisor`
     // would drive them.
-    var undoStore: [UUID: InboxLifecycleSnapshot] = [:]
-    var undoRestores: [[UUID: InboxLifecycleSnapshot]] = []
     var undoWindows: [NSWindow] = []
     /// What the host does while the action runs — the same closure-shaped seam section J
     /// records, because production performs and re-pushes INSIDE the callback.
-    var undoHostScript: (([UUID]) -> Void)?
     func makeUndoView(rows: [AgentInboxRow], wireUndo: Bool = true) -> AgentInboxView {
         let view = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
         view.clock = { LabFixtures.inboxNow }
         if wireUndo {
-            view.lifecycleFacts = { undoStore[$0] }
+            view.lifecycleFacts = { checkState.undoStore[$0] }
             view.onUndoLifecycle = { restoring in
-                undoRestores.append(restoring)
-                for (id, facts) in restoring { undoStore[id] = facts }
+                checkState.undoRestores.append(restoring)
+                for (id, facts) in restoring { checkState.undoStore[id] = facts }
             }
         }
-        view.onRowAction = { _, ids in undoHostScript?(ids) }
-        view.onBulkAction = { _, ids in undoHostScript?(ids) }
+        view.onRowAction = { _, ids in checkState.undoHostScript?(ids) }
+        view.onBulkAction = { _, ids in checkState.undoHostScript?(ids) }
         view.wiredRowActions = Set(InboxRowAction.allCases)
         view.wiredBulkActions = Set(InboxBulkAction.allCases)
         view.reload(rows: rows)
@@ -25103,10 +25111,10 @@ extension AppDelegate {
     /// The host's snooze: both dates written, the override left exactly as it was.
     func hostSnoozes(_ ids: [UUID]) {
         for id in ids {
-            guard var facts = undoStore[id] else { continue }
+            guard var facts = checkState.undoStore[id] else { continue }
             facts.snoozedUntil = undoWakeAt
             facts.snoozedAt = undoSnoozedAt
-            undoStore[id] = facts
+            checkState.undoStore[id] = facts
         }
     }
 
@@ -25116,10 +25124,10 @@ extension AppDelegate {
     // until the person had pinned this row keep-active, at which point reconstructing
     // throws that decision away and the next inactivity sweep (P4.3) buries the row.
     let undoPinned = try advanceRow(1)
-    undoStore = [undoPinned.id: InboxLifecycleSnapshot(settledOverride: .active)]
-    let undoCapturedPin = undoStore[undoPinned.id]
+    checkState.undoStore = [undoPinned.id: InboxLifecycleSnapshot(settledOverride: .active)]
+    let undoCapturedPin = checkState.undoStore[undoPinned.id]
     let undoOne = makeUndoView(rows: advanceFixture)
-    undoHostScript = { ids in
+    checkState.undoHostScript = { ids in
         hostSnoozes(ids)
         undoOne.apply(
             rows: advanceFixture.map {
@@ -25131,23 +25139,23 @@ extension AppDelegate {
     try expect(undoOne.pickRowMenuItemForQA(.snooze),
                "Snooze must be live — got \(undoOne.rowMenuTitlesForQA) / \(undoOne.rowMenuEnabledForQA)")
     undoOne.layoutForQA()
-    try expect(undoStore[undoPinned.id]?.snoozedUntil == undoWakeAt,
+    try expect(checkState.undoStore[undoPinned.id]?.snoozedUntil == undoWakeAt,
                "setup: the host must really have snoozed the agent, or there is nothing to undo")
     try expect(undoOne.undoToastTextForQA == "Snoozed until 18:00 · Undo",
                "the toast says what happened and offers the way back — got '\(undoOne.undoToastTextForQA)'")
     try expect(undoOne.pendingUndoForQA == [undoPinned.id: undoCapturedPin!],
                "…holding the values as they were BEFORE the action — got \(String(describing: undoOne.pendingUndoForQA))")
     try expect(undoOne.clickUndoForQA(), "Undo must be pressable")
-    try expect(undoStore[undoPinned.id] == undoCapturedPin,
-               "all four fields come back exactly — got \(String(describing: undoStore[undoPinned.id]))")
-    try expect(undoStore[undoPinned.id]?.settledOverride == .active,
+    try expect(checkState.undoStore[undoPinned.id] == undoCapturedPin,
+               "all four fields come back exactly — got \(String(describing: checkState.undoStore[undoPinned.id]))")
+    try expect(checkState.undoStore[undoPinned.id]?.settledOverride == .active,
                "…including the keep-active PIN, which a reconstructed undo would have flattened to neutral")
     try expect(undoOne.undoToastTextForQA.isEmpty && undoOne.pendingUndoForQA == nil,
                "…and the toast comes down with the press — got '\(undoOne.undoToastTextForQA)'")
     try expect(!undoOne.clickUndoForQA(),
                "a second press does nothing: the restore is spent, and re-applying it would put back facts the first press already restored")
-    try expect(undoRestores.count == 1,
-               "…so the host was asked exactly once — got \(undoRestores.count)")
+    try expect(checkState.undoRestores.count == 1,
+               "…so the host was asked exactly once — got \(checkState.undoRestores.count)")
 
     // K2 · A BULK ACTION UNDOES AS ONE UNIT, over three agents in three different prior
     // states — neutral, pinned, and ALREADY SETTLED. The last is the packet's watch-out:
@@ -25157,16 +25165,16 @@ extension AppDelegate {
     let undoSettledRow = try advanceRow(4)
     let undoSettledOn = LabFixtures.inboxNow.addingTimeInterval(-3_600)
     let undoTrio = [undoNeutralRow.id, undoPinnedRow.id, undoSettledRow.id]
-    undoStore = [
+    checkState.undoStore = [
         undoNeutralRow.id: InboxLifecycleSnapshot(),
         undoPinnedRow.id: InboxLifecycleSnapshot(settledOverride: .active),
         undoSettledRow.id: InboxLifecycleSnapshot(settledOverride: .settled, settledAt: undoSettledOn),
     ]
-    let undoCapturedTrio = undoStore
+    let undoCapturedTrio = checkState.undoStore
     let undoBulk = makeUndoView(rows: advanceFixture)
     try expect(undoBulk.selectRowsForQA(ids: undoTrio), "three rows must be selectable together")
     undoBulk.layoutForQA()
-    undoHostScript = { ids in
+    checkState.undoHostScript = { ids in
         hostSnoozes(ids)
         undoBulk.apply(
             rows: advanceFixture.map {
@@ -25182,24 +25190,24 @@ extension AppDelegate {
     try expect(undoBulk.pendingUndoForQA == undoCapturedTrio,
                "…and holds all three captures, not the first — got \(String(describing: undoBulk.pendingUndoForQA?.count))")
     try expect(undoBulk.clickUndoForQA(), "Undo must be pressable")
-    try expect(undoRestores.last?.count == 3,
-               "the whole set is restored in ONE call — got \(String(describing: undoRestores.last?.count))")
+    try expect(checkState.undoRestores.last?.count == 3,
+               "the whole set is restored in ONE call — got \(String(describing: checkState.undoRestores.last?.count))")
     for (id, captured) in undoCapturedTrio {
-        try expect(undoStore[id] == captured,
-                   "every agent in the bulk comes back exactly — \(id) is \(String(describing: undoStore[id]))")
+        try expect(checkState.undoStore[id] == captured,
+                   "every agent in the bulk comes back exactly — \(id) is \(String(describing: checkState.undoStore[id]))")
     }
-    try expect(undoStore[undoSettledRow.id]?.settledOverride == .settled
-                && undoStore[undoSettledRow.id]?.settledAt == undoSettledOn,
-               "…and an agent that was ALREADY SETTLED before the snooze is settled again, with its own date — got \(String(describing: undoStore[undoSettledRow.id]))")
-    try expect(undoStore[undoSettledRow.id]?.snoozedUntil == nil,
+    try expect(checkState.undoStore[undoSettledRow.id]?.settledOverride == .settled
+                && checkState.undoStore[undoSettledRow.id]?.settledAt == undoSettledOn,
+               "…and an agent that was ALREADY SETTLED before the snooze is settled again, with its own date — got \(String(describing: checkState.undoStore[undoSettledRow.id]))")
+    try expect(checkState.undoStore[undoSettledRow.id]?.snoozedUntil == nil,
                "…with the snooze this action added taken back off it")
 
     // K3 · AN ACTION THAT CHANGED NOTHING RAISES NO TOAST. The host refused (a cancelled
     // Delete is the shipped case), so there is nothing to undo — and a toast with nothing
     // behind it is the notification channel the packet's watch-out forbids.
-    undoStore = [undoNeutralRow.id: InboxLifecycleSnapshot()]
+    checkState.undoStore = [undoNeutralRow.id: InboxLifecycleSnapshot()]
     let undoRefused = makeUndoView(rows: advanceFixture)
-    undoHostScript = { _ in undoRefused.apply(rows: advanceFixture, changed: .empty) }
+    checkState.undoHostScript = { _ in undoRefused.apply(rows: advanceFixture, changed: .empty) }
     try expect(undoRefused.openRowMenuForQA(clickedRowId: undoNeutralRow.id), "the menu must open")
     try expect(undoRefused.pickRowMenuItemForQA(.snooze), "Snooze must be live")
     undoRefused.layoutForQA()
@@ -25212,33 +25220,33 @@ extension AppDelegate {
     // back. The verb exists (K's table above); reversibility is what withholds the card.
     // The ROW is the ready one: P3.11's rule refuses Archive to a working agent, and
     // `undoNeutralRow` is mid-turn.
-    undoStore = [undoSettledRow.id: InboxLifecycleSnapshot()]
+    checkState.undoStore = [undoSettledRow.id: InboxLifecycleSnapshot()]
     let undoArchive = makeUndoView(rows: advanceFixture)
-    undoHostScript = { ids in
-        for id in ids { undoStore[id] = nil }
+    checkState.undoHostScript = { ids in
+        for id in ids { checkState.undoStore[id] = nil }
         undoArchive.apply(rows: advanceFixture.filter { !ids.contains($0.id) }, changed: .empty)
     }
     try expect(undoArchive.openRowMenuForQA(clickedRowId: undoSettledRow.id), "the menu must open")
     try expect(undoArchive.pickRowMenuItemForQA(.archive),
                "Archive must be live on a row that is not working — got \(undoArchive.rowMenuTitlesForQA)")
     undoArchive.layoutForQA()
-    try expect(undoStore[undoSettledRow.id] == nil,
+    try expect(checkState.undoStore[undoSettledRow.id] == nil,
                "setup: the archive must really have taken the record away")
     try expect(undoArchive.undoToastTextForQA.isEmpty && undoArchive.pendingUndoForQA == nil,
                "an action whose record is gone offers no Undo rather than one that half-works — got '\(undoArchive.undoToastTextForQA)'")
 
     // K5 · AN ACTION WITH NO VERB RAISES NOTHING even when facts move underneath it —
     // the table at the top of this section is a gate, not a comment.
-    undoStore = [undoNeutralRow.id: InboxLifecycleSnapshot()]
+    checkState.undoStore = [undoNeutralRow.id: InboxLifecycleSnapshot()]
     let undoMark = makeUndoView(rows: advanceFixture)
-    undoHostScript = { ids in
+    checkState.undoHostScript = { ids in
         hostSnoozes(ids)
         undoMark.apply(rows: advanceFixture, changed: .empty)
     }
     try expect(undoMark.openRowMenuForQA(clickedRowId: undoNeutralRow.id), "the menu must open")
     try expect(undoMark.pickRowMenuItemForQA(.markUnread), "Mark Unread must be live on a read row")
     undoMark.layoutForQA()
-    try expect(undoStore[undoNeutralRow.id]?.snoozedUntil == undoWakeAt,
+    try expect(checkState.undoStore[undoNeutralRow.id]?.snoozedUntil == undoWakeAt,
                "setup: the facts must really have moved, or this proves nothing about the verb")
     try expect(undoMark.undoToastTextForQA.isEmpty,
                "read-state is not a lifecycle fact, so it raises no toast — got '\(undoMark.undoToastTextForQA)'")
@@ -25246,17 +25254,17 @@ extension AppDelegate {
     // K6 · ONE TOAST AT A TIME. The second action replaces the first, and pressing Undo
     // then restores the SECOND action's capture only — a queue would leave an Undo on
     // screen for an action two actions ago, whose facts a later action has since moved.
-    undoStore = [
+    checkState.undoStore = [
         undoNeutralRow.id: InboxLifecycleSnapshot(),
         undoSettledRow.id: InboxLifecycleSnapshot(settledOverride: .active),
     ]
-    let undoSecondCapture = undoStore[undoSettledRow.id]
+    let undoSecondCapture = checkState.undoStore[undoSettledRow.id]
     let undoTwice = makeUndoView(rows: advanceFixture)
-    undoHostScript = { ids in
+    checkState.undoHostScript = { ids in
         hostSnoozes(ids)
         undoTwice.apply(
             rows: advanceFixture.map {
-                undoStore[$0.id]?.snoozedUntil != nil ? lifecycled($0, .snoozed(until: undoWakeAt)) : $0
+                checkState.undoStore[$0.id]?.snoozedUntil != nil ? lifecycled($0, .snoozed(until: undoWakeAt)) : $0
             },
             changed: .empty)
     }
@@ -25271,18 +25279,18 @@ extension AppDelegate {
     try expect(undoTwice.pendingUndoForQA == [undoSettledRow.id: undoSecondCapture!],
                "the second action replaces the first — got \(String(describing: undoTwice.pendingUndoForQA))")
     try expect(undoTwice.clickUndoForQA(), "Undo must be pressable")
-    try expect(undoRestores.last?.count == 1 && undoStore[undoSettledRow.id] == undoSecondCapture,
-               "…and puts back only what the toast on screen was holding — got \(String(describing: undoRestores.last))")
-    try expect(undoStore[undoNeutralRow.id]?.snoozedUntil == undoWakeAt,
+    try expect(checkState.undoRestores.last?.count == 1 && checkState.undoStore[undoSettledRow.id] == undoSecondCapture,
+               "…and puts back only what the toast on screen was holding — got \(String(describing: checkState.undoRestores.last))")
+    try expect(checkState.undoStore[undoNeutralRow.id]?.snoozedUntil == undoWakeAt,
                "…leaving the first action's snooze exactly where it was")
 
     // K7 · IT GOES AWAY ON ITS OWN. The real timer, driven at a duration a check can
     // wait out — and the restore goes with it, so a card that has scrolled out of the
     // person's attention cannot be pressed a minute later.
-    undoStore = [undoNeutralRow.id: InboxLifecycleSnapshot()]
+    checkState.undoStore = [undoNeutralRow.id: InboxLifecycleSnapshot()]
     let undoExpiring = makeUndoView(rows: advanceFixture)
     undoExpiring.undoToastDuration = 0.2
-    undoHostScript = { ids in
+    checkState.undoHostScript = { ids in
         hostSnoozes(ids)
         undoExpiring.apply(rows: advanceFixture, changed: .empty)
     }
@@ -25297,16 +25305,16 @@ extension AppDelegate {
                "the toast dismisses itself after \(undoExpiring.undoToastDuration)s — got '\(undoExpiring.undoToastTextForQA)'")
     try expect(undoExpiring.pendingUndoForQA == nil,
                "…and takes the restore with it, so a stale press cannot fire — got \(String(describing: undoExpiring.pendingUndoForQA))")
-    let undoRestoreCountBeforeStalePress = undoRestores.count
-    try expect(!undoExpiring.clickUndoForQA() && undoRestores.count == undoRestoreCountBeforeStalePress,
+    let undoRestoreCountBeforeStalePress = checkState.undoRestores.count
+    try expect(!undoExpiring.clickUndoForQA() && checkState.undoRestores.count == undoRestoreCountBeforeStalePress,
                "…proved: pressing a dismissed toast asks the host for nothing")
 
     // K8 · NO RESTORE PATH, NO TOAST — which is the shipped sidebar today
     // (`configureWorkspaceSidebar` wires neither seam), and the same call P3.15 made
     // for a menu item nothing performs.
-    undoStore = [undoNeutralRow.id: InboxLifecycleSnapshot()]
+    checkState.undoStore = [undoNeutralRow.id: InboxLifecycleSnapshot()]
     let undoUnwired = makeUndoView(rows: advanceFixture, wireUndo: false)
-    undoHostScript = { ids in
+    checkState.undoHostScript = { ids in
         hostSnoozes(ids)
         undoUnwired.apply(rows: advanceFixture, changed: .empty)
     }
@@ -25318,14 +25326,14 @@ extension AppDelegate {
 
     // K9 · THE TWO CARDS DO NOT OVERLAP. A context gesture outside the selection
     // retargets it to one row, so the toast remains visible without a stale bulk bar.
-    undoStore = [undoNeutralRow.id: InboxLifecycleSnapshot()]
+    checkState.undoStore = [undoNeutralRow.id: InboxLifecycleSnapshot()]
     let undoStacked = makeUndoView(rows: advanceFixture)
     let undoOtherPair = [try advanceRow(0).id, try advanceRow(2).id]
     try expect(undoStacked.selectRowsForQA(ids: undoOtherPair),
                "two other rows must be selectable together")
     undoStacked.layoutForQA()
     try expect(undoStacked.isBulkBarVisibleForQA, "setup: two selected rows raise the bar")
-    undoHostScript = { ids in
+    checkState.undoHostScript = { ids in
         hostSnoozes(ids)
         undoStacked.apply(rows: advanceFixture, changed: .empty)
     }
@@ -25348,9 +25356,9 @@ extension AppDelegate {
     // would be offering to restore four fields onto a record that no longer exists.
     // An action that moves no lifecycle fact at all is the other half, and it must NOT
     // clear the card: the toast is still telling the truth and is still safe to press.
-    undoStore = [undoSettledRow.id: InboxLifecycleSnapshot(), undoNeutralRow.id: InboxLifecycleSnapshot()]
+    checkState.undoStore = [undoSettledRow.id: InboxLifecycleSnapshot(), undoNeutralRow.id: InboxLifecycleSnapshot()]
     let undoStale = makeUndoView(rows: advanceFixture)
-    undoHostScript = { ids in
+    checkState.undoHostScript = { ids in
         hostSnoozes(ids)
         undoStale.apply(rows: advanceFixture, changed: .empty)
     }
@@ -25363,8 +25371,8 @@ extension AppDelegate {
     undoStale.layoutForQA()
     try expect(!undoStale.undoToastTextForQA.isEmpty,
                "an action that moves no lifecycle fact leaves the card alone — got '\(undoStale.undoToastTextForQA)'")
-    undoHostScript = { ids in
-        for id in ids { undoStore[id] = nil }
+    checkState.undoHostScript = { ids in
+        for id in ids { checkState.undoStore[id] = nil }
         undoStale.apply(rows: advanceFixture.filter { !ids.contains($0.id) }, changed: .empty)
     }
     try expect(undoStale.openRowMenuForQA(clickedRowId: undoSettledRow.id), "the menu must open again")
@@ -25373,7 +25381,7 @@ extension AppDelegate {
     try expect(undoStale.undoToastTextForQA.isEmpty && undoStale.pendingUndoForQA == nil,
                "…but a lifecycle action that earns no toast of its own still retires the stale one — got '\(undoStale.undoToastTextForQA)'")
 
-    undoHostScript = nil
+    checkState.undoHostScript = nil
     undoWindows.removeAll()
 
     // MARK: L · a lifecycle move crossfades in place (P4.12)
