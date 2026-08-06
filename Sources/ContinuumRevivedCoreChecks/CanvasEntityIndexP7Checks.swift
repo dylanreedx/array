@@ -10,7 +10,11 @@ func runCanvasEntityIndexP7Checks() {
     runCanvasEntityIndexP7R4DetachedAgentCheck()
     runCanvasEntityIndexP7R5AuthorityBoundaryCheck()
     runCanvasEntityIndexP7R6DeletedStaleFailureCheck()
-    print("CanvasEntityIndex P7 checks: R1-R6 passed")
+    runCanvasEntityIndexP7R7ManagedTileCanonicalIdentityCheck()
+    runCanvasEntityIndexP7R8MultipleTilesPerAgentCheck()
+    runCanvasEntityIndexP7R9DuplicateRegistrationCheck()
+    runCanvasEntityIndexP7R10StableQuerySnapshotCheck()
+    print("CanvasEntityIndex P7 checks: R1-R10 passed")
 }
 
 private let p7Now = Date(timeIntervalSinceReferenceDate: 910_000_000)
@@ -24,6 +28,20 @@ private let p7Browser = CanvasEntityStableID("tile:91000000-0000-4000-8000-00000
 private let p7Stale = CanvasEntityStableID("tile:91000000-0000-4000-8000-000000000015")
 private let p7Deleted = CanvasEntityStableID("tile:91000000-0000-4000-8000-000000000016")
 private let p7AgentID = AgentID(rawValue: UUID(uuidString: "91000000-0000-4000-8000-0000000000A1")!)
+private let p7AgentTileA = UUID(uuidString: "91000000-0000-4000-8000-0000000000B1")!
+private let p7AgentTileB = UUID(uuidString: "91000000-0000-4000-8000-0000000000B2")!
+
+private func p7Tile(_ id: UUID, title: String = "managed") -> Tile {
+    Tile(
+        id: id,
+        kind: .managedAgent,
+        title: title,
+        frame: TileFrame(x: 0, y: 0, width: 120, height: 80),
+        zPosition: FracIndex(value: 0.5),
+        runtimeRef: nil,
+        metadata: TileMetadata()
+    )
+}
 
 private func p7Entity(
     _ id: CanvasEntityStableID,
@@ -162,4 +180,68 @@ private func runCanvasEntityIndexP7R6DeletedStaleFailureCheck() {
     }
     expect(deletedId == p7Deleted, "P7.R6 deleted failure should name target")
     expect(deletedReason == "deleted", "P7.R6 deleted failure reason not visible")
+}
+
+private func runCanvasEntityIndexP7R7ManagedTileCanonicalIdentityCheck() {
+    let withoutAgent = CanvasEntityIndex.tileEntity(p7Tile(p7AgentTileA), observedAt: p7Now, projectId: p7Project, agentId: nil)
+    let withAgent = CanvasEntityIndex.tileEntity(p7Tile(p7AgentTileA), observedAt: p7Now, projectId: p7Project, agentId: p7AgentID)
+
+    expect(withoutAgent.id == .tile(p7AgentTileA), "P7.R7 managed tile without agent should use tile identity")
+    expect(withAgent.id == .tile(p7AgentTileA), "P7.R7 managed tile with agent should keep tile identity")
+    expect(withAgent.id == withoutAgent.id, "P7.R7 managed tile ID changed when agent knowledge appeared")
+    expect(withAgent.kind == .tile, "P7.R7 managed tile should remain a tile entity, not alias to agent kind")
+    expect(withAgent.attachedAgentId == p7AgentID, "P7.R7 managed tile should preserve attached agent relation")
+    expect(!withAgent.scopeRole.emitsFilesystemAuthority, "P7.R7 managed visual tile should not become an authority emitter")
+}
+
+private func runCanvasEntityIndexP7R8MultipleTilesPerAgentCheck() {
+    let tileA = CanvasEntityIndex.tileEntity(p7Tile(p7AgentTileA, title: "A"), observedAt: p7Now, projectId: p7Project, agentId: p7AgentID)
+    let tileB = CanvasEntityIndex.tileEntity(p7Tile(p7AgentTileB, title: "B"), observedAt: p7Now, projectId: p7Project, agentId: p7AgentID)
+    let agent = CanvasEntity(
+        id: .agent(p7AgentID),
+        kind: .agent,
+        label: "Agent",
+        frame: nil,
+        visibility: .detached,
+        freshness: .fresh(observedAt: p7Now),
+        projectId: p7Project,
+        attachedAgentId: p7AgentID,
+        scopeRole: .emitsScope(projectId: p7Project, relativeWorkingDirectory: nil, checkoutHandle: "checkout-main"),
+        evidence: ["agent-record"]
+    )
+    let index = CanvasEntityIndex(entities: [tileA, tileB, agent])
+    let ids = index.allEntities.map(\.id)
+    expect(ids.contains(.agent(p7AgentID)), "P7.R8 stable agent entity should be preserved separately")
+    expect(ids.contains(.tile(p7AgentTileA)) && ids.contains(.tile(p7AgentTileB)), "P7.R8 two visual tiles for one agent should both remain registered")
+    expect(index.allEntities.filter { $0.attachedAgentId == p7AgentID && $0.kind == .tile }.map(\.id).sorted() == [.tile(p7AgentTileA), .tile(p7AgentTileB)], "P7.R8 attached-agent relation should not collapse multiple tiles")
+    expect(index.duplicateEntityIDs.isEmpty, "P7.R8 multiple tiles for one agent should not look like duplicate entity IDs")
+}
+
+private func runCanvasEntityIndexP7R9DuplicateRegistrationCheck() {
+    let first = p7Entity(p7Origin, kind: .terminal, x: 0, y: 0)
+    let second = p7Entity(p7Origin, kind: .fileTree, x: 100, y: 0)
+    var index = CanvasEntityIndex(entities: [first, second])
+    expect(index.duplicateEntityIDs == [p7Origin], "P7.R9 initializer should report duplicate entity IDs")
+    expect(index.allEntities.first { $0.id == p7Origin }?.kind == .terminal, "P7.R9 initializer should not silently overwrite first duplicate")
+
+    let report = index.upsert(second)
+    expect(report.duplicateEntityID == p7Origin, "P7.R9 upsert should report duplicate entity ID")
+    expect(index.allEntities.first { $0.id == p7Origin }?.kind == .terminal, "P7.R9 upsert should not silently overwrite duplicate")
+}
+
+private func runCanvasEntityIndexP7R10StableQuerySnapshotCheck() {
+    let first = CanvasEntityIndex(entities: [
+        p7Entity(p7Right, kind: .terminal, x: 30, y: 0),
+        p7Entity(p7Origin, kind: .terminal, x: 0, y: 0),
+    ])
+    let second = CanvasEntityIndex(entities: [
+        p7Entity(p7Origin, kind: .terminal, x: 0, y: 0),
+        p7Entity(p7Right, kind: .terminal, x: 300, y: 0),
+    ])
+
+    let firstSnapshot = first.directional(from: p7Origin, direction: .right).chosenIDsSnapshot
+    let secondSnapshot = second.directional(from: p7Origin, direction: .right).chosenIDsSnapshot
+    expect(firstSnapshot.entityIds == [p7Right], "P7.R10 first snapshot should capture stable right ID")
+    expect(secondSnapshot.entityIds == [p7Right], "P7.R10 second snapshot should use stable IDs despite movement")
+    expect(first.validate(snapshot: firstSnapshot).chosenIDsSnapshot.entityIds == second.validate(snapshot: firstSnapshot).chosenIDsSnapshot.entityIds, "P7.R10 snapshot validation should not retarget by current geometry")
 }

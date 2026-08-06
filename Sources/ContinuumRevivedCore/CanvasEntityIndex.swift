@@ -258,13 +258,55 @@ public enum CanvasDirection: String, Hashable, Codable, Sendable {
     case down
 }
 
+public struct CanvasEntityRegistrationReport: Hashable, Sendable {
+    public enum Outcome: Hashable, Sendable {
+        case inserted
+        case duplicateRejected(existing: CanvasEntityStableID)
+    }
+
+    public let id: CanvasEntityStableID
+    public let outcome: Outcome
+
+    public var duplicateEntityID: CanvasEntityStableID? {
+        if case .duplicateRejected(let existing) = outcome { return existing }
+        return nil
+    }
+}
+
 public struct CanvasEntityIndex: Sendable {
-    private let entitiesByID: [CanvasEntityStableID: CanvasEntity]
+    private var entitiesByID: [CanvasEntityStableID: CanvasEntity]
+    public private(set) var registrationReports: [CanvasEntityRegistrationReport]
 
     public init(entities: [CanvasEntity]) {
         var map: [CanvasEntityStableID: CanvasEntity] = [:]
-        for entity in entities { map[entity.id] = entity }
+        var reports: [CanvasEntityRegistrationReport] = []
+        for entity in entities {
+            if map[entity.id] != nil {
+                reports.append(CanvasEntityRegistrationReport(id: entity.id, outcome: .duplicateRejected(existing: entity.id)))
+            } else {
+                map[entity.id] = entity
+                reports.append(CanvasEntityRegistrationReport(id: entity.id, outcome: .inserted))
+            }
+        }
         self.entitiesByID = map
+        self.registrationReports = reports
+    }
+
+    public var duplicateEntityIDs: [CanvasEntityStableID] {
+        Array(Set(registrationReports.compactMap(\.duplicateEntityID))).sorted()
+    }
+
+    @discardableResult
+    public mutating func upsert(_ entity: CanvasEntity) -> CanvasEntityRegistrationReport {
+        let report: CanvasEntityRegistrationReport
+        if entitiesByID[entity.id] != nil {
+            report = CanvasEntityRegistrationReport(id: entity.id, outcome: .duplicateRejected(existing: entity.id))
+        } else {
+            entitiesByID[entity.id] = entity
+            report = CanvasEntityRegistrationReport(id: entity.id, outcome: .inserted)
+        }
+        registrationReports.append(report)
+        return report
     }
 
     public var allEntities: [CanvasEntity] { sorted(Array(entitiesByID.values)) }
@@ -430,7 +472,7 @@ public extension CanvasEntityIndex {
     ) -> CanvasEntity {
         let kind: CanvasEntityKind
         switch tile.kind {
-        case .managedAgent: kind = .agent
+        case .managedAgent: kind = .tile
         case .terminal: kind = .terminal
         case .note: kind = .note
         case .fileTree: kind = .fileTree
@@ -438,8 +480,12 @@ public extension CanvasEntityIndex {
         case .runArtifacts: kind = .artifact("runArtifacts")
         default: kind = .tile
         }
-        let id = agentId.map(CanvasEntityStableID.agent) ?? CanvasEntityStableID.tile(tile.id)
-        let role = scopeRole ?? ((kind == .terminal || kind == .fileTree || kind == .agent) && projectId != nil ? .emitsScope(projectId: projectId!, relativeWorkingDirectory: nil, checkoutHandle: nil) : .contextOnly)
+        // Canonical identity policy: a visual tile is always registered under
+        // its tile ID. A managed-agent tile may carry an attachedAgentId relation,
+        // but it must not alias to the stable agent entity when that agent ID is
+        // known; detached/authoritative agent records are registered separately.
+        let id = CanvasEntityStableID.tile(tile.id)
+        let role = scopeRole ?? ((kind == .terminal || kind == .fileTree) && projectId != nil ? .emitsScope(projectId: projectId!, relativeWorkingDirectory: nil, checkoutHandle: nil) : .contextOnly)
         return CanvasEntity(
             id: id,
             kind: kind,
