@@ -362,12 +362,12 @@ class TileNSView: NSView, TokenThemed {
     /// bottom/left/right ring. Returning self for ring points routes mouseDown
     /// to TileNSView.mouseDown so the existing resize logic fires.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        // AppKit passes `point` in this receiver's local coordinate system.
-        // A previous implementation treated it as superview/canvas coordinates
-        // and converted it again, which made terminal title bars/rings miss at
-        // non-zero origins and zoom levels. Browser tiles appeared better only
-        // because their own subview stack still left more chrome hittable.
-        let local = point
+        // AppKit passes `point` in the receiver's SUPERVIEW coordinate system.
+        // Convert to this tile's world-sized bounds before ring math. Treating the
+        // canvas point as local only works accidentally near the canvas origin;
+        // elsewhere body content swallows the bottom/side rings while the title
+        // bar makes the top edge appear to work.
+        let local = superview.map { convert(point, from: $0) } ?? point
         if bounds.contains(local), resizeEdge(at: local) != nil {
             return self
         }
@@ -392,6 +392,15 @@ class TileNSView: NSView, TokenThemed {
         mouseDraggedSinceDown = false
         resizeFreeFrame = nil
         dragLastWindowPoint = event.locationInWindow
+        // Cmd/Space camera gestures must win before stale selection/resize-ring
+        // state classifies this press as a tile resize. Limit interception to tile
+        // chrome that already routes here; command-clicks and spaces inside terminal/
+        // browser/text content retain their native behavior.
+        if let canvas, canvas.pointerPanRequested(for: event) {
+            dragKind = .canvasPan
+            canvas.beginPointerPan(with: event)
+            return
+        }
         let local = convert(event.locationInWindow, from: nil)
         if let edge = resizeEdge(at: local) {
             dragKind = .resize(edge)
@@ -416,6 +425,8 @@ class TileNSView: NSView, TokenThemed {
         let delta = CGSize(width: dx, height: -dy)
         dragLastWindowPoint = event.locationInWindow
         switch dragKind {
+        case .canvasPan:
+            canvas.continuePointerPan(with: event)
         case .move:
             // The tile follows the cursor freely; once it dwells within snap range
             // of a neighbor (~dragGhostDelay) the destination is previewed as a
@@ -471,6 +482,11 @@ class TileNSView: NSView, TokenThemed {
             canvas?.updateTile(snapped)
         }
         if let canvas { cancelDragGhost(on: canvas) } else { teardownDragGhostState() }
+
+        if case .canvasPan = completedDragKind {
+            canvas?.endPointerPan()
+            return
+        }
 
         if case .move = completedDragKind, wasClick {
             canvas?.focusBroker?.enterScope(.tile(tile.id), reason: .userClick)
@@ -641,12 +657,15 @@ class TileNSView: NSView, TokenThemed {
         return titleBar.convert(titleBar.qaCloseButtonFrame, to: self)
     }
 
-    /// QA: does a local tile-coordinate click route to this tile's move handling
-    /// rather than body content? This validates the production override using
-    /// AppKit's documented `hitTest(_:)` local-coordinate contract. Body content
-    /// would be a regression. Drives `--tile-drag-grab-check`.
+    /// QA: does a local tile-coordinate click route to this tile's move/resize
+    /// handling rather than body content? AppKit calls `hitTest(_:)` with a point
+    /// in the receiver's SUPERVIEW coordinates, so this seam converts the desired
+    /// local probe before driving the real override. Body content would be a
+    /// regression. Drives `--tile-drag-grab-check`.
     func qaHitRoutesToMove(atLocal localPoint: CGPoint) -> Bool {
-        let hit = hitTest(localPoint)
+        guard let superview else { return false }
+        let superPoint = convert(localPoint, to: superview)
+        let hit = hitTest(superPoint)
         return hit === self || hit === titleBar
     }
 
@@ -693,6 +712,7 @@ class TileNSView: NSView, TokenThemed {
 
     private enum DragKind {
         case none
+        case canvasPan
         case move
         case resize(ResizeEdge)
     }

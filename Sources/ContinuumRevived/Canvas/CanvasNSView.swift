@@ -85,7 +85,12 @@ final class CanvasNSView: NSView, TokenThemed {
     var leaderZoneOrdinalAlphabet: [String] = NavKeymap.default.leaderZoneOrdinalAlphabet
 
     private var spaceHeld = false
-    private var spaceDragLastWindowPoint: CGPoint = .zero
+    /// True while this canvas owns the open-hand cursor pushed by Space. Kept
+    /// separate from `spaceHeld` so releasing Space during a mouse drag can defer
+    /// its pop until the closed-hand pointer-pan cursor above it is removed.
+    private var spaceCursorPushed = false
+    private var pointerPanActive = false
+    private var pointerPanLastWindowPoint: CGPoint = .zero
 
     // MARK: - Zone gesture state machine (T19)
 
@@ -1741,13 +1746,48 @@ final class CanvasNSView: NSView, TokenThemed {
         setViewport(next)
     }
 
+    /// Whether this press should enter the shared camera-pan lifecycle. Tile
+    /// chrome asks the canvas rather than reimplementing the Space/Cmd policy.
+    func pointerPanRequested(for event: NSEvent) -> Bool {
+        spaceHeld || event.modifierFlags.contains(.command)
+    }
+
+    /// Start the shared pointer-pan lifecycle. Canvas background gestures and
+    /// Cmd/Space drags whose AppKit target is tile chrome both delegate here so
+    /// camera math, cursor ownership, and release handling cannot diverge.
+    func beginPointerPan(with event: NSEvent) {
+        guard !pointerPanActive else { return }
+        pointerPanActive = true
+        pointerPanLastWindowPoint = event.locationInWindow
+        NSCursor.closedHand.push()
+    }
+
+    func continuePointerPan(with event: NSEvent) {
+        guard pointerPanActive else { return }
+        let dx = event.locationInWindow.x - pointerPanLastWindowPoint.x
+        let dy = event.locationInWindow.y - pointerPanLastWindowPoint.y
+        pointerPanLastWindowPoint = event.locationInWindow
+        var v = canvasState.viewport
+        // Window y goes up, canvas y is flipped (down). Drag-down moves the
+        // viewport down, matching the existing trackpad-scroll convention.
+        v.x -= Double(dx) / v.zoom
+        v.y += Double(dy) / v.zoom
+        setViewport(v)
+    }
+
+    func endPointerPan() {
+        guard pointerPanActive else { return }
+        pointerPanActive = false
+        NSCursor.pop() // closed hand
+        if !spaceHeld, spaceCursorPushed {
+            NSCursor.pop() // deferred open hand after a mid-drag Space release
+            spaceCursorPushed = false
+        }
+    }
+
     override func mouseDown(with event: NSEvent) {
-        if spaceHeld {
-            // Space + drag pan: openHand → closedHand on press; pop on
-            // mouseUp. Cursor stack restores cleanly even if the cursor
-            // rect logic of subviews fights for control.
-            NSCursor.closedHand.push()
-            spaceDragLastWindowPoint = event.locationInWindow
+        if pointerPanRequested(for: event) {
+            beginPointerPan(with: event)
             return
         }
         let point = convert(event.locationInWindow, from: nil)
@@ -1810,17 +1850,8 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        if spaceHeld {
-            let dx = event.locationInWindow.x - spaceDragLastWindowPoint.x
-            let dy = event.locationInWindow.y - spaceDragLastWindowPoint.y
-            spaceDragLastWindowPoint = event.locationInWindow
-            var v = canvasState.viewport
-            // Window y goes up, canvas y is flipped (down). Drag-down on the
-            // trackpad/mouse should move the viewport down (revealing tiles
-            // higher up), matching the trackpad scroll math in scrollWheel.
-            v.x -= Double(dx) / v.zoom
-            v.y += Double(dy) / v.zoom
-            setViewport(v)
+        if pointerPanActive {
+            continuePointerPan(with: event)
             return
         }
         let point = convert(event.locationInWindow, from: nil)
@@ -1890,8 +1921,8 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     override func mouseUp(with event: NSEvent) {
-        if spaceHeld {
-            NSCursor.pop()
+        if pointerPanActive {
+            endPointerPan()
             return
         }
         let currentGesture = zoneGesture
@@ -1991,7 +2022,12 @@ final class CanvasNSView: NSView, TokenThemed {
         if event.keyCode == 49 {
             if !spaceHeld {
                 spaceHeld = true
-                NSCursor.openHand.push()
+                // Do not push an open hand above an in-flight Cmd-pan's closed
+                // hand; that would make cursor-stack teardown order ambiguous.
+                if !pointerPanActive {
+                    NSCursor.openHand.push()
+                    spaceCursorPushed = true
+                }
             }
             return
         }
@@ -2001,7 +2037,10 @@ final class CanvasNSView: NSView, TokenThemed {
     override func keyUp(with event: NSEvent) {
         if event.keyCode == 49, spaceHeld {
             spaceHeld = false
-            NSCursor.pop()
+            if !pointerPanActive, spaceCursorPushed {
+                NSCursor.pop()
+                spaceCursorPushed = false
+            }
             return
         }
         super.keyUp(with: event)
@@ -3060,6 +3099,30 @@ final class CanvasNSView: NSView, TokenThemed {
         try expect(screenshotBytes > 0, "zone chrome screenshot should be non-empty")
         let chromePixels = VisualSnapshot.metrics(of: rep)
         try expect(!chromePixels.isBlank, "zone chrome render must not be blank/uniform (the grey-screen guard) — got \(chromePixels.distinctSampledColors) distinct sampled colors at \(chromePixels.width)x\(chromePixels.height)")
+
+        // The zone body/header must be clipped to the same rounded outline that
+        // is stroked. A rectangular `headerRect.fill()` used to paint square teal
+        // pixels through the rounded top corners. Render the real chrome view on
+        // transparency: an interior header pixel is present, while the extreme
+        // top-right corner stays clear outside the rounded path.
+        guard let alphaChrome = canvas.zoneChromeViews[alphaZoneId],
+              let alphaRep = alphaChrome.bitmapImageRepForCachingDisplay(in: alphaChrome.bounds) else {
+            throw CheckError.failed("zone rounded-clip probe could not create a bitmap")
+        }
+        alphaChrome.cacheDisplay(in: alphaChrome.bounds, to: alphaRep)
+        let cornerX = max(0, alphaRep.pixelsWide - 2)
+        let cornerY = min(max(0, alphaRep.pixelsHigh - 1), 1)
+        let interiorX = max(0, alphaRep.pixelsWide - 24)
+        let interiorY = min(max(0, alphaRep.pixelsHigh - 1), 16)
+        guard let cornerColor = alphaRep.colorAt(x: cornerX, y: cornerY)?.usingColorSpace(.deviceRGB),
+              let interiorColor = alphaRep.colorAt(x: interiorX, y: interiorY)?.usingColorSpace(.deviceRGB) else {
+            throw CheckError.failed("zone rounded-clip probe could not read rendered pixels")
+        }
+        let roundedCornerAlpha = cornerColor.alphaComponent
+        let interiorHeaderAlpha = interiorColor.alphaComponent
+        try expect(interiorHeaderAlpha > 0.05, "zone rounded-clip probe did not render an interior header pixel (alpha \(interiorHeaderAlpha))")
+        try expect(roundedCornerAlpha < interiorHeaderAlpha * 0.25, "zone header/background escaped the rounded top-right clip (corner alpha \(roundedCornerAlpha), interior alpha \(interiorHeaderAlpha))")
+
         let artifact = directory.appendingPathComponent("manifest.json")
         // MARK: — Multi-layer block (T05 assertions 1–12)
         // Fresh canvas: no conflict with alpha/beta/gamma fixtures above.
@@ -3209,6 +3272,11 @@ final class CanvasNSView: NSView, TokenThemed {
             "headerDoubleClickViewport": viewportDictionary(headerFit),
             "backgroundDoubleClickViewport": viewportDictionary(backgroundFit),
             "zoneHeaderCursorRectCount": canvas.qaZoneHeaderCursorRectCount(),
+            "roundedClip": [
+                "cornerAlpha": roundedCornerAlpha,
+                "interiorHeaderAlpha": interiorHeaderAlpha,
+                "cornerToInteriorAlphaRatio": roundedCornerAlpha / interiorHeaderAlpha
+            ],
             "collapsedChildHitSuppressed": true,
             "collapsedHeaderZoneId": gammaZoneId.uuidString,
             "zoneChromeScreenshot": screenshot.path,
@@ -3733,21 +3801,183 @@ final class CanvasNSView: NSView, TokenThemed {
                 ("bottomLeft", CGPoint(x: 1, y: h - 1)),
                 ("bottomRight", CGPoint(x: w - 1, y: h - 1)),
             ]
+            func productionHit(atLocal localPoint: CGPoint) throws -> NSView? {
+                // Exercise the complete AppKit route: canvas.hitTest receives a
+                // point in the CANVAS SUPERVIEW's coordinates, then recursively
+                // calls TileNSView.hitTest with a canvas-coordinate point. This is
+                // the production contract documented by NSView.hitTest(_:), not a
+                // direct helper call tailored to TileNSView's implementation.
+                guard let canvasSuperview = ringCanvas.superview else {
+                    throw CheckError.failed("ring probe canvas was not installed in a window view hierarchy")
+                }
+                let canvasLocal = ringView.convert(localPoint, to: ringCanvas)
+                let canvasSuperviewPoint = ringCanvas.convert(canvasLocal, to: canvasSuperview)
+                return ringCanvas.hitTest(canvasSuperviewPoint)
+            }
             for (name, p) in ringProbes {
                 try expect(ringView.qaResizeEdge(at: p) != nil, "ring probe \(name) must sit on the resize ring (local-coords premise); got nil at \(p)")
-                ringReclaim[name] = ringView.qaHitRoutesToMove(atLocal: p)
+                ringReclaim[name] = try productionHit(atLocal: p) === ringView
             }
             // A deep-body point must still reach the content view (we didn't over-claim).
             let bodyPoint = CGPoint(x: w / 2, y: (ringView.grabHeightInLocalCoordinates + (h - rm)) / 2)
             try expect(ringView.qaResizeEdge(at: bodyPoint) == nil, "body probe must be off the ring; got \(String(describing: ringView.qaResizeEdge(at: bodyPoint)))")
-            ringBodyReclaimed = ringView.qaHitRoutesToMove(atLocal: bodyPoint)
+            ringBodyReclaimed = try productionHit(atLocal: bodyPoint) === ringView
         }
         try expect(ringReclaim.values.allSatisfy { $0 == true }, "a panned/zoomed tile must reclaim the resize ring from body content on every edge/corner: \(ringReclaim)")
         try expect(ringBodyReclaimed == false, "a deep-body click must reach content, not be reclaimed by the tile as a resize/move")
 
+        // Cmd-drag and canvas-owned Space-drag are camera gestures even when the
+        // press lands on a tile's resize ring. Verify that the full canvas hit-test
+        // route selects TileNSView, then drive that production handler lifecycle:
+        // modifier precedence must preserve the tile frame and pan the viewport.
+        var pointerPanProductionHitRoutedToTile = false
+        var commandPanPreservedTileFrame = false
+        var commandPanChangedViewport = false
+        var spacePanPreservedTileFrame = false
+        var spacePanChangedViewport = false
+        var cornerResizeProductionPasses: [String: Bool] = [:]
+        do {
+            let pointerProbe = Tile(
+                id: UUID(uuidString: "00000000-0000-0000-0000-0000000011C1")!,
+                kind: .note,
+                title: "POINTER_PAN_PROBE",
+                frame: TileFrame(x: 260, y: 180, width: 320, height: 240),
+                zPosition: .fromLegacyRank(1),
+                runtimeRef: nil,
+                metadata: TileMetadata()
+            )
+            let initialViewport = CanvasViewport(x: 40, y: 25, zoom: 1.5)
+            let pointerCanvas = CanvasNSView(canvasState: CanvasState(
+                viewport: initialViewport,
+                tiles: [pointerProbe],
+                groups: [],
+                lastActiveTileId: pointerProbe.id
+            ))
+            pointerCanvas.frame = NSRect(x: 0, y: 0, width: 1200, height: 900)
+            let pointerWindow = NSWindow(contentRect: pointerCanvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            pointerWindow.contentView = pointerCanvas
+            pointerWindow.orderFrontRegardless()
+            let pointerView = TileNSView(tile: pointerProbe)
+            pointerCanvas.install(tileView: pointerView, for: pointerProbe)
+            pointerView.setContentView(NSView(frame: .zero))
+            pointerCanvas.layoutSubtreeIfNeeded()
+
+            func mouse(_ type: NSEvent.EventType, at point: CGPoint, modifiers: NSEvent.ModifierFlags) throws -> NSEvent {
+                guard let event = NSEvent.mouseEvent(
+                    with: type,
+                    location: point,
+                    modifierFlags: modifiers,
+                    timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: pointerWindow.windowNumber,
+                    context: nil,
+                    eventNumber: 1,
+                    clickCount: 1,
+                    pressure: 1
+                ) else { throw CheckError.failed("could not synthesize pointer-pan mouse event") }
+                return event
+            }
+            func spaceKey(_ type: NSEvent.EventType) throws -> NSEvent {
+                guard let event = NSEvent.keyEvent(
+                    with: type,
+                    location: .zero,
+                    modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: pointerWindow.windowNumber,
+                    context: nil,
+                    characters: " ",
+                    charactersIgnoringModifiers: " ",
+                    isARepeat: false,
+                    keyCode: 49
+                ) else { throw CheckError.failed("could not synthesize Space pointer-pan key event") }
+                return event
+            }
+            func runPointerPan(modifiers: NSEvent.ModifierFlags, holdingSpace: Bool) throws -> (preservedTile: Bool, changedViewport: Bool) {
+                pointerCanvas.setViewport(initialViewport)
+                pointerCanvas.layoutSubtreeIfNeeded()
+                let localStart = CGPoint(x: pointerView.bounds.maxX - 1, y: pointerView.bounds.maxY - 1)
+                let canvasStart = pointerView.convert(localStart, to: pointerCanvas)
+                let windowStart = pointerCanvas.convert(canvasStart, to: nil)
+                if holdingSpace { pointerCanvas.keyDown(with: try spaceKey(.keyDown)) }
+                let tileFrameBefore = pointerCanvas.canvasState.tiles[0].frame
+                let viewportBefore = pointerCanvas.viewport
+                pointerView.mouseDown(with: try mouse(.leftMouseDown, at: windowStart, modifiers: modifiers))
+                let windowEnd = CGPoint(x: windowStart.x + 36, y: windowStart.y + 18)
+                pointerView.mouseDragged(with: try mouse(.leftMouseDragged, at: windowEnd, modifiers: modifiers))
+                pointerView.mouseUp(with: try mouse(.leftMouseUp, at: windowEnd, modifiers: modifiers))
+                if holdingSpace { pointerCanvas.keyUp(with: try spaceKey(.keyUp)) }
+                return (
+                    pointerCanvas.canvasState.tiles[0].frame == tileFrameBefore,
+                    pointerCanvas.viewport != viewportBefore
+                )
+            }
+
+            let localStart = CGPoint(x: pointerView.bounds.maxX - 1, y: pointerView.bounds.maxY - 1)
+            let canvasStart = pointerView.convert(localStart, to: pointerCanvas)
+            guard let canvasSuperview = pointerCanvas.superview else {
+                throw CheckError.failed("pointer-pan canvas was not installed in a window view hierarchy")
+            }
+            let canvasSuperviewStart = pointerCanvas.convert(canvasStart, to: canvasSuperview)
+            pointerPanProductionHitRoutedToTile = pointerCanvas.hitTest(canvasSuperviewStart) === pointerView
+
+            let commandResult = try runPointerPan(modifiers: [.command], holdingSpace: false)
+            commandPanPreservedTileFrame = commandResult.preservedTile
+            commandPanChangedViewport = commandResult.changedViewport
+            let spaceResult = try runPointerPan(modifiers: [], holdingSpace: true)
+            spacePanPreservedTileFrame = spaceResult.preservedTile
+            spacePanChangedViewport = spaceResult.changedViewport
+
+            // Route and execute an actual resize gesture from every corner. The
+            // prior edge/classifier checks alone could all pass while AppKit still
+            // delivered a bottom-corner press to body content. Reset the same
+            // panned/zoomed tile before each drag and require the expected anchored
+            // origin plus growth on both axes.
+            let cornerDrags: [(name: String, localStart: (TileNSView) -> CGPoint, windowDelta: CGPoint, movesLeft: Bool, movesTop: Bool)] = [
+                ("topLeft", { _ in CGPoint(x: 1, y: 1) }, CGPoint(x: -30, y: 18), true, true),
+                ("topRight", { CGPoint(x: $0.bounds.maxX - 1, y: 1) }, CGPoint(x: 30, y: 18), false, true),
+                ("bottomLeft", { CGPoint(x: 1, y: $0.bounds.maxY - 1) }, CGPoint(x: -30, y: -18), true, false),
+                ("bottomRight", { CGPoint(x: $0.bounds.maxX - 1, y: $0.bounds.maxY - 1) }, CGPoint(x: 30, y: -18), false, false)
+            ]
+            for corner in cornerDrags {
+                pointerCanvas.updateTile(pointerProbe)
+                pointerCanvas.setViewport(initialViewport)
+                pointerCanvas.layoutSubtreeIfNeeded()
+                let local = corner.localStart(pointerView)
+                let canvasPoint = pointerView.convert(local, to: pointerCanvas)
+                let superPoint = pointerCanvas.convert(canvasPoint, to: canvasSuperview)
+                guard pointerCanvas.hitTest(superPoint) === pointerView else {
+                    cornerResizeProductionPasses[corner.name] = false
+                    continue
+                }
+                let windowStart = pointerCanvas.convert(canvasPoint, to: nil)
+                let before = pointerCanvas.canvasState.tiles[0].frame
+                pointerView.mouseDown(with: try mouse(.leftMouseDown, at: windowStart, modifiers: []))
+                let windowEnd = CGPoint(x: windowStart.x + corner.windowDelta.x, y: windowStart.y + corner.windowDelta.y)
+                pointerView.mouseDragged(with: try mouse(.leftMouseDragged, at: windowEnd, modifiers: []))
+                pointerView.mouseUp(with: try mouse(.leftMouseUp, at: windowEnd, modifiers: []))
+                let after = pointerCanvas.canvasState.tiles[0].frame
+                let xPass = corner.movesLeft ? after.x < before.x : after.x == before.x
+                let yPass = corner.movesTop ? after.y < before.y : after.y == before.y
+                cornerResizeProductionPasses[corner.name] = xPass && yPass
+                    && after.width > before.width && after.height > before.height
+            }
+            pointerWindow.orderOut(nil)
+        }
+        try expect(pointerPanProductionHitRoutedToTile, "canvas/window hit testing did not route a panned/zoomed bottom-right ring press to TileNSView")
+        try expect(commandPanPreservedTileFrame, "Cmd+drag from a selected tile's resize ring resized the tile instead of preserving its frame")
+        try expect(commandPanChangedViewport, "Cmd+drag from a selected tile's resize ring did not pan the canvas viewport")
+        try expect(spacePanPreservedTileFrame, "Space-drag from a selected tile's resize ring resized the tile instead of preserving its frame")
+        try expect(spacePanChangedViewport, "Space-drag from a selected tile's resize ring did not pan the canvas viewport")
+        try expect(cornerResizeProductionPasses.count == 4 && cornerResizeProductionPasses.values.allSatisfy { $0 }, "production-routed resize gestures must work from all four corners: \(cornerResizeProductionPasses)")
+
         let manifest: [String: Any] = [
             "check": "tile-drag-grab",
             "ringReclaim": ringReclaim,
+            "pointerPanProductionHitRoutedToTile": pointerPanProductionHitRoutedToTile,
+            "commandPanPreservedTileFrame": commandPanPreservedTileFrame,
+            "commandPanChangedViewport": commandPanChangedViewport,
+            "spacePanPreservedTileFrame": spacePanPreservedTileFrame,
+            "spacePanChangedViewport": spacePanChangedViewport,
+            "cornerResizeProductionPasses": cornerResizeProductionPasses,
             "worldSize": ["width": tile.frame.width, "height": tile.frame.height],
             "titleBarHeight": TileNSView.titleBarHeight,
             "minScreenGrabPx": TileNSView.minScreenGrabPx,
@@ -5516,12 +5746,17 @@ final class ZoneChromeNSView: NSView {
         super.draw(dirtyRect)
         let accent = Self.color(named: model.placement.color)
         let zoneRect = bounds.insetBy(dx: 1, dy: 1)
-        accent.withAlphaComponent(model.placement.collapsed ? 0.20 : 0.10).setFill()
-        zoneRect.fill()
-        accent.withAlphaComponent(0.75).setStroke()
         let path = NSBezierPath(roundedRect: zoneRect, xRadius: 12, yRadius: 12)
         path.lineWidth = 2
-        path.stroke()
+
+        // The body and header share one overflow boundary. Filling `zoneRect`
+        // and `headerRect` as bare rectangles paints square pixels through the
+        // rounded top corners; clip every interior draw to the rounded path, then
+        // restore and stroke the outline last so the header cannot paint over it.
+        NSGraphicsContext.saveGraphicsState()
+        path.addClip()
+        accent.withAlphaComponent(model.placement.collapsed ? 0.20 : 0.10).setFill()
+        zoneRect.fill()
 
         accent.withAlphaComponent(0.24).setFill()
         headerRect.fill()
@@ -5571,6 +5806,10 @@ final class ZoneChromeNSView: NSView {
             )
             rollup.draw(in: rollupRect, withAttributes: rollupAttributes)
         }
+        NSGraphicsContext.restoreGraphicsState()
+
+        accent.withAlphaComponent(0.75).setStroke()
+        path.stroke()
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
