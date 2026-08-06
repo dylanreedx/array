@@ -1216,8 +1216,8 @@ Exit gate:
 - [x] **P3.4** Show a clear outbound marker when What targets an external path.
 - [ ] **P3.5** Preserve branch, model, effort, context usage, and lifecycle information at responsive
   widths.
-- [ ] **P3.6** Provide full Home/Where/provenance/access details through tooltip or native disclosure.
-- [ ] **P3.7** Add keyboard-accessible path actions: change, copy, reveal, terminal, file tree, and
+- [x] **P3.6** Provide full Home/Where/provenance/access details through tooltip or native disclosure.
+- [x] **P3.7** Add keyboard-accessible path actions: change, copy, reveal, terminal, file tree, and
   return Home where supported.
 - [ ] **P3.8** Ensure VoiceOver announces Home, Where divergence, What, and lifecycle independently.
 - [x] **P3.9** Ensure truncation never hides the fact that Where/What is external.
@@ -1243,16 +1243,16 @@ Supervised gate:
 - [ ] **P4.1** Register project zones as authoritative Home signals.
 - [ ] **P4.2** Register managed agents as stable Home/check-out/relative-directory signals.
 - [ ] **P4.3** Define which terminal/file-tree entities may emit proven scope.
-- [ ] **P4.4** Compute zoom-independent distance between world-coordinate frames.
-- [ ] **P4.5** Rank containing zone ahead of nearby entities.
-- [ ] **P4.6** Rank nearby agreement ahead of a single incidental signal.
-- [ ] **P4.7** Use only an explicit workspace default when no spatial signal exists.
+- [x] **P4.4** Compute zoom-independent distance between world-coordinate frames.
+- [x] **P4.5** Rank containing zone ahead of nearby entities.
+- [x] **P4.6** Rank nearby agreement ahead of a single incidental signal.
+- [x] **P4.7** Use only an explicit workspace default when no spatial signal exists.
 - [ ] **P4.8** Open the switcher when neither spatial context nor explicit default exists.
-- [ ] **P4.9** Never fall back silently to the Continuum process cwd.
-- [ ] **P4.10** Infer project more readily than exact subdirectory.
-- [ ] **P4.11** Map inherited relative directories into each new isolated checkout.
-- [ ] **P4.12** Warn and fall back to checkout root when a relative directory is absent.
-- [ ] **P4.13** Never inherit another agent's isolated absolute worktree by proximity.
+- [x] **P4.9** Never fall back silently to the Continuum process cwd.
+- [x] **P4.10** Infer project more readily than exact subdirectory.
+- [x] **P4.11** Map inherited relative directories into each new isolated checkout.
+- [x] **P4.12** Warn and fall back to checkout root when a relative directory is absent.
+- [x] **P4.13** Never inherit another agent's isolated absolute worktree by proximity.
 - [ ] **P4.14** Display provisional provenance immediately on a zero-turn agent.
 - [ ] **P4.15** Recompute provisional scope only after settled movement, not every drag frame.
 - [ ] **P4.16** Freeze automatic inference at the owner-approved composer/reference/manual/submission
@@ -1262,14 +1262,14 @@ Supervised gate:
 
 RED checks:
 
-- [ ] **P4.R1** Containing project zone wins over a nearby cross-project tile.
-- [ ] **P4.R2** A nearby agent's external What does not influence new-agent Home.
-- [ ] **P4.R3** Multiple nearby agents agree on project without forcing an incidental subdirectory.
-- [ ] **P4.R4** Zoom changes do not alter nearest-neighbor results.
-- [ ] **P4.R5** Dragging an active tile never mutates scope.
-- [ ] **P4.R6** Composer/reference/manual freeze events prevent later reinference.
-- [ ] **P4.R7** Empty-canvas behavior never selects app process cwd.
-- [ ] **P4.R8** Isolated checkout inheritance produces the new agent's own absolute path.
+- [x] **P4.R1** Containing project zone wins over a nearby cross-project tile.
+- [x] **P4.R2** A nearby agent's external What does not influence new-agent Home.
+- [x] **P4.R3** Multiple nearby agents agree on project without forcing an incidental subdirectory.
+- [x] **P4.R4** Zoom changes do not alter nearest-neighbor results.
+- [x] **P4.R5** Dragging an active tile never mutates scope.
+- [x] **P4.R6** Composer/reference/manual freeze events prevent later reinference.
+- [x] **P4.R7** Empty-canvas behavior never selects app process cwd.
+- [x] **P4.R8** Isolated checkout inheritance produces the new agent's own absolute path.
 
 Real-route gate:
 
@@ -1279,14 +1279,14 @@ Real-route gate:
 
 ### P5 — location/sessionizer switcher and index
 
-- [ ] **P5.1** Define a shared searchable index over projects, directories, agents, sessions, tiles, and
+- [x] **P5.1** Define a shared searchable index over projects, directories, agents, sessions, tiles, and
   zones.
-- [ ] **P5.2** Preserve stable IDs while allowing friendly labels and aliases to change.
-- [ ] **P5.3** Implement bounded shallow discovery roots; never recursively scan all of `$HOME`.
+- [x] **P5.2** Preserve stable IDs while allowing friendly labels and aliases to change.
+- [x] **P5.3** Implement bounded shallow discovery roots; never recursively scan all of `$HOME`.
 - [ ] **P5.4** Cache registered project metadata, recency, Git identity, and active-agent counts.
 - [ ] **P5.5** Add incremental file indexing where file reference mode requires it.
-- [ ] **P5.6** Implement fuzzy name/path matching and collision-safe result labels.
-- [ ] **P5.7** Rank anchor, nearby context, nearby projects, recency, active agents, workspace projects,
+- [x] **P5.6** Implement fuzzy name/path matching and collision-safe result labels.
+- [x] **P5.7** Rank anchor, nearby context, nearby projects, recency, active agents, workspace projects,
   then bounded discovery.
 - [ ] **P5.8** Build a native keyboard-first result list with asynchronous preview.
 - [ ] **P5.9** Build project directory preview using a native outline/tree.
@@ -1295,16 +1295,16 @@ Real-route gate:
 - [ ] **P5.12** Preserve tmux-sessionizer speed: immediate results, fuzzy filtering, preview, and
   switch-or-create semantics.
 - [ ] **P5.13** Provide explicit Choose Folder/File through `NSOpenPanel` as an escape hatch.
-- [ ] **P5.14** Define location mode, reference mode, and global navigation mode over the shared index.
+- [x] **P5.14** Define location mode, reference mode, and global navigation mode over the shared index.
 - [ ] **P5.15** Audit and assign conflict-free keyboard shortcuts.
 
 RED/mechanical checks:
 
-- [ ] **P5.R1** Ranking fixtures cover spatial, recent, active, workspace, and discovered results.
-- [ ] **P5.R2** Same-name projects/sessions remain unambiguous.
-- [ ] **P5.R3** Empty query and partial path fragments produce deterministic results.
-- [ ] **P5.R4** Discovery obeys depth/root bounds and cancellation.
-- [ ] **P5.R5** Preview loading cannot block typing/selection.
+- [x] **P5.R1** Ranking fixtures cover spatial, recent, active, workspace, and discovered results.
+- [x] **P5.R2** Same-name projects/sessions remain unambiguous.
+- [x] **P5.R3** Empty query and partial path fragments produce deterministic results.
+- [x] **P5.R4** Discovery obeys depth/root bounds and cancellation.
+- [x] **P5.R5** Preview loading cannot block typing/selection.
 - [ ] **P5.R6** Keyboard and accessibility actions cover search, select, preview, create, and picker.
 
 Supervised gate:
@@ -1355,27 +1355,27 @@ Real-route gate:
 
 - [ ] **P7.1** Register stable entities for agents, tiles, zones, notes, terminals, file trees, browser
   tiles, and future artifact types.
-- [ ] **P7.2** Keep agent identity independent from zero, one, or multiple visual tiles.
+- [x] **P7.2** Keep agent identity independent from zero, one, or multiple visual tiles.
 - [ ] **P7.3** Maintain world-coordinate frames and visibility state for installed entities.
-- [ ] **P7.4** Compute contains, overlap, nearest, radius, directional, same-zone, and same-project
+- [x] **P7.4** Compute contains, overlap, nearest, radius, directional, same-zone, and same-project
   relations.
-- [ ] **P7.5** Define deterministic tie-breaking and confidence/evidence output.
+- [x] **P7.5** Define deterministic tie-breaking and confidence/evidence output.
 - [ ] **P7.6** Resolve composer-local `this/me/my tile` to the composing tile.
 - [ ] **P7.7** Resolve global `this` only from an explicit selection/context-command anchor.
-- [ ] **P7.8** Snapshot spatial resolution to stable IDs at invocation time.
+- [x] **P7.8** Snapshot spatial resolution to stable IDs at invocation time.
 - [ ] **P7.9** Return chosen target, distance/relation, state, and freshness visibly.
-- [ ] **P7.10** Distinguish scope emitters from context-only entities.
-- [ ] **P7.11** Exclude hidden/deleted/stale entities according to explicit query options.
+- [x] **P7.10** Distinguish scope emitters from context-only entities.
+- [x] **P7.11** Exclude hidden/deleted/stale entities according to explicit query options.
 - [ ] **P7.12** Keep detailed canvas context tool-driven rather than automatically injected.
 
 RED checks:
 
-- [ ] **P7.R1** Directional and nearest queries are invariant under zoom/pan.
-- [ ] **P7.R2** Tie fixtures resolve deterministically or return ambiguity.
-- [ ] **P7.R3** Moving an entity after resolution does not retarget the captured request.
-- [ ] **P7.R4** Detached agents remain addressable but do not pretend to have visible geometry.
-- [ ] **P7.R5** Notes/browser tiles never emit filesystem authority.
-- [ ] **P7.R6** Deleted/stale targets fail safely with a visible reason.
+- [x] **P7.R1** Directional and nearest queries are invariant under zoom/pan.
+- [x] **P7.R2** Tie fixtures resolve deterministically or return ambiguity.
+- [x] **P7.R3** Moving an entity after resolution does not retarget the captured request.
+- [x] **P7.R4** Detached agents remain addressable but do not pretend to have visible geometry.
+- [x] **P7.R5** Notes/browser tiles never emit filesystem authority.
+- [x] **P7.R6** Deleted/stale targets fail safely with a visible reason.
 
 ### P8 — semantic references and bounded inspection
 
@@ -1568,7 +1568,8 @@ RED/security checks:
 
 ## First implementation slice
 
-Status: implemented and mechanically GREEN on 2026-08-06; not committed.
+Status: implemented, committed, and mechanically GREEN on 2026-08-06 (`85e678c`, hardened by
+`7a2f571`).
 
 The first slice stayed below UI and Pi RPC:
 
@@ -1616,7 +1617,8 @@ runtime ownership; proximity depends on stable identity/location contracts.
 
 ## Second implementation slice — P2 host-local What projection
 
-Status: implemented and mechanically GREEN on 2026-08-06; not committed; live Pi/UI gate still open.
+Status: implemented and committed on 2026-08-06 (`85e678c`); deterministic checks and the real
+Pi Home/Where/What route are GREEN.
 
 Implemented files:
 
@@ -1665,8 +1667,9 @@ and broker messaging remains P2.9.
 
 ## Third implementation slice — P3 native managed-tile status
 
-Status: first tile slice implemented and mechanically GREEN on 2026-08-06; not committed; visual,
-VoiceOver, disclosure-action, sidebar, and owner gates remain open.
+Status: native tile status committed on 2026-08-06 (`85e678c`); disclosure/path actions followed
+in `e27a908`, `307015e`, `565b423`, and `ab14feb`. VoiceOver, sidebar projection, and final owner
+acceptance remain open.
 
 Implemented files:
 
@@ -1747,9 +1750,68 @@ Component Lab comparison remains honestly RED and unblessed at
 expected missing baselines for the two new location cards, while 22 other renders match. No baseline
 was changed or blessed. Headless Aqua/Dark Aqua candidate screenshots were reviewed and approved,
 and the isolated normal-app harness exercised real Pi read/edit/Bash/wait/external/stale transitions.
-No real VoiceOver pass, keyboard disclosure/action review, or owner acceptance occurred. VoiceOver is
-explicitly deferred from the current owner-testing effort rather than treated as complete. P3.5–P3.8,
-P3.10, P3.S2, and P3.S3 therefore remain unchecked where mechanical/live evidence is insufficient.
+No real VoiceOver pass or owner acceptance occurred. VoiceOver is explicitly deferred from the
+current owner-testing effort rather than treated as complete. P3.5, P3.8, P3.10, P3.S2, and P3.S3
+therefore remain unchecked where mechanical/live evidence is insufficient.
+
+## Fourth implementation slice — Home actions and P4/P5/P7 Core foundations
+
+Status: committed through `ab14feb`; final headless/nonvisual matrix GREEN; owner dogfood build launched.
+P4/P5/P7 live App/canvas integration remains open.
+
+Implemented files:
+
+```text
+Sources/ContinuumRevived/App/AgentSupervisor.swift
+Sources/ContinuumRevived/App/ContinuumApp.swift
+Sources/ContinuumRevivedCore/Agents/AgentContextGravity.swift
+Sources/ContinuumRevivedCore/LocationSessionIndex.swift
+Sources/ContinuumRevivedCore/CanvasEntityIndex.swift
+Sources/ContinuumRevivedCoreChecks/AgentContextGravityChecks.swift
+Sources/ContinuumRevivedCoreChecks/LocationSessionIndexP5RChecks.swift
+Sources/ContinuumRevivedCoreChecks/CanvasEntityIndexP7Checks.swift
+scripts/run-matrix.sh
+```
+
+Outcome:
+
+- zero-turn managed agents can select a valid registered project or arbitrary existing folder;
+- restored, active, or historically used agents expose **New Agent Here** instead of retargeting Home;
+- Home is persisted before the live record/projector changes, and injected write failure leaves all
+  three unchanged;
+- native path actions provide copy, Finder, Terminal, and file-tree routes where supported;
+- invalid, missing, regular-file, non-file, and stale registered roots fail without mutating Home;
+- explicitly selected symlinks resolve to an existing directory target before becoming Home;
+- `AgentContextGravity` defines deterministic zoom-independent provisional-scope ranking, relative
+  checkout inheritance, explicit-default-only fallback, freeze semantics, and symlink containment;
+- `LocationSessionIndex` defines stable searchable entities, modes, bounded discovery, deterministic
+  spatial/recency ranking, async preview, and non-Codable private routing;
+- `CanvasEntityIndex` defines stable agent/tile/zone identities, world-coordinate spatial relations,
+  snapshot validation, explicit ambiguity, freshness/visibility filtering, and scope-role boundaries;
+- the iOS build caught `homeDirectoryForCurrentUser` in the shared P5 source; `ab14feb` replaced it
+  with the cross-platform sandbox Home and the full simulator build then passed;
+- production still lacks the adapters that feed live canvas state into these three Core services.
+
+Evidence:
+
+```text
+Focused P4/P5/P7 + supervisor GREEN: /tmp/continuum-queue91-wrap.VAX4al/
+Initial final-matrix iOS RED: /tmp/continuum-queue91-final-matrix.Y6W1nU/output.log
+Direct iOS GREEN: /tmp/continuum-queue91-ios-build-fix.log
+Final matrix GREEN: /tmp/continuum-queue91-final-matrix2.lJZVy1/output.log
+Home policy/surface GREEN: /tmp/continuum-queue91-location-policy.fqZG6I/output.log
+Core follow-up APPROVE: .pi/agent-runs/code-reviewer-20260806T193012Z-ea258a/final.md
+Home policy follow-up APPROVE: .pi/agent-runs/code-reviewer-20260806T195118Z-8ab731/final.md
+QA follow-up PASS: .pi/agent-runs/qa-reviewer-20260806T195118Z-19d2af/final.md
+UX follow-up MANUAL_CHECK: .pi/agent-runs/ux-reviewer-20260806T193012Z-040e15/final.md
+Owner artifact: qa-runs/owner-queue91-2026-08-06T195129Z/Array.app
+```
+
+The checked P4/P5/P7 items above describe the implemented pure-Core contracts and deterministic
+checks only. Project-zone/agent registration, native switcher UI, live entity snapshots, and owner
+routes remain unchecked. The foundation agents did not archive an independent pre-implementation
+RED run; the final checks are executable and independently reviewed, but that chronology is not
+retroactively claimed.
 
 ## Current direction and open owner decisions
 
