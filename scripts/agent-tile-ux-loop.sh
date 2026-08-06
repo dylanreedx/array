@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Sequential worker/reviewer loop for docs/38-tickets/91-agent-tile-ux.
-# The harness owns selection, scope validation, final checks, ledger, and commits.
+# Sequential implementation/monitor loop for docs/38-tickets/91-agent-tile-ux.
+# Luna high implements; Sol xhigh independently monitors and reconciles through
+# bounded REWORK -> Luna repair rounds. The harness owns selection, scope
+# validation, final checks, ledger, and commits.
 
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -13,8 +15,10 @@ STOP_FILE="$PROGRAM_DIR/STOP"
 EXPECTED_BRANCH="${EXPECTED_BRANCH:-overnight/agent-ux}"
 MAX_ITER="${MAX_ITER:-60}"
 MAX_REPAIR_PASSES="${MAX_REPAIR_PASSES:-2}"
-PI_WORKER_MODELS="${PI_WORKER_MODELS:-openai-codex/gpt-5.6-sol openai-codex/gpt-5.6-luna}"
-PI_THINKING="${PI_THINKING:-medium}"
+PI_WORKER_MODEL="${PI_WORKER_MODEL:-openai-codex/gpt-5.6-luna}"
+PI_WORKER_THINKING="${PI_WORKER_THINKING:-high}"
+PI_MONITOR_MODEL="${PI_MONITOR_MODEL:-openai-codex/gpt-5.6-sol}"
+PI_MONITOR_THINKING="${PI_MONITOR_THINKING:-xhigh}"
 ROOT_PI_DIR="${ROOT_PI_DIR:-$HOME/.pi}"
 CONTROL_DIR="${CONTROL_DIR:-$ROOT_PI_DIR/agent-tile-ux-loop-control/$(basename "$(git rev-parse --show-toplevel)")}"
 RUN_ROOT="${RUN_ROOT:-$ROOT_PI_DIR/agent-tile-ux-runs/$(basename "$(git rev-parse --show-toplevel)")}"
@@ -175,18 +179,8 @@ EOF
   [ "$count" -gt 0 ] || { echo "worker produced no ticket changes" >&2; return 1; }
 }
 
-worker_model() {
-  local models=($PI_WORKER_MODELS) index
-  index=$(( (ITERATION - 1) % ${#models[@]} ))
-  printf '%s\n' "${models[$index]}"
-}
-
-review_model() {
-  case "$1" in
-    *gpt-5.6-sol) printf '%s\n' openai-codex/gpt-5.6-luna ;;
-    *) printf '%s\n' openai-codex/gpt-5.6-sol ;;
-  esac
-}
+worker_model() { printf '%s\n' "$PI_WORKER_MODEL"; }
+review_model() { printf '%s\n' "$PI_MONITOR_MODEL"; }
 
 run_worker() {
   local ticket="$1" model="$2" task_dir="$3" pass="$4" review_file="${5:-}"
@@ -208,8 +202,8 @@ This is a repair pass. Address only blocking findings in $review_file."
 
 $(cat "$PROMPT_FILE")"
 
-  log "$ticket worker pass $pass ($model)"
-  pi --approve --model "$model" --thinking "$PI_THINKING" \
+  log "$ticket worker pass $pass ($model, thinking=$PI_WORKER_THINKING)"
+  pi --approve --model "$model" --thinking "$PI_WORKER_THINKING" \
     --session-dir "$session_dir" --name "agent-tile-$ITERATION-worker-$pass" --mode text -p "$prompt" \
     > "$output" 2> "$task_dir/worker-$pass.stderr" &
   CURRENT_CHILD=$!
@@ -245,13 +239,15 @@ Read:
 Be strict about correctness, packet architecture, privacy, file scope, deterministic proof, and gate
 weakening. Report only blocking issues: behavior that can be wrong, architecture that violates a
 locked decision, unsafe handling, or a named done criterion left unproved. Do not request stylistic
-cleanup or unrelated hardening. Give at most five blocking findings. You are read-only.
+cleanup or unrelated hardening. Give at most five blocking findings. You are the read-only Sol xhigh
+monitor: a REWORK verdict is the reconciliation packet for the next bounded Luna repair pass, and
+you will review the resulting diff again.
 
 End with exactly DECISION: APPROVE or DECISION: REWORK.
 EOF
   mkdir -p "$session"
-  log "$ticket review round $round ($model)"
-  pi --no-approve --model "$model" --thinking "$PI_THINKING" --tools read,grep,find,ls \
+  log "$ticket monitor round $round ($model, thinking=$PI_MONITOR_THINKING)"
+  pi --no-approve --model "$model" --thinking "$PI_MONITOR_THINKING" --tools read,grep,find,ls \
     --session-dir "$session" --name "agent-tile-$ITERATION-review-$round" --mode text -p "@$request" \
     > "$output" 2> "$task_dir/review-$round.stderr" &
   CURRENT_CHILD=$!
@@ -279,7 +275,7 @@ update_ledger_done() {
   local ticket="$1" task_dir="$2" timestamp tmp note
   timestamp="$(now_utc)"
   tmp="$LEDGER_FILE.tmp"
-  note="Harness-owned completion: focused worker checks, independent opposite-model review, swift build, and final matrix passed. Evidence: $task_dir."
+  note="Harness-owned completion: focused Luna-high worker checks, independent Sol-xhigh monitor reconciliation, swift build, and final matrix passed. Evidence: $task_dir."
   awk -F'|' -v OFS='|' -v ticket="$ticket" -v timestamp="$timestamp" -v note="$note" '
     /^last-touch / {
       print "last-touch " timestamp " · ticket " ticket " · attempt 1 · pid — · status done"
@@ -318,8 +314,10 @@ preflight() {
   [ "$(git branch --show-current)" = "$EXPECTED_BRANCH" ] || { echo "wrong branch" >&2; return 1; }
   [ ! -f "$STOP_FILE" ] || { echo "STOP is present" >&2; return 1; }
   [ -z "$(unexpected_status)" ] || { echo "tracked/non-authorized changes present" >&2; unexpected_status >&2; return 1; }
-  [ "$PI_WORKER_MODELS" = 'openai-codex/gpt-5.6-sol openai-codex/gpt-5.6-luna' ] || return 1
-  [ "$PI_THINKING" = medium ] || return 1
+  [ "$PI_WORKER_MODEL" = openai-codex/gpt-5.6-luna ] || return 1
+  [ "$PI_WORKER_THINKING" = high ] || return 1
+  [ "$PI_MONITOR_MODEL" = openai-codex/gpt-5.6-sol ] || return 1
+  [ "$PI_MONITOR_THINKING" = xhigh ] || return 1
   command -v pi >/dev/null 2>&1 || return 1
   ./scripts/check-agent-tile-ux-program.sh --check || return 1
   if ! swift scripts/check-retina-main.swift; then
@@ -351,9 +349,9 @@ for ITERATION in $(seq 1 "$MAX_ITER"); do
   mkdir -p "$task_dir"
   before_head="$(git rev-parse HEAD)"
   model="$(worker_model)"
-  reviewer="$(review_model "$model")"
-  printf '{"ticket":"%s","worker":"%s","reviewer":"%s","startedAt":"%s","beforeHead":"%s"}\n' \
-    "$CURRENT_TICKET" "$model" "$reviewer" "$(now_utc)" "$before_head" > "$task_dir/task.json"
+  reviewer="$(review_model)"
+  printf '{"ticket":"%s","worker":"%s","workerThinking":"%s","monitor":"%s","monitorThinking":"%s","startedAt":"%s","beforeHead":"%s"}\n' \
+    "$CURRENT_TICKET" "$model" "$PI_WORKER_THINKING" "$reviewer" "$PI_MONITOR_THINKING" "$(now_utc)" "$before_head" > "$task_dir/task.json"
 
   if ! run_worker "$CURRENT_TICKET" "$model" "$task_dir" 1; then finish "worker-failed:$CURRENT_TICKET"; break; fi
   [ "$(git rev-parse HEAD)" = "$before_head" ] || { finish "worker-committed:$CURRENT_TICKET"; break; }

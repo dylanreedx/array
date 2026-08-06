@@ -14,6 +14,12 @@ When Dylan explicitly resumes the program for overnight work, use only the exist
 
 The loop must remain local-only, one ticket/commit at a time, with the existing queue, ledger, file fences, STOP behavior, deterministic gates, and supervised/manual gates preserved. Do not start it until Dylan explicitly requests the overnight run.
 
+Locked model roles for the next run:
+
+- implementation and bounded repair passes: `openai-codex/gpt-5.6-luna`, thinking `high`;
+- independent monitoring/reconciliation: `openai-codex/gpt-5.6-sol`, thinking `xhigh`;
+- Sol remains read-only and returns a bounded REWORK reconciliation packet to Luna when needed.
+
 Pause was confirmed with:
 
 ```text

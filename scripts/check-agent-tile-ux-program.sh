@@ -43,8 +43,11 @@ check_program() {
   grep -Fq '**Autonomy is the default.**' "$DIR/_DESIGN.md" || fail "design regained a Continuum approval gate"
   grep -Fq '**No context tile.**' "$DIR/_DESIGN.md" || fail "design regained a context tile"
   grep -Fq '`P5.3-provider-current-work-projection.md`' "$QUEUE" || fail "queue lost provider current-work projection"
-  grep -Fq 'openai-codex/gpt-5.6-sol openai-codex/gpt-5.6-luna' scripts/agent-tile-ux-loop.sh || fail "loop lost Sol/Luna worker pair"
-  grep -Fq 'PI_THINKING="${PI_THINKING:-medium}"' scripts/agent-tile-ux-loop.sh || fail "loop lost medium thinking default"
+  grep -Fq 'PI_WORKER_MODEL="${PI_WORKER_MODEL:-openai-codex/gpt-5.6-luna}"' scripts/agent-tile-ux-loop.sh || fail "loop lost Luna implementation role"
+  grep -Fq 'PI_WORKER_THINKING="${PI_WORKER_THINKING:-high}"' scripts/agent-tile-ux-loop.sh || fail "loop lost Luna high thinking"
+  grep -Fq 'PI_MONITOR_MODEL="${PI_MONITOR_MODEL:-openai-codex/gpt-5.6-sol}"' scripts/agent-tile-ux-loop.sh || fail "loop lost Sol monitor role"
+  grep -Fq 'PI_MONITOR_THINKING="${PI_MONITOR_THINKING:-xhigh}"' scripts/agent-tile-ux-loop.sh || fail "loop lost Sol xhigh thinking"
+  grep -Fq 'a REWORK verdict is the reconciliation packet' scripts/agent-tile-ux-loop.sh || fail "loop lost bounded monitor reconciliation"
   grep -Fq 'MAX_REPAIR_PASSES="${MAX_REPAIR_PASSES:-2}"' scripts/agent-tile-ux-loop.sh || fail "loop lost bounded repair budget"
   grep -Fq 'reviewer-session-' scripts/agent-tile-ux-loop.sh || fail "loop lost durable reviewer sessions"
   grep -Fq 'DECISION: APPROVE' scripts/agent-tile-ux-loop.sh || fail "loop lost independent approval gate"
@@ -147,7 +150,7 @@ EOF
   expected_supervised="$(printf 'P3.12\nP4.10\nP5.5\n')"
   [ "$actual_supervised" = "$expected_supervised" ] || fail "supervised gates changed: [$actual_supervised]"
 
-  packet_count="$(find "$DIR" -maxdepth 1 -type f -name 'P*.md' | wc -l | tr -d ' ')"
+  packet_count="$(find "$DIR" -maxdepth 1 -type f -name 'P*.md' ! -name 'PAUSED-*.md' | wc -l | tr -d ' ')"
   [ "$packet_count" = 50 ] || fail "expected 50 packet files, found $packet_count"
 
   # Ledger: one row per packet, a state from the runbook's vocabulary, and no
