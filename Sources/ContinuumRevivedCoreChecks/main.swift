@@ -36,6 +36,11 @@ if CommandLine.arguments.contains("--agent-context-gravity-check") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--canvas-entity-index-p7-check") {
+    runCanvasEntityIndexP7Checks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--agent-what-projection-check") {
     runAgentWhatProjectionChecks()
     Foundation.exit(0)
@@ -155,6 +160,7 @@ try runAsyncCheck {
 }
 
 try runCompanionFreshnessChecks()
+runCanvasEntityIndexP7Checks()
 
 // Trap-testing hook: when invoked with this env var set, deliberately call
 // the operation under test so a subprocess check can assert the process
