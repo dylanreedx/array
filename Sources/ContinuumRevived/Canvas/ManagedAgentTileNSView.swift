@@ -142,6 +142,9 @@ final class ManagedAgentTileNSView: TileNSView {
     /// attached to); this is for a host that wants to know, and for a tile with no
     /// agent behind it.
     var onProviderSettingsChange: ((AgentModelConfig.Resolution) -> Void)?
+    /// Native Home/Where action route. The app builds the menu because it owns
+    /// project registry, NSOpenPanel, Finder/Terminal, and spawn infrastructure.
+    var onLocationActionMenuRequested: ((_ agentID: AgentID, _ anchor: NSButton) -> Void)?
 
     init(
         tile: Tile,
@@ -178,6 +181,10 @@ final class ManagedAgentTileNSView: TileNSView {
         )
         // The compiled host seam stops the whole running agent process, not
         // only its current turn. Keep the action and its label equally broad.
+        locationStatus.onActionMenuRequested = { [weak self] anchor in
+            guard let self, let agentID = self.projectedAgentID else { return }
+            self.onLocationActionMenuRequested?(agentID, anchor)
+        }
         agentHeader.onStopAgentRun = { [weak self] in
             guard let self else { return }
             if self.isProbingV2HeaderActions { self.onStopRun?() }
@@ -477,6 +484,65 @@ final class ManagedAgentTileNSView: TileNSView {
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    static func runLocationActionSurfaceSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { if case let .failed(message) = self { return message } }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        let tile = Tile(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000912")!,
+            kind: .managedAgent,
+            title: "LOCATION_ACTIONS",
+            frame: TileFrame(x: 0, y: 0, width: 520, height: 320),
+            zPosition: .fromLegacyRank(1),
+            runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")
+        )
+        let view = ManagedAgentTileNSView(tile: tile)
+        view.frame = NSRect(x: 0, y: 0, width: 520, height: 320)
+        let home = AgentHome(
+            projectId: UUID(uuidString: "91000000-0000-4000-8000-000000000912")!,
+            projectRoot: URL(fileURLWithPath: "/tmp/location-actions/project", isDirectory: true),
+            checkoutRoot: URL(fileURLWithPath: "/tmp/location-actions/project", isDirectory: true)
+        )
+        view.applyLocationPresentationForComponentLab(AgentLocationStatusPresenter.present(
+            AgentLocationSnapshot(
+                home: home,
+                whereDirectory: URL(fileURLWithPath: "/tmp/location-actions/other", isDirectory: true)),
+            projectName: "Location Actions"
+        ))
+        view.layoutSubtreeIfNeeded()
+        var invoked = false
+        view.onLocationActionMenuRequested = { _, _ in invoked = true }
+        // This fixture has no attached agent, so the app route is intentionally not
+        // invoked; the status surface itself is still a keyboard-reachable button.
+        try expect(view.qaLocationActionButtonAccessibilityLabel == "Location actions", "missing Location actions AX label")
+        try expect(view.qaLocationActionButtonEnabled, "location actions button should be enabled")
+        try expect(!view.qaLocationDetail.isEmpty, "disclosure detail should retain full Home/Where text")
+        try expect(view.qaWhereOutboundMarkerVisible, "external Where marker should remain visible with actions installed")
+        let manifest: [String: Any] = [
+            "check": "location-action-surface",
+            "actionButtonAX": view.qaLocationActionButtonAccessibilityLabel,
+            "actionButtonEnabled": view.qaLocationActionButtonEnabled,
+            "location": view.qaLocationText,
+            "detailContainsHome": view.qaLocationDetail.contains("Home"),
+            "invokedWithoutAgent": invoked
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("location-action-surface", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+            .write(to: artifact, options: .atomic)
         return artifact
     }
 
@@ -1111,6 +1177,10 @@ final class ManagedAgentTileNSView: TileNSView {
         locationStatus.qaMarkerLanesDoNotOverlapText
     }
     var qaLocationContentFitsBounds: Bool { locationStatus.qaContentFitsBounds }
+    var qaLocationActionButtonAccessibilityLabel: String {
+        locationStatus.qaLocationActionButtonAccessibilityLabel
+    }
+    var qaLocationActionButtonEnabled: Bool { locationStatus.qaLocationActionButtonEnabled }
     var qaLocationAccessibilityValue: String { locationStatus.qaLocationAccessibilityValue }
     var qaWhatAccessibilityValue: String { locationStatus.qaWhatAccessibilityValue }
     var qaLocationStaleTimerActive: Bool { locationStaleTimer?.isValid == true }

@@ -20,7 +20,19 @@ final class AgentLocationStatusView: NSView, TokenThemed {
     private let locationLabel = NSTextField(labelWithString: "")
     private let whatMarker = NSTextField(labelWithString: "")
     private let whatLabel = NSTextField(labelWithString: "")
+    private let actionButton: NSButton = {
+        let button = NSButton(title: "⋯", target: nil, action: nil)
+        button.bezelStyle = .inline
+        button.isBordered = false
+        button.setButtonType(.momentaryPushIn)
+        button.toolTip = "Location actions"
+        button.setAccessibilityLabel("Location actions")
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        return button
+    }()
     private var presentation: AgentLocationStatusPresentation?
+    var onActionMenuRequested: ((NSButton) -> Void)?
 
     override var intrinsicContentSize: NSSize {
         NSSize(
@@ -44,21 +56,27 @@ final class AgentLocationStatusView: NSView, TokenThemed {
         rows.alignment = .leading
         rows.spacing = CGFloat(Space.xs)
         rows.edgeInsets = NSEdgeInsets(Inset.row)
-        rows.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(rows)
+        let container = NSStackView(views: [rows, actionButton])
+        container.orientation = .horizontal
+        container.alignment = .centerY
+        container.spacing = CGFloat(Space.xs)
+        container.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(container)
+        actionButton.target = self
+        actionButton.action = #selector(showActions(_:))
 
         NSLayoutConstraint.activate([
-            rows.leadingAnchor.constraint(equalTo: leadingAnchor),
-            rows.trailingAnchor.constraint(equalTo: trailingAnchor),
-            rows.topAnchor.constraint(equalTo: topAnchor),
-            rows.bottomAnchor.constraint(equalTo: bottomAnchor),
+            container.leadingAnchor.constraint(equalTo: leadingAnchor),
+            container.trailingAnchor.constraint(equalTo: trailingAnchor),
+            container.topAnchor.constraint(equalTo: topAnchor),
+            container.bottomAnchor.constraint(equalTo: bottomAnchor),
             locationRow.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -Inset.row.horizontal),
             whatRow.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -Inset.row.horizontal),
         ])
 
         setAccessibilityRole(.group)
         setAccessibilityLabel("Agent location and observed activity")
-        setAccessibilityChildren([locationLabel, whatLabel])
+        setAccessibilityChildren([locationLabel, whatLabel, actionButton])
         isHidden = true
         applyTokens()
     }
@@ -80,6 +98,7 @@ final class AgentLocationStatusView: NSView, TokenThemed {
         whatLabel.setAccessibilityLabel(next.whatAccessibilityValue)
         locationLabel.toolTip = next.detailText
         whatLabel.toolTip = next.detailText
+        actionButton.toolTip = next.detailText + "\nLocation actions"
         toolTip = next.detailText
         invalidateIntrinsicContentSize()
         applyTokens()
@@ -94,6 +113,7 @@ final class AgentLocationStatusView: NSView, TokenThemed {
         whatMarker.stringValue = ""
         locationLabel.toolTip = nil
         whatLabel.toolTip = nil
+        actionButton.toolTip = "Location actions"
         toolTip = nil
         invalidateIntrinsicContentSize()
     }
@@ -135,6 +155,16 @@ final class AgentLocationStatusView: NSView, TokenThemed {
         label.setAccessibilityLabel(accessibilityLabel)
     }
 
+    @objc private func showActions(_ sender: NSButton) {
+        onActionMenuRequested?(sender)
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard let onActionMenuRequested else { return super.menu(for: event) }
+        onActionMenuRequested(actionButton)
+        return nil
+    }
+
     private func makeRow(marker: NSTextField, label: NSTextField) -> NSStackView {
         let row = NSStackView(views: [marker, label])
         row.orientation = .horizontal
@@ -148,6 +178,10 @@ final class AgentLocationStatusView: NSView, TokenThemed {
     var qaLocationDetail: String { presentation?.detailText ?? "" }
     var qaWhereOutboundMarkerVisible: Bool { whereMarker.stringValue == "↗" }
     var qaWhatOutboundMarkerVisible: Bool { whatMarker.stringValue == "↗" }
+    var qaLocationActionButtonAccessibilityLabel: String {
+        actionButton.accessibilityLabel() ?? ""
+    }
+    var qaLocationActionButtonEnabled: Bool { actionButton.isEnabled }
     var qaLocationAccessibilityValue: String {
         locationLabel.accessibilityLabel() ?? ""
     }

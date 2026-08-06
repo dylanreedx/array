@@ -1021,6 +1021,30 @@ final class AgentSupervisor {
         locationProjectors[id]?.ingest(observation)
     }
 
+    /// True once there is user/session work that makes Home retargeting unsafe.
+    /// Used by the native Home action surface: zero-turn agents may be reassigned;
+    /// anything with a prompt, history, or live runner must fork through New Agent Here.
+    func hasUserWorkOrSessionHistory(_ id: AgentID) -> Bool {
+        firstPromptByAgent[id] != nil || !(history[id]?.isEmpty ?? true) || isRunning(id)
+    }
+
+    /// Explicitly changes authoritative Home for a provisional zero-turn agent.
+    /// This mutates only the host-local execution record (`cwd`, `projectId`) and
+    /// the in-memory location projector; no path-bearing value becomes Codable.
+    @discardableResult
+    func reassignProvisionalHome(agentID id: AgentID, cwd: URL, projectId: UUID?) -> Bool {
+        guard var record = records[id] else { return false }
+        guard !hasUserWorkOrSessionHistory(id) else { return false }
+        record.cwd = cwd.path
+        record.projectId = projectId
+        record.lastActivityAt = max(record.lastActivityAt, Date())
+        records[id] = record
+        locationProjectors[id] = nil
+        ensureLocationProjector(for: record)
+        persist(record)
+        return true
+    }
+
     // MARK: - Restore (P2A.7)
 
     /// What one `restore()` adopted, so the caller reports numbers instead of
@@ -4012,6 +4036,52 @@ func runAgentSupervisorChecks() async throws {
     // than being masked by the broader historical naming corpus below.
     let generatedNameReport = try await checkGeneratedNameOneShot(config: config, fail: fail)
     let namingReport = try await checkAgentNameContract(config: config, cwd: cwd, fail: fail)
+
+    // Queue 91 P3.6/P3.7 — Home may be changed only while the agent is still a
+    // zero-turn/provisional record. After any session history exists, callers must
+    // use the app's explicit New Agent Here route instead of silently retargeting.
+    let homeSelectionStore = AgentStore(
+        applicationSupportDirectory: root.appendingPathComponent("home-selection", isDirectory: true))
+    let homeSelectionSupervisor = AgentSupervisor(
+        store: homeSelectionStore,
+        makeRunner: { _ in ScriptedAgentRunner(script: [.sessionStateChanged(.ready)]) })
+    let originalProjectId = UUID()
+    let selectedHome = root.appendingPathComponent("selected-home", isDirectory: true)
+    try FileManager.default.createDirectory(at: selectedHome, withIntermediateDirectories: true)
+    let homeSelectionAgent = homeSelectionSupervisor.spawn(
+        role: nil,
+        prompt: nil,
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking,
+        projectId: originalProjectId)
+    let selectedProjectId = UUID()
+    guard homeSelectionSupervisor.reassignProvisionalHome(
+        agentID: homeSelectionAgent,
+        cwd: selectedHome,
+        projectId: selectedProjectId) else {
+        throw fail("zero-turn Home selection should update the authoritative AgentRecord before submission")
+    }
+    guard homeSelectionSupervisor.records[homeSelectionAgent]?.cwd == selectedHome.path,
+          homeSelectionSupervisor.records[homeSelectionAgent]?.projectId == selectedProjectId,
+          homeSelectionSupervisor.locationSnapshot(for: homeSelectionAgent)?.home.checkoutRoot.path == selectedHome.path else {
+        throw fail("provisional Home selection did not update record and host-local projector together")
+    }
+    homeSelectionSupervisor.send("first real prompt", to: homeSelectionAgent)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        homeSelectionSupervisor.hasUserWorkOrSessionHistory(homeSelectionAgent)
+    }) else {
+        throw fail("first prompt did not mark the agent as no longer provisional")
+    }
+    let forbiddenHome = root.appendingPathComponent("forbidden-retarget", isDirectory: true)
+    try FileManager.default.createDirectory(at: forbiddenHome, withIntermediateDirectories: true)
+    guard !homeSelectionSupervisor.reassignProvisionalHome(
+        agentID: homeSelectionAgent,
+        cwd: forbiddenHome,
+        projectId: nil),
+          homeSelectionSupervisor.records[homeSelectionAgent]?.cwd == selectedHome.path else {
+        throw fail("agent with session history was silently retargeted instead of requiring New Agent Here")
+    }
 
     // Queue 91 P2 — the runner's private observation reaches supervisor-owned
     // Home/Where/What before the matching generic item event, while subscribers

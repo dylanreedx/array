@@ -1937,6 +1937,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--location-action-surface-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try ManagedAgentTileNSView.runLocationActionSurfaceSelfCheck()
+                print("ContinuumRevivedLocationActionSurfaceChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--focus-scope-dispatch-check") {
             do {
                 _ = NSApplication.shared
@@ -2872,6 +2884,27 @@ struct UnconfirmedElapsedFreeze {
             return row.withUnconfirmed(true, elapsed: lastKnown[row.id] ?? row.elapsed)
         }
     }
+}
+
+private extension String {
+    func shellQuoted() -> String {
+        "'" + replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
+
+private final class ClosureMenuItem: NSMenuItem {
+    private let handler: () -> Void
+
+    init(title: String, enabled: Bool = true, handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(title: title, action: #selector(runHandler), keyEquivalent: "")
+        target = self
+        isEnabled = enabled
+    }
+
+    required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    @objc private func runHandler() { handler() }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, CanvasNSViewDelegate, NSSplitViewDelegate {
@@ -9536,8 +9569,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// root and id, and the configured model/thinking level. `tileId` is a view
     /// binding, not identity, so `nil` is a headless agent; a non-nil `prompt` runs
     /// on spawn (`AgentSupervisor.spawn`'s own parameter).
-    private func spawnSupervisedAgent(tileId: UUID?, prompt: String? = nil) -> AgentID {
-        let cwd = URL(fileURLWithPath: activeProject?.rootPath ?? FileManager.default.currentDirectoryPath, isDirectory: true)
+    private func spawnSupervisedAgent(
+        tileId: UUID?,
+        prompt: String? = nil,
+        cwd overrideCWD: URL? = nil,
+        projectId overrideProjectId: UUID? = nil,
+        useOverrideProjectId: Bool = false
+    ) -> AgentID {
+        let cwd = overrideCWD ?? URL(fileURLWithPath: activeProject?.rootPath ?? FileManager.default.currentDirectoryPath, isDirectory: true)
         let model = AgentModelConfig.resolvedFromDefaults()
         return agentSupervisor.spawn(
             role: nil,
@@ -9545,7 +9584,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             cwd: cwd,
             model: model.model,
             thinking: model.thinking,
-            projectId: activeProject?.id,
+            projectId: useOverrideProjectId ? overrideProjectId : (overrideProjectId ?? activeProject?.id),
             tileId: tileId
         )
     }
@@ -9617,6 +9656,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let view else { return }
             self?.recordManagedActivity(agentId: agentId, tileId: tileId, event: event, status: view.currentAgentStatus)
         }
+        view.onLocationActionMenuRequested = { [weak self] requestedAgentID, anchor in
+            self?.showLocationActionMenu(for: requestedAgentID, anchoredTo: anchor)
+        }
         // Replays the agent's history, then follows the tail; re-wiring the same
         // tile to the same agent is a no-op inside `attach`, so none of the three
         // call sites can double-ingest. Project NAME is supplied by the app's
@@ -9646,6 +9688,134 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if supervisor.needsPreviousSessionNotice(agentId) {
             view.showPreviousSessionNotice()
         }
+    }
+
+    private func showLocationActionMenu(for agentID: AgentID, anchoredTo anchor: NSButton) {
+        guard let snapshot = agentSupervisor.locationSnapshot(for: agentID) else { return }
+        let menu = NSMenu(title: "Location Actions")
+        let hasWork = agentSupervisor.hasUserWorkOrSessionHistory(agentID)
+        let homeURL = snapshot.home.checkoutRoot
+        let whereURL = snapshot.workingLocation.directory
+
+        if hasWork {
+            let newHere = NSMenuItem(title: "New Agent Here", action: nil, keyEquivalent: "")
+            newHere.submenu = projectActionSubmenu(prefix: "New Agent in", includeFolder: true) { [weak self] project in
+                self?.spawnManagedAgentHere(cwd: URL(fileURLWithPath: project.rootPath, isDirectory: true), projectId: project.id)
+            } folderHandler: { [weak self] url in
+                self?.spawnManagedAgentHere(cwd: url, projectId: nil)
+            }
+            menu.addItem(newHere)
+        } else {
+            let changeHome = NSMenuItem(title: "Change Home", action: nil, keyEquivalent: "")
+            changeHome.submenu = projectActionSubmenu(prefix: "Use", includeFolder: true) { [weak self] project in
+                self?.reassignHome(agentID: agentID, cwd: URL(fileURLWithPath: project.rootPath, isDirectory: true), projectId: project.id)
+            } folderHandler: { [weak self] url in
+                self?.reassignHome(agentID: agentID, cwd: url, projectId: nil)
+            }
+            menu.addItem(changeHome)
+        }
+
+        menu.addItem(.separator())
+        addPathActions(to: menu, label: "Home", url: homeURL)
+        if whereURL.standardizedFileURL.path != homeURL.standardizedFileURL.path {
+            addPathActions(to: menu, label: "Where", url: whereURL)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height), in: anchor)
+    }
+
+    private func projectActionSubmenu(
+        prefix: String,
+        includeFolder: Bool,
+        projectHandler: @escaping (ProjectEntry) -> Void,
+        folderHandler: @escaping (URL) -> Void
+    ) -> NSMenu {
+        let menu = NSMenu(title: prefix)
+        let projects = ((try? registryStore?.loadOrEmpty()) ?? Registry.empty()).projects
+            .filter { !$0.missing }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        if projects.isEmpty {
+            let item = NSMenuItem(title: "No registered projects", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+        } else {
+            for project in projects {
+                menu.addItem(ClosureMenuItem(title: "\(prefix) \(project.name)") { projectHandler(project) })
+            }
+        }
+        if includeFolder {
+            menu.addItem(.separator())
+            menu.addItem(ClosureMenuItem(title: "Choose Folder…") { [weak self] in
+                guard let self, let url = self.chooseAgentHomeFolder() else { return }
+                folderHandler(url)
+            })
+        }
+        return menu
+    }
+
+    private func chooseAgentHomeFolder() -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose Home"
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    private func reassignHome(agentID: AgentID, cwd: URL, projectId: UUID?) {
+        guard agentSupervisor.reassignProvisionalHome(agentID: agentID, cwd: cwd, projectId: projectId) else {
+            NSSound.beep()
+            return
+        }
+        refreshAgentSurfaces()
+        if let tileId = agentSupervisor.records[agentID]?.tileId,
+           let view = canvasView?.tileView(for: tileId) as? ManagedAgentTileNSView {
+            view.attach(agentID: agentID, supervisor: agentSupervisor, projectName: projectName(for: projectId))
+        }
+    }
+
+    private func spawnManagedAgentHere(cwd: URL, projectId: UUID?) {
+        guard let spawner = tileSpawner else { return }
+        switch spawner.spawnManagedAgent() {
+        case let .spawned(tileId):
+            let agentID = spawnSupervisedAgent(tileId: tileId, cwd: cwd, projectId: projectId, useOverrideProjectId: true)
+            wireManagedAgentTile(tileId, agentID: agentID)
+            focusSpawnedTile(tileId)
+            scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "location-new-agent-here", debounce: 0.2)
+        case let .failure(error):
+            fputs("Location New Agent Here failed: \(error)\n", stderr)
+        }
+    }
+
+    private func projectName(for projectId: UUID?) -> String? {
+        guard let projectId else { return nil }
+        if activeProject?.id == projectId { return activeProject?.name }
+        let registry = (try? registryStore?.loadOrEmpty()) ?? Registry.empty()
+        return registry.projects.first(where: { $0.id == projectId })?.name
+    }
+
+    private func addPathActions(to menu: NSMenu, label: String, url: URL) {
+        let path = url.path
+        menu.addItem(ClosureMenuItem(title: "Copy \(label) Path") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(path, forType: .string)
+        })
+        let exists = FileManager.default.fileExists(atPath: path)
+        menu.addItem(ClosureMenuItem(title: "Reveal \(label) in Finder", enabled: exists) {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        })
+        let terminalSupported = exists && NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") != nil
+        menu.addItem(ClosureMenuItem(title: "Open Terminal at \(label)", enabled: terminalSupported) {
+            self.openTerminal(at: url)
+        })
+    }
+
+    private func openTerminal(at url: URL) {
+        let script = "tell application \"Terminal\" to do script "
+            + String(reflecting: "cd " + url.path.shellQuoted())
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+        try? process.run()
     }
 
     /// Records a managed-agent runtime event onto the per-agent syncable
