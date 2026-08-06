@@ -1940,6 +1940,7 @@ enum ContinuumApp {
         if CommandLine.arguments.contains("--location-action-surface-check") {
             do {
                 _ = NSApplication.shared
+                try AppDelegate.runLocationActionPolicySelfCheck()
                 let artifact = try ManagedAgentTileNSView.runLocationActionSurfaceSelfCheck()
                 print("ContinuumRevivedLocationActionSurfaceChecks passed: \(artifact.path)")
                 Foundation.exit(0)
@@ -9710,23 +9711,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let homeURL = snapshot.home.checkoutRoot
         let whereURL = snapshot.workingLocation.directory
 
-        if hasWork {
-            let newHere = NSMenuItem(title: "New Agent Here", action: nil, keyEquivalent: "")
-            newHere.submenu = projectActionSubmenu(prefix: "New Agent in", includeFolder: true) { [weak self] project in
-                self?.spawnManagedAgentHere(cwd: URL(fileURLWithPath: project.rootPath, isDirectory: true), projectId: project.id)
-            } folderHandler: { [weak self] url in
-                self?.spawnManagedAgentHere(cwd: url, projectId: nil)
-            }
-            menu.addItem(newHere)
-        } else {
-            let changeHome = NSMenuItem(title: "Change Home", action: nil, keyEquivalent: "")
-            changeHome.submenu = projectActionSubmenu(prefix: "Use", includeFolder: true) { [weak self] project in
-                self?.reassignHome(agentID: agentID, cwd: URL(fileURLWithPath: project.rootPath, isDirectory: true), projectId: project.id)
-            } folderHandler: { [weak self] url in
-                self?.reassignHome(agentID: agentID, cwd: url, projectId: nil)
-            }
-            menu.addItem(changeHome)
-        }
+        menu.addItem(locationPrimaryActionMenuItem(for: agentID, hasWork: hasWork))
 
         menu.addItem(.separator())
         addPathActions(to: menu, label: "Home", url: homeURL)
@@ -9734,6 +9719,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             addPathActions(to: menu, label: "Where", url: whereURL)
         }
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height), in: anchor)
+    }
+
+    private func locationPrimaryActionMenuItem(for agentID: AgentID, hasWork: Bool) -> NSMenuItem {
+        if hasWork {
+            let newHere = NSMenuItem(title: "New Agent Here", action: nil, keyEquivalent: "")
+            newHere.submenu = projectActionSubmenu(prefix: "New Agent in", includeFolder: true) { [weak self] project in
+                self?.spawnManagedAgentHere(cwd: URL(fileURLWithPath: project.rootPath, isDirectory: true), projectId: project.id)
+            } folderHandler: { [weak self] url in
+                self?.spawnManagedAgentHere(cwd: url, projectId: nil)
+            }
+            return newHere
+        }
+
+        let changeHome = NSMenuItem(title: "Change Home", action: nil, keyEquivalent: "")
+        changeHome.submenu = projectActionSubmenu(prefix: "Use", includeFolder: true) { [weak self] project in
+            self?.reassignHome(agentID: agentID, cwd: URL(fileURLWithPath: project.rootPath, isDirectory: true), projectId: project.id)
+        } folderHandler: { [weak self] url in
+            self?.reassignHome(agentID: agentID, cwd: url, projectId: nil)
+        }
+        return changeHome
     }
 
     private func projectActionSubmenu(
@@ -9877,6 +9882,98 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         process.arguments = ["-e", script]
         try? process.run()
+    }
+
+    static func runLocationActionPolicySelfCheck() throws {
+        struct LocationActionPolicyCheckError: Error, CustomStringConvertible {
+            let description: String
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw LocationActionPolicyCheckError(description: message) }
+        }
+
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-location-action-policy-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        let validRoot = root.appendingPathComponent("valid-project", isDirectory: true)
+        let symlinkTarget = root.appendingPathComponent("selected-target", isDirectory: true)
+        let symlinkRoot = root.appendingPathComponent("selected-link", isDirectory: true)
+        let regularFile = root.appendingPathComponent("not-a-directory.txt")
+        let missingRoot = root.appendingPathComponent("missing-project", isDirectory: true)
+        try fileManager.createDirectory(at: validRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: symlinkTarget, withIntermediateDirectories: true)
+        try Data("file".utf8).write(to: regularFile)
+        try fileManager.createSymbolicLink(at: symlinkRoot, withDestinationURL: symlinkTarget)
+
+        let delegate = AppDelegate()
+        try expect(delegate.usableAgentHomeDirectory(validRoot)?.path == validRoot.resolvingSymlinksInPath().path,
+                   "location action policy rejected an existing directory")
+        try expect(delegate.usableAgentHomeDirectory(regularFile) == nil,
+                   "location action policy accepted a regular file")
+        try expect(delegate.usableAgentHomeDirectory(missingRoot) == nil,
+                   "location action policy accepted a missing directory")
+        try expect(delegate.usableAgentHomeDirectory(URL(string: "https://example.invalid/home")!) == nil,
+                   "location action policy accepted a non-file URL")
+        try expect(delegate.usableAgentHomeDirectory(symlinkRoot)?.path == symlinkTarget.resolvingSymlinksInPath().path,
+                   "an explicitly selected symlink did not resolve to its existing directory target")
+
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        func project(_ name: String, _ url: URL, missing: Bool = false) -> ProjectEntry {
+            ProjectEntry(
+                id: UUID(),
+                name: name,
+                rootPath: url.path,
+                workspaceId: nil,
+                lastOpenedAt: now,
+                pinned: false,
+                missing: missing)
+        }
+        var registry = Registry.empty()
+        registry.projects = [
+            project("Alpha", validRoot),
+            project("File", regularFile),
+            project("Missing Path", missingRoot),
+            project("Marked Missing", validRoot, missing: true),
+            project("Symlink", symlinkRoot),
+        ]
+        let registryStore = RegistryStore(applicationSupportDirectory: root.appendingPathComponent("registry", isDirectory: true))
+        try registryStore.save(registry)
+        delegate.registryStore = registryStore
+
+        let probeAgentID = AgentID(rawValue: UUID())
+        let changeHome = delegate.locationPrimaryActionMenuItem(for: probeAgentID, hasWork: false)
+        try expect(changeHome.title == "Change Home", "zero-turn location menu lost Change Home")
+        let changeTitles = changeHome.submenu?.items.filter { !$0.isSeparatorItem }.map(\.title) ?? []
+        try expect(changeTitles == ["Use Alpha", "Use Symlink", "Choose Folder…"],
+                   "Change Home menu exposed invalid projects or lost valid choices: \(changeTitles)")
+
+        let newAgent = delegate.locationPrimaryActionMenuItem(for: probeAgentID, hasWork: true)
+        try expect(newAgent.title == "New Agent Here", "worked/restored location menu can still retarget Home")
+        let newTitles = newAgent.submenu?.items.filter { !$0.isSeparatorItem }.map(\.title) ?? []
+        try expect(newTitles == ["New Agent in Alpha", "New Agent in Symlink", "Choose Folder…"],
+                   "New Agent Here menu exposed invalid projects or lost valid choices: \(newTitles)")
+
+        let agentSupport = root.appendingPathComponent("agents", isDirectory: true)
+        let agentStore = AgentStore(applicationSupportDirectory: agentSupport)
+        delegate.agentSupervisor = AgentSupervisor(store: agentStore, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+        let agentID = delegate.agentSupervisor.spawn(
+            role: nil,
+            prompt: nil,
+            cwd: validRoot,
+            model: "test-model",
+            thinking: "off")
+        let before = delegate.agentSupervisor.records[agentID]
+        for invalid in [regularFile, missingRoot, URL(string: "https://example.invalid/home")!] {
+            delegate.reassignHome(agentID: agentID, cwd: invalid, projectId: UUID())
+            try expect(delegate.agentSupervisor.records[agentID] == before,
+                       "invalid Home action mutated the live record for \(invalid.absoluteString)")
+            let durableRecord = try agentStore.load(id: agentID)
+            try expect(durableRecord == before,
+                       "invalid Home action mutated the durable record for \(invalid.absoluteString)")
+        }
     }
 
     /// Records a managed-agent runtime event onto the per-agent syncable

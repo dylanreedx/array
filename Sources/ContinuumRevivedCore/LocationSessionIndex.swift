@@ -379,7 +379,10 @@ public struct LocationDiscoveryOptions: Sendable {
     public var roots: [LocationDiscoveryRoot]
     public var homeDirectory: URL
 
-    public init(roots: [LocationDiscoveryRoot], homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) {
+    public init(
+        roots: [LocationDiscoveryRoot],
+        homeDirectory: URL = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+    ) {
         self.roots = roots
         self.homeDirectory = homeDirectory
     }

@@ -299,6 +299,10 @@ run_app_check .build/debug/continuum-revived --note-click-focus-check
 # P5.5 correction: the same click-focus contract for the v2 agent composer — the
 # broker steal, an editor-glyph click, and a padding-ring click all land in the editor.
 run_app_check .build/debug/continuum-revived --agent-tile-click-focus-check
+# Queue 91 P3.7/P3.S1: the real Home action policy rejects file, missing,
+# non-file, and stale registered roots without mutating the agent; the native
+# menu switches from Change Home to New Agent Here after work/history exists.
+run_app_check .build/debug/continuum-revived --location-action-surface-check
 run_app_check .build/debug/continuum-revived --focus-scope-dispatch-check
 run_app_check .build/debug/continuum-revived --reserved-dispatch-check
 run_app_check .build/debug/continuum-revived --tile-action-check
