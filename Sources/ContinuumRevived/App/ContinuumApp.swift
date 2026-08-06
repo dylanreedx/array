@@ -9562,7 +9562,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             title: "New Agent Without a Tile",
             informativeText: "The agent runs with no tile on the canvas. Enter its first prompt."
         ) else { return }
-        let agentId = spawnSupervisedAgent(tileId: nil, prompt: prompt)
+        guard let agentId = spawnSupervisedAgent(tileId: nil, prompt: prompt) else { return }
         fputs("Spawned headless agent \(agentId.rawValue.uuidString) (no tile; visible in the inbox from Phase 3, stopped on quit)\n", stderr)
     }
 
@@ -9570,15 +9570,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// root and id, and the configured model/thinking level. `tileId` is a view
     /// binding, not identity, so `nil` is a headless agent; a non-nil `prompt` runs
     /// on spawn (`AgentSupervisor.spawn`'s own parameter).
-    private func spawnSupervisedAgent(tileId: UUID?, prompt: String? = nil) -> AgentID {
-        let cwd = URL(
-            fileURLWithPath: activeProject?.rootPath ?? FileManager.default.currentDirectoryPath,
-            isDirectory: true)
+    private func spawnSupervisedAgent(tileId: UUID?, prompt: String? = nil) -> AgentID? {
+        guard let activeProject,
+              let cwd = usableAgentHomeDirectory(
+                  URL(fileURLWithPath: activeProject.rootPath, isDirectory: true)) else {
+            NSSound.beep()
+            fputs("Managed agent spawn refused: choose an explicit Home; process cwd is never an agent Home fallback\n", stderr)
+            return nil
+        }
         return spawnSupervisedAgentAtHome(
             tileId: tileId,
             prompt: prompt,
             cwd: cwd,
-            projectId: activeProject?.id)
+            projectId: activeProject.id)
     }
 
     /// Explicit-Home variant used only after the owner chooses a registered
@@ -9642,7 +9646,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             return
         } else {
-            agentId = spawnSupervisedAgent(tileId: tileId)
+            guard let spawnedAgentID = spawnSupervisedAgent(tileId: tileId) else { return }
+            agentId = spawnedAgentID
         }
         // The view binding lives in one place (P2A.5), so this is the site that
         // records it whichever branch above ran — and the site Phase 3's "open in
