@@ -26,6 +26,11 @@ if CommandLine.arguments.contains("--agent-location-contract-check") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--agent-context-gravity-check") {
+    runAgentContextGravityChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--agent-what-projection-check") {
     runAgentWhatProjectionChecks()
     Foundation.exit(0)
