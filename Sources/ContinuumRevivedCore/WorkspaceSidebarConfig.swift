@@ -11,6 +11,10 @@ public enum WorkspaceSidebarConfig {
     public static let defaultWidth: Double = 280
     public static let minWidth: Double = 220
     public static let maxWidth: Double = 420
+    /// The detail pane must retain this floor while the sidebar grows.
+    public static let contentMinimumWidth: Double = 640
+    /// AppKit's thin divider consumes part of the window, so it is included by
+    /// the view owner when deriving the available content width.
 
     public static func resolveVisible(defaults: UserDefaults = .standard) -> Bool {
         guard defaults.object(forKey: visibleKey) != nil else { return defaultVisible }
@@ -31,11 +35,31 @@ public enum WorkspaceSidebarConfig {
     }
 
     public static func setWidth(_ width: Double, defaults: UserDefaults = .standard) {
+        // Persistence has no window context. Never resurrect the old 420 pt
+        // ceiling here; the live split view applies its computed growth veto.
         defaults.set(clampedWidth(width), forKey: widthKey)
     }
 
+    public static func maximumWidth(forWindowWidth windowWidth: Double, dividerThickness: Double = 0) -> Double {
+        max(minWidth, floor(windowWidth) - contentMinimumWidth - dividerThickness)
+    }
+
+    /// Shrinking is always accepted, including when the current width is over
+    /// a newly-derived ceiling. Only growth is vetoed by the content floor.
+    public static func constrainedWidth(proposed: Double, current: Double, windowWidth: Double, dividerThickness: Double = 0) -> Double {
+        let candidate = max(minWidth, proposed)
+        guard candidate > current else { return candidate }
+        let maximum = maximumWidth(
+            forWindowWidth: windowWidth, dividerThickness: dividerThickness)
+        // If a window resize put the current divider beyond the new ceiling, a
+        // growth gesture is vetoed in place. Never snap backward to the ceiling;
+        // any later proposed shrink remains free to follow the pointer.
+        guard current < maximum else { return current }
+        return min(candidate, maximum)
+    }
+
     public static func clampedWidth(_ width: Double) -> Double {
-        min(max(width, minWidth), maxWidth)
+        max(minWidth, width)
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.8-scope-dropdown.md

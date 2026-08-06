@@ -7836,9 +7836,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         splitView.dividerStyle = .thin
         splitView.addArrangedSubview(sidebar)
         splitView.addArrangedSubview(contentView)
-        splitView.delegate = app
+        var resizeWrites: [Double] = []
+        sidebar.setWidthPersistenceForQA { width in
+            resizeWrites.append(width)
+            WorkspaceSidebarConfig.setWidth(width)
+        }
         app.workspaceSplitView = splitView
         splitView.layoutSubtreeIfNeeded()
+        try expect(splitView.delegate is WorkspaceSidebarResizeController,
+                   "the sidebar must replace the composition root as the live resize delegate")
         app.reloadWorkspaceSidebar()
         sidebar.layoutSubtreeIfNeeded()
 
@@ -7862,10 +7868,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(widthAfterHide == 340.0, "hiding sidebar must not corrupt persisted width, got \(widthAfterHide)")
         WorkspaceSidebarConfig.setWidth(340)
         app.setWorkspaceSidebarVisible(true)
-        sidebar.setFrameSize(NSSize(width: 360, height: sidebar.frame.height))
-        app.splitViewDidResizeSubviews(Notification(name: NSSplitView.didResizeSubviewsNotification, object: splitView))
+        // Simulated drag: all intermediate positions/layouts remain write-free.
+        sidebar.beginResizeForQA()
+        splitView.setPosition(340, ofDividerAt: 0)
+        splitView.layoutSubtreeIfNeeded()
+        try expect(resizeWrites.isEmpty, "first intermediate divider move wrote \(resizeWrites.count) time(s)")
+        splitView.setPosition(360, ofDividerAt: 0)
+        splitView.layoutSubtreeIfNeeded()
+        try expect(resizeWrites.isEmpty, "second intermediate divider move wrote \(resizeWrites.count) time(s)")
+        sidebar.finishResizeForQA()
+        sidebar.finishResizeForQA()
         let widthAfterDividerMove = WorkspaceSidebarConfig.resolveWidth()
-        try expect(widthAfterDividerMove == 360.0, "visible divider move should persist width 360, got \(widthAfterDividerMove)")
+        try expect(resizeWrites == [360.0], "resize-end must write exactly once with 360, got \(resizeWrites)")
+        try expect(widthAfterDividerMove == 360.0, "resize-end must persist width 360, got \(widthAfterDividerMove)")
 
         guard let expectedTileAViewport = canvas.framedViewportForTileJump(tileA) else {
             throw CheckError.failed("tileA must be frameable before sidebar click")

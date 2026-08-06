@@ -3,6 +3,200 @@ import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
+/// Owns the generic split view's sidebar-divider contract without moving
+/// resize policy or persistence into the application composition root.
+@MainActor
+final class WorkspaceSidebarResizeController: NSObject, NSSplitViewDelegate {
+    enum ResizeDirection: String {
+        case locked = "cannot grow or shrink"
+        case growOnly = "grow only"
+        case shrinkOnly = "shrink only"
+        case growOrShrink = "grow or shrink"
+    }
+
+    private weak var sidebar: WorkspaceSidebarView?
+    private weak var splitView: NSSplitView?
+    nonisolated(unsafe) private var eventMonitor: Any?
+    private var dragInFlight = false
+    private var persistWidth: (Double) -> Void = { WorkspaceSidebarConfig.setWidth($0) }
+
+    init(sidebar: WorkspaceSidebarView, splitView: NSSplitView) {
+        self.sidebar = sidebar
+        self.splitView = splitView
+        super.init()
+        splitView.delegate = self
+        installResizeEndMonitor()
+        refreshPresentation()
+    }
+
+    deinit {
+        if let eventMonitor {
+            MainActor.assumeIsolated { NSEvent.removeMonitor(eventMonitor) }
+        }
+    }
+
+    private var sidebarWidth: Double { Double(sidebar?.frame.width ?? 0) }
+    private var maximumSidebarWidth: Double {
+        guard let splitView else { return WorkspaceSidebarConfig.minWidth }
+        return WorkspaceSidebarConfig.maximumWidth(
+            forWindowWidth: Double(splitView.bounds.width),
+            dividerThickness: Double(splitView.dividerThickness))
+    }
+
+    var resizeDirection: ResizeDirection {
+        let atMinimum = sidebarWidth <= WorkspaceSidebarConfig.minWidth + 0.5
+        let atMaximum = sidebarWidth >= maximumSidebarWidth - 0.5
+        if atMinimum && atMaximum { return .locked }
+        if atMinimum { return .growOnly }
+        if atMaximum { return .shrinkOnly }
+        return .growOrShrink
+    }
+
+    var resizeAccessibilityLabel: String {
+        "Resize sidebar, \(resizeDirection.rawValue)"
+    }
+
+    private var accessibilityDivider: AnyObject? {
+        guard let splitView else { return nil }
+        for child in splitView.accessibilityChildren() ?? [] {
+            let element = child as AnyObject
+            if element.accessibilityRole?() == .splitter { return element }
+        }
+        return nil
+    }
+
+    var liveDividerAccessibilityRole: NSAccessibility.Role? {
+        accessibilityDivider?.accessibilityRole?()
+    }
+
+    var liveDividerAccessibilityLabel: String? {
+        accessibilityDivider?.accessibilityLabel?()
+    }
+
+    var resizeCursor: NSCursor {
+        switch resizeDirection {
+        case .locked: return .operationNotAllowed
+        case .growOnly: return .resizeRight
+        case .shrinkOnly: return .resizeLeft
+        case .growOrShrink: return .resizeLeftRight
+        }
+    }
+
+    func constrainedSidebarPosition(_ proposed: CGFloat) -> CGFloat {
+        guard let splitView else { return proposed }
+        return CGFloat(WorkspaceSidebarConfig.constrainedWidth(
+            proposed: Double(proposed),
+            current: sidebarWidth,
+            windowWidth: Double(splitView.bounds.width),
+            dividerThickness: Double(splitView.dividerThickness)))
+    }
+
+    func splitView(
+        _ splitView: NSSplitView,
+        constrainMinCoordinate proposedMinimumPosition: CGFloat,
+        ofSubviewAt dividerIndex: Int
+    ) -> CGFloat {
+        guard splitView === self.splitView, dividerIndex == 0 else { return proposedMinimumPosition }
+        if sidebar?.isHidden == true { return 0 }
+        return CGFloat(WorkspaceSidebarConfig.minWidth)
+    }
+
+    func splitView(
+        _ splitView: NSSplitView,
+        constrainMaxCoordinate proposedMaximumPosition: CGFloat,
+        ofSubviewAt dividerIndex: Int
+    ) -> CGFloat {
+        guard splitView === self.splitView, dividerIndex == 0 else { return proposedMaximumPosition }
+        if sidebar?.isHidden == true { return 0 }
+        // This callback receives a boundary, not the pointer. Keep an existing
+        // over-limit position legal while it shrinks; the position callback below
+        // independently vetoes growth beyond the content floor.
+        let nonSnappingMaximum = max(maximumSidebarWidth, sidebarWidth)
+        return min(proposedMaximumPosition, CGFloat(nonSnappingMaximum))
+    }
+
+    func splitView(
+        _ splitView: NSSplitView,
+        constrainSplitPosition proposedPosition: CGFloat,
+        ofSubviewAt dividerIndex: Int
+    ) -> CGFloat {
+        guard splitView === self.splitView, dividerIndex == 0 else { return proposedPosition }
+        if sidebar?.isHidden == true { return 0 }
+        return constrainedSidebarPosition(proposedPosition)
+    }
+
+    func splitView(
+        _ splitView: NSSplitView,
+        effectiveRect proposedEffectiveRect: NSRect,
+        forDrawnRect drawnRect: NSRect,
+        ofDividerAt dividerIndex: Int
+    ) -> NSRect {
+        guard splitView === self.splitView, dividerIndex == 0 else { return proposedEffectiveRect }
+        return proposedEffectiveRect.insetBy(dx: -4, dy: 0)
+    }
+
+    func splitViewDidResizeSubviews(_ notification: Notification) {
+        guard notification.object as? NSSplitView === splitView else { return }
+        // AppKit sends one notification for every intermediate frame. Presentation
+        // tracks those frames, but persistence waits for the monitored mouse-up.
+        refreshPresentation()
+    }
+
+    private func installResizeEndMonitor() {
+        eventMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .leftMouseUp]
+        ) { [weak self] event in
+            self?.observeResizeEvent(event)
+            return event
+        }
+    }
+
+    private func observeResizeEvent(_ event: NSEvent) {
+        guard let splitView else { return }
+        switch event.type {
+        case .leftMouseDown:
+            guard event.window === splitView.window else { return }
+            let point = splitView.convert(event.locationInWindow, from: nil)
+            dragInFlight = dividerHitRect(in: splitView).contains(point)
+        case .leftMouseUp:
+            finishResize()
+        default:
+            break
+        }
+    }
+
+    private func dividerHitRect(in splitView: NSSplitView) -> NSRect {
+        let dividerX = sidebar?.frame.maxX ?? 0
+        return NSRect(
+            x: dividerX - 4,
+            y: splitView.bounds.minY,
+            width: max(8, splitView.dividerThickness + 8),
+            height: splitView.bounds.height)
+    }
+
+    private func finishResize() {
+        guard dragInFlight else { return }
+        dragInFlight = false
+        guard let sidebar, !sidebar.isHidden else { return }
+        persistWidth(Double(sidebar.frame.width))
+    }
+
+    func refreshPresentation() {
+        guard let splitView else { return }
+        accessibilityDivider?.setAccessibilityLabel?(resizeAccessibilityLabel)
+        accessibilityDivider?.setAccessibilityIdentifier?("ContinuumWorkspaceSidebarDivider")
+        splitView.window?.invalidateCursorRects(for: splitView)
+        if let sidebar { sidebar.window?.invalidateCursorRects(for: sidebar) }
+    }
+
+    func setWidthPersistenceForQA(_ writer: @escaping (Double) -> Void) {
+        persistWidth = writer
+    }
+
+    func beginResizeForQA() { dragInFlight = true }
+    func finishResizeForQA() { finishResize() }
+}
+
 @MainActor
 enum WorkspaceSidebarSelection: Equatable {
     case workspace(UUID)
@@ -70,6 +264,7 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
     private let column: NSTableColumn
     private let titleLabel: NSTextField
     private let managementMessageLabel: NSTextField
+    private var resizeController: WorkspaceSidebarResizeController?
 
     private var tree = SidebarTree(workspaces: [])
     private var currentWorkspaceId: UUID?
@@ -172,6 +367,68 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
 
     required init?(coder: NSCoder) {
         return nil
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        guard let splitView = superview as? NSSplitView else {
+            resizeController = nil
+            return
+        }
+        resizeController = WorkspaceSidebarResizeController(sidebar: self, splitView: splitView)
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        guard let resizeController else { return }
+        let edgeWidth = min(5, bounds.width)
+        addCursorRect(
+            NSRect(x: bounds.maxX - edgeWidth, y: bounds.minY, width: edgeWidth, height: bounds.height),
+            cursor: resizeController.resizeCursor)
+        if let splitView = superview as? NSSplitView {
+            splitView.addCursorRect(
+                NSRect(x: frame.maxX, y: splitView.bounds.minY,
+                       width: splitView.dividerThickness, height: splitView.bounds.height),
+                cursor: resizeController.resizeCursor)
+        }
+    }
+
+    var resizeDirectionForQA: WorkspaceSidebarResizeController.ResizeDirection? {
+        resizeController?.resizeDirection
+    }
+
+    var resizeAccessibilityLabelForQA: String? {
+        resizeController?.liveDividerAccessibilityLabel
+    }
+
+    var resizeAccessibilityRoleForQA: NSAccessibility.Role? {
+        resizeController?.liveDividerAccessibilityRole
+    }
+
+    var resizeCursorForQA: NSCursor? {
+        resizeController?.resizeCursor
+    }
+
+    func constrainedResizePositionForQA(_ proposed: CGFloat) -> CGFloat? {
+        resizeController?.constrainedSidebarPosition(proposed)
+    }
+
+    func maximumResizeCoordinateForQA(_ proposedMaximum: CGFloat) -> CGFloat? {
+        guard let splitView = superview as? NSSplitView else { return nil }
+        return resizeController?.splitView(
+            splitView, constrainMaxCoordinate: proposedMaximum, ofSubviewAt: 0)
+    }
+
+    func setWidthPersistenceForQA(_ writer: @escaping (Double) -> Void) {
+        resizeController?.setWidthPersistenceForQA(writer)
+    }
+
+    func beginResizeForQA() {
+        resizeController?.beginResizeForQA()
+    }
+
+    func finishResizeForQA() {
+        resizeController?.finishResizeForQA()
     }
 
     /// P1.11: the sidebar IS `SurfaceToken.panel` — the token declared for "the

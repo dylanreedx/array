@@ -6549,8 +6549,8 @@ do {
     expect(WorkspaceSidebarConfig.resolveWidth(defaults: sidebarDefaults) == 350.0, "workspace sidebar width round-trips in-range value")
     WorkspaceSidebarConfig.setWidth(100, defaults: sidebarDefaults)
     expect(WorkspaceSidebarConfig.resolveWidth(defaults: sidebarDefaults) == 220.0, "workspace sidebar width clamps to floor")
-    WorkspaceSidebarConfig.setWidth(500, defaults: sidebarDefaults)
-    expect(WorkspaceSidebarConfig.resolveWidth(defaults: sidebarDefaults) == 420.0, "workspace sidebar width clamps to ceiling")
+    WorkspaceSidebarConfig.setWidth(520, defaults: sidebarDefaults)
+    expect(WorkspaceSidebarConfig.resolveWidth(defaults: sidebarDefaults) == 520.0, "workspace sidebar persists a width above the legacy ceiling for the window-derived live clamp")
     sidebarDefaults.set("320", forKey: WorkspaceSidebarConfig.widthKey)
     expect(WorkspaceSidebarConfig.resolveWidth(defaults: sidebarDefaults) == 320.0, "workspace sidebar width accepts Settings text-field numeric string")
 

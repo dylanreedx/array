@@ -285,6 +285,8 @@ enum UIProbeGeometry {
         // that failed to set its own appearance could not pass the .aqua pass.
         NSApp.appearance = NSAppearance(named: .darkAqua)
 
+        let sidebarResizeAssertions = try checkSidebarWidthResizePolicy()
+        print("UIProbeGeometry: sidebar resize policy, delegate, cursor/AX, restore, and write timing held across \(sidebarResizeAssertions) assertions")
         // P5.5 acceptance: the legacy card-stack transcript and its approval dock
         // are deleted; the v2 composition root is gated by
         // `checkLiveV2AgentTileLayout()` below (320/480/640/900 x both themes,
@@ -315,6 +317,142 @@ enum UIProbeGeometry {
             format: "UIProbeGeometry: reusable block host identity/reset and 8-dimensional measurement key gated; composer grows through %d width/draft cases with an eight-visual-line cap and stable constraints; custom choice popover gates %d keyboard, disabled, accessibility-state, appearance, and screen-placement cases; live v2 tile gated at 320/480/640/900 in both appearances with footer truncation measured; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, and %d exceptional states preserve request identity and opaque privacy at 320pt",
             composerCases, choiceCases, transcriptLiveHosts, streamingApplies, proseRows, userPromptRows, codeRows, operationRows, exceptionalRows
         ))
+    }
+
+    // MARK: - Sidebar width policy
+
+    /// Covers the pure policy and the actual NSSplitView delegate seam. In
+    /// particular, an already-over-limit divider may shrink to any proposed
+    /// coordinate without `constrainMaxCoordinate` snapping it to the new ceiling.
+    private static func checkSidebarWidthResizePolicy() throws -> Int {
+        var assertions = 0
+        let divider = 2.0
+        let normalWindow = WorkspaceSidebarConfig.contentMinimumWidth + 500 + divider
+        let narrowWindow = WorkspaceSidebarConfig.contentMinimumWidth - 40 + divider
+        let computedMaximum = WorkspaceSidebarConfig.maximumWidth(
+            forWindowWidth: normalWindow, dividerThickness: divider)
+        let narrowMaximum = WorkspaceSidebarConfig.maximumWidth(
+            forWindowWidth: narrowWindow, dividerThickness: divider)
+
+        func require(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String) throws {
+            guard condition() else { throw fail(message()) }
+            assertions += 1
+        }
+
+        func makeSplit(windowWidth: Double, sidebarWidth: Double) -> (NSSplitView, WorkspaceSidebarView) {
+            let splitView = NSSplitView(frame: NSRect(x: 0, y: 0, width: windowWidth, height: 420))
+            splitView.isVertical = true
+            splitView.dividerStyle = .thin
+            let sidebar = WorkspaceSidebarView(
+                frame: NSRect(x: 0, y: 0, width: sidebarWidth, height: 420))
+            let content = NSView(frame: NSRect(
+                x: sidebarWidth + divider, y: 0,
+                width: max(0, windowWidth - sidebarWidth - divider), height: 420))
+            splitView.addArrangedSubview(sidebar)
+            splitView.addArrangedSubview(content)
+            splitView.setPosition(sidebarWidth, ofDividerAt: 0)
+            splitView.layoutSubtreeIfNeeded()
+            return (splitView, sidebar)
+        }
+
+        try require(
+            WorkspaceSidebarConfig.clampedWidth(WorkspaceSidebarConfig.minWidth - 40) == WorkspaceSidebarConfig.minWidth,
+            "ui-geometry-check.sidebar-resize.minimum: width escaped the 220 pt floor")
+        try require(
+            WorkspaceSidebarConfig.clampedWidth(WorkspaceSidebarConfig.defaultWidth) == WorkspaceSidebarConfig.defaultWidth,
+            "ui-geometry-check.sidebar-resize.default: default width changed")
+        try require(computedMaximum == 500 && computedMaximum > WorkspaceSidebarConfig.maxWidth,
+            "ui-geometry-check.sidebar-resize.computed maximum: expected dynamic 500 above legacy 420, got \(computedMaximum)")
+        try require(narrowMaximum == WorkspaceSidebarConfig.minWidth,
+            "ui-geometry-check.sidebar-resize.narrow maximum: expected sidebar floor, got \(narrowMaximum)")
+
+        let computedGrowth = WorkspaceSidebarConfig.constrainedWidth(
+            proposed: computedMaximum + 80, current: WorkspaceSidebarConfig.defaultWidth,
+            windowWidth: normalWindow, dividerThickness: divider)
+        try require(computedGrowth == computedMaximum,
+            "ui-geometry-check.sidebar-resize.computed maximum: growth resolved \(computedGrowth), expected \(computedMaximum)")
+
+        let overLimitGrowth = WorkspaceSidebarConfig.constrainedWidth(
+            proposed: 370, current: 360, windowWidth: narrowWindow, dividerThickness: divider)
+        try require(overLimitGrowth == 360,
+            "ui-geometry-check.sidebar-resize.over-limit growth snapped from 360 to \(overLimitGrowth)")
+        let proposedShrink = WorkspaceSidebarConfig.constrainedWidth(
+            proposed: 300, current: 360, windowWidth: narrowWindow, dividerThickness: divider)
+        try require(proposedShrink == 300,
+            "ui-geometry-check.sidebar-resize.over-limit shrink snapped from proposed 300 to \(proposedShrink)")
+        let minimumShrink = WorkspaceSidebarConfig.constrainedWidth(
+            proposed: WorkspaceSidebarConfig.minWidth - 1, current: 360,
+            windowWidth: narrowWindow, dividerThickness: divider)
+        try require(minimumShrink == WorkspaceSidebarConfig.minWidth,
+            "ui-geometry-check.sidebar-resize.minimum shrink resolved \(minimumShrink)")
+
+        let suiteName = "continuum.sidebar-resize-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            throw fail("ui-geometry-check.sidebar-resize: could not create isolated defaults")
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        WorkspaceSidebarConfig.setWidth(520, defaults: defaults)
+        try require(WorkspaceSidebarConfig.resolveWidth(defaults: defaults) == 520,
+            "ui-geometry-check.sidebar-resize.restore: computed width above 420 did not survive persistence")
+
+        let (minimumSplit, minimumSidebar) = makeSplit(
+            windowWidth: normalWindow, sidebarWidth: WorkspaceSidebarConfig.minWidth)
+        _ = minimumSplit
+        try require(
+            minimumSidebar.resizeDirectionForQA == .growOnly && minimumSidebar.resizeCursorForQA === NSCursor.resizeRight,
+            "ui-geometry-check.sidebar-resize.minimum presentation did not expose grow-only cursor state")
+
+        let (maximumSplit, maximumSidebar) = makeSplit(
+            windowWidth: normalWindow, sidebarWidth: computedMaximum)
+        let liveComputedMaximum = WorkspaceSidebarConfig.maximumWidth(
+            forWindowWidth: normalWindow,
+            dividerThickness: Double(maximumSplit.dividerThickness))
+        maximumSplit.setPosition(liveComputedMaximum, ofDividerAt: 0)
+        maximumSplit.layoutSubtreeIfNeeded()
+        try require(
+            maximumSidebar.resizeDirectionForQA == .shrinkOnly && maximumSidebar.resizeCursorForQA === NSCursor.resizeLeft,
+            "ui-geometry-check.sidebar-resize.maximum presentation did not expose shrink-only cursor state (width=\(maximumSidebar.frame.width), direction=\(String(describing: maximumSidebar.resizeDirectionForQA)))")
+
+        let (lockedSplit, lockedSidebar) = makeSplit(
+            windowWidth: narrowWindow, sidebarWidth: narrowMaximum)
+        _ = lockedSplit
+        try require(
+            lockedSplit.accessibilityRole() == .splitGroup
+                && lockedSidebar.resizeDirectionForQA == .locked
+                && lockedSidebar.resizeCursorForQA === NSCursor.operationNotAllowed
+                && lockedSidebar.resizeAccessibilityRoleForQA == .splitter
+                && lockedSidebar.resizeAccessibilityLabelForQA == "Resize sidebar, cannot grow or shrink",
+            "ui-geometry-check.sidebar-resize.locked cursor and accessibility state disagreed")
+
+        let (overLimitSplit, overLimitSidebar) = makeSplit(windowWidth: narrowWindow, sidebarWidth: 360)
+        _ = overLimitSplit
+        let liveMaximum = overLimitSidebar.maximumResizeCoordinateForQA(1_000)
+        let liveShrink = overLimitSidebar.constrainedResizePositionForQA(300)
+        let liveGrowth = overLimitSidebar.constrainedResizePositionForQA(370)
+        try require(liveMaximum == 360,
+            "ui-geometry-check.sidebar-resize.delegate maximum snapped over-limit width to \(String(describing: liveMaximum))")
+        try require(liveShrink == 300,
+            "ui-geometry-check.sidebar-resize.delegate shrink did not follow 300: \(String(describing: liveShrink))")
+        try require(liveGrowth == 360,
+            "ui-geometry-check.sidebar-resize.delegate growth was not vetoed in place: \(String(describing: liveGrowth))")
+
+        let (dragSplit, dragSidebar) = makeSplit(
+            windowWidth: normalWindow, sidebarWidth: WorkspaceSidebarConfig.defaultWidth)
+        var writes: [Double] = []
+        dragSidebar.setWidthPersistenceForQA { writes.append($0) }
+        dragSidebar.beginResizeForQA()
+        dragSplit.setPosition(300, ofDividerAt: 0)
+        dragSplit.layoutSubtreeIfNeeded()
+        dragSplit.setPosition(320, ofDividerAt: 0)
+        dragSplit.layoutSubtreeIfNeeded()
+        try require(writes.isEmpty,
+            "ui-geometry-check.sidebar-resize.drag wrote \(writes.count) time(s) before resize end")
+        dragSidebar.finishResizeForQA()
+        dragSidebar.finishResizeForQA()
+        try require(writes == [320],
+            "ui-geometry-check.sidebar-resize.drag expected one idempotent resize-end write [320], got \(writes)")
+
+        return assertions
     }
 
     // MARK: - Sidebar check seam
