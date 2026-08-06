@@ -25,6 +25,8 @@ public struct PiEventTranslator {
     private var threadId: String = "pi-unknown"
     private var turnCounter: Int = 0
     private var currentTurnId: String = "pi-unknown#t0"
+    private var workingDirectory: URL?
+    private let now: @Sendable () -> Date
 
     /// P2D.2 — the LOCAL-ONLY side channel for `spawn_agent` (and nothing else).
     ///
@@ -39,7 +41,22 @@ public struct PiEventTranslator {
     /// in production.
     public var onSpawnRequest: (@Sendable (SpawnRequest) -> Void)?
 
-    public init() {}
+    /// Queue 91 P2 — the general host-local observation side channel.
+    ///
+    /// Like `onSpawnRequest`, this never widens `AgentRuntimeEvent`. It exposes
+    /// only an explicit runtime cwd and a whitelisted operation/path projection;
+    /// raw args, commands, queries, prompts, and result bodies remain discarded.
+    /// The callback fires on the translator's owner queue before the matching
+    /// normalized event is returned.
+    public var onRuntimeObservation: (@Sendable (AgentRuntimeObservation) -> Void)?
+
+    public init(
+        workingDirectory: URL? = nil,
+        now: @escaping @Sendable () -> Date = { Date() }
+    ) {
+        self.workingDirectory = workingDirectory?.standardizedFileURL
+        self.now = now
+    }
 
     /// Translate one line of Pi json output into zero or more normalized
     /// events. Unrecognised or purely-structural lines (text_start markers,
@@ -58,6 +75,11 @@ public struct PiEventTranslator {
         case "session":
             if let id = object["id"] as? String {
                 threadId = id
+            }
+            if let cwd = object["cwd"] as? String,
+               let directory = Self.absoluteDirectory(cwd) {
+                workingDirectory = directory
+                onRuntimeObservation?(.workingDirectory(directory, observedAt: now()))
             }
             return [.sessionStateChanged(.ready)]
 
@@ -79,10 +101,19 @@ public struct PiEventTranslator {
             // event below. `tool_execution_start` carries the WHOLE args object;
             // the `toolcall_delta` fragments in `message_update` are partial JSON
             // by construction, so this is the only line worth reading.
-            if let onSpawnRequest,
-               let args = object["args"] as? [String: Any],
-               let request = SpawnRequest.parse(toolName: toolName, args: args) {
-                onSpawnRequest(request)
+            if let args = object["args"] as? [String: Any] {
+                if let onSpawnRequest,
+                   let request = SpawnRequest.parse(toolName: toolName, args: args) {
+                    onSpawnRequest(request)
+                }
+                if let onRuntimeObservation,
+                   let activity = Self.toolActivity(
+                       toolName: toolName,
+                       args: args,
+                       workingDirectory: workingDirectory,
+                       at: now()) {
+                    onRuntimeObservation(.toolActivity(itemId: toolCallId, activity: activity))
+                }
             }
             // title = tool NAME only. Never args (args.path is I5-sensitive).
             return [.itemStarted(
@@ -142,6 +173,76 @@ public struct PiEventTranslator {
             // via the top-level tool_execution_* events) carry no body.
             return []
         }
+    }
+
+    // MARK: - host-local tool observation
+
+    private static func toolActivity(
+        toolName: String,
+        args: [String: Any],
+        workingDirectory: URL?,
+        at observedAt: Date
+    ) -> AgentObservedActivity? {
+        let operation: AgentObservedActivity.Operation
+        let pathKeys: [String]
+        switch toolName.lowercased() {
+        case "read", "cat":
+            operation = .reading
+            pathKeys = ["path", "file", "file_path"]
+        case "edit", "write", "multiedit", "apply_patch", "applypatch":
+            operation = .editing
+            pathKeys = ["path", "file", "file_path"]
+        case "bash", "shell", "run", "exec", "execute_command":
+            // Never retain or parse args.command. In particular, textual `cd`
+            // is not a runtime location operation and cannot change Where.
+            operation = .running
+            pathKeys = []
+        case "grep", "find", "ls", "glob", "search", "web_search", "websearch", "web":
+            // Search patterns/queries can contain source or secrets; preserve
+            // only an optional filesystem scope.
+            operation = .searching
+            pathKeys = ["path", "directory", "root"]
+        default:
+            // Unknown tool arguments remain fully opaque. The operation itself
+            // is still useful local evidence without guessing an args schema.
+            operation = .inspecting
+            pathKeys = []
+        }
+
+        let target = pathKeys.lazy.compactMap { args[$0] as? String }.first
+            .flatMap { resolvedTarget($0, workingDirectory: workingDirectory) }
+        return AgentObservedActivity(
+            operation: operation,
+            targetPath: target,
+            startedAt: observedAt,
+            updatedAt: observedAt,
+            evidenceSource: .toolEvent)
+    }
+
+    private static let maximumObservedPathBytes = 4_096
+
+    private static func absoluteDirectory(_ raw: String) -> URL? {
+        guard isSafePathText(raw) else { return nil }
+        let expanded = (raw as NSString).expandingTildeInPath
+        guard (expanded as NSString).isAbsolutePath else { return nil }
+        return URL(fileURLWithPath: expanded, isDirectory: true).standardizedFileURL
+    }
+
+    private static func resolvedTarget(_ raw: String, workingDirectory: URL?) -> URL? {
+        guard isSafePathText(raw) else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let expanded = (trimmed as NSString).expandingTildeInPath
+        if (expanded as NSString).isAbsolutePath {
+            return URL(fileURLWithPath: expanded).standardizedFileURL
+        }
+        guard let workingDirectory else { return nil }
+        return workingDirectory.appendingPathComponent(expanded).standardizedFileURL
+    }
+
+    private static func isSafePathText(_ raw: String) -> Bool {
+        guard !raw.isEmpty, raw.utf8.count <= maximumObservedPathBytes else { return false }
+        return !raw.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
     }
 
     // MARK: - tool → ItemKind

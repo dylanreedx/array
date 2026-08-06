@@ -1167,6 +1167,7 @@ enum LabCatalog {
             notifyCategoriesCard, agentAdapterProjectionCard, managedSessionRecordCard,
             sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher,
             sidebarLiveCard, activityDockCard, sidebarSelectedCard, managedAgentCard,
+            managedAgentLocationStatusCard, managedAgentNarrowLocationTileCard,
             transcriptReviewCard, composerReviewCard, composerFullVariantCard,
             composerCompactVariantCard, composerProviderControlsCard,
 
@@ -2042,6 +2043,169 @@ enum LabCatalog {
         )
     }
 
+    /// Queue 91 P3: one deterministic visual surface for every compact
+    /// Home/Where/What state, each at the real 320pt tile minimum and a roomy
+    /// width. Keeping the pair on one card makes marker/truncation differences
+    /// directly comparable without multiplying the rest of the tile chrome.
+    private static var managedAgentLocationStatusCard: LabEntry {
+        LabEntry(
+            id: "managed-agent.location-status",
+            category: "Managed Agent",
+            title: "Home / Where / What — compact states",
+            summary: "Root, subdirectory, external, targetless, recent, and empty states at wide and minimum tile widths.",
+            content: .staticCard(preferredSize: NSSize(width: 900, height: 430)) {
+                makeManagedAgentLocationStatusPreview()
+            }
+        )
+    }
+
+    private static var managedAgentNarrowLocationTileCard: LabEntry {
+        LabEntry(
+            id: "managed-agent.location-tile-narrow",
+            category: "Managed Agent",
+            title: "Home / Where / What — narrow tile",
+            summary: "The complete managed tile at its 320pt minimum with branch, lifecycle, external What, transcript, and composer metadata intact.",
+            content: .staticCard(preferredSize: NSSize(width: 320, height: 560)) {
+                let view = makeManagedAgentFixtureView(includeApproval: false)
+                view.frame = NSRect(x: 0, y: 0, width: 320, height: 560)
+                view.layoutSubtreeIfNeeded()
+                return view
+            }
+        )
+    }
+
+    static func makeManagedAgentLocationStatusPreview() -> NSView {
+        let root = NSStackView()
+        root.identifier = NSUserInterfaceItemIdentifier("locationStatus.preview")
+        root.orientation = .vertical
+        root.alignment = .leading
+        root.spacing = CGFloat(Space.s)
+        root.edgeInsets = NSEdgeInsets(
+            top: CGFloat(Space.m), left: CGFloat(Space.m),
+            bottom: CGFloat(Space.m), right: CGFloat(Space.m))
+
+        let checkout = URL(fileURLWithPath: "/Users/qa/Projects/continuum", isDirectory: true)
+        let external = URL(fileURLWithPath: "/Users/qa/References/design-system", isDirectory: true)
+        let home = AgentHome(
+            projectId: UUID(uuidString: "91000000-0000-4000-8000-000000000391")!,
+            projectRoot: checkout,
+            checkoutRoot: checkout)
+        let now = LabFixtures.epoch
+        func activity(
+            _ operation: AgentObservedActivity.Operation,
+            _ target: URL?,
+            source: AgentObservedActivity.EvidenceSource = .toolEvent
+        ) -> AgentObservedActivity {
+            AgentObservedActivity(
+                operation: operation,
+                targetPath: target,
+                startedAt: now,
+                updatedAt: now.addingTimeInterval(12),
+                evidenceSource: source)
+        }
+        func presentation(_ snapshot: AgentLocationSnapshot) -> AgentLocationStatusPresentation {
+            AgentLocationStatusPresenter.present(snapshot, projectName: "Continuum")
+        }
+
+        let rows: [(id: String, title: String, presentation: AgentLocationStatusPresentation)] = [
+            (
+                "root", "Root",
+                presentation(AgentLocationSnapshot(
+                    home: home,
+                    whereDirectory: checkout,
+                    what: activity(.reading, checkout.appendingPathComponent("README.md"))
+                ))
+            ),
+            (
+                "subdirectory", "Subdirectory",
+                presentation(AgentLocationSnapshot(
+                    home: home,
+                    whereDirectory: checkout.appendingPathComponent("Sources/ContinuumRevived", isDirectory: true)
+                ))
+            ),
+            (
+                "external-where", "External Where",
+                presentation(AgentLocationSnapshot(home: home, whereDirectory: external))
+            ),
+            (
+                "external-what", "External What",
+                presentation(AgentLocationSnapshot(
+                    home: home,
+                    whereDirectory: checkout,
+                    what: activity(.reading, external.appendingPathComponent("Tokens.swift"))
+                ))
+            ),
+            (
+                "targetless", "Targetless",
+                presentation(AgentLocationSnapshot(
+                    home: home,
+                    whereDirectory: checkout,
+                    what: activity(.running, nil)
+                ))
+            ),
+            (
+                "recent", "Recent useful",
+                presentation(AgentLocationSnapshot(
+                    home: home,
+                    whereDirectory: checkout,
+                    lastUsefulWhat: activity(.editing, checkout.appendingPathComponent("docs/location-plan.md"))
+                ))
+            ),
+            (
+                "empty", "Empty",
+                presentation(AgentLocationSnapshot(home: home, whereDirectory: checkout))
+            ),
+        ]
+
+        func caption(_ text: String, identifier: String, width: CGFloat = 110) -> NSTextField {
+            let field = NSTextField(labelWithString: text)
+            field.identifier = NSUserInterfaceItemIdentifier(identifier)
+            field.font = .token(.caption)
+            field.textColor = mutedLabelColor
+            field.lineBreakMode = .byTruncatingTail
+            field.translatesAutoresizingMaskIntoConstraints = false
+            field.widthAnchor.constraint(equalToConstant: width).isActive = true
+            return field
+        }
+        func status(
+            _ presentation: AgentLocationStatusPresentation,
+            identifier: String,
+            width: CGFloat
+        ) -> AgentLocationStatusView {
+            let view = AgentLocationStatusView(frame: NSRect(
+                x: 0, y: 0, width: width, height: AgentLocationStatusView.preferredHeight))
+            view.identifier = NSUserInterfaceItemIdentifier(identifier)
+            view.apply(presentation)
+            view.translatesAutoresizingMaskIntoConstraints = false
+            view.widthAnchor.constraint(equalToConstant: width).isActive = true
+            view.heightAnchor.constraint(equalToConstant: AgentLocationStatusView.preferredHeight).isActive = true
+            return view
+        }
+
+        let headings = NSStackView(views: [
+            caption("STATE", identifier: "locationStatus.heading.state"),
+            caption("WIDE · 420 PT", identifier: "locationStatus.heading.wide", width: 420),
+            caption("NARROW · 320 PT", identifier: "locationStatus.heading.narrow", width: 320),
+        ])
+        headings.orientation = .horizontal
+        headings.alignment = .centerY
+        headings.spacing = CGFloat(Space.m)
+        root.addArrangedSubview(headings)
+
+        for row in rows {
+            let line = NSStackView(views: [
+                caption(row.title, identifier: "locationStatus.\(row.id).caption"),
+                status(row.presentation, identifier: "locationStatus.\(row.id).wide", width: 420),
+                status(row.presentation, identifier: "locationStatus.\(row.id).narrow", width: 320),
+            ])
+            line.orientation = .horizontal
+            line.alignment = .centerY
+            line.spacing = CGFloat(Space.m)
+            root.addArrangedSubview(line)
+        }
+        return root
+    }
+
     private static var transcriptReviewCard: LabEntry {
         LabEntry(
             id: "agent.transcript.review",
@@ -2567,6 +2731,30 @@ enum LabCatalog {
         return events
     }
 
+    private static func managedAgentIntegratedLocationPresentation()
+        -> AgentLocationStatusPresentation {
+        let checkout = URL(fileURLWithPath: "/Users/qa/Projects/continuum", isDirectory: true)
+        let externalTarget = URL(
+            fileURLWithPath: "/Users/qa/References/design-system/Tokens.swift")
+        let observedAt = LabFixtures.epoch.addingTimeInterval(12)
+        let home = AgentHome(
+            projectId: UUID(uuidString: "91000000-0000-4000-8000-000000000392")!,
+            projectRoot: checkout,
+            checkoutRoot: checkout)
+        return AgentLocationStatusPresenter.present(
+            AgentLocationSnapshot(
+                home: home,
+                whereDirectory: checkout.appendingPathComponent(
+                    "Sources/ContinuumRevived", isDirectory: true),
+                what: AgentObservedActivity(
+                    operation: .reading,
+                    targetPath: externalTarget,
+                    startedAt: observedAt,
+                    updatedAt: observedAt,
+                    evidenceSource: .toolEvent)),
+            projectName: "Continuum")
+    }
+
     static func makeManagedAgentFixtureView(
         includeApproval: Bool = true
     ) -> ManagedAgentTileNSView {
@@ -2596,6 +2784,8 @@ enum LabCatalog {
             worktreeBranch: "agent/implementer-fix-login-1a2b3c4d",
             checkedOutBranch: "agent/implementer-fix-login-1a2b3c4d"
         ))
+        view.applyLocationPresentationForComponentLab(
+            managedAgentIntegratedLocationPresentation())
         for event in managedAgentFixtureEvents(includeApproval: includeApproval) {
             view.ingest(event)
         }
@@ -3982,6 +4172,14 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard managedAgentView.currentAgentStatus == .needsAttention else {
             throw fail("managed agent fixture status \(managedAgentView.currentAgentStatus), expected needsAttention")
         }
+        guard managedAgentView.qaLocationText
+                == "Home Continuum · Where Sources/ContinuumRevived",
+              managedAgentView.qaWhatText
+                == "What Reading design-system/Tokens.swift",
+              !managedAgentView.qaWhereOutboundMarkerVisible,
+              managedAgentView.qaWhatOutboundMarkerVisible else {
+            throw fail("managed agent fixture did not expose the integrated inside-Where/external-What status")
+        }
         let v2ManagedAgentView = LabCatalog.makeManagedAgentFixtureView(includeApproval: false)
         guard v2ManagedAgentView.qaUsesV2Tile,
               v2ManagedAgentView.qaUsesFullTurnComposer,
@@ -3992,6 +4190,58 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
         guard entries.contains(where: { $0.id == "managed-agent.approval-dock" }) else {
             throw fail("missing managed-agent.approval-dock card")
+        }
+        guard let locationStatusEntry = entries.first(where: { $0.id == "managed-agent.location-status" }),
+              case let .staticCard(locationStatusSize?, makeLocationStatusView) = locationStatusEntry.content,
+              locationStatusSize == NSSize(width: 900, height: 430) else {
+            throw fail("missing managed-agent.location-status static card at 900x430")
+        }
+        guard let narrowLocationTileEntry = entries.first(where: {
+            $0.id == "managed-agent.location-tile-narrow"
+        }), case let .staticCard(narrowLocationTileSize?, makeNarrowLocationTile)
+                = narrowLocationTileEntry.content,
+              narrowLocationTileSize == NSSize(width: 320, height: 560),
+              let narrowLocationTile = makeNarrowLocationTile() as? ManagedAgentTileNSView,
+              narrowLocationTile.qaWhatOutboundMarkerVisible else {
+            throw fail("missing integrated managed-agent.location-tile-narrow static card at 320x560")
+        }
+        let locationStatusView = makeLocationStatusView()
+        let locationStates: [String: (
+            location: String, what: String, whereExternal: Bool, whatExternal: Bool
+        )] = [
+            "root": ("Home Continuum", "What Reading README.md", false, false),
+            "subdirectory": (
+                "Home Continuum · Where Sources/ContinuumRevived",
+                "What No observed activity", false, false),
+            "external-where": (
+                "Home Continuum · Where design-system",
+                "What No observed activity", true, false),
+            "external-what": (
+                "Home Continuum",
+                "What Reading design-system/Tokens.swift", false, true),
+            "targetless": ("Home Continuum", "What Running", false, false),
+            "recent": (
+                "Home Continuum", "Last Edited docs/location-plan.md", false, false),
+            "empty": ("Home Continuum", "What No observed activity", false, false),
+        ]
+        for (state, expected) in locationStates {
+            for width in ["wide", "narrow"] {
+                let identifier = "locationStatus.\(state).\(width)"
+                guard let status = locationStatusView.descendant(withIdentifier: identifier)
+                    as? AgentLocationStatusView else {
+                    throw fail("managed-agent.location-status missing \(identifier)")
+                }
+                guard !status.isHidden,
+                      status.qaAccessibilityLabels.count == 2,
+                      !status.qaLocationAccessibilityValue.isEmpty,
+                      !status.qaWhatAccessibilityValue.isEmpty,
+                      status.qaLocationText == expected.location,
+                      status.qaWhatText == expected.what,
+                      status.qaWhereOutboundMarkerVisible == expected.whereExternal,
+                      status.qaWhatOutboundMarkerVisible == expected.whatExternal else {
+                    throw fail("managed-agent.location-status \(identifier) lost its semantic/marker fixture")
+                }
+            }
         }
         guard let newTileCwdEntry = entries.first(where: { $0.id == "terminal.new-tile-cwd" }),
               case let .staticCard(_, makeNewTileCwdView) = newTileCwdEntry.content else {

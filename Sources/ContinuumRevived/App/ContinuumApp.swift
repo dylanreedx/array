@@ -3387,7 +3387,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 }
             }
 
-            if CommandLine.arguments.contains("--managed-agent-live-check") {
+            if CommandLine.arguments.contains("--agent-location-live-check") {
+                runAgentLocationLiveCheck(window: window)
+            } else if CommandLine.arguments.contains("--managed-agent-live-check") {
                 runManagedAgentLiveCheck(window: window)
             } else if CommandLine.arguments.contains("--palette-captures-keys-over-browser-check") {
                 runPaletteCapturesKeysOverBrowserCheck(window: window)
@@ -3402,6 +3404,226 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
         } catch {
             presentFatalError(error)
+        }
+    }
+
+    /// Queue 91 P3 supervised gate: run one real Pi turn through the production
+    /// supervisor/tile path and preserve the live Home/Where/What transitions as
+    /// window captures plus a local JSON manifest. The fixture paths must be
+    /// supplied by the isolated launch environment; this check never targets the
+    /// owner's project or Application Support store.
+    private func runAgentLocationLiveCheck(window: NSWindow) {
+        let report: @MainActor @Sendable (String) -> Void = { line in
+            FileHandle.standardError.write(Data("[agent-location-live] \(line)\n".utf8))
+        }
+        guard let externalPath = ProcessInfo.processInfo.environment["CONTINUUM_LOCATION_LIVE_EXTERNAL"],
+              (externalPath as NSString).isAbsolutePath,
+              FileManager.default.fileExists(atPath: externalPath),
+              let projectRoot = activeProject?.rootPath else {
+            report("FAIL: isolated project root/external fixture missing")
+            Foundation.exit(2)
+        }
+        let insidePath = URL(fileURLWithPath: projectRoot, isDirectory: true)
+            .appendingPathComponent("inside.txt").path
+        guard FileManager.default.fileExists(atPath: insidePath) else {
+            report("FAIL: isolated inside fixture missing")
+            Foundation.exit(2)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self, let spawner = self.tileSpawner, let canvasView = self.canvasView else {
+                report("FAIL: no spawner/canvas")
+                Foundation.exit(2)
+            }
+            guard case let .spawned(tileId) = spawner.spawnManagedAgent() else {
+                report("FAIL: spawnManagedAgent did not spawn")
+                Foundation.exit(2)
+            }
+            self.wireManagedAgentTile(tileId)
+            self.focusSpawnedTile(tileId)
+            guard let view = canvasView.tileView(for: tileId) as? ManagedAgentTileNSView else {
+                report("FAIL: spawned tile is not a ManagedAgentTileNSView")
+                Foundation.exit(2)
+            }
+
+            let qaCapture = QACapture()
+            var samples: [[String: Any]] = []
+            var seenStates = Set<String>()
+            let sample: @MainActor @Sendable (String) -> Void = { phase in
+                view.layoutSubtreeIfNeeded()
+                window.displayIfNeeded()
+                let row: [String: Any] = [
+                    "phase": phase,
+                    "location": view.qaLocationText,
+                    "what": view.qaWhatText,
+                    "locationAX": view.qaLocationAccessibilityValue,
+                    "whatAX": view.qaWhatAccessibilityValue,
+                    "detail": view.qaLocationDetail,
+                    "whereExternalMarker": view.qaWhereOutboundMarkerVisible,
+                    "whatExternalMarker": view.qaWhatOutboundMarkerVisible,
+                ]
+                samples.append(row)
+                report("\(phase): \(view.qaLocationText) | \(view.qaWhatText) | external=\(view.qaWhatOutboundMarkerVisible)")
+                let stateKey = "\(view.qaLocationText)|\(view.qaWhatText)|\(view.qaWhereOutboundMarkerVisible)|\(view.qaWhatOutboundMarkerVisible)"
+                if seenStates.insert(stateKey).inserted {
+                    // Hold this exact streamed state for one compositor flush. Pi's
+                    // read/edit tools can start and finish inside one display tick;
+                    // without the flush a CGWindow capture truthfully samples the
+                    // live window but only after it has already advanced to Thinking.
+                    window.display()
+                    window.flush()
+                    Thread.sleep(forTimeInterval: 0.05)
+                    qaCapture?.capture(
+                        step: phase,
+                        tSec: Date().timeIntervalSince1970,
+                        window: window,
+                        canvasState: canvasView.canvasState)
+                    // Also snapshot the installed live tile synchronously. The
+                    // WindowServer capture above proves real-window context, while
+                    // this cacheDisplay sample preserves the exact streamed state
+                    // before a millisecond read/edit tool can complete.
+                    if let output = ProcessInfo.processInfo.environment["CONTINUUM_QA_CAPTURE"],
+                       let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                        view.cacheDisplay(in: view.bounds, to: rep)
+                        let safePhase = phase.map { character in
+                            character.isLetter || character.isNumber || character == "-"
+                                ? character : "-"
+                        }
+                        let name = String(format: "exact-%02d-%@.png", seenStates.count, String(safePhase))
+                        if let data = rep.representation(using: .png, properties: [:]) {
+                            try? data.write(
+                                to: URL(fileURLWithPath: output, isDirectory: true)
+                                    .appendingPathComponent(name),
+                                options: .atomic)
+                        }
+                    }
+                }
+            }
+
+            let productionIngest = view.onIngestedEvent
+            view.onIngestedEvent = { event in
+                productionIngest?(event)
+                switch event {
+                case .itemStarted(_, _, _, let title):
+                    sample("item-start-\(title ?? "unknown")")
+                case .itemCompleted(_, _, _, let status):
+                    sample("item-end-\(status)")
+                case .sessionStateChanged(let state):
+                    sample("session-\(state)")
+                case .turnCompleted:
+                    sample("turn-completed")
+                default:
+                    break
+                }
+            }
+
+            sample("spawned")
+            let prompt = """
+            This is a supervised UI validation using disposable files. Perform exactly these actions in order:
+            1. Use the read tool on \(insidePath).
+            2. Use the edit tool on \(insidePath), replacing LIVE_ALPHA with LIVE_BETA.
+            3. Use the bash tool to run exactly: sleep 2
+            4. Use the read tool on \(externalPath).
+            Then reply with exactly LOCATION_LIVE_DONE. Do not perform any other action.
+            """
+            view.qaSubmitPrompt(prompt)
+            sample("submitted")
+
+            Task { @MainActor in
+                @MainActor func fail(_ message: String) -> Never {
+                    sample("failure")
+                    qaCapture?.writeManifest()
+                    if let output = ProcessInfo.processInfo.environment["CONTINUUM_QA_CAPTURE"] {
+                        try? JSONSerialization.data(
+                            withJSONObject: ["verdict": "FAIL", "message": message, "samples": samples],
+                            options: [.prettyPrinted, .sortedKeys]
+                        ).write(to: URL(fileURLWithPath: output, isDirectory: true)
+                            .appendingPathComponent("location-live.json"), options: .atomic)
+                    }
+                    report("transcript:\n\(view.qaTranscriptText)")
+                    report("FAIL: \(message)")
+                    Foundation.exit(1)
+                }
+
+                guard await waitUntil(timeout: 180, {
+                    view.qaLastAssistantCardBody?.contains("LOCATION_LIVE_DONE") == true
+                        && view.qaV2CanSend
+                        && view.qaV2ActionTitle == "Send"
+                }) else { fail("timed out waiting for the real Pi turn to finish") }
+                sample("turn-settled")
+
+                let insideRead = samples.contains {
+                    ($0["what"] as? String)?.contains("Reading inside.txt") == true
+                        && ($0["whatExternalMarker"] as? Bool) == false
+                }
+                let insideEdit = samples.contains {
+                    ($0["what"] as? String)?.contains("Editing inside.txt") == true
+                        && ($0["whatExternalMarker"] as? Bool) == false
+                }
+                let bashRun = samples.contains {
+                    ($0["what"] as? String) == "What Running"
+                }
+                let externalRead = samples.contains {
+                    ($0["what"] as? String)?.contains("Reading") == true
+                        && ($0["what"] as? String)?.contains("external.txt") == true
+                        && ($0["whatExternalMarker"] as? Bool) == true
+                        && ($0["detail"] as? String)?.contains("outside Home") == true
+                }
+                let homeStayedAuthoritative = samples.allSatisfy {
+                    ($0["location"] as? String) == "Home project"
+                        && ($0["whereExternalMarker"] as? Bool) == false
+                }
+                let accessibilityStayedSemantic = samples.allSatisfy {
+                    (($0["locationAX"] as? String)?.isEmpty == false)
+                        && (($0["whatAX"] as? String)?.isEmpty == false)
+                }
+                let edited = (try? String(contentsOfFile: insidePath, encoding: .utf8))?
+                    .contains("LIVE_BETA") == true
+                guard insideRead, insideEdit, bashRun, externalRead, homeStayedAuthoritative,
+                      accessibilityStayedSemantic, edited else {
+                    fail("missing live transition: read=\(insideRead) edit=\(insideEdit) bash=\(bashRun) external=\(externalRead) home=\(homeStayedAuthoritative) ax=\(accessibilityStayedSemantic) edited=\(edited)")
+                }
+
+                guard await waitUntil(timeout: 35, {
+                    view.qaWhatText.hasPrefix("Last Read")
+                        && view.qaWhatOutboundMarkerVisible
+                }) else { fail("live stale timer did not demote current What to recent external activity") }
+                sample("stale-to-recent")
+                if let rawHold = ProcessInfo.processInfo.environment["CONTINUUM_LOCATION_LIVE_HOLD_SECONDS"],
+                   let requestedHold = UInt64(rawHold), requestedHold > 0 {
+                    let holdSeconds = min(requestedHold, 60)
+                    report("VOICEOVER_READY: holding stale external activity for \(holdSeconds)s")
+                    try? await Task.sleep(nanoseconds: holdSeconds * 1_000_000_000)
+                }
+
+                qaCapture?.writeManifest()
+                if let output = ProcessInfo.processInfo.environment["CONTINUUM_QA_CAPTURE"] {
+                    let result: [String: Any] = [
+                        "verdict": "PASS",
+                        "homeStayedAuthoritative": homeStayedAuthoritative,
+                        "insideReadObserved": insideRead,
+                        "insideEditObserved": insideEdit,
+                        "bashRunObserved": bashRun,
+                        "externalReadObserved": externalRead,
+                        "staleRecentObserved": true,
+                        "accessibilityValuesNonempty": accessibilityStayedSemantic,
+                        "samples": samples,
+                    ]
+                    do {
+                        let url = URL(fileURLWithPath: output, isDirectory: true)
+                            .appendingPathComponent("location-live.json")
+                        try JSONSerialization.data(
+                            withJSONObject: result,
+                            options: [.prettyPrinted, .sortedKeys]
+                        ).write(to: url, options: .atomic)
+                        report("artifact: \(url.path)")
+                    } catch {
+                        fail("could not write location-live.json: \(error)")
+                    }
+                }
+                report("PASS: real Pi produced inside read/edit, Bash, external read, waiting, and stale-to-recent UI evidence while Home remained authoritative")
+                Foundation.exit(0)
+            }
         }
     }
 
@@ -3451,7 +3673,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 // settled (not working). Then ask for recall.
                 guard await waitUntil(timeout: deadline.timeIntervalSinceNow, {
                     view.transcriptCardCount > cardsAfterTurn1Submit
-                        && view.qaComposeEnabled && view.currentAgentStatus != .working
+                        && view.qaV2CanSend
+                        && view.qaV2ActionTitle == "Send"
+                        && view.currentAgentStatus != .working
                 }) else { timedOut("waiting for turn 1 reply") }
 
                 report("turn 1 done; submitting turn 2 (recall) in a fresh Pi process, same session")
@@ -9395,8 +9619,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         // Replays the agent's history, then follows the tail; re-wiring the same
         // tile to the same agent is a no-op inside `attach`, so none of the three
-        // call sites can double-ingest.
-        view.attach(agentID: agentId, supervisor: supervisor)
+        // call sites can double-ingest. Project NAME is supplied by the app's
+        // registry rather than inferred from an isolated worktree's final path
+        // component; full host paths remain inside the local snapshot/disclosure.
+        let recordProjectId = supervisor.records[agentId]?.projectId
+        let projectName: String?
+        if activeProject?.id == recordProjectId {
+            projectName = activeProject?.name
+        } else {
+            let registry = (try? registryStore?.loadOrEmpty()) ?? Registry.empty()
+            projectName = registry.projects.first(where: { $0.id == recordProjectId })?.name
+        }
+        view.attach(
+            agentID: agentId,
+            supervisor: supervisor,
+            projectName: projectName)
 
         // P2A.7: an agent restored from the previous launch has a real conversation
         // and an empty desktop transcript (that transcript lives only in the view,

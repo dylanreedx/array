@@ -52,6 +52,10 @@ protocol AgentRunning: AnyObject, Sendable {
     /// because a `SpawnRequest` carries the call's ARGUMENTS, which may never enter
     /// `AgentRuntimeEvent` (I5); set by `send` before the prompt runs.
     func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void)
+    /// Queue 91 P2 — local-only cwd/tool evidence, likewise separate from the
+    /// Codable runtime and companion activity streams.
+    func observeRuntimeObservations(
+        _ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void)
 }
 
 extension PiAgentRunner: AgentRunning {}
@@ -862,6 +866,9 @@ final class AgentSupervisor {
     private var runners: [AgentID: AgentRunning] = [:]
     private var subscribers: [AgentID: [UUID: AsyncStream<AgentRuntimeEvent>.Continuation]] = [:]
     private var history: [AgentID: [AgentRuntimeEvent]] = [:]
+    /// Queue 91 P2 host-local projection. Never persisted or published: it carries
+    /// concrete checkout/current/tool-target URLs that are outside I5's wire model.
+    private var locationProjectors: [AgentID: AgentLocationProjector] = [:]
     /// Prompt-derived naming context stays in memory only. It is deliberately not
     /// an AgentRecord field and never reaches AgentInventory or the companion.
     private var firstPromptByAgent: [AgentID: String] = [:]
@@ -980,6 +987,38 @@ final class AgentSupervisor {
             sessionId: sessionId(for: record.id),
             extraArgs: RoleRegistry(projectRoot: cwd).toolsArguments(roleId: record.role)
         )
+    }
+
+    // MARK: - Host-local Home / Where / What (Queue 91 P2)
+
+    /// Current private location projection. Legacy `cwd` remains both checkout
+    /// Home and initial Where; richer project-root lookup/persistence is a later
+    /// migration. This value is not Codable and never enters companion sync.
+    func locationSnapshot(for id: AgentID, at now: Date = Date()) -> AgentLocationSnapshot? {
+        guard let record = records[id] else { return nil }
+        ensureLocationProjector(for: record)
+        return locationProjectors[id]?.snapshot(at: now)
+    }
+
+    private func ensureLocationProjector(for record: AgentRecord) {
+        guard locationProjectors[record.id] == nil else { return }
+        let checkout = URL(fileURLWithPath: record.cwd, isDirectory: true)
+        let home = AgentHome(
+            projectId: record.projectId,
+            projectRoot: nil,
+            checkoutRoot: checkout)
+        locationProjectors[record.id] = AgentLocationProjector(
+            home: home,
+            whereDirectory: checkout)
+    }
+
+    private func ingestRuntimeObservation(
+        _ observation: AgentRuntimeObservation,
+        for id: AgentID
+    ) {
+        guard let record = records[id] else { return }
+        ensureLocationProjector(for: record)
+        locationProjectors[id]?.ingest(observation)
     }
 
     // MARK: - Restore (P2A.7)
@@ -1567,6 +1606,14 @@ final class AgentSupervisor {
         runner.observeSpawnRequests { [weak self] request in
             DispatchQueue.main.async { self?.handleSpawnRequest(request, from: id) }
         }
+        // The runner emits private observations before the matching normalized
+        // item event on one serial queue. Main-queue FIFO preserves that order, so
+        // the generic event cannot overwrite the path-bearing local What value.
+        runner.observeRuntimeObservations { [weak self] observation in
+            DispatchQueue.main.async {
+                self?.ingestRuntimeObservation(observation, for: id)
+            }
+        }
         let threadId = Self.threadId(for: id)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
@@ -2038,6 +2085,7 @@ final class AgentSupervisor {
 
         records.removeValue(forKey: id)
         history.removeValue(forKey: id)
+        locationProjectors.removeValue(forKey: id)
         turnFacts.removeValue(forKey: id)
         for continuation in (subscribers[id] ?? [:]).values { continuation.finish() }
         subscribers.removeValue(forKey: id)
@@ -3025,6 +3073,10 @@ final class AgentSupervisor {
 
     private func deliver(_ event: AgentRuntimeEvent, to id: AgentID, now: Date = Date()) {
         updateTurnFacts(with: event, for: id, now: now)
+        if let record = records[id] {
+            ensureLocationProjector(for: record)
+            locationProjectors[id]?.ingest(event, at: now)
+        }
 
         var buffer = history[id] ?? []
         buffer.append(event)
@@ -3274,6 +3326,7 @@ private final class AgentSupervisorCheckWriteState {
 /// is exercised without a real process.
 final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
     private let script: [AgentRuntimeEvent]
+    private let runtimeObservations: [AgentRuntimeObservation]
     private let holdUntilStopped: Bool
     private let released = DispatchSemaphore(value: 0)
     private let lock = NSLock()
@@ -3283,9 +3336,15 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
     private var promptsStorage: [String] = []
     private var liveHandler: (@Sendable (AgentRuntimeEvent) -> Void)?
     private var spawnHandler: (@Sendable (SpawnRequest) -> Void)?
+    private var runtimeObservationHandler: (@Sendable (AgentRuntimeObservation) -> Void)?
 
-    init(script: [AgentRuntimeEvent], holdUntilStopped: Bool = false) {
+    init(
+        script: [AgentRuntimeEvent],
+        runtimeObservations: [AgentRuntimeObservation] = [],
+        holdUntilStopped: Bool = false
+    ) {
         self.script = script
+        self.runtimeObservations = runtimeObservations
         self.holdUntilStopped = holdUntilStopped
     }
 
@@ -3303,6 +3362,9 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
             runCountStorage += 1
             promptsStorage.append(prompt)
             liveHandler = onEvent
+        }
+        if let observer = lock.withLock({ runtimeObservationHandler }) {
+            for observation in runtimeObservations { observer(observation) }
         }
         for event in script { onEvent(event) }
         if holdUntilStopped { released.wait() }
@@ -3331,6 +3393,12 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
 
     func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {
         lock.withLock { spawnHandler = handler }
+    }
+
+    func observeRuntimeObservations(
+        _ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void
+    ) {
+        lock.withLock { runtimeObservationHandler = handler }
     }
 
     /// Fires the side channel the supervisor registered, as a provider stream would.
@@ -3945,6 +4013,161 @@ func runAgentSupervisorChecks() async throws {
     let generatedNameReport = try await checkGeneratedNameOneShot(config: config, fail: fail)
     let namingReport = try await checkAgentNameContract(config: config, cwd: cwd, fail: fail)
 
+    // Queue 91 P2 — the runner's private observation reaches supervisor-owned
+    // Home/Where/What before the matching generic item event, while subscribers
+    // still receive exactly the original event and no path-bearing payload.
+    let locationStore = AgentStore(
+        applicationSupportDirectory: root.appendingPathComponent("location-projection", isDirectory: true))
+    let locationProjectId = UUID()
+    let externalTarget = root
+        .appendingPathComponent("external-reference", isDirectory: true)
+        .appendingPathComponent("Router.swift")
+    let locationObservedAt = Date()
+    let locationRunner = ScriptedAgentRunner(
+        script: [
+            .itemStarted(
+                threadId: "provider-location",
+                itemId: "read-location",
+                kind: .commandExecution,
+                title: "read"),
+            .itemCompleted(
+                threadId: "provider-location",
+                itemId: "read-location",
+                kind: .commandExecution,
+                status: .completed),
+        ],
+        runtimeObservations: [
+            .workingDirectory(cwd, observedAt: locationObservedAt),
+            .toolActivity(
+                itemId: "read-location",
+                activity: AgentObservedActivity(
+                    operation: .reading,
+                    targetPath: externalTarget,
+                    startedAt: locationObservedAt,
+                    updatedAt: locationObservedAt,
+                    evidenceSource: .toolEvent)),
+        ])
+    let locationSupervisor = AgentSupervisor(store: locationStore, makeRunner: { _ in locationRunner })
+    let locationAgentId = locationSupervisor.spawn(
+        role: nil,
+        prompt: nil,
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking,
+        projectId: locationProjectId)
+    let locationTile = ManagedAgentTileNSView(tile: Tile(
+        id: UUID(),
+        kind: .managedAgent,
+        title: "Location agent",
+        frame: TileFrame(x: 0, y: 0, width: 520, height: 360),
+        zPosition: .fromLegacyRank(1),
+        runtimeRef: nil,
+        metadata: TileMetadata(launchProfileId: "managed")
+    ))
+    locationTile.frame = NSRect(x: 0, y: 0, width: 520, height: 360)
+    locationTile.attach(
+        agentID: locationAgentId,
+        supervisor: locationSupervisor,
+        projectName: "Continuum")
+    let locationInbox = EventInbox()
+    let locationStream = locationSupervisor.events(for: locationAgentId)
+    let locationTask = Task { @MainActor in
+        for await event in locationStream { locationInbox.append(event) }
+    }
+    locationSupervisor.send("inspect external reference", to: locationAgentId)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        locationInbox.events.count == 2
+            && locationTile.ingestedEvents.count == 2
+            && locationSupervisor.locationSnapshot(for: locationAgentId)?.what?.operation == .thinking
+            && locationSupervisor.locationSnapshot(for: locationAgentId)?.lastUsefulWhat?.operation == .reading
+            && locationTile.qaLocationText == "Home Continuum"
+            && locationTile.qaWhatText == "What Thinking"
+            && locationTile.qaLocationStaleTimerActive
+    }) else {
+        locationTask.cancel()
+        throw fail("host-local location observation did not reach the supervisor before its matching event")
+    }
+    locationTask.cancel()
+    guard let locationSnapshot = locationSupervisor.locationSnapshot(for: locationAgentId),
+          locationSnapshot.home.projectId == locationProjectId,
+          locationSnapshot.home.checkoutRoot == cwd.standardizedFileURL,
+          locationSnapshot.workingLocation.directory == cwd.standardizedFileURL,
+          locationSnapshot.lastUsefulWhat?.targetPath == externalTarget.standardizedFileURL,
+          locationSnapshot.lastUsefulWhatRelationToHome == .outside else {
+        throw fail("supervisor Home/Where/What projection lost identity, cwd, target, or outside relation")
+    }
+    let locationWire = String(
+        decoding: try JSONEncoder().encode(locationInbox.events),
+        as: UTF8.self)
+    guard !locationWire.contains(externalTarget.path), locationInbox.events.count == 2 else {
+        throw fail("private location observation widened or duplicated supervisor event fan-out")
+    }
+    guard locationTile.qaLocationDetail.contains(externalTarget.path),
+          locationTile.qaLocationAccessibilityValue
+            == "Home and Where: Continuum, project root.",
+          locationTile.qaWhatAccessibilityValue == "What: thinking." else {
+        throw fail("managed tile did not consume independent host-local location/activity disclosure and AX facts: location='\(locationTile.qaLocationText)' what='\(locationTile.qaWhatText)' locationAX='\(locationTile.qaLocationAccessibilityValue)' whatAX='\(locationTile.qaWhatAccessibilityValue)' detail='\(locationTile.qaLocationDetail)'")
+    }
+    guard let locationExpiry = locationSnapshot.whatExpiresAt else {
+        throw fail("supervisor location snapshot omitted the exact UI stale refresh boundary")
+    }
+    locationTile.qaRefreshLocation(at: locationExpiry)
+    guard locationTile.qaWhatText == "Last Read external-reference/Router.swift",
+          locationTile.qaWhatAccessibilityValue
+            == "Last observed activity: read external-reference/Router.swift, outside Home.",
+          !locationTile.qaLocationStaleTimerActive else {
+        throw fail("managed tile did not replace expired current What with retained recent activity at the projector boundary")
+    }
+    locationTile.qaRefreshLocation(at: Date())
+    guard locationTile.qaWhatText == "What Thinking",
+          locationTile.qaLocationStaleTimerActive else {
+        throw fail("managed tile could not restore current What from the live projector before detach")
+    }
+    locationTile.detach()
+    guard locationTile.qaWhatText == "Last Read external-reference/Router.swift",
+          locationTile.qaWhatAccessibilityValue
+            == "Last observed activity: read external-reference/Router.swift, outside Home.",
+          !locationTile.qaLocationStaleTimerActive else {
+        throw fail("detached tile froze current What after removing its observer/timer instead of demoting it to recent")
+    }
+
+    // Exercise the real native location band at narrow width. Externality has its
+    // own fixed marker lane, so tail truncation can never turn an outside fact into
+    // an apparently in-Home one.
+    let externalActivity = AgentObservedActivity(
+        operation: .reading,
+        targetPath: externalTarget,
+        startedAt: locationObservedAt,
+        updatedAt: locationObservedAt,
+        evidenceSource: .toolEvent)
+    let externalSnapshot = AgentLocationSnapshot(
+        home: locationSnapshot.home,
+        whereDirectory: externalTarget.deletingLastPathComponent(),
+        what: externalActivity,
+        lastUsefulWhat: externalActivity)
+    let narrowLocation = AgentLocationStatusView(frame: NSRect(
+        x: 0, y: 0, width: 320, height: AgentLocationStatusView.preferredHeight))
+    narrowLocation.apply(AgentLocationStatusPresenter.present(
+        externalSnapshot,
+        projectName: "Continuum"))
+    narrowLocation.layoutSubtreeIfNeeded()
+    guard narrowLocation.qaWhereOutboundMarkerVisible,
+          narrowLocation.qaWhatOutboundMarkerVisible,
+          narrowLocation.qaLocationText.contains("Where external-reference"),
+          narrowLocation.qaWhatText.contains("What Reading"),
+          narrowLocation.qaMarkerLanesDoNotOverlapText,
+          narrowLocation.qaContentFitsBounds,
+          narrowLocation.qaCompactTextFitsWithoutTruncation,
+          narrowLocation.qaLocationAccessibilityValue.contains("outside Home"),
+          narrowLocation.qaWhatAccessibilityValue.contains("outside Home"),
+          narrowLocation.qaAccessibilityLabels == [
+            narrowLocation.qaLocationAccessibilityValue,
+            narrowLocation.qaWhatAccessibilityValue,
+          ] else {
+        throw fail("narrow native location band hid/overlapped external Where/What or lost independent AX values")
+    }
+    let locationProjectionReport = "host-local Home/Where/What projected before unchanged event fan-out and rendered in a narrow external-safe native band"
+
     // The script is deliberately a real turn shape with DISTINCT events, so
     // "in order" is checkable and a dropped or reordered event is named.
     let scriptThread = "provider-thread"
@@ -4215,7 +4438,7 @@ func runAgentSupervisorChecks() async throws {
     let turnStateReport = try await checkCapabilityDrivenTurnStates(config: config, cwd: cwd, fail: fail)
 
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport)")
 }
 
 @MainActor
@@ -7443,6 +7666,7 @@ final class FixtureStreamRunner: AgentRunning, @unchecked Sendable {
     private let lines: [String]
     private let lock = NSLock()
     private var spawnHandler: (@Sendable (SpawnRequest) -> Void)?
+    private var runtimeObservationHandler: (@Sendable (AgentRuntimeObservation) -> Void)?
     private var promptsStorage: [String] = []
 
     init(lines: [String]) { self.lines = lines }
@@ -7455,6 +7679,9 @@ final class FixtureStreamRunner: AgentRunning, @unchecked Sendable {
         if let handler = lock.withLock({ spawnHandler }) {
             translator.onSpawnRequest = handler
         }
+        if let handler = lock.withLock({ runtimeObservationHandler }) {
+            translator.onRuntimeObservation = handler
+        }
         for line in lines {
             for event in translator.translate(line: line) { onEvent(event) }
         }
@@ -7464,6 +7691,12 @@ final class FixtureStreamRunner: AgentRunning, @unchecked Sendable {
 
     func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {
         lock.withLock { spawnHandler = handler }
+    }
+
+    func observeRuntimeObservations(
+        _ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void
+    ) {
+        lock.withLock { runtimeObservationHandler = handler }
     }
 }
 

@@ -5039,6 +5039,15 @@ enum UIProbeGeometry {
                       transcript.qaSemanticRowCount >= 4 else {
                     throw fail("\(label): v2 tile retained legacy UI or failed semantic rendering")
                 }
+                guard tile.qaLocationText
+                        == "Home Continuum · Where Sources/ContinuumRevived",
+                      tile.qaWhatText == "What Reading design-system/Tokens.swift",
+                      !tile.qaWhereOutboundMarkerVisible,
+                      tile.qaWhatOutboundMarkerVisible,
+                      tile.qaLocationMarkerLanesDoNotOverlapText,
+                      tile.qaLocationContentFitsBounds else {
+                    throw fail("\(label): integrated Home/Where/What lost its content or fixed external-marker lane")
+                }
                 try fills(child: transcript, parent: tile, minRatio: 0.95, label: "\(label): semantic transcript")
                 // P5.5 defect 6: a pixel gate cannot see this — the collection
                 // view's default background is `windowBackgroundColor`, which only

@@ -21,6 +21,21 @@ if CommandLine.arguments.contains("--agent-status-vocabulary-check") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--agent-location-contract-check") {
+    runAgentLocationContractChecks()
+    Foundation.exit(0)
+}
+
+if CommandLine.arguments.contains("--agent-what-projection-check") {
+    runAgentWhatProjectionChecks()
+    Foundation.exit(0)
+}
+
+if CommandLine.arguments.contains("--agent-location-presentation-check") {
+    runAgentLocationPresentationChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--agent-completion-negative-witness") {
     runAgentCompletionNegativeWitness()
     Foundation.exit(0)
@@ -10296,6 +10311,18 @@ runTypographyReadabilityChecks()
 // Ticket: docs/38-tickets/90-agent-ux/P2A.1-agent-record.md — the agent as an
 // entity, with the tile demoted to an optional view binding.
 runAgentRecordChecks()
+
+// Queue 91 spatial awareness: provider-neutral Home / Where / What contracts,
+// preserving legacy cwd and the host-local I5 boundary before UI/inference work.
+runAgentLocationContractChecks()
+
+// Queue 91 P2: host-local What observations stay separate from Codable
+// runtime/activity streams and never infer Where from tool arguments.
+runAgentWhatProjectionChecks()
+
+// Queue 91 P3: the native UI receives one pure, host-local compact/disclosure
+// presentation with explicit external markers and independent AX facts.
+runAgentLocationPresentationChecks()
 
 // Ticket: docs/38-tickets/90-agent-ux/P2A.2-agent-store.md — agents listable
 // across every project, out of application support rather than a project root.

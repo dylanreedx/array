@@ -673,6 +673,10 @@ enum UIProbeAppearance {
         "ManagedAgentTileNSView.contentBackdrop",
         "ManagedAgentTileNSView.header",
         "ManagedAgentTileNSView.composeBackdrop",
+        // Queue 91/P3: the host-local Home/Where/What band uses the same
+        // `tileChrome` surface as the header it extends; its external markers and
+        // text use the existing primary/secondary text tokens.
+        "AgentLocationStatusView",
         // P5.5 acceptance: the legacy TranscriptCardView/TranscriptProseView owners
         // were deleted with the compatibility path; the v2 tiles the Lab now vends
         // paint the composer shell on every managed-agent surface, so the composer

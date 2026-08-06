@@ -71,8 +71,11 @@ final class ManagedAgentTileNSView: TileNSView {
     /// only under the v2 fixture flag. The compatibility shell and its baselines
     /// remain untouched until final live migration.
     private let agentHeader = AgentTileHeaderView()
+    private let locationStatus = AgentLocationStatusView()
     private var headerAgentName: String?
     private var branchContext: AgentRowContext?
+    private var locationProjectName: String?
+    private var locationStaleTimer: Timer?
 
     private let transcriptCollectionFixture: AgentTranscriptListView?
     private let v2Composer: AgentComposerView?
@@ -194,6 +197,8 @@ final class ManagedAgentTileNSView: TileNSView {
         fatalError("init(coder:) is not supported")
     }
 
+    isolated deinit { locationStaleTimer?.invalidate() }
+
     /// The thread this tile's transcript filters on. The app rebinds incoming
     /// provider events to this before ingest (ticket 88.4b).
     var wiringThreadId: String { threadId }
@@ -234,8 +239,16 @@ final class ManagedAgentTileNSView: TileNSView {
     /// the replay is the agent's whole conversation and the cards on screen are
     /// already part of it — whether they came from the same agent (detach, then
     /// attach again) or a different one (two agents rendered as one).
-    func attach(agentID: AgentID, supervisor: AgentSupervisor) {
-        if attachedAgentID == agentID, eventSubscription != nil { return }
+    func attach(
+        agentID: AgentID,
+        supervisor: AgentSupervisor,
+        projectName: String? = nil
+    ) {
+        if attachedAgentID == agentID, eventSubscription != nil {
+            if let projectName { locationProjectName = projectName }
+            refreshLocationStatus()
+            return
+        }
         let replayingIntoAProjection = projectedAgentID != nil
         detach()
         if replayingIntoAProjection { resetProjection() }
@@ -250,7 +263,9 @@ final class ManagedAgentTileNSView: TileNSView {
         // event, and without the tile ever reading a repository itself.
         agentSource = supervisor
         headerAgentName = supervisor.records[agentID]?.displayName
+        locationProjectName = projectName
         applyBranchContext(supervisor.branchContext(for: agentID))
+        refreshLocationStatus()
         // P6.1: and which model and thinking level it runs with. From the RECORD,
         // for the same reason the branch is: the agent has its own values (a role
         // may have chosen them at spawn, or the user may have picked them in a
@@ -296,6 +311,9 @@ final class ManagedAgentTileNSView: TileNSView {
     /// is left alone, so a detached tile still SHOWS the agent it was following;
     /// `attach` is what clears it, on the next replay.
     func detach() {
+        settleLocationForDetach()
+        locationStaleTimer?.invalidate()
+        locationStaleTimer = nil
         eventSubscription?.cancel()
         eventSubscription = nil
         if let capabilityObserverToken {
@@ -485,6 +503,7 @@ final class ManagedAgentTileNSView: TileNSView {
     func applyBranchContext(_ context: AgentRowContext?) {
         branchContext = context
         applyAgentHeader(status: descriptor.status)
+        refreshLocationStatus()
     }
 
     /// Re-read the agent's branch state and repaint. Drops the cached read first:
@@ -503,6 +522,10 @@ final class ManagedAgentTileNSView: TileNSView {
         promptInFlight = false
         descriptor.status = model.currentStatus
         agentStatus = model.currentStatus
+        locationProjectName = nil
+        locationStaleTimer?.invalidate()
+        locationStaleTimer = nil
+        locationStatus.clear()
         applyHeader(status: model.currentStatus)
         synchronizeV2Transcript()
     }
@@ -572,6 +595,7 @@ final class ManagedAgentTileNSView: TileNSView {
         }
         model.ingest(event)
         refreshV2TurnSnapshot()
+        refreshLocationStatus()
         synchronizeV2Transcript()
     }
 
@@ -625,6 +649,7 @@ final class ManagedAgentTileNSView: TileNSView {
         contentBackdrop.layer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(for: theme)
         header.layer?.backgroundColor = SurfaceToken.tileChrome.color.cgColor(for: theme)
         composeBackdrop.layer?.backgroundColor = SurfaceToken.tileChrome.color.cgColor(for: theme)
+        locationStatus.applyTokens()
         // Idle v2 agent tiles do not claim a state-bearing perimeter edge.
         // Keyboard focus and needs-attention remain the canvas-owned strong
         // overlays; the surface ladder supplies the quiet containment.
@@ -692,7 +717,7 @@ final class ManagedAgentTileNSView: TileNSView {
         composeColumn.translatesAutoresizingMaskIntoConstraints = false
         composeBackdrop.addSubview(composeColumn)
 
-        let layout = NSStackView(views: [agentHeader, transcript, composeBackdrop])
+        let layout = NSStackView(views: [agentHeader, locationStatus, transcript, composeBackdrop])
         layout.orientation = .vertical
         layout.spacing = 0
         layout.translatesAutoresizingMaskIntoConstraints = false
@@ -704,6 +729,7 @@ final class ManagedAgentTileNSView: TileNSView {
             layout.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             agentHeader.heightAnchor.constraint(equalToConstant: AgentTileHeaderView.preferredHeight),
             agentHeader.widthAnchor.constraint(equalTo: layout.widthAnchor),
+            locationStatus.widthAnchor.constraint(equalTo: layout.widthAnchor),
             transcript.widthAnchor.constraint(equalTo: layout.widthAnchor),
             composeBackdrop.widthAnchor.constraint(equalTo: layout.widthAnchor),
             composeColumn.leadingAnchor.constraint(equalTo: composeBackdrop.leadingAnchor),
@@ -919,6 +945,38 @@ final class ManagedAgentTileNSView: TileNSView {
         }
     }
 
+    /// A detached tile keeps showing the agent it previously represented, but it
+    /// no longer observes that agent. Demote current What immediately rather than
+    /// freezing a claim such as “Reading” forever after its source/timer is gone.
+    private func settleLocationForDetach(at now: Date = Date()) {
+        guard let agentID = projectedAgentID,
+              let snapshot = agentSource?.locationSnapshot(for: agentID, at: now) else { return }
+        let settled = AgentLocationSnapshot(
+            home: snapshot.home,
+            whereDirectory: snapshot.workingLocation.directory,
+            lastUsefulWhat: snapshot.lastUsefulWhat)
+        locationStatus.apply(AgentLocationStatusPresenter.present(
+            settled,
+            projectName: locationProjectName ?? branchContext?.projectName))
+    }
+
+    private func refreshLocationStatus(at now: Date = Date()) {
+        locationStaleTimer?.invalidate()
+        locationStaleTimer = nil
+        guard let agentID = projectedAgentID,
+              let snapshot = agentSource?.locationSnapshot(for: agentID, at: now) else { return }
+        locationStatus.apply(AgentLocationStatusPresenter.present(
+            snapshot,
+            projectName: locationProjectName ?? branchContext?.projectName))
+        guard let expiresAt = snapshot.whatExpiresAt, expiresAt > now else { return }
+        let timer = Timer(timeInterval: expiresAt.timeIntervalSince(now), repeats: false) {
+            [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshLocationStatus(at: expiresAt) }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        locationStaleTimer = timer
+    }
+
     override func sync(tile: Tile) {
         super.sync(tile: tile)
         applyHeader(status: descriptor.status)
@@ -1035,6 +1093,28 @@ final class ManagedAgentTileNSView: TileNSView {
         guard qaV2HeaderContractHolds() else { return qaV2HeaderFailure }
         return agentHeader.qaBranch
     }
+    /// Component Lab builds the real tile without an AgentStore/Supervisor. This
+    /// preview-only seam paints the same host-local presentation production applies
+    /// after attach; it accepts no snapshot/path-bearing model and publishes nothing.
+    func applyLocationPresentationForComponentLab(
+        _ presentation: AgentLocationStatusPresentation
+    ) {
+        locationStatus.apply(presentation)
+    }
+
+    var qaLocationText: String { locationStatus.qaLocationText }
+    var qaWhatText: String { locationStatus.qaWhatText }
+    var qaLocationDetail: String { locationStatus.qaLocationDetail }
+    var qaWhereOutboundMarkerVisible: Bool { locationStatus.qaWhereOutboundMarkerVisible }
+    var qaWhatOutboundMarkerVisible: Bool { locationStatus.qaWhatOutboundMarkerVisible }
+    var qaLocationMarkerLanesDoNotOverlapText: Bool {
+        locationStatus.qaMarkerLanesDoNotOverlapText
+    }
+    var qaLocationContentFitsBounds: Bool { locationStatus.qaContentFitsBounds }
+    var qaLocationAccessibilityValue: String { locationStatus.qaLocationAccessibilityValue }
+    var qaWhatAccessibilityValue: String { locationStatus.qaWhatAccessibilityValue }
+    var qaLocationStaleTimerActive: Bool { locationStaleTimer?.isValid == true }
+    func qaRefreshLocation(at now: Date) { refreshLocationStatus(at: now) }
     var qaBranchChipIsWarning: Bool {
         agentHeader.qaBranchIsWarning
     }

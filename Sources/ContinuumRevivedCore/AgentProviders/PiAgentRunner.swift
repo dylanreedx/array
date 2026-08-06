@@ -147,13 +147,14 @@ public final class PiAgentRunner: @unchecked Sendable {
     /// runner cannot witness that (from the cross-review).
     public let config: Config
     private let queue = DispatchQueue(label: "continuum.pi-agent-runner")
-    private var translator = PiEventTranslator()
+    private var translator: PiEventTranslator
     private var buffer = Data()
     private var stderrBuffer = Data()   // queue-confined
     private var process: Process?       // queue-confined (set in run, read in stop)
 
     public init(config: Config) {
         self.config = config
+        self.translator = PiEventTranslator(workingDirectory: config.cwd)
     }
 
     /// Runs Pi with `prompt`, streaming events to `onEvent` until Pi exits.
@@ -240,6 +241,15 @@ public final class PiAgentRunner: @unchecked Sendable {
     /// hops itself, exactly as it already does for events.
     public func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {
         queue.sync { translator.onSpawnRequest = handler }
+    }
+
+    /// Queue 91 P2 — observe the private cwd/tool projection without widening
+    /// AgentRuntimeEvent. Set before `run`; callbacks use this runner's serial
+    /// queue, matching spawn observations and normalized event ordering.
+    public func observeRuntimeObservations(
+        _ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void
+    ) {
+        queue.sync { translator.onRuntimeObservation = handler }
     }
 
     // MARK: - queue-confined line assembly
