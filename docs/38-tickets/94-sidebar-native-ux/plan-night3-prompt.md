@@ -33,9 +33,12 @@ Start here, in order:
    legs in a way no autonomous ticket may clear.
 
 6. **End of night**, whatever the count: refresh `qa-runs/p3.6-gate/` (its live half was never run and
-   its REVIEW.md is 14 tickets stale), create `qa-runs/p5.6-gate/` from scratch, update
-   `plan-morning-review.md` to the truth, verify `git log --oneline e63321d..HEAD` reads clean, leave
-   the tree clean and the loop stopped.
+   its REVIEW.md is 14 tickets stale), create `qa-runs/p5.6-gate/` from scratch, **build a release app
+   bundle into `qa-runs/night3-candidate/` per the handoff's "Leave a launchable candidate" section —
+   build it, do not launch it** — update `plan-morning-review.md` to the truth (including the bundle
+   path, its commit, and the warning that Phase 6's first launch is the first time settled/snoozed/slim
+   rows have ever rendered outside fixtures), verify `git log --oneline e63321d..HEAD` reads clean, and
+   leave the tree clean and the loop stopped.
 
 Cadence: dispatch Luna as a detached `pi` subprocess exactly as the handoff shows; check liveness by
 **open file handle, never argv**; run each review while its matrix runs; log one timestamped line per

@@ -161,6 +161,29 @@ once in this program; every run so far used `CONTINUUM_SKIP_SURFACE_CHECKS=1`.
 
 Refresh P3.6's and create P5.6's materials as end-of-night work. **Never mark a gate done.**
 
+### Leave a launchable candidate — the last thing you do
+
+Nothing in this program has ever built an app bundle, and there is no `Continuum Revived.app` on this
+machine. Dylan should wake to something he can actually open, so **after the last slice commits**:
+
+```bash
+cd /Users/dylan/Documents/personal/continuum-overnight
+pgrep -f 'Continuum Revived.app/Contents/MacOS' && echo REFUSE || \
+  ./scripts/make-app-bundle.sh --configuration release \
+    --output "qa-runs/night3-candidate/Continuum Revived.app"
+```
+
+`qa-runs/` is gitignored, so this pollutes nothing. **Build it; do not launch it** — launching is
+Dylan's, and the rail against running an instance stands. Record in `plan-morning-review.md`: the
+bundle path, the commit it was built from, and the `open` command. If the release build fails, say so
+plainly and leave the debug binary path instead; do not spend the night on packaging.
+
+**Say this in the morning doc, in these terms:** the first launch with Phase 6 wired is the **first
+time** `.settled`, `.snoozed` and the slim variant have rendered in the real app rather than in
+fixtures — two phases of work coming out of the dark at once (R4). Expect to find things. That is
+what P3.6 and P5.6 exist to catch, and finding something there is the gates working, not the night
+failing.
+
 ### Baseline worksheet — 60 PNGs, and 12 need deleting
 
 Nothing has been blessed since `a8c9aed` (P1.5, 22 pairs) — verified: zero commits and zero working-
