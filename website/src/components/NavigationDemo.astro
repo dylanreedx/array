@@ -1,0 +1,121 @@
+<div class="navigation-demo" data-navigation-demo data-focus="browser">
+  <div class="navigation-demo__topbar">
+    <div>
+      <span class="nav-live-dot"></span>
+      <strong data-navigation-status>Browser is focused</strong>
+      <small>Current zoom stays unchanged</small>
+    </div>
+    <button class="leader-button" type="button" data-leader-button aria-pressed="false">
+      <kbd>⌥</kbd>
+      <span><strong>Hold Option</strong><small>Reveal tile jumps</small></span>
+    </button>
+  </div>
+
+  <div class="navigation-viewport">
+    <div class="navigation-world">
+      <article class="navigation-tile navigation-tile--agent" data-navigation-tile data-tile="agent" data-title="Auth agent">
+        <button class="jump-label" type="button" data-jump-label aria-label="Jump to Auth agent"></button>
+        <header><span class="status-dot status-dot--pulse"></span><strong>Auth agent</strong><span>Working</span></header>
+        <p>Updating passkey enrollment</p>
+        <div class="navigation-code"><i></i><i></i><i></i></div>
+      </article>
+
+      <article class="navigation-tile navigation-tile--server" data-navigation-tile data-tile="server" data-title="Dev server">
+        <button class="jump-label" type="button" data-jump-label aria-label="Jump to Dev server"></button>
+        <header><span class="terminal-symbol">›_</span><strong>Dev server</strong><span>Live</span></header>
+        <code>localhost:3000</code>
+        <div class="server-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+      </article>
+
+      <article class="navigation-tile navigation-tile--browser is-focused" data-navigation-tile data-tile="browser" data-title="Browser">
+        <button class="jump-label" type="button" data-jump-label aria-label="Jump to Browser"></button>
+        <header><span>◫</span><strong>Browser</strong><span>localhost:3000</span></header>
+        <div class="navigation-browser"><div></div><strong>Sign in to Array</strong><p>Continue with a passkey</p><button type="button" tabindex="-1">Continue</button></div>
+      </article>
+
+      <article class="navigation-tile navigation-tile--review" data-navigation-tile data-tile="review" data-title="Review">
+        <button class="jump-label" type="button" data-jump-label aria-label="Jump to Review"></button>
+        <header><span>±</span><strong>Review</strong><span>8 files</span></header>
+        <div class="review-lines"><i></i><i></i><i></i><i></i></div>
+      </article>
+    </div>
+    <div class="leader-hud" aria-hidden="true"><span>Jump mode</span><strong>Press a label</strong><small>The focused tile is omitted</small></div>
+  </div>
+
+  <div class="navigation-demo__footer">
+    <p><strong>Try it:</strong> click “Hold Option,” then choose a label—or hold the real ⌥ key and press its letter.</p>
+    <span><kbd>⌘ K</kbd> also lists every tile by title</span>
+  </div>
+</div>
+
+<script>
+  const demos = document.querySelectorAll<HTMLElement>('[data-navigation-demo]');
+
+  demos.forEach((demo) => {
+    const button = demo.querySelector<HTMLButtonElement>('[data-leader-button]');
+    const status = demo.querySelector<HTMLElement>('[data-navigation-status]');
+    const tiles = Array.from(demo.querySelectorAll<HTMLElement>('[data-navigation-tile]'));
+    const homeKeys = 'asdfghjkl';
+    let leaderActive = false;
+
+    const updateLabels = () => {
+      let labelIndex = 0;
+      tiles.forEach((tile) => {
+        const label = tile.querySelector<HTMLButtonElement>('[data-jump-label]');
+        if (!label) return;
+        if (tile.classList.contains('is-focused')) {
+          label.dataset.key = '';
+          label.textContent = '';
+          return;
+        }
+        const key = homeKeys[labelIndex++] ?? '';
+        label.dataset.key = key;
+        label.textContent = key.toUpperCase();
+      });
+    };
+
+    const setLeader = (active: boolean) => {
+      leaderActive = active;
+      demo.classList.toggle('is-leader-active', active);
+      button?.setAttribute('aria-pressed', String(active));
+      updateLabels();
+    };
+
+    const jumpTo = (tile: HTMLElement) => {
+      tiles.forEach((candidate) => candidate.classList.toggle('is-focused', candidate === tile));
+      demo.dataset.focus = tile.dataset.tile ?? '';
+      if (status) status.textContent = `${tile.dataset.title ?? 'Tile'} is focused`;
+      tile.classList.remove('did-jump');
+      requestAnimationFrame(() => tile.classList.add('did-jump'));
+      updateLabels();
+    };
+
+    button?.addEventListener('click', () => setLeader(!leaderActive));
+
+    tiles.forEach((tile) => {
+      tile.querySelector('[data-jump-label]')?.addEventListener('click', () => {
+        if (leaderActive) jumpTo(tile);
+      });
+    });
+
+    window.addEventListener('keydown', (event) => {
+      if (event.key === 'Alt') {
+        setLeader(true);
+        return;
+      }
+      if (!leaderActive) return;
+      const key = event.key.toLowerCase();
+      const target = tiles.find((tile) => tile.querySelector<HTMLElement>('[data-jump-label]')?.dataset.key === key);
+      if (target) {
+        event.preventDefault();
+        jumpTo(target);
+      }
+    });
+
+    window.addEventListener('keyup', (event) => {
+      if (event.key === 'Alt') setLeader(false);
+    });
+
+    updateLabels();
+  });
+</script>
