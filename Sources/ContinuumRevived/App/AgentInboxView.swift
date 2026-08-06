@@ -287,6 +287,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// from `slimRowHeight` rather than restated, so a P1.4 type move moves both.
     static var shelfHeaderHeight: Double { slimRowHeight }
 
+    /// Whether the row's rollup summary is actually drawn in this disclosure
+    /// state. A collapsed group shows the complete descendant summary; an
+    /// expanded but capped group shows only attention from the omitted portion,
+    /// so a blocked hidden child can still raise its visible parent without
+    /// borrowing the parent's `attention` watermark.
+    fileprivate static func drawsRollup(
+        disclosure: RowDisclosure, rollup: ChildRollup?
+    ) -> Bool {
+        guard let rollup else { return false }
+        return disclosure == .collapsed || rollup.cappedAttentionSummary != nil
+    }
+
     /// The height of a row's rendered content. Card rows ask the shared metrics
     /// helper for the roles their live cell will draw; the name is always present,
     /// while the two label bands are included only when their content slots are
@@ -303,7 +315,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         case .slim:
             return slimRowHeight
         case .card:
-            let drawsRollup = disclosure == .collapsed && rollup != nil
+            let drawsRollup = Self.drawsRollup(disclosure: disclosure, rollup: rollup)
             let tier = availableWidth.map {
                 AgentInboxCellView.fitTier(
                     for: row,
@@ -480,6 +492,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Ids are kept even when their agent leaves the list (a scope change, a settle)
     /// so that coming back re-collapses the group the way you left it.
     private var collapsedParents: Set<UUID> = []
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P6.5-child-fanout-attention-rollup.md
+    /// Parents whose remainder affordance has been opened. This is view-local
+    /// presentation state: it changes how many children are inline, never the
+    /// underlying rows or any resource bookkeeping.
+    private var expandedFanoutParents: Set<UUID> = []
+    /// The current deferred groups, derived from the full sorted row list. The
+    /// remainder cell is a non-agent affordance, so it never enters `rows`,
+    /// selection, jump indexes or lifecycle actions.
+    private var fanoutRemaindersByParent: [UUID: FanoutRemainder] = [:]
+    /// More than one nested remainder can follow the same final visible agent:
+    /// the child owns one and its parent owns another. The value is therefore an
+    /// ordered list, not a unique-key dictionary that traps during materialization.
+    private var fanoutRemaindersByAfterRow: [UUID: [FanoutRemainder]] = [:]
     /// The rows that HAVE a child on screen, from the sorted list before it was
     /// collapsed — a folded parent must keep the triangle you fold it back with.
     private var parentsWithChildren: Set<UUID> = []
@@ -641,6 +666,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// The settled tail's footer, kept out of `cellsByRow` for the same reason the
     /// heading is. At most one exists — the tail is one section.
     private var settledMoreCell: AgentInboxSettledMoreView?
+    private var fanoutRemainderCellsByParent: [UUID: AgentInboxRemainderView] = [:]
     private(set) var cellBuildCountForQA = 0
 
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P2.3-content-derived-row-height.md
@@ -1218,6 +1244,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         cellsByRow.removeAll()
         shelfHeaderCell = nil
         settledMoreCell = nil
+        fanoutRemainderCellsByParent.removeAll()
         tableView.reloadData()
         updateEmptyState()
         // P3.11: `reloadData` empties the table's selection, so the bar has to come
@@ -1352,24 +1379,70 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 .contains { $0.localizedCaseInsensitiveContains(query) }
         }
         let sorted = InboxSort.sortForInbox(rows: searched)
-        // P2D.4: measured on the SORTED list, before the fold — a collapsed parent
-        // has no children on screen, and a triangle derived from what is on screen
-        // would vanish the moment you used it.
+        // P2D.4/P2D.5 must read the FULL sorted list. Capping or folding before
+        // these derivations would make a hidden child's disclosure, rollup and
+        // lifecycle blocker disappear together.
         parentsWithChildren = InboxSort.parentIds(in: sorted)
-        // P2D.5: same list, same moment, same reason.
-        rollupsByParent = InboxSort.rollups(in: sorted)
-        let visible = InboxSort.visibleRows(sorted, collapsed: collapsedParents)
+        var fullRollups = InboxSort.rollups(in: sorted)
+        let bounded = InboxSort.boundedForInbox(
+            rows: sorted, expandedParents: expandedFanoutParents)
+        fanoutRemaindersByParent = bounded.remainderByParent
+        // The capped fields are a presentation-only overlay on the full rollup.
+        // `holdsParentOpen` and the lifecycle/action policy continue to read the
+        // uncapped descendant tallies above, so a remainder cannot change resource
+        // or settlement bookkeeping.
+        for remainder in bounded.remainders {
+            guard var rollup = fullRollups[remainder.parentId] else { continue }
+            let hidden = remainder.hiddenDescendantCount
+            rollup = ChildRollup(
+                children: rollup.children,
+                working: rollup.working,
+                needsYou: rollup.needsYou,
+                failed: rollup.failed,
+                cappedChildren: remainder.hiddenChildCount,
+                cappedDescendants: hidden,
+                cappedWorking: remainder.hiddenWorking,
+                cappedNeedsYou: remainder.hiddenNeedsYou,
+                cappedFailed: remainder.hiddenFailed)
+            fullRollups[remainder.parentId] = rollup
+        }
+        rollupsByParent = fullRollups
+        let visible = InboxSort.visibleRows(bounded.rows, collapsed: collapsedParents)
+        let visibleIDs = Set(visible.map(\.id))
+        // A fold can remove the model's original after-row without removing the
+        // ancestor remainder it anchored. Re-anchor each still-visible parent's
+        // affordance to the last row that remains visible in that parent's bounded
+        // subtree. Iterating the model's ordered remainders preserves the nested
+        // child-before-parent order when two affordances share that fallback row.
+        var visibleRemaindersByAfterRow: [UUID: [FanoutRemainder]] = [:]
+        for remainder in bounded.remainders {
+            guard !collapsedParents.contains(remainder.parentId),
+                  visibleIDs.contains(remainder.parentId),
+                  let parentIndex = bounded.rows.firstIndex(where: {
+                      $0.id == remainder.parentId
+                  }) else { continue }
+            let parentDepth = bounded.rows[parentIndex].depth
+            let nextIndex = bounded.rows.index(after: parentIndex)
+            let subtreeEnd = bounded.rows[nextIndex...].firstIndex(where: {
+                $0.depth <= parentDepth
+            }) ?? bounded.rows.endIndex
+            guard let anchor = bounded.rows[parentIndex..<subtreeEnd].last(where: {
+                visibleIDs.contains($0.id)
+            }) else { continue }
+            visibleRemaindersByAfterRow[anchor.id, default: []].append(remainder)
+        }
+        fanoutRemaindersByAfterRow = visibleRemaindersByAfterRow
         // P4.7. `clock()` and not `Date()`: the same injection point a parked row's
         // "in 25m" is read from, so a card whose snooze expires between two renders
         // cannot make a committed baseline flap.
         let parts = InboxSort.partition(rows: visible, now: clock())
-        var built = parts.active.map(InboxListItem.agent)
+        var built = agentItems(for: parts.active)
         // NO HEADER FOR AN EMPTY SHELF: "Snoozed (0)" is a line of chrome about
         // nothing, and it would take a row's worth of a 320pt sidebar to say it.
         if parts.shelfCount > 0 {
             built.append(.shelfHeader(count: parts.shelfCount, isExpanded: shelfExpanded))
             if shelfExpanded {
-                built.append(contentsOf: parts.snoozed.map(InboxListItem.agent))
+                built.append(contentsOf: agentItems(for: parts.snoozed))
             }
         }
         // P4.8: history is PAGED, and the page is taken last — on the rows that
@@ -1377,11 +1450,25 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // is of rows that pressing it really does produce.
         let page = InboxSort.pageSettled(
             parts.settled, limit: settledLimit, openAgentId: openAgentId)
-        built.append(contentsOf: page.shown.map(InboxListItem.agent))
+        built.append(contentsOf: agentItems(for: page.shown))
         if page.hasMore {
             built.append(.settledMore(hidden: page.hidden))
         }
         return built
+    }
+
+    /// Turn a section's agent rows into table items, inserting each remainder
+    /// after the visible end of its live parent's subtree. `display(from:)`
+    /// already excludes a folded parent and re-anchors an ancestor's remainder
+    /// when a nested fold removes the model's original anchor.
+    private func agentItems(for sectionRows: [AgentInboxRow]) -> [InboxListItem] {
+        var result: [InboxListItem] = []
+        for row in sectionRows {
+            result.append(.agent(row))
+            guard let remainders = fanoutRemaindersByAfterRow[row.id] else { continue }
+            result.append(contentsOf: remainders.map(InboxListItem.fanoutRemainder))
+        }
+        return result
     }
 
     // MARK: - The settled tail (P4.8)
@@ -1503,6 +1590,21 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // (`render` ends in `refreshHoverFromPointer()`), so a fold or a scope
         // flip cannot leave a row lit that the pointer is no longer over — and
         // cannot un-light the row it still is over either.
+        hoveredAgentId = nil
+        keyboardFocusIntent = nil
+        render(display(from: allRows))
+    }
+
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P6.5-child-fanout-attention-rollup.md
+    /// Open one parent's explicit remainder. This is the only path that removes
+    /// the cap: the hidden children are never silently discarded or inferred from
+    /// a row count, and the selection/focus reset follows every other list-shape
+    /// change because the table's index space changes.
+    func expandFanout(parentId: UUID) {
+        guard fanoutRemaindersByParent[parentId] != nil else { return }
+        expandedFanoutParents.insert(parentId)
+        tableView.deselectAll(nil)
+        selectedRowsForEmphasis = IndexSet()
         hoveredAgentId = nil
         keyboardFocusIntent = nil
         render(display(from: allRows))
@@ -1668,7 +1770,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// the list never branches on state, attention, or lifecycle importance.
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
         lastHeightQueryColumnWidth = column.width
-        guard let model = item(at: row)?.agentRow else { return AgentInboxView.shelfHeaderHeight }
+        guard let item = item(at: row) else { return AgentInboxView.shelfHeaderHeight }
+        guard let model = item.agentRow else {
+            switch item {
+            case .fanoutRemainder: return AgentInboxView.slimRowHeight
+            case .shelfHeader, .settledMore: return AgentInboxView.shelfHeaderHeight
+            case .agent: return AgentInboxView.shelfHeaderHeight
+            }
+        }
         let indent = Double(max(0, model.depth)) * AgentInboxView.indentPerLevel
         let available = max(
             0,
@@ -1715,6 +1824,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 footer.apply(hidden: hidden)
                 settledMoreCell = footer
                 return footer
+            case .fanoutRemainder(let remainder):
+                let cell = fanoutRemainderCellsByParent[remainder.parentId] ?? AgentInboxRemainderView()
+                cell.identifier = NSUserInterfaceItemIdentifier(
+                    "agent-inbox-fanout-\(remainder.parentId.uuidString)")
+                cell.onExpand = { [weak self] in self?.expandFanout(parentId: remainder.parentId) }
+                cell.apply(remainder: remainder)
+                fanoutRemainderCellsByParent[remainder.parentId] = cell
+                return cell
             case .agent:
                 return nil
             }
@@ -1746,17 +1863,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         cell.setAccessibilityIdentifier(AgentInboxView.accessibilityIdentifier(for: model))
         let agentId = model.id
         cell.onToggleDisclosure = { [weak self] in self?.toggleCollapse(parentId: agentId) }
+        let rowDisclosure = disclosure(for: model)
+        let rowRollup = rollupsByParent[model.id]
         cell.apply(
             model,
             emphasis: AgentInboxRow.emphasis(
                 for: model.state, attention: model.attention, isInteracting: interacting
             ),
             indent: Double(max(0, model.depth)) * AgentInboxView.indentPerLevel,
-            disclosure: disclosure(for: model),
-            // P2D.5: handed over for every parent; the cell shows it only while the
-            // group is folded, which is the one moment the children are not on
-            // screen to speak for themselves.
-            rollup: rollupsByParent[model.id],
+            disclosure: rowDisclosure,
+            // P2D.5/P6.5: a full rollup speaks while folded; a capped attention
+            // rollup also speaks while expanded because its hidden child is still
+            // absent from the drawn rows. Neither path mutates row.attention.
+            rollup: rowRollup,
             // P3.11: EVERY selected row is outlined, not just the last one clicked —
             // `selectedRow` is one index and a range is a set.
             isSelected: tableView.selectedRowIndexes.contains(row),
@@ -3101,6 +3220,38 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var rowCountForQA: Int {
         tableView.numberOfRows - items.filter { $0.agentRow == nil }.count
     }
+    /// The complete table row count, including explicit non-agent affordances.
+    /// P6.5 uses this beside the materialized agent-cell count so a remainder
+    /// cannot masquerade as a missing child.
+    var tableRowCountForQA: Int { tableView.numberOfRows }
+    var nonAgentTableRowCountForQA: Int {
+        tableView.numberOfRows - rowCountForQA
+    }
+    var fanoutRemainderParentIDsForQA: Set<UUID> { Set(fanoutRemaindersByParent.keys) }
+    var fanoutRemaindersByParentForQA: [UUID: FanoutRemainder] { fanoutRemaindersByParent }
+    var fanoutRemainderTitlesForQA: [String] {
+        items.compactMap { item in
+            guard case let .fanoutRemainder(remainder) = item else { return nil }
+            return remainder.title
+        }
+    }
+    var fanoutRemainderRowsForQA: [FanoutRemainder] {
+        items.compactMap { item in
+            guard case let .fanoutRemainder(remainder) = item else { return nil }
+            return remainder
+        }
+    }
+    var fanoutRemainderAccessibilityLabelsForQA: [String] {
+        fanoutRemainderCellsByParent.values.compactMap { $0.qaAccessibilityLabel }
+    }
+    var expandedFanoutParentsForQA: Set<UUID> { expandedFanoutParents }
+
+    /// Press a real rendered remainder button, not the state mutation directly.
+    @discardableResult
+    func clickFanoutRemainderForQA(parentId: UUID) -> Bool {
+        guard let cell = fanoutRemainderCellsByParent[parentId] else { return false }
+        return cell.clickForQA()
+    }
 
     /// Materialized agent cells found by walking the live table subtree. This is
     /// intentionally not `cellsByRow`: a stale registry can say a row exists after
@@ -3345,6 +3496,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// and after content arrives so a stale height cache cannot satisfy them.
     func rowHeightForQA(id: UUID) -> Double? {
         guard let tableRow = tableRow(forAgentId: id) else { return nil }
+        return Double(tableView.rect(ofRow: tableRow).height - tableView.intercellSpacing.height)
+    }
+
+    /// The live table height of a particular remainder affordance. Remainders are
+    /// keyed by parent id rather than their after-row anchor, because nested
+    /// remainders can share that anchor while remaining distinct controls.
+    func fanoutRemainderHeightForQA(parentId: UUID) -> Double? {
+        guard let tableRow = items.firstIndex(where: { item in
+            guard case let .fanoutRemainder(remainder) = item else { return false }
+            return remainder.parentId == parentId
+        }) else { return nil }
         return Double(tableView.rect(ofRow: tableRow).height - tableView.intercellSpacing.height)
     }
 
@@ -3959,6 +4121,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 /// AppKit boundary.
 enum InboxListItem {
     case agent(AgentInboxRow)
+    case fanoutRemainder(FanoutRemainder)
     case shelfHeader(count: Int, isExpanded: Bool)
     // Ticket: docs/38-tickets/90-agent-ux/P4.8-settled-tail-paging.md
     /// The footer under a paged settled tail. A third KIND of row rather than a
@@ -3984,6 +4147,7 @@ enum InboxListItem {
     var identity: String {
         switch self {
         case .agent(let row): return "agent:\(row.id.uuidString)"
+        case .fanoutRemainder(let remainder): return "fanout:\(remainder.identity)"
         case .shelfHeader(let count, let isExpanded): return "shelf:\(count):\(isExpanded)"
         // P4.8: the hidden count is part of the footer's identity for the same
         // reason the shelf's is part of the heading's — an agent settling while the
@@ -4185,6 +4349,79 @@ final class AgentInboxSettledMoreView: NSTableCellView, TokenThemed {
     }
 
     var qaTitle: String { label.stringValue }
+}
+
+// Ticket: docs/38-tickets/94-sidebar-native-ux/P6.5-child-fanout-attention-rollup.md
+/// The explicit non-agent remainder under a capped parent. It is deliberately a
+/// separate table item: it cannot be selected, renamed, counted as an agent or
+/// handed to lifecycle/resource actions. Its button expands the parent's complete
+/// child set through the same live target/action path the other inbox affordances
+/// use.
+@MainActor
+final class AgentInboxRemainderView: NSTableCellView {
+    private let label = NSTextField(labelWithString: "")
+    private let button = NSButton(frame: .zero)
+    private var remainder: FanoutRemainder?
+    var onExpand: (() -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+
+        label.font = .token(.label)
+        label.lineBreakMode = .byTruncatingTail
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        button.isBordered = false
+        button.title = ""
+        button.setAccessibilityRole(.button)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.target = self
+        button.action = #selector(expandClicked)
+        addSubview(button)
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            button.leadingAnchor.constraint(equalTo: leadingAnchor),
+            button.trailingAnchor.constraint(equalTo: trailingAnchor),
+            button.topAnchor.constraint(equalTo: topAnchor),
+            button.bottomAnchor.constraint(equalTo: bottomAnchor),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Inset.row.left),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -Inset.row.right),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        applyTokens()
+    }
+
+    required init?(coder: NSCoder) { return nil }
+
+    func apply(remainder: FanoutRemainder) {
+        self.remainder = remainder
+        label.stringValue = remainder.title
+        button.setAccessibilityLabel("Show \(remainder.accessibilityTitle)")
+        applyTokens()
+    }
+
+    private func applyTokens() {
+        label.textColor = TextToken.textSecondary.color.nsColor(in: self)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
+    }
+
+    @objc private func expandClicked() { onExpand?() }
+
+    @discardableResult
+    func clickForQA() -> Bool {
+        guard remainder != nil else { return false }
+        button.performClick(nil)
+        return true
+    }
+
+    var qaParentID: UUID? { remainder?.parentId }
+    var qaTitle: String { label.stringValue }
+    var qaAccessibilityLabel: String? { button.accessibilityLabel() }
 }
 
 // Ticket: docs/38-tickets/90-agent-ux/P3.7-slim-rows.md
@@ -5614,10 +5851,18 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         }
         branchLabel.stringValue = AgentInboxCellView.branchText(branch: row.branch)
         branchLabel.isHidden = branchLabel.stringValue.isEmpty
+        let rollupSummary: String?
+        if disclosure == .collapsed {
+            rollupSummary = rollup?.summary
+        } else {
+            rollupSummary = rollup?.cappedAttentionSummary
+        }
         metaLabel.stringValue = AgentInboxCellView.metaText(
             isIsolated: row.isIsolated,
             hasBranch: !branchLabel.isHidden,
-            rollup: disclosure == .collapsed ? rollup : nil)
+            rollup: rollup,
+            rollupSummary: rollupSummary,
+            showRollup: AgentInboxView.drawsRollup(disclosure: disclosure, rollup: rollup))
         metaLabel.isHidden = metaLabel.stringValue.isEmpty
         updateDetailSlotConstraints()
 
@@ -5971,10 +6216,13 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         isIsolated: Bool,
         hasBranch: Bool,
         remote: String? = nil,
-        rollup: ChildRollup? = nil
+        rollup: ChildRollup? = nil,
+        rollupSummary: String? = nil,
+        showRollup: Bool = true
     ) -> String {
         let isolation = isIsolated ? "isolated" : (hasBranch ? "shared" : nil)
-        return [rollup?.summary, isolation, remote]
+        let resolvedRollup = showRollup ? (rollupSummary ?? rollup?.summary) : nil
+        return [resolvedRollup, isolation, remote]
             .compactMap { $0 }
             .filter { !$0.isEmpty }
             .joined(separator: " · ")

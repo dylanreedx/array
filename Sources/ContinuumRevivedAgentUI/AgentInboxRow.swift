@@ -522,13 +522,6 @@ public struct ChildRollup: Equatable, Sendable {
     /// Descendants in `InboxState.failed`.
     public let failed: Int
 
-    public init(children: Int, working: Int, needsYou: Int, failed: Int) {
-        self.children = children
-        self.working = working
-        self.needsYou = needsYou
-        self.failed = failed
-    }
-
     /// True when something down there is yours to deal with. `failed` counts:
     /// broken work under a folded parent is the loudest thing the fold can hide.
     public var needsAnyone: Bool { needsYou > 0 || failed > 0 }
@@ -569,6 +562,55 @@ public struct ChildRollup: Equatable, Sendable {
     /// parent open; `ready` and `failed` do not. A future blocker producer must extend
     /// this tally explicitly rather than inherit a guess from `InboxState`.
     public var holdsParentOpen: Bool { needsYou > 0 || working > 0 }
+
+    /// A capped direct-child count, kept beside the full descendant tally rather
+    /// than folded into it. The full `children`/`needsYou`/`failed` fields remain
+    /// the lifecycle/rollup facts for the whole subtree; these fields describe only
+    /// what the inline presentation deferred to the remainder affordance.
+    public let cappedChildren: Int
+    /// Every omitted row below a capped direct child, including grandchildren.
+    /// This is separate from `cappedChildren` so accounting can prove that no
+    /// descendant disappeared when a child owns a subtree of its own.
+    public let cappedDescendants: Int
+    public let cappedWorking: Int
+    public let cappedNeedsYou: Int
+    public let cappedFailed: Int
+
+    public init(
+        children: Int,
+        working: Int,
+        needsYou: Int,
+        failed: Int,
+        cappedChildren: Int = 0,
+        cappedDescendants: Int = 0,
+        cappedWorking: Int = 0,
+        cappedNeedsYou: Int = 0,
+        cappedFailed: Int = 0
+    ) {
+        self.children = children
+        self.working = working
+        self.needsYou = needsYou
+        self.failed = failed
+        self.cappedChildren = cappedChildren
+        self.cappedDescendants = cappedDescendants
+        self.cappedWorking = cappedWorking
+        self.cappedNeedsYou = cappedNeedsYou
+        self.cappedFailed = cappedFailed
+    }
+
+    /// Whether this rollup has a bounded inline fan-out. It is presentation
+    /// state, not a lifecycle fact, and therefore cannot affect `holdsParentOpen`.
+    public var isCapped: Bool { cappedChildren > 0 }
+
+    /// The attention raised by the omitted portion only. A parent with an
+    /// expanded group may still need to say this because the hidden child is not
+    /// on screen; the parent's own `attention` watermark remains untouched.
+    public var cappedAttentionSummary: String? {
+        var parts: [String] = []
+        if cappedNeedsYou > 0 { parts.append("\(cappedNeedsYou) needs you") }
+        if cappedFailed > 0 { parts.append("\(cappedFailed) failed") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
 
     /// The compact secondary line — `"3 children · 1 needs you"`.
     ///
@@ -673,6 +715,12 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// row is built (`AgentInboxRowBuilder`). Nothing stores it — a stored elapsed
     /// is stale the instant after it is written.
     public let elapsed: TimeInterval?
+    /// The newest activity stamp known for this agent. This is a fan-out
+    /// presentation key only: the desktop list's global order remains frozen on
+    /// `createdAt`, while a capped parent's visible survivors can keep the most
+    /// recently active children in view. A missing stamp falls back to creation
+    /// order in `InboxSort`, which is deterministic for legacy/fixture rows.
+    public let lastActiveAt: Date?
     // Ticket: docs/38-tickets/90-agent-ux/P2D.4-parent-child-nesting.md
     /// How far this row is drawn in: 0 for a top-level agent, 1 for a child of one,
     /// capped at `AgentInboxRow.maxDepth`.
@@ -819,6 +867,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         branch: String? = nil,
         isIsolated: Bool = false,
         elapsed: TimeInterval? = nil,
+        lastActiveAt: Date? = nil,
         depth: Int = 0,
         // Kept as a source-compatible argument for the older row producers. It
         // is deliberately ignored: density is a lifecycle fact, not a
@@ -841,6 +890,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.branch = branch
         self.isIsolated = isIsolated
         self.elapsed = elapsed
+        self.lastActiveAt = lastActiveAt
         self.depth = depth
         // Derive this at the model boundary so even a legacy caller that passes
         // the wrong compatibility value cannot make settled/snoozed work render
@@ -875,7 +925,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             id: id, title: title, projectName: projectName, workspaceName: workspaceName,
             state: state, attention: attention, lifecycle: lifecycle, model: model, role: role,
             branch: branch, isIsolated: isIsolated,
-            elapsed: frozenElapsed ?? elapsed, depth: depth,
+            elapsed: frozenElapsed ?? elapsed, lastActiveAt: lastActiveAt, depth: depth,
             variant: variant, createdAt: createdAt, parentId: parentId,
             isUnconfirmed: value, settlementBlocked: settlementBlocked)
     }

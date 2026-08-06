@@ -670,6 +670,305 @@ enum UIProbeGeometry {
         try visit(root, path: "", borderedAncestor: nil)
     }
 
+    private struct IndependentFanoutRemainderExpectation {
+        let parentID: UUID
+        let hiddenChildIDs: [UUID]
+        let hiddenDescendantIDs: [UUID]
+
+        var title: String { "\(hiddenChildIDs.count) more" }
+    }
+
+    private struct IndependentFanoutExpectation {
+        let visibleIDs: [UUID]
+        let remainders: [IndependentFanoutRemainderExpectation]
+    }
+
+    /// Independent expectation for the P0.3 fan-out corpus. This deliberately
+    /// does not call `boundedForInbox`: the gate knows the defect fixture's one
+    /// forty-child parent and calculates the eight survivor ids, hidden subtree
+    /// ids and remainder title itself, so a cap that silently changes both the
+    /// renderer and its oracle cannot stay green by agreeing with itself.
+    private static func independentlyExpectedDefaultFanout(
+        _ rows: [AgentInboxRow]
+    ) throws -> IndependentFanoutExpectation {
+        let sorted = InboxSort.sortForInbox(rows: rows)
+        let largeParents = sorted.filter { parent in
+            rows.filter { $0.parentId == parent.id }.count > 8
+        }
+        guard largeParents.count == 1, let parent = largeParents.first else {
+            throw fail("sidebar-ux-check.fanout: expected exactly one parent over the independent eight-child cap")
+        }
+        let children = rows.filter { $0.parentId == parent.id }
+        func priority(_ row: AgentInboxRow) -> Int {
+            switch row.state {
+            case .approval, .input: return 0
+            case .failed: return 1
+            case .working, .ready: return 2
+            }
+        }
+        let orderedChildren = children.sorted {
+            let leftPriority = priority($0)
+            let rightPriority = priority($1)
+            if leftPriority != rightPriority { return leftPriority < rightPriority }
+            let leftActive = $0.lastActiveAt ?? $0.createdAt
+            let rightActive = $1.lastActiveAt ?? $1.createdAt
+            if leftActive != rightActive { return leftActive > rightActive }
+            return $0.id.uuidString < $1.id.uuidString
+        }
+        let selected = orderedChildren.prefix(8)
+        let hidden = Array(orderedChildren.dropFirst(8))
+        let selectedIDs = Set(selected.map(\.id))
+        let childIDs = Set(children.map(\.id))
+
+        func subtreeIDs(startingAt id: UUID) -> [UUID] {
+            var result: [UUID] = []
+            var visited = Set<UUID>()
+            func visit(_ current: UUID) {
+                guard visited.insert(current).inserted else { return }
+                result.append(current)
+                for child in rows where child.parentId == current {
+                    visit(child.id)
+                }
+            }
+            visit(id)
+            return result
+        }
+
+        let remainder = IndependentFanoutRemainderExpectation(
+            parentID: parent.id,
+            hiddenChildIDs: hidden.map(\.id),
+            hiddenDescendantIDs: hidden.flatMap { subtreeIDs(startingAt: $0.id) })
+        return IndependentFanoutExpectation(
+            visibleIDs: sorted
+                .filter { !childIDs.contains($0.id) || selectedIDs.contains($0.id) }
+                .map(\.id),
+            remainders: [remainder])
+    }
+
+    /// The offscreen host is sized for both explicit contracts: the default
+    /// capped list with its remainder item, and the expanded list with every
+    /// corpus agent. The larger contract wins; a fixed corpus-count height would
+    /// either under-materialize the expanded state or hide a bad cap behind slack.
+    private static func sidebarProbeHeight(for rows: [AgentInboxRow]) -> CGFloat {
+        let sorted = InboxSort.sortForInbox(rows: rows)
+        let defaultBounded = InboxSort.boundedForInbox(rows: sorted)
+        let expandedBounded = InboxSort.boundedForInbox(
+            rows: sorted, expandedParents: Set(InboxSort.parentIds(in: sorted)))
+        func tableRows(for bounded: BoundedInbox) -> Int {
+            let parts = InboxSort.partition(rows: bounded.rows, now: LabFixtures.inboxNow)
+            let shelf = parts.shelfCount > 0 ? 1 : 0
+            let page = InboxSort.pageSettled(
+                parts.settled, limit: InboxSort.settledPageSize).hasMore ? 1 : 0
+            return bounded.rows.count + shelf + page + bounded.remainders.count
+        }
+        let requiredRows = max(tableRows(for: defaultBounded), tableRows(for: expandedBounded))
+        let rowPitch = AgentInboxView.rowHeight + Space.s
+        return CGFloat(
+            (Double(requiredRows) * rowPitch + AgentInboxView.scopeControlHeight + 160).rounded(.up)
+        )
+    }
+
+    /// Read the live table's DEFAULT shape before any remainder button is
+    /// pressed. The expected cap and remainder are independently derived from
+    /// the corpus above; only the shelf heading and history footer are counted as
+    /// other non-agent rows. This is deliberately a table-row equation, not an
+    /// accessor-only check:
+    ///
+    ///   table rows = visible agent cells + remainder affordances + section chrome
+    ///
+    /// A missing remainder can therefore not masquerade as a missing agent cell.
+    private static func assertDefaultFanoutAccounting(
+        _ probe: SidebarProbeHost,
+        rows: [AgentInboxRow],
+        expected: IndependentFanoutExpectation,
+        label: String
+    ) throws {
+        guard probe.inbox.isShelfExpandedForQA else {
+            throw fail("\(label): default fan-out accounting requires the real shelf to be expanded")
+        }
+        let expectedVisible = Set(expected.visibleIDs)
+        let sorted = InboxSort.sortForInbox(rows: rows)
+        let defaultVisibleRows = sorted.filter { expectedVisible.contains($0.id) }
+        let parts = InboxSort.partition(rows: defaultVisibleRows, now: LabFixtures.inboxNow)
+        let page = InboxSort.pageSettled(parts.settled, limit: InboxSort.settledPageSize)
+        let expectedAgentIDs = (parts.active + parts.snoozed + page.shown).map(\.id)
+        let expectedAgentCells = expectedAgentIDs.count
+        let expectedShelfRows = parts.shelfCount > 0 ? 1 : 0
+        let expectedPagingRows = page.hasMore ? 1 : 0
+        let expectedNonAgentRows = expectedShelfRows + expectedPagingRows
+        let actualRemainders = probe.inbox.fanoutRemainderRowsForQA
+        let expectedRemainderIDs = Set(expected.remainders.map(\.parentID))
+        let actualRemainderIDs = Set(actualRemainders.map(\.parentId))
+
+        guard expectedAgentIDs == expected.visibleIDs,
+              probe.inbox.rowIdsForQA == expectedAgentIDs,
+              probe.inbox.qaMaterializedRowCellCount == expectedAgentCells,
+              probe.inbox.rowCountForQA == expectedAgentCells else {
+            throw fail("\(label): default agent-cell accounting disagreed with the independent cap (live ids \(probe.inbox.rowIdsForQA.count), expected \(expectedAgentCells))")
+        }
+        guard actualRemainderIDs == expectedRemainderIDs,
+              actualRemainders.count == expected.remainders.count,
+              probe.inbox.fanoutRemainderTitlesForQA == expected.remainders.map(\.title) else {
+            throw fail("\(label): default remainder parent/count/title accounting disagreed (live parents \(actualRemainderIDs), titles \(probe.inbox.fanoutRemainderTitlesForQA); expected parents \(expectedRemainderIDs), titles \(expected.remainders.map(\.title))")
+        }
+        for expectedRemainder in expected.remainders {
+            guard let actual = probe.inbox.fanoutRemaindersByParentForQA[expectedRemainder.parentID],
+                  actual.hiddenChildIDs == expectedRemainder.hiddenChildIDs,
+                  actual.hiddenDescendantIDs == expectedRemainder.hiddenDescendantIDs,
+                  actual.hiddenChildCount == expectedRemainder.hiddenChildIDs.count,
+                  actual.title == expectedRemainder.title else {
+                throw fail("\(label): live remainder for \(expectedRemainder.parentID.uuidString) did not preserve its exact hidden-child count/title")
+            }
+        }
+
+        let expectedTableRows = expectedAgentCells + actualRemainders.count + expectedNonAgentRows
+        guard probe.inbox.tableRowCountForQA == expectedTableRows,
+              probe.inbox.nonAgentTableRowCountForQA == actualRemainders.count + expectedNonAgentRows else {
+            throw fail("\(label): default table rows \(probe.inbox.tableRowCountForQA) != \(expectedAgentCells) capped agent cells + \(actualRemainders.count) exact remainder rows + \(expectedNonAgentRows) shelf/paging rows")
+        }
+    }
+
+    /// Exercise the nested case in the live AppKit table. The root has nine
+    /// direct children, its final visible child has nine grandchildren, and both
+    /// caps therefore place a remainder after the same final grandchild. Folding
+    /// that child removes the shared anchor: the root remainder must re-anchor to
+    /// the folded child, expand the root, and leave the child's own remainder ready
+    /// when the child is opened again.
+    private static func checkNestedFanoutProbe(
+        width: CGFloat, appearanceName: NSAppearance.Name
+    ) throws {
+        let epoch = Date(timeIntervalSinceReferenceDate: 810_000_000)
+        func id(_ value: Int) -> UUID {
+            UUID(uuidString: String(format: "5B000000-0000-4000-8000-%012X", value))!
+        }
+        let rootID = id(200)
+        let directIDs = (0..<9).map { id(210 + $0) }
+        let grandchildIDs = (0..<9).map { id(230 + $0) }
+        let root = AgentInboxRow(
+            id: rootID, title: "Nested fan-out root", state: .ready,
+            createdAt: epoch.addingTimeInterval(2_000))
+        let direct = directIDs.enumerated().map { index, childID in
+            AgentInboxRow(
+                id: childID, title: "Nested child \(index)", state: .ready,
+                lastActiveAt: epoch.addingTimeInterval(Double(900 - index)),
+                depth: 1, createdAt: epoch.addingTimeInterval(Double(1_900 - index)),
+                parentId: rootID)
+        }
+        let grandchildren = grandchildIDs.enumerated().map { index, childID in
+            AgentInboxRow(
+                id: childID, title: "Nested grandchild \(index)", state: .ready,
+                lastActiveAt: epoch.addingTimeInterval(Double(800 - index)),
+                depth: 2, createdAt: epoch.addingTimeInterval(Double(1_800 - index)),
+                parentId: directIDs[7])
+        }
+        let rows = [root] + direct + grandchildren
+        let sorted = InboxSort.sortForInbox(rows: rows)
+        let bounded = InboxSort.boundedForInbox(rows: sorted)
+        guard bounded.remainders.count == 2,
+              bounded.rows.last?.id == bounded.remainders[0].afterRowID,
+              bounded.remainders[0].afterRowID == bounded.remainders[1].afterRowID else {
+            throw fail("sidebar-ux-check.nested-fanout@\(Int(width))pt.\(appearanceName.rawValue): model did not produce two same-anchor nested remainders")
+        }
+        let sharedAnchor = bounded.remainders[0].afterRowID
+        guard bounded.remaindersByAfterRow[sharedAnchor]?.map(\.parentId)
+                == [directIDs[7], rootID] else {
+            throw fail("sidebar-ux-check.nested-fanout@\(Int(width))pt.\(appearanceName.rawValue): model lost child-before-parent remainder structure")
+        }
+
+        let height = CGFloat(
+            (Double(rows.count + 2) * (AgentInboxView.rowHeight + Space.s)
+                + AgentInboxView.scopeControlHeight + 160).rounded(.up))
+        let probe = try makeSidebarProbeHost(
+            width: width, height: height, appearanceName: appearanceName)
+        probe.host.layoutSubtreeIfNeeded()
+        probe.inbox.reload(rows: rows)
+        probe.inbox.layoutForQA()
+        probe.host.layoutSubtreeIfNeeded()
+        probe.inbox.layoutForQA()
+
+        guard probe.inbox.rowIdsForQA == bounded.rows.map(\.id),
+              probe.inbox.qaMaterializedRowCellCount == bounded.rows.count,
+              probe.inbox.tableRowCountForQA == bounded.rows.count + 2,
+              probe.inbox.nonAgentTableRowCountForQA == 2 else {
+            throw fail("sidebar-ux-check.nested-fanout@\(Int(width))pt.\(appearanceName.rawValue): default table lost an agent or one of the two same-anchor remainder rows")
+        }
+        let initialRemainders = probe.inbox.fanoutRemainderRowsForQA
+        guard initialRemainders.map(\.parentId) == [directIDs[7], rootID],
+              initialRemainders[0].hiddenChildIDs == [grandchildIDs[8]],
+              initialRemainders[1].hiddenChildIDs == [directIDs[8]],
+              probe.inbox.fanoutRemainderTitlesForQA == ["1 more", "1 more"] else {
+            throw fail("sidebar-ux-check.nested-fanout@\(Int(width))pt.\(appearanceName.rawValue): live remainder rows had the wrong parent, count or title")
+        }
+
+        guard probe.inbox.clickDisclosureForQA(id: directIDs[7]) else {
+            throw fail("sidebar-ux-check.nested-fanout@\(Int(width))pt.\(appearanceName.rawValue): nested capped child disclosure was not materialized")
+        }
+        probe.inbox.layoutForQA()
+        probe.host.layoutSubtreeIfNeeded()
+        probe.inbox.layoutForQA()
+        let collapsedDefaultRows = InboxSort.visibleRows(
+            bounded.rows, collapsed: [directIDs[7]])
+        guard probe.inbox.collapsedParentsForQA.contains(directIDs[7]),
+              probe.inbox.rowIdsForQA == collapsedDefaultRows.map(\.id),
+              probe.inbox.fanoutRemainderRowsForQA.map(\.parentId) == [rootID],
+              probe.inbox.fanoutRemainderRowsForQA.first?.hiddenChildIDs == [directIDs[8]],
+              probe.inbox.tableRowCountForQA == collapsedDefaultRows.count + 1,
+              probe.inbox.nonAgentTableRowCountForQA == 1 else {
+            throw fail("sidebar-ux-check.nested-fanout@\(Int(width))pt.\(appearanceName.rawValue): folding the nested child lost or retargeted the root remainder")
+        }
+
+        guard probe.inbox.clickFanoutRemainderForQA(parentId: rootID) else {
+            throw fail("sidebar-ux-check.nested-fanout@\(Int(width))pt.\(appearanceName.rawValue): root remainder was not clickable after its shared anchor folded")
+        }
+        probe.inbox.layoutForQA()
+        probe.host.layoutSubtreeIfNeeded()
+        probe.inbox.layoutForQA()
+        let rootExpanded = InboxSort.boundedForInbox(
+            rows: sorted, expandedParents: [rootID])
+        let collapsedRootExpandedRows = InboxSort.visibleRows(
+            rootExpanded.rows, collapsed: [directIDs[7]])
+        guard probe.inbox.expandedFanoutParentsForQA == Set([rootID]),
+              probe.inbox.rowIdsForQA == collapsedRootExpandedRows.map(\.id),
+              probe.inbox.rowIdsForQA.contains(directIDs[8]),
+              probe.inbox.fanoutRemainderRowsForQA.isEmpty,
+              probe.inbox.tableRowCountForQA == collapsedRootExpandedRows.count,
+              probe.inbox.nonAgentTableRowCountForQA == 0 else {
+            throw fail("sidebar-ux-check.nested-fanout@\(Int(width))pt.\(appearanceName.rawValue): re-anchored root expansion did not materialize its ninth child while preserving the nested fold")
+        }
+
+        guard probe.inbox.clickDisclosureForQA(id: directIDs[7]) else {
+            throw fail("sidebar-ux-check.nested-fanout@\(Int(width))pt.\(appearanceName.rawValue): nested child could not be reopened after root expansion")
+        }
+        probe.inbox.layoutForQA()
+        probe.host.layoutSubtreeIfNeeded()
+        probe.inbox.layoutForQA()
+        guard !probe.inbox.collapsedParentsForQA.contains(directIDs[7]),
+              probe.inbox.rowIdsForQA == rootExpanded.rows.map(\.id),
+              probe.inbox.fanoutRemainderRowsForQA.map(\.parentId) == [directIDs[7]],
+              probe.inbox.fanoutRemainderRowsForQA.first?.hiddenChildIDs == [grandchildIDs[8]],
+              probe.inbox.tableRowCountForQA == rootExpanded.rows.count + 1 else {
+            throw fail("sidebar-ux-check.nested-fanout@\(Int(width))pt.\(appearanceName.rawValue): reopening the nested child did not restore its own remainder")
+        }
+
+        guard probe.inbox.clickFanoutRemainderForQA(parentId: directIDs[7]) else {
+            throw fail("sidebar-ux-check.nested-fanout@\(Int(width))pt.\(appearanceName.rawValue): child remainder button was not materialized after reopening")
+        }
+        probe.inbox.layoutForQA()
+        probe.host.layoutSubtreeIfNeeded()
+        probe.inbox.layoutForQA()
+        let bothExpanded = InboxSort.boundedForInbox(
+            rows: sorted, expandedParents: [rootID, directIDs[7]])
+        guard probe.inbox.expandedFanoutParentsForQA == Set([rootID, directIDs[7]]),
+              probe.inbox.fanoutRemainderRowsForQA.isEmpty,
+              probe.inbox.fanoutRemainderParentIDsForQA.isEmpty,
+              probe.inbox.rowIdsForQA == sorted.map(\.id),
+              probe.inbox.qaMaterializedRowCellCount == rows.count,
+              probe.inbox.tableRowCountForQA == bothExpanded.rows.count,
+              Set(probe.inbox.rowIdsForQA) == Set(rows.map(\.id)) else {
+            throw fail("sidebar-ux-check.nested-fanout@\(Int(width))pt.\(appearanceName.rawValue): expanding both levels lost, duplicated or mis-targeted an agent")
+        }
+    }
+
     private static func checkSidebarProbe(
         _ probe: SidebarProbeHost, rows: [AgentInboxRow], width: CGFloat,
         appearanceName: NSAppearance.Name
@@ -684,18 +983,93 @@ enum UIProbeGeometry {
         probe.host.layoutSubtreeIfNeeded()
         probe.inbox.layoutForQA()
 
+        guard InboxSort.maxVisibleChildren == 8 else {
+            throw fail("\(label): the bounded inline policy changed from the independently gated eight-child cap")
+        }
+        let sortedRows = InboxSort.sortForInbox(rows: rows)
+        let expectedDefault = try independentlyExpectedDefaultFanout(rows)
+        guard expectedDefault.visibleIDs.count < rows.count else {
+            throw fail("\(label): the defect corpus did not exercise a capped parent")
+        }
+        try assertDefaultFanoutAccounting(
+            probe, rows: rows, expected: expectedDefault, label: label)
+        guard let fanoutParent = expectedDefault.remainders.first?.parentID,
+              let defaultRemainder = probe.inbox.fanoutRemaindersByParentForQA[fanoutParent] else {
+            throw fail("\(label): the capped parent did not render an explicit remainder")
+        }
+        guard Set(defaultRemainder.hiddenDescendantIDs).intersection(Set(expectedDefault.visibleIDs)).isEmpty,
+              Set(defaultRemainder.hiddenDescendantIDs).union(Set(expectedDefault.visibleIDs)) == Set(rows.map(\.id)) else {
+            throw fail("\(label): the remainder did not account for every hidden child without losing a visible id")
+        }
+
+        // The nested witness uses a separate live host so the forty-child defect
+        // corpus remains unchanged. It intentionally ends one visible capped child
+        // at the same anchor as its parent's remainder and presses both real
+        // affordances through their target/action path.
+        try checkNestedFanoutProbe(width: width, appearanceName: appearanceName)
+
+        // A blocked child is deliberately kept in the hidden ninth slot: the
+        // first eight siblings are given the same higher-priority human-blocked
+        // state, so this witness proves propagation from a CAPPED child rather
+        // than from a child that happened to become visible.
+        let directChildren = rows.filter { $0.parentId == fanoutParent }
+            .sorted { $0.createdAt != $1.createdAt ? $0.createdAt > $1.createdAt : $0.id.uuidString < $1.id.uuidString }
+        guard directChildren.count > InboxSort.maxVisibleChildren else {
+            throw fail("\(label): fan-out attention witness has no hidden ninth child")
+        }
+        let blockedIDs = Set(directChildren.prefix(InboxSort.maxVisibleChildren + 1).map(\.id))
+        let blockedRows = rows.map { row -> AgentInboxRow in
+            guard blockedIDs.contains(row.id) else { return row }
+            return AgentInboxRow(
+                id: row.id, title: row.title, projectName: row.projectName,
+                workspaceName: row.workspaceName, state: .input, attention: row.attention,
+                lifecycle: row.lifecycle, model: row.model, role: row.role, branch: row.branch,
+                isIsolated: row.isIsolated, elapsed: row.elapsed, lastActiveAt: row.lastActiveAt,
+                depth: row.depth, variant: row.variant, createdAt: row.createdAt,
+                parentId: row.parentId, isUnconfirmed: row.isUnconfirmed,
+                settlementBlocked: row.settlementBlocked)
+        }
+        guard let blockedParent = blockedRows.first(where: { $0.id == fanoutParent }),
+              blockedParent.attention == rows.first(where: { $0.id == fanoutParent })?.attention else {
+            throw fail("\(label): the capped-child witness changed the parent's own attention watermark")
+        }
+        probe.inbox.reload(rows: blockedRows)
+        probe.inbox.layoutForQA()
+        probe.host.layoutSubtreeIfNeeded()
+        probe.inbox.layoutForQA()
+        guard let blockedParentGeometry = probe.inbox.qaRowGeometriesForQA.first(where: { $0.agentID == fanoutParent }),
+              blockedParentGeometry.labels.first(where: { $0.element == "meta" })?.text.contains("needs you") == true,
+              probe.inbox.fanoutRemainderAccessibilityLabelsForQA.contains(where: { $0.contains("needs you") }) else {
+            throw fail("\(label): a blocked child hidden behind the remainder did not raise the parent rollup")
+        }
+        // Restore the corpus before the all-ids expansion witness. The real
+        // remainder button, not a direct Set mutation, is the expansion path.
+        probe.inbox.reload(rows: rows)
+        probe.inbox.layoutForQA()
+        probe.host.layoutSubtreeIfNeeded()
+        probe.inbox.layoutForQA()
+        guard probe.inbox.clickFanoutRemainderForQA(parentId: fanoutParent) else {
+            throw fail("\(label): the live N more affordance did not expand its parent")
+        }
+        probe.inbox.layoutForQA()
+        probe.host.layoutSubtreeIfNeeded()
+        probe.inbox.layoutForQA()
+        let expandedIDs = probe.inbox.rowIdsForQA
+        guard expandedIDs == sortedRows.map(\.id),
+              probe.inbox.qaMaterializedRowCellCount == rows.count,
+              probe.inbox.fanoutRemainderParentIDsForQA.isEmpty,
+              probe.inbox.expandedFanoutParentsForQA.contains(fanoutParent) else {
+            throw fail("\(label): expanded fan-out did not materialize every corpus agent id")
+        }
+
         let cells = probe.inbox.qaMaterializedRowCells
         guard !cells.isEmpty else {
             throw fail("\(label): no row cells materialized")
         }
         guard cells.count == rows.count,
               probe.inbox.qaMaterializedRowCellCount == rows.count else {
-            throw fail("\(label): materialized \(cells.count) row cells for \(rows.count) corpus rows")
+            throw fail("\(label): expanded materialized \(cells.count) row cells for \(rows.count) corpus rows")
         }
-        // Negative witness (2026-08-03): changing the first `==` to `>` made
-        // `--sidebar-ux-check` exit 1 at the exact message
-        // `sidebar-ux-check@220pt.NSAppearanceNameAqua: materialized 7 row cells for 7 corpus rows`.
-        // The source was restored by hash before the green run.
         guard cells.allSatisfy({ $0.isDescendant(of: probe.inbox) && $0.window === probe.window }) else {
             throw fail("\(label): a QA row cell is not part of the live inbox window tree")
         }
@@ -1594,14 +1968,28 @@ enum UIProbeGeometry {
             transitionInbox.frame = transitionHost.bounds
             let transitionProbe = SidebarProbeHost(
                 window: transitionRootProbe.window, host: transitionHost, inbox: transitionInbox)
-            func layoutTransitionHost(width: CGFloat) {
+            func layoutTransitionHost(width: CGFloat, setWindowContentSize: Bool = false) {
+                if setWindowContentSize {
+                    let requestedSize = NSSize(width: width, height: maxHeight)
+                    // This branch is used by the P6.5 one-host remainder witness.
+                    // Relax the probe window's previous exact-size clamp before
+                    // setting each live width; otherwise AppKit would keep the
+                    // first 320pt content size while the child host appeared to
+                    // resize.
+                    transitionProbe.window.contentMinSize = .zero
+                    transitionProbe.window.contentMaxSize = requestedSize
+                    transitionProbe.window.setContentSize(requestedSize)
+                }
                 var frame = transitionProbe.host.frame
                 frame.size.width = width
+                frame.size.height = maxHeight
                 transitionProbe.host.frame = frame
                 transitionProbe.inbox.frame = transitionProbe.host.bounds
                 transitionProbe.host.layoutSubtreeIfNeeded()
                 transitionProbe.inbox.layoutForQA()
                 transitionProbe.inbox.setViewportWidthForQA(Double(width))
+                transitionProbe.host.layoutSubtreeIfNeeded()
+                transitionProbe.inbox.layoutForQA()
             }
             transitionProbe.inbox.reload(rows: [resizingRow])
             transitionProbe.inbox.layoutForQA()
@@ -1762,6 +2150,114 @@ enum UIProbeGeometry {
             }
             try expectRenameEditorToFollowTitle("the restored wide resize")
             _ = transitionProbe.inbox.pressKeyInRenameForQA(#selector(NSResponder.cancelOperation(_:)))
+            asserted += 8
+
+            // P6.5 height-cache witness: keep ONE live host and a genuinely
+            // capped parent (>8 direct children). The hidden ninth child is an
+            // approval, so the real remainder rollup stays visible while the
+            // same host crosses 320→220→280. At 280 the test presses the REAL
+            // remainder affordance, then returns to 320 with the expanded parent.
+            // Every number below comes from the live table rect, not a model-only
+            // height accessor; the expected line roles are independently fixed by
+            // the visible project/meta labels and the explicit hidden rollup.
+            // Negative witness observed against the final check: mutating
+            // `AgentInboxView.height`'s `let drawsRollup = Self.drawsRollup(...)`
+            // to `let drawsRollup = false` (mutated-file SHA-256
+            // `e64ae3b6d2e51851c73f1e2c30fbc62eaa55c4ae8e49388de0ae1988bea43d7d`),
+            // rebuilding, and running `--sidebar-ux-check` exited 1 at the exact
+            // message `sidebar-ux-check.content-height.NSAppearanceNameAqua: cached parent height at 320pt capped was 61.0, wanted 79.0 from the live project+name+rollup bands`.
+            // The source was restored byte-for-byte (restored-file SHA-256
+            // `4760b3b02dd89e2dc6f9e1875643f53566a76315e1e5e2abc280c9af58112d7c`)
+            // before the rebuilt geometry check exited 0.
+            let rollupParentID = UUID(uuidString: "5A000000-0000-4000-8000-000000000006")!
+            let rollupChildIDs = (0..<9).map { index in
+                UUID(uuidString: String(format: "5A000000-0000-4000-8000-%012d", index + 8))!
+            }
+            let rollupParent = AgentInboxRow(
+                id: rollupParentID, title: "Rollup height parent", projectName: resizingProject,
+                state: .ready, attention: .none, model: nil, role: nil, branch: nil,
+                elapsed: nil, createdAt: epoch.addingTimeInterval(20))
+            let rollupChildren = rollupChildIDs.enumerated().map { index, childID in
+                AgentInboxRow(
+                    id: childID, title: "Hidden approval \(index)", state: .approval,
+                    attention: .none, model: nil, role: nil, branch: nil,
+                    lastActiveAt: epoch.addingTimeInterval(Double(19 - index)),
+                    depth: 1, createdAt: epoch.addingTimeInterval(Double(19 - index)),
+                    parentId: rollupParentID)
+            }
+            let cappedRollupRows = [rollupParent] + rollupChildren
+            let cappedRollupSorted = InboxSort.sortForInbox(rows: cappedRollupRows)
+            let cappedRollupDefault = InboxSort.boundedForInbox(rows: cappedRollupSorted)
+            guard cappedRollupDefault.rows.count == 1 + InboxSort.maxVisibleChildren,
+                  cappedRollupDefault.remainders.count == 1,
+                  cappedRollupDefault.remainders.first?.parentId == rollupParentID,
+                  cappedRollupDefault.remainders.first?.hiddenChildIDs == [rollupChildIDs[8]] else {
+                throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): height witness did not construct a capped ninth-child remainder")
+            }
+            transitionProbe.inbox.reload(rows: cappedRollupRows)
+
+            func assertCappedHeight(
+                at width: CGFloat, phase: String, remainderExpected: Bool
+            ) throws {
+                layoutTransitionHost(width: width, setWindowContentSize: true)
+                guard let geometry = transitionProbe.inbox.qaRowGeometriesForQA.first(where: { $0.agentID == rollupParentID }),
+                      let project = geometry.labels.first(where: { $0.element == "project" }),
+                      let meta = geometry.labels.first(where: { $0.element == "meta" }) else {
+                    throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): capped height witness did not materialize its parent at \(phase)")
+                }
+                if remainderExpected {
+                    guard !meta.isHidden, meta.text.contains("1 needs you") else {
+                        throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): capped parent rollup disappeared at \(phase)")
+                    }
+                } else {
+                    guard meta.isHidden || meta.text.isEmpty else {
+                        throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): expanded parent retained a stale capped rollup at \(phase)")
+                    }
+                }
+                let projectVisible = !project.isHidden
+                let roles: [TextRole]
+                if remainderExpected {
+                    roles = projectVisible ? [.label, .title, .label] : [.title, .label]
+                } else {
+                    roles = projectVisible ? [.label, .title] : [.title]
+                }
+                let expectedParentHeight = Metrics.rowHeight(
+                    for: roles, insets: Inset.card, spacing: Space.s)
+                guard let actualParentHeight = transitionProbe.inbox.rowHeightForQA(id: rollupParentID),
+                      abs(actualParentHeight - expectedParentHeight) <= 0.5 else {
+                    throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): cached parent height at \(phase) was \(transitionProbe.inbox.rowHeightForQA(id: rollupParentID) ?? -1), wanted \(expectedParentHeight) from the live \(projectVisible ? "project+name+rollup" : "name+rollup") bands")
+                }
+                if remainderExpected {
+                    guard let remainderHeight = transitionProbe.inbox.fanoutRemainderHeightForQA(parentId: rollupParentID),
+                          abs(remainderHeight - AgentInboxView.slimRowHeight) <= 0.5,
+                          transitionProbe.inbox.fanoutRemainderRowsForQA.map(\.parentId) == [rollupParentID],
+                          transitionProbe.inbox.tableRowCountForQA
+                            == transitionProbe.inbox.qaMaterializedRowCellCount + 1 else {
+                        throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): cached remainder height or table accounting was stale at \(phase)")
+                    }
+                } else {
+                    guard transitionProbe.inbox.fanoutRemainderHeightForQA(parentId: rollupParentID) == nil,
+                          transitionProbe.inbox.fanoutRemainderRowsForQA.isEmpty,
+                          transitionProbe.inbox.tableRowCountForQA
+                            == transitionProbe.inbox.qaMaterializedRowCellCount else {
+                        throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): expanded remainder row remained in the live table at \(phase)")
+                    }
+                }
+            }
+
+            // The sequence is intentionally on one host/window: the table's old
+            // row-height cache survives each width change and is observed again.
+            try assertCappedHeight(at: 320, phase: "320pt capped", remainderExpected: true)
+            try assertCappedHeight(
+                at: CGFloat(WorkspaceSidebarConfig.minWidth),
+                phase: "220pt capped", remainderExpected: true)
+            try assertCappedHeight(
+                at: CGFloat(WorkspaceSidebarConfig.defaultWidth),
+                phase: "280pt capped", remainderExpected: true)
+            guard transitionProbe.inbox.clickFanoutRemainderForQA(parentId: rollupParentID) else {
+                throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): height witness could not press the live remainder affordance")
+            }
+            try assertCappedHeight(at: 320, phase: "320pt expanded", remainderExpected: false)
             asserted += 8
         }
 
@@ -2914,24 +3410,17 @@ enum UIProbeGeometry {
             throw fail("sidebar-ux-check: corpus agent ids are not unique")
         }
         // P4.8 pages the settled tail at `settledPageSize` rows, hiding the rest
-        // behind a footer that is not an agent cell — which would make the
-        // cells == rows assertion below fail at the symptom instead of the
-        // cause. The corpus keeps its settled tail within the first page; a
-        // packet that needs a longer tail must expand paging here first.
+        // behind a footer that is not an agent cell. The corpus keeps its settled
+        // tail within the first page; a packet that needs a longer tail must
+        // expand paging here first.
         let settledRows = rows.filter { InboxSort.section(for: $0.lifecycle, now: LabFixtures.inboxNow) == .settled }.count
         guard settledRows <= InboxSort.settledPageSize else {
             throw fail("sidebar-ux-check: corpus has \(settledRows) settled rows, past the \(InboxSort.settledPageSize)-row first page — expand paging in the probe before asserting cells == rows")
         }
-        // P0.3: the host's height is DERIVED from the corpus, not fixed at 620pt.
-        // Materialization is bounded by the viewport, so a 40-child fan-out in a
-        // 620pt host would leave most rows unbuilt and cells == rows could never
-        // hold. Pitch is the tallest row (a card) plus the inter-cell gap; +2
-        // rows cover the shelf heading and a paging footer, and the tail slack
-        // covers the scope control and the card/slim difference in its favour.
-        let rowPitch = AgentInboxView.rowHeight + Space.s
-        let probeHeight = CGFloat(
-            (Double(rows.count + 2) * rowPitch + AgentInboxView.scopeControlHeight + 160).rounded(.up)
-        )
+        // P0.3: derive the host height from both the collapsed bounded contract
+        // and the real expansion contract. A viewport must not make either state
+        // pass by truncating rows that should be accounted for.
+        let probeHeight = sidebarProbeHeight(for: rows)
         let widths: [CGFloat] = [
             CGFloat(WorkspaceSidebarConfig.minWidth),
             CGFloat(WorkspaceSidebarConfig.defaultWidth),
@@ -3419,13 +3908,15 @@ enum UIProbeGeometry {
 
         let rows = LabFixtures.inboxDefectRows()
         guard !rows.isEmpty else { throw fail("ui-geometry-check: sidebar gate corpus is empty") }
+        let expectedDefault = try independentlyExpectedDefaultFanout(rows)
+        let expectedDefaultIDs = expectedDefault.visibleIDs
+        guard let fanoutParentID = expectedDefault.remainders.first?.parentID else {
+            throw fail("ui-geometry-check: sidebar gate corpus has no fan-out parent")
+        }
         var corpusIndexByID: [UUID: Int] = [:]
         for (index, row) in rows.enumerated() { corpusIndexByID[row.id] = index }
 
-        let rowPitch = AgentInboxView.rowHeight + Space.s
-        let probeHeight = CGFloat(
-            (Double(rows.count + 2) * rowPitch + AgentInboxView.scopeControlHeight + 160).rounded(.up)
-        )
+        let probeHeight = sidebarProbeHeight(for: rows)
 
         var measured = 0
         var observedByAppearance: [NSAppearance.Name: Set<String>] = [:]
@@ -3447,9 +3938,28 @@ enum UIProbeGeometry {
                 probe.inbox.layoutForQA()
                 probe.host.layoutSubtreeIfNeeded()
                 probe.inbox.layoutForQA()
+                try assertDefaultFanoutAccounting(
+                    probe,
+                    rows: rows,
+                    expected: expectedDefault,
+                    label: "ui-geometry-check@\(gate.name).\(appearanceName.rawValue)")
+                try checkNestedFanoutProbe(width: gate.width, appearanceName: appearanceName)
+                guard probe.inbox.rowIdsForQA == expectedDefaultIDs,
+                      probe.inbox.fanoutRemainderParentIDsForQA == Set([fanoutParentID]),
+                      probe.inbox.fanoutRemainderTitlesForQA.count == 1 else {
+                    throw fail("ui-geometry-check: sidebar gate lost the bounded default contract at \(gate.name)")
+                }
+                guard probe.inbox.clickFanoutRemainderForQA(parentId: fanoutParentID) else {
+                    throw fail("ui-geometry-check: sidebar gate could not press the live fan-out remainder at \(gate.name)")
+                }
+                probe.inbox.layoutForQA()
+                probe.host.layoutSubtreeIfNeeded()
+                probe.inbox.layoutForQA()
                 let geometries = probe.inbox.qaRowGeometriesForQA
-                guard geometries.count == rows.count else {
-                    throw fail("ui-geometry-check: sidebar gate materialized \(geometries.count) rows of \(rows.count) at \(gate.name)")
+                guard geometries.count == rows.count,
+                      probe.inbox.rowIdsForQA == InboxSort.sortForInbox(rows: rows).map(\.id),
+                      probe.inbox.fanoutRemainderParentIDsForQA.isEmpty else {
+                    throw fail("ui-geometry-check: sidebar gate materialized \(geometries.count) rows of \(rows.count) at \(gate.name) after expansion")
                 }
                 for geometry in geometries {
                     guard let id = geometry.agentID, let index = corpusIndexByID[id] else {

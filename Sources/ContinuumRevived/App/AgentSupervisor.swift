@@ -8316,19 +8316,29 @@ private func checkArchiveCleanup(
     // MARK: 6 · orphans, and what is NOT one
 
     let orphanSupervisor = AgentSupervisor(store: store, makeRunner: { ScriptedRunnerQueue([]).next($0) })
-    func spawnOn(_ supervisor: AgentSupervisor, role: String) throws -> AgentRecord {
+    func spawnOn(
+        _ supervisor: AgentSupervisor,
+        role: String,
+        parentAgentID: AgentID? = nil
+    ) throws -> AgentRecord {
         let id = try supervisor.spawn(
             role: role,
             prompt: nil,
             cwd: repo,
             model: config.model,
             thinking: config.thinking,
+            parentAgentID: parentAgentID,
             isolated: true
         )
         guard let record = supervisor.records[id] else { throw fail("lost the \(role) agent") }
         return record
     }
     let keptAgent = try spawnOn(orphanSupervisor, role: "kept")
+    // This child is the resource-bookkeeping counterpart of a UI child that may
+    // be omitted by presentation: its durable record still owns a worktree and
+    // must remain in the known set after relaunch.
+    let cappedChildAgent = try spawnOn(
+        orphanSupervisor, role: "capped-child", parentAgentID: keptAgent.id)
     let orphanAgent = try spawnOn(orphanSupervisor, role: "orphaned")
     // Behind the supervisor's back: the record file goes, nothing else does.
     try store.delete(id: orphanAgent.id)
@@ -8343,6 +8353,14 @@ private func checkArchiveCleanup(
     //   record was deleted
     guard orphans.count == 1 else {
         throw fail("orphan detection reported \(orphans.count) worktrees, expected only the one whose record was deleted: \(orphans.map { $0.path.lastPathComponent })")
+    }
+    guard !orphans.contains(where: {
+        WorktreeManager.resolved($0.path) == WorktreeManager.resolved(URL(fileURLWithPath: cappedChildAgent.cwd))
+    }) else {
+        throw fail("a capped child worktree was classified as an orphan even though its stored child record remained in the known set")
+    }
+    guard FileManager.default.fileExists(atPath: cappedChildAgent.cwd) else {
+        throw fail("the capped child's known worktree disappeared before repair")
     }
     guard WorktreeManager.resolved(orphans[0].path) == WorktreeManager.resolved(URL(fileURLWithPath: orphanAgent.cwd)) else {
         throw fail("orphan detection named \(orphans[0].path.path), expected \(orphanAgent.cwd)")
@@ -8455,7 +8473,7 @@ private func checkArchiveCleanup(
     }
 
     supervisor.stopAll()
-    return "archive removed a clean agent's worktree and branch, KEPT the branch of one with an unmerged commit, stopped a live runner, left a non-isolated agent's repo untouched, refused to touch a project root a record wrongly claimed, repaired 1 orphan while leaving a live and a stale agent alone"
+    return "archive removed a clean agent's worktree and branch, KEPT the branch of one with an unmerged commit, stopped a live runner, left a non-isolated agent's repo untouched, refused to touch a project root a record wrongly claimed, repaired 1 orphan while leaving a live child-resource record and a stale agent alone"
 }
 
 /// A temp repository with one commit — `git worktree add` needs a HEAD. The `-c`

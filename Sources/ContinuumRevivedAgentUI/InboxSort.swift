@@ -13,7 +13,107 @@ import Foundation
 // sorts coexist on purpose, and the divergence is asserted rather than left to
 // drift (`runInboxSortDivergesFromBoardOrderCheck`, in CoreChecks — it is the one
 // place both orders are visible, since this module may not import Core).
+public struct FanoutRemainder: Equatable, Sendable {
+    /// The parent whose inline children were capped.
+    public let parentId: UUID
+    /// Direct children omitted from the inline list. The visible `N more` count
+    /// is this count, not a count derived from whatever happened to materialize.
+    public let hiddenChildIDs: [UUID]
+    /// Every row omitted below those children, including grandchildren. Keeping
+    /// this separate makes the accounting proof fail if a hidden child owns a
+    /// subtree that the remainder forgets to count.
+    public let hiddenDescendantIDs: [UUID]
+    /// The last visible agent row in this parent's inline subtree. The AppKit
+    /// list inserts the remainder after this id without making the remainder an
+    /// agent row or a selection target.
+    public let afterRowID: UUID
+    public let hiddenWorking: Int
+    public let hiddenNeedsYou: Int
+    public let hiddenFailed: Int
+
+    public init(
+        parentId: UUID,
+        hiddenChildIDs: [UUID],
+        hiddenDescendantIDs: [UUID],
+        afterRowID: UUID,
+        hiddenWorking: Int,
+        hiddenNeedsYou: Int,
+        hiddenFailed: Int
+    ) {
+        self.parentId = parentId
+        self.hiddenChildIDs = hiddenChildIDs
+        self.hiddenDescendantIDs = hiddenDescendantIDs
+        self.afterRowID = afterRowID
+        self.hiddenWorking = hiddenWorking
+        self.hiddenNeedsYou = hiddenNeedsYou
+        self.hiddenFailed = hiddenFailed
+    }
+
+    public var hiddenChildCount: Int { hiddenChildIDs.count }
+    public var hiddenDescendantCount: Int { hiddenDescendantIDs.count }
+    public var title: String { "\(hiddenChildCount) more" }
+    public var hasAttention: Bool { hiddenNeedsYou > 0 || hiddenFailed > 0 }
+
+    /// The accessibility string keeps the visible affordance short while
+    /// exposing the hidden attention axis to VoiceOver as well.
+    public var accessibilityTitle: String {
+        var parts = ["\(hiddenChildCount) more \(hiddenChildCount == 1 ? "agent" : "agents")"]
+        if hiddenNeedsYou > 0 { parts.append("\(hiddenNeedsYou) needs you") }
+        if hiddenFailed > 0 { parts.append("\(hiddenFailed) failed") }
+        return parts.joined(separator: " · ")
+    }
+
+    /// A stable identity for the list's incremental-render decision. Attention
+    /// counts are included because a non-agent remainder cell has no row diff of
+    /// its own to trigger a repaint. The anchor is included too: expanding a
+    /// nested visible child can move its parent's remainder to a later agent row
+    /// without changing the parent's hidden-child count.
+    public var identity: String {
+        let ids = hiddenChildIDs.map(\.uuidString).joined(separator: ",")
+        return "\(parentId.uuidString):\(afterRowID.uuidString):\(ids):\(hiddenWorking):\(hiddenNeedsYou):\(hiddenFailed)"
+    }
+}
+
+public struct BoundedInbox: Equatable, Sendable {
+    /// The agent rows that remain inline after every parent cap is applied.
+    public let rows: [AgentInboxRow]
+    /// One remainder for each capped parent. A dictionary view is convenient for
+    /// the AppKit list, while the ordered array keeps deterministic equality and
+    /// lets checks prove every deferred group was rendered.
+    public let remainders: [FanoutRemainder]
+
+    public init(rows: [AgentInboxRow], remainders: [FanoutRemainder]) {
+        self.rows = rows
+        self.remainders = remainders
+    }
+
+    public var remainderByParent: [UUID: FanoutRemainder] {
+        Dictionary(uniqueKeysWithValues: remainders.map { ($0.parentId, $0) })
+    }
+
+    /// A visible child can be the final visible child of its parent while also
+    /// owning a capped subtree. Both remainder affordances then belong after the
+    /// same agent row. Keep the ordered values rather than forcing a one-to-one
+    /// anchor dictionary; the nested remainder is emitted before its parent's
+    /// remainder, matching the depth-first materialization order.
+    public var remaindersByAfterRow: [UUID: [FanoutRemainder]] {
+        Dictionary(grouping: remainders, by: \.afterRowID)
+    }
+
+    /// Every input id is either inline or named by exactly one deferred subtree.
+    /// The view check uses this independently of cell materialization.
+    public func accountedIDs(for input: [AgentInboxRow]) -> Set<UUID> {
+        Set(rows.map(\.id)).union(remainders.flatMap(\.hiddenDescendantIDs))
+    }
+}
+
 public enum InboxSort {
+    /// The maximum number of direct children shown inline for one parent. This is
+    /// a presentation cap, deliberately separate from the supervisor's spawn cap:
+    /// old stores and fixture corpora can contain more children than a new spawn
+    /// policy permits, and none of those agents may vanish from accounting.
+    public static let maxVisibleChildren = 8
+
     /// The desktop inbox's order.
     ///
     /// Three blocks, in this order:
@@ -60,6 +160,134 @@ public enum InboxSort {
         return nest(live, by: newestSpawnedFirst)
             + nest(shelf, by: newestSpawnedFirst)
             + nest(history, by: mostRecentlyEndedFirst)
+    }
+
+    /// Bound direct children without changing the global frozen root order. A
+    /// parent may opt into the expanded set, in which case every child and every
+    /// nested subtree is emitted. Otherwise the eight survivors are chosen by the
+    /// inline need policy: human-blocked first, failed next, then most recently
+    /// active, with a stable id tie-break.
+    ///
+    /// `rows` must already be the result of `sortForInbox`, because the depth and
+    /// cross-section promotion decisions belong to that function. The result is
+    /// still a depth-first agent sequence; remainder rows are metadata for the
+    /// AppKit boundary and never enter `AgentInboxRow` or resource bookkeeping.
+    public static func boundedForInbox(
+        rows: [AgentInboxRow], expandedParents: Set<UUID> = []
+    ) -> BoundedInbox {
+        guard !rows.isEmpty else { return BoundedInbox(rows: [], remainders: []) }
+
+        let present = Set(rows.map(\.id))
+        let byID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+        var childrenOf: [UUID: [AgentInboxRow]] = [:]
+        var roots: [AgentInboxRow] = []
+        for row in rows {
+            if row.depth > 0, let parentId = row.parentId,
+               parentId != row.id, present.contains(parentId) {
+                childrenOf[parentId, default: []].append(row)
+            } else {
+                roots.append(row)
+            }
+        }
+
+        func needRank(_ row: AgentInboxRow) -> Int {
+            switch row.state {
+            case .approval, .input: return 0
+            case .failed: return 1
+            case .working, .ready: return 2
+            }
+        }
+
+        func needFirst(_ lhs: AgentInboxRow, _ rhs: AgentInboxRow) -> Bool {
+            let leftRank = needRank(lhs)
+            let rightRank = needRank(rhs)
+            if leftRank != rightRank { return leftRank < rightRank }
+            let leftActive = lhs.lastActiveAt ?? lhs.createdAt
+            let rightActive = rhs.lastActiveAt ?? rhs.createdAt
+            if leftActive != rightActive { return leftActive > rightActive }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+
+        var emitted: [AgentInboxRow] = []
+        emitted.reserveCapacity(rows.count)
+        var remainders: [FanoutRemainder] = []
+        var visited: Set<UUID> = []
+
+        func subtreeIDs(start: AgentInboxRow) -> [UUID] {
+            var result: [UUID] = []
+            var seen: Set<UUID> = []
+            func visit(_ row: AgentInboxRow) {
+                guard seen.insert(row.id).inserted else { return }
+                result.append(row.id)
+                for child in childrenOf[row.id] ?? [] { visit(child) }
+            }
+            visit(start)
+            return result
+        }
+
+        func counts(for ids: [UUID]) -> (working: Int, needsYou: Int, failed: Int) {
+            ids.reduce(into: (working: 0, needsYou: 0, failed: 0)) { result, id in
+                guard let row = byID[id] else { return }
+                switch row.state {
+                case .working: result.working += 1
+                case .approval, .input: result.needsYou += 1
+                case .failed: result.failed += 1
+                case .ready: break
+                }
+            }
+        }
+
+        func emit(_ row: AgentInboxRow) {
+            guard visited.insert(row.id).inserted else { return }
+            emitted.append(row)
+            let frozenChildren = childrenOf[row.id] ?? []
+            guard !frozenChildren.isEmpty else { return }
+
+            let selected: ArraySlice<AgentInboxRow>
+            let hidden: ArraySlice<AgentInboxRow>
+            if expandedParents.contains(row.id) || frozenChildren.count <= maxVisibleChildren {
+                // Need-order is the bounded-survivor exception, not a second
+                // inbox sort. An uncapped or explicitly expanded group keeps the
+                // frozen depth-first order supplied by `sortForInbox`, so activity
+                // cannot shuffle a list whose complete contents are visible.
+                selected = frozenChildren[...]
+                hidden = frozenChildren[frozenChildren.endIndex...]
+            } else {
+                let needOrdered = frozenChildren.sorted(by: needFirst)
+                selected = needOrdered[..<maxVisibleChildren]
+                hidden = needOrdered[maxVisibleChildren...]
+            }
+            for child in selected { emit(child) }
+            guard !hidden.isEmpty else { return }
+
+            let hiddenChildIDs = hidden.map(\.id)
+            let hiddenDescendantIDs = hidden.flatMap { subtreeIDs(start: $0) }
+            // Deferred rows are accounted, but deliberately not emitted. Marking
+            // their complete subtrees visited keeps the permutation fallback from
+            // appending them after the visible roots.
+            visited.formUnion(hiddenDescendantIDs)
+            let tally = counts(for: hiddenDescendantIDs)
+            remainders.append(FanoutRemainder(
+                parentId: row.id,
+                hiddenChildIDs: hiddenChildIDs,
+                hiddenDescendantIDs: hiddenDescendantIDs,
+                afterRowID: emitted.last?.id ?? row.id,
+                hiddenWorking: tally.working,
+                hiddenNeedsYou: tally.needsYou,
+                hiddenFailed: tally.failed
+            ))
+        }
+
+        // Root order is already the frozen live/shelf/history order. Only the
+        // sibling selection/order inside a parent uses the fan-out need policy.
+        for root in roots { emit(root) }
+        // A malformed cycle has no root. Preserve the same permutation guarantee
+        // as `sortForInbox`; any cycle survivor is a root for this presentation
+        // pass and its descendants are still accounted once.
+        if emitted.count != rows.count {
+            for row in rows where !visited.contains(row.id) { emit(row) }
+        }
+        return BoundedInbox(rows: emitted, remainders: remainders)
     }
 
     /// Newest-spawned first. **`createdAt` is the only timestamp read here** — the

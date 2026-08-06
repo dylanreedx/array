@@ -238,6 +238,9 @@ private func runInboxRowCoverageAndIdentityCheck() {
     let boardRows = AgentsBoardProjection.rows(from: snapshot, context: index)
     expect(rows.map(\.id) == boardRows.map(\.id),
            "an inbox row's id IS the board row's agent identity, in the same order — got \(rows.map(\.id)) vs \(boardRows.map(\.id))")
+    let boardRowsByID = Dictionary(uniqueKeysWithValues: boardRows.map { ($0.agentId, $0) })
+    expect(rows.allSatisfy { $0.lastActiveAt == boardRowsByID[$0.id]?.updatedAt },
+           "P6.5 rows carry the board's canonical latest-event stamp for child survivor priority")
     expect(Set(rows.map(\.id)) == Set([inboxHeadlessAgentId.rawValue, inboxIsolatedAgentId.rawValue]),
            "the ids are the agent ids, not tile ids (both agents are headless and have none), got \(Set(rows.map(\.id)))")
 

@@ -215,6 +215,10 @@ public enum AgentInboxRowBuilder {
             // `record.lastSeenAt`, so the "current working run" starts at the spawn
             // instant however recent the actual prompt was.
             elapsed: elapsed(state: state, turnSnapshot: turnSnapshot, boardRow: boardRow, now: now),
+            // P6.5 uses the board's canonical latest event stamp only to choose
+            // which children survive a bounded inline fan-out. It never reaches
+            // the desktop's global frozen comparator.
+            lastActiveAt: boardRow.updatedAt,
             // P2D.4 nests children under their parent, and assigns the depth in
             // `InboxSort` — depth is a property of the row's place in a LIST and
             // this fold sees one agent at a time. `parentId` below is the fact it

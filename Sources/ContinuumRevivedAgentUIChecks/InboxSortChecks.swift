@@ -55,6 +55,11 @@ import Foundation
 //  11. HISTORY IS PAGED, NOT DUMPED — `pageSettled` shows the ten most recently
 //      ended, says how many it is holding, adds 25 per press, and always includes
 //      the agent you have open however deep in history it is.
+//
+// Ticket: docs/38-tickets/94-sidebar-native-ux/P6.5-child-fanout-attention-rollup.md
+//  12. BOUNDED FAN-OUT — direct children use a deterministic need/last-activity
+//      priority, the remainder names every hidden subtree id, and expansion emits
+//      the complete depth-first list without changing global root/block order.
 
 func runInboxSortChecks() {
     runInboxFrozenUnderActivityCheck()
@@ -68,7 +73,8 @@ func runInboxSortChecks() {
     runInboxRollupCheck()
     runInboxPartitionCheck()
     runInboxSettledPagingCheck()
-    print("InboxSort checks: frozen under activity (200 trials, status-sorted witness fails), parent/child nesting, lifecycle relocation, history by end time, tie determinism, cycle termination, depth assignment (orphan promoted, chain capped at \(AgentInboxRow.maxDepth)), subtree collapse, transitive child rollup, the three-section partition (exhaustive, disjoint, woken rejoins active) and settled tail paging (\(InboxSort.settledPageSize) then \(InboxSort.settledPageStep) more, open agent always in the page) passed")
+    runInboxFanoutCheck()
+    print("InboxSort checks: frozen under activity (200 trials, status-sorted witness fails), parent/child nesting, lifecycle relocation, history by end time, tie determinism, cycle termination, depth assignment (orphan promoted, chain capped at \(AgentInboxRow.maxDepth)), subtree collapse, transitive child rollup, the three-section partition (exhaustive, disjoint, woken rejoins active), settled tail paging (\(InboxSort.settledPageSize) then \(InboxSort.settledPageStep) more, open agent always in the page), and P6.5 bounded fan-out (need priority, complete remainder accounting, and live expansion model) passed")
 }
 
 // MARK: - Fixture
@@ -99,6 +105,7 @@ private func sortRow(
     attention: InboxAttention = .none,
     lifecycle: InboxLifecycle = .active,
     elapsed: TimeInterval? = nil,
+    lastActiveAt: Date? = nil,
     depth: Int = 0,
     parentId: UUID? = nil
 ) -> AgentInboxRow {
@@ -109,6 +116,7 @@ private func sortRow(
         attention: attention,
         lifecycle: lifecycle,
         elapsed: elapsed,
+        lastActiveAt: lastActiveAt,
         depth: depth,
         variant: RowVariant.forLifecycle(lifecycle),
         createdAt: sortEpoch.addingTimeInterval(spawnedAfter),
@@ -148,6 +156,7 @@ private func withActivity(
         branch: row.branch,
         isIsolated: row.isIsolated,
         elapsed: elapsed,
+        lastActiveAt: row.lastActiveAt,
         depth: row.depth,
         variant: row.variant,
         createdAt: row.createdAt,
@@ -168,6 +177,7 @@ private func withLifecycle(_ row: AgentInboxRow, _ lifecycle: InboxLifecycle) ->
         branch: row.branch,
         isIsolated: row.isIsolated,
         elapsed: row.elapsed,
+        lastActiveAt: row.lastActiveAt,
         depth: row.depth,
         variant: RowVariant.forLifecycle(lifecycle),
         createdAt: row.createdAt,
@@ -518,6 +528,8 @@ private func runInboxDepthCheck() {
            "a chain stays in chain order, got \(nested.map(\.id))")
     expect(nested.map(\.depth) == [0, 1, 2, AgentInboxRow.maxDepth],
            "depth counts to the cap and stops, got \(nested.map(\.depth))")
+    expect(nested.last?.parentId == rowThree && nested.last?.depth == AgentInboxRow.maxDepth,
+           "the real depth-3 descendant is still present but clamped rather than drawn as depth 2 by accident")
     expect(AgentInboxRow.maxDepth == 2,
            "the cap is a root, its worker and that worker's worker — got \(AgentInboxRow.maxDepth)")
 }
@@ -920,4 +932,205 @@ private func runInboxSettledPagingCheck() {
     let none = InboxSort.pageSettled(thirty, limit: 0, openAgentId: openId)
     expect(none.shown.map(\.title) == ["S26"] && none.hidden == 29,
            "even at a limit of nothing the open agent is on screen — got \(none.shown.map(\.title))")
+}
+
+// MARK: 12 · bounded child fan-out and hidden attention (P6.5)
+
+private func runInboxFanoutCheck() {
+    func fanoutID(_ value: Int) -> UUID {
+        UUID(uuidString: String(format: "3B410000-0000-4000-8000-%012X", value))!
+    }
+
+    let parentID = fanoutID(0)
+    let childIDs = (0..<10).map { fanoutID($0 + 1) }
+    let grandchildID = fanoutID(100)
+    let parentDate = sortEpoch.addingTimeInterval(1_000)
+    let childDate = sortEpoch.addingTimeInterval(100)
+    func child(
+        _ index: Int,
+        state: InboxState = .ready,
+        lastActiveOffset: TimeInterval
+    ) -> AgentInboxRow {
+        AgentInboxRow(
+            id: childIDs[index], title: "Child \(index)", state: state,
+            lastActiveAt: sortEpoch.addingTimeInterval(lastActiveOffset),
+            createdAt: childDate.addingTimeInterval(Double(index)), parentId: parentID)
+    }
+
+    // Ten direct children make the cap bite. The first eight are not inferred
+    // from collection order: explicit expected ids below exercise blocked,
+    // failed, then last-active ordering independently of `boundedForInbox`.
+    let inputRows = [
+        child(0, state: .input, lastActiveOffset: 10),
+        child(1, state: .approval, lastActiveOffset: 20),
+        child(2, state: .failed, lastActiveOffset: 30),
+        child(3, state: .working, lastActiveOffset: 40),
+        child(4, lastActiveOffset: 0), // hidden, and owns a hidden grandchild
+        child(5, lastActiveOffset: 50),
+        child(6, lastActiveOffset: 60),
+        child(7, lastActiveOffset: 70),
+        child(8, lastActiveOffset: 80),
+        child(9, lastActiveOffset: 90),
+        AgentInboxRow(
+            id: grandchildID, title: "Hidden grandchild", state: .working,
+            lastActiveAt: sortEpoch.addingTimeInterval(91),
+            createdAt: childDate.addingTimeInterval(11), parentId: childIDs[4]),
+        AgentInboxRow(
+            id: parentID, title: "Fan-out parent", state: .working,
+            createdAt: parentDate)
+    ]
+    let sorted = InboxSort.sortForInbox(rows: inputRows)
+    expect(sorted.map(\.id).first == parentID,
+           "fan-out fixture has a real parent root before its descendants")
+    expect(sorted.map(\.depth).contains(2),
+           "fan-out fixture includes a real grandchild at depth 2, so descendant accounting is not flat")
+
+    let bounded = InboxSort.boundedForInbox(rows: sorted)
+    let expectedVisible = [
+        parentID, childIDs[1], childIDs[0], childIDs[2],
+        childIDs[9], childIDs[8], childIDs[7], childIDs[6], childIDs[5],
+    ]
+    expect(bounded.rows.map(\.id) == expectedVisible,
+           "the independent need order keeps blocked/failed/recent children in the cap — got \(bounded.rows.map(\.id))")
+    expect(bounded.rows.count == 1 + InboxSort.maxVisibleChildren,
+           "a ten-child parent keeps exactly the eight-child inline budget — got \(bounded.rows.count)")
+    expect(bounded.remainders.count == 1,
+           "one capped parent produces one explicit remainder — got \(bounded.remainders.count)")
+    guard let remainder = bounded.remainders.first else {
+        fputs("FAIL: P6.5 fan-out remainder missing\n", stderr)
+        Foundation.exit(1)
+    }
+    expect(remainder.hiddenChildIDs == [childIDs[3], childIDs[4]],
+           "the remainder names the two independently hidden direct children — got \(remainder.hiddenChildIDs)")
+    expect(remainder.hiddenDescendantIDs == [childIDs[3], childIDs[4], grandchildID],
+           "the remainder accounts for a hidden child's whole subtree — got \(remainder.hiddenDescendantIDs)")
+    expect(remainder.title == "2 more" && remainder.hiddenChildCount == 2,
+           "the affordance is an N-more count of direct hidden children — got \(remainder.title)")
+    expect(remainder.hiddenWorking == 2 && remainder.hiddenNeedsYou == 0 && remainder.hiddenFailed == 0,
+           "hidden subtree state tallies are separate from the parent's own state — got working \(remainder.hiddenWorking), needs \(remainder.hiddenNeedsYou), failed \(remainder.hiddenFailed)")
+    expect(bounded.accountedIDs(for: sorted) == Set(sorted.map(\.id)),
+           "capping preserves complete agent accounting, including hidden descendants")
+    expect(Set(bounded.rows.map(\.id)).intersection(Set(remainder.hiddenDescendantIDs)).isEmpty,
+           "a hidden id is not also emitted inline")
+
+    // Expansion is a model-level counterpart to the AppKit button witness: it
+    // removes only the cap, preserves the frozen global root/block order, and
+    // leaves no remainder metadata behind.
+    let expanded = InboxSort.boundedForInbox(rows: sorted, expandedParents: [parentID])
+    expect(expanded.remainders.isEmpty,
+           "expanding the parent removes its remainder rather than hiding it elsewhere")
+    expect(expanded.rows.map(\.id) == sorted.map(\.id),
+           "expanded fan-out emits every sorted id exactly once in frozen depth-first order")
+    expect(expanded.accountedIDs(for: sorted) == Set(sorted.map(\.id)),
+           "expanded fan-out remains a complete accounting permutation")
+
+    // Need-order is only the capped-survivor exception. With no cap to apply,
+    // changing state/activity must not become a second inbox sort.
+    let uncappedInput = [inputRows.last!] + Array(inputRows.prefix(4))
+    let uncappedSorted = InboxSort.sortForInbox(rows: uncappedInput)
+    let uncapped = InboxSort.boundedForInbox(rows: uncappedSorted)
+    expect(uncapped.remainders.isEmpty
+           && uncapped.rows.map(\.id) == uncappedSorted.map(\.id),
+           "an uncapped group preserves frozen order instead of reordering by activity")
+
+    // Equal need and equal activity have one deterministic survivor boundary.
+    // Assert the direction explicitly so reversing or removing the stable id
+    // tie-break changes which two agents the remainder names.
+    let tiedParentID = fanoutID(300)
+    let tiedChildIDs = (0..<10).map { fanoutID(301 + $0) }
+    let tiedParent = AgentInboxRow(
+        id: tiedParentID, title: "Tie parent", state: .ready,
+        createdAt: sortEpoch.addingTimeInterval(3_000))
+    let tiedChildren = tiedChildIDs.reversed().map { id in
+        AgentInboxRow(
+            id: id, title: "Tie child", state: .working,
+            lastActiveAt: sortEpoch.addingTimeInterval(2_000),
+            createdAt: sortEpoch.addingTimeInterval(1_500), parentId: tiedParentID)
+    }
+    let tiedSorted = InboxSort.sortForInbox(rows: [tiedParent] + tiedChildren)
+    let tiedBounded = InboxSort.boundedForInbox(rows: tiedSorted)
+    expect(tiedBounded.rows.map(\.id) == [tiedParentID] + Array(tiedChildIDs.prefix(8))
+           && tiedBounded.remainders.first?.hiddenChildIDs == Array(tiedChildIDs.suffix(2)),
+           "equal-priority/equal-activity fan-out uses the ascending stable-id tie-break")
+
+    // A hidden blocker has its own separate rollup axis. Make enough direct
+    // siblings blocked that one still falls behind the eight-row budget; the
+    // parent itself remains `working` and its attention mark is not mutated.
+    let blockedRows = inputRows.map { row -> AgentInboxRow in
+        guard childIDs.contains(row.id) else { return row }
+        return AgentInboxRow(
+            id: row.id, title: row.title, state: .input,
+            lastActiveAt: row.lastActiveAt, createdAt: row.createdAt, parentId: row.parentId)
+    }
+    let blockedSorted = InboxSort.sortForInbox(rows: blockedRows)
+    let blocked = InboxSort.boundedForInbox(rows: blockedSorted)
+    guard let blockedRemainder = blocked.remainders.first else {
+        fputs("FAIL: P6.5 hidden-attention remainder missing\n", stderr)
+        Foundation.exit(1)
+    }
+    expect(blockedRemainder.hiddenNeedsYou > 0 && blockedRemainder.hasAttention,
+           "a blocked child that loses the cap raises the remainder's separate attention axis")
+    expect(blockedSorted.first(where: { $0.id == parentID })?.attention == InboxAttention.none,
+           "descendant attention does not overwrite the parent's own attention watermark")
+
+    // Nested capped fan-out: the final visible child of the root is itself
+    // capped. Its remainder and the root's remainder therefore share one
+    // after-row anchor, which must remain an ordered parent/remainder pair rather
+    // than a unique-key lookup that traps or retargets either button.
+    let nestedRootID = fanoutID(200)
+    let nestedChildIDs = (0..<9).map { fanoutID(210 + $0) }
+    let nestedGrandchildIDs = (0..<9).map { fanoutID(230 + $0) }
+    let nestedRoot = AgentInboxRow(
+        id: nestedRootID, title: "Nested fan-out root", state: .ready,
+        createdAt: sortEpoch.addingTimeInterval(2_000))
+    let nestedDirect = nestedChildIDs.enumerated().map { index, id in
+        AgentInboxRow(
+            id: id, title: "Nested child \(index)", state: .ready,
+            lastActiveAt: sortEpoch.addingTimeInterval(Double(900 - index)),
+            depth: 1, createdAt: sortEpoch.addingTimeInterval(Double(1_900 - index)),
+            parentId: nestedRootID)
+    }
+    let nestedGrandchildren = nestedGrandchildIDs.enumerated().map { index, id in
+        AgentInboxRow(
+            id: id, title: "Nested grandchild \(index)", state: .ready,
+            lastActiveAt: sortEpoch.addingTimeInterval(Double(800 - index)),
+            depth: 2, createdAt: sortEpoch.addingTimeInterval(Double(1_800 - index)),
+            parentId: nestedChildIDs[7])
+    }
+    let nestedInput = [nestedRoot] + nestedDirect + nestedGrandchildren
+    let nestedSorted = InboxSort.sortForInbox(rows: nestedInput)
+    let nestedBounded = InboxSort.boundedForInbox(rows: nestedSorted)
+    let nestedRemainders = nestedBounded.remainders
+    guard let childRemainder = nestedRemainders.first(where: { $0.parentId == nestedChildIDs[7] }),
+          let rootRemainder = nestedRemainders.first(where: { $0.parentId == nestedRootID }) else {
+        fputs("FAIL: P6.5 nested fan-out remainders missing\n", stderr)
+        Foundation.exit(1)
+    }
+    expect(nestedDirect.prefix(8).map(\.id).contains(nestedChildIDs[7]),
+           "nested fixture leaves the capped child inside the root's eight visible direct-child slots")
+    expect(nestedBounded.rows.last?.id == childRemainder.afterRowID,
+           "the nested capped child is the root's final visible child subtree")
+    expect(childRemainder.afterRowID == rootRemainder.afterRowID,
+           "nested and root remainders intentionally share the final visible agent anchor")
+    expect(nestedBounded.remaindersByAfterRow[childRemainder.afterRowID]?.map(\.parentId)
+        == [nestedChildIDs[7], nestedRootID],
+        "shared remainder anchors retain child-before-parent structure instead of a unique-key trap")
+    expect(childRemainder.hiddenChildIDs == [nestedGrandchildIDs[8]]
+           && rootRemainder.hiddenChildIDs == [nestedChildIDs[8]],
+           "each nested remainder keeps its own direct hidden child and target")
+    expect(nestedBounded.accountedIDs(for: nestedSorted) == Set(nestedSorted.map(\.id)),
+           "nested capped fan-out accounts every root, child and grandchild exactly once")
+
+    let childExpanded = InboxSort.boundedForInbox(
+        rows: nestedSorted, expandedParents: [nestedChildIDs[7]])
+    expect(childExpanded.remainders.count == 1
+           && childExpanded.remainders.first?.parentId == nestedRootID
+           && childExpanded.rows.contains(where: { $0.id == nestedGrandchildIDs[8] }),
+           "expanding the visible capped child removes only its own remainder and materializes all nine grandchildren")
+    let bothExpanded = InboxSort.boundedForInbox(
+        rows: nestedSorted, expandedParents: [nestedRootID, nestedChildIDs[7]])
+    expect(bothExpanded.remainders.isEmpty
+           && bothExpanded.rows.map(\.id) == nestedSorted.map(\.id)
+           && bothExpanded.accountedIDs(for: nestedSorted) == Set(nestedSorted.map(\.id)),
+           "expanding the nested child and then its parent reaches every agent with no duplicate or wrong-target row")
 }
