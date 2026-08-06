@@ -18,16 +18,27 @@ public enum AmbientZoneHome: Sendable {
 
     public static func resolvedFromDefaults(
         standardDefaults: UserDefaults = .standard,
-        directoryExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+        directoryExists: (String) -> Bool = { path in
+            var isDirectory: ObjCBool = false
+            return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+                && isDirectory.boolValue
+        }
     ) -> AmbientZoneHomeResolution {
         guard let raw = standardDefaults.string(forKey: userDefaultsKey) else {
             return AmbientZoneHomeResolution(path: fallback, rawValue: nil, source: .fallbackDefault)
         }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, directoryExists(trimmed) else {
+        let expanded = (trimmed as NSString).expandingTildeInPath
+        guard !trimmed.isEmpty,
+              expanded.hasPrefix("/"),
+              directoryExists(expanded) else {
             return AmbientZoneHomeResolution(path: fallback, rawValue: raw, source: .fallbackDefault)
         }
-        return AmbientZoneHomeResolution(path: trimmed, rawValue: raw, source: .standardDomain)
+        let normalized = URL(fileURLWithPath: expanded, isDirectory: true)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+            .path
+        return AmbientZoneHomeResolution(path: normalized, rawValue: raw, source: .standardDomain)
     }
 }
 

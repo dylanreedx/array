@@ -9,10 +9,11 @@ import Foundation
 func runAgentLocationContractChecks() {
     checkLegacyRecordProjection()
     checkOutsideWherePreservesHome()
+    checkSymlinkEscapeIsOutsideHome()
     checkOutsideWhatPreservesHomeAndWhere()
     checkSharedProjectDistinctCheckouts()
     checkLocationSnapshotIsHostLocal()
-    print("AgentLocation contract checks passed: legacy cwd compatibility, stable Home across outside Where/What, distinct checkouts in one project, component-safe path relations, and non-Codable host-local boundary")
+    print("AgentLocation contract checks passed: legacy cwd compatibility, stable Home across outside Where/What, distinct checkouts in one project, component- and symlink-aware path relations, and non-Codable host-local boundary")
 }
 
 // P1.R1 — today's required `cwd` remains the effective checkout and Where when
@@ -77,6 +78,40 @@ private func checkOutsideWherePreservesHome() {
         whereDirectory: URL(fileURLWithPath: "/tmp/continuum-location/home-a-copy", isDirectory: true))
     expect(prefixCollision.workingLocation.relationToHome == .outside,
            "path relation uses components, not a raw string prefix")
+}
+
+// P2.3 — a lexical child that traverses a symlink outside Home must not be
+// presented as inside. Include a missing leaf to cover edit targets whose
+// destination has not been created yet.
+private func checkSymlinkEscapeIsOutsideHome() {
+    let fileManager = FileManager.default
+    let fixture = fileManager.temporaryDirectory
+        .appendingPathComponent("continuum-location-symlink-\(UUID().uuidString)", isDirectory: true)
+    let checkout = fixture.appendingPathComponent("checkout", isDirectory: true)
+    let outside = fixture.appendingPathComponent("outside", isDirectory: true)
+    let escape = checkout.appendingPathComponent("escape", isDirectory: true)
+    do {
+        try fileManager.createDirectory(at: checkout, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: outside, withIntermediateDirectories: true)
+        try fileManager.createSymbolicLink(at: escape, withDestinationURL: outside)
+        defer { try? fileManager.removeItem(at: fixture) }
+
+        let existingTarget = outside.appendingPathComponent("secret.txt")
+        try Data("host-local".utf8).write(to: existingTarget)
+        let throughLink = escape.appendingPathComponent("secret.txt")
+        let missingThroughLink = escape.appendingPathComponent("new-file.txt")
+        let home = fixtureHome(checkout: checkout.path)
+
+        expect(AgentPathRelation.classify(throughLink, relativeTo: home.checkoutRoot) == .outside,
+               "an existing target reached through an escaping symlink is outside Home")
+        expect(AgentPathRelation.classify(missingThroughLink, relativeTo: home.checkoutRoot) == .outside,
+               "a missing edit target beneath an escaping symlink is outside Home")
+        expect(AgentLocationSnapshot(home: home, whereDirectory: escape).workingLocation.relationToHome == .outside,
+               "Where reached through an escaping symlink is outside Home")
+    } catch {
+        fputs("FAIL: symlink-aware location fixture: \(error)\n", stderr)
+        Foundation.exit(1)
+    }
 }
 
 // P1.R3 — an external activity target changes What only.

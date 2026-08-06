@@ -1176,7 +1176,7 @@ Exit gate:
 
 - [x] **P2.1** Derive Home from the authoritative agent/project/checkout record.
 - [x] **P2.2** Derive Where from the runtime cwd/location operation rather than recent file activity.
-- [ ] **P2.3** Classify Where relative to Home using normalized/symlink-aware path policy.
+- [x] **P2.3** Classify Where relative to Home using normalized/symlink-aware path policy.
 - [x] **P2.4** Convert read events into bounded `reading <target>` activity.
 - [x] **P2.5** Convert edit/write events into bounded `editing <target>` activity.
 - [x] **P2.6** Convert Bash/process events into `running` activity without retaining raw command
@@ -1729,6 +1729,7 @@ Final Core + AgentUI + Sync + build GREEN: /tmp/continuum-location-integrated-fi
 Real Pi Home/Where/What transitions GREEN: /tmp/continuum-location-live3.N79MUn/output.log
 Real Pi capture manifest: /tmp/continuum-location-live3.N79MUn/captures/location-live.json
 Two-turn stable-session continuity GREEN: /tmp/continuum-managed-live-fixed.YQuHi7/output.log
+Symlink-aware Home relation + ambient-root hardening GREEN: /tmp/continuum-queue91-hardening-core.log
 Unblessed visual candidates: qa-runs/2026-08-06T172616Z/
 Code/UX seam audit: .pi/agent-runs/code-scout-20260806T162244Z-efc577/final.md
 UX-state audit: .pi/agent-runs/ux-scout-20260806T162244Z-bab3af/final.md

@@ -10,16 +10,18 @@ import Foundation
 // and pane handles do not belong in this contract.
 
 /// Whether a filesystem location is the checkout root, inside it, or outside it.
-/// Classification is lexical and component-aware. Symlink authority is a later
-/// access-policy concern; callers must not treat this relation as authorization.
+/// Classification is component-aware and resolves existing symlink ancestors so
+/// an in-Home link to an outside target remains visibly outside. This relation is
+/// still display evidence, not filesystem authorization: access policy must make
+/// its own race-safe decision at the operation boundary.
 public enum AgentPathRelation: String, Equatable, Sendable {
     case root
     case inside
     case outside
 
     public static func classify(_ location: URL, relativeTo root: URL) -> AgentPathRelation {
-        let locationComponents = normalizedFileURL(location).pathComponents
-        let rootComponents = normalizedFileURL(root).pathComponents
+        let locationComponents = symlinkAwareFileURL(location).pathComponents
+        let rootComponents = symlinkAwareFileURL(root).pathComponents
         if locationComponents == rootComponents { return .root }
         guard locationComponents.count > rootComponents.count,
               locationComponents.prefix(rootComponents.count).elementsEqual(rootComponents) else {
@@ -29,8 +31,8 @@ public enum AgentPathRelation: String, Equatable, Sendable {
     }
 
     static func relativePath(_ location: URL, relativeTo root: URL) -> String? {
-        let normalizedLocation = normalizedFileURL(location)
-        let normalizedRoot = normalizedFileURL(root)
+        let normalizedLocation = symlinkAwareFileURL(location)
+        let normalizedRoot = symlinkAwareFileURL(root)
         guard classify(normalizedLocation, relativeTo: normalizedRoot) == .inside else {
             return nil
         }
@@ -181,4 +183,27 @@ private func normalizedFileURL(_ url: URL) -> URL {
     let expanded = (url.path as NSString).expandingTildeInPath
     let standardized = (expanded as NSString).standardizingPath
     return URL(fileURLWithPath: standardized, isDirectory: url.hasDirectoryPath).standardizedFileURL
+}
+
+/// Resolves the deepest existing ancestor, then restores any not-yet-created
+/// suffix. Resolving only the complete URL would miss an edit target whose leaf
+/// does not exist yet but whose parent traverses a symlink outside Home.
+private func symlinkAwareFileURL(_ url: URL) -> URL {
+    guard url.isFileURL else { return url.standardized }
+    let normalized = normalizedFileURL(url)
+    var existingAncestor = normalized
+    var missingSuffix: [String] = []
+    let fileManager = FileManager.default
+
+    while existingAncestor.path != "/",
+          !fileManager.fileExists(atPath: existingAncestor.path) {
+        missingSuffix.insert(existingAncestor.lastPathComponent, at: 0)
+        existingAncestor.deleteLastPathComponent()
+    }
+
+    var resolved = existingAncestor.resolvingSymlinksInPath()
+    for component in missingSuffix {
+        resolved.appendPathComponent(component, isDirectory: false)
+    }
+    return normalizedFileURL(resolved)
 }

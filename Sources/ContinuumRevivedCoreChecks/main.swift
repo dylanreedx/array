@@ -6512,6 +6512,30 @@ do {
     let bogusResolution = AmbientZoneHome.resolvedFromDefaults(standardDefaults: ambientDefaults, directoryExists: { _ in false })
     expect(bogusResolution.path == NSHomeDirectory(), "ambient zone home: bogus override rejected, fallback to $HOME")
     expect(bogusResolution.source == .fallbackDefault, "ambient zone home: bogus override source is .fallbackDefault")
+    // Relative roots never inherit the Continuum process cwd.
+    ambientDefaults.set("../relative-home", forKey: AmbientZoneHome.userDefaultsKey)
+    let relativeResolution = AmbientZoneHome.resolvedFromDefaults(
+        standardDefaults: ambientDefaults,
+        directoryExists: { _ in true })
+    expect(relativeResolution.source == .fallbackDefault,
+           "ambient zone home: relative override rejected even when an existence probe says true")
+    // Tilde input expands to one absolute standardized directory.
+    ambientDefaults.set("~", forKey: AmbientZoneHome.userDefaultsKey)
+    let tildeResolution = AmbientZoneHome.resolvedFromDefaults(
+        standardDefaults: ambientDefaults,
+        directoryExists: { $0 == NSHomeDirectory() })
+    expect(tildeResolution.path == URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        .resolvingSymlinksInPath().path,
+        "ambient zone home: tilde override expands and normalizes")
+    // Existing regular files do not qualify as ambient directory roots.
+    let ambientFile = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ambient-home-file-\(UUID().uuidString)")
+    try! Data("not a directory".utf8).write(to: ambientFile)
+    defer { try? FileManager.default.removeItem(at: ambientFile) }
+    ambientDefaults.set(ambientFile.path, forKey: AmbientZoneHome.userDefaultsKey)
+    let fileResolution = AmbientZoneHome.resolvedFromDefaults(standardDefaults: ambientDefaults)
+    expect(fileResolution.source == .fallbackDefault,
+           "ambient zone home: a regular file override is rejected")
 
     // AutosaveConfig resolver: default / clamp-low / clamp-high / non-numeric → default.
     let autosaveSuiteName = "AutosaveConfigChecks-\(UUID().uuidString)"
