@@ -134,6 +134,11 @@ public struct AgentScopeBinding: Equatable, Sendable {
 public struct AgentContextGravityInput: Equatable, Sendable {
     public let newAgentFrame: AgentWorldRect
     public let newAgentCheckoutRoot: URL
+    /// Optional per-project checkout roots for the new agent. This lets the
+    /// engine choose the selected project's safe root after spatial inference,
+    /// instead of inheriting a neighboring managed agent's isolated checkout or
+    /// forcing callers to know the winner up front.
+    public let newAgentCheckoutRootsByProjectId: [UUID: URL]
     public let projectZones: [AgentScopeSignal]
     public let managedAgents: [AgentScopeSignal]
     public let workspaceDefault: AgentHome?
@@ -142,6 +147,7 @@ public struct AgentContextGravityInput: Equatable, Sendable {
     public init(
         newAgentFrame: AgentWorldRect,
         newAgentCheckoutRoot: URL,
+        newAgentCheckoutRootsByProjectId: [UUID: URL] = [:],
         projectZones: [AgentScopeSignal] = [],
         managedAgents: [AgentScopeSignal] = [],
         workspaceDefault: AgentHome? = nil,
@@ -149,10 +155,18 @@ public struct AgentContextGravityInput: Equatable, Sendable {
     ) {
         self.newAgentFrame = newAgentFrame
         self.newAgentCheckoutRoot = AgentContextGravityEngine.normalizedDirectoryURL(newAgentCheckoutRoot)
+        self.newAgentCheckoutRootsByProjectId = newAgentCheckoutRootsByProjectId.mapValues {
+            AgentContextGravityEngine.normalizedDirectoryURL($0)
+        }
         self.projectZones = projectZones
         self.managedAgents = managedAgents
         self.workspaceDefault = workspaceDefault
         self.workspaceId = workspaceId
+    }
+
+    public func checkoutRoot(for signal: AgentScopeSignal) -> URL {
+        guard let projectId = signal.home.projectId else { return newAgentCheckoutRoot }
+        return newAgentCheckoutRootsByProjectId[projectId] ?? newAgentCheckoutRoot
     }
 }
 
@@ -170,7 +184,7 @@ public enum AgentContextGravityEngine: Sendable {
             .first {
             return binding(
                 from: containing,
-                checkoutRoot: input.newAgentCheckoutRoot,
+                checkoutRoot: input.checkoutRoot(for: containing),
                 state: .provisional,
                 directoryExists: directoryExists,
                 allowSingleRelativeDirectory: true)
@@ -179,7 +193,7 @@ public enum AgentContextGravityEngine: Sendable {
         if let agreed = agreedManagedAgentSignal(input.managedAgents, relativeTo: input.newAgentFrame) {
             return binding(
                 from: agreed.signal,
-                checkoutRoot: input.newAgentCheckoutRoot,
+                checkoutRoot: input.checkoutRoot(for: agreed.signal),
                 state: .provisional,
                 directoryExists: directoryExists,
                 forcedRelativeDirectory: agreed.relativeDirectory)
@@ -190,7 +204,7 @@ public enum AgentContextGravityEngine: Sendable {
         }) {
             return binding(
                 from: nearest,
-                checkoutRoot: input.newAgentCheckoutRoot,
+                checkoutRoot: input.checkoutRoot(for: nearest),
                 state: .provisional,
                 directoryExists: directoryExists,
                 allowSingleRelativeDirectory: false)

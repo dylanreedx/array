@@ -13,9 +13,10 @@ func runAgentContextGravityChecks() {
     checkFreezeEventsPreventLaterReinference()
     checkEmptyCanvasNeverFallsBackToProcessCwd()
     checkIsolatedCheckoutInheritanceUsesNewAgentPath()
+    checkCrossProjectSelectionUsesSelectedProjectCheckoutRoot()
     checkInheritedWhereRejectsSymlinkEscapeAndFileCandidates()
     checkStableTieBreakersAreIndependentOfInputOrder()
-    print("AgentContextGravity P4 checks passed: P4.R1-P4.R10")
+    print("AgentContextGravity P4 checks passed: P4.R1-P4.R11")
 }
 
 private func checkContainingProjectZoneWinsOverNearbyCrossProjectTile() {
@@ -186,6 +187,35 @@ private func checkIsolatedCheckoutInheritanceUsesNewAgentPath() {
     let missing = requireProposal(input)
     expect(missing.whereDirectory.path == checkoutRoot.path, "P4.R8 missing relative directory falls back to checkout root")
     expect(missing.warning == .inheritedRelativeDirectoryMissing("Sources"), "P4.R8 missing relative directory is explicit")
+}
+
+private func checkCrossProjectSelectionUsesSelectedProjectCheckoutRoot() {
+    let selected = project(id: 21, root: "/tmp/continuum-p4/selected-project", checkout: "/tmp/continuum-p4/worktrees/neighbor-selected")
+    let other = project(id: 22, root: "/tmp/continuum-p4/other-project", checkout: "/tmp/continuum-p4/worktrees/neighbor-other")
+    let selectedCheckout = uniqueTemporaryDirectory("agent-context-gravity-selected-checkout")
+    let otherCheckout = uniqueTemporaryDirectory("agent-context-gravity-other-checkout")
+    let sources = selectedCheckout.appendingPathComponent("Sources", isDirectory: true)
+    try! FileManager.default.createDirectory(at: sources, withIntermediateDirectories: true)
+
+    let input = AgentContextGravityInput(
+        newAgentFrame: rect(0, 0),
+        newAgentCheckoutRoot: otherCheckout,
+        newAgentCheckoutRootsByProjectId: [
+            selected.projectId!: selectedCheckout,
+            other.projectId!: otherCheckout,
+        ],
+        managedAgents: [
+            AgentScopeSignal(provenance: .managedAgent(agentId: "selected-a"), frame: rect(1, 0), home: selected, relativeDirectory: "Sources"),
+            AgentScopeSignal(provenance: .managedAgent(agentId: "selected-b"), frame: rect(2, 0), home: selected, relativeDirectory: "Sources"),
+            AgentScopeSignal(provenance: .managedAgent(agentId: "other-nearer"), frame: rect(0.5, 0), home: other, relativeDirectory: "Sources"),
+        ],
+        workspaceId: "workspace")
+
+    let binding = requireProposal(input)
+    expect(binding.home.projectId == selected.projectId, "P4.R11 cross-project agreement selects the agreeing project")
+    expect(binding.home.checkoutRoot.path == selectedCheckout.path, "P4.R11 selected project maps to its own safe new checkout root")
+    expect(binding.whereDirectory.path == sources.path, "P4.R11 relative Where maps inside selected project's new checkout")
+    expect(binding.home.checkoutRoot.path != selected.checkoutRoot.path, "P4.R11 neighboring agent absolute isolated checkout is never inherited")
 }
 
 private func checkInheritedWhereRejectsSymlinkEscapeAndFileCandidates() {
