@@ -529,6 +529,12 @@ enum UIProbeGeometry {
         // machine's preference makes the truncation table machine-dependent. The
         // shipped view deliberately does NOT do this — see `pinScrollerStyleForQA`.
         inbox.pinScrollerStyleForQA()
+        // Existing geometry legs assert the normal palette and immediate variant
+        // transition. The P6.6 sweep replaces these seams to drive Reduce Motion and
+        // Increase Contrast explicitly, so the host setting cannot make an old leg
+        // pass or fail by accident.
+        inbox.prefersReducedMotion = { false }
+        inbox.prefersIncreasedContrast = { false }
         return SidebarProbeHost(window: window, host: host, inbox: inbox)
     }
 
@@ -1194,8 +1200,7 @@ enum UIProbeGeometry {
                     guard let provider, !provider.isHidden, provider.text == AgentProviderGlyph.glyph(for: model),
                           provider.text != model,
                           provider.accessibilityLabel == model,
-                          provider.toolTip == model,
-                          geometry.accessibilityLabel?.contains(model) == true else {
+                          provider.toolTip == model else {
                         throw fail("\(label): '\(row.title)' provider glyph lost the full model '\(model)' to VoiceOver/help or painted the model as prose")
                     }
                 } else {
@@ -1412,8 +1417,14 @@ enum UIProbeGeometry {
             throw fail("\(label): the cell for '\(row.displayTitle)' does not say its own name to VoiceOver")
         }
         if let model = row.model?.trimmingCharacters(in: .whitespacesAndNewlines), !model.isEmpty {
-            guard spoken.contains(model) else {
-                throw fail("\(label): the provider glyph for '\(row.displayTitle)' does not expose its full model '\(model)' to VoiceOver")
+            if byElement["provider"]?.isHidden == true {
+                guard spoken.contains(model) else {
+                    throw fail("\(label): the hidden provider fact for '\(row.displayTitle)' was not relocated to the row owner")
+                }
+            } else {
+                guard byElement["provider"]?.accessibilityLabel == model else {
+                    throw fail("\(label): the visible provider glyph for '\(row.displayTitle)' does not own its full model in VoiceOver")
+                }
             }
         }
         if let projectName = row.projectName, project?.isHidden == true {
@@ -3475,6 +3486,8 @@ enum UIProbeGeometry {
         let renameAssertions = try checkSidebarRenameInteraction()
         let filterBandAssertions = try checkSidebarFilterBand(rows: rows, probeHeight: probeHeight)
         let bulkAssertions = try checkSidebarBulkActionBar(rows: rows, probeHeight: probeHeight)
+        let accessibilityMotionAssertions = try checkSidebarAccessibilityMotion(
+            rows: rows, probeHeight: probeHeight)
         // Both ENDS of the ladder are reached by real rows at shipping widths. The
         // middle rung is reached too, at a width derived from a row's own
         // measurements inside `checkSidebarFitTierLadder` — see the note there for
@@ -3493,6 +3506,7 @@ enum UIProbeGeometry {
         print("UIProbeGeometry: live rename editor held \(renameAssertions) body/control/modifier/active-editor/trailing-click/Return/Escape/blur/empty assertions at 220/280/320pt in both appearances")
         print("UIProbeGeometry: filter band held \(filterBandAssertions) production-path scope/search/accessibility assertions at 220/280/320pt, including visible-disabled management and active-scope restoration")
         print("UIProbeGeometry: bulk bar held \(bulkAssertions) production-path scope/search targeting, host-owned confirmation, reentrant idempotence, later repeatability, and 220/280/320 control geometry assertions")
+        print("UIProbeGeometry: accessibility/motion sweep held \(accessibilityMotionAssertions) live AX hierarchy, hidden-fact relocation, single status ownership, custom-menu/bulk/shelf/footer semantics, Reduce Motion, Increase Contrast, P6.5 remainder, and resize-divider assertions at 220/280/320pt in Aqua and Dark Aqua")
     }
 
     /// P5.2 production filter-band gate. It materializes the real ChoiceButton
@@ -3755,6 +3769,863 @@ enum UIProbeGeometry {
                     throw fail("\(label): later confirmed retry was suppressed")
                 }
                 assertions += 7
+            }
+        }
+        return assertions
+    }
+
+    // MARK: - P6.6 — the live accessibility/motion sweep
+
+    /// Walk the AX tree that the production inbox exposes. This intentionally
+    /// follows `accessibilityChildren()` rather than `subviews`: a visually hidden
+    /// measured-fit label can still exist in the view tree while being absent from
+    /// the reachable accessibility tree, and that distinction is the defect this
+    /// ticket gates.
+    private static func accessibilityDescendants(of root: NSView) -> [NSView] {
+        var result: [NSView] = []
+        var seen = Set<ObjectIdentifier>()
+        func visit(_ view: NSView) {
+            guard seen.insert(ObjectIdentifier(view)).inserted else { return }
+            result.append(view)
+            for child in view.accessibilityChildren() ?? [] {
+                if let child = child as? NSView { visit(child) }
+            }
+        }
+        visit(root)
+        return result
+    }
+
+    private static func legacyAccessibilityValue(
+        _ object: Any, _ attribute: NSAccessibility.Attribute
+    ) -> Any? {
+        (object as? NSObject)?.accessibilityAttributeValue(attribute)
+    }
+
+    private static func accessibilityChildren(of object: Any) -> [Any] {
+        if let view = object as? NSView { return view.accessibilityChildren() ?? [] }
+        if let element = object as? NSAccessibilityElement,
+           let children = element.accessibilityChildren() {
+            return children
+        }
+        if let children = legacyAccessibilityValue(object, .children) as? [Any] {
+            return children
+        }
+        return []
+    }
+
+    private static func accessibilityRole(of object: Any) -> NSAccessibility.Role? {
+        if let view = object as? NSView { return view.accessibilityRole() }
+        if let role = (object as? NSAccessibilityElement)?.accessibilityRole() { return role }
+        return legacyAccessibilityValue(object, .role) as? NSAccessibility.Role
+    }
+
+    private static func accessibilityLabel(of object: Any) -> String? {
+        if let view = object as? NSView { return view.accessibilityLabel() }
+        if let label = (object as? NSAccessibilityElement)?.accessibilityLabel() { return label }
+        return (legacyAccessibilityValue(object, .description)
+            ?? legacyAccessibilityValue(object, .title)) as? String
+    }
+
+    private static func accessibilityIdentifier(of object: Any) -> String? {
+        if let view = object as? NSView { return view.accessibilityIdentifier() }
+        if let identifier = (object as? NSAccessibilityElement)?.accessibilityIdentifier() {
+            return identifier
+        }
+        return legacyAccessibilityValue(object, .identifier) as? String
+    }
+
+    private static func accessibilityIndex(of object: Any) -> Int? {
+        if let value = legacyAccessibilityValue(object, .index) as? Int { return value }
+        if let value = legacyAccessibilityValue(object, .index) as? NSNumber { return value.intValue }
+        return nil
+    }
+
+    private static func accessibilityValueString(of object: Any) -> String {
+        let value: Any?
+        if let view = object as? NSView {
+            value = view.accessibilityValue()
+        } else if let element = object as? NSAccessibilityElement {
+            value = element.accessibilityValue()
+        } else {
+            value = legacyAccessibilityValue(object, .value)
+        }
+        if let value = value as? String { return value }
+        return value.map { String(describing: $0) } ?? ""
+    }
+
+    /// Traverse the live AX provider objects, including AppKit's virtual table
+    /// children. The object identity guard prevents a native row provider from
+    /// being visited twice when it also appears through a materialized view.
+    private static func accessibilityObjects(from root: Any) -> [Any] {
+        var result: [Any] = []
+        var seen = Set<ObjectIdentifier>()
+        func visit(_ object: Any) {
+            let identity = ObjectIdentifier(object as AnyObject)
+            guard seen.insert(identity).inserted else { return }
+            result.append(object)
+            for child in accessibilityChildren(of: object) { visit(child) }
+        }
+        visit(root)
+        return result
+    }
+
+    private static func axNode(
+        _ views: [NSView], identifier: String
+    ) -> NSView? {
+        views.first { $0.accessibilityIdentifier() == identifier }
+    }
+
+    private static func checkSidebarAccessibilityMotion(
+        rows: [AgentInboxRow], probeHeight: CGFloat
+    ) throws -> Int {
+        let widths: [CGFloat] = [220, 280, 320]
+        let unconfirmedSource = rows.first { $0.state == .working && $0.elapsed != nil }
+            ?? rows.first!
+        let unconfirmedIDs = LabFixtures.sidebarUnobservedAgentIds()
+        let axRows = rows.map { row in
+            if unconfirmedIDs.contains(row.id) || row.id == unconfirmedSource.id {
+                return row.withUnconfirmed(true, elapsed: row.elapsed ?? 4_200)
+            }
+            return row
+        }
+        guard let fanoutParentID = rows.first(where: { candidate in
+            rows.contains { $0.parentId == candidate.id }
+        })?.id else {
+            throw fail("sidebar-ux-check.accessibility: no P6.5 fan-out parent in the live corpus")
+        }
+        var assertions = 0
+
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            for width in widths {
+                // A deliberately small viewport is important here. The table must
+                // have enough content to scroll, but this proof must not turn the
+                // host into a full-list materialization fixture.
+                let label = "sidebar-ux-check.accessibility@\(Int(width))pt.\(appearanceName.rawValue)"
+                let probe = try makeSidebarProbeHost(
+                    width: width,
+                    height: min(probeHeight, CGFloat(190)),
+                    appearanceName: appearanceName)
+                probe.inbox.prefersReducedMotion = { false }
+                probe.inbox.prefersIncreasedContrast = { false }
+                probe.inbox.toggleShelf()
+                probe.inbox.reload(rows: axRows)
+                probe.inbox.layoutViewportForQA()
+                probe.host.layoutSubtreeIfNeeded()
+                probe.inbox.layoutViewportForQA()
+
+                // Inspect the real P6.5 remainder button before pressing it. The
+                // press is deliberately after this AX assertion because it removes
+                // that affordance from the live table.
+                guard probe.inbox.scrollToFanoutRemainderForQA(parentId: fanoutParentID),
+                      let remainder = probe.inbox.fanoutRemainderRowsForQA.first(where: {
+                          $0.parentId == fanoutParentID
+                      }) else {
+                    throw fail("\(label): P6.5 remainder did not materialize in the constrained viewport")
+                }
+                let beforeRemainderAX = accessibilityObjects(from: probe.inbox)
+                let remainderLabel = "Show \(remainder.accessibilityTitle)"
+                guard let remainderButton = beforeRemainderAX.first(where: {
+                    accessibilityRole(of: $0) == .button
+                        && accessibilityLabel(of: $0) == remainderLabel
+                }),
+                accessibilityValueString(of: remainderButton) == remainder.accessibilityTitle else {
+                    throw fail("\(label): P6.5 remainder button was not a reachable live AX child before expansion")
+                }
+                assertions += 2
+                guard probe.inbox.clickFanoutRemainderForQA(parentId: fanoutParentID) else {
+                    throw fail("\(label): P6.5 remainder was not operable through its live button")
+                }
+                probe.inbox.layoutViewportForQA()
+                probe.inbox.scrollToTopForQA()
+
+                let rootAX = accessibilityDescendants(of: probe.inbox)
+                guard probe.inbox.accessibilityRole() == .group,
+                      probe.inbox.accessibilityLabel() == "Agent inbox",
+                      probe.inbox.accessibilityChildren()?.contains(where: {
+                          ($0 as? NSView)?.accessibilityIdentifier() == "ContinuumAgentInboxScope"
+                      }) == true,
+                      probe.inbox.accessibilityChildren()?.contains(where: {
+                          ($0 as? NSView)?.accessibilityIdentifier() == "ContinuumAgentInboxSearch"
+                      }) == true,
+                      probe.inbox.accessibilityChildren()?.contains(where: {
+                          ($0 as? NSView)?.accessibilityIdentifier() == "ContinuumAgentInboxList"
+                      }) == true else {
+                    throw fail("\(label): inbox root lost its group hierarchy or fixed filter/list children")
+                }
+                guard let scope = axNode(rootAX, identifier: "ContinuumAgentInboxScope"),
+                      scope.accessibilityRole() == .popUpButton,
+                      scope.accessibilityLabel() == "Agent scope",
+                      !accessibilityValueString(of: scope).isEmpty,
+                      let search = axNode(rootAX, identifier: "ContinuumAgentInboxSearch"),
+                      search.accessibilityRole() == .textField,
+                      search.accessibilityLabel() == "Search agents",
+                      let list = axNode(rootAX, identifier: "ContinuumAgentInboxList"),
+                      list.accessibilityRole() == .list else {
+                    throw fail("\(label): scope/search/list role, label, or value is incomplete")
+                }
+                let displayedRows = probe.inbox.rowIdsForQA.compactMap { id in
+                    axRows.first(where: { $0.id == id })
+                }
+                guard !displayedRows.isEmpty,
+                      accessibilityValueString(of: list) == "\(displayedRows.count) agents" else {
+                    throw fail("\(label): live list value did not match its displayed agent rows")
+                }
+                assertions += 6
+
+                // Read the native table provider, not a copied list of cells. A
+                // constrained viewport must leave at least one displayed row
+                // materialized and at least one displayed row offscreen, while
+                // every displayed row remains reachable through native AX children.
+                let nativeTableChildren = probe.inbox.tableAccessibilityChildrenForQA
+                let nativeRows = nativeTableChildren.filter {
+                    accessibilityRole(of: $0) == .row
+                }
+                let viewportCells = probe.inbox.qaMaterializedRowCells
+                let visibleIDs = Set(probe.inbox.visibleAgentIdsForQA)
+                guard viewportCells.count > 0,
+                      viewportCells.count < displayedRows.count,
+                      nativeRows.count == probe.inbox.tableRowCountForQA,
+                      let offscreen = displayedRows.reversed().first(where: {
+                          !visibleIDs.contains($0.id)
+                      }) else {
+                    throw fail("\(label): constrained table did not leave a real offscreen row beside materialized cells or native AX rows (materialized=\(viewportCells.count), displayed=\(displayedRows.count), native=\(nativeRows.count), table=\(probe.inbox.tableRowCountForQA), visible=\(visibleIDs.count))")
+                }
+                let nativeIndexes = Set(nativeRows.compactMap(accessibilityIndex(of:)))
+                guard nativeIndexes == Set(0..<probe.inbox.tableRowCountForQA) else {
+                    throw fail("\(label): NSTableView native AX row providers lost virtual indexes (indexes=\(nativeIndexes.sorted()), table=\(probe.inbox.tableRowCountForQA))")
+                }
+                for row in displayedRows {
+                    guard let tableRow = probe.inbox.tableRowIndexForQA(id: row.id),
+                          nativeIndexes.contains(tableRow) else {
+                        throw fail("\(label): displayed row '\(row.displayTitle)' was absent from the native virtual AX index hierarchy")
+                    }
+                }
+                guard let offscreenTableRow = probe.inbox.tableRowIndexForQA(id: offscreen.id),
+                      nativeRows.contains(where: { accessibilityIndex(of: $0) == offscreenTableRow }) else {
+                    throw fail("\(label): offscreen row '\(offscreen.displayTitle)' was absent from NSTableView's native virtual AX children")
+                }
+                assertions += 5
+
+                // Virtual reachability was proven above while the viewport stayed
+                // constrained. Ask AppKit for the remaining row views only now,
+                // for a separate exact-ownership audit, and require both production
+                // variants so card-only coverage cannot make slim duplication pass.
+                probe.inbox.layoutForQA()
+                let materializedCells = probe.inbox.qaMaterializedRowCells
+                let materializedVariants = materializedCells.compactMap { cell in
+                    displayedRows.first(where: { $0.id == cell.qaAgentID })?.variant
+                }
+                guard materializedVariants.contains(.card),
+                      materializedVariants.contains(.slim) else {
+                    throw fail("\(label): exact AX ownership did not inspect both card and slim rows (cells=\(materializedCells.count), rows=\(displayedRows.count), variants=\(materializedVariants))")
+                }
+                assertions += 2
+
+                // Detailed child ownership is asserted for the materialized card
+                // and slim cells after the independent virtual-row proof above.
+                for cell in materializedCells {
+                    guard let id = cell.qaAgentID,
+                          let row = displayedRows.first(where: { $0.id == id }),
+                          cell.accessibilityRole() == .row,
+                          let cellLabel = cell.accessibilityLabel(),
+                          cellLabel.contains(row.displayTitle),
+                          accessibilityValueString(of: cell).isEmpty else {
+                        throw fail("\(label): materialized row lost its row/name semantics or grew a duplicate status value")
+                    }
+                    let descendants = accessibilityObjects(from: cell)
+                    let identifiers = Set(descendants.compactMap(accessibilityIdentifier(of:)))
+                    guard !identifiers.contains("ContinuumAgentInboxTitleLabel"),
+                          !identifiers.contains("ContinuumAgentInboxElapsedLabel"),
+                          !identifiers.contains("ContinuumAgentInboxTimeLabel") else {
+                        throw fail("\(label): row \(row.displayTitle) exposes a duplicate name or ticking duration child")
+                    }
+                    guard let geometry = probe.inbox.qaRowGeometriesForQA.first(where: {
+                        $0.agentID == row.id
+                    }) else {
+                        throw fail("\(label): missing live geometry for \(row.displayTitle)")
+                    }
+                    let byElement = Dictionary(uniqueKeysWithValues: geometry.labels.map {
+                        ($0.element, $0)
+                    })
+                    if let project = row.projectName, !project.isEmpty {
+                        if row.variant == .slim {
+                            guard cellLabel.contains("Project \(project)"),
+                                  !identifiers.contains("ContinuumAgentInboxProjectLabel") else {
+                                throw fail("\(label): slim project fact for \(row.displayTitle) was not owned exactly once by the row")
+                            }
+                        } else if byElement["project"]?.isHidden == true {
+                            guard cellLabel.contains("Project \(project)"),
+                                  !identifiers.contains("ContinuumAgentInboxProjectLabel") else {
+                                throw fail("\(label): hidden project fact for \(row.displayTitle) was not relocated exactly once to its row owner")
+                            }
+                        } else {
+                            guard !cellLabel.contains("Project \(project)"),
+                                  identifiers.contains("ContinuumAgentInboxProjectLabel") else {
+                                throw fail("\(label): visible project fact for \(row.displayTitle) was duplicated or lost its child owner")
+                            }
+                        }
+                    }
+                    if let branch = row.branch, !branch.isEmpty {
+                        let branchText = AgentInboxCellView.branchText(branch: branch)
+                        if byElement["branch"]?.isHidden == true {
+                            guard cellLabel.contains("Branch \(branchText)"),
+                                  !identifiers.contains("ContinuumAgentInboxBranchLabel") else {
+                                throw fail("\(label): hidden branch fact for \(row.displayTitle) was not relocated exactly once to its row owner")
+                            }
+                        } else {
+                            guard !cellLabel.contains("Branch \(branchText)"),
+                                  identifiers.contains("ContinuumAgentInboxBranchLabel") else {
+                                throw fail("\(label): visible branch fact for \(row.displayTitle) was duplicated or lost its child owner")
+                            }
+                        }
+                    }
+                    if row.variant == .slim {
+                        let slimPlacement = row.isIsolated
+                            ? "isolated"
+                            : (row.branch?.isEmpty == false ? "shared" : nil)
+                        if let slimPlacement {
+                            guard cellLabel.contains(slimPlacement),
+                                  !identifiers.contains("ContinuumAgentInboxMetaLabel") else {
+                                throw fail("\(label): slim placement fact for \(row.displayTitle) was not owned exactly once by the row")
+                            }
+                        }
+                    } else if let meta = byElement["meta"], !meta.text.isEmpty {
+                        if meta.isHidden {
+                            guard cellLabel.contains("Details \(meta.text)"),
+                                  !identifiers.contains("ContinuumAgentInboxMetaLabel") else {
+                                throw fail("\(label): hidden meta fact for \(row.displayTitle) was not relocated exactly once to its row owner")
+                            }
+                        } else {
+                            guard !cellLabel.contains("Details \(meta.text)"),
+                                  identifiers.contains("ContinuumAgentInboxMetaLabel") else {
+                                throw fail("\(label): visible meta fact for \(row.displayTitle) was duplicated or lost its child owner")
+                            }
+                        }
+                    }
+                    if let model = row.model?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       !model.isEmpty {
+                        if row.variant == .slim {
+                            guard cellLabel.contains("Model \(model)"),
+                                  !identifiers.contains("ContinuumAgentInboxProviderLabel") else {
+                                throw fail("\(label): slim model fact for \(row.displayTitle) was not owned exactly once by the row")
+                            }
+                        } else if let provider = byElement["provider"], provider.isHidden {
+                            guard cellLabel.contains("Model \(model)"),
+                                  !identifiers.contains("ContinuumAgentInboxProviderLabel") else {
+                                throw fail("\(label): hidden model fact for \(row.displayTitle) was not relocated exactly once to its row owner")
+                            }
+                        } else {
+                            guard !cellLabel.contains("Model \(model)"),
+                                  identifiers.contains("ContinuumAgentInboxProviderLabel"),
+                                  byElement["provider"]?.accessibilityLabel == model else {
+                                throw fail("\(label): visible model fact for \(row.displayTitle) was duplicated or lost its provider child owner")
+                            }
+                        }
+                    }
+                    if let elapsed = AgentInboxCellView.elapsedText(row.elapsed) {
+                        guard cellLabel.contains(elapsed) else {
+                            throw fail("\(label): exact duration fact for \(row.displayTitle) is absent from its row owner")
+                        }
+                    }
+                    let statusOwners = descendants.filter { object in
+                        let spoken = "\(accessibilityLabel(of: object) ?? "") \(accessibilityValueString(of: object))"
+                        return (accessibilityRole(of: object) == .staticText
+                            || accessibilityRole(of: object) == .image)
+                            && spoken.contains("Status")
+                    }
+                    let owner = cell.accessibilityStatusOwner
+                    let ownerWords = "\(accessibilityLabel(of: owner) ?? "") \(accessibilityValueString(of: owner))"
+                    let expectedStatus = row.isUnconfirmed ? "Unconfirmed" : (row.label ?? "Ready")
+                    guard statusOwners.count == 1,
+                          statusOwners.first.map({ ObjectIdentifier($0 as AnyObject) })
+                              == ObjectIdentifier(owner),
+                          (accessibilityRole(of: owner) == .staticText
+                              || accessibilityRole(of: owner) == .image),
+                          ownerWords.contains("Status"),
+                          ownerWords.contains(expectedStatus),
+                          !row.isUnconfirmed || ownerWords.contains("no live agent snapshot") else {
+                        throw fail("\(label): row \(row.displayTitle) did not have exactly one reachable semantic status owner with its current explanation")
+                    }
+                    assertions += 6
+                }
+
+                // The custom row menu is a ChoiceListView/list of enabled rows, not
+                // stock NSMenu chrome. Require a real child before applying the
+                // universal child assertion; an empty allSatisfy would be vacuous.
+                probe.inbox.onRevealRow = { _ in }
+                probe.inbox.onRowAction = { _, _ in }
+                probe.inbox.wiredRowActions = Set(InboxRowAction.allCases)
+                guard let menuTarget = displayedRows.first(where: { $0.variant == .card }),
+                      probe.inbox.openRowMenuForQA(clickedRowId: menuTarget.id),
+                      probe.inbox.isRowMenuWiredForQA,
+                      probe.inbox.rowMenuAccessibilityRoleForQA == .list,
+                      probe.inbox.rowMenuAccessibilityLabelForQA == "Agent actions",
+                      probe.inbox.rowMenuTitlesForQA.contains("Open in Tile") else {
+                    throw fail("\(label): custom context menu lost its live list/action surface")
+                }
+                let menuChildren = probe.inbox.rowMenuAccessibilityChildrenForQA
+                guard !menuChildren.isEmpty,
+                      menuChildren.allSatisfy({
+                          accessibilityRole(of: $0) == .row
+                              && accessibilityLabel(of: $0) != nil
+                      }) else {
+                    throw fail("\(label): custom context menu exposed no real AX row child or a child without a label")
+                }
+                assertions += 7
+                _ = probe.inbox.openRowMenuForQA(clickedRowId: nil)
+
+                // Bulk actions are one group with a neutral, enabled pull-down;
+                // the count and action are reachable children, not painted-only text.
+                let bulkRows = displayedRows.filter {
+                    InboxBulkAction.delete.isAvailable(for: $0)
+                }
+                guard bulkRows.count >= 2 else {
+                    throw fail("\(label): no bulk-action witness rows")
+                }
+                probe.inbox.onBulkAction = { _, _ in }
+                probe.inbox.wiredBulkActions = Set(InboxBulkAction.allCases)
+                guard probe.inbox.selectRowsForQA(ids: Array(bulkRows.prefix(2).map(\.id))) else {
+                    throw fail("\(label): bulk accessibility witness could not select two rows")
+                }
+                probe.inbox.layoutForQA()
+                let bulkAX = accessibilityObjects(from: probe.inbox)
+                guard let bulk = bulkAX.first(where: {
+                    accessibilityIdentifier(of: $0) == "ContinuumAgentInboxBulkBar"
+                }),
+                      accessibilityRole(of: bulk) == .group,
+                      accessibilityLabel(of: bulk) == "Bulk actions",
+                      accessibilityValueString(of: bulk) == "2 selected" else {
+                    throw fail("\(label): bulk card lost group/value semantics")
+                }
+                let bulkChildren = accessibilityChildren(of: bulk)
+                guard !bulkChildren.isEmpty,
+                      bulkChildren.contains(where: {
+                          accessibilityRole(of: $0) == .popUpButton
+                              && accessibilityLabel(of: $0) == InboxBulkActionBar.menuTitle
+                      }) else {
+                    throw fail("\(label): bulk card exposed no real action control")
+                }
+                assertions += 6
+
+                // Exercise the real toast, its real Undo button, and the real
+                // callback. A rendered message without a reversible backing store
+                // is not an accessibility action.
+                let undoRows = displayedRows.filter {
+                    $0.lifecycle == .active && InboxBulkAction.settle.isAvailable(for: $0)
+                }
+                guard undoRows.count >= 2 else {
+                    throw fail("\(label): no reversible settle rows for the live undo witness")
+                }
+                let undoIDs = Array(undoRows.prefix(2).map(\.id))
+                var undoFacts = Dictionary(uniqueKeysWithValues: undoIDs.map {
+                    ($0, InboxLifecycleSnapshot())
+                })
+                var restoredFacts: [UUID: InboxLifecycleSnapshot]?
+                probe.inbox.lifecycleFacts = { undoFacts[$0] }
+                probe.inbox.onUndoLifecycle = { restoredFacts = $0 }
+                probe.inbox.onBulkAction = { action, ids in
+                    guard action == .settle else { return }
+                    for id in ids {
+                        undoFacts[id] = InboxLifecycleSnapshot(
+                            settledOverride: .settled,
+                            settledAt: LabFixtures.inboxNow)
+                    }
+                }
+                probe.inbox.wiredBulkActions = [.settle]
+                guard probe.inbox.selectRowsForQA(ids: undoIDs) else {
+                    throw fail("\(label): undo witness could not select its reversible rows")
+                }
+                probe.inbox.layoutForQA()
+                guard probe.inbox.bulkActionTitlesForQA.contains("Settle"),
+                      probe.inbox.pickBulkActionForQA(.settle) else {
+                    throw fail("\(label): live settle action did not reach the host path that raises Undo")
+                }
+                probe.inbox.layoutForQA()
+                let undoAX = accessibilityObjects(from: probe.inbox)
+                guard let toast = undoAX.first(where: {
+                    accessibilityIdentifier(of: $0) == "ContinuumAgentInboxUndoToast"
+                }),
+                      accessibilityRole(of: toast) == .group,
+                      accessibilityLabel(of: toast) == "Undo notification",
+                      !accessibilityValueString(of: toast).isEmpty else {
+                    throw fail("\(label): live undo toast did not materialize with its group/value hierarchy")
+                }
+                let toastChildren = accessibilityChildren(of: toast)
+                guard toastChildren.count >= 2,
+                      toastChildren.contains(where: {
+                          accessibilityRole(of: $0) == .staticText
+                              && accessibilityIdentifier(of: $0) == "ContinuumAgentInboxUndoMessage"
+                      }),
+                      toastChildren.contains(where: {
+                          accessibilityRole(of: $0) == .button
+                              && accessibilityIdentifier(of: $0) == "ContinuumAgentInboxUndoButton"
+                              && accessibilityLabel(of: $0) == "Undo"
+                      }) else {
+                    throw fail("\(label): live undo toast exposed no real message/button child")
+                }
+                guard probe.inbox.clickUndoForQA(),
+                      restoredFacts == Dictionary(uniqueKeysWithValues: undoIDs.map {
+                          ($0, InboxLifecycleSnapshot())
+                      }),
+                      probe.inbox.undoToastTextForQA.isEmpty else {
+                    throw fail("\(label): live Undo button did not invoke the restore callback and dismiss the toast")
+                }
+                assertions += 8
+            }
+        }
+
+        // Status snapshots are compared at the list boundary. Use a small table
+        // with a deliberately offscreen last row, then prove removed/reintroduced
+        // ids are silent and a materialized cell is refreshed without a stale word.
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            for width in widths {
+                let label = "sidebar-ux-check.accessibility.status@\(Int(width))pt.\(appearanceName.rawValue)"
+                let statusProbe = try makeSidebarProbeHost(
+                    width: width, height: min(probeHeight, CGFloat(190)), appearanceName: appearanceName)
+                var owners: [NSView] = []
+                var messages: [String] = []
+                statusProbe.inbox.accessibilityAnnouncementSink = { owner, message in
+                    owners.append(owner)
+                    messages.append(message)
+                }
+                func replacing(
+                    _ row: AgentInboxRow,
+                    state: InboxState,
+                    unconfirmed: Bool = false,
+                    elapsed: TimeInterval? = nil
+                ) -> AgentInboxRow {
+                    AgentInboxRow(
+                        id: row.id, title: row.title, projectName: row.projectName,
+                        workspaceName: row.workspaceName, state: state, attention: row.attention,
+                        lifecycle: row.lifecycle, model: row.model, role: row.role,
+                        branch: row.branch, isIsolated: row.isIsolated,
+                        elapsed: elapsed ?? row.elapsed, lastActiveAt: row.lastActiveAt,
+                        depth: row.depth, createdAt: row.createdAt, parentId: row.parentId,
+                        isUnconfirmed: unconfirmed, settlementBlocked: row.settlementBlocked)
+                }
+                let statusRows = Array(rows.filter {
+                    $0.variant == .card && $0.parentId == nil
+                }.prefix(6)).map { replacing($0, state: .ready, elapsed: 90) }
+                guard statusRows.count >= 4, let offscreenSource = statusRows.last else {
+                    throw fail("\(label): constrained status table lacks enough card rows")
+                }
+                statusProbe.inbox.reload(rows: statusRows)
+                statusProbe.inbox.layoutViewportForQA()
+                statusProbe.host.layoutSubtreeIfNeeded()
+                statusProbe.inbox.layoutViewportForQA()
+                guard !statusProbe.inbox.visibleAgentIdsForQA.contains(offscreenSource.id),
+                      statusProbe.inbox.qaMaterializedRowCellCount < statusRows.count else {
+                    throw fail("\(label): status witness did not keep its transition source offscreen")
+                }
+                guard messages.isEmpty else {
+                    throw fail("\(label): initial status load announced unexpectedly")
+                }
+                statusProbe.inbox.resetAccessibilityAnnouncementsForQA()
+                let transitioned = replacing(
+                    offscreenSource, state: .approval, elapsed: 91)
+                statusProbe.inbox.apply(
+                    rows: statusRows.map { $0.id == transitioned.id ? transitioned : $0 },
+                    changed: AgentsBoardChangeSet(added: [], updated: [transitioned.id], removed: []))
+                statusProbe.inbox.layoutViewportForQA()
+                guard messages.count == 1,
+                      messages[0].contains("Needs attention"),
+                      !messages[0].contains("91"),
+                      owners.count == 1 else {
+                    throw fail("\(label): offscreen status transition was not announced exactly once at the row-model boundary")
+                }
+                statusProbe.inbox.layoutViewportForQA()
+                guard messages.count == 1 else {
+                    throw fail("\(label): repeated offscreen layout announced the transition twice")
+                }
+                let ticked = replacing(transitioned, state: .approval, elapsed: 92)
+                statusProbe.inbox.apply(
+                    rows: statusRows.map { $0.id == ticked.id ? ticked : $0 },
+                    changed: AgentsBoardChangeSet(added: [], updated: [ticked.id], removed: []))
+                statusProbe.inbox.layoutViewportForQA()
+                guard messages.count == 1 else {
+                    throw fail("\(label): elapsed-only update announced a second status change")
+                }
+                guard statusProbe.inbox.scrollToAgentForQA(id: ticked.id),
+                      statusProbe.inbox.qaMaterializedRowCells.contains(where: {
+                          $0.qaAgentID == ticked.id
+                      }),
+                      messages.count == 1 else {
+                    throw fail("\(label): actually materializing the transitioned offscreen row replayed or lost its one announcement")
+                }
+                // Remove, then reintroduce the same id with a different state. The
+                // prune at the update boundary makes this a new initial observation.
+                let withoutSource = statusRows.filter { $0.id != transitioned.id }
+                statusProbe.inbox.apply(
+                    rows: withoutSource,
+                    changed: AgentsBoardChangeSet(added: [], updated: [], removed: [transitioned.id]))
+                statusProbe.inbox.apply(
+                    rows: withoutSource + [replacing(offscreenSource, state: .failed, elapsed: 93)],
+                    changed: AgentsBoardChangeSet(added: [offscreenSource.id], updated: [], removed: []))
+                guard messages.count == 1 else {
+                    throw fail("\(label): removed/reintroduced status id retained stale announcement state")
+                }
+                let confirmedVisible = statusRows[0]
+                let confirmedTransition = replacing(confirmedVisible, state: .approval, elapsed: 94)
+                statusProbe.inbox.apply(
+                    rows: statusRows.map { $0.id == confirmedVisible.id ? confirmedTransition : $0 },
+                    changed: AgentsBoardChangeSet(added: [], updated: [confirmedVisible.id], removed: []))
+                statusProbe.inbox.layoutForQA()
+                guard let recycled = statusProbe.inbox.qaMaterializedRowCells.first(where: {
+                    $0.qaAgentID == confirmedVisible.id
+                }),
+                let recycledOwner = recycled.accessibilityStatusOwner as? NSView,
+                ("\(recycledOwner.accessibilityLabel() ?? "") \(accessibilityValueString(of: recycledOwner))")
+                    .contains("Needs attention") else {
+                    throw fail("\(label): recycled row retained stale status-owner wording")
+                }
+                assertions += 7
+            }
+        }
+
+        // Shelf and settled-more are separate table rows, so probe each at all
+        // shipping widths/themes rather than accepting the agent-row census as a
+        // proxy for section chrome.
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            for width in widths {
+                let label = "sidebar-ux-check.accessibility.sections@\(Int(width))pt.\(appearanceName.rawValue)"
+                let shelfProbe = try makeSidebarProbeHost(width: width, height: probeHeight, appearanceName: appearanceName)
+                shelfProbe.inbox.clock = { LabFixtures.inboxNow }
+                shelfProbe.inbox.reload(rows: LabFixtures.inboxParkedRows())
+                shelfProbe.inbox.layoutForQA()
+                shelfProbe.host.layoutSubtreeIfNeeded()
+                shelfProbe.inbox.layoutForQA()
+                let shelfAX = accessibilityObjects(from: shelfProbe.inbox)
+                guard let shelfButton = shelfAX.first(where: {
+                    accessibilityRole(of: $0) == .button
+                        && (accessibilityLabel(of: $0) ?? "").hasPrefix("Expand Snoozed")
+                }),
+                accessibilityValueString(of: shelfButton).contains("collapsed") else {
+                    throw fail("\(label): snoozed shelf header lost collapsed button/value semantics")
+                }
+                guard shelfProbe.inbox.clickShelfDisclosureForQA() else {
+                    throw fail("\(label): shelf header was not operable through its live button")
+                }
+                shelfProbe.inbox.layoutForQA()
+                let expandedShelfAX = accessibilityObjects(from: shelfProbe.inbox)
+                guard let expandedShelf = expandedShelfAX.first(where: {
+                    accessibilityRole(of: $0) == .button
+                        && (accessibilityLabel(of: $0) ?? "").hasPrefix("Collapse Snoozed")
+                }),
+                accessibilityValueString(of: expandedShelf).contains("expanded") else {
+                    throw fail("\(label): snoozed shelf header lost expanded semantics")
+                }
+                assertions += 4
+
+                let tailProbe = try makeSidebarProbeHost(width: width, height: probeHeight, appearanceName: appearanceName)
+                tailProbe.inbox.reload(rows: LabFixtures.inboxPagedRows())
+                tailProbe.inbox.layoutForQA()
+                tailProbe.host.layoutSubtreeIfNeeded()
+                tailProbe.inbox.layoutForQA()
+                let tailAX = accessibilityObjects(from: tailProbe.inbox)
+                guard let more = tailAX.first(where: {
+                    accessibilityRole(of: $0) == .button
+                        && (accessibilityLabel(of: $0) ?? "").hasPrefix("Show \(InboxSort.settledPageStep) more")
+                }),
+                accessibilityValueString(of: more).contains("settled agents hidden") else {
+                    throw fail("\(label): settled-more footer lost enabled button/value semantics")
+                }
+                guard tailProbe.inbox.clickSettledMoreForQA() else {
+                    throw fail("\(label): settled-more footer was not operable through its live button")
+                }
+                tailProbe.inbox.layoutForQA()
+                guard !accessibilityObjects(from: tailProbe.inbox).contains(where: {
+                    accessibilityRole(of: $0) == .button
+                        && (accessibilityLabel(of: $0) ?? "").hasPrefix("Show \(InboxSort.settledPageStep) more")
+                }) else {
+                    throw fail("\(label): settled-more footer remained in the AX tree after paging")
+                }
+                assertions += 4
+            }
+        }
+
+        // Reduce Motion is a production decision, not an assertion that no code
+        // calls NSAnimationContext. The variant cue still lands immediately while
+        // the optional ghost exists only when the injected setting permits motion.
+        let motionRow = rows.first { $0.variant == .card && $0.elapsed != nil } ?? rows.first!
+        func parked(_ row: AgentInboxRow) -> AgentInboxRow {
+            AgentInboxRow(
+                id: row.id, title: row.title, projectName: row.projectName,
+                workspaceName: row.workspaceName, state: .ready, attention: row.attention,
+                lifecycle: .settled(at: LabFixtures.inboxNow), model: row.model, role: row.role,
+                branch: row.branch, isIsolated: row.isIsolated, elapsed: row.elapsed,
+                lastActiveAt: row.lastActiveAt, depth: row.depth, createdAt: row.createdAt,
+                parentId: row.parentId, isUnconfirmed: row.isUnconfirmed,
+                settlementBlocked: row.settlementBlocked)
+        }
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            for width in widths {
+                for reduced in [false, true] {
+                    let label = "sidebar-ux-check.accessibility.motion@\(Int(width))pt.\(appearanceName.rawValue).reduced=\(reduced)"
+                    let probe = try makeSidebarProbeHost(width: width, height: probeHeight, appearanceName: appearanceName)
+                    probe.inbox.prefersReducedMotion = { reduced }
+                    probe.inbox.reload(rows: [motionRow])
+                    probe.inbox.layoutForQA()
+                    probe.host.layoutSubtreeIfNeeded()
+                    probe.inbox.layoutForQA()
+                    probe.inbox.apply(
+                        rows: [parked(motionRow)],
+                        changed: AgentsBoardChangeSet(added: [], updated: [motionRow.id], removed: []))
+                    probe.inbox.layoutForQA()
+                    guard probe.inbox.rowVariantsForQA == [.slim],
+                          !probe.inbox.glyphsForQA.first!.isEmpty,
+                          probe.inbox.titlesForQA.first == motionRow.displayTitle else {
+                        throw fail("\(label): semantic card-to-slim cue disappeared during the transition")
+                    }
+                    if reduced {
+                        guard probe.inbox.crossfadingRowCountForQA == 0 else {
+                            throw fail("\(label): Reduce Motion left a crossfade ghost in the live tree")
+                        }
+                    } else {
+                        guard probe.inbox.crossfadingRowCountForQA == 1 else {
+                            throw fail("\(label): normal motion did not use the production in-place transition")
+                        }
+                    }
+                    assertions += 3
+                }
+            }
+        }
+
+        // Measure the actual painted fills against the actual surrounding panel.
+        // No expected paint is computed with AgentInboxCardView.interactionFill.
+        func rgba(_ color: CGColor) -> (r: Double, g: Double, b: Double, a: Double)? {
+            guard let nsColor = NSColor(cgColor: color),
+                  let srgb = nsColor.usingColorSpace(.sRGB) else { return nil }
+            return (Double(srgb.redComponent), Double(srgb.greenComponent),
+                    Double(srgb.blueComponent), Double(srgb.alphaComponent))
+        }
+        func composite(
+            _ foreground: (r: Double, g: Double, b: Double, a: Double),
+            over background: (r: Double, g: Double, b: Double, a: Double)
+        ) -> (r: Double, g: Double, b: Double) {
+            (
+                foreground.r * foreground.a + background.r * (1 - foreground.a),
+                foreground.g * foreground.a + background.g * (1 - foreground.a),
+                foreground.b * foreground.a + background.b * (1 - foreground.a))
+        }
+        func luminance(_ color: (r: Double, g: Double, b: Double)) -> Double {
+            func linear(_ component: Double) -> Double {
+                component <= 0.04045
+                    ? component / 12.92
+                    : pow((component + 0.055) / 1.055, 2.4)
+            }
+            return 0.2126 * linear(color.r)
+                + 0.7152 * linear(color.g)
+                + 0.0722 * linear(color.b)
+        }
+        func contrast(
+            _ foreground: CGColor, over background: CGColor
+        ) -> Double? {
+            guard let fg = rgba(foreground), let bg = rgba(background) else { return nil }
+            let resolved = composite(fg, over: bg)
+            let foregroundLuminance = luminance(resolved)
+            let backgroundLuminance = luminance((r: bg.r, g: bg.g, b: bg.b))
+            return (max(foregroundLuminance, backgroundLuminance) + 0.05)
+                / (min(foregroundLuminance, backgroundLuminance) + 0.05)
+        }
+        guard let contrastRow = rows.first(where: { $0.variant == .card }) else {
+            throw fail("sidebar-ux-check.accessibility.contrast: no card row witness")
+        }
+        let roleSet: [(name: String, configure: (AgentInboxView, UUID) -> Bool)] = [
+            ("selected", { inbox, id in inbox.selectRowForQA(id: id) }),
+            ("hover", { inbox, id in inbox.hoverRowForQA(id: id) }),
+            ("route-active", { inbox, id in inbox.openAgentId = id; return true }),
+        ]
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            let theme: TokenTheme = appearanceName == .darkAqua ? .dark : .light
+            for width in widths {
+                var normalRatios: [String: Double] = [:]
+                var highRatios: [String: Double] = [:]
+                var highFills: [String: CGColor] = [:]
+                for increased in [false, true] {
+                    for role in roleSet {
+                        let label = "sidebar-ux-check.accessibility.contrast@\(Int(width))pt.\(appearanceName.rawValue).\(role.name).high=\(increased)"
+                        let probe = try makeSidebarProbeHost(
+                            width: width, height: probeHeight, appearanceName: appearanceName)
+                        probe.inbox.prefersIncreasedContrast = { increased }
+                        probe.inbox.reload(rows: [contrastRow])
+                        probe.inbox.layoutForQA()
+                        guard role.configure(probe.inbox, contrastRow.id) else {
+                            throw fail("\(label): could not drive the live \(role.name) interaction state")
+                        }
+                        probe.inbox.layoutForQA()
+                        guard let geometry = probe.inbox.qaRowGeometriesForQA.first,
+                              geometry.surfaceRole?.rawValue == "sidebar\(role.name == "route-active" ? "Active" : role.name.capitalized)",
+                              let fill = geometry.resolvedFill,
+                              let surrounding = probe.inbox.layer?.backgroundColor,
+                              let ratio = contrast(fill, over: surrounding) else {
+                            throw fail("\(label): live painted fill or surrounding panel was not measurable")
+                        }
+                        if increased {
+                            highRatios[role.name] = ratio
+                            highFills[role.name] = fill
+                        } else {
+                            normalRatios[role.name] = ratio
+                        }
+                    }
+                }
+                guard roleSet.allSatisfy({
+                    guard let normal = normalRatios[$0.name], let high = highRatios[$0.name] else { return false }
+                    return high > normal + 0.001
+                }) else {
+                    throw fail("sidebar-ux-check.accessibility.contrast@\(Int(width))pt.\(appearanceName.rawValue): Increase Contrast did not produce a measured ratio increase for every interaction role (normal=\(normalRatios), high=\(highRatios))")
+                }
+                guard let selected = highRatios["selected"],
+                      let hover = highRatios["hover"],
+                      let active = highRatios["route-active"],
+                      selected < hover, hover < active,
+                      let normalSelected = normalRatios["selected"],
+                      let normalHover = normalRatios["hover"],
+                      let normalActive = normalRatios["route-active"],
+                      normalSelected < normalHover, normalHover < normalActive else {
+                    throw fail("sidebar-ux-check.accessibility.contrast@\(Int(width))pt.\(appearanceName.rawValue): selected < hover < route-active paint ordering was not preserved (normal=\(normalRatios), high=\(highRatios))")
+                }
+                // Stronger background contrast cannot spend the foreground's
+                // accessibility budget. Measure the actual high-contrast paint
+                // against the same complete text/status/control roster and floors
+                // as SidebarTokens, rather than checking only fill versus panel.
+                for role in roleSet {
+                    guard let fill = highFills[role.name] else {
+                        throw fail("sidebar-ux-check.accessibility.contrast@\(Int(width))pt.\(appearanceName.rawValue): no high-contrast fill for \(role.name)")
+                    }
+                    for pair in SidebarTokens.documentedPairs {
+                        let foreground = pair.color.cgColor(for: theme)
+                        guard let ratio = contrast(foreground, over: fill),
+                              ratio + 0.0001 >= pair.floor else {
+                            throw fail("sidebar-ux-check.accessibility.contrast@\(Int(width))pt.\(appearanceName.rawValue): \(pair.foreground) on high-contrast \(role.name) measured \(contrast(foreground, over: fill) ?? -1):1 below \(pair.floor):1")
+                        }
+                    }
+                }
+                assertions += 11
+            }
+        }
+
+        // Divider semantics are owned by the production split-view controller;
+        // this check consumes its live AX splitter rather than a copied label.
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            NSApp?.appearance = NSAppearance(named: appearanceName)
+            for width in widths {
+                let splitWidth = width + WorkspaceSidebarConfig.contentMinimumWidth + 2
+                let split = NSSplitView(frame: NSRect(x: 0, y: 0, width: splitWidth, height: 420))
+                split.isVertical = true
+                split.dividerStyle = .thin
+                let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: width, height: 420))
+                split.addArrangedSubview(sidebar)
+                split.addArrangedSubview(NSView(frame: NSRect(
+                    x: width + 2, y: 0, width: WorkspaceSidebarConfig.contentMinimumWidth, height: 420)))
+                split.setPosition(width, ofDividerAt: 0)
+                split.layoutSubtreeIfNeeded()
+                let label = "sidebar-ux-check.accessibility.divider@\(Int(width))pt.\(appearanceName.rawValue)"
+                guard split.accessibilityRole() == .splitGroup,
+                      sidebar.resizeAccessibilityRoleForQA == .splitter,
+                      sidebar.resizeAccessibilityLabelForQA?.hasPrefix("Resize sidebar, ") == true else {
+                    throw fail("\(label): live resize divider lost split-group/splitter role or direction label")
+                }
+                assertions += 3
             }
         }
         return assertions

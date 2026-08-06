@@ -118,6 +118,10 @@ struct AgentInboxRowGeometryForQA {
     let labels: [AgentInboxLabelGeometryForQA]
     let paintedBorderWidth: Double?
     let resolvedFill: CGColor?
+    /// Whether the live cell resolved its semantic interaction fill through the
+    /// Increase Contrast environment branch. The ordinary surface checks pin this
+    /// false; the accessibility sweep drives both branches through the same seam.
+    let increasedContrast: Bool
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.2-interaction-fill-ladder.md
     /// Which step of the interaction ladder this row RESOLVED to, read off the
     /// card. Reported next to `resolvedFill` so a check can hold the two to each
@@ -236,6 +240,24 @@ private func inboxLabelGeometryForQA(
         compressionResistance: Double(
             label.contentCompressionResistancePriority(for: .horizontal).rawValue)
     )
+}
+
+@MainActor
+private final class AgentInboxStatusAnnouncementOwner: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityLabel("Status")
+    }
+
+    required init?(coder: NSCoder) { return nil }
+
+    func apply(summary: String) {
+        setAccessibilityLabel("Status: \(summary)")
+        setAccessibilityValue(summary)
+        setAccessibilityEnabled(true)
+    }
 }
 
 @MainActor
@@ -722,6 +744,27 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P6.6-accessibility-motion-sweep.md
+    /// Increase Contrast is read at the production decision point, not copied into
+    /// a check as a second rendering mode. The geometry probe replaces this closure
+    /// to drive both settings deterministically while the shipped view reads the
+    /// user's actual display preference.
+    var prefersIncreasedContrast: () -> Bool = {
+        NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+    }
+
+    // The status owner is the only live announcement source in this subtree. A
+    // test may observe the same production dispatch without relying on the global
+    // accessibility server; nil uses the real NSAccessibility notification path.
+    var accessibilityAnnouncementSink: ((NSView, String) -> Void)?
+    private var accessibilityStatusByAgent: [UUID: String] = [:]
+    /// Offscreen rows have no materialized status label to post from. These
+    /// dedicated announcement targets carry no row facts and are never inserted
+    /// into the AX tree; they only keep a boundary-level transition from waiting
+    /// for a recycled cell to appear.
+    private var accessibilityStatusAnnouncementOwners: [UUID: AgentInboxStatusAnnouncementOwner] = [:]
+    private(set) var qaStatusAnnouncements: [(owner: NSView, message: String)] = []
+
     // Ticket: docs/38-tickets/90-agent-ux/P3.8-scope-dropdown.md
     /// Which agents the list is showing. `.all` at birth and NOT read from
     /// `UserDefaults` here: this view is rendered by three committed Lab baselines,
@@ -893,14 +936,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         searchField.focusRingType = .none
         searchField.font = .token(.label)
         searchField.placeholderString = "Search agents"
+        searchField.setAccessibilityElement(true)
         searchField.setAccessibilityRole(.textField)
         searchField.setAccessibilityLabel("Search agents")
+        searchField.setAccessibilityHelp("Filters agents by name, project, workspace, model, or branch")
 
         scrollView = NSScrollView(frame: .zero)
         scrollView.borderType = .noBorder
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = false
         scrollView.translatesAutoresizingMaskIntoConstraints = false
+        // The scroll container is navigation chrome, not a second list in the
+        // accessibility tree. The table below owns the agent hierarchy.
+        scrollView.setAccessibilityElement(false)
 
         tableView = AgentInboxTableView(frame: .zero)
         tableView.headerView = nil
@@ -915,6 +963,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         tableView.usesAlternatingRowBackgroundColors = false
         tableView.backgroundColor = .clear
         tableView.selectionHighlightStyle = .none
+        tableView.setAccessibilityElement(true)
+        tableView.setAccessibilityRole(.list)
+        tableView.setAccessibilityLabel("Agents")
+        tableView.setAccessibilityHelp("Agent inbox rows")
         tableView.allowsEmptySelection = true
         // Ticket: docs/38-tickets/90-agent-ux/P3.11-multi-select-bulk.md
         //
@@ -950,9 +1002,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // inside the view's bounds so a longer string cannot silently spill.
         emptyLabel.lineBreakMode = .byWordWrapping
         emptyLabel.maximumNumberOfLines = 2
+        emptyLabel.setAccessibilityElement(true)
+        emptyLabel.setAccessibilityRole(.staticText)
+        emptyLabel.setAccessibilityLabel("Agent inbox status")
         emptyLabel.translatesAutoresizingMaskIntoConstraints = false
 
         super.init(frame: frameRect)
+
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("Agent inbox")
+        setAccessibilityHelp("Managed agent activity and actions")
 
         // A cached answer may be available from an earlier view, but the first
         // frame must still be safe when the answer is unknown. Starting the task
@@ -971,6 +1031,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         emptyLabel.setAccessibilityIdentifier("ContinuumAgentInboxEmpty")
         scopeButton.setAccessibilityIdentifier("ContinuumAgentInboxScope")
         searchField.setAccessibilityIdentifier("ContinuumAgentInboxSearch")
+        scopeButton.setAccessibilityHelp("Opens the agent scope choices")
 
         addSubview(scopeButton)
         addSubview(searchField)
@@ -1076,6 +1137,99 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         applyTokens()
     }
 
+    /// The root owns the fixed band/list hierarchy. Hidden overlays are omitted
+    /// rather than left as disabled AX children, so a filtered or collapsed list
+    /// never advertises an action the user cannot reach.
+    private func updateAccessibilityHierarchy() {
+        let count = rows.count
+        setAccessibilityValue(count == 1 ? "1 agent" : "\(count) agents")
+        tableView.setAccessibilityValue(count == 1 ? "1 agent" : "\(count) agents")
+        emptyLabel.setAccessibilityValue(emptyLabel.stringValue)
+        var children: [NSView] = [scopeButton, searchField, tableView]
+        if !emptyLabel.isHidden { children.append(emptyLabel) }
+        if !bulkBar.isHidden { children.append(bulkBar) }
+        if !undoToast.isHidden { children.append(undoToast) }
+        setAccessibilityChildren(children)
+
+        // NSTableView owns its virtual accessibility children. Do not replace
+        // that answer with the cells AppKit has happened to materialize: the
+        // native list provider is what keeps offscreen rows reachable while a
+        // person scrolls.
+    }
+
+    /// The status owner is the only announcement source. A changed elapsed value
+    /// deliberately does not enter this snapshot, so re-rendering a ticking row
+    /// can update its aggregate label without posting a second live-region event.
+    private func statusAccessibilitySummary(for row: AgentInboxRow) -> String {
+        if row.isUnconfirmed {
+            let lastKnown = row.label ?? "Ready"
+            return "Unconfirmed: no live agent snapshot; last known status \(lastKnown)"
+        }
+        return row.presentationLabel ?? "Ready"
+    }
+
+    /// Compare status at the row-model boundary, before cell materialization. The
+    /// initial snapshot is silent; a removed id is pruned immediately, so a later
+    /// reintroduction starts a fresh observation rather than announcing stale disk
+    /// state. Elapsed is deliberately absent from this key.
+    private func updateStatusSnapshots(for newRows: [AgentInboxRow]) {
+        let ids = Set(newRows.map(\.id))
+        accessibilityStatusByAgent = accessibilityStatusByAgent.filter { ids.contains($0.key) }
+        accessibilityStatusAnnouncementOwners = accessibilityStatusAnnouncementOwners.filter {
+            ids.contains($0.key)
+        }
+
+        for row in newRows {
+            // Compare the spoken semantic status, not elapsed or other row facts.
+            // This also catches a ready→woke attention transition without making
+            // the status owner depend on the ticking duration.
+            let current = statusAccessibilitySummary(for: row)
+            guard let previous = accessibilityStatusByAgent[row.id] else {
+                accessibilityStatusByAgent[row.id] = current
+                continue
+            }
+            guard previous != current else { continue }
+
+            let owner: NSView
+            if let cell = cellsByRow.values.first(where: { $0.qaAgentID == row.id }) {
+                owner = cell.accessibilityStatusOwner
+            } else {
+                let announcementOwner = accessibilityStatusAnnouncementOwners[row.id]
+                    ?? AgentInboxStatusAnnouncementOwner(frame: .zero)
+                announcementOwner.apply(summary: statusAccessibilitySummary(for: row))
+                accessibilityStatusAnnouncementOwners[row.id] = announcementOwner
+                owner = announcementOwner
+            }
+            let summary = statusAccessibilitySummary(for: row)
+            owner.setAccessibilityRole(owner.accessibilityRole() ?? .staticText)
+            owner.setAccessibilityLabel("Status: \(summary)")
+            owner.setAccessibilityValue(summary)
+            let message = "\(row.displayTitle): \(summary)"
+            qaStatusAnnouncements.append((owner: owner, message: message))
+            if let accessibilityAnnouncementSink {
+                accessibilityAnnouncementSink(owner, message)
+            } else {
+                NSAccessibility.post(
+                    element: owner,
+                    notification: .announcementRequested,
+                    userInfo: [.announcement: message])
+            }
+            accessibilityStatusByAgent[row.id] = current
+        }
+    }
+
+    /// Re-apply the current display preferences to already materialized cells.
+    /// The workspace notification calls this in production; QA uses the same seam
+    /// after replacing either preference closure.
+    private func reapplyDisplayPreferences() {
+        let increasedContrast = prefersIncreasedContrast()
+        for cell in cellsByRow.values { cell.setIncreasedContrast(increasedContrast) }
+    }
+
+    func reapplyDisplayPreferencesForQA() {
+        reapplyDisplayPreferences()
+    }
+
     /// Re-ask every table row for its height when the sidebar divider changes the
     /// width available to the cell. `AgentInboxCellView.layout()` re-tiers the
     /// labels, but AppKit's row-height cache does not observe that cell-local
@@ -1157,6 +1311,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// frozen desktop order (P3.4) and applying it here is what makes "row N on
     /// screen" and "rows[N]" the same thing for every accessor below.
     func reload(rows newRows: [AgentInboxRow]) {
+        // P6.6: status transitions belong to this row-model boundary, not to
+        // `viewFor`, so offscreen rows announce on the push that changed them.
+        updateStatusSnapshots(for: newRows)
         // P4.10: read BEFORE the render, which empties the table's selection — the
         // advance is validated against the selection the person had when this push
         // arrived, and by the time `render` returns nobody can tell what that was.
@@ -1252,6 +1409,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // nothing to apply them to.
         selectedRowsForEmphasis = IndexSet()
         updateBulkBar()
+        updateAccessibilityHierarchy()
         // P1.2: the list under the pointer just changed, so hover is re-derived
         // from the pointer rather than carried over or dropped. This is the row
         // REUSE half of "no row is left lit": `reloadData` rebuilt every cell,
@@ -1282,6 +1440,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// `Equatable` makes exact rather than a guess. (Found in cross-review; the
     /// change-set-only version showed a stale project name after a rename.)
     func apply(rows newRows: [AgentInboxRow], changed: AgentsBoardChangeSet) {
+        // P6.6: compare/prune before the incremental/full list branch. Cell
+        // materialization is a rendering detail and must not decide whether a
+        // semantic transition was announced.
+        updateStatusSnapshots(for: newRows)
         // P4.10: the same read `reload(rows:)` makes, and for the same reason — this
         // path keeps the selection when the list's identities did not move, and drops
         // it through `render` when they did, so only a value taken here survives both.
@@ -1759,6 +1921,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // still draws its heading, and "No agents in this scope" underneath a
         // `Snoozed (2)` line would be the list contradicting itself.
         emptyLabel.isHidden = !items.isEmpty
+        updateAccessibilityHierarchy()
     }
 
     // MARK: - Table
@@ -1886,11 +2049,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // reason the pill below is — `apply` paints what the agent IS, and where
         // the pointer and the keyboard are is not that.
         cell.applyInteraction(interaction(forTableRow: row))
+        cell.setIncreasedContrast(prefersIncreasedContrast())
+        // P6.6: status snapshots were compared at the row-model boundary above;
+        // cell materialization must not be the first observation of a transition.
         // P3.10: the hint is set AFTER `apply` and through its own call, because it
         // is an overlay and not part of the row's content — `apply` paints what the
         // agent IS, and a pill is a thing about the keyboard.
         cell.showJumpHint(jumpHintsVisible ? AgentInboxView.jumpHintText(forRowIndex: index) : nil)
         cellsByRow[row] = cell
+        updateAccessibilityHierarchy()
         return cell
     }
 
@@ -2303,6 +2470,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let selected = selectedRows
         guard selected.count >= AgentInboxView.minimumBulkSelection else {
             bulkBar.hide()
+            updateAccessibilityHierarchy()
             return
         }
         // NO HANDLER, NO MENU — and, since P3.15, no handler FOR THIS ACTION, no item.
@@ -2316,6 +2484,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             offeredBulkActions(for: selected),
             selectionCount: selected.count,
             keptBranches: InboxBulkAction.keptBranches(in: selected))
+        updateAccessibilityHierarchy()
     }
 
     /// Hand the host an action and the agents it lands on.
@@ -3032,7 +3201,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // took the table's deferred incremental reload with it — measured,
         // `--agent-inbox-check`: `selecting a row must clear its recession — text
         // alpha 0.88, wanted 1.0`, on a selection that had really moved.
-        for token in interactionObservers { center.removeObserver(token) }
+        for token in interactionObservers {
+            center.removeObserver(token)
+            NSWorkspace.shared.notificationCenter.removeObserver(token)
+        }
         interactionObservers = []
         guard let window else {
             cancelWakeRerender()
@@ -3061,6 +3233,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 }
             })
         }
+        // Increase Contrast can change while this view is alive. Repaint the
+        // already-materialized row cards through the same production setting seam;
+        // no row reload or animation is needed to preserve the semantic cue.
+        interactionObservers.append(NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil, queue: nil
+        ) { [weak self] _ in
+            DispatchQueue.main.async { self?.reapplyDisplayPreferences() }
+        })
+        reapplyDisplayPreferences()
         scheduleWakeRerender()
     }
 
@@ -3253,6 +3435,21 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         return cell.clickForQA()
     }
 
+    /// Bring the real remainder row into the constrained viewport without asking
+    /// the table to materialize every other row. The subsequent AX walk can inspect
+    /// its button before the action removes that remainder from the list.
+    @discardableResult
+    func scrollToFanoutRemainderForQA(parentId: UUID) -> Bool {
+        guard let tableRow = items.firstIndex(where: { item in
+            guard case let .fanoutRemainder(remainder) = item else { return false }
+            return remainder.parentId == parentId
+        }) else { return false }
+        tableView.scrollRowToVisible(tableRow)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        layoutViewportForQA()
+        return fanoutRemainderCellsByParent[parentId] != nil
+    }
+
     /// Materialized agent cells found by walking the live table subtree. This is
     /// intentionally not `cellsByRow`: a stale registry can say a row exists after
     /// AppKit has removed it, while a probe must fail on what is actually painted.
@@ -3279,6 +3476,26 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     var rowIdsForQA: [UUID] { rows.map(\.id) }
+    /// The live table index for an agent id, including the section rows that
+    /// precede it. Native virtual AX children expose this same index even when
+    /// the corresponding cell is outside the viewport.
+    func tableRowIndexForQA(id: UUID) -> Int? { tableRow(forAgentId: id) }
+    var accessibilityStatusAnnouncementMessagesForQA: [String] {
+        qaStatusAnnouncements.map(\.message)
+    }
+    var accessibilityStatusAnnouncementOwnersForQA: [NSView] {
+        qaStatusAnnouncements.map(\.owner)
+    }
+    func resetAccessibilityAnnouncementsForQA() {
+        qaStatusAnnouncements.removeAll()
+    }
+    /// The current live accessibility hierarchy, rooted at the production inbox
+    /// group. The probe walks the returned objects rather than a parallel model.
+    var accessibilityChildrenForQA: [Any] { accessibilityChildren() ?? [] }
+    /// The native NSTableView answer, including virtual children for rows that are
+    /// outside the clipped viewport. This is deliberately read-only: the inbox
+    /// never installs a materialized-cell replacement for this answer.
+    var tableAccessibilityChildrenForQA: [Any] { tableView.accessibilityChildren() ?? [] }
     // Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md
     /// The heading as RENDERED — its words and which way its triangle points — and
     /// nil when the shelf is holding nothing and draws no heading at all.
@@ -3831,6 +4048,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var rowMenuFocusAnnouncementForQA: String? {
         activeChoiceListForQA?.lastAccessibilityAnnouncementForQA
     }
+    var rowMenuAccessibilityRoleForQA: NSAccessibility.Role? {
+        activeChoiceListForQA?.accessibilityRole()
+    }
+    var rowMenuAccessibilityLabelForQA: String? {
+        activeChoiceListForQA?.accessibilityLabel()
+    }
+    var rowMenuAccessibilityChildrenForQA: [Any] {
+        activeChoiceListForQA?.accessibilityChildren() ?? []
+    }
     var isTableFirstResponderForQA: Bool { tableView.window?.firstResponder === tableView }
 
     @discardableResult
@@ -4036,6 +4262,30 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         layoutForQA()
     }
 
+    /// Return to the top through the real clip-view path without materializing the
+    /// rest of the document. Virtual-AX checks use this to make the first rows
+    /// visible while keeping a later row genuinely offscreen.
+    func scrollToTopForQA() {
+        let origin = scrollView.contentView.bounds.origin
+        scrollView.contentView.scroll(to: NSPoint(x: origin.x, y: 0))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        layoutViewportForQA()
+    }
+
+    /// Scroll one agent into the constrained viewport through NSTableView's real
+    /// row path. Unlike `layoutForQA`, this materializes only what the destination
+    /// viewport needs, so an offscreen-announcement witness can prove that later
+    /// cell creation does not replay a transition.
+    @discardableResult
+    func scrollToAgentForQA(id: UUID) -> Bool {
+        guard let tableRow = tableRow(forAgentId: id) else { return false }
+        tableView.scrollRowToVisible(tableRow)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        layoutViewportForQA()
+        return cellsByRow[tableRow]?.qaAgentID == id
+            && visibleAgentIdsForQA.contains(id)
+    }
+
     /// The live clip offset, read back from the scroll view rather than inferred
     /// from row indexes. P2.3 uses it to prove an incremental height change does
     /// not reset the user's scroll position.
@@ -4088,19 +4338,29 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         layoutForQA()
     }
 
+    /// Lay out only the constrained viewport. Unlike `layoutForQA`, this never
+    /// asks AppKit to make an offscreen row, so a virtual-AX check can prove that
+    /// the native table exposes rows it has not materialized.
+    func layoutViewportForQA() {
+        layoutSubtreeIfNeeded()
+        tableView.layoutSubtreeIfNeeded()
+        layoutSubtreeIfNeeded()
+        updateAccessibilityHierarchy()
+    }
+
     /// Force the table to realise a cell for every row, so the accessors above
     /// describe the whole list and not just the part AppKit felt like laying out.
     /// The second list-owned layout pass is intentional: offscreen probes may create
     /// cells only after the first `view(atColumn:row:)` request, and their frames are
     /// not painted until the table lays those new hosts out.
     func layoutForQA() {
-        layoutSubtreeIfNeeded()
-        tableView.layoutSubtreeIfNeeded()
+        layoutViewportForQA()
         for row in 0..<tableView.numberOfRows where cellsByRow[row] == nil {
             _ = tableView.view(atColumn: 0, row: row, makeIfNecessary: true)
         }
         tableView.layoutSubtreeIfNeeded()
         layoutSubtreeIfNeeded()
+        updateAccessibilityHierarchy()
     }
 
     private func cells() -> [AgentInboxRowCell] {
@@ -4189,18 +4449,26 @@ final class AgentInboxShelfHeaderView: NSTableCellView, TokenThemed {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        setAccessibilityElement(false)
 
         disclosureButton.target = self
         disclosureButton.action = #selector(toggleClicked)
+        // The full-width hit button is the single AX control for this heading;
+        // exposing the decorative triangle as a second button would duplicate the
+        // same action in VoiceOver navigation.
+        disclosureButton.setAccessibilityElement(false)
 
         label.font = .token(.label)
         label.lineBreakMode = .byTruncatingTail
+        label.setAccessibilityElement(false)
 
         hitButton.isBordered = false
         hitButton.title = ""
         hitButton.target = self
         hitButton.action = #selector(toggleClicked)
+        hitButton.setAccessibilityElement(true)
         hitButton.setAccessibilityRole(.button)
+        hitButton.setAccessibilityHelp("Shows or hides snoozed agents")
         hitButton.translatesAutoresizingMaskIntoConstraints = false
         addSubview(hitButton)
 
@@ -4232,8 +4500,12 @@ final class AgentInboxShelfHeaderView: NSTableCellView, TokenThemed {
         self.count = count
         label.stringValue = AgentInboxShelfHeaderView.title(count: count)
         disclosureButton.show(isExpanded ? .expanded : .collapsed)
-        hitButton.setAccessibilityLabel(
-            "\(isExpanded ? "Collapse" : "Expand") \(label.stringValue)")
+        let action = isExpanded ? "Collapse" : "Expand"
+        hitButton.setAccessibilityLabel("\(action) \(label.stringValue)")
+        hitButton.setAccessibilityValue("\(count) snoozed, \(isExpanded ? "expanded" : "collapsed")")
+        hitButton.setAccessibilityExpanded(isExpanded)
+        hitButton.setAccessibilityEnabled(true)
+        setAccessibilityChildren([hitButton])
         applyTokens()
     }
 
@@ -4292,16 +4564,20 @@ final class AgentInboxSettledMoreView: NSTableCellView, TokenThemed {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        setAccessibilityElement(false)
 
         label.font = .token(.label)
         label.lineBreakMode = .byTruncatingTail
+        label.setAccessibilityElement(false)
         label.translatesAutoresizingMaskIntoConstraints = false
 
         hitButton.isBordered = false
         hitButton.title = ""
         hitButton.target = self
         hitButton.action = #selector(pressed)
+        hitButton.setAccessibilityElement(true)
         hitButton.setAccessibilityRole(.button)
+        hitButton.setAccessibilityHelp("Shows more settled agents")
         hitButton.translatesAutoresizingMaskIntoConstraints = false
         addSubview(hitButton)
         addSubview(label)
@@ -4325,6 +4601,9 @@ final class AgentInboxSettledMoreView: NSTableCellView, TokenThemed {
     func apply(hidden: Int) {
         label.stringValue = AgentInboxSettledMoreView.title(hidden: hidden)
         hitButton.setAccessibilityLabel(label.stringValue)
+        hitButton.setAccessibilityValue("\(hidden) settled agents hidden")
+        hitButton.setAccessibilityEnabled(true)
+        setAccessibilityChildren([hitButton])
         applyTokens()
     }
 
@@ -4366,15 +4645,19 @@ final class AgentInboxRemainderView: NSTableCellView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        setAccessibilityElement(false)
 
         label.font = .token(.label)
         label.lineBreakMode = .byTruncatingTail
+        label.setAccessibilityElement(false)
         label.translatesAutoresizingMaskIntoConstraints = false
         label.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         button.isBordered = false
         button.title = ""
+        button.setAccessibilityElement(true)
         button.setAccessibilityRole(.button)
+        button.setAccessibilityHelp("Shows the hidden child agents")
         button.translatesAutoresizingMaskIntoConstraints = false
         button.target = self
         button.action = #selector(expandClicked)
@@ -4398,6 +4681,9 @@ final class AgentInboxRemainderView: NSTableCellView {
         self.remainder = remainder
         label.stringValue = remainder.title
         button.setAccessibilityLabel("Show \(remainder.accessibilityTitle)")
+        button.setAccessibilityValue(remainder.accessibilityTitle)
+        button.setAccessibilityEnabled(true)
+        setAccessibilityChildren([button])
         applyTokens()
     }
 
@@ -4452,6 +4738,15 @@ protocol AgentInboxRowCell: NSTableCellView {
     /// and threading them back through `apply` would make an appearance flip a
     /// place hover state could be dropped.
     func applyInteraction(_ interaction: RowInteraction)
+
+    /// Increase Contrast changes the strength of a semantic interaction fill, not
+    /// the row's state or hierarchy. It is set separately so a live accessibility
+    /// preference change repaints existing cells without re-deriving row content.
+    func setIncreasedContrast(_ enabled: Bool)
+
+    /// The one view that owns status-transition announcements. Elapsed/time labels
+    /// deliberately do not implement this role.
+    var accessibilityStatusOwner: NSView { get }
 
     /// What the row's disclosure triangle does. Set by the list, which is the only
     /// thing that knows the fold state; a cell with `RowDisclosure.none` never calls
@@ -4548,6 +4843,8 @@ final class InboxDisclosureButton: NSButton, TokenThemed {
         isBordered = false
         bezelStyle = .inline
         setButtonType(.momentaryChange)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
         font = .token(.label)
         // The glyph is the whole control, so it must not be squeezed out of a
         // narrow sidebar the way a truncating label can be.
@@ -4560,7 +4857,12 @@ final class InboxDisclosureButton: NSButton, TokenThemed {
     func show(_ disclosure: RowDisclosure) {
         isHidden = disclosure == .none
         glyph = disclosure.glyph
+        let expanded = disclosure == .expanded
+        setAccessibilityElement(disclosure != .none)
         setAccessibilityLabel(disclosure == .collapsed ? "Expand" : "Collapse")
+        setAccessibilityValue(disclosure == .none ? nil : (expanded ? "Expanded" : "Collapsed"))
+        setAccessibilityExpanded(expanded)
+        setAccessibilityEnabled(disclosure != .none)
         applyTokens()
     }
 
@@ -5117,7 +5419,14 @@ final class InboxBulkActionBar: NSView, TokenThemed {
         layer?.borderWidth = LineWidth.hairline
         layer?.cornerRadius = Radius.card
         isHidden = true
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("Bulk actions")
+        setAccessibilityHelp("Actions for every selected agent")
         countLabel.font = .token(.label)
+        countLabel.setAccessibilityElement(true)
+        countLabel.setAccessibilityRole(.staticText)
+        countLabel.setAccessibilityLabel("Selected agents")
         countLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         countLabel.translatesAutoresizingMaskIntoConstraints = false
         actionButton.translatesAutoresizingMaskIntoConstraints = false
@@ -5128,6 +5437,9 @@ final class InboxBulkActionBar: NSView, TokenThemed {
         actionButton.onSelection = { [weak self] item in self?.choose(item) }
         keptLabel.font = .token(.caption)
         keptLabel.lineBreakMode = .byTruncatingMiddle
+        keptLabel.setAccessibilityElement(true)
+        keptLabel.setAccessibilityRole(.staticText)
+        keptLabel.setAccessibilityLabel("Unmerged work kept")
         keptLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(countLabel); addSubview(actionButton); addSubview(keptLabel)
         NSLayoutConstraint.activate([
@@ -5158,12 +5470,17 @@ final class InboxBulkActionBar: NSView, TokenThemed {
         countLabel.stringValue = Self.selectionText(count: selectionCount)
         keptLabel.stringValue = Self.keptText(branches: keptBranches)
         keptLabel.isHidden = keptLabel.stringValue.isEmpty
+        setAccessibilityValue(Self.selectionText(count: selectionCount))
+        setAccessibilityEnabled(true)
+        setAccessibilityChildren(
+            [countLabel, actionButton] + (keptLabel.isHidden ? [] : [keptLabel]))
         isHidden = false
         applyTokens()
     }
 
     func hide() {
         isHidden = true; actions = []
+        setAccessibilityEnabled(false)
         actionButton.setPresentationTitle(Self.menuTitle)
     }
 
@@ -5273,8 +5590,16 @@ final class InboxUndoToast: NSView, TokenThemed {
         layer?.borderWidth = LineWidth.hairline
         layer?.cornerRadius = Radius.card
         isHidden = true
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("Undo notification")
+        setAccessibilityHelp("Reports the last reversible inbox action")
 
         messageLabel.font = .token(.label)
+        messageLabel.setAccessibilityElement(true)
+        messageLabel.setAccessibilityRole(.staticText)
+        messageLabel.setAccessibilityLabel("Inbox action")
+        messageLabel.setAccessibilityIdentifier("ContinuumAgentInboxUndoMessage")
         messageLabel.lineBreakMode = .byTruncatingTail
         messageLabel.translatesAutoresizingMaskIntoConstraints = false
 
@@ -5286,6 +5611,7 @@ final class InboxUndoToast: NSView, TokenThemed {
         undoButton.action = #selector(undoPressed)
         undoButton.setAccessibilityRole(.button)
         undoButton.setAccessibilityLabel(InboxUndoToast.undoTitle)
+        undoButton.setAccessibilityIdentifier("ContinuumAgentInboxUndoButton")
         // The way back must never be the thing a 320pt sidebar truncates away.
         undoButton.setContentCompressionResistancePriority(.required, for: .horizontal)
         undoButton.setContentHuggingPriority(.required, for: .horizontal)
@@ -5316,12 +5642,17 @@ final class InboxUndoToast: NSView, TokenThemed {
 
     func show(_ message: String) {
         messageLabel.stringValue = message
+        setAccessibilityValue(message)
+        setAccessibilityEnabled(true)
+        setAccessibilityChildren([messageLabel, undoButton])
         isHidden = false
         applyTokens()
     }
 
     func hide() {
         isHidden = true
+        setAccessibilityEnabled(false)
+        setAccessibilityValue(nil)
         messageLabel.stringValue = ""
     }
 
@@ -5474,6 +5805,11 @@ final class AgentInboxCardView: NSView, TokenThemed {
             focusRing.isHidden = !hasKeyboardFocus
         }
     }
+    /// Increase Contrast strengthens only the semantic interaction wash. Resting
+    /// rows remain unfilled and the role ordering remains selected < hover < active.
+    var usesIncreasedContrast = false {
+        didSet { guard usesIncreasedContrast != oldValue else { return }; applyTokens() }
+    }
 
     private let focusRing = InboxRowFocusRingView()
 
@@ -5524,10 +5860,27 @@ final class AgentInboxCardView: NSView, TokenThemed {
     /// row's words against the nearest ancestor that paints one. With `nil` the
     /// sidebar's own `panel` IS the row's background in both gates, which is
     /// exactly what the design decision says a resting row shows.
+    static func interactionFill(
+        for role: SidebarSurfaceRole, increasedContrast: Bool, theme: TokenTheme
+    ) -> CGColor? {
+        guard role != .resting else { return nil }
+        guard increasedContrast else { return role.color.cgColor(for: theme) }
+        // Use the existing semantic text/panel tokens and a stronger mix rather
+        // than a new literal. The bounded +1.5pt step keeps every interaction
+        // role louder while retaining the existing foreground floors: the light
+        // active row's accentFailed pair is the limiting 4.5:1 case, so the
+        // strongest fill may not exceed a 12% primary-over-panel mix.
+        let base = SidebarSurfaceRole.rowBase.color.resolved(for: theme)
+        let foreground = TextToken.textPrimary.color.resolved(for: theme)
+        let strengthenedAlpha = min(0.12, role.emphasisAlpha + 0.015)
+        let mixed = foreground.composited(over: base, alpha: strengthenedAlpha)
+        return TokenColor(mixed).cgColor(for: theme)
+    }
+
     func applyTokens() {
         let theme = effectiveTokenTheme
-        let role = surfaceRole
-        layer?.backgroundColor = role == .resting ? nil : role.color.cgColor(for: theme)
+        layer?.backgroundColor = Self.interactionFill(
+            for: surfaceRole, increasedContrast: usesIncreasedContrast, theme: theme)
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -5548,6 +5901,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
     }
 
     var qaIsFocusRingVisible: Bool { !focusRing.isHidden }
+    var qaUsesIncreasedContrast: Bool { usesIncreasedContrast }
 }
 
 /// One row's words, on the card that carries them.
@@ -5591,30 +5945,56 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.row)
+        setAccessibilityHelp("Agent row")
+        card.setAccessibilityElement(false)
+        jumpHint.setAccessibilityElement(false)
 
         card.translatesAutoresizingMaskIntoConstraints = false
         addSubview(card)
 
         projectLabel.font = .token(.caption)
         projectLabel.lineBreakMode = .byTruncatingTail
+        projectLabel.setAccessibilityRole(.staticText)
+        projectLabel.setAccessibilityLabel("Project")
+        projectLabel.setAccessibilityIdentifier("ContinuumAgentInboxProjectLabel")
 
         titleLabel.font = .token(.title)
         titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.setAccessibilityRole(.staticText)
+        titleLabel.setAccessibilityLabel("Agent name")
+        titleLabel.setAccessibilityIdentifier("ContinuumAgentInboxTitleLabel")
 
         stateLabel.font = .token(.label)
+        stateLabel.setAccessibilityRole(.staticText)
+        stateLabel.setAccessibilityLabel("Status")
+        stateLabel.setAccessibilityIdentifier("ContinuumAgentInboxStateLabel")
 
         elapsedLabel.font = .token(.captionMono)
         elapsedLabel.lineBreakMode = .byClipping
+        // Elapsed is a changing fact, not an independent live region. The row
+        // aggregate below carries it for VoiceOver without making every clock tick
+        // a separate accessibility element/update.
+        elapsedLabel.setAccessibilityElement(false)
+        elapsedLabel.setAccessibilityIdentifier("ContinuumAgentInboxElapsedLabel")
 
         metaLabel.font = .token(.label)
         metaLabel.lineBreakMode = .byTruncatingTail
+        metaLabel.setAccessibilityRole(.staticText)
+        metaLabel.setAccessibilityLabel("Agent details")
+        metaLabel.setAccessibilityIdentifier("ContinuumAgentInboxMetaLabel")
 
         // Middle, not tail: an `agent/<role>-<slug>` branch is identified by both
         // ends, the same reasoning `BranchChipNSView` records for its own label.
         branchLabel.font = .token(.label)
         branchLabel.lineBreakMode = .byTruncatingMiddle
+        branchLabel.setAccessibilityRole(.staticText)
+        branchLabel.setAccessibilityLabel("Branch")
+        branchLabel.setAccessibilityIdentifier("ContinuumAgentInboxBranchLabel")
 
         providerGlyphLabel.font = .token(.label)
+        providerGlyphLabel.setAccessibilityIdentifier("ContinuumAgentInboxProviderLabel")
         providerGlyphLabel.setContentHuggingPriority(.required, for: .horizontal)
         providerGlyphLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         providerGlyphLabel.setAccessibilityRole(.image)
@@ -5841,14 +6221,13 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         if row.isUnconfirmed {
             // Confidence is quiet content, not a new state or an accent colour.
             stateLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
-            stateLabel.setAccessibilityLabel("Unconfirmed: last known status")
-        } else {
-            // Cells are recycled: a confirmed row must RESTORE the default so a
-            // reused cell cannot show "Working" while VoiceOver still says
-            // "Unconfirmed" (P3.4 review round 2, finding 2). nil hands the
-            // element back its stringValue-derived description.
-            stateLabel.setAccessibilityLabel(nil)
         }
+        // The status owner always carries the explanation, including why a disk
+        // record is not confirmation. A confirmed cell restores the same explicit
+        // role/value after AppKit recycles it for another row.
+        stateLabel.setAccessibilityRole(.staticText)
+        stateLabel.setAccessibilityLabel("Status")
+        stateLabel.setAccessibilityValue(Self.statusAccessibilityValue(for: row))
         branchLabel.stringValue = AgentInboxCellView.branchText(branch: row.branch)
         branchLabel.isHidden = branchLabel.stringValue.isEmpty
         let rollupSummary: String?
@@ -5872,6 +6251,7 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         providerGlyphLabel.isHidden = providerGlyph.isEmpty
         providerGlyphLabel.toolTip = modelLabel?.isEmpty == false ? modelLabel : nil
         providerGlyphLabel.setAccessibilityLabel(providerGlyphLabel.toolTip)
+        providerGlyphLabel.setAccessibilityValue(modelLabel)
         providerGlyphLabel.setAccessibilityRole(.image)
 
         // Bands are content slots, not semantic state slots. The row model and
@@ -5904,6 +6284,84 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         appliedTier = nil
         applyRelocatedFacts()
         applyFitTier()
+    }
+
+    /// The status wording is shared by the visible label, its AX value and the
+    /// one announcement owner. In particular, an unconfirmed row never says only
+    /// "Working" to assistive technology when the live snapshot is absent.
+    static func statusAccessibilityValue(for row: AgentInboxRow) -> String {
+        if row.isUnconfirmed {
+            return "Unconfirmed: no live agent snapshot; last known status \(row.label ?? "Ready")"
+        }
+        return row.presentationLabel ?? "Ready"
+    }
+
+    /// The row/cell owns the name, every hidden fact, and the exact changing
+    /// duration. Visible project/branch/meta/model facts stay on their one visible
+    /// child owner; status stays on `stateLabel` and is never repeated here.
+    private func accessibilityAggregate(for row: AgentInboxRow) -> String {
+        var parts = ["Agent \(row.displayTitle)"]
+        if let project = row.projectName, !project.isEmpty, projectLabel.isHidden {
+            parts.append("Project \(project)")
+        }
+        if let branch = row.branch, !branch.isEmpty, branchLabel.isHidden {
+            parts.append("Branch \(Self.branchText(branch: branch))")
+        }
+        if !metaLabel.stringValue.isEmpty, metaLabel.isHidden {
+            parts.append("Details \(metaLabel.stringValue)")
+        }
+        if let model = row.model?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !model.isEmpty,
+           providerGlyphLabel.isHidden {
+            parts.append("Model \(model)")
+        }
+        if let elapsed = AgentInboxCellView.elapsedText(row.elapsed) {
+            parts.append(row.isUnconfirmed ? "last seen \(elapsed)" : "Elapsed \(elapsed)")
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    private func updateAccessibilityPresentation() {
+        guard let row = shown?.row else { return }
+        setAccessibilityElement(true)
+        setAccessibilityRole(.row)
+        setAccessibilityLabel(accessibilityAggregate(for: row))
+        // The row aggregate is not a second status owner. Status is exposed only
+        // by `stateLabel`; selection/expanded state use their dedicated AX flags.
+        setAccessibilityValue(nil)
+        setAccessibilityEnabled(true)
+        setAccessibilitySelected(card.isSelected)
+        setAccessibilityExpanded(shown?.disclosure == RowDisclosure.expanded)
+
+        // The row aggregate owns the subject/name. Keeping the visible title out
+        // of the child list avoids a second AX owner for the same fact.
+        titleLabel.setAccessibilityElement(false)
+        titleLabel.setAccessibilityValue(nil)
+        projectLabel.setAccessibilityElement(!projectLabel.isHidden && !projectLabel.stringValue.isEmpty)
+        projectLabel.setAccessibilityValue(projectLabel.stringValue)
+        // Keep the status owner present even for the visual `ready` state, whose
+        // word is intentionally omitted. Its AX value supplies the semantic state
+        // without adding a fourth painted line to the parked/resting row.
+        stateLabel.setAccessibilityElement(true)
+        stateLabel.setAccessibilityRole(.staticText)
+        let statusValue = Self.statusAccessibilityValue(for: row)
+        stateLabel.setAccessibilityLabel("Status: \(statusValue)")
+        stateLabel.setAccessibilityValue(statusValue)
+        branchLabel.setAccessibilityElement(!branchLabel.isHidden && !branchLabel.stringValue.isEmpty)
+        branchLabel.setAccessibilityValue(branchLabel.stringValue)
+        metaLabel.setAccessibilityElement(!metaLabel.isHidden && !metaLabel.stringValue.isEmpty)
+        metaLabel.setAccessibilityValue(metaLabel.stringValue)
+        // `elapsedLabel` remains false in every state, including when it is drawn.
+        elapsedLabel.setAccessibilityElement(false)
+        providerGlyphLabel.setAccessibilityElement(
+            !providerGlyphLabel.isHidden && !providerGlyphLabel.stringValue.isEmpty)
+        disclosureButton.setAccessibilityElement(!disclosureButton.isHidden)
+        var children: [NSView] = []
+        for child in [projectLabel, stateLabel, metaLabel, branchLabel, providerGlyphLabel, disclosureButton]
+            where child.isAccessibilityElement() && (!child.isHidden || child === stateLabel) {
+            children.append(child)
+        }
+        setAccessibilityChildren(children)
     }
 
     // MARK: - P2.2 — the measured-fit tier
@@ -6023,24 +6481,8 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     /// has no width problem at all, and taking the fact off the tree for them would
     /// be a bug dressed as adaptivity.
     private func applyRelocatedFacts() {
-        guard let shown else { return }
-        var spoken = [titleLabel.stringValue]
-        if !stateLabel.isHidden, !stateLabel.stringValue.isEmpty {
-            spoken.append(stateLabel.stringValue)
-        }
-        if projectLabel.isHidden, let project = shown.row.projectName {
-            spoken.append(project)
-        }
-        if elapsedLabel.isHidden, let elapsed = AgentInboxCellView.elapsedText(shown.row.elapsed) {
-            spoken.append(elapsed)
-        }
-        // The visible provider mark is intentionally terse, but VoiceOver must
-        // still receive the complete model even when the child label is not the
-        // element AppKit focuses first.
-        if let model = providerGlyphLabel.toolTip {
-            spoken.append(model)
-        }
-        setAccessibilityLabel(spoken.joined(separator: ", "))
+        guard shown != nil else { return }
+        updateAccessibilityPresentation()
     }
 
     override func layout() {
@@ -6066,6 +6508,12 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         card.isRouteActive = interaction.isRouteActive
         card.hasKeyboardFocus = interaction.hasKeyboardFocus
     }
+
+    func setIncreasedContrast(_ enabled: Bool) {
+        card.usesIncreasedContrast = enabled
+    }
+
+    var accessibilityStatusOwner: NSView { stateLabel }
 
     @discardableResult
     func clickDisclosureForQA() -> Bool {
@@ -6306,6 +6754,7 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
             labels: labels,
             paintedBorderWidth: card.layer.map { Double($0.borderWidth) },
             resolvedFill: card.layer?.backgroundColor,
+            increasedContrast: card.qaUsesIncreasedContrast,
             surfaceRole: card.surfaceRole,
             paintedLines: card.qaPaintedLines,
             isFocusRingVisible: card.qaIsFocusRingVisible,
@@ -6401,15 +6850,26 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.row)
+        setAccessibilityHelp("Agent row")
+        card.setAccessibilityElement(false)
+        jumpHint.setAccessibilityElement(false)
 
         card.translatesAutoresizingMaskIntoConstraints = false
         addSubview(card)
 
         glyphLabel.font = .token(.label)
+        glyphLabel.setAccessibilityRole(.image)
+        glyphLabel.setAccessibilityLabel("Status")
+        glyphLabel.setAccessibilityIdentifier("ContinuumAgentInboxStatusGlyph")
         glyphLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         titleLabel.font = .token(.title)
         titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.setAccessibilityRole(.staticText)
+        titleLabel.setAccessibilityLabel("Agent name")
+        titleLabel.setAccessibilityIdentifier("ContinuumAgentInboxTitleLabel")
         // The name is the subject and yields LAST. The branch is the first
         // optional fact to leave the one-line row, followed by its relative-time
         // metric; the glyph and the name remain the purpose of the row.
@@ -6421,11 +6881,18 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         // Middle, for the same reason the card's branch line uses it. Its live
         // floor is retracted when the measured tier drops the branch entirely.
         branchLabel.lineBreakMode = .byTruncatingMiddle
+        branchLabel.setAccessibilityRole(.staticText)
+        branchLabel.setAccessibilityLabel("Branch")
+        branchLabel.setAccessibilityIdentifier("ContinuumAgentInboxBranchLabel")
         branchLabel.setContentCompressionResistancePriority(
             AgentInboxCellView.branchCompressionResistance, for: .horizontal)
 
         timeLabel.font = .token(.captionMono)
         timeLabel.lineBreakMode = .byClipping
+        // The row/cell label carries the relative time; this child never becomes
+        // an independent ticking accessibility element.
+        timeLabel.setAccessibilityElement(false)
+        timeLabel.setAccessibilityIdentifier("ContinuumAgentInboxTimeLabel")
         timeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         disclosureButton.target = self
@@ -6630,15 +7097,74 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     /// label. The sighted row keeps its name-first line; VoiceOver keeps every
     /// fact the measured tier had to remove.
     private func applyRelocatedFacts() {
-        guard self.shown != nil else { return }
-        var spoken = [titleLabel.stringValue]
-        if branchLabel.isHidden, !branchLabel.stringValue.isEmpty {
-            spoken.append(branchLabel.stringValue)
+        guard shown != nil else { return }
+        updateAccessibilityPresentation()
+    }
+
+    static func statusAccessibilityValue(for row: AgentInboxRow) -> String {
+        if row.isUnconfirmed {
+            return "Unconfirmed: no live agent snapshot; last known status \(row.label ?? "Ready")"
         }
-        if timeLabel.isHidden, !timeLabel.stringValue.isEmpty {
-            spoken.append(timeLabel.stringValue)
+        return row.presentationLabel ?? "Ready"
+    }
+
+    /// The slim row keeps the same aggregate ancestor contract as the card. The
+    /// glyph is the status owner; the non-AX time label's exact fact remains on
+    /// the row owner. Slim rows have no project/meta/model children, so those
+    /// facts are relocated here instead of being silently dropped.
+    private func accessibilityAggregate(for row: AgentInboxRow) -> String {
+        var parts = ["Agent \(row.displayTitle)"]
+        if let project = row.projectName, !project.isEmpty {
+            parts.append("Project \(project)")
         }
-        setAccessibilityLabel(spoken.joined(separator: ", "))
+        if let branch = row.branch, !branch.isEmpty, branchLabel.isHidden {
+            parts.append("Branch \(Self.branchText(branch: branch))")
+        }
+        if row.isIsolated {
+            parts.append("isolated")
+        } else if row.branch?.isEmpty == false {
+            parts.append("shared")
+        }
+        if let model = row.model?.trimmingCharacters(in: .whitespacesAndNewlines), !model.isEmpty {
+            parts.append("Model \(model)")
+        }
+        let time = row.isUnconfirmed
+            ? AgentInboxCellView.elapsedText(row.elapsed).map { "last seen \($0)" } ?? ""
+            : Self.relativeText(for: row.lifecycle, now: shown?.now ?? Date())
+        if !time.isEmpty { parts.append(time) }
+        return parts.joined(separator: ", ")
+    }
+
+    private func updateAccessibilityPresentation() {
+        guard let row = shown?.row else { return }
+        setAccessibilityElement(true)
+        setAccessibilityRole(.row)
+        setAccessibilityLabel(accessibilityAggregate(for: row))
+        // The glyph below is the only status owner for a slim row.
+        setAccessibilityValue(nil)
+        setAccessibilityEnabled(true)
+        setAccessibilitySelected(card.isSelected)
+        setAccessibilityExpanded(shown?.disclosure == RowDisclosure.expanded)
+
+        glyphLabel.setAccessibilityElement(true)
+        glyphLabel.setAccessibilityRole(.image)
+        let statusValue = Self.statusAccessibilityValue(for: row)
+        glyphLabel.setAccessibilityLabel("Status: \(statusValue)")
+        glyphLabel.setAccessibilityValue(statusValue)
+        // The row aggregate owns the subject/name; the title is not a second AX
+        // fact beneath it.
+        titleLabel.setAccessibilityElement(false)
+        titleLabel.setAccessibilityValue(nil)
+        branchLabel.setAccessibilityElement(!branchLabel.isHidden && !branchLabel.stringValue.isEmpty)
+        branchLabel.setAccessibilityValue(branchLabel.stringValue)
+        timeLabel.setAccessibilityElement(false)
+        disclosureButton.setAccessibilityElement(!disclosureButton.isHidden)
+        var children: [NSView] = [glyphLabel]
+        for child in [branchLabel, disclosureButton]
+            where child.isAccessibilityElement() && !child.isHidden {
+            children.append(child)
+        }
+        setAccessibilityChildren(children)
     }
 
     func apply(_ row: AgentInboxRow, emphasis: RowEmphasis, indent: Double,
@@ -6700,6 +7226,12 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         card.isRouteActive = interaction.isRouteActive
         card.hasKeyboardFocus = interaction.hasKeyboardFocus
     }
+
+    func setIncreasedContrast(_ enabled: Bool) {
+        card.usesIncreasedContrast = enabled
+    }
+
+    var accessibilityStatusOwner: NSView { glyphLabel }
 
     @discardableResult
     func clickDisclosureForQA() -> Bool {
@@ -6812,6 +7344,7 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
             labels: labels,
             paintedBorderWidth: card.layer.map { Double($0.borderWidth) },
             resolvedFill: card.layer?.backgroundColor,
+            increasedContrast: card.qaUsesIncreasedContrast,
             surfaceRole: card.surfaceRole,
             paintedLines: card.qaPaintedLines,
             isFocusRingVisible: card.qaIsFocusRingVisible,
