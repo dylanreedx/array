@@ -99,6 +99,60 @@ public struct NamingRequest: Codable, Equatable, Sendable {
     }
 }
 
+/// The non-persisted activity facts needed to classify one record at read time.
+/// Lifecycle itself is intentionally absent: callers carry raw record fields plus
+/// these observations into `AgentRecord.lifecycle` for each read.
+public struct AgentLifecycleFacts: Equatable, Sendable {
+    public var attentionIsYours: Bool
+    public var hasLiveRunner: Bool
+    /// Blockers projected from descendants. This is observation input, not a
+    /// persisted lifecycle value; the builder supplies it before deriving the
+    /// parent's lifecycle so the child rollup cannot disagree with settlement.
+    public var descendantBlockers: LifecycleBlockers
+    /// A prompt accepted by the runtime but not yet adopted by a turn. This is
+    /// bounded on both sides of `now` so a peer clock cannot pin a row forever.
+    public var unadoptedPromptAt: Date?
+    public var graceWindow: TimeInterval
+
+    public init(
+        attentionIsYours: Bool = false,
+        hasLiveRunner: Bool = false,
+        descendantBlockers: LifecycleBlockers = .unblocked,
+        unadoptedPromptAt: Date? = nil,
+        graceWindow: TimeInterval = 30
+    ) {
+        self.attentionIsYours = attentionIsYours
+        self.hasLiveRunner = hasLiveRunner
+        self.descendantBlockers = descendantBlockers
+        self.unadoptedPromptAt = unadoptedPromptAt
+        self.graceWindow = max(0, graceWindow)
+    }
+
+    public func hasUnadoptedPrompt(now: Date) -> Bool {
+        guard let unadoptedPromptAt else { return false }
+        let distance = now.timeIntervalSince(unadoptedPromptAt)
+        return distance >= -graceWindow && distance <= graceWindow
+    }
+
+    /// The one blocker set consumed by both lifecycle classification and the
+    /// settle action guard. The bool named `attentionIsYours` is deliberately a
+    /// pending-human-request fact here, never the inbox's unread mark. Descendant
+    /// blockers join through the same union as own blockers before either
+    /// consumer sees the set.
+    public func lifecycleBlockers(now: Date) -> LifecycleBlockers {
+        var blockers = LifecycleBlockers.unblocked
+        if attentionIsYours { blockers.insert(.pendingInput) }
+        if hasLiveRunner { blockers.insert(.sessionRunning) }
+        if hasUnadoptedPrompt(now: now) { blockers.insert(.queuedTurn) }
+        return blockers.includingDescendants([descendantBlockers])
+    }
+
+    /// One blocker list, shared by classification and the settle action guard.
+    public func blocksSettlement(now: Date) -> Bool {
+        lifecycleBlockers(now: now).isBlocking
+    }
+}
+
 public struct AgentRecord: Codable, Equatable, Sendable {
     public static let currentSchemaVersion = 1
     /// Compatibility spelling for callers that need the sentinel beside the
@@ -193,6 +247,41 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// When it left the list. **`archived` ≠ `settled`**: settled stays in the
     /// list, slim and readable; archived is gone from it.
     public var archivedAt: Date?
+
+    /// Derive lifecycle from persisted facts and current observations. No result
+    /// is stored on `AgentRecord`; every reader gets a fresh answer.
+    public func lifecycle(
+        facts: AgentLifecycleFacts = AgentLifecycleFacts(),
+        autoSettleAfter: TimeInterval? = nil,
+        now: Date
+    ) -> InboxLifecycle {
+        InboxLifecycle.resolve(
+            override: settledOverride,
+            blockers: facts.lifecycleBlockers(now: now),
+            settledAt: settledAt,
+            snoozedUntil: snoozedUntil,
+            archivedAt: archivedAt,
+            lastActivityAt: lastActivityAt,
+            autoSettleAfter: autoSettleAfter,
+            now: now
+        )
+    }
+
+    /// The settle action uses the exact same blocker predicate and shared
+    /// lifecycle/action decision as the classifier. The builder folds the
+    /// descendant hold into `facts` before calling this; the view's rollup is a
+    /// structural witness for the same row-level action predicate.
+    public func canSettle(
+        facts: AgentLifecycleFacts = AgentLifecycleFacts(),
+        autoSettleAfter: TimeInterval? = nil,
+        now: Date
+    ) -> Bool {
+        let blocked = facts.blocksSettlement(now: now)
+        return InboxSettlement.canSettle(
+            lifecycle: lifecycle(facts: facts, autoSettleAfter: autoSettleAfter, now: now),
+            blocked: blocked
+        )
+    }
 
     /// Resolve the display title for a derived spawn. This is the only precedence
     /// ladder: explicit name, first prompt, source item, then parent-relative

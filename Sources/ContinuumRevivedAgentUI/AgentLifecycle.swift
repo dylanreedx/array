@@ -385,10 +385,10 @@ extension InboxLifecycle {
     /// `lastActivityAt` outright — the work ended when it went quiet, not when the
     /// sweep noticed.
     ///
-    /// NOTHING CALLS THIS YET. The packet's `## Files` name this file and its
-    /// checks; the writers of these facts are P4.3–P4.6 and the reader is the
-    /// row builder once one of them wires a fact. Same shape as P3.4's
-    /// `sortForInbox`, which landed a run before its list view.
+    /// The production reader is `AgentRecord.lifecycle` in Core, called by the
+    /// row builder on every build; this pure function remains the single precedence
+    /// owner. The direct AgentUI checks keep the full matrix and boundary cases
+    /// visible without introducing a second resolver.
     public static func resolve(
         override: SettledOverride,
         blockers: LifecycleBlockers = .unblocked,

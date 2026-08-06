@@ -33,7 +33,8 @@ func runAgentInboxRowBuilderChecks() {
     runInboxSortDivergesFromBoardOrderCheck()
     runInboxRowSnapshotIsTheOwnerCheck()
     runInboxRowStampedElapsedCheck()
-    print("AgentInboxRowBuilder checks: coverage/identity, refresh stability, headless rows, title source, terminal sessions, elapsed derivation, branch precedence, the approval/input split, the frozen-vs-attention-first sort divergence, P3.3's snapshot-owned state over all 6 operational kinds and the stamped elapsed anchor passed")
+    runInboxLifecycleDerivationCheck()
+    print("AgentInboxRowBuilder checks: coverage/identity, refresh stability, headless rows, title source, terminal sessions, elapsed derivation, branch precedence, the approval/input split, the frozen-vs-attention-first sort divergence, P3.3's snapshot-owned state over all 6 operational kinds, the stamped elapsed anchor, and P6.1 lifecycle/action agreement passed")
 }
 
 // MARK: - Fixture
@@ -283,7 +284,7 @@ private func runInboxRowHeadlessCheck() {
     expect(headless.state == .ready && headless.elapsed == nil,
            "an idle agent is at rest with no duration, got \(headless.state.rawValue)/\(String(describing: headless.elapsed))")
     expect(headless.lifecycle == .active && headless.variant == .card && headless.depth == 0 && headless.attention == .none,
-           "Phase-4 lifecycle and P3.3 attention are not yet derivable, so every row is an active top-level card, got \(headless)")
+           "a fresh neutral record with no blocker or settle window derives an active top-level card, got \(headless)")
 
     // No index at all — the fixture caller, and the path a consumer takes before
     // it has built one. The row still exists and still renders a name.
@@ -927,4 +928,206 @@ private func runInboxRowStampedElapsedCheck() {
     ).first { $0.id == inboxIsolatedAgentId.rawValue }
     expect(unstamped?.elapsed == nil,
            "with an owner reporting no turn in flight the row shows no clock, not the ring's week-old run — got \(String(describing: unstamped?.elapsed))")
+}
+
+// MARK: - P6.1 · lifecycle is derived and action eligibility agrees
+
+/// The builder-facing matrix uses a separate hand-written expectation for the
+/// important production cases. In particular, unread is deliberately paired
+/// with a settled override: it is a mark, not a blocker, so the row must still
+/// reach the slim settled variant.
+private func runInboxLifecycleDerivationCheck() {
+    let threeDays: TimeInterval = 3 * 86_400
+    let settledAt = inboxNow.addingTimeInterval(-600)
+
+    func row(
+        for record: AgentRecord,
+        attention: InboxAttention = .none,
+        facts: AgentLifecycleFacts = AgentLifecycleFacts(),
+        autoSettleAfter: TimeInterval? = nil,
+        activity: [AgentActivityEventDraft] = [],
+        turnSnapshot: AgentTileTurnSnapshot? = nil
+    ) -> AgentInboxRow {
+        let snapshot = inboxSnapshot(
+            agents: [record],
+            activityByAgent: activity.isEmpty ? [:] : [record.id: activity]
+        )
+        let built = AgentInboxRowBuilder.rows(
+            from: snapshot,
+            context: inboxIndex(agents: [record]),
+            attention: [record.id.rawValue: attention],
+            turnSnapshots: turnSnapshot.map { [record.id.rawValue: $0] } ?? [:],
+            records: [record.id.rawValue: record],
+            lifecycleFacts: [record.id.rawValue: facts],
+            autoSettleAfter: autoSettleAfter,
+            now: inboxNow
+        )
+        guard let builtRow = built.first else {
+            fputs("FAIL: P6.1 lifecycle fixture did not build a row\n", stderr)
+            Foundation.exit(1)
+        }
+        return builtRow
+    }
+
+    var settledRecord = inboxAgentRecord(inboxHeadlessAgentId, name: "Filed Reviewer", spawnedAfter: 0)
+    settledRecord.settledOverride = .settled
+    settledRecord.settledAt = settledAt
+    let settledUnread = row(for: settledRecord, attention: .unread)
+    expect(settledUnread.attention == .unread,
+           "the lifecycle witness must retain the finished row's unread mark")
+    expect(settledUnread.lifecycle == .settled(at: settledAt) && settledUnread.variant == .slim,
+           "unread is a mark, not a settlement blocker — expected a slim settled row, got \(settledUnread.lifecycle)/\(settledUnread.variant.rawValue)")
+    expect(!settledUnread.canSettle(),
+           "an already-settled row is not a settle target even when it is unread")
+
+    var stale = settledRecord
+    stale.settledOverride = .neutral
+    stale.settledAt = nil
+    stale.lastActivityAt = inboxNow.addingTimeInterval(-threeDays)
+    let liveBlocker = row(
+        for: stale,
+        facts: AgentLifecycleFacts(hasLiveRunner: true),
+        autoSettleAfter: threeDays)
+    expect(liveBlocker.lifecycle == .active && liveBlocker.settlementBlocked,
+           "a live runner outranks auto-settle and the row carries the same blocker — got \(liveBlocker.lifecycle)/\(liveBlocker.settlementBlocked)")
+    expect(!liveBlocker.canSettle(),
+           "the settle action must refuse the same live-runner blocker the classifier saw")
+
+    let pendingBlocker = row(
+        for: settledRecord,
+        attention: .unread,
+        activity: [inboxDraft(inboxHeadlessAgentId, status: .needsAttention, kind: "needs-attention", secondsAfterStart: -10)])
+    expect(pendingBlocker.lifecycle == .active && pendingBlocker.settlementBlocked,
+           "a pending human request outranks a settled override, including when the row is unread — got \(pendingBlocker.lifecycle)/\(pendingBlocker.settlementBlocked)")
+    expect(!pendingBlocker.canSettle(),
+           "a pending human request is not a settle target")
+
+    // The ring's pending event is only a no-snapshot fallback. Once the supervisor
+    // has an authoritative terminal-ish snapshot, the same stale event remains
+    // timeline evidence but cannot pin the parked record active.
+    let staleRingPending = [
+        inboxDraft(inboxHeadlessAgentId, status: .needsAttention, kind: "needs-attention", secondsAfterStart: -10),
+    ]
+    let noSnapshotPending = row(for: settledRecord, activity: staleRingPending)
+    expect(noSnapshotPending.lifecycle == .active && noSnapshotPending.settlementBlocked,
+           "without a supervisor snapshot, ring pending still blocks a settled override — got \(noSnapshotPending.lifecycle)/\(noSnapshotPending.settlementBlocked)")
+    expect(!noSnapshotPending.canSettle(),
+           "the no-snapshot pending fallback still refuses settle")
+
+    let authoritativeStates: [(String, AgentTileOperationalState)] = [
+        ("ready", .ready),
+        ("failed", .failed(message: "provider")),
+        ("restored", .restored),
+    ]
+    for (name, authoritativeState) in authoritativeStates {
+        let authoritative = row(
+            for: settledRecord,
+            activity: staleRingPending,
+            turnSnapshot: inboxTurnSnapshot(authoritativeState))
+        expect(authoritative.lifecycle == .settled(at: settledAt) && !authoritative.settlementBlocked,
+               "stale ring pending must not pin an authoritative \(name) snapshot active — got \(authoritative.lifecycle)/\(authoritative.settlementBlocked)")
+        expect(!authoritative.canSettle(),
+               "an authoritative \(name) snapshot leaves the already-settled row a no-op")
+    }
+
+    let genuineNeedsAction = row(
+        for: settledRecord,
+        activity: [],
+        turnSnapshot: inboxTurnSnapshot(.needsAction(inboxRequest(.approval))))
+    expect(genuineNeedsAction.state == .approval
+            && genuineNeedsAction.lifecycle == .active
+            && genuineNeedsAction.settlementBlocked,
+           "a genuine supervisor needsAction snapshot still blocks a parked override — got \(genuineNeedsAction.state)/\(genuineNeedsAction.lifecycle)/\(genuineNeedsAction.settlementBlocked)")
+    expect(!genuineNeedsAction.canSettle(),
+           "a genuine supervisor needsAction snapshot is not a settle target")
+
+    // Production builder witness: a parked parent must be promoted back to the
+    // active/card variant before lifecycle derivation when its child is working
+    // or needs you. The parent's attention stays its own read-state axis; the
+    // child hold reaches the shared blocker/action policy instead.
+    let parkedParent = settledRecord
+    var child = inboxAgentRecord(inboxIsolatedAgentId, name: "Child Worker", spawnedAfter: 10)
+    child.parentAgentID = parkedParent.id
+    let childCases: [(String, AgentTileOperationalState)] = [
+        ("working", .working),
+        ("needs-you", .needsAction(inboxRequest(.input))),
+    ]
+    for (name, childState) in childCases {
+        let family = [parkedParent, child]
+        let familyRows = AgentInboxRowBuilder.rows(
+            from: inboxSnapshot(agents: family),
+            context: inboxIndex(agents: family),
+            attention: [parkedParent.id.rawValue: .none, child.id.rawValue: .none],
+            turnSnapshots: [child.id.rawValue: inboxTurnSnapshot(childState)],
+            records: Dictionary(uniqueKeysWithValues: family.map { ($0.id.rawValue, $0) }),
+            now: inboxNow)
+        let sortedFamily = InboxSort.sortForInbox(rows: familyRows)
+        let rollups = InboxSort.rollups(in: sortedFamily)
+        expect(rollups[parkedParent.id.rawValue]?.holdsParentOpen == true,
+               "the production family must expose a \(name) child hold before the parent is classified")
+        guard let parent = familyRows.first(where: { $0.id == parkedParent.id.rawValue }) else {
+            expect(false, "the production family must keep its parked parent row")
+            continue
+        }
+        let rollup = rollups[parent.id]
+        expect(parent.attention == .none,
+               "a \(name) child hold must not be folded into the parent's read attention")
+        expect(parent.lifecycle == .active && parent.variant == .card && parent.settlementBlocked,
+               "a settled override with a \(name) child must derive active/card with one blocker policy — got \(parent.lifecycle)/\(parent.variant.rawValue)/\(parent.settlementBlocked)")
+        expect(!parent.canSettle(rollup: rollup),
+               "classifier/action agreement: a parked parent with a \(name) child is not a settle target")
+        expect(parent.canSettle(rollup: rollup)
+                == InboxSettlement.canSettle(
+                    lifecycle: parent.lifecycle,
+                    blocked: parent.settlementBlocked,
+                    holdsParentOpen: rollup?.holdsParentOpen ?? false),
+               "the production row action must consume the same child-inclusive blocker policy for a \(name) child")
+    }
+
+    // The unadopted-prompt grace window is two-sided. Inside it a peer clock may
+    // be ahead OR behind and still blocks; outside it the stale record reaches
+    // the auto-settle rung instead of being pinned active forever.
+    for offset in [-10.0, 10.0] {
+        let skewed = row(
+            for: stale,
+            facts: AgentLifecycleFacts(
+                unadoptedPromptAt: inboxNow.addingTimeInterval(offset),
+                graceWindow: 30),
+            autoSettleAfter: threeDays)
+        expect(skewed.lifecycle == .active && skewed.settlementBlocked,
+               "an unadopted prompt \(offset < 0 ? "behind" : "ahead") of now inside grace blocks — got \(skewed.lifecycle)/\(skewed.settlementBlocked)")
+    }
+    for offset in [-31.0, 31.0] {
+        let expired = row(
+            for: stale,
+            facts: AgentLifecycleFacts(
+                unadoptedPromptAt: inboxNow.addingTimeInterval(offset),
+                graceWindow: 30),
+            autoSettleAfter: threeDays)
+        expect(expired.lifecycle == .settled(at: stale.lastActivityAt),
+               "a prompt \(offset < 0 ? "behind" : "ahead") outside grace is clock skew, not a permanent blocker — got \(expired.lifecycle)")
+        expect(!expired.settlementBlocked && !expired.canSettle(),
+               "the expired prompt has no blocker, while its settled lifecycle still makes the action a no-op")
+    }
+
+    // The row and record consume the same shared settlement decision over the
+    // matrix's own, blocked, snoozed and auto-settled cases.
+    var pinned = stale
+    pinned.settledOverride = .active
+    var snoozed = stale
+    snoozed.snoozedUntil = inboxNow.addingTimeInterval(3_600)
+    let matrix: [(String, AgentRecord, AgentLifecycleFacts, TimeInterval?)] = [
+        ("fresh neutral", settledRecord, AgentLifecycleFacts(), nil),
+        ("keep-active pin", pinned, AgentLifecycleFacts(), threeDays),
+        ("snoozed", snoozed, AgentLifecycleFacts(), threeDays),
+        ("auto-settled", stale, AgentLifecycleFacts(), threeDays),
+        ("pending", settledRecord, AgentLifecycleFacts(attentionIsYours: true), nil),
+        ("running", stale, AgentLifecycleFacts(hasLiveRunner: true), threeDays),
+    ]
+    for (name, record, facts, window) in matrix {
+        let built = row(for: record, facts: facts, autoSettleAfter: window)
+        let expected = record.canSettle(facts: facts, autoSettleAfter: window, now: inboxNow)
+        expect(built.canSettle() == expected,
+               "classifier/action agreement for \(name): row \(built.canSettle()) vs record \(expected), lifecycle \(built.lifecycle)")
+    }
 }

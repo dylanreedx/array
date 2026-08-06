@@ -371,8 +371,8 @@ public enum InboxAttention: String, CaseIterable, Equatable, Sendable {
 }
 
 /// Settle / snooze / archive (locked decision). P4.1 owns the persisted facts and
-/// P4.2 the derivation; this ticket only names the vocabulary the row carries, and
-/// every row it builds today is `.active`.
+/// P4.2 the derivation; the Core row builder supplies the read-time result and the
+/// row carries it without persisting a second lifecycle value.
 public enum InboxLifecycle: Equatable, Sendable {
     case active
     case snoozed(until: Date)
@@ -412,6 +412,38 @@ public enum RowVariant: String, CaseIterable, Equatable, Sendable {
             return .slim
         case .active, .archived:
             return .card
+        }
+    }
+}
+
+/// The one settlement decision shared by lifecycle classification and the
+/// action surfaces. Core supplies the raw blocker fact, including the child
+/// hold-open projection; the inbox view may pass its rollup again so menu/bulk
+/// eligibility remains explicit without inventing a second settle predicate.
+public enum InboxSettlement {
+    /// Whether a row may be sent to the settle action. A blocker keeps the row
+    /// visible even when an override or auto-settle would otherwise park it;
+    /// settled and archived rows are no-ops. `holdsParentOpen` is the same
+    /// descendant rule that `ChildRollup` exposes to the view.
+    public static func canSettle(
+        lifecycle: InboxLifecycle,
+        blocked: Bool,
+        holdsParentOpen: Bool = false
+    ) -> Bool {
+        guard !blocked, !holdsParentOpen else { return false }
+        switch lifecycle {
+        case .active, .snoozed: return true
+        case .settled, .archived: return false
+        }
+    }
+
+    /// Compatibility inference for rows authored without Core's raw blocker
+    /// facts. Production rows pass the explicit value from `AgentRecord`; this
+    /// fallback preserves the shipped state-only fixture vocabulary.
+    public static func inferredBlocker(for state: InboxState) -> Bool {
+        switch state {
+        case .approval, .input: return true
+        case .working, .failed, .ready: return false
         }
     }
 }
@@ -518,27 +550,24 @@ public struct ChildRollup: Equatable, Sendable {
     ///
     /// WHAT THIS DELIBERATELY CANNOT SEE, from cross-review (codex, gpt-5.5, round 2):
     /// `LifecycleBlockers` has four members and two of them — `.sessionRunning` and
-    /// `.queuedTurn` — are invisible in the five-state vocabulary this counts, so a
-    /// descendant with a queued turn does not hold its parent open here. That is not
-    /// an oversight being deferred, it is the ONLY honest answer available: a row
-    /// carries no blocker facts (P3.1 flattened it to a state), nothing in production
-    /// constructs a `LifecycleBlockers` yet at all (P4.2 landed `resolve` with no
-    /// caller), and inventing the two missing bits from a state would be the exact
-    /// derivation `LifecycleBlockers` documents as lossy.
+    /// `.queuedTurn` — are not expressible in the five-state vocabulary this tally
+    /// counts. P6.1 carries each row's own blocker fact and consumes this existing
+    /// rollup's hold-open result before the parent's lifecycle is derived; the
+    /// rollup still does not synthesize descendant lifecycle facts or call
+    /// `InboxLifecycle.resolve` itself. Core maps its two hold-open tallies into the
+    /// shared blocker set, while the view passes the rollup to the same action guard.
     ///
-    /// AND WHERE IT IS DELIBERATELY STRICTER THAN THE ROW'S OWN RULE, by exactly one
-    /// state: a `working` row CAN be settled on its own account (`InboxBulkAction`
-    /// withholds Settle only from `approval`/`input`), but a `working` DESCENDANT holds
-    /// its parent open. That is the packet's own wording — "not settleable while any
-    /// child is blocked **or running**" — and the asymmetry is the difference between
-    /// the two acts: settling your own running row parks one thing you chose to stop
-    /// watching, while settling a parent collapses a group whose output you have not
-    /// seen yet and cannot see, because the fold is what put it out of sight. An
-    /// attempt to write this as an equivalence with the row rule was caught red by the
-    /// state sweep below, which is why the sweep asserts the rule PER STATE rather than
-    /// as a symmetry: `approval`, `input` and `working` hold a parent open; `ready` and
-    /// `failed` do not. All five are gated, so a blocker producer landing later must
-    /// state where it belongs rather than inherit a guess.
+    /// AND WHERE IT IS DELIBERATELY STRICTER THAN THE ROW'S OWN STATE RULE, by exactly
+    /// one state: a state-only `working` row can be settled on its own account, but a
+    /// `working` DESCENDANT holds its parent open. A production row with an explicit
+    /// live-runner blocker is still refused by its own canonical predicate. The
+    /// descendant rule is the packet's wording — "not settleable while any child is
+    /// blocked **or running**" — and the asymmetry is the difference between the two
+    /// acts: settling your own row is a decision about one agent, while settling a
+    /// parent collapses a group whose output you cannot see. The state sweep below
+    /// pins the existing rollup vocabulary: `approval`, `input` and `working` hold a
+    /// parent open; `ready` and `failed` do not. A future blocker producer must extend
+    /// this tally explicitly rather than inherit a guess from `InboxState`.
     public var holdsParentOpen: Bool { needsYou > 0 || working > 0 }
 
     /// The compact secondary line — `"3 children · 1 needs you"`.
@@ -690,6 +719,11 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// deliberately separate from `state`: it says how well-known the state is,
     /// never invents a sixth `InboxState`.
     public let isUnconfirmed: Bool
+    /// The activity blocker computed by the Core builder, including any child
+    /// hold-open projection. It is carried so the action surface cannot re-derive
+    /// settlement eligibility from a lossy state enum; `canSettle(rollup:)` is the
+    /// one row-level action predicate.
+    public let settlementBlocked: Bool
 
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P2.3-content-derived-row-height.md
     /// Whether the card's upper metadata band has something to draw. These
@@ -792,7 +826,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         variant: RowVariant? = nil,
         createdAt: Date,
         parentId: UUID? = nil,
-        isUnconfirmed: Bool = false
+        isUnconfirmed: Bool = false,
+        settlementBlocked: Bool? = nil
     ) {
         self.id = id
         self.title = title
@@ -814,6 +849,19 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.createdAt = createdAt
         self.parentId = parentId
         self.isUnconfirmed = isUnconfirmed
+        self.settlementBlocked = settlementBlocked ?? InboxSettlement.inferredBlocker(for: state)
+    }
+
+    /// The one action predicate shared by the row menu and bulk bar. The Core
+    /// builder already includes child hold-open in `settlementBlocked`; the
+    /// `InboxSort` rollup is passed at the view boundary as the same structural
+    /// witness, and no caller may replace the blocker with a state-only guess.
+    public func canSettle(rollup: ChildRollup? = nil) -> Bool {
+        InboxSettlement.canSettle(
+            lifecycle: lifecycle,
+            blocked: settlementBlocked,
+            holdsParentOpen: rollup?.holdsParentOpen ?? false
+        )
     }
 
     /// A surface stamps observation knowledge after the Core join. Keeping this
@@ -828,7 +876,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             state: state, attention: attention, lifecycle: lifecycle, model: model, role: role,
             branch: branch, isIsolated: isIsolated,
             elapsed: frozenElapsed ?? elapsed, depth: depth,
-            variant: variant, createdAt: createdAt, parentId: parentId, isUnconfirmed: value)
+            variant: variant, createdAt: createdAt, parentId: parentId,
+            isUnconfirmed: value, settlementBlocked: settlementBlocked)
     }
 
     /// The status words the row may paint. Unconfirmed is a confidence modifier,

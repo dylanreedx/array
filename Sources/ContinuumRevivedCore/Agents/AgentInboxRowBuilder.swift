@@ -95,23 +95,48 @@ public enum AgentInboxRowBuilder {
         context: [UUID: AgentRowContext] = [:],
         attention: [UUID: InboxAttention] = [:],
         turnSnapshots: [UUID: AgentTileTurnSnapshot] = [:],
+        records: [UUID: AgentRecord] = [:],
+        lifecycleFacts: [UUID: AgentLifecycleFacts] = [:],
+        autoSettleAfter: TimeInterval? = nil,
         now: Date
     ) -> [AgentInboxRow] {
-        AgentsBoardProjection.rows(from: snapshot, context: context)
-            .map {
-                row(
-                    from: $0,
-                    attention: attention[$0.agentId] ?? .none,
-                    turnSnapshot: turnSnapshots[$0.agentId],
-                    now: now
-                )
-            }
+        let boardRows = AgentsBoardProjection.rows(from: snapshot, context: context)
+        // Child rollups must be known before a parked parent's lifecycle is
+        // resolved. Build an all-active provisional list solely to let the
+        // existing `ChildRollup`/`InboxSort` fold see the parent links; using the
+        // final lifecycle here would move a settled parent into history before
+        // its descendant could hold it open.
+        let childBlockers = descendantBlockers(
+            in: boardRows,
+            attention: attention,
+            turnSnapshots: turnSnapshots,
+            lifecycleFacts: lifecycleFacts,
+            now: now
+        )
+        return boardRows.map { boardRow in
+            var facts = lifecycleFacts[boardRow.agentId] ?? AgentLifecycleFacts()
+            facts.descendantBlockers = facts.descendantBlockers.includingDescendants([
+                childBlockers[boardRow.agentId] ?? .unblocked
+            ])
+            return row(
+                from: boardRow,
+                attention: attention[boardRow.agentId] ?? .none,
+                turnSnapshot: turnSnapshots[boardRow.agentId],
+                record: records[boardRow.agentId],
+                lifecycleFacts: facts,
+                autoSettleAfter: autoSettleAfter,
+                now: now
+            )
+        }
     }
 
     public static func row(
         from boardRow: AgentsBoardRow,
         attention: InboxAttention = .none,
         turnSnapshot: AgentTileTurnSnapshot? = nil,
+        record: AgentRecord? = nil,
+        lifecycleFacts: AgentLifecycleFacts = AgentLifecycleFacts(),
+        autoSettleAfter: TimeInterval? = nil,
         now: Date
     ) -> AgentInboxRow {
         let context = boardRow.context
@@ -122,16 +147,37 @@ public enum AgentInboxRowBuilder {
         //
         // P3.2 (queue 90): the fallback's status alone cannot say WHICH of the two
         // things a `needsAttention` agent wants, so the ring's pending request still
-        // outranks it there. Both facts come from `AgentsBoardProjection`, which owns
-        // the ring; this join still derives nothing of its own.
+        // outranks it there. Once a supervisor snapshot exists, the ring is timeline
+        // evidence only and cannot supply a second status/blocker opinion.
+        let pending = turnSnapshot == nil
+            ? AgentsBoardProjection.pendingRequest(in: boardRow.recent)
+            : nil
         let state = turnSnapshot.map(InboxState.state(forSnapshot:))
-            ?? AgentInboxRow.state(
-                for: boardRow.status,
-                pending: AgentsBoardProjection.pendingRequest(in: boardRow.recent))
-        // P4 populates these two; until it does, every agent is active and no row
-        // is slim (`RowVariant.forLifecycle` is what keeps those two consistent —
-        // a caller never picks a variant).
-        let lifecycle = InboxLifecycle.active
+            ?? AgentInboxRow.state(for: boardRow.status, pending: pending)
+        // Lifecycle is a read-time projection of raw record fields. Compose the
+        // one blocker list here from live observations; it is then consumed by
+        // `AgentRecord.lifecycle` and `AgentRecord.canSettle`, never persisted.
+        var observedFacts = lifecycleFacts
+        // Unread is a read-state mark, not an activity blocker. Only a pending
+        // human request belongs in this fact; otherwise a finished-but-unseen
+        // row can never be settled. A supervisor snapshot's needsAction state is
+        // the authoritative equivalent and is handled below.
+        observedFacts.attentionIsYours = observedFacts.attentionIsYours
+            || pending != nil
+        if let turnSnapshot {
+            switch turnSnapshot.state {
+            case .working, .queued: observedFacts.hasLiveRunner = true
+            case .needsAction: observedFacts.attentionIsYours = true
+            case .ready, .failed, .restored: break
+            }
+        }
+        // Terminal sessions and legacy callers without a record retain the active
+        // default; they have no persisted lifecycle facts to reinterpret here.
+        let lifecycle = record?.lifecycle(
+            facts: observedFacts,
+            autoSettleAfter: autoSettleAfter,
+            now: now
+        ) ?? .active
         return AgentInboxRow(
             id: boardRow.agentId,
             title: title(for: context),
@@ -168,8 +214,39 @@ public enum AgentInboxRowBuilder {
             // terminal descriptor carry one), so this fallback is for a caller that
             // built rows with no context at all.
             createdAt: context?.createdAt ?? .distantPast,
-            parentId: context?.parentId
+            parentId: context?.parentId,
+            settlementBlocked: observedFacts.blocksSettlement(now: now)
         )
+    }
+
+    /// Translate the existing child rollup's two hold-open states into the same
+    /// blocker set the parent lifecycle and settle action consume. Failed and
+    /// ready descendants remain visible in the rollup but do not block.
+    private static func descendantBlockers(
+        in boardRows: [AgentsBoardRow],
+        attention: [UUID: InboxAttention],
+        turnSnapshots: [UUID: AgentTileTurnSnapshot],
+        lifecycleFacts: [UUID: AgentLifecycleFacts],
+        now: Date
+    ) -> [UUID: LifecycleBlockers] {
+        let provisionalRows = boardRows.map { boardRow in
+            row(
+                from: boardRow,
+                attention: attention[boardRow.agentId] ?? .none,
+                turnSnapshot: turnSnapshots[boardRow.agentId],
+                lifecycleFacts: lifecycleFacts[boardRow.agentId] ?? AgentLifecycleFacts(),
+                now: now
+            )
+        }
+        let sorted = InboxSort.sortForInbox(rows: provisionalRows)
+        let rollups = InboxSort.rollups(in: sorted)
+        return rollups.reduce(into: [UUID: LifecycleBlockers]()) { result, entry in
+            guard entry.value.holdsParentOpen else { return }
+            var blockers = LifecycleBlockers.unblocked
+            if entry.value.needsYou > 0 { blockers.insert(.pendingInput) }
+            if entry.value.working > 0 { blockers.insert(.sessionRunning) }
+            result[entry.key] = blockers
+        }
     }
 
     /// The agent's name, preferring the one the agent owns.

@@ -4290,12 +4290,12 @@ enum InboxBulkAction: String, CaseIterable, Equatable {
     ///
     /// The two rules the packet states outright:
     ///
-    ///   * **A blocked row cannot be settled.** `approval` and `input` are the agent
-    ///     waiting on YOU, and the locked decision is that blockers outrank an explicit
-    ///     settle (`_RUNBOOK.md`) — settling one would take the row out of the
-    ///     attention flow while the thing it is asking for is still unanswered. It can
-    ///     still be SNOOZED: deferring a request is a decision, and P4.6 exists exactly
-    ///     for the snoozed agent that raises its hand again.
+    ///   * **A blocked row cannot be settled.** The row's Core-built blocker fact covers
+    ///     a pending human request, a live runner and an unadopted prompt grace window;
+    ///     blockers outrank an explicit settle (`_RUNBOOK.md`). Settling one would take
+    ///     the row out of the attention flow while work or a request is still live. It
+    ///     can still be SNOOZED: deferring a request is a decision, and P4.6 exists
+    ///     exactly for the snoozed agent that raises its hand again.
     ///   * **A running agent cannot be archived or deleted.** Both are destructive of
     ///     the row's place in the list, and `working` means the agent has the next move.
     ///
@@ -4315,17 +4315,14 @@ enum InboxBulkAction: String, CaseIterable, Equatable {
     /// roll up (a fixture, one row on its own) gets precisely the rule that shipped
     /// before this ticket.
     ///
-    /// Only `.settle` consults it. Archive and delete are refused for a RUNNING row,
-    /// and extending those to descendants is P2D.6's question about what a fan-out
-    /// means, not this packet's; the derived lifecycle already keeps a blocked child's
-    /// parent off the shelf without any action rule (`InboxLifecycle.resolve` puts
-    /// blockers above the snooze rung).
+    /// Only `.settle` consults the row's canonical settlement predicate. Archive and
+    /// delete are refused for a RUNNING row, and extending those to descendants is
+    /// P2D.6's question about what a fan-out means, not this packet's. The row carries
+    /// the Core blocker decision; this function only adds the derived child rollup.
     func isAvailable(for row: AgentInboxRow, rollups: [UUID: ChildRollup] = [:]) -> Bool {
         switch self {
         case .settle:
-            return !InboxBulkAction.isBlocked(row) && !InboxBulkAction.isSettled(row)
-                && !InboxBulkAction.isArchived(row)
-                && !(rollups[row.id]?.holdsParentOpen ?? false)
+            return row.canSettle(rollup: rollups[row.id])
         case .snooze:
             return !InboxBulkAction.isArchived(row)
         case .markUnread:
@@ -4379,13 +4376,6 @@ enum InboxBulkAction: String, CaseIterable, Equatable {
     /// below) can ask the same questions: the context menu's enablement is specified as
     /// "the same capability rules as bulk", and sharing the predicates is the only way
     /// that holds by construction instead of by two copies agreeing today.
-    fileprivate static func isBlocked(_ row: AgentInboxRow) -> Bool {
-        switch row.state {
-        case .approval, .input: return true
-        case .working, .ready, .failed: return false
-        }
-    }
-
     fileprivate static func isRunning(_ row: AgentInboxRow) -> Bool { row.state == .working }
 
     fileprivate static func isSettled(_ row: AgentInboxRow) -> Bool {
@@ -4600,7 +4590,13 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         // action a compile error here.
         case .openInTile: return "cannot be opened."
         case .settle:
-            if InboxBulkAction.isBlocked(row) { return "is waiting on you." }
+            if row.settlementBlocked {
+                switch row.state {
+                case .approval, .input: return "is waiting on you."
+                case .working: return "is still working."
+                case .ready, .failed: return "has activity in flight."
+                }
+            }
             // P2D.5: named against the GROUP, and after the row's own blocker, because
             // "Ada is waiting on you" is the truer sentence when both hold. The two
             // halves are told apart — a reader deciding whether to wait or to answer
@@ -6069,18 +6065,15 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     ///     from a parent while a descendant is blocked or running, so the action that
     ///     would collapse the row is not offered while there is something under it to
     ///     hide. Asserted in section A4b of `runAgentInboxChecks`.
-    ///   * BY DERIVATION — `LifecycleBlockers.includingDescendants` folds a
-    ///     descendant's blockers into the parent's before `InboxLifecycle.resolve` sees
-    ///     them, landing them on the rung that outranks both "I said done" and a
-    ///     snooze, so the resolved lifecycle is `.active` and
-    ///     `RowVariant.forLifecycle(.active)` is a CARD. Asserted directly in
-    ///     `runParentBlockedByDescendantCheck`.
+    ///   * BY DERIVATION — the production builder now derives the row's own lifecycle
+    ///     from its record and read-time blocker facts. `settlementBlocked` keeps an
+    ///     own blocked row active before the override rungs, while the child rollup
+    ///     remains the explicit action guard for a parent. The resolver is deliberately
+    ///     untouched in P6.1; the pure `includingDescendants` fixture still documents
+    ///     the separate descendant precedence rule.
     ///
-    /// The honest limit, since a comment that overstates is worse than none: NOTHING
-    /// PRODUCES A PARKED ROW YET. `AgentInboxRowBuilder` still hands every row
-    /// `.active` (P4.2 recorded the same gap — the writers of the stored facts are
-    /// P4.3–P4.6), so today the second path is a proof about a function rather than
-    /// about a rendering. When a writer lands, that is the check to look at.
+    /// Parked rows are now reachable through the shipped builder (explicit records or
+    /// the auto-settle window), so this cell's slim path is no longer fixture-only.
     private func updateOptionalSlotConstraints() {
         let drawsBranch = !branchLabel.isHidden && !branchLabel.stringValue.isEmpty
         branchMinimumWidth?.isActive = drawsBranch
