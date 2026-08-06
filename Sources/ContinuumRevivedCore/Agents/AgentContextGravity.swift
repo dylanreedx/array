@@ -159,11 +159,14 @@ public struct AgentContextGravityInput: Equatable, Sendable {
 public enum AgentContextGravityEngine: Sendable {
     public static func proposeScope(
         _ input: AgentContextGravityInput,
-        directoryExists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }
+        directoryExists: (URL) -> Bool = { candidate in
+            var isDirectory: ObjCBool = false
+            return FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDirectory) && isDirectory.boolValue
+        }
     ) -> AgentScopeBinding? {
         if let containing = input.projectZones
             .filter({ $0.frame.contains(input.newAgentFrame.center) })
-            .sorted(by: { $0.frame.distance(to: input.newAgentFrame) < $1.frame.distance(to: input.newAgentFrame) })
+            .sorted(by: { compareSignals($0, $1, relativeTo: input.newAgentFrame) })
             .first {
             return binding(
                 from: containing,
@@ -182,8 +185,8 @@ public enum AgentContextGravityEngine: Sendable {
                 forcedRelativeDirectory: agreed.relativeDirectory)
         }
 
-        if let nearest = input.managedAgents.min(by: {
-            $0.frame.distance(to: input.newAgentFrame) < $1.frame.distance(to: input.newAgentFrame)
+        if let nearest = input.managedAgents.min(by: { lhs, rhs in
+            compareSignals(lhs, rhs, relativeTo: input.newAgentFrame)
         }) {
             return binding(
                 from: nearest,
@@ -212,7 +215,10 @@ public enum AgentContextGravityEngine: Sendable {
         current: AgentScopeBinding,
         lifecycle: AgentScopeLifecycle,
         input: AgentContextGravityInput,
-        directoryExists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }
+        directoryExists: (URL) -> Bool = { candidate in
+            var isDirectory: ObjCBool = false
+            return FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDirectory) && isDirectory.boolValue
+        }
     ) -> AgentScopeBinding {
         guard current.state == .provisional, lifecycle == .zeroTurnUntouched else { return current }
         return proposeScope(input, directoryExists: directoryExists) ?? current
@@ -252,7 +258,7 @@ public enum AgentContextGravityEngine: Sendable {
         let relative = forcedRelativeDirectory ?? (allowSingleRelativeDirectory ? signal.relativeDirectory : nil)
         if let relative {
             let candidate = normalizedCheckout.appendingPathComponent(relative, isDirectory: true)
-            if directoryExists(candidate) {
+            if directoryExists(candidate), isDirectoryWithinResolvedCheckout(candidate, checkoutRoot: normalizedCheckout) {
                 return AgentScopeBinding(
                     home: home,
                     whereDirectory: candidate,
@@ -279,10 +285,13 @@ public enum AgentContextGravityEngine: Sendable {
     ) -> (signal: AgentScopeSignal, relativeDirectory: String?)? {
         let grouped = Dictionary(grouping: signals, by: projectKey)
         let candidates = grouped.values.filter { $0.count >= 2 }
-        guard let group = candidates.max(by: { lhs, rhs in
-            if lhs.count != rhs.count { return lhs.count < rhs.count }
-            return nearestDistance(lhs, relativeTo: newAgentFrame) > nearestDistance(rhs, relativeTo: newAgentFrame)
-        }) else { return nil }
+        guard let group = candidates.sorted(by: { lhs, rhs in
+            if lhs.count != rhs.count { return lhs.count > rhs.count }
+            let lhsNearest = nearestDistance(lhs, relativeTo: newAgentFrame)
+            let rhsNearest = nearestDistance(rhs, relativeTo: newAgentFrame)
+            if lhsNearest != rhsNearest { return lhsNearest < rhsNearest }
+            return projectKey(lhs[0]) < projectKey(rhs[0])
+        }).first else { return nil }
 
         let relativeCounts = Dictionary(grouping: group.compactMap(\.relativeDirectory), by: { $0 })
         let agreedRelative = relativeCounts
@@ -293,7 +302,7 @@ public enum AgentContextGravityEngine: Sendable {
             }
             .first?.key
         let representative = group.min(by: { lhs, rhs in
-            lhs.frame.distance(to: newAgentFrame) < rhs.frame.distance(to: newAgentFrame)
+            compareSignals(lhs, rhs, relativeTo: newAgentFrame)
         }) ?? group[0]
         return (representative, agreedRelative)
     }
@@ -304,7 +313,42 @@ public enum AgentContextGravityEngine: Sendable {
         return "checkout:\(signal.home.checkoutRoot.path)"
     }
 
+    private static func compareSignals(_ lhs: AgentScopeSignal, _ rhs: AgentScopeSignal, relativeTo newAgentFrame: AgentWorldRect) -> Bool {
+        let lhsDistance = lhs.frame.distance(to: newAgentFrame)
+        let rhsDistance = rhs.frame.distance(to: newAgentFrame)
+        if lhsDistance != rhsDistance { return lhsDistance < rhsDistance }
+        return stableSignalKey(lhs) < stableSignalKey(rhs)
+    }
+
+    private static func stableSignalKey(_ signal: AgentScopeSignal) -> String {
+        [
+            projectKey(signal),
+            provenanceKey(signal.provenance),
+            signal.relativeDirectory ?? ""
+        ].joined(separator: "|")
+    }
+
+    private static func provenanceKey(_ provenance: AgentScopeSignalProvenance) -> String {
+        switch provenance {
+        case .projectZone(let zoneId): return "projectZone:\(zoneId)"
+        case .managedAgent(let agentId): return "managedAgent:\(agentId)"
+        case .terminal(let entityId): return "terminal:\(entityId)"
+        case .fileTree(let entityId): return "fileTree:\(entityId)"
+        case .workspaceDefault(let workspaceId): return "workspaceDefault:\(workspaceId)"
+        }
+    }
+
     private static func nearestDistance(_ signals: [AgentScopeSignal], relativeTo newAgentFrame: AgentWorldRect) -> Double {
         signals.map { $0.frame.distance(to: newAgentFrame) }.min() ?? .infinity
+    }
+
+    private static func isDirectoryWithinResolvedCheckout(_ candidate: URL, checkoutRoot: URL?) -> Bool {
+        guard candidate.isFileURL else { return false }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDirectory), isDirectory.boolValue else { return false }
+        guard let checkoutRoot else { return true }
+        let resolvedCandidate = candidate.resolvingSymlinksInPath().standardizedFileURL.path
+        let resolvedCheckout = checkoutRoot.resolvingSymlinksInPath().standardizedFileURL.path
+        return resolvedCandidate == resolvedCheckout || resolvedCandidate.hasPrefix(resolvedCheckout + "/")
     }
 }
