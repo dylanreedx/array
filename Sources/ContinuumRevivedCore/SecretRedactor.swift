@@ -9,7 +9,7 @@ public enum SecretRedactor {
 
         redacted = replace(redacted, pattern: #"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"#, template: "$1[REDACTED]")
         redacted = replace(redacted, pattern: #"(?i)(authorization\s*:\s*bearer\s+)[A-Za-z0-9._~+/=-]+"#, template: "$1[REDACTED]")
-        redacted = replace(redacted, pattern: #"(?i)(password|passwd|pwd|secret|token|api[_-]?key|authorization)(\s*[=:]\s*)([^\s\"'&,}]+)"#, template: "$1$2[REDACTED]")
+        redacted = replace(redacted, pattern: #"(?i)(password|passwd|pwd|secret|token|api[_-]?key|authorization|auth|credential|credentials|cookie|session|signing[_-]?key|signature|private[_-]?key|access[_-]?key|refresh[_-]?key|client[_-]?secret|ssh[_-]?key|jwt)(\s*[=:]\s*)([^\s\"'&,}]+)"#, template: "$1$2[REDACTED]")
         redacted = replace(redacted, pattern: #"(?i)(document\.querySelector\([^\n]+\)\.value\s*=\s*)['\"][^'\"]+['\"]"#, template: "$1'[REDACTED]'")
         redacted = replace(redacted, pattern: #"([?&][^=&#]+)=([^&#]*)"#, template: "$1=[REDACTED]")
         return redacted
