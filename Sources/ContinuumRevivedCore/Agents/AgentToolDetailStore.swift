@@ -174,6 +174,10 @@ public struct AgentToolDetailRecord: Equatable, Sendable {
     var latestEndExplicitFingerprints: Set<String>
     var latestStartTimestamp: Date?
     var latestEndTimestamp: Date?
+    // Equal/missing provider timestamps use these canonical payload keys. The
+    // lexicographically larger key wins; identical keys are idempotent.
+    var latestStartTieKey: String?
+    var latestEndTieKey: String?
 
     public init(
         providerItemID: AgentToolDetailID,
@@ -189,7 +193,9 @@ public struct AgentToolDetailRecord: Equatable, Sendable {
         sensitiveStartFingerprints: Set<String> = [],
         latestEndExplicitFingerprints: Set<String> = [],
         latestStartTimestamp: Date? = nil,
-        latestEndTimestamp: Date? = nil
+        latestEndTimestamp: Date? = nil,
+        latestStartTieKey: String? = nil,
+        latestEndTieKey: String? = nil
     ) {
         self.providerItemID = providerItemID
         self.toolName = toolName
@@ -205,6 +211,8 @@ public struct AgentToolDetailRecord: Equatable, Sendable {
         self.latestEndExplicitFingerprints = latestEndExplicitFingerprints
         self.latestStartTimestamp = latestStartTimestamp
         self.latestEndTimestamp = latestEndTimestamp
+        self.latestStartTieKey = latestStartTieKey
+        self.latestEndTieKey = latestEndTieKey
     }
 
     public var duration: TimeInterval? {
@@ -217,9 +225,17 @@ public struct AgentToolDetailSanitizer: Sendable {
     public static let redactionUnavailableMarker = "[redaction unavailable: output omitted]"
 
     public var limits: AgentToolDetailLimits
+    // This key is generated when the sanitizer (and therefore its owning
+    // store) is created. It is intentionally not Codable or persisted: secret
+    // equality is useful only while associating this host-local lifecycle.
+    private let fingerprintKey: SymmetricKey
 
-    public init(limits: AgentToolDetailLimits = AgentToolDetailLimits()) {
+    public init(
+        limits: AgentToolDetailLimits = AgentToolDetailLimits(),
+        fingerprintKey: SymmetricKey = SymmetricKey(size: .bits256)
+    ) {
         self.limits = limits
+        self.fingerprintKey = fingerprintKey
     }
 
     func sanitizeToolName(_ raw: String, explicitSecrets: [String]) -> String {
@@ -258,11 +274,11 @@ public struct AgentToolDetailSanitizer: Sendable {
     }
 
     func sensitiveFingerprints(in fields: [AgentToolDetailField], explicitSecrets: [String]) -> Set<String> {
-        Set((explicitSecrets + Self.sensitiveValues(in: fields)).compactMap(Self.fingerprint))
+        Set((explicitSecrets + Self.sensitiveValues(in: fields)).compactMap { fingerprint($0) })
     }
 
     func explicitFingerprints(_ explicitSecrets: [String]) -> Set<String> {
-        Set(explicitSecrets.compactMap(Self.fingerprint))
+        Set(explicitSecrets.compactMap { fingerprint($0) })
     }
 
     func sanitizeOutput(
@@ -303,6 +319,8 @@ public struct AgentToolDetailSanitizer: Sendable {
         var result: [URL] = []
         var seen = Set<String>()
         for file in existing + files {
+            // Do not retain a made-up URL containing a redaction marker. A
+            // path is useful only when it is still a reliable path.
             guard let sanitized = Self.sanitizedFileURL(file, explicitSecrets: explicitSecrets) else { continue }
             let path = sanitized.path
             guard seen.insert(path).inserted else { continue }
@@ -310,6 +328,43 @@ public struct AgentToolDetailSanitizer: Sendable {
             if result.count >= limits.maxAffectedFiles { break }
         }
         return result
+    }
+
+    /// Stable, non-secret event keys used only to break same-ID timestamp ties.
+    /// All text is sanitized first; explicit secret equality is represented by
+    /// this store's ephemeral HMAC fingerprints rather than the secret itself.
+    func stableStartTieKey(
+        toolName: String,
+        arguments: [AgentToolDetailArgument],
+        affectedFiles: [URL],
+        explicitFingerprints: Set<String>
+    ) -> String {
+        stableKey([
+            toolName,
+            arguments.map { "\($0.key)=\($0.value.text):\($0.sensitiveKeyFiltered)" }.joined(separator: "\u{1f}"),
+            affectedFiles.map(\.absoluteString).joined(separator: "\u{1f}"),
+            explicitFingerprints.sorted().joined(separator: "\u{1f}")
+        ])
+    }
+
+    func stableEndTieKey(
+        output: AgentToolDetailBoundedText?,
+        status: AgentItemStatus,
+        exitCode: Int?,
+        affectedFiles: [URL],
+        explicitFingerprints: Set<String>
+    ) -> String {
+        stableKey([
+            output?.text ?? "",
+            status.rawValue,
+            exitCode.map(String.init) ?? "",
+            affectedFiles.map(\.absoluteString).joined(separator: "\u{1f}"),
+            explicitFingerprints.sorted().joined(separator: "\u{1f}")
+        ])
+    }
+
+    private func stableKey(_ parts: [String]) -> String {
+        parts.map { "\($0.utf8.count):\($0)" }.joined(separator: "|")
     }
 
     private func boundText(_ text: String, maxBytes: Int, maxLines: Int, redacted: Bool) -> AgentToolDetailBoundedText {
@@ -358,24 +413,28 @@ public struct AgentToolDetailSanitizer: Sendable {
         return sensitiveFragments.contains { normalized.contains($0) }
     }
 
-    private static func fingerprint(_ value: String) -> String? {
+    private func fingerprint(_ value: String) -> String? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        var data = Data("AgentToolDetailStore.secret.v1\0".utf8)
-        data.append(Data(trimmed.utf8))
-        let digest = SHA256.hash(data: data)
+        let digest = HMAC<SHA256>.authenticationCode(for: Data(trimmed.utf8), using: fingerprintKey)
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     private static func sanitizedFileURL(_ file: URL, explicitSecrets: [String]) -> URL? {
         guard file.isFileURL else { return nil }
-        var path = file.standardizedFileURL.path
-        path = SecretRedactor.redact(path, explicitSecrets: explicitSecrets)
+        let absolute = file.absoluteString
+        let redactedAbsolute = SecretRedactor.redact(absolute, explicitSecrets: explicitSecrets)
+        // Query credentials, URL userinfo, and explicit secret substrings make
+        // the source path unreliable. Omit it rather than storing a fabricated
+        // `file:///…/[REDACTED]` path.
+        guard redactedAbsolute == absolute else { return nil }
+        let standardized = file.standardizedFileURL
+        let path = standardized.path
         guard !path.isEmpty,
               path.utf8.count <= 4_096,
               !path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
         else { return nil }
-        return URL(fileURLWithPath: path).standardizedFileURL
+        return standardized
     }
 
     private static let truncationMarker = "[truncated]"
@@ -428,6 +487,7 @@ public actor AgentToolDetailStore {
     private let clock: @Sendable () -> Date
     private let timeToLive: TimeInterval
     private let sanitizer: AgentToolDetailSanitizer
+    private var expiryTask: Task<Void, Never>?
 
     public init(
         clock: @escaping @Sendable () -> Date = { Date() },
@@ -439,57 +499,100 @@ public actor AgentToolDetailStore {
         self.sanitizer = AgentToolDetailSanitizer(limits: limits)
     }
 
+    /// Stop the local reaper when its owning session is torn down. The weak
+    /// capture in the task also makes store deallocation cancellation-safe.
+    public func shutdown() {
+        expiryTask?.cancel()
+        expiryTask = nil
+    }
+
     @discardableResult
     public func recordStart(_ start: AgentToolDetailStart) -> AgentToolDetailRecord {
         let observedAt = clock()
-        let eventTimestamp = start.startedAt ?? observedAt
+        // A zero-TTL store has terminal cleanup semantics: a new event never
+        // resurrects an older record, even if the background task has not run.
+        expireLocked(at: observedAt)
+        startExpiryTaskIfNeeded()
+        let sanitizedToolName = sanitizer.sanitizeToolName(start.toolName, explicitSecrets: start.explicitSecrets)
+        let sanitizedArguments = sanitizer.sanitizeArguments(start.arguments, explicitSecrets: start.explicitSecrets)
+        let sanitizedFiles = sanitizer.sanitizeFiles(start.affectedFiles, existing: [], explicitSecrets: start.explicitSecrets)
+        let sensitiveFingerprints = sanitizer.sensitiveFingerprints(in: start.arguments, explicitSecrets: start.explicitSecrets)
+        let tieKey = sanitizer.stableStartTieKey(
+            toolName: sanitizedToolName,
+            arguments: sanitizedArguments,
+            affectedFiles: sanitizedFiles,
+            explicitFingerprints: sensitiveFingerprints
+        )
         let existing = details[start.providerItemID]
         var record = existing ?? AgentToolDetailRecord(providerItemID: start.providerItemID, updatedAt: observedAt)
-        let shouldApplyStart = record.latestStartTimestamp.map { eventTimestamp > $0 } ?? true
+        let shouldApplyStart = isNewer(
+            timestamp: start.startedAt,
+            tieKey: tieKey,
+            than: record.latestStartTimestamp,
+            existingTieKey: record.latestStartTieKey
+        )
         if shouldApplyStart {
-            record.toolName = sanitizer.sanitizeToolName(start.toolName, explicitSecrets: start.explicitSecrets)
-            record.arguments = sanitizer.sanitizeArguments(start.arguments, explicitSecrets: start.explicitSecrets)
-            record.startedAt = eventTimestamp
-            record.latestStartTimestamp = eventTimestamp
-            record.sensitiveStartFingerprints = sanitizer.sensitiveFingerprints(in: start.arguments, explicitSecrets: start.explicitSecrets)
+            record.toolName = sanitizedToolName
+            record.arguments = sanitizedArguments
+            // Missing provider timestamps remain missing. Using arrival time
+            // here would make equal/absent timestamp races nondeterministic.
+            record.startedAt = start.startedAt
+            record.latestStartTimestamp = start.startedAt
+            record.latestStartTieKey = tieKey
+            record.sensitiveStartFingerprints = sensitiveFingerprints
             if record.output != nil,
                !record.sensitiveStartFingerprints.isSubset(of: record.latestEndExplicitFingerprints) {
                 record.output = sanitizer.redactionUnavailableOutput()
             }
-        } else if record.startedAt == nil {
-            record.startedAt = eventTimestamp
         }
         record.updatedAt = observedAt
         record.affectedFiles = sanitizer.sanitizeFiles(start.affectedFiles, existing: record.affectedFiles, explicitSecrets: start.explicitSecrets)
         details[start.providerItemID] = record
+        if timeToLive == 0 { expireLocked(at: observedAt) }
         return record
     }
 
     @discardableResult
     public func recordEnd(_ end: AgentToolDetailEnd) -> AgentToolDetailRecord {
         let observedAt = clock()
-        let eventTimestamp = end.endedAt ?? observedAt
+        expireLocked(at: observedAt)
+        startExpiryTaskIfNeeded()
+        let explicitFingerprints = sanitizer.explicitFingerprints(end.explicitSecrets)
+        let sanitizedOutput = sanitizer.sanitizeOutput(
+            end.output,
+            explicitSecrets: end.explicitSecrets,
+            requiredStartFingerprints: details[end.providerItemID]?.sensitiveStartFingerprints ?? [],
+            associatedArguments: details[end.providerItemID]?.arguments ?? []
+        )
+        let sanitizedFiles = sanitizer.sanitizeFiles(end.affectedFiles, existing: [], explicitSecrets: end.explicitSecrets)
+        let tieKey = sanitizer.stableEndTieKey(
+            output: sanitizedOutput,
+            status: end.status,
+            exitCode: end.exitCode,
+            affectedFiles: sanitizedFiles,
+            explicitFingerprints: explicitFingerprints
+        )
         let existing = details[end.providerItemID]
         var record = existing ?? AgentToolDetailRecord(providerItemID: end.providerItemID, updatedAt: observedAt)
-        let shouldApplyEnd = record.latestEndTimestamp.map { eventTimestamp > $0 } ?? true
+        let shouldApplyEnd = isNewer(
+            timestamp: end.endedAt,
+            tieKey: tieKey,
+            than: record.latestEndTimestamp,
+            existingTieKey: record.latestEndTieKey
+        )
         if shouldApplyEnd {
-            record.output = sanitizer.sanitizeOutput(
-                end.output,
-                explicitSecrets: end.explicitSecrets,
-                requiredStartFingerprints: record.sensitiveStartFingerprints,
-                associatedArguments: record.arguments
-            )
+            record.output = sanitizedOutput
             record.status = end.status
             record.exitCode = end.exitCode
-            record.endedAt = eventTimestamp
-            record.latestEndTimestamp = eventTimestamp
-            record.latestEndExplicitFingerprints = sanitizer.explicitFingerprints(end.explicitSecrets)
-        } else if record.endedAt == nil {
-            record.endedAt = eventTimestamp
+            record.endedAt = end.endedAt
+            record.latestEndTimestamp = end.endedAt
+            record.latestEndTieKey = tieKey
+            record.latestEndExplicitFingerprints = explicitFingerprints
         }
         record.updatedAt = observedAt
         record.affectedFiles = sanitizer.sanitizeFiles(end.affectedFiles, existing: record.affectedFiles, explicitSecrets: end.explicitSecrets)
         details[end.providerItemID] = record
+        if timeToLive == 0 { expireLocked(at: observedAt) }
         return record
     }
 
@@ -511,11 +614,53 @@ public actor AgentToolDetailStore {
         expireLocked(at: clock())
     }
 
+    private func isNewer(timestamp: Date?, tieKey: String, than existingTimestamp: Date?, existingTieKey: String?) -> Bool {
+        switch (timestamp, existingTimestamp) {
+        case let (lhs?, rhs?):
+            if lhs != rhs { return lhs > rhs }
+        case (_?, nil):
+            return true
+        case (nil, _?):
+            return false
+        case (nil, nil):
+            break
+        }
+        // Explicit tie policy: canonical sanitized payload keys are compared
+        // lexicographically, and equal keys are idempotent.
+        return tieKey > (existingTieKey ?? "")
+    }
+
+    private func startExpiryTaskIfNeeded() {
+        guard expiryTask == nil else { return }
+        // Polling is bounded to one second for long-lived sessions and remains
+        // short for tests/short TTLs. The task sleeps without retaining the
+        // actor, then briefly asks it to reap; shutdown can therefore cancel
+        // it without a retain cycle.
+        let pollSeconds = min(max(timeToLive / 10, 0.01), 1.0)
+        let pollNanos = UInt64(pollSeconds * 1_000_000_000)
+        expiryTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: pollNanos)
+                } catch {
+                    return
+                }
+                guard let self, await self.reapFromExpiryTask() else { return }
+            }
+        }
+    }
+
+    private func reapFromExpiryTask() -> Bool {
+        _ = expireLocked(at: clock())
+        let remains = !details.isEmpty
+        if !remains { expiryTask = nil }
+        return remains
+    }
+
     @discardableResult
     private func expireLocked(at now: Date) -> [AgentToolDetailID] {
-        guard timeToLive >= 0 else { return [] }
         let expired = details
-            .filter { now.timeIntervalSince($0.value.updatedAt) > timeToLive }
+            .filter { now.timeIntervalSince($0.value.updatedAt) >= timeToLive }
             .map { $0.key }
             .sorted { $0.rawValue < $1.rawValue }
         for key in expired { details.removeValue(forKey: key) }
@@ -573,9 +718,9 @@ public enum AgentToolDetailPresenter {
         let status = statusText(detail.status)
         let duration = detail.duration.map(formatDuration)
         let fileText: String? = detail.affectedFiles.isEmpty ? nil : "\(detail.affectedFiles.count) file\(detail.affectedFiles.count == 1 ? "" : "s")"
-        let coreSummary = pureSummary(for: detail) ?? detail.toolName
+        let coreSummary = shortLine(pureSummary(for: detail) ?? detail.toolName)
         let suffix = [status, duration, fileText].compactMap { $0 }.joined(separator: " · ")
-        let summary = suffix.isEmpty ? coreSummary : "\(coreSummary) · \(suffix)"
+        let summary = shortLine(suffix.isEmpty ? coreSummary : "\(coreSummary) · \(suffix)")
         return AgentToolDetailCompactPresentation(
             title: detail.toolName,
             statusText: status,
@@ -623,6 +768,22 @@ public enum AgentToolDetailPresenter {
             return "Read file"
         }
         return nil
+    }
+
+    private static func shortLine(_ raw: String, maxBytes: Int = 180) -> String {
+        let normalized = raw.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        guard normalized.utf8.count > maxBytes else { return normalized }
+        let marker = "…"
+        let budget = maxBytes - marker.utf8.count
+        var prefix = ""
+        var count = 0
+        for character in normalized {
+            let bytes = String(character).utf8.count
+            guard count + bytes <= budget else { break }
+            prefix.append(character)
+            count += bytes
+        }
+        return prefix + marker
     }
 
     private static func safeArgument(_ detail: AgentToolDetailRecord, keys: Set<String>) -> String? {

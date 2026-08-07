@@ -8,6 +8,7 @@ func runAgentToolDetailStoreChecks() async throws {
     try await runAgentToolDetailConcurrencyChecks()
     try await runAgentToolDetailPresentationChecks()
     runAgentToolDetailSourceBoundaryChecks()
+    try runAgentToolDetailCompileNegativeBoundaryCheck()
     print("Agent tool detail store checks passed: privacy redaction/fail-closed output, provider ID bounds, argument/file bounds, truncation caps, start/end ordering, local expiry, same-ID concurrency, compact summaries, and source boundaries")
 }
 
@@ -42,7 +43,7 @@ private func runAgentToolDetailPrivacyChecks() async throws {
         providerItemID: "tool-privacy",
         toolName: "bash",
         arguments: [
-            AgentToolDetailField(key: "command", value: "curl -H 'Authorization: Bearer \(rawSecret)' https://example.test?token=abc"),
+            AgentToolDetailField(key: "command", value: "curl -H 'Authorization: Bearer \(rawSecret)' --token argv-secret --data '{\"token\":\"json-secret\"}' https://user:pass@example.test?token=abc"),
             AgentToolDetailField(key: "password", value: rawSecret),
             AgentToolDetailField(key: "auth", value: authSecret),
             AgentToolDetailField(key: "session_key", value: "session=\(authSecret)"),
@@ -71,7 +72,7 @@ private func runAgentToolDetailPrivacyChecks() async throws {
     }
     let expanded = AgentToolDetailPresenter.expanded(detail)
     let rendered = ([expanded.header] + expanded.arguments.map { "\($0.key)=\($0.value.text)" } + [expanded.output?.text ?? ""] + expanded.affectedFiles.map(\.absoluteString)).joined(separator: "\n")
-    for secret in [rawSecret, authSecret, privateKey, "token=abc", "user:pass"] {
+    for secret in [rawSecret, authSecret, privateKey, "token=abc", "argv-secret", "json-secret", "user:pass"] {
         expect(!rendered.contains(secret), "AgentToolDetailStore privacy: \(secret) must be redacted/stripped before storage/presentation, got \(rendered)")
     }
     expect(rendered.contains("password=[REDACTED]") && rendered.contains("auth=[REDACTED]") && rendered.contains("privateSigningKey=[REDACTED]"),
@@ -79,8 +80,8 @@ private func runAgentToolDetailPrivacyChecks() async throws {
     expect(expanded.arguments.count == 6, "AgentToolDetailStore privacy: maxArguments must bound argument retention, got \(expanded.arguments.count)")
     expect(expanded.arguments.allSatisfy { $0.key.utf8.count <= 24 },
            "AgentToolDetailStore privacy: argument keys must be byte-bounded, got \(expanded.arguments.map(\.key))")
-    expect(detail.affectedFiles.count == 2 && detail.affectedFiles.allSatisfy(\.isFileURL),
-           "AgentToolDetailStore privacy: affected files must keep only sanitized file URLs, got \(detail.affectedFiles)")
+    expect(detail.affectedFiles.count == 1 && detail.affectedFiles == [URL(fileURLWithPath: "/tmp/work/file.swift")],
+           "AgentToolDetailStore privacy: secret-bearing affected URLs must be omitted, not rewritten with fabricated markers, got \(detail.affectedFiles)")
 
     let compact = AgentToolDetailPresenter.compact(detail)
     let accessibility = [compact.accessibilitySummary, expanded.accessibilitySummary].joined(separator: "\n")
@@ -290,6 +291,15 @@ private func runAgentToolDetailAssociationAndExpiryChecks() async throws {
     let futureExpired = await timestampStore.expireNow()
     expect(futureExpired == ["tool-future-old"],
            "AgentToolDetailStore expiry: future provider timestamps must not retain records beyond local TTL")
+
+    // TTL zero is terminal cleanup, not a special case that waits for a read.
+    let zeroTTLStore = AgentToolDetailStore(clock: { clock.now() }, timeToLive: 0)
+    _ = await zeroTTLStore.recordStart(AgentToolDetailStart(providerItemID: "tool-zero-ttl", toolName: "read"))
+    for _ in 0..<3 { await Task.yield() }
+    let zeroTTLDetails = await zeroTTLStore.allDetails()
+    expect(zeroTTLDetails.isEmpty,
+           "AgentToolDetailStore expiry: TTL zero must remove records without a lookup-triggered retention window")
+    await zeroTTLStore.shutdown()
 }
 
 private func runAgentToolDetailConcurrencyChecks() async throws {
@@ -366,6 +376,36 @@ private func runAgentToolDetailConcurrencyChecks() async throws {
     let afterStaleStart = await raceStore.detail(for: "tool-same-id-race")
     expect(afterStaleStart?.toolName == "worker-19" && afterStaleStart?.arguments.isEmpty == true,
            "AgentToolDetailStore ordering: stale start must not regress name/arguments, got \(String(describing: afterStaleStart))")
+
+    // Equal and absent timestamps use the same canonical sanitized payload tie
+    // policy in either arrival order. Arrival is deliberately not a sequence.
+    let equalClock = ManualToolDetailClock(base)
+    let forward = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+    let reverse = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+    let equalDate = base.addingTimeInterval(5)
+    let firstStart = AgentToolDetailStart(providerItemID: "tool-tie", toolName: "alpha", arguments: [AgentToolDetailField(key: "command", value: "one")], startedAt: equalDate)
+    let secondStart = AgentToolDetailStart(providerItemID: "tool-tie", toolName: "zulu", arguments: [AgentToolDetailField(key: "command", value: "two")], startedAt: equalDate)
+    _ = await forward.recordStart(firstStart)
+    _ = await forward.recordStart(secondStart)
+    _ = await reverse.recordStart(secondStart)
+    _ = await reverse.recordStart(firstStart)
+    let forwardValue = await forward.detail(for: "tool-tie")
+    let reverseValue = await reverse.detail(for: "tool-tie")
+    expect(forwardValue?.toolName == reverseValue?.toolName && forwardValue?.arguments == reverseValue?.arguments,
+           "AgentToolDetailStore ordering: equal timestamp winner must be independent of actor arrival")
+
+    let absentForward = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+    let absentReverse = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+    let absentA = AgentToolDetailStart(providerItemID: "tool-absent-tie", toolName: "alpha", arguments: [AgentToolDetailField(key: "command", value: "one")])
+    let absentB = AgentToolDetailStart(providerItemID: "tool-absent-tie", toolName: "zulu", arguments: [AgentToolDetailField(key: "command", value: "two")])
+    _ = await absentForward.recordStart(absentA)
+    _ = await absentForward.recordStart(absentB)
+    _ = await absentReverse.recordStart(absentB)
+    _ = await absentReverse.recordStart(absentA)
+    let absentForwardValue = await absentForward.detail(for: "tool-absent-tie")
+    let absentReverseValue = await absentReverse.detail(for: "tool-absent-tie")
+    expect(absentForwardValue?.toolName == absentReverseValue?.toolName && absentForwardValue?.arguments == absentReverseValue?.arguments,
+           "AgentToolDetailStore ordering: absent timestamp winner must be independent of actor arrival")
 }
 
 private func runAgentToolDetailPresentationChecks() async throws {
@@ -379,6 +419,14 @@ private func runAgentToolDetailPresentationChecks() async throws {
     var detail = await store.detail(for: "tool-command-summary")
     expect(AgentToolDetailPresenter.compact(detail!).summary.hasPrefix("Ran swift test --filter Core"),
            "AgentToolDetailPresenter compact: command summary should be useful and sanitized")
+    _ = await store.recordStart(AgentToolDetailStart(
+        providerItemID: "tool-command-summary-long",
+        toolName: "bash",
+        arguments: [AgentToolDetailField(key: "command", value: "line one\nline two " + String(repeating: "long ", count: 80))]
+    ))
+    let oneLineSummary = AgentToolDetailPresenter.compact((await store.detail(for: "tool-command-summary-long"))!).summary
+    expect(!oneLineSummary.contains("\n") && oneLineSummary.utf8.count <= 180,
+           "AgentToolDetailPresenter compact: command summaries must be one short normalized line, got \(oneLineSummary)")
 
     _ = await store.recordStart(AgentToolDetailStart(
         providerItemID: "tool-search-summary",
@@ -429,6 +477,15 @@ private func runAgentToolDetailSourceBoundaryChecks() {
                    "AgentToolDetailStore source boundary: host-local detail vocabulary must remain non-Codable; found forbidden conformance on \(typeName) in \(relative)")
         }
 
+        if relative == "Sources/ContinuumRevivedCore/Agents/AgentToolDetailStore.swift" {
+            expect(source.contains("HMAC<SHA256>"),
+                   "AgentToolDetailStore privacy boundary: secret association must use keyed HMAC")
+            expect(!source.contains("SHA256.hash"),
+                   "AgentToolDetailStore privacy boundary: predictable exact-secret SHA-256 fingerprint remains")
+            expect(source.contains("SymmetricKey(size: .bits256)"),
+                   "AgentToolDetailStore privacy boundary: per-store ephemeral key generation is missing")
+        }
+
         let isRuntimeOrActivityFile = relative == "Sources/ContinuumRevivedCore/AgentStatusEngine.swift" ||
             relative == "Sources/ContinuumRevivedCore/AgentActivityEvent.swift"
         let isSyncFile = relative.hasPrefix("Sources/ContinuumRevivedSync/")
@@ -437,6 +494,46 @@ private func runAgentToolDetailSourceBoundaryChecks() {
                    "AgentToolDetailStore source boundary: runtime/activity/sync production types must not gain local detail references; found in \(relative)")
         }
     }
+}
+
+private func runAgentToolDetailCompileNegativeBoundaryCheck() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let modulePath = root.appendingPathComponent(".build/debug/Modules")
+    guard FileManager.default.fileExists(atPath: modulePath.path) else {
+        fputs("FAIL: AgentToolDetailStore compile-negative boundary: Core modules are unavailable at \(modulePath.path)\n", stderr)
+        Foundation.exit(1)
+    }
+    let source = """
+    import ContinuumRevivedCore
+    func mustNotBeCodable(_ value: AgentToolDetailRecord) {
+        let _: any Encodable = value
+    }
+    """
+    let sourceURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-tool-detail-noncodable-\\(UUID().uuidString).swift")
+    try source.write(to: sourceURL, atomically: true, encoding: .utf8)
+    defer { try? FileManager.default.removeItem(at: sourceURL) }
+
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/swiftc")
+    let includePaths = [
+        modulePath.path,
+        root.appendingPathComponent(".build/checkouts/swift-markdown/Sources/CAtomic/include").path,
+        root.appendingPathComponent(".build/checkouts/swift-cmark/extensions/include").path,
+        root.appendingPathComponent(".build/checkouts/swift-cmark/src/include").path,
+        root.appendingPathComponent(".build/checkouts/GRDB.swift/Support").path,
+        root.appendingPathComponent(".build/checkouts/GRDB.swift/Sources/GRDBSQLite").path
+    ]
+    process.arguments = ["-typecheck"] + includePaths.flatMap { ["-I", $0] } + [sourceURL.path]
+    let errorPipe = Pipe()
+    process.standardError = errorPipe
+    try process.run()
+    process.waitUntilExit()
+    let diagnostics = String(decoding: errorPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    expect(process.terminationStatus != 0,
+           "AgentToolDetailStore boundary: compile-negative Encodable oracle unexpectedly accepted local detail")
+    expect(diagnostics.contains("does not conform") || diagnostics.contains("not convertible") || diagnostics.contains("cannot convert"),
+           "AgentToolDetailStore boundary: expected a non-Codable compile diagnostic, got: \(diagnostics)")
 }
 
 private func lineCount(_ text: String) -> Int {
