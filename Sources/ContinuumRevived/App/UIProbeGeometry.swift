@@ -6140,7 +6140,11 @@ enum UIProbeGeometry {
         func id(_ value: String) -> AgentNodeID { AgentNodeID(rawValue: value)! }
         let blockID = id("tool-composition-block")
         let itemID: AgentToolDetailID = "tool-composition-item"
-        let identity = AgentToolDetailKey(providerItemID: itemID)
+        let scope = AgentToolDetailScope(
+            agentID: "composition-agent", threadID: "composition-thread",
+            turnID: "composition-turn", provider: "runtime"
+        )!
+        let identity = AgentToolDetailKey(scope: scope, providerItemID: itemID)
         let record = AgentToolDetailRecord(
             identity: identity,
             toolName: "/Users/private/project/run-tool",
@@ -6173,6 +6177,7 @@ enum UIProbeGeometry {
         let list = AgentTranscriptListView(toolDetailProvider: { key in
             key == identity ? record : nil
         })
+        list.bindToolDetailIdentity(identity, to: entry.id)
         list.frame = NSRect(x: 0, y: 0, width: 320, height: 120)
         let host = NSView(frame: list.frame)
         host.addSubview(list)

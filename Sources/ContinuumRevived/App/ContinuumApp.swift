@@ -962,6 +962,21 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--tool-detail-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    let assertions = try await UIProbeGeometry.runToolDetailChecks()
+                    print("ContinuumRevivedToolDetailChecks passed: \(assertions) immutable-scope/expiry assertions")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--ui-geometry-check") {
             do {
                 _ = NSApplication.shared
