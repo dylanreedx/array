@@ -1170,6 +1170,7 @@ enum LabCatalog {
             managedAgentLocationStatusCard, managedAgentNarrowLocationTileCard,
             transcriptReviewCard, composerReviewCard, composerFullVariantCard,
             composerCompactVariantCard, composerProviderControlsCard, throbberCandidateGalleryCard,
+            orbitVariationsGalleryCard,
 
             // MARK: night3-C cards
             managedAgentApprovalDockCard, newTileCwdPolicyCard,
@@ -2299,9 +2300,28 @@ enum LabCatalog {
         )
     }
 
+    private static var orbitVariationsGalleryCard: LabEntry {
+        LabEntry(
+            id: "managed-agent.orbit-variations",
+            category: "Managed Agent",
+            title: "Orbit Variations — Motion Study",
+            summary: "Original Orbit plus five named variations at true 18×18 scale, shown in Normal and Reduced Motion with compact status-row context. Review only; no production winner is selected.",
+            content: .reviewSurface(preferredSize: OrbitVariationsGalleryView.preferredSize) {
+                LabCatalog.makeOrbitVariationsGalleryView(mode: .live)
+            }
+        )
+    }
+
     static func makeThrobberCandidateGalleryView(mode: ThrobberCandidateGalleryView.Mode) -> ThrobberCandidateGalleryView {
         ThrobberCandidateGalleryView(
             frame: NSRect(origin: .zero, size: ThrobberCandidateGalleryView.preferredSize),
+            mode: mode
+        )
+    }
+
+    static func makeOrbitVariationsGalleryView(mode: OrbitVariationsGalleryView.Mode) -> OrbitVariationsGalleryView {
+        OrbitVariationsGalleryView(
+            frame: NSRect(origin: .zero, size: OrbitVariationsGalleryView.preferredSize),
             mode: mode
         )
     }
@@ -3677,6 +3697,102 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
     }
 
+    private static func runOrbitVariationsGalleryCheck(fail: (String) -> Error) throws {
+        let appearances: [NSAppearance.Name] = [.aqua, .darkAqua]
+        var contrast = UIProbeContrast.Evaluation()
+        for appearance in appearances {
+            for scale in [CGFloat(1), CGFloat(2)] {
+                let label = "orbit-variations.\(appearance.rawValue).\(Int(scale))x"
+                let probe = try UIProbe.render(
+                    UIProbe.Spec(
+                        id: "managed-agent.orbit-variations.\(appearance.rawValue).\(Int(scale))x",
+                        size: OrbitVariationsGalleryView.preferredSize,
+                        appearance: appearance,
+                        renderScale: scale
+                    ),
+                    make: { LabCatalog.makeOrbitVariationsGalleryView(mode: .snapshot) }
+                )
+                guard let gallery = probe.view as? OrbitVariationsGalleryView else {
+                    throw fail("\(label): probe did not render OrbitVariationsGalleryView")
+                }
+                try UIProbeGeometry.expectNoZeroSizeViews(gallery, label: label)
+                try UIProbeGeometry.expectNoClipping(gallery, label: label)
+                try UIProbeGeometry.expectNoBrokenRequiredSizeConstraints(gallery, label: label)
+                guard gallery.qaCandidateCount == 6, gallery.qaFixtureCount == 12 else {
+                    throw fail("\(label): expected original Orbit plus five variations in Normal and Reduced Motion")
+                }
+                for fixture in gallery.qaIndicatorFixtures {
+                    let indicator = fixture.indicator
+                    guard indicator.bounds.size == NSSize(width: 18, height: 18),
+                          indicator.accessibilityRole() == .progressIndicator,
+                          indicator.accessibilityLabel()?.contains("Agent thinking") == true,
+                          gallery.bounds.contains(indicator.convert(indicator.bounds, to: gallery)),
+                          fixture.nameLabel.stringValue == fixture.candidate.rawValue,
+                          fixture.directionLabel.stringValue == fixture.candidate.direction,
+                          !fixture.statusLabel.stringValue.isEmpty,
+                          fixture.nameLabel.maximumNumberOfLines == 2,
+                          fixture.directionLabel.maximumNumberOfLines == 2 else {
+                        throw fail("\(label): \(fixture.candidate.rawValue) lost 18×18 geometry, AX, direction, or status context")
+                    }
+                    guard fixture.nameLabel.frame.width + 0.5 >= fixture.nameLabel.intrinsicContentSize.width || fixture.nameLabel.maximumNumberOfLines == 2,
+                          fixture.directionLabel.frame.width > 0,
+                          fixture.statusLabel.frame.width > 0 else {
+                        throw fail("\(label): \(fixture.candidate.rawValue) clipped review labels")
+                    }
+                    guard activeAnimationCount(in: indicator) == 0 else {
+                        throw fail("\(label): snapshot route installed animation for \(fixture.candidate.rawValue)")
+                    }
+                }
+                contrast.merge(try UIProbeContrast.evaluate(probe))
+            }
+        }
+        guard contrast.measured > 0, contrast.failures.isEmpty else {
+            throw fail("orbit variations contrast/color-token check failed: \(contrast.failures.joined(separator: "; "))")
+        }
+
+        let liveProbe = try UIProbe.render(
+            UIProbe.Spec(id: "managed-agent.orbit-variations.live.darkAqua", size: OrbitVariationsGalleryView.preferredSize, appearance: .darkAqua),
+            make: { LabCatalog.makeOrbitVariationsGalleryView(mode: .live) }
+        )
+        guard let liveGallery = liveProbe.view as? OrbitVariationsGalleryView else {
+            throw fail("orbit variations live probe did not render gallery")
+        }
+        guard liveGallery.qaIndicatorFixtures.filter({ $0.reducedMotion }).count == 6,
+              liveGallery.qaIndicatorFixtures.filter({ !$0.reducedMotion }).count == 6 else {
+            throw fail("orbit variations live route lost Normal/Reduced Motion coverage")
+        }
+        for fixture in liveGallery.qaIndicatorFixtures {
+            let count = activeAnimationCount(in: fixture.indicator)
+            if fixture.reducedMotion {
+                guard count == 0 else { throw fail("orbit variations Reduced Motion animated \(fixture.candidate.rawValue)") }
+            } else {
+                guard count > 0 else { throw fail("orbit variations Normal Motion did not animate \(fixture.candidate.rawValue)") }
+            }
+        }
+        for candidate in OrbitVariationsGalleryView.Candidate.allCases {
+            let indicator = candidate.makeIndicator(reducedMotion: false)
+            indicator.frame = NSRect(x: 0, y: 0, width: 18, height: 18)
+            indicator.startAnimating()
+            guard activeAnimationCount(in: indicator) == 0 else {
+                throw fail("orbit variations \(candidate.rawValue) animated before entering a window")
+            }
+            let host = NSView(frame: NSRect(x: 0, y: 0, width: 40, height: 40))
+            let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = host
+            host.addSubview(indicator)
+            indicator.frame = NSRect(x: 11, y: 11, width: 18, height: 18)
+            indicator.startAnimating()
+            guard activeAnimationCount(in: indicator) > 0 else { throw fail("orbit variations \(candidate.rawValue) did not animate when visible") }
+            indicator.setReducedMotion(true)
+            guard activeAnimationCount(in: indicator) == 0 else { throw fail("orbit variations \(candidate.rawValue) ignored Reduced Motion") }
+            indicator.setReducedMotion(false)
+            indicator.startAnimating()
+            indicator.isHidden = true
+            guard activeAnimationCount(in: indicator) == 0 else { throw fail("orbit variations \(candidate.rawValue) animated while hidden") }
+            window.contentView = nil
+        }
+    }
+
     private static func activeAnimationCount(in indicator: NSView & AgentThinkingIndicatorAnimating) -> Int {
         switch indicator {
         case let view as OrbitingTriadThinkingIndicatorView:
@@ -3686,6 +3802,16 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         case let view as BreathingSparkIndicatorView:
             return view.qaActiveAnimationCount
         case let view as DrawingLoopIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as ChromaticRelayOrbitThinkingIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as TiltedPrismOrbitThinkingIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as CounterCurrentOrbitThinkingIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as SolarHandoffOrbitThinkingIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as AngularSlingshotOrbitThinkingIndicatorView:
             return view.qaActiveAnimationCount
         default:
             return 0
@@ -3812,6 +3938,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         try runPlanAndDiffRendererCheck(fail: fail)
         try runTranscriptReviewCheck(fail: fail)
         try runThrobberCandidateGalleryCheck(fail: fail)
+        try runOrbitVariationsGalleryCheck(fail: fail)
 
         let panel = ComponentLabPanel(env: LabEnvironment(ghostty: nil, browserEngine: nil))
         panel.show(near: nil)
@@ -3831,6 +3958,11 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard let throbberEntry = entries.first(where: { $0.id == "managed-agent.throbber-candidates" }),
               case .reviewSurface = throbberEntry.content else {
             throw fail("missing throbber candidate review surface")
+        }
+        guard let orbitVariationsEntry = entries.first(where: { $0.id == "managed-agent.orbit-variations" }),
+              orbitVariationsEntry.title == "Orbit Variations — Motion Study",
+              case .reviewSurface = orbitVariationsEntry.content else {
+            throw fail("missing Orbit Variations motion study review surface")
         }
         guard let composerEntry = entries.first(where: { $0.id == "agent.composer.review" }),
               case let .reviewSurface(composerSize, makeComposerView) = composerEntry.content,

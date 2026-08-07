@@ -11190,6 +11190,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             gallery.frame = NSRect(origin: .zero, size: ThrobberCandidateGalleryView.preferredSize)
             content = gallery
             backingSize = ThrobberCandidateGalleryView.preferredSize
+        case "orbit-variations":
+            let gallery = LabCatalog.makeOrbitVariationsGalleryView(mode: .snapshot)
+            gallery.frame = NSRect(origin: .zero, size: OrbitVariationsGalleryView.preferredSize)
+            content = gallery
+            backingSize = OrbitVariationsGalleryView.preferredSize
         default:
             FileHandle.standardError.write(Data("unknown component snapshot: \(name)\n".utf8))
             return false

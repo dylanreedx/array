@@ -370,7 +370,7 @@ final class AngularSlingshotOrbitThinkingIndicatorView: NSView, AgentThinkingInd
             ? TokenTheme.dark
             : TokenTheme.light
         let color = token.color.resolved(for: appearance)
-        return CGColor(red: color.r, green: color.g, blue: color.b, alpha: 1)
+        return StatusChipNSView.nsColor(color).cgColor
     }
 
     private static func animationGroup(
