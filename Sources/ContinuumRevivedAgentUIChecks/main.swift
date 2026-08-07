@@ -35,6 +35,9 @@ if CommandLine.arguments.contains("--composer-action-negative-witness") {
 // Ticket: docs/38-tickets/87-agent-ui-component-framework.md
 runStatusChipChecks()
 
+// Selected iOS companion indicator: shared pure geometry/status/lifecycle contract.
+runDualPlaneGyroChecks()
+
 // Ticket: docs/38-tickets/90-agent-ux/P1.2-tokencolor-light-dark.md
 runTokenColorChecks()
 
@@ -87,6 +90,72 @@ runComposerActionPresentationChecks()
 runSidebarDefectCorpusChecks()
 
 print("ContinuumRevivedAgentUIChecks passed")
+
+// MARK: - Selected Dual-Plane Gyro — pure iOS companion contract
+
+func runDualPlaneGyroChecks() {
+    let bounds = CGRect(x: 0, y: 0, width: DualPlaneGyroIndicatorModel.side, height: DualPlaneGyroIndicatorModel.side)
+    let states = DualPlaneGyroIndicatorModel.nodeStates(in: bounds, phase: DualPlaneGyroIndicatorModel.reducedMotionPhase)
+
+    expect(DualPlaneGyroIndicatorModel.side == 18, "Dual-Plane Gyro: footprint must remain 18×18")
+    expect(DualPlaneGyroIndicatorModel.primaryTiltDegrees == 28
+        && DualPlaneGyroIndicatorModel.secondaryTiltDegrees == -28,
+        "Dual-Plane Gyro: two planes must retain ±28° tilt")
+    expect(DualPlaneGyroIndicatorModel.masterDuration == 7.20
+        && DualPlaneGyroIndicatorModel.primaryOrbitPeriod == 2.40
+        && DualPlaneGyroIndicatorModel.secondaryOrbitPeriod == 3.60,
+        "Dual-Plane Gyro: deterministic 7.20s master / 2.40s + 3.60s orbit periods")
+    expect(states.count == 3
+        && states.filter({ $0.plane == .primary }).count == 2
+        && states.filter({ $0.plane == .secondary }).count == 1,
+        "Dual-Plane Gyro: two primary nodes and one secondary node")
+    expect(states.map { $0.token.rawValue } == [
+        AccentToken.accentWorking.rawValue,
+        AccentToken.accentInput.rawValue,
+        AccentToken.accentApproval.rawValue
+    ], "Dual-Plane Gyro: node accents must be the three semantic tokens")
+    expect(DualPlaneGyroIndicatorModel.sampledPathFitsFootprint(in: bounds),
+           "Dual-Plane Gyro: sampled nodes must remain inside the 18×18 footprint")
+    expect(DualPlaneGyroIndicatorModel.minimumCenterClearance(in: bounds) > 0,
+           "Dual-Plane Gyro: center must remain open at every sampled phase")
+
+    expect(DualPlaneGyroIndicatorModel.normalizedPhase(1) == 0
+        && DualPlaneGyroIndicatorModel.nodeStates(in: bounds, phase: 0)
+            == DualPlaneGyroIndicatorModel.nodeStates(in: bounds, phase: 1),
+        "Dual-Plane Gyro: master-cycle phase must be deterministic")
+    expect(DualPlaneGyroIndicatorModel.nodeStates(in: bounds, phase: .nan)
+        == DualPlaneGyroIndicatorModel.nodeStates(in: bounds, phase: 0),
+        "Dual-Plane Gyro: malformed phase must settle to the deterministic origin")
+    expect(DualPlaneGyroIndicatorModel.accessibilityLabel == "Agent thinking",
+           "Dual-Plane Gyro: accessibility label must be concise and stable")
+
+    for status in AgentStatus.allCases {
+        let expected = status == .working || status == .configuring
+        expect(DualPlaneGyroIndicatorModel.isActive(status: status) == expected,
+               "Dual-Plane Gyro: activity must follow synced status only for \(status.rawValue)")
+    }
+    expect(DualPlaneGyroIndicatorModel.shouldAnimate(
+        active: true, windowAttached: true, viewVisible: true, sceneActive: true,
+        reducedMotion: false, bounds: bounds),
+        "Dual-Plane Gyro: foreground attached visible active view may animate")
+    expect(!DualPlaneGyroIndicatorModel.shouldAnimate(
+        active: true, windowAttached: false, viewVisible: true, sceneActive: true,
+        reducedMotion: false, bounds: bounds)
+        && !DualPlaneGyroIndicatorModel.shouldAnimate(
+            active: true, windowAttached: true, viewVisible: true, sceneActive: false,
+            reducedMotion: false, bounds: bounds)
+        && !DualPlaneGyroIndicatorModel.shouldAnimate(
+            active: true, windowAttached: true, viewVisible: true, sceneActive: true,
+            reducedMotion: true, bounds: bounds),
+        "Dual-Plane Gyro: lifecycle and Reduced Motion gates must stop compositor motion")
+
+    let light = AccentToken.accentWorking.color.resolved(for: .light)
+    let dark = AccentToken.accentWorking.color.resolved(for: .dark)
+    expect(light != dark && LineToken.separator.color.resolved(for: .light)
+        != LineToken.separator.color.resolved(for: .dark),
+        "Dual-Plane Gyro: semantic accent and guide tokens must rebuild for both themes")
+    print("Dual-Plane Gyro checks passed: geometry, semantic accents, phase, Reduced Motion, AX, theme, and lifecycle")
+}
 
 // MARK: - P4.6 — truthful composer intents, capabilities and action state
 
