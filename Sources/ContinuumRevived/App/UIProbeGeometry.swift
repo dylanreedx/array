@@ -6043,16 +6043,38 @@ enum UIProbeGeometry {
             id: id("route-reasoning-finished-unknown"), revision: 1, kind: finishedUnknownKind,
             payload: .opaque(.init(debugLabel: "route-fixture", value: .null))
         )
+        let finishedTool = AgentBlock(
+            id: id("route-reasoning-finished-tool"), revision: 1, kind: .toolCall,
+            payload: .toolCall(.init(
+                name: "Read fixture", summary: "The nested tool returned a deliberately long semantic summary so outer geometry must change.",
+                status: .completed
+            ))
+        )
+        let finishedCommand = AgentBlock(
+            id: id("route-reasoning-finished-command"), revision: 1, kind: .commandOutput,
+            payload: .commandOutput(.init(
+                text: "nested command output\nwith enough detail to remeasure the containing reasoning row\n",
+                exitCode: 0, status: .completed
+            ))
+        )
         let finished = AgentEntry(
             id: id("route-reasoning-finished"), revision: 1, role: .reasoning,
             provenance: .providerItem(provider: "fixture", itemID: "finished"),
             lifecycle: .finished,
-            blocks: [finishedParagraph, finishedCode, finishedUnknown]
+            blocks: [finishedParagraph, finishedCode, finishedUnknown, finishedTool, finishedCommand]
+        )
+        let removedTool = AgentBlock(
+            id: id("route-reasoning-removed-tool"), revision: 1, kind: .toolCall,
+            payload: .toolCall(.init(name: "Removed tool", summary: "This disclosure must be purged with its reasoning parent.", status: .completed))
+        )
+        let removedCommand = AgentBlock(
+            id: id("route-reasoning-removed-command"), revision: 1, kind: .commandOutput,
+            payload: .commandOutput(.init(text: "removed command detail\n", exitCode: 0, status: .completed))
         )
         let removed = AgentEntry(
             id: id("route-reasoning-removed"), revision: 1, role: .reasoning,
             provenance: .providerItem(provider: "fixture", itemID: "removed"), lifecycle: .finished,
-            blocks: [paragraph("removed thought", id: "route-reasoning-removed-block")]
+            blocks: [paragraph("removed thought", id: "route-reasoning-removed-block"), removedTool, removedCommand]
         )
         let assistant = AgentEntry(
             id: id("route-assistant"), revision: 1, role: .assistant,
@@ -6060,7 +6082,7 @@ enum UIProbeGeometry {
             blocks: [paragraph("answer", id: "route-assistant-block")]
         )
         let list = AgentTranscriptListView()
-        list.frame = NSRect(x: 0, y: 0, width: 320, height: 240)
+        list.frame = NSRect(x: 0, y: 0, width: 320, height: 640)
         let host = NSView(frame: list.frame)
         host.addSubview(list)
         list.autoresizingMask = [.width, .height]
@@ -6088,16 +6110,66 @@ enum UIProbeGeometry {
         _ = disclosure.accessibilityPerformPress()
         host.layoutSubtreeIfNeeded()
         list.collectionView.layoutSubtreeIfNeeded()
-        guard disclosure.isExpanded, disclosure.bodyHosts.count == 3,
+        guard disclosure.isExpanded, disclosure.bodyHosts.count == 5,
               disclosure.bodyHosts.allSatisfy({ $0.representedRole == .reasoning }),
               disclosure.bodyHosts[1].rendererView is CodeBlockView,
               disclosure.bodyHosts[2].rendererView is AgentUnknownBlockView,
+              disclosure.bodyHosts[3].rendererView is ToolCallView,
+              disclosure.bodyHosts[4].rendererView is CommandOutputView,
               let expandedHeight = list.qaTranscriptRowHeight(for: finished.id),
               expandedHeight > collapsedHeight + 1 else {
             throw GeometryError(message: "transcript reasoning disclosure did not expand through its collection item and change row height")
         }
+        let nestedToolView = disclosure.bodyHosts[3].rendererView as! ToolCallView
+        let nestedCommandView = disclosure.bodyHosts[4].rendererView as! CommandOutputView
+        let outerHeightBeforeNestedToggles = expandedHeight
+        nestedToolView.disclosureButton.performClick(nil)
+        host.layoutSubtreeIfNeeded()
+        list.collectionView.layoutSubtreeIfNeeded()
+        let outerHeightAfterTool = list.qaTranscriptRowHeight(for: finished.id)
+        guard nestedToolView.isExpanded,
+              let outerHeightAfterTool,
+              outerHeightAfterTool > outerHeightBeforeNestedToggles else {
+            throw GeometryError(message: "nested tool disclosure did not remeasure its containing reasoning row (expanded=\(nestedToolView.isExpanded), before=\(outerHeightBeforeNestedToggles), after=\(String(describing: outerHeightAfterTool)))")
+        }
+        nestedCommandView.disclosureButton.performClick(nil)
+        host.layoutSubtreeIfNeeded()
+        list.collectionView.layoutSubtreeIfNeeded()
+        guard nestedCommandView.isExpanded,
+              let outerHeightAfterCommand = list.qaTranscriptRowHeight(for: finished.id),
+              outerHeightAfterCommand > outerHeightAfterTool else {
+            throw GeometryError(message: "nested command disclosure did not remeasure its containing reasoning row")
+        }
         guard list.qaDisclosureState(for: finished.id) == true else {
             throw GeometryError(message: "transcript reasoning expansion was not stored by entry identity")
+        }
+
+        // Non-vacuous removal witness: establish explicit state and revision
+        // entries for the parent and both nested disclosure blocks before the
+        // parent disappears from the document.
+        guard let removedDisclosure = list.accessibilityChildren()?.compactMap({ $0 as? CompletedReasoningDisclosureView })
+            .first(where: { $0.presentation?.entryID == removed.id }) else {
+            throw GeometryError(message: "removal witness did not mount the reasoning parent")
+        }
+        _ = removedDisclosure.accessibilityPerformPress()
+        host.layoutSubtreeIfNeeded()
+        list.collectionView.layoutSubtreeIfNeeded()
+        guard removedDisclosure.isExpanded,
+              removedDisclosure.bodyHosts.count == 3,
+              let removedToolView = removedDisclosure.bodyHosts[1].rendererView as? ToolCallView,
+              let removedCommandView = removedDisclosure.bodyHosts[2].rendererView as? CommandOutputView else {
+            throw GeometryError(message: "removal witness did not expand the nested tool and command hosts")
+        }
+        removedToolView.disclosureButton.performClick(nil)
+        removedCommandView.disclosureButton.performClick(nil)
+        host.layoutSubtreeIfNeeded()
+        list.collectionView.layoutSubtreeIfNeeded()
+        let removedChildIDs = [id("route-reasoning-removed-tool"), id("route-reasoning-removed-command")]
+        guard list.qaDisclosureState(for: removed.id) == true,
+              removedChildIDs.allSatisfy({ list.qaDisclosureState(for: $0) == true }),
+              list.qaDisclosureRevision(for: removed.id) > 0,
+              removedChildIDs.allSatisfy({ list.qaDisclosureRevision(for: $0) > 0 }) else {
+            throw GeometryError(message: "removal witness failed to establish parent and nested disclosure state")
         }
         let revisedFinished = AgentEntry(
             id: finished.id, revision: 2, role: finished.role,
@@ -6116,9 +6188,13 @@ enum UIProbeGeometry {
         host.layoutSubtreeIfNeeded()
         list.collectionView.layoutSubtreeIfNeeded()
         guard list.qaDisclosureState(for: removed.id) == nil,
+              list.qaDisclosureRevision(for: removed.id) == 0,
+              removedChildIDs.allSatisfy({ list.qaDisclosureState(for: $0) == nil }),
+              removedChildIDs.allSatisfy({ list.qaDisclosureRevision(for: $0) == 0 }),
               list.qaDisclosureState(for: finished.id) == true,
+              list.qaDisclosureRevision(for: finished.id) > 0,
               list.qaSemanticRowCount == 2 else {
-            throw GeometryError(message: "removed reasoning state was retained or unaffected expansion was lost")
+            throw GeometryError(message: "removed reasoning subtree state or revisions were retained, or unaffected expansion was lost")
         }
 
         // resetProjection presents an empty transcript between sessions. Reuse

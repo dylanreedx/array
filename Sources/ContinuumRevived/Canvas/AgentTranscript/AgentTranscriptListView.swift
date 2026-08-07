@@ -468,9 +468,13 @@ final class AgentTranscriptListView: NSView {
     ) throws {
         let oldIDs = rows.map(\.id)
         let oldRowsByID = rowsByID
-        let oldReasoningIDs = Set(rows.compactMap(\.entry).map(\.id))
+        let oldReasoningEntries = Dictionary(
+            uniqueKeysWithValues: rows.compactMap { row in
+                row.entry.map { ($0.id, $0) }
+            }
+        )
         let newReasoningIDs = Set(flattened.rows.compactMap(\.entry).map(\.id))
-        let removedReasoningIDs = oldReasoningIDs.subtracting(newReasoningIDs)
+        let removedReasoningIDs = Set(oldReasoningEntries.keys).subtracting(newReasoningIDs)
         if flattened.rows.isEmpty, !rows.isEmpty {
             // resetProjection presents an empty document before replaying the
             // next session. Clear the complete owner scope as well as the
@@ -479,9 +483,18 @@ final class AgentTranscriptListView: NSView {
             disclosureStateStore.removeAll(for: disclosureOwnerID)
         } else {
             for id in removedReasoningIDs {
-                disclosureStateStore.removeState(for: ToolDisclosureKey(
-                    agentID: disclosureOwnerID, blockID: id
-                ))
+                guard let entry = oldReasoningEntries[id] else { continue }
+                var descendantIDs: Set<AgentNodeID> = []
+                func collect(_ block: AgentBlock) {
+                    descendantIDs.insert(block.id)
+                    block.children.forEach(collect)
+                }
+                entry.blocks.forEach(collect)
+                disclosureStateStore.removeSubtree(
+                    for: disclosureOwnerID,
+                    rootID: id,
+                    descendantIDs: descendantIDs
+                )
             }
         }
         rows = flattened.rows
@@ -619,7 +632,16 @@ final class AgentTranscriptListView: NSView {
     }
 
     private func remeasureDisclosure(id: AgentNodeID) {
-        guard let content = rowsByID[id]?.content, case .completedReasoning = content else { return }
+        // Renderer callbacks carry the toggled block ID. A tool/command inside
+        // a reasoning disclosure is not itself a collection item; route it back
+        // through the flattened ownership map so the outer entry is remeasured.
+        let topLevelIDs = topLevelIDsByNodeID[id] ?? []
+        let reasoningIDs = Set(topLevelIDs.filter { topLevelID in
+            guard let content = rowsByID[topLevelID]?.content else { return false }
+            if case .completedReasoning = content { return true }
+            return false
+        })
+        guard !reasoningIDs.isEmpty else { return }
         scrollController.apply(
             in: scrollView,
             idAtY: { [weak self] y in self?.transcriptID(at: y) },
@@ -627,7 +649,7 @@ final class AgentTranscriptListView: NSView {
             isSelecting: { [weak self] in self?.hasActiveTextSelection() ?? false },
             update: { [weak self] in
                 guard let self else { return }
-                transcriptLayout.invalidate(changedIDs: [id])
+                transcriptLayout.invalidate(changedIDs: reasoningIDs)
                 layoutSubtreeIfNeeded()
             }
         )
@@ -727,6 +749,11 @@ final class AgentTranscriptListView: NSView {
     func qaDisclosureState(for entryID: AgentNodeID) -> Bool? {
         disclosureStateStore.explicitState(for: ToolDisclosureKey(
             agentID: disclosureOwnerID, blockID: entryID
+        ))
+    }
+    func qaDisclosureRevision(for blockID: AgentNodeID) -> UInt64 {
+        disclosureStateStore.presentationRevision(for: ToolDisclosureKey(
+            agentID: disclosureOwnerID, blockID: blockID
         ))
     }
     func qaTranscriptRowHeight(for id: AgentNodeID) -> CGFloat? {

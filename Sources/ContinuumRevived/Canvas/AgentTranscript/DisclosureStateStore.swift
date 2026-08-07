@@ -33,9 +33,25 @@ final class DisclosureStateStore {
         revisions[key, default: 0] &+= 1
     }
 
+    /// Removes one bounded disclosure subtree. The caller owns the semantic
+    /// tree, so it supplies the descendant IDs; the store remains a keyed
+    /// preference store and never needs to retain a second ownership graph.
+    func removeSubtree(
+        for agentID: AgentID,
+        rootID: AgentNodeID,
+        descendantIDs: Set<AgentNodeID> = []
+    ) {
+        let blockIDs = descendantIDs.union([rootID])
+        let keys = Set(blockIDs.map { ToolDisclosureKey(agentID: agentID, blockID: $0) })
+        explicitStates = explicitStates.filter { !keys.contains($0.key) }
+        // Revision entries are lifecycle state too. Do not leave tombstones
+        // behind for IDs that can be reused in a later transcript session.
+        revisions = revisions.filter { !keys.contains($0.key) }
+    }
+
     func removeState(for key: ToolDisclosureKey) {
-        guard explicitStates.removeValue(forKey: key) != nil else { return }
-        revisions[key, default: 0] &+= 1
+        explicitStates.removeValue(forKey: key)
+        revisions.removeValue(forKey: key)
     }
 
     func removeAll(for agentID: AgentID) {
