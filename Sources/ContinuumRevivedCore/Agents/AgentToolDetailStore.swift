@@ -252,10 +252,10 @@ public struct AgentToolDetailSanitizer: Sendable {
     func sanitizeArguments(_ fields: [AgentToolDetailField], explicitSecrets: [String]) -> [AgentToolDetailArgument] {
         guard limits.maxArguments > 0 else { return [] }
         let clippedFields = Array(fields.prefix(limits.maxArguments))
-        let secrets = explicitSecrets + Self.sensitiveValues(in: clippedFields)
+        let secrets = explicitSecrets + discoveredSensitiveValues(in: clippedFields)
         return clippedFields.map { field in
             let key = Self.sanitizedKey(field.key, explicitSecrets: secrets, maxBytes: limits.maxArgumentKeyBytes)
-            if Self.isSensitiveKey(key) || Self.isSensitiveKey(field.key) {
+            if SecretRedactor.isSensitiveName(key) || SecretRedactor.isSensitiveName(field.key) {
                 let bounded = boundText("[REDACTED]", maxBytes: limits.maxFieldValueBytes, maxLines: limits.maxFieldValueLines, redacted: true)
                 return AgentToolDetailArgument(key: key, value: bounded, sensitiveKeyFiltered: true)
             }
@@ -274,7 +274,19 @@ public struct AgentToolDetailSanitizer: Sendable {
     }
 
     func sensitiveFingerprints(in fields: [AgentToolDetailField], explicitSecrets: [String]) -> Set<String> {
-        Set((explicitSecrets + Self.sensitiveValues(in: fields)).compactMap { fingerprint($0) })
+        Set((explicitSecrets + discoveredSensitiveValues(in: fields)).compactMap { fingerprint($0) })
+    }
+
+    func discoveredSensitiveValues(in fields: [AgentToolDetailField]) -> [String] {
+        fields.flatMap { field in
+            let fieldValue = SecretRedactor.isSensitiveName(field.key) ? [field.value] : []
+            return fieldValue + SecretRedactor.discoveredSensitiveValues(in: field.value)
+        }
+    }
+
+    func discoveredSensitiveValues(in output: String?) -> [String] {
+        guard let output else { return [] }
+        return SecretRedactor.discoveredSensitiveValues(in: output)
     }
 
     func explicitFingerprints(_ explicitSecrets: [String]) -> Set<String> {
@@ -331,19 +343,17 @@ public struct AgentToolDetailSanitizer: Sendable {
     }
 
     /// Stable, non-secret event keys used only to break same-ID timestamp ties.
-    /// All text is sanitized first; explicit secret equality is represented by
-    /// this store's ephemeral HMAC fingerprints rather than the secret itself.
+    /// Every component is sanitized first. Ephemeral HMAC fingerprints remain
+    /// separate and are used only for same-lifecycle output association.
     func stableStartTieKey(
         toolName: String,
         arguments: [AgentToolDetailArgument],
-        affectedFiles: [URL],
-        explicitFingerprints: Set<String>
+        affectedFiles: [URL]
     ) -> String {
         stableKey([
             toolName,
-            arguments.map { "\($0.key)=\($0.value.text):\($0.sensitiveKeyFiltered)" }.joined(separator: "\u{1f}"),
-            affectedFiles.map(\.absoluteString).joined(separator: "\u{1f}"),
-            explicitFingerprints.sorted().joined(separator: "\u{1f}")
+            arguments.map { stableArgumentKey($0) }.joined(separator: "\u{1f}"),
+            affectedFiles.map(\.absoluteString).joined(separator: "\u{1f}")
         ])
     }
 
@@ -351,15 +361,31 @@ public struct AgentToolDetailSanitizer: Sendable {
         output: AgentToolDetailBoundedText?,
         status: AgentItemStatus,
         exitCode: Int?,
-        affectedFiles: [URL],
-        explicitFingerprints: Set<String>
+        affectedFiles: [URL]
     ) -> String {
         stableKey([
-            output?.text ?? "",
+            stableTextKey(output),
             status.rawValue,
             exitCode.map(String.init) ?? "",
-            affectedFiles.map(\.absoluteString).joined(separator: "\u{1f}"),
-            explicitFingerprints.sorted().joined(separator: "\u{1f}")
+            affectedFiles.map(\.absoluteString).joined(separator: "\u{1f}")
+        ])
+    }
+
+    private func stableArgumentKey(_ argument: AgentToolDetailArgument) -> String {
+        stableKey([
+            argument.key,
+            stableTextKey(argument.value),
+            argument.sensitiveKeyFiltered ? "sensitive" : "ordinary"
+        ])
+    }
+
+    private func stableTextKey(_ text: AgentToolDetailBoundedText?) -> String {
+        guard let text else { return "<nil>" }
+        return stableKey([
+            text.text,
+            text.truncatedByBytes ? "bytes" : "unbounded-bytes",
+            text.truncatedByLines ? "lines" : "unbounded-lines",
+            text.redacted ? "redacted" : "unredacted"
         ])
     }
 
@@ -394,24 +420,6 @@ public struct AgentToolDetailSanitizer: Sendable {
             .map(String.init) ?? ""
     }
 
-    private static func sensitiveValues(in fields: [AgentToolDetailField]) -> [String] {
-        fields.compactMap { field in
-            guard isSensitiveKey(field.key) else { return nil }
-            let trimmed = field.value.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed
-        }
-    }
-
-    private static func isSensitiveKey(_ key: String) -> Bool {
-        let normalized = key.lowercased().filter { $0.isLetter || $0.isNumber }
-        let sensitiveFragments = [
-            "password", "passwd", "pwd", "secret", "token", "apikey", "authorization",
-            "auth", "credential", "credentials", "cookie", "session", "signin", "signing",
-            "signature", "private", "privatekey", "access", "accesskey", "refreshkey", "clientsecret",
-            "sshkey", "jwt", "bearer"
-        ]
-        return sensitiveFragments.contains { normalized.contains($0) }
-    }
 
     private func fingerprint(_ value: String) -> String? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -513,15 +521,16 @@ public actor AgentToolDetailStore {
         // resurrects an older record, even if the background task has not run.
         expireLocked(at: observedAt)
         startExpiryTaskIfNeeded()
-        let sanitizedToolName = sanitizer.sanitizeToolName(start.toolName, explicitSecrets: start.explicitSecrets)
-        let sanitizedArguments = sanitizer.sanitizeArguments(start.arguments, explicitSecrets: start.explicitSecrets)
-        let sanitizedFiles = sanitizer.sanitizeFiles(start.affectedFiles, existing: [], explicitSecrets: start.explicitSecrets)
+        let implicitSecrets = sanitizer.discoveredSensitiveValues(in: start.arguments)
+        let eventSecrets = start.explicitSecrets + implicitSecrets
+        let sanitizedToolName = sanitizer.sanitizeToolName(start.toolName, explicitSecrets: eventSecrets)
+        let sanitizedArguments = sanitizer.sanitizeArguments(start.arguments, explicitSecrets: eventSecrets)
+        let sanitizedFiles = sanitizer.sanitizeFiles(start.affectedFiles, existing: [], explicitSecrets: eventSecrets)
         let sensitiveFingerprints = sanitizer.sensitiveFingerprints(in: start.arguments, explicitSecrets: start.explicitSecrets)
         let tieKey = sanitizer.stableStartTieKey(
             toolName: sanitizedToolName,
             arguments: sanitizedArguments,
-            affectedFiles: sanitizedFiles,
-            explicitFingerprints: sensitiveFingerprints
+            affectedFiles: sanitizedFiles
         )
         let existing = details[start.providerItemID]
         var record = existing ?? AgentToolDetailRecord(providerItemID: start.providerItemID, updatedAt: observedAt)
@@ -546,7 +555,7 @@ public actor AgentToolDetailStore {
             }
         }
         record.updatedAt = observedAt
-        record.affectedFiles = sanitizer.sanitizeFiles(start.affectedFiles, existing: record.affectedFiles, explicitSecrets: start.explicitSecrets)
+        record.affectedFiles = sanitizer.sanitizeFiles(start.affectedFiles, existing: record.affectedFiles, explicitSecrets: eventSecrets)
         details[start.providerItemID] = record
         if timeToLive == 0 { expireLocked(at: observedAt) }
         return record
@@ -557,6 +566,8 @@ public actor AgentToolDetailStore {
         let observedAt = clock()
         expireLocked(at: observedAt)
         startExpiryTaskIfNeeded()
+        let implicitSecrets = sanitizer.discoveredSensitiveValues(in: end.output)
+        let eventSecrets = end.explicitSecrets + implicitSecrets
         let explicitFingerprints = sanitizer.explicitFingerprints(end.explicitSecrets)
         let sanitizedOutput = sanitizer.sanitizeOutput(
             end.output,
@@ -564,13 +575,12 @@ public actor AgentToolDetailStore {
             requiredStartFingerprints: details[end.providerItemID]?.sensitiveStartFingerprints ?? [],
             associatedArguments: details[end.providerItemID]?.arguments ?? []
         )
-        let sanitizedFiles = sanitizer.sanitizeFiles(end.affectedFiles, existing: [], explicitSecrets: end.explicitSecrets)
+        let sanitizedFiles = sanitizer.sanitizeFiles(end.affectedFiles, existing: [], explicitSecrets: eventSecrets)
         let tieKey = sanitizer.stableEndTieKey(
             output: sanitizedOutput,
             status: end.status,
             exitCode: end.exitCode,
-            affectedFiles: sanitizedFiles,
-            explicitFingerprints: explicitFingerprints
+            affectedFiles: sanitizedFiles
         )
         let existing = details[end.providerItemID]
         var record = existing ?? AgentToolDetailRecord(providerItemID: end.providerItemID, updatedAt: observedAt)
@@ -590,7 +600,7 @@ public actor AgentToolDetailStore {
             record.latestEndExplicitFingerprints = explicitFingerprints
         }
         record.updatedAt = observedAt
-        record.affectedFiles = sanitizer.sanitizeFiles(end.affectedFiles, existing: record.affectedFiles, explicitSecrets: end.explicitSecrets)
+        record.affectedFiles = sanitizer.sanitizeFiles(end.affectedFiles, existing: record.affectedFiles, explicitSecrets: eventSecrets)
         details[end.providerItemID] = record
         if timeToLive == 0 { expireLocked(at: observedAt) }
         return record

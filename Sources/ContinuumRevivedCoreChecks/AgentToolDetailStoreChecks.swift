@@ -3,6 +3,7 @@ import Foundation
 
 func runAgentToolDetailStoreChecks() async throws {
     try await runAgentToolDetailPrivacyChecks()
+    try await runAgentToolDetailImplicitSensitivityChecks()
     try await runAgentToolDetailTruncationChecks()
     try await runAgentToolDetailAssociationAndExpiryChecks()
     try await runAgentToolDetailConcurrencyChecks()
@@ -160,6 +161,58 @@ private func runAgentToolDetailPrivacyChecks() async throws {
     let activityJSON = String(decoding: try JSONEncoder().encode(activity), as: UTF8.self)
     expect(!activityJSON.contains(rawSecret) && !activityJSON.contains("visible-value") && !activityJSON.contains("echoed"),
            "AgentActivityEvent privacy boundary: sync-safe activity must not carry expanded local detail, got \(activityJSON)")
+}
+
+private func runAgentToolDetailImplicitSensitivityChecks() async throws {
+    let clock = ManualToolDetailClock(Date(timeIntervalSinceReferenceDate: 2_500))
+    let implicitCases: [(label: String, text: String, secret: String)] = [
+        ("argv whitespace", "runner --access-token implicit-argv-secret", "implicit-argv-secret"),
+        ("argv equal", "runner --session-key=implicit-session-secret", "implicit-session-secret"),
+        ("query", "https://example.test/?refresh_token=implicit-query-secret", "implicit-query-secret"),
+        ("header", "Authorization: Bearer implicit-header-secret", "implicit-header-secret"),
+        ("json", #"{"private-signing-key":"implicit-json-secret"}"#, "implicit-json-secret")
+    ]
+    for testCase in implicitCases {
+        let store = AgentToolDetailStore(clock: { clock.now() }, timeToLive: 60)
+        let providerItemID = AgentToolDetailID("implicit-\(testCase.label)")!
+        _ = await store.recordStart(AgentToolDetailStart(
+            providerItemID: providerItemID,
+            toolName: "run",
+            arguments: [AgentToolDetailField(key: "command", value: testCase.text)],
+            affectedFiles: [URL(fileURLWithPath: "/tmp/implicit-\(testCase.secret)/leak.swift")]
+        ))
+        let files = await store.detail(for: providerItemID)?.affectedFiles ?? []
+        expect(files.isEmpty,
+               "AgentToolDetailStore privacy: \(testCase.label) implicit secret must omit affected path without explicitSecrets, got \(files)")
+    }
+    let outputStore = AgentToolDetailStore(clock: { clock.now() }, timeToLive: 60)
+    let outputSecret = "implicit-output-secret"
+    _ = await outputStore.recordEnd(AgentToolDetailEnd(
+        providerItemID: "implicit-output",
+        output: "Authorization: Bearer \(outputSecret)",
+        status: .completed,
+        affectedFiles: [URL(fileURLWithPath: "/tmp/implicit-\(outputSecret)/output.swift")]
+    ))
+    let outputFiles = await outputStore.detail(for: "implicit-output")?.affectedFiles ?? []
+    expect(outputFiles.isEmpty,
+           "AgentToolDetailStore privacy: output-discovered secret must omit affected path without explicitSecrets")
+
+    let argvCases: [(option: String, separator: String, secret: String)] = [
+        ("--access-token", " ", "argv-access-secret"),
+        ("--session-key", "=", "argv-session-secret"),
+        ("--private-signing-key", " ", "argv-signing-secret"),
+        ("--api-password", "=", "argv-password-secret"),
+        ("--client-secret", " ", "argv-client-secret"),
+        ("--credential", "=", "argv-credential-secret")
+    ]
+    for testCase in argvCases {
+        let redacted = SecretRedactor.redact("runner \(testCase.option)\(testCase.separator)\(testCase.secret)")
+        expect(!redacted.contains(testCase.secret),
+               "SecretRedactor argv matrix: \(testCase.option) must redact whitespace/equal value, got \(redacted)")
+    }
+    let falsePositive = SecretRedactor.redact("runner --tokenize keep-tokenized --monkey keep-monkey")
+    expect(falsePositive.contains("keep-tokenized") && falsePositive.contains("keep-monkey"),
+           "SecretRedactor argv matrix: near-match option names must not redact ordinary values, got \(falsePositive)")
 }
 
 private func runAgentToolDetailTruncationChecks() async throws {
@@ -380,6 +433,68 @@ private func runAgentToolDetailConcurrencyChecks() async throws {
     // Equal and absent timestamps use the same canonical sanitized payload tie
     // policy in either arrival order. Arrival is deliberately not a sequence.
     let equalClock = ManualToolDetailClock(base)
+    for timestamp in [base.addingTimeInterval(5), nil] {
+        for index in 0..<12 {
+            let secretA = "cross-store-start-a-\(index)"
+            let secretB = "cross-store-start-b-\(index)"
+            let a = AgentToolDetailStart(
+                providerItemID: AgentToolDetailID("tool-cross-store-start-\(index)")!,
+                toolName: "alpha-\(index)",
+                arguments: [AgentToolDetailField(key: "password", value: secretA)],
+                startedAt: timestamp
+            )
+            let b = AgentToolDetailStart(
+                providerItemID: AgentToolDetailID("tool-cross-store-start-\(index)")!,
+                toolName: "zulu-\(index)",
+                arguments: [AgentToolDetailField(key: "password", value: secretB)],
+                startedAt: timestamp
+            )
+            let left = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+            let right = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+            _ = await left.recordStart(a)
+            _ = await left.recordStart(b)
+            _ = await right.recordStart(b)
+            _ = await right.recordStart(a)
+            let leftValue = await left.detail(for: a.providerItemID)
+            let rightValue = await right.detail(for: a.providerItemID)
+            let timestampLabel = timestamp == nil ? "absent" : "equal"
+            expect(leftValue?.toolName == rightValue?.toolName && leftValue?.arguments == rightValue?.arguments,
+                   "AgentToolDetailStore ordering: cross-store \(timestampLabel) secret-bearing start winner must not depend on random HMAC or arrival")
+        }
+    }
+
+    for timestamp in [base.addingTimeInterval(5), nil] {
+        for index in 0..<12 {
+            let secretA = "cross-store-end-a-\(index)"
+            let secretB = "cross-store-end-b-\(index)"
+            let a = AgentToolDetailEnd(
+                providerItemID: AgentToolDetailID("tool-cross-store-end-\(index)")!,
+                output: "alpha-\(index) \(secretA)",
+                status: .completed,
+                endedAt: timestamp,
+                explicitSecrets: [secretA]
+            )
+            let b = AgentToolDetailEnd(
+                providerItemID: AgentToolDetailID("tool-cross-store-end-\(index)")!,
+                output: "zulu-\(index) \(secretB)",
+                status: .completed,
+                endedAt: timestamp,
+                explicitSecrets: [secretB]
+            )
+            let left = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+            let right = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+            _ = await left.recordEnd(a)
+            _ = await left.recordEnd(b)
+            _ = await right.recordEnd(b)
+            _ = await right.recordEnd(a)
+            let leftValue = await left.detail(for: a.providerItemID)
+            let rightValue = await right.detail(for: a.providerItemID)
+            let timestampLabel = timestamp == nil ? "absent" : "equal"
+            expect(leftValue?.output == rightValue?.output,
+                   "AgentToolDetailStore ordering: cross-store \(timestampLabel) secret-bearing end winner must not depend on random HMAC or arrival")
+        }
+    }
+
     let forward = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
     let reverse = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
     let equalDate = base.addingTimeInterval(5)
