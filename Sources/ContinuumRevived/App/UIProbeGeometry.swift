@@ -328,6 +328,7 @@ enum UIProbeGeometry {
         try checkLiveV2AgentTileLayout()
         try checkManagedAgentStreamingTeardown()
         let transcriptLiveHosts = try checkTranscriptCollectionList()
+        let toolCompositionAssertions = try checkHostLocalToolDisclosureComposition()
         let streamingApplies = try checkIncrementalTranscriptBehavior()
         let proseRows = try checkAssistantProseRenderer()
         let userPromptRows = try checkUserPromptRenderer()
@@ -347,8 +348,8 @@ enum UIProbeGeometry {
             sidebarGate.measured, sidebarGate.truncated
         ))
         print(String(
-            format: "UIProbeGeometry: reusable block host identity/reset and 8-dimensional measurement key gated; composer grows through %d width/draft cases with an eight-visual-line cap and stable constraints; custom choice popover gates %d keyboard, disabled, accessibility-state, appearance, and screen-placement cases; live v2 tile gated at 320/480/560/640/900 in both appearances with footer truncation measured across the required effort values; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, %d image/gallery states preserve opaque local media actions, %d exceptional states preserve request identity and opaque privacy, and %d completed-reasoning disclosure states preserve scoped expansion at 320pt",
-            composerCases, choiceCases, transcriptLiveHosts, streamingApplies, proseRows, userPromptRows, codeRows, operationRows, mediaRows, exceptionalRows, reasoningDisclosureRows
+            format: "UIProbeGeometry: reusable block host identity/reset and 8-dimensional measurement key gated; composer grows through %d width/draft cases with an eight-visual-line cap and stable constraints; custom choice popover gates %d keyboard, disabled, accessibility-state, appearance, and screen-placement cases; live v2 tile gated at 320/480/560/640/900 in both appearances with footer truncation measured across the required effort values; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; host-local tool composition held %d reflow/copy/accessibility/scroll assertions; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, %d image/gallery states preserve opaque local media actions, %d exceptional states preserve request identity and opaque privacy, and %d completed-reasoning disclosure states preserve scoped expansion at 320pt",
+            composerCases, choiceCases, transcriptLiveHosts, toolCompositionAssertions, streamingApplies, proseRows, userPromptRows, codeRows, operationRows, mediaRows, exceptionalRows, reasoningDisclosureRows
         ))
     }
 
@@ -6130,6 +6131,92 @@ enum UIProbeGeometry {
             throw fail("incremental transcript updates retained \(list.qaLiveHostCount) live hosts")
         }
         return live
+    }
+
+    /// Composition gate for the host-local tool-detail adapter. The provider
+    /// record is intentionally supplied through the production resolver seam,
+    /// while the semantic document remains free of local summary/path text.
+    private static func checkHostLocalToolDisclosureComposition() throws -> Int {
+        func id(_ value: String) -> AgentNodeID { AgentNodeID(rawValue: value)! }
+        let blockID = id("tool-composition-block")
+        let itemID: AgentToolDetailID = "tool-composition-item"
+        let identity = AgentToolDetailKey(providerItemID: itemID)
+        let record = AgentToolDetailRecord(
+            identity: identity,
+            toolName: "/Users/private/project/run-tool",
+            arguments: [AgentToolDetailArgument(
+                key: "command",
+                value: AgentToolDetailBoundedText(text: "echo safe")
+            )],
+            status: .completed,
+            updatedAt: Date(timeIntervalSinceReferenceDate: 10)
+        )
+        let block = AgentBlock(
+            id: blockID, revision: 1, kind: .toolCall,
+            payload: .toolCall(AgentToolCallPayload(
+                name: "provider-tool", summary: "Completed", status: .completed
+            ))
+        )
+        let filler = (1..<20).map { index in
+            AgentBlock(
+                id: id("tool-composition-filler-\(index)"), revision: 1,
+                kind: AgentBlockKind(rawValue: "fixture-opaque")!,
+                payload: .opaque(AgentOpaquePayload(debugLabel: "filler-\(index)", value: .null))
+            )
+        }
+        let blocks = [block] + filler
+        let entry = AgentEntry(
+            id: id("tool-composition-entry"), revision: 1, role: .assistant,
+            provenance: .providerItem(provider: "runtime", itemID: itemID.rawValue), blocks: blocks
+        )
+        let document = AgentDocument(version: 1, entries: [entry])
+        let list = AgentTranscriptListView(toolDetailProvider: { key in
+            key == identity ? record : nil
+        })
+        list.frame = NSRect(x: 0, y: 0, width: 320, height: 120)
+        let host = NSView(frame: list.frame)
+        host.addSubview(list)
+        list.autoresizingMask = [.width, .height]
+        try list.apply(document: document, patch: AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: blocks.map(\.id)))
+        host.layoutSubtreeIfNeeded()
+        list.collectionView.layoutSubtreeIfNeeded()
+
+        var assertions = 0
+        guard list.qaPresentedToolSummary(for: blockID)?.contains("Tool") == true else {
+            throw fail("host-local tool composition did not reflow the sanitized terminal summary")
+        }
+        assertions += 1
+        guard list.qaTranscriptRowHeight(for: blockID).map({ $0 > 0 }) == true else {
+            throw fail("host-local tool composition produced no measured row height")
+        }
+        assertions += 1
+
+        list.collectionView.selectionIndexPaths = [IndexPath(item: 0, section: 0)]
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("ContinuumToolCompositionCopy"))
+        list.copySelectedBlocks(asMarkdown: true, pasteboard: pasteboard)
+        guard let copied = pasteboard.string(forType: NSPasteboard.PasteboardType.string),
+              copied.contains("provider-tool"),
+              !copied.contains("/Users/private") else {
+            throw fail("host-local tool copy crossed the local summary/path boundary")
+        }
+        assertions += 1
+
+        let spoken = list.qaVisibleAccessibilityText.joined(separator: " ")
+        guard spoken.contains("provider-tool") || spoken.contains("Completed"),
+              !spoken.contains("/Users/private") else {
+            throw fail("host-local tool accessibility output exposed a path or lost the semantic label")
+        }
+        assertions += 1
+
+        let beforeY = list.scrollView.contentView.bounds.origin.y
+        list.scrollView.contentView.scroll(to: NSPoint(x: 0, y: 12))
+        list.scrollView.reflectScrolledClipView(list.scrollView.contentView)
+        let afterY = list.scrollView.contentView.bounds.origin.y
+        guard beforeY != afterY || list.scrollView.contentSize.height <= list.scrollView.contentView.bounds.height else {
+            throw fail("host-local tool composition did not preserve the transcript scroll seam")
+        }
+        assertions += 1
+        return assertions
     }
 
     /// Production entry/item acceptance check for the completed-reasoning route.

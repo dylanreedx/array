@@ -59,6 +59,46 @@ public struct AgentToolDetailID: Hashable, Equatable, Sendable, ExpressibleByStr
     }
 }
 
+/// Host-local scope for a provider tool item. This is deliberately not Codable:
+/// it prevents a provider item/tool-call ID from becoming a document, runtime,
+/// or sync identity while still making retention collision-safe across agents,
+/// threads, and turns.
+public struct AgentToolDetailScope: Hashable, Equatable, Sendable {
+    public let agentID: String
+    public let threadID: String
+    public let turnID: String?
+    public let provider: String
+
+    public init(agentID: String, threadID: String, turnID: String? = nil, provider: String) {
+        self.agentID = agentID
+        self.threadID = threadID
+        self.turnID = turnID
+        self.provider = provider
+    }
+
+    public static let unscoped = AgentToolDetailScope(agentID: "", threadID: "", turnID: nil, provider: "")
+}
+
+/// Complete host-local lookup identity. Never concatenate these components into
+/// a string: tuple fields must remain independently collision-safe.
+public struct AgentToolDetailKey: Hashable, Equatable, Sendable {
+    public let scope: AgentToolDetailScope
+    public let providerItemID: AgentToolDetailID
+
+    public init(scope: AgentToolDetailScope, providerItemID: AgentToolDetailID) {
+        self.scope = scope
+        self.providerItemID = providerItemID
+    }
+
+    public init(providerItemID: AgentToolDetailID) {
+        self.init(scope: .unscoped, providerItemID: providerItemID)
+    }
+
+    var sortDescription: String {
+        "\(scope.agentID)\u{001f}\(scope.threadID)\u{001f}\(scope.turnID ?? "")\u{001f}\(scope.provider)\u{001f}\(providerItemID.rawValue)"
+    }
+}
+
 /// Raw adapter-owned key/value text handed to the host-local detail store. The
 /// store sanitizes and bounds values before retaining them.
 public struct AgentToolDetailField: Equatable, Sendable {
@@ -72,7 +112,8 @@ public struct AgentToolDetailField: Equatable, Sendable {
 }
 
 public struct AgentToolDetailStart: Equatable, Sendable {
-    public var providerItemID: AgentToolDetailID
+    public var identity: AgentToolDetailKey
+    public var providerItemID: AgentToolDetailID { identity.providerItemID }
     public var toolName: String
     public var arguments: [AgentToolDetailField]
     public var affectedFiles: [URL]
@@ -82,6 +123,22 @@ public struct AgentToolDetailStart: Equatable, Sendable {
     public var explicitSecrets: [String]
 
     public init(
+        identity: AgentToolDetailKey,
+        toolName: String,
+        arguments: [AgentToolDetailField] = [],
+        affectedFiles: [URL] = [],
+        startedAt: Date? = nil,
+        explicitSecrets: [String] = []
+    ) {
+        self.identity = identity
+        self.toolName = toolName
+        self.arguments = arguments
+        self.affectedFiles = affectedFiles
+        self.startedAt = startedAt
+        self.explicitSecrets = explicitSecrets
+    }
+
+    public init(
         providerItemID: AgentToolDetailID,
         toolName: String,
         arguments: [AgentToolDetailField] = [],
@@ -89,17 +146,15 @@ public struct AgentToolDetailStart: Equatable, Sendable {
         startedAt: Date? = nil,
         explicitSecrets: [String] = []
     ) {
-        self.providerItemID = providerItemID
-        self.toolName = toolName
-        self.arguments = arguments
-        self.affectedFiles = affectedFiles
-        self.startedAt = startedAt
-        self.explicitSecrets = explicitSecrets
+        self.init(identity: AgentToolDetailKey(providerItemID: providerItemID), toolName: toolName,
+                  arguments: arguments, affectedFiles: affectedFiles, startedAt: startedAt,
+                  explicitSecrets: explicitSecrets)
     }
 }
 
 public struct AgentToolDetailEnd: Equatable, Sendable {
-    public var providerItemID: AgentToolDetailID
+    public var identity: AgentToolDetailKey
+    public var providerItemID: AgentToolDetailID { identity.providerItemID }
     public var output: String?
     public var status: AgentItemStatus
     public var exitCode: Int?
@@ -110,6 +165,24 @@ public struct AgentToolDetailEnd: Equatable, Sendable {
     public var explicitSecrets: [String]
 
     public init(
+        identity: AgentToolDetailKey,
+        output: String? = nil,
+        status: AgentItemStatus,
+        exitCode: Int? = nil,
+        affectedFiles: [URL] = [],
+        endedAt: Date? = nil,
+        explicitSecrets: [String] = []
+    ) {
+        self.identity = identity
+        self.output = output
+        self.status = status
+        self.exitCode = exitCode
+        self.affectedFiles = affectedFiles
+        self.endedAt = endedAt
+        self.explicitSecrets = explicitSecrets
+    }
+
+    public init(
         providerItemID: AgentToolDetailID,
         output: String? = nil,
         status: AgentItemStatus,
@@ -118,13 +191,9 @@ public struct AgentToolDetailEnd: Equatable, Sendable {
         endedAt: Date? = nil,
         explicitSecrets: [String] = []
     ) {
-        self.providerItemID = providerItemID
-        self.output = output
-        self.status = status
-        self.exitCode = exitCode
-        self.affectedFiles = affectedFiles
-        self.endedAt = endedAt
-        self.explicitSecrets = explicitSecrets
+        self.init(identity: AgentToolDetailKey(providerItemID: providerItemID), output: output,
+                  status: status, exitCode: exitCode, affectedFiles: affectedFiles,
+                  endedAt: endedAt, explicitSecrets: explicitSecrets)
     }
 }
 
@@ -157,7 +226,8 @@ public struct AgentToolDetailArgument: Equatable, Sendable {
 /// Sanitized, bounded, host-local tool detail. It intentionally has no Codable
 /// conformance and must not be embedded in sync or normalized runtime events.
 public struct AgentToolDetailRecord: Equatable, Sendable {
-    public var providerItemID: AgentToolDetailID
+    public var identity: AgentToolDetailKey
+    public var providerItemID: AgentToolDetailID { identity.providerItemID }
     public var toolName: String
     public var arguments: [AgentToolDetailArgument]
     public var output: AgentToolDetailBoundedText?
@@ -180,6 +250,42 @@ public struct AgentToolDetailRecord: Equatable, Sendable {
     var latestEndTieKey: String?
 
     public init(
+        identity: AgentToolDetailKey,
+        toolName: String = "Tool",
+        arguments: [AgentToolDetailArgument] = [],
+        output: AgentToolDetailBoundedText? = nil,
+        status: AgentItemStatus = .inProgress,
+        exitCode: Int? = nil,
+        startedAt: Date? = nil,
+        endedAt: Date? = nil,
+        updatedAt: Date,
+        affectedFiles: [URL] = [],
+        sensitiveStartFingerprints: Set<String> = [],
+        latestEndExplicitFingerprints: Set<String> = [],
+        latestStartTimestamp: Date? = nil,
+        latestEndTimestamp: Date? = nil,
+        latestStartTieKey: String? = nil,
+        latestEndTieKey: String? = nil
+    ) {
+        self.identity = identity
+        self.toolName = toolName
+        self.arguments = arguments
+        self.output = output
+        self.status = status
+        self.exitCode = exitCode
+        self.startedAt = startedAt
+        self.endedAt = endedAt
+        self.updatedAt = updatedAt
+        self.affectedFiles = affectedFiles
+        self.sensitiveStartFingerprints = sensitiveStartFingerprints
+        self.latestEndExplicitFingerprints = latestEndExplicitFingerprints
+        self.latestStartTimestamp = latestStartTimestamp
+        self.latestEndTimestamp = latestEndTimestamp
+        self.latestStartTieKey = latestStartTieKey
+        self.latestEndTieKey = latestEndTieKey
+    }
+
+    public init(
         providerItemID: AgentToolDetailID,
         toolName: String = "Tool",
         arguments: [AgentToolDetailArgument] = [],
@@ -197,22 +303,13 @@ public struct AgentToolDetailRecord: Equatable, Sendable {
         latestStartTieKey: String? = nil,
         latestEndTieKey: String? = nil
     ) {
-        self.providerItemID = providerItemID
-        self.toolName = toolName
-        self.arguments = arguments
-        self.output = output
-        self.status = status
-        self.exitCode = exitCode
-        self.startedAt = startedAt
-        self.endedAt = endedAt
-        self.updatedAt = updatedAt
-        self.affectedFiles = affectedFiles
-        self.sensitiveStartFingerprints = sensitiveStartFingerprints
-        self.latestEndExplicitFingerprints = latestEndExplicitFingerprints
-        self.latestStartTimestamp = latestStartTimestamp
-        self.latestEndTimestamp = latestEndTimestamp
-        self.latestStartTieKey = latestStartTieKey
-        self.latestEndTieKey = latestEndTieKey
+        self.init(identity: AgentToolDetailKey(providerItemID: providerItemID), toolName: toolName,
+                  arguments: arguments, output: output, status: status, exitCode: exitCode,
+                  startedAt: startedAt, endedAt: endedAt, updatedAt: updatedAt,
+                  affectedFiles: affectedFiles, sensitiveStartFingerprints: sensitiveStartFingerprints,
+                  latestEndExplicitFingerprints: latestEndExplicitFingerprints,
+                  latestStartTimestamp: latestStartTimestamp, latestEndTimestamp: latestEndTimestamp,
+                  latestStartTieKey: latestStartTieKey, latestEndTieKey: latestEndTieKey)
     }
 
     public var duration: TimeInterval? {
@@ -238,9 +335,19 @@ public struct AgentToolDetailSanitizer: Sendable {
         self.fingerprintKey = fingerprintKey
     }
 
+    /// Tool titles are provider text, not trusted display labels. A title that
+    /// looks like a path is omitted before it enters the retained record.
+    static func isPathBearingToolName(_ raw: String) -> Bool {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return false }
+        return value.contains("/") || value.contains("\\") ||
+            value.hasPrefix("~") || value.hasPrefix(".") ||
+            value.lowercased().hasPrefix("file:") || value.contains("://")
+    }
+
     func sanitizeToolName(_ raw: String, explicitSecrets: [String]) -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let candidate = trimmed.isEmpty ? "Tool" : trimmed
+        let candidate = trimmed.isEmpty || Self.isPathBearingToolName(trimmed) ? "Tool" : trimmed
         return boundText(
             SecretRedactor.redact(Self.singleLine(candidate), explicitSecrets: explicitSecrets),
             maxBytes: limits.maxToolNameBytes,
@@ -495,7 +602,7 @@ public struct AgentToolDetailSanitizer: Sendable {
 }
 
 public actor AgentToolDetailStore {
-    private var details: [AgentToolDetailID: AgentToolDetailRecord] = [:]
+    private var details: [AgentToolDetailKey: AgentToolDetailRecord] = [:]
     private let clock: @Sendable () -> Date
     private let timeToLive: TimeInterval
     private let sanitizer: AgentToolDetailSanitizer
@@ -536,8 +643,8 @@ public actor AgentToolDetailStore {
             arguments: sanitizedArguments,
             affectedFiles: sanitizedFiles
         )
-        let existing = details[start.providerItemID]
-        var record = existing ?? AgentToolDetailRecord(providerItemID: start.providerItemID, updatedAt: observedAt)
+        let existing = details[start.identity]
+        var record = existing ?? AgentToolDetailRecord(identity: start.identity, updatedAt: observedAt)
         let shouldApplyStart = isNewer(
             timestamp: start.startedAt,
             tieKey: tieKey,
@@ -572,7 +679,7 @@ public actor AgentToolDetailStore {
         }
         record.updatedAt = observedAt
         record.affectedFiles = sanitizer.sanitizeFiles(start.affectedFiles, existing: record.affectedFiles, explicitSecrets: eventSecrets)
-        details[start.providerItemID] = record
+        details[start.identity] = record
         if timeToLive == 0 { expireLocked(at: observedAt) }
         return record
     }
@@ -589,8 +696,8 @@ public actor AgentToolDetailStore {
             end.output,
             explicitSecrets: end.explicitSecrets,
             redactionSecrets: implicitSecrets,
-            requiredStartFingerprints: details[end.providerItemID]?.sensitiveStartFingerprints ?? [],
-            associatedArguments: details[end.providerItemID]?.arguments ?? []
+            requiredStartFingerprints: details[end.identity]?.sensitiveStartFingerprints ?? [],
+            associatedArguments: details[end.identity]?.arguments ?? []
         )
         let sanitizedFiles = sanitizer.sanitizeFiles(end.affectedFiles, existing: [], explicitSecrets: eventSecrets)
         let tieKey = sanitizer.stableEndTieKey(
@@ -599,8 +706,8 @@ public actor AgentToolDetailStore {
             exitCode: end.exitCode,
             affectedFiles: sanitizedFiles
         )
-        let existing = details[end.providerItemID]
-        var record = existing ?? AgentToolDetailRecord(providerItemID: end.providerItemID, updatedAt: observedAt)
+        let existing = details[end.identity]
+        var record = existing ?? AgentToolDetailRecord(identity: end.identity, updatedAt: observedAt)
         let shouldApplyEnd = isNewer(
             timestamp: end.endedAt,
             tieKey: tieKey,
@@ -618,20 +725,27 @@ public actor AgentToolDetailStore {
         }
         record.updatedAt = observedAt
         record.affectedFiles = sanitizer.sanitizeFiles(end.affectedFiles, existing: record.affectedFiles, explicitSecrets: eventSecrets)
-        details[end.providerItemID] = record
+        details[end.identity] = record
         if timeToLive == 0 { expireLocked(at: observedAt) }
         return record
     }
 
+    /// Legacy unscoped lookup is intentionally exact. Scoped callers must use
+    /// the complete key; an item ID alone is never allowed to select another
+    /// agent, turn, thread, provider, or tool call.
     public func detail(for providerItemID: AgentToolDetailID) -> AgentToolDetailRecord? {
+        detail(for: AgentToolDetailKey(providerItemID: providerItemID))
+    }
+
+    public func detail(for identity: AgentToolDetailKey) -> AgentToolDetailRecord? {
         expireLocked(at: clock())
-        return details[providerItemID]
+        return details[identity]
     }
 
     public func allDetails() -> [AgentToolDetailRecord] {
         expireLocked(at: clock())
         return details.values.sorted { lhs, rhs in
-            if lhs.updatedAt == rhs.updatedAt { return lhs.providerItemID.rawValue < rhs.providerItemID.rawValue }
+            if lhs.updatedAt == rhs.updatedAt { return lhs.identity.sortDescription < rhs.identity.sortDescription }
             return lhs.updatedAt < rhs.updatedAt
         }
     }
@@ -686,12 +800,12 @@ public actor AgentToolDetailStore {
 
     @discardableResult
     private func expireLocked(at now: Date) -> [AgentToolDetailID] {
-        let expired = details
+        let expiredKeys = details
             .filter { now.timeIntervalSince($0.value.updatedAt) >= timeToLive }
             .map { $0.key }
-            .sorted { $0.rawValue < $1.rawValue }
-        for key in expired { details.removeValue(forKey: key) }
-        return expired
+            .sorted { $0.sortDescription < $1.sortDescription }
+        for key in expiredKeys { details.removeValue(forKey: key) }
+        return expiredKeys.map(\.providerItemID)
     }
 }
 
@@ -741,15 +855,24 @@ public struct AgentToolDetailExpandedPresentation: Equatable, Sendable {
 }
 
 public enum AgentToolDetailPresenter {
+    /// Provider closures are an untrusted composition seam. Enforce the same
+    /// title rule again before either visible text or accessibility receives it.
+    public static func safeToolName(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !AgentToolDetailSanitizer.isPathBearingToolName(trimmed) else { return "Tool" }
+        return trimmed
+    }
+
     public static func compact(_ detail: AgentToolDetailRecord) -> AgentToolDetailCompactPresentation {
         let status = statusText(detail.status)
+        let safeName = safeToolName(detail.toolName)
         let duration = detail.duration.map(formatDuration)
         let fileText: String? = detail.affectedFiles.isEmpty ? nil : "\(detail.affectedFiles.count) file\(detail.affectedFiles.count == 1 ? "" : "s")"
-        let coreSummary = shortLine(pureSummary(for: detail) ?? detail.toolName)
+        let coreSummary = shortLine(pureSummary(for: detail) ?? safeName)
         let suffix = [status, duration, fileText].compactMap { $0 }.joined(separator: " · ")
         let summary = shortLine(suffix.isEmpty ? coreSummary : "\(coreSummary) · \(suffix)")
         return AgentToolDetailCompactPresentation(
-            title: detail.toolName,
+            title: safeName,
             statusText: status,
             summary: summary,
             accessibilitySummary: accessibilitySummary(for: detail, status: status)
@@ -773,7 +896,7 @@ public enum AgentToolDetailPresenter {
     }
 
     private static func pureSummary(for detail: AgentToolDetailRecord) -> String? {
-        let normalizedTool = detail.toolName.lowercased().filter { $0.isLetter || $0.isNumber }
+        let normalizedTool = safeToolName(detail.toolName).lowercased().filter { $0.isLetter || $0.isNumber }
         if let command = safeArgument(detail, keys: ["command", "cmd", "shellcommand"]),
            ["bash", "shell", "sh", "zsh", "command", "run"].contains(where: { normalizedTool.contains($0) }) {
             return "Ran \(command)"
@@ -854,7 +977,7 @@ public enum AgentToolDetailPresenter {
     }
 
     private static func accessibilitySummary(for detail: AgentToolDetailRecord, status: String) -> String {
-        var parts = ["Tool", detail.toolName, status]
+        var parts = ["Tool", safeToolName(detail.toolName), status]
         if let duration = detail.duration { parts.append("duration \(formatDuration(duration))") }
         if detail.output != nil { parts.append("output available") }
         if !detail.arguments.isEmpty { parts.append("\(detail.arguments.count) arguments") }

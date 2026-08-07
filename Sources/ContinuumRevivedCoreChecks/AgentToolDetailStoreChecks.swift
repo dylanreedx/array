@@ -3,6 +3,7 @@ import Foundation
 
 func runAgentToolDetailStoreChecks() async throws {
     try await runAgentToolDetailPrivacyChecks()
+    try await runAgentToolDetailIdentityCollisionChecks()
     try await runAgentToolDetailImplicitSensitivityChecks()
     try await runAgentToolDetailTruncationChecks()
     try await runAgentToolDetailAssociationAndExpiryChecks()
@@ -10,7 +11,7 @@ func runAgentToolDetailStoreChecks() async throws {
     try await runAgentToolDetailPresentationChecks()
     runAgentToolDetailSourceBoundaryChecks()
     try runAgentToolDetailCompileNegativeBoundaryCheck()
-    print("Agent tool detail store checks passed: privacy redaction/fail-closed output, implicit-path and compound-argv secret witnesses, cross-store reversed-arrival ties, provider ID bounds, argument/file bounds, truncation caps, start/end ordering, local expiry, same-ID concurrency, compact summaries, and source boundaries")
+    print("Agent tool detail store checks passed: privacy redaction/fail-closed output, scoped cross-agent/turn identity, path-title retention/AX witnesses, implicit-path and compound-argv secret witnesses, cross-store reversed-arrival ties, provider ID bounds, argument/file bounds, truncation caps, start/end ordering, local expiry, same-ID concurrency, compact summaries, and source boundaries")
 }
 
 private func runAgentToolDetailPrivacyChecks() async throws {
@@ -161,6 +162,51 @@ private func runAgentToolDetailPrivacyChecks() async throws {
     let activityJSON = String(decoding: try JSONEncoder().encode(activity), as: UTF8.self)
     expect(!activityJSON.contains(rawSecret) && !activityJSON.contains("visible-value") && !activityJSON.contains("echoed"),
            "AgentActivityEvent privacy boundary: sync-safe activity must not carry expanded local detail, got \(activityJSON)")
+}
+
+private func runAgentToolDetailIdentityCollisionChecks() async throws {
+    let clock = ManualToolDetailClock(Date(timeIntervalSinceReferenceDate: 2_250))
+    let store = AgentToolDetailStore(clock: { clock.now() }, timeToLive: 60)
+    let itemID: AgentToolDetailID = "reused-item"
+    let first = AgentToolDetailKey(
+        scope: AgentToolDetailScope(agentID: "agent-a", threadID: "thread-a", turnID: "turn-1", provider: "pi"),
+        providerItemID: itemID
+    )
+    let second = AgentToolDetailKey(
+        scope: AgentToolDetailScope(agentID: "agent-b", threadID: "thread-b", turnID: "turn-9", provider: "pi"),
+        providerItemID: itemID
+    )
+    _ = await store.recordStart(AgentToolDetailStart(identity: first, toolName: "read"))
+    _ = await store.recordEnd(AgentToolDetailEnd(identity: first, output: "first", status: .completed))
+    _ = await store.recordStart(AgentToolDetailStart(identity: second, toolName: "edit"))
+    _ = await store.recordEnd(AgentToolDetailEnd(identity: second, output: "second", status: .failed))
+    let firstDetail = await store.detail(for: first)
+    let secondDetail = await store.detail(for: second)
+    expect(firstDetail?.toolName == "read" && firstDetail?.output?.text == "first",
+           "AgentToolDetail identity: first agent/turn/thread must retain its reused item independently")
+    expect(secondDetail?.toolName == "edit" && secondDetail?.output?.text == "second",
+           "AgentToolDetail identity: second agent/turn/thread must retain its reused item independently")
+    let ambiguousLookup = await store.detail(for: itemID)
+    expect(ambiguousLookup == nil,
+           "AgentToolDetail identity: item-only lookup must fail closed when only scoped records exist")
+    let identities = Set((await store.allDetails()).map(\.identity))
+    expect(identities == Set([first, second]),
+           "AgentToolDetail identity: provider item/tool call key must include every host-local scope component")
+
+    let pathTitle = "/Users/example/project/run-tool"
+    let pathStore = AgentToolDetailStore(clock: { clock.now() }, timeToLive: 60)
+    _ = await pathStore.recordStart(AgentToolDetailStart(
+        identity: first, toolName: pathTitle
+    ))
+    let retained = await pathStore.detail(for: first)
+    expect(retained?.toolName == "Tool",
+           "AgentToolDetail privacy: path-bearing tool title must be omitted before retention")
+    let providerRecord = AgentToolDetailRecord(
+        identity: first, toolName: pathTitle, updatedAt: clock.now()
+    )
+    let compact = AgentToolDetailPresenter.compact(providerRecord)
+    expect(compact.title == "Tool" && !compact.accessibilitySummary.contains(pathTitle),
+           "AgentToolDetail privacy: provider-supplied path title must fail closed before AX")
 }
 
 private func runAgentToolDetailImplicitSensitivityChecks() async throws {
@@ -656,6 +702,8 @@ private func runAgentToolDetailSourceBoundaryChecks() {
         let compacted = source.replacingOccurrences(of: "\n", with: " ")
         let localDetailTypeNames = [
             "AgentToolDetailID",
+            "AgentToolDetailScope",
+            "AgentToolDetailKey",
             "AgentToolDetailField",
             "AgentToolDetailStart",
             "AgentToolDetailEnd",

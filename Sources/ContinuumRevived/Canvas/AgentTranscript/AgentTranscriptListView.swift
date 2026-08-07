@@ -128,10 +128,13 @@ final class AgentTranscriptListView: NSView {
     /// intentionally owned outside the document; this cache contains only the
     /// already-sanitized records used for the current host view.
     private let toolDetailStore: AgentToolDetailStore?
-    private let toolDetailProvider: ((AgentToolDetailID) -> AgentToolDetailRecord?)?
-    private var toolDetailsByID: [AgentToolDetailID: AgentToolDetailRecord] = [:]
+    private let toolDetailProvider: ((AgentToolDetailKey) -> AgentToolDetailRecord?)?
+    private var toolDetailsByID: [AgentToolDetailKey: AgentToolDetailRecord] = [:]
     private var toolDetailRefreshTask: Task<Void, Never>?
-    private var toolDetailIDByBlockID: [AgentNodeID: AgentToolDetailID] = [:]
+    private var toolDetailIDByBlockID: [AgentNodeID: AgentToolDetailKey] = [:]
+    /// This scope is host-local composition state. It is never copied into the
+    /// semantic document or any runtime/sync payload.
+    private var toolDetailScope: AgentToolDetailScope?
     /// The list owns the view-state binding because the existing tile context
     /// deliberately carries only semantic render actions. Entry IDs remain the
     /// disclosure key; this opaque owner token prevents state crossing lists.
@@ -183,7 +186,8 @@ final class AgentTranscriptListView: NSView {
         ),
         authoritativeReasoningDuration: @escaping (AgentEntry) -> TimeInterval? = { _ in nil },
         toolDetailStore: AgentToolDetailStore? = nil,
-        toolDetailProvider: ((AgentToolDetailID) -> AgentToolDetailRecord?)? = nil
+        toolDetailProvider: ((AgentToolDetailKey) -> AgentToolDetailRecord?)? = nil,
+        toolDetailScope: AgentToolDetailScope? = nil
     ) {
         self.registry = registry
         disclosureOwnerID = AgentID(rawValue: UUID())
@@ -191,6 +195,7 @@ final class AgentTranscriptListView: NSView {
         self.authoritativeReasoningDuration = authoritativeReasoningDuration
         self.toolDetailStore = toolDetailStore
         self.toolDetailProvider = toolDetailProvider
+        self.toolDetailScope = toolDetailScope
         measurementCache = AgentBlockMeasurementCache()
         super.init(frame: .zero)
         self.renderContext = contextWithDisclosureState(renderContext)
@@ -427,7 +432,7 @@ final class AgentTranscriptListView: NSView {
     /// unchanged IDs; reconfiguration is limited to rows touched by the patch.
     /// There is intentionally no reloadData path after (or before) initial load.
     private func applyCoalesced(document: AgentDocument) throws {
-        let flattened = try Self.flatten(document)
+        let flattened = try flatten(document)
         let oldIndexes = Dictionary(uniqueKeysWithValues: rows.enumerated().map { ($0.element.id, $0.offset) })
         let changedNodeIDs = Set(flattened.rows.compactMap { row -> AgentNodeID? in
             guard let old = rowsByID[row.id] else { return nil }
@@ -447,7 +452,7 @@ final class AgentTranscriptListView: NSView {
         if let appliedVersion, patch.fromVersion != appliedVersion {
             throw UpdateError.versionMismatch(expected: appliedVersion, actual: patch.fromVersion)
         }
-        let flattened = try Self.flatten(document)
+        let flattened = try flatten(document)
         try applyWithScroll(
             document: document,
             flattened: flattened,
@@ -458,7 +463,7 @@ final class AgentTranscriptListView: NSView {
 
     private func applyWithScroll(
         document: AgentDocument,
-        flattened: (rows: [Row], topLevelIDsByNodeID: [AgentNodeID: Set<AgentNodeID>]),
+        flattened: (rows: [Row], topLevelIDsByNodeID: [AgentNodeID: Set<AgentNodeID>], toolDetailIDByBlockID: [AgentNodeID: AgentToolDetailKey]),
         changedNodeIDs: Set<AgentNodeID>
     ) throws {
         try scrollController.apply(
@@ -480,7 +485,7 @@ final class AgentTranscriptListView: NSView {
 
     private func applyUnscrolled(
         document: AgentDocument,
-        flattened: (rows: [Row], topLevelIDsByNodeID: [AgentNodeID: Set<AgentNodeID>]),
+        flattened: (rows: [Row], topLevelIDsByNodeID: [AgentNodeID: Set<AgentNodeID>], toolDetailIDByBlockID: [AgentNodeID: AgentToolDetailKey]),
         changedNodeIDs: Set<AgentNodeID>
     ) throws {
         let oldIDs = rows.map(\.id)
@@ -716,27 +721,41 @@ final class AgentTranscriptListView: NSView {
         }
     }
 
-    private static func flatten(
+    private func flatten(
         _ document: AgentDocument
     ) throws -> (
         rows: [Row],
         topLevelIDsByNodeID: [AgentNodeID: Set<AgentNodeID>],
-        toolDetailIDByBlockID: [AgentNodeID: AgentToolDetailID]
+        toolDetailIDByBlockID: [AgentNodeID: AgentToolDetailKey]
     ) {
         var rows: [Row] = []
         var owners: [AgentNodeID: Set<AgentNodeID>] = [:]
-        var toolDetailIDs: [AgentNodeID: AgentToolDetailID] = [:]
+        var toolDetailIDs: [AgentNodeID: AgentToolDetailKey] = [:]
         var topLevelIDs: Set<AgentNodeID> = []
 
-        func index(_ block: AgentBlock, owner: AgentNodeID, detailID: AgentToolDetailID?) {
+        func index(_ block: AgentBlock, owner: AgentNodeID, detailID: AgentToolDetailKey?) {
             owners[block.id] = [owner]
             if let detailID { toolDetailIDs[block.id] = detailID }
             block.children.forEach { index($0, owner: owner, detailID: detailID) }
         }
         for entry in document.entries {
-            let detailID: AgentToolDetailID?
-            if case let .providerItem(_, itemID?) = entry.provenance {
-                detailID = AgentToolDetailID(itemID)
+            var detailID: AgentToolDetailKey?
+            if case let .providerItem(provider, itemID?) = entry.provenance,
+               let itemID = AgentToolDetailID(itemID) {
+                detailID = AgentToolDetailKey(
+                    scope: toolDetailScope ?? .unscoped,
+                    providerItemID: itemID
+                )
+                // The provider component is part of the key even when the
+                // caller supplied no explicit host scope.
+                if let scope = toolDetailScope {
+                    detailID = AgentToolDetailKey(
+                        scope: AgentToolDetailScope(
+                            agentID: scope.agentID, threadID: scope.threadID,
+                            turnID: scope.turnID, provider: provider
+                        ), providerItemID: itemID
+                    )
+                }
             } else {
                 detailID = nil
             }
@@ -808,7 +827,7 @@ final class AgentTranscriptListView: NSView {
         toolDetailRefreshTask = Task { [weak self, toolDetailStore] in
             let details = await toolDetailStore.allDetails()
             guard !Task.isCancelled, let self else { return }
-            self.toolDetailsByID = Dictionary(uniqueKeysWithValues: details.map { ($0.providerItemID, $0) })
+            self.toolDetailsByID = Dictionary(uniqueKeysWithValues: details.map { ($0.identity, $0) })
             self.refreshVisibleToolDetails()
         }
     }
@@ -837,26 +856,37 @@ final class AgentTranscriptListView: NSView {
         jumpToLatestButton.isHidden = !scrollController.showsJumpToLatest
     }
 
-    /// Runtime capture remains a host-local adapter: only the provider item ID,
-    /// sanitized tool name, lifecycle status, and approved path observation enter
-    /// the actor. Raw runtime payloads never cross into this view or the document.
+    /// Runtime capture remains a host-local adapter: only a non-Codable scoped
+    /// key, sanitized tool name, lifecycle status, and approved path observation
+    /// enter the actor. Raw runtime payloads never cross into this view or the
+    /// document. Runtime events already carry thread/turn routing; this adapter
+    /// derives local scope from them instead of widening their Codable shape.
     func captureRuntimeEvent(_ event: AgentRuntimeEvent) {
         guard let toolDetailStore else { return }
         switch event {
-        case let .itemStarted(_, itemID, kind, title):
+        case let .turnStarted(threadID, turnID):
+            toolDetailScope = runtimeScope(threadID: threadID, turnID: turnID)
+        case let .itemStarted(threadID, itemID, kind, title):
             guard Self.isToolDetailKind(kind), let providerID = AgentToolDetailID(itemID) else { return }
+            let turnID = toolDetailScope?.threadID == threadID ? toolDetailScope?.turnID : nil
+            let scope = runtimeScope(threadID: threadID, turnID: turnID)
+            toolDetailScope = scope
+            let identity = AgentToolDetailKey(scope: scope, providerItemID: providerID)
             Task { [weak self, toolDetailStore] in
                 _ = await toolDetailStore.recordStart(AgentToolDetailStart(
-                    providerItemID: providerID,
+                    identity: identity,
                     toolName: title ?? "Tool"
                 ))
                 self?.refreshToolDetailPresentation()
             }
-        case let .itemCompleted(_, itemID, kind, status):
+        case let .itemCompleted(threadID, itemID, kind, status):
             guard Self.isToolDetailKind(kind), let providerID = AgentToolDetailID(itemID) else { return }
+            let turnID = toolDetailScope?.threadID == threadID ? toolDetailScope?.turnID : nil
+            let scope = runtimeScope(threadID: threadID, turnID: turnID)
+            let identity = AgentToolDetailKey(scope: scope, providerItemID: providerID)
             let mapped: AgentItemStatus = status == .failed ? .failed : (status == .declined ? .cancelled : .completed)
             Task { [weak self, toolDetailStore] in
-                _ = await toolDetailStore.recordEnd(AgentToolDetailEnd(providerItemID: providerID, status: mapped))
+                _ = await toolDetailStore.recordEnd(AgentToolDetailEnd(identity: identity, status: mapped))
                 self?.refreshToolDetailPresentation()
             }
         default:
@@ -868,15 +898,26 @@ final class AgentTranscriptListView: NSView {
         guard let toolDetailStore else { return }
         guard case let .toolActivity(itemID, activity) = observation,
               let providerID = AgentToolDetailID(itemID) else { return }
+        let scope = toolDetailScope ?? runtimeScope(threadID: "")
+        let identity = AgentToolDetailKey(scope: scope, providerItemID: providerID)
         Task { [weak self, toolDetailStore] in
             _ = await toolDetailStore.recordStart(AgentToolDetailStart(
-                providerItemID: providerID,
+                identity: identity,
                 toolName: activity.operation.rawValue,
                 affectedFiles: activity.targetPath.map { [$0] } ?? [],
                 startedAt: activity.startedAt
             ))
             self?.refreshToolDetailPresentation()
         }
+    }
+
+    private func runtimeScope(threadID: String, turnID: String? = nil) -> AgentToolDetailScope {
+        AgentToolDetailScope(
+            agentID: disclosureOwnerID.rawValue.uuidString,
+            threadID: threadID,
+            turnID: turnID,
+            provider: "runtime"
+        )
     }
 
     private static func isToolDetailKind(_ kind: ItemKind) -> Bool {
@@ -957,6 +998,16 @@ final class AgentTranscriptListView: NSView {
     var qaCachedMeasurementCount: Int { measurementCache.cachedMeasurementCount }
     var qaLayoutPreparePassCount: Int { transcriptLayout.preparePassCount }
     var qaShowsJumpToLatest: Bool { !jumpToLatestButton.isHidden }
+    var qaVisibleAccessibilityText: [String] {
+        collectionView.visibleItems().compactMap { item in
+            guard let item = item as? AgentTranscriptCollectionItem,
+                  let renderer = item.hostView?.rendererView else { return nil }
+            return [renderer.accessibilityLabel(), renderer.accessibilityValue() as? String]
+                .compactMap { $0 }
+                .joined(separator: " ")
+        }
+    }
+
     var qaVisibleAccessibilityOrder: [AgentNodeID] {
         collectionView.visibleItems().compactMap { item -> (Int, AgentNodeID)? in
             guard let item = item as? AgentTranscriptCollectionItem,
