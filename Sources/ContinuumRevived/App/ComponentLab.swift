@@ -2331,7 +2331,7 @@ enum LabCatalog {
             id: "managed-agent.tilted-variations",
             category: "Managed Agent",
             title: "Tilted Prism Variations — Motion Study",
-            summary: "Selected Tilted Prism baseline plus five new named variations at true 18×18 scale, shown in live Normal and static Reduced Motion with compact status context. Review only; no production winner is selected.",
+            summary: "Selected Tilted Prism baseline plus eight new named variations at true 18×18 scale, shown in live Normal and static Reduced Motion with compact status context. Review only; no production winner is selected.",
             content: .reviewSurface(preferredSize: TiltedVariationsGalleryView.preferredSize) {
                 LabCatalog.makeTiltedVariationsGalleryView(mode: .live)
             }
@@ -3838,8 +3838,11 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
                 try UIProbeGeometry.expectNoClipping(gallery, label: label)
                 try UIProbeGeometry.expectNoBrokenRequiredSizeConstraints(gallery, label: label)
                 guard gallery.qaCandidateCount == expectedCandidates.count,
-                      gallery.qaFixtureCount == expectedCandidates.count * 2 else {
-                    throw fail("\(label): expected Tilted Prism baseline plus five new variations in Normal and Reduced Motion")
+                      gallery.qaFixtureCount == expectedCandidates.count * 2,
+                      expectedCandidates.contains(.arrayEchoGyro),
+                      expectedCandidates.contains(.signalGrainGyro),
+                      expectedCandidates.contains(.depthPulseGyro) else {
+                    throw fail("\(label): expected Tilted Prism baseline plus eight new variations in Normal and Reduced Motion")
                 }
                 for fixture in gallery.qaIndicatorFixtures {
                     let indicator = fixture.indicator
@@ -3861,6 +3864,24 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
                     }
                     guard activeAnimationCount(in: indicator) == 0 else {
                         throw fail("\(label): snapshot route installed animation for \(fixture.candidate.rawValue)")
+                    }
+                    if let gyro = indicator as? GyroBrandDerivativeThinkingIndicatorView {
+                        let report = gyro.qaReport
+                        guard report.footprintSide == 18,
+                              report.nodeCount == 3,
+                              report.guideCount == (gyro.variant == .arrayEcho ? 3 : 2),
+                              report.sampledPathFitsFootprint,
+                              report.minimumCenterClearance > 0,
+                              report.colorHandoffSamples > 0 || gyro.variant != .depthPulse,
+                              gyro.qaNodeStates.allSatisfy({ state in
+                                  AccentToken.allCases.contains(where: { $0.rawValue == state.tokenName })
+                                      && state.opacity >= 0 && state.opacity <= 1
+                              }) else {
+                            throw fail("\(label): \(fixture.candidate.rawValue) lost bounded geometry, open centre, semantic colour, or depth handoff")
+                        }
+                        if gyro.variant == .signalGrain {
+                            guard report.usesDeterministicHarmonics else { throw fail("\(label): Signal Grain Gyro lost deterministic harmonic modulation") }
+                        }
                     }
                 }
                 contrast.merge(try UIProbeContrast.evaluate(probe))
@@ -3893,6 +3914,14 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             } else {
                 guard count > 0 else { throw fail("tilted variations Normal Motion did not animate \(fixture.candidate.rawValue)") }
             }
+            if let gyro = fixture.indicator as? GyroBrandDerivativeThinkingIndicatorView {
+                guard gyro.qaIntrinsicSide == 18,
+                      gyro.qaNodeStates.count == 3,
+                      gyro.qaNodeStates.allSatisfy({ $0.clearanceFromCenter > 0 }),
+                      gyro.qaReport.sampledPathFitsFootprint else {
+                    throw fail("tilted variations live geometry gate failed for \(fixture.candidate.rawValue)")
+                }
+            }
         }
 
         // Exercise the real window/appearance seam: each candidate must repaint
@@ -3906,14 +3935,20 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         liveGallery.frame = host.bounds
         host.layoutSubtreeIfNeeded()
         for appearance in [NSAppearance.Name.darkAqua, .aqua] {
+            let generationsBeforeFlip = liveGallery.qaIndicatorFixtures.map { ($0.indicator as? GyroBrandDerivativeThinkingIndicatorView)?.qaColorResolutionGeneration ?? -1 }
             window.appearance = NSAppearance(named: appearance)
             host.layoutSubtreeIfNeeded()
-            for fixture in liveGallery.qaIndicatorFixtures {
+            for (index, fixture) in liveGallery.qaIndicatorFixtures.enumerated() {
                 let count = activeAnimationCount(in: fixture.indicator)
                 if fixture.reducedMotion {
                     guard count == 0 else { throw fail("tilted variations appearance redraw animated Reduced Motion \(fixture.candidate.rawValue)") }
                 } else {
                     guard count > 0 else { throw fail("tilted variations appearance redraw failed to restart \(fixture.candidate.rawValue) in \(appearance.rawValue)") }
+                }
+                if let gyro = fixture.indicator as? GyroBrandDerivativeThinkingIndicatorView {
+                    guard gyro.qaColorResolutionGeneration > generationsBeforeFlip[index] else {
+                        throw fail("tilted variations appearance flip did not re-resolve semantic colours for \(fixture.candidate.rawValue)")
+                    }
                 }
             }
         }
@@ -3941,6 +3976,8 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         case let view as AngularSlingshotOrbitThinkingIndicatorView:
             return view.qaActiveAnimationCount
         case let view as ChromaticDepthRelayTiltedThinkingIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as GyroBrandDerivativeThinkingIndicatorView:
             return view.qaActiveAnimationCount
         case let view as DualPlaneGyroTiltedThinkingIndicatorView:
             return view.qaActiveAnimationCount
