@@ -92,7 +92,13 @@ final class ComposerImageAttachmentRailView: NSView, TokenThemed {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     deinit {
-        for task in thumbnailTasks.values { task.cancel() }
+        NotificationCenter.default.removeObserver(self)
+        MainActor.assumeIsolated {
+            for task in thumbnailTasks.values { task.cancel() }
+            thumbnailTasks.removeAll()
+            visibleThumbnailIDs.removeAll()
+            thumbnailsByID.removeAll()
+        }
     }
 
     override var intrinsicContentSize: NSSize {
@@ -155,6 +161,26 @@ final class ComposerImageAttachmentRailView: NSView, TokenThemed {
         }
     }
 
+    override var isHidden: Bool {
+        didSet {
+            guard oldValue != isHidden else { return }
+            if isHidden {
+                cancelAllThumbnailLeases(removeThumbnails: true)
+            } else {
+                scheduleVisibleThumbnailSync()
+            }
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            cancelAllThumbnailLeases(removeThumbnails: true)
+        } else {
+            scheduleVisibleThumbnailSync()
+        }
+    }
+
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         applyTokens()
@@ -208,6 +234,13 @@ final class ComposerImageAttachmentRailView: NSView, TokenThemed {
         scrollView.autohidesScrollers = true
         scrollView.scrollerStyle = .overlay
         scrollView.documentView = collectionView
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(clipViewBoundsDidChange(_:)),
+            name: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView
+        )
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(scrollView)
 
@@ -241,12 +274,23 @@ final class ComposerImageAttachmentRailView: NSView, TokenThemed {
         }
     }
 
-    private func syncVisibleThumbnailLeases() {
-        let liveVisibleIDs = Set(collectionView.indexPathsForVisibleItems().compactMap { indexPath -> String? in
+    @objc private func clipViewBoundsDidChange(_ notification: Notification) {
+        syncVisibleThumbnailLeases()
+    }
+
+    private func syncVisibleThumbnailLeases(liveVisibleIDs suppliedVisibleIDs: Set<String>? = nil) {
+        guard window != nil, !isHiddenOrHasHiddenAncestor, !bounds.isEmpty, !items.isEmpty else {
+            cancelAllThumbnailLeases(removeThumbnails: true)
+            return
+        }
+        let liveVisibleIDs = suppliedVisibleIDs ?? Set(collectionView.indexPathsForVisibleItems().compactMap { indexPath -> String? in
             guard items.indices.contains(indexPath.item) else { return nil }
             return items[indexPath.item].id
         })
-        guard !liveVisibleIDs.isEmpty else { return }
+        guard !liveVisibleIDs.isEmpty else {
+            cancelAllThumbnailLeases(removeThumbnails: true)
+            return
+        }
         for id in visibleThumbnailIDs where !liveVisibleIDs.contains(id) {
             cancelThumbnailLease(for: id, removeThumbnail: true)
         }
@@ -254,6 +298,12 @@ final class ComposerImageAttachmentRailView: NSView, TokenThemed {
         for id in liveVisibleIDs {
             guard let item = itemsByID[id] else { continue }
             startThumbnailIfNeeded(for: item)
+        }
+    }
+
+    private func scheduleVisibleThumbnailSync() {
+        DispatchQueue.main.async { [weak self] in
+            self?.syncVisibleThumbnailLeases()
         }
     }
 
@@ -649,6 +699,10 @@ extension ComposerImageAttachmentRailView {
 
     func qaSyncVisibleThumbnailLeases() {
         syncVisibleThumbnailLeases()
+    }
+
+    func qaSyncVisibleThumbnailLeases(liveVisibleIDsForChecks liveVisibleIDs: Set<String>) {
+        syncVisibleThumbnailLeases(liveVisibleIDs: liveVisibleIDs)
     }
 
     func qaCancelVisibleThumbnailLease(id: String) {

@@ -7620,26 +7620,66 @@ enum UIProbeGeometry {
         let coalescedRenderCount = await coalescingPipeline.qaRenderInvocationCount()
         try require(coalescedRenderCount == 1, "ImageIO thumbnail pipeline did not coalesce in-flight duplicate requests")
 
-        let cancellationPipeline = ComposerImageIOThumbnailPipeline(configuration: .init(maximumEntries: 20, maximumBytes: 4 * 1024 * 1024, maximumPixelSize: 1024, decodeStartDelayNanosecondsForChecks: 500_000_000))
+        let decodeGate = ComposerImageDecodeStageGate()
+        let cancellationPipeline = ComposerImageIOThumbnailPipeline(configuration: .init(
+            maximumEntries: 20,
+            maximumBytes: 4 * 1024 * 1024,
+            maximumPixelSize: 1024,
+            decodeStageHooksForChecks: .init(afterThumbnailDecode: {
+                await decodeGate.markReachedAndWaitUntilReleased()
+            })
+        ))
         let cancellable = Task { try await cancellationPipeline.thumbnail(for: wideURL, maxPixelSize: 512) }
-        try await Task.sleep(nanoseconds: 30_000_000)
+        try await decodeGate.waitUntilReached(timeoutNanoseconds: 1_000_000_000)
         cancellable.cancel()
-        do {
-            _ = try await cancellable.value
-            throw fail("ImageIO thumbnail cancellation unexpectedly returned a thumbnail")
-        } catch is CancellationError {
-            // Expected.
-        }
         for _ in 0..<20 {
             if await cancellationPipeline.qaInFlightCount() == 0 { break }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         let inFlightAfterCancellation = await cancellationPipeline.qaInFlightCount()
+        try require(inFlightAfterCancellation == 0, "ImageIO thumbnail cancellation did not clear actor-side in-flight bookkeeping before the detached decode hook resumed")
+        await decodeGate.release()
+        do {
+            let unexpectedThumbnail = try await cancellable.value
+            let unexpectedInFlightCount = await cancellationPipeline.qaInFlightCount()
+            let unexpectedCachedCount = await cancellationPipeline.cachedEntryCount()
+            throw fail("ImageIO thumbnail cancellation unexpectedly returned a thumbnail (\(unexpectedThumbnail.pixelWidth)×\(unexpectedThumbnail.pixelHeight), inFlight: \(unexpectedInFlightCount), cached: \(unexpectedCachedCount))")
+        } catch is CancellationError {
+            // Expected.
+        }
         let cachedAfterCancellation = await cancellationPipeline.cachedEntryCount()
         let cancelledRenderCount = await cancellationPipeline.qaCancelledRenderCount()
-        try require(inFlightAfterCancellation == 0, "ImageIO thumbnail cancellation stranded an in-flight decode task")
-        try require(cachedAfterCancellation == 0, "ImageIO thumbnail cancellation cached a cancelled decode")
-        try require(cancelledRenderCount >= 1, "ImageIO thumbnail cancellation did not reach the actual decode task")
+        try require(inFlightAfterCancellation == 0, "ImageIO thumbnail cancellation stranded actor-side in-flight bookkeeping after the thumbnail decode stage had started")
+        try require(cachedAfterCancellation == 0, "ImageIO thumbnail cancellation cached a decode cancelled after ImageIO thumbnail creation")
+        try require(cancelledRenderCount >= 1, "ImageIO thumbnail cancellation did not cancel the detached decode lease")
+
+        let leasePipeline = ComposerImageIOThumbnailPipeline(configuration: .init(maximumEntries: 20, maximumBytes: 4 * 1024 * 1024, maximumPixelSize: 1024, decodeStartDelayNanosecondsForChecks: 250_000_000))
+        let firstLease = Task { try await leasePipeline.thumbnail(for: wideURL, maxPixelSize: 513) }
+        let secondLease = Task { try await leasePipeline.thumbnail(for: wideURL, maxPixelSize: 513) }
+        let thirdLease = Task { try await leasePipeline.thumbnail(for: wideURL, maxPixelSize: 513) }
+        for _ in 0..<20 {
+            if await leasePipeline.qaInFlightLeaseCount() == 3 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        firstLease.cancel()
+        for _ in 0..<20 {
+            if await leasePipeline.qaInFlightLeaseCount() == 2 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let inFlightCountAfterOneLeaseCancellation = await leasePipeline.qaInFlightCount()
+        let leaseCountAfterOneLeaseCancellation = await leasePipeline.qaInFlightLeaseCount()
+        try require(inFlightCountAfterOneLeaseCancellation == 1, "coalesced thumbnail cancellation removed the shared in-flight request while other leases remained")
+        try require(leaseCountAfterOneLeaseCancellation == 2, "coalesced thumbnail cancellation did not preserve the remaining waiter leases")
+        _ = try await secondLease.value
+        _ = try await thirdLease.value
+        do {
+            _ = try await firstLease.value
+            throw fail("coalesced thumbnail cancellation unexpectedly returned the cancelled lease")
+        } catch is CancellationError {
+            // Expected.
+        }
+        let renderInvocationCountAfterLeaseCancellation = await leasePipeline.qaRenderInvocationCount()
+        try require(renderInvocationCountAfterLeaseCancellation == 1, "coalesced thumbnail cancellation spawned a duplicate render for remaining waiters")
         return assertions
     }
 
@@ -7767,11 +7807,81 @@ enum UIProbeGeometry {
         let railCancellationCount = await cancellationLoader.cancellationCount()
         try require(railCancellationCount > 0, "attachment rail did not cancel thumbnail work for offscreen/reused items")
         try require(cancellationRail.qaThumbnailTaskIDs.intersection(initiallyVisibleTasks).isEmpty, "attachment rail stranded thumbnail tasks after visible item reuse")
+
+        for _ in 0..<20 {
+            if cancellationRail.qaThumbnailTaskCount > 0 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+            cancellationRail.qaSyncVisibleThumbnailLeases()
+        }
+        try require(cancellationRail.qaThumbnailTaskCount > 0, "attachment rail did not keep visible thumbnail work active before the zero-visible release check")
+        let cancellationCountBeforeZeroVisible = await cancellationLoader.cancellationCount()
+        cancellationRail.qaSyncVisibleThumbnailLeases(liveVisibleIDsForChecks: [])
+        for _ in 0..<20 {
+            let cancellationCount = await cancellationLoader.cancellationCount()
+            if cancellationRail.qaThumbnailTaskCount == 0 && cancellationCount > cancellationCountBeforeZeroVisible { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let cancellationCountAfterZeroVisible = await cancellationLoader.cancellationCount()
+        try require(cancellationRail.qaThumbnailTaskCount == 0 && cancellationRail.qaThumbnailCount == 0 && cancellationRail.qaVisibleThumbnailLeaseIDs.isEmpty, "attachment rail did not release all leases/thumbnails when the visible set became empty")
+        try require(cancellationCountAfterZeroVisible > cancellationCountBeforeZeroVisible, "attachment rail zero-visible release did not cancel outstanding thumbnail work")
+
+        cancellationRail.layoutSubtreeIfNeeded()
+        cancellationRail.collectionView.layoutSubtreeIfNeeded()
+        cancellationRail.qaSyncVisibleThumbnailLeases()
+        for _ in 0..<20 {
+            if cancellationRail.qaThumbnailTaskCount > 0 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+            cancellationRail.qaSyncVisibleThumbnailLeases()
+        }
+        try require(cancellationRail.qaThumbnailTaskCount > 0 && cancellationRail.qaThumbnailTaskCount < cancellationRail.qaItemCount, "attachment rail did not restore thumbnail requests only for visible items after a zero-visible release")
+
+        let cancellationCountBeforeHide = await cancellationLoader.cancellationCount()
+        cancellationRail.isHidden = true
+        for _ in 0..<20 {
+            let cancellationCount = await cancellationLoader.cancellationCount()
+            if cancellationRail.qaThumbnailTaskCount == 0 && cancellationCount > cancellationCountBeforeHide { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let cancellationCountAfterHide = await cancellationLoader.cancellationCount()
+        try require(cancellationRail.qaThumbnailTaskCount == 0 && cancellationRail.qaThumbnailCount == 0 && cancellationRail.qaVisibleThumbnailLeaseIDs.isEmpty, "attachment rail did not release all thumbnails when hidden")
+        try require(cancellationCountAfterHide > cancellationCountBeforeHide, "attachment rail hide lifecycle did not cancel outstanding thumbnail work")
+        cancellationRail.isHidden = false
+        cancellationRail.layoutSubtreeIfNeeded()
+        cancellationRail.collectionView.layoutSubtreeIfNeeded()
+        cancellationRail.qaSyncVisibleThumbnailLeases()
+        for _ in 0..<20 {
+            if cancellationRail.qaThumbnailTaskCount > 0 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+            cancellationRail.qaSyncVisibleThumbnailLeases()
+        }
+        try require(cancellationRail.qaThumbnailTaskCount > 0 && cancellationRail.qaThumbnailTaskCount < cancellationRail.qaItemCount, "attachment rail did not restore visible thumbnail requests after becoming visible")
+
+        let cancellationCountBeforeDetach = await cancellationLoader.cancellationCount()
+        cancellationWindow.contentView = nil
+        for _ in 0..<20 {
+            let cancellationCount = await cancellationLoader.cancellationCount()
+            if cancellationRail.qaThumbnailTaskCount == 0 && cancellationCount > cancellationCountBeforeDetach { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let cancellationCountAfterDetach = await cancellationLoader.cancellationCount()
+        try require(cancellationRail.qaThumbnailTaskCount == 0 && cancellationRail.qaThumbnailCount == 0 && cancellationRail.qaVisibleThumbnailLeaseIDs.isEmpty, "attachment rail did not release all thumbnails when detached from its window")
+        try require(cancellationCountAfterDetach > cancellationCountBeforeDetach, "attachment rail detach lifecycle did not cancel outstanding thumbnail work")
+        cancellationWindow.contentView = cancellationRail
+        cancellationRail.layoutSubtreeIfNeeded()
+        cancellationRail.collectionView.layoutSubtreeIfNeeded()
+        cancellationRail.qaSyncVisibleThumbnailLeases()
+        for _ in 0..<20 {
+            if cancellationRail.qaThumbnailTaskCount > 0 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+            cancellationRail.qaSyncVisibleThumbnailLeases()
+        }
+        try require(cancellationRail.qaThumbnailTaskCount > 0 && cancellationRail.qaThumbnailTaskCount < cancellationRail.qaItemCount, "attachment rail did not restore requests only for visible items after reattach")
+
         cancellationRail.setItems([])
         for _ in 0..<20 where cancellationRail.qaThumbnailTaskCount != 0 {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
-        try require(cancellationRail.qaThumbnailTaskCount == 0 && cancellationRail.qaThumbnailCount == 0, "attachment rail did not cancel and release thumbnails when items were removed")
+        try require(cancellationRail.qaThumbnailTaskCount == 0 && cancellationRail.qaThumbnailCount == 0 && cancellationRail.qaVisibleThumbnailLeaseIDs.isEmpty, "attachment rail did not cancel and release thumbnails when items were removed")
         cancellationWindow.contentView = nil
         window.contentView = nil
         return assertions
@@ -7848,6 +7958,65 @@ private actor ComposerImageImportRecorder {
 
     func isManagedFileURL(_ url: URL) -> Bool {
         url.standardizedFileURL.path.hasPrefix(directory.standardizedFileURL.path + "/")
+    }
+}
+
+private actor ComposerImageDecodeStageGate {
+    private var reached = false
+    private var released = false
+    private var reachedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func markReachedAndWaitUntilReleased() async {
+        markReached()
+        if released { return }
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        guard !released else { return }
+        released = true
+        let continuations = releaseWaiters
+        releaseWaiters.removeAll()
+        for continuation in continuations {
+            continuation.resume()
+        }
+    }
+
+    private func markReached() {
+        guard !reached else { return }
+        reached = true
+        let continuations = reachedWaiters
+        reachedWaiters.removeAll()
+        for continuation in continuations {
+            continuation.resume()
+        }
+    }
+
+    func waitUntilReached(timeoutNanoseconds: UInt64) async throws {
+        if reached { return }
+        let waiter = Task {
+            await withCheckedContinuation { continuation in
+                reachedWaiters.append(continuation)
+            }
+        }
+        let timeout = Task {
+            try await Task.sleep(nanoseconds: timeoutNanoseconds)
+            throw UIProbeGeometry.GeometryError(message: "timed out waiting for ImageIO thumbnail decode stage hook")
+        }
+        try await withTaskCancellationHandler {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask { await waiter.value }
+                group.addTask { try await timeout.value }
+                try await group.next()
+                group.cancelAll()
+            }
+        } onCancel: {
+            waiter.cancel()
+            timeout.cancel()
+        }
     }
 }
 

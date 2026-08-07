@@ -26,19 +26,49 @@ actor ComposerImageIOThumbnailPipeline: ComposerImageThumbnailLoading {
         var minimumPixelSize: Int
         var maximumPixelSize: Int
         var decodeStartDelayNanosecondsForChecks: UInt64
+        var decodeStageHooksForChecks: DecodeStageHooks
 
         init(
             maximumEntries: Int = 96,
             maximumBytes: Int = 24 * 1024 * 1024,
             minimumPixelSize: Int = 24,
             maximumPixelSize: Int = 1024,
-            decodeStartDelayNanosecondsForChecks: UInt64 = 0
+            decodeStartDelayNanosecondsForChecks: UInt64 = 0,
+            decodeStageHooksForChecks: DecodeStageHooks = .none
         ) {
             self.maximumEntries = max(1, maximumEntries)
             maximumDecodedBytes = max(256 * 1024, maximumBytes)
             self.minimumPixelSize = max(1, minimumPixelSize)
             self.maximumPixelSize = max(self.minimumPixelSize, maximumPixelSize)
             self.decodeStartDelayNanosecondsForChecks = decodeStartDelayNanosecondsForChecks
+            self.decodeStageHooksForChecks = decodeStageHooksForChecks
+        }
+    }
+
+    struct DecodeStageHooks: Sendable {
+        static let none = DecodeStageHooks()
+
+        var beforeSourceCreation: (@Sendable () async throws -> Void)?
+        var afterSourceCreation: (@Sendable () async throws -> Void)?
+        var beforeThumbnailDecode: (@Sendable () async throws -> Void)?
+        var afterThumbnailDecode: (@Sendable () async throws -> Void)?
+        var beforeEncoding: (@Sendable () async throws -> Void)?
+        var afterEncoding: (@Sendable () async throws -> Void)?
+
+        init(
+            beforeSourceCreation: (@Sendable () async throws -> Void)? = nil,
+            afterSourceCreation: (@Sendable () async throws -> Void)? = nil,
+            beforeThumbnailDecode: (@Sendable () async throws -> Void)? = nil,
+            afterThumbnailDecode: (@Sendable () async throws -> Void)? = nil,
+            beforeEncoding: (@Sendable () async throws -> Void)? = nil,
+            afterEncoding: (@Sendable () async throws -> Void)? = nil
+        ) {
+            self.beforeSourceCreation = beforeSourceCreation
+            self.afterSourceCreation = afterSourceCreation
+            self.beforeThumbnailDecode = beforeThumbnailDecode
+            self.afterThumbnailDecode = afterThumbnailDecode
+            self.beforeEncoding = beforeEncoding
+            self.afterEncoding = afterEncoding
         }
     }
 
@@ -75,6 +105,7 @@ actor ComposerImageIOThumbnailPipeline: ComposerImageThumbnailLoading {
         var requestID: UUID
         var task: Task<ComposerImageThumbnail, Error>
         var leases: Set<UUID>
+        var didCacheResult: Bool
     }
 
     private let configuration: Configuration
@@ -104,7 +135,10 @@ actor ComposerImageIOThumbnailPipeline: ComposerImageThumbnailLoading {
         let request = beginRequest(for: key, fileURL: fileURL, targetPixelSize: targetPixelSize, leaseID: leaseID)
         return try await withTaskCancellationHandler {
             do {
-                let thumbnail = try await request.task.value
+                let thumbnail = try await awaitRequestValueOrCancellation(request.task)
+                guard leaseIsActive(for: key, requestID: request.id, leaseID: leaseID) else {
+                    throw CancellationError()
+                }
                 try Task.checkCancellation()
                 finishRequest(for: key, requestID: request.id, leaseID: leaseID, result: .success(thumbnail))
                 return thumbnail
@@ -113,8 +147,15 @@ actor ComposerImageIOThumbnailPipeline: ComposerImageThumbnailLoading {
                 throw error
             }
         } onCancel: {
-            Task { await self.cancelLease(for: key, requestID: request.id, leaseID: leaseID) }
+            Task.detached { await self.cancelLease(for: key, requestID: request.id, leaseID: leaseID) }
         }
+    }
+
+    nonisolated private func awaitRequestValueOrCancellation(
+        _ task: Task<ComposerImageThumbnail, Error>
+    ) async throws -> ComposerImageThumbnail {
+        let awaiter = CancellationAwareThumbnailAwaiter()
+        return try await awaiter.value(for: task)
     }
 
     func cachedEntryCount() -> Int { cache.count }
@@ -122,6 +163,7 @@ actor ComposerImageIOThumbnailPipeline: ComposerImageThumbnailLoading {
     func qaRenderInvocationCount() -> Int { renderInvocationCount }
     func qaCancelledRenderCount() -> Int { cancelledRenderCount }
     func qaInFlightCount() -> Int { inFlight.count }
+    func qaInFlightLeaseCount() -> Int { inFlight.values.reduce(0) { $0 + $1.leases.count } }
     func qaCanonicalPixelSize(for requestedSize: Int) -> Int { canonicalPixelSize(requestedSize) }
 
     private func canonicalPixelSize(_ requestedSize: Int) -> Int {
@@ -142,16 +184,26 @@ actor ComposerImageIOThumbnailPipeline: ComposerImageThumbnailLoading {
 
         renderInvocationCount += 1
         let delay = configuration.decodeStartDelayNanosecondsForChecks
-        let task = Task(priority: .utility) {
+        let stageHooks = configuration.decodeStageHooksForChecks
+        let task = Task.detached(priority: .utility) {
             if delay > 0 { try await Task.sleep(nanoseconds: delay) }
             try Task.checkCancellation()
-            let result = try Self.renderThumbnail(fileURL: fileURL, maxPixelSize: targetPixelSize)
+            let result = try await Self.renderThumbnail(
+                fileURL: fileURL,
+                maxPixelSize: targetPixelSize,
+                stageHooks: stageHooks
+            )
             try Task.checkCancellation()
             return result
         }
         let requestID = UUID()
-        inFlight[key] = InFlightRequest(requestID: requestID, task: task, leases: [leaseID])
+        inFlight[key] = InFlightRequest(requestID: requestID, task: task, leases: [leaseID], didCacheResult: false)
         return (requestID, task)
+    }
+
+    private func leaseIsActive(for key: CacheKey, requestID: UUID, leaseID: UUID) -> Bool {
+        guard let request = inFlight[key], request.requestID == requestID else { return false }
+        return request.leases.contains(leaseID)
     }
 
     private func finishRequest(
@@ -160,22 +212,25 @@ actor ComposerImageIOThumbnailPipeline: ComposerImageThumbnailLoading {
         leaseID: UUID,
         result: Result<ComposerImageThumbnail, Error>
     ) {
-        if var request = inFlight[key], request.requestID == requestID {
-            request.leases.remove(leaseID)
-            inFlight[key] = request
+        guard var request = inFlight[key], request.requestID == requestID else {
+            return
         }
 
+        request.leases.remove(leaseID)
         switch result {
         case .success(let thumbnail):
-            if inFlight[key]?.requestID == requestID {
-                inFlight[key] = nil
+            if !request.didCacheResult {
+                request.didCacheResult = true
+                insert(thumbnail, for: key)
             }
-            insert(thumbnail, for: key)
         case .failure(let error):
             if error is CancellationError { cancelledRenderCount += 1 }
-            if inFlight[key]?.requestID == requestID {
-                inFlight[key] = nil
-            }
+        }
+
+        if request.leases.isEmpty {
+            inFlight[key] = nil
+        } else {
+            inFlight[key] = request
         }
     }
 
@@ -184,7 +239,8 @@ actor ComposerImageIOThumbnailPipeline: ComposerImageThumbnailLoading {
         request.leases.remove(leaseID)
         if request.leases.isEmpty {
             request.task.cancel()
-            inFlight[key] = request
+            inFlight[key] = nil
+            cancelledRenderCount += 1
         } else {
             inFlight[key] = request
         }
@@ -226,7 +282,15 @@ actor ComposerImageIOThumbnailPipeline: ComposerImageThumbnailLoading {
         return bytes.overflow ? Int.max : bytes.partialValue
     }
 
-    private static func renderThumbnail(fileURL: URL, maxPixelSize: Int) throws -> ComposerImageThumbnail {
+    private static func renderThumbnail(
+        fileURL: URL,
+        maxPixelSize: Int,
+        stageHooks: DecodeStageHooks
+    ) async throws -> ComposerImageThumbnail {
+        try Task.checkCancellation()
+        try await stageHooks.beforeSourceCreation?()
+        try Task.checkCancellation()
+
         let sourceOptions = [
             kCGImageSourceShouldCache: false,
             kCGImageSourceShouldCacheImmediately: false,
@@ -234,6 +298,10 @@ actor ComposerImageIOThumbnailPipeline: ComposerImageThumbnailLoading {
         guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, sourceOptions) else {
             throw ThumbnailError.imageSourceCreationFailed
         }
+        try Task.checkCancellation()
+        try await stageHooks.afterSourceCreation?()
+        try Task.checkCancellation()
+
         guard let type = CGImageSourceGetType(source) as String?,
               ComposerImagePasteboardDecoder.acceptedContentTypes.contains(type)
         else { throw ThumbnailError.unsupportedSource }
@@ -245,10 +313,17 @@ actor ComposerImageIOThumbnailPipeline: ComposerImageThumbnailLoading {
             kCGImageSourceShouldCache: false,
             kCGImageSourceShouldCacheImmediately: true,
         ] as CFDictionary
+        try await stageHooks.beforeThumbnailDecode?()
+        try Task.checkCancellation()
         guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else {
             throw ThumbnailError.thumbnailCreationFailed
         }
+        try Task.checkCancellation()
+        try await stageHooks.afterThumbnailDecode?()
+        try Task.checkCancellation()
 
+        try await stageHooks.beforeEncoding?()
+        try Task.checkCancellation()
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(
             data,
@@ -258,10 +333,59 @@ actor ComposerImageIOThumbnailPipeline: ComposerImageThumbnailLoading {
         ) else { throw ThumbnailError.pngEncodingFailed }
         CGImageDestinationAddImage(destination, image, nil)
         guard CGImageDestinationFinalize(destination) else { throw ThumbnailError.pngEncodingFailed }
+        try Task.checkCancellation()
+        try await stageHooks.afterEncoding?()
+        try Task.checkCancellation()
+
         return ComposerImageThumbnail(
             pngData: data as Data,
             pixelWidth: image.width,
             pixelHeight: image.height
         )
+    }
+}
+
+private final class CancellationAwareThumbnailAwaiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<ComposerImageThumbnail, Error>?
+    private var didResume = false
+
+    func value(for task: Task<ComposerImageThumbnail, Error>) async throws -> ComposerImageThumbnail {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                if didResume {
+                    lock.unlock()
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                self.continuation = continuation
+                lock.unlock()
+
+                Task.detached { [weak self] in
+                    do {
+                        let thumbnail = try await task.value
+                        self?.resume(.success(thumbnail))
+                    } catch {
+                        self?.resume(.failure(error))
+                    }
+                }
+            }
+        } onCancel: {
+            resume(.failure(CancellationError()))
+        }
+    }
+
+    private func resume(_ result: Result<ComposerImageThumbnail, Error>) {
+        lock.lock()
+        guard !didResume else {
+            lock.unlock()
+            return
+        }
+        didResume = true
+        let continuation = continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(with: result)
     }
 }
