@@ -610,8 +610,10 @@ enum UIProbeGeometry {
                     try require(row.qaContextDetail.contains("Freshness"), "compact status row context tooltip missing freshness")
                     try require(row.qaAccessibilityLabel.contains("Home") && row.qaAccessibilityLabel.contains("Where") && row.qaAccessibilityLabel.contains("Activity") && row.qaAccessibilityLabel.contains("Context"),
                                 "compact status row AX label dropped one semantic fact")
-                    try require(row.qaAccessibilityChildrenCount == 0,
-                                "compact status row exposes duplicate accessibility children")
+                    try require(row.qaAccessibilityChildrenCount == 1,
+                                "compact status row must expose exactly its one location-action child")
+                    try require(row.qaLocationActionButtonAccessibilityLabel == "Location actions",
+                                "compact status row lost the single accessible location action route")
                     if presentation.activity.showsThinkingIndicator {
                         try require(row.qaThinkingSlotVisible, "compact status row hid injected thinking indicator while active")
                     }
@@ -5439,6 +5441,10 @@ enum UIProbeGeometry {
                 tile.layoutSubtreeIfNeeded()
                 transcript.layoutSubtreeIfNeeded()
                 guard !tile.qaHasLegacyComposeField, !tile.qaHasPermanentApprovalDock,
+                      tile.qaLegacyLocationStatusIsHidden,
+                      tile.qaCompactStatusAccessibilityLabel.contains("Home")
+                          && (tile.qaCompactStatusAccessibilityLabel.contains("What")
+                              || tile.qaCompactStatusAccessibilityLabel.contains("Activity")),
                       tile.qaV2RenderError == nil,
                       transcript.qaSemanticRowCount >= 4 else {
                     throw fail("\(label): v2 tile retained legacy UI or failed semantic rendering")

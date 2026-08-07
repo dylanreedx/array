@@ -71,11 +71,13 @@ final class ManagedAgentTileNSView: TileNSView {
     /// only under the v2 fixture flag. The compatibility shell and its baselines
     /// remain untouched until final live migration.
     private let agentHeader = AgentTileHeaderView()
-    /// The legacy Home/Where/What disclosure remains available to the host's
-    /// location action route, but the compact row is the one status surface
-    /// installed in the live managed-agent composition.
+    /// The compact row is the sole live Home/Where/What and activity surface;
+    /// its action button remains the host's native location route. The former
+    /// location view stays hidden in the hierarchy only for its existing theme
+    /// census; it owns no production layout or accessibility content.
     private let locationStatus = AgentLocationStatusView()
     private let compactStatusRow = AgentCompactStatusRowView()
+    private var lastLocationPresentation: AgentLocationStatusPresentation?
     private var headerAgentName: String?
     private var branchContext: AgentRowContext?
     private var locationProjectName: String?
@@ -206,7 +208,7 @@ final class ManagedAgentTileNSView: TileNSView {
         )
         // The compiled host seam stops the whole running agent process, not
         // only its current turn. Keep the action and its label equally broad.
-        locationStatus.onActionMenuRequested = { [weak self] anchor in
+        compactStatusRow.onActionMenuRequested = { [weak self] anchor in
             guard let self, let agentID = self.projectedAgentID else { return }
             self.onLocationActionMenuRequested?(agentID, anchor)
         }
@@ -348,6 +350,10 @@ final class ManagedAgentTileNSView: TileNSView {
     /// `attach` is what clears it, on the next replay.
     func detach() {
         prepareStreamingMarkupForTeardown(final: true)
+        // Clear lifecycle facts before the detached-location demotion so the
+        // final compact projection keeps recent What without retaining a live
+        // phase claim.
+        resetCompactStatusProjection()
         settleLocationForDetach()
         locationStaleTimer?.invalidate()
         locationStaleTimer = nil
@@ -363,7 +369,6 @@ final class ManagedAgentTileNSView: TileNSView {
         v2Composer?.unbindActionSink()
         v2ActionAdapter = nil
         v2TurnSnapshot = nil
-        resetCompactStatusProjection()
         attachedAgentID = nil
         agentSource = nil
         updateV2ComposerPresentation()
@@ -627,7 +632,7 @@ final class ManagedAgentTileNSView: TileNSView {
         locationProjectName = nil
         locationStaleTimer?.invalidate()
         locationStaleTimer = nil
-        locationStatus.clear()
+        lastLocationPresentation = nil
         resetCompactStatusProjection()
         applyHeader(status: model.currentStatus)
         // A reset restarts the reducer's version numbering, so the forwarded
@@ -782,6 +787,10 @@ final class ManagedAgentTileNSView: TileNSView {
             turn: compactStatusTurn,
             location: snapshot,
             interaction: compactStatusInteraction)
+        let locationPresentation = AgentLocationStatusPresenter.present(
+            snapshot,
+            projectName: locationProjectName ?? branchContext?.projectName)
+        lastLocationPresentation = locationPresentation
         let resolution = compactStatusPhaseAdapter.update(facts, now: now)
         compactStatusResolution = resolution
         let activity: AgentCompactStatusPresentation.Activity
@@ -796,9 +805,6 @@ final class ManagedAgentTileNSView: TileNSView {
             return
         }
         activity = unknownCompactActivity()
-        let locationPresentation = AgentLocationStatusPresenter.present(
-            snapshot,
-            projectName: locationProjectName ?? branchContext?.projectName)
         compactStatusRow.apply(AgentCompactStatusPresentation(
             location: compactLocationPresentation(snapshot, detail: locationPresentation),
             activity: activity,
@@ -817,6 +823,7 @@ final class ManagedAgentTileNSView: TileNSView {
             let detail = AgentLocationStatusPresenter.present(
                 snapshot,
                 projectName: locationProjectName ?? branchContext?.projectName)
+            lastLocationPresentation = detail
             compactStatusRow.apply(AgentCompactStatusPresentation(
                 location: compactLocationPresentation(snapshot, detail: detail),
                 activity: unknownCompactActivity(),
@@ -827,6 +834,7 @@ final class ManagedAgentTileNSView: TileNSView {
     }
 
     private func applyUnknownCompactStatus() {
+        lastLocationPresentation = nil
         compactStatusResolution = .unknown
         compactStatusRow.apply(AgentCompactStatusPresentation(
             location: .init(
@@ -897,6 +905,9 @@ final class ManagedAgentTileNSView: TileNSView {
         let resolution = compactStatusPhaseAdapter.update(facts, now: now)
         compactStatusResolution = resolution
         if let input = resolution.activityInput {
+            lastLocationPresentation = AgentLocationStatusPresenter.present(
+                location,
+                projectName: locationProjectName ?? branchContext?.projectName)
             compactStatusRow.apply(AgentCompactStatusPresentation.present(
                 location: location,
                 projectName: locationProjectName ?? branchContext?.projectName,
@@ -907,6 +918,7 @@ final class ManagedAgentTileNSView: TileNSView {
             let detail = AgentLocationStatusPresenter.present(
                 location,
                 projectName: locationProjectName ?? branchContext?.projectName)
+            lastLocationPresentation = detail
             compactStatusRow.apply(AgentCompactStatusPresentation(
                 location: compactLocationPresentation(location, detail: detail),
                 activity: unknownCompactActivity(),
@@ -1041,6 +1053,7 @@ final class ManagedAgentTileNSView: TileNSView {
         composeColumn.translatesAutoresizingMaskIntoConstraints = false
         composeBackdrop.addSubview(composeColumn)
 
+        locationStatus.isHidden = true
         let layout = NSStackView(views: [agentHeader, locationStatus, transcript, composeBackdrop])
         layout.orientation = .vertical
         layout.spacing = 0
@@ -1317,9 +1330,7 @@ final class ManagedAgentTileNSView: TileNSView {
             home: snapshot.home,
             whereDirectory: snapshot.workingLocation.directory,
             lastUsefulWhat: snapshot.lastUsefulWhat)
-        locationStatus.apply(AgentLocationStatusPresenter.present(
-            settled,
-            projectName: locationProjectName ?? branchContext?.projectName))
+        refreshCompactStatus(at: now, location: settled)
     }
 
     private func refreshLocationStatus(at now: Date = Date()) {
@@ -1327,9 +1338,6 @@ final class ManagedAgentTileNSView: TileNSView {
         locationStaleTimer = nil
         guard let agentID = projectedAgentID,
               let snapshot = agentSource?.locationSnapshot(for: agentID, at: now) else { return }
-        locationStatus.apply(AgentLocationStatusPresenter.present(
-            snapshot,
-            projectName: locationProjectName ?? branchContext?.projectName))
         refreshCompactStatus(at: now, location: snapshot)
         guard let expiresAt = snapshot.whatExpiresAt, expiresAt > now else { return }
         let timer = Timer(timeInterval: expiresAt.timeIntervalSince(now), repeats: false) {
@@ -1367,6 +1375,7 @@ final class ManagedAgentTileNSView: TileNSView {
     var qaCompactStatusHasVisiblePrefixes: Bool { compactStatusRow.qaHasVisiblePrefixes }
     var qaCompactStatusContentFitsBounds: Bool { compactStatusRow.qaContentFitsBounds }
     var qaCompactStatusRowIsInstalled: Bool { compactStatusRow.superview != nil }
+    var qaLegacyLocationStatusIsHidden: Bool { locationStatus.isHidden }
     var qaComposeEnabled: Bool {
         !composeIsBusy
     }
@@ -1473,24 +1482,44 @@ final class ManagedAgentTileNSView: TileNSView {
     func applyLocationPresentationForComponentLab(
         _ presentation: AgentLocationStatusPresentation
     ) {
-        locationStatus.apply(presentation)
+        lastLocationPresentation = presentation
+        compactStatusRow.apply(AgentCompactStatusPresentation(
+            location: .init(
+                symbolName: presentation.whereIsExternal ? "arrow.up.forward.square" : "folder",
+                text: presentation.locationText,
+                accessibilityLabel: presentation.locationAccessibilityValue,
+                detailText: presentation.detailText,
+                isExternal: presentation.whereIsExternal),
+            activity: .init(
+                phase: .ready,
+                symbolName: "checkmark.circle",
+                text: presentation.whatText,
+                elapsedText: nil,
+                accessibilityLabel: presentation.whatAccessibilityValue,
+                detailText: presentation.detailText,
+                showsThinkingIndicator: false),
+            context: AgentRadialContextMeterPresenter.present(nil)))
     }
 
-    var qaLocationText: String { locationStatus.qaLocationText }
-    var qaWhatText: String { locationStatus.qaWhatText }
-    var qaLocationDetail: String { locationStatus.qaLocationDetail }
-    var qaWhereOutboundMarkerVisible: Bool { locationStatus.qaWhereOutboundMarkerVisible }
-    var qaWhatOutboundMarkerVisible: Bool { locationStatus.qaWhatOutboundMarkerVisible }
-    var qaLocationMarkerLanesDoNotOverlapText: Bool {
-        locationStatus.qaMarkerLanesDoNotOverlapText
-    }
-    var qaLocationContentFitsBounds: Bool { locationStatus.qaContentFitsBounds }
+    // These location accessors retain the semantic presenter witness for the
+    // existing host checks; the visible and reachable owner is compactStatusRow.
+    var qaLocationText: String { lastLocationPresentation?.locationText ?? compactStatusRow.qaLocationText }
+    var qaWhatText: String { lastLocationPresentation?.whatText ?? compactStatusRow.qaActivityText }
+    var qaLocationDetail: String { lastLocationPresentation?.detailText ?? "" }
+    var qaWhereOutboundMarkerVisible: Bool { lastLocationPresentation?.whereIsExternal == true }
+    var qaWhatOutboundMarkerVisible: Bool { lastLocationPresentation?.whatIsExternal == true }
+    var qaLocationMarkerLanesDoNotOverlapText: Bool { compactStatusRow.qaContentFitsBounds }
+    var qaLocationContentFitsBounds: Bool { compactStatusRow.qaContentFitsBounds }
     var qaLocationActionButtonAccessibilityLabel: String {
-        locationStatus.qaLocationActionButtonAccessibilityLabel
+        compactStatusRow.qaLocationActionButtonAccessibilityLabel
     }
-    var qaLocationActionButtonEnabled: Bool { locationStatus.qaLocationActionButtonEnabled }
-    var qaLocationAccessibilityValue: String { locationStatus.qaLocationAccessibilityValue }
-    var qaWhatAccessibilityValue: String { locationStatus.qaWhatAccessibilityValue }
+    var qaLocationActionButtonEnabled: Bool { compactStatusRow.qaLocationActionButtonEnabled }
+    var qaLocationAccessibilityValue: String {
+        lastLocationPresentation?.locationAccessibilityValue ?? ""
+    }
+    var qaWhatAccessibilityValue: String {
+        lastLocationPresentation?.whatAccessibilityValue ?? ""
+    }
     var qaLocationStaleTimerActive: Bool { locationStaleTimer?.isValid == true }
     var qaStreamingMarkupParseTimerActive: Bool { streamingMarkupParseTimer?.isValid == true }
     var qaStreamingMarkupParseTimerInterval: TimeInterval? { streamingMarkupParseTimerScheduledDelay }

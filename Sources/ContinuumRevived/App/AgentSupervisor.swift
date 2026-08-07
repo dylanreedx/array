@@ -6864,6 +6864,21 @@ private func checkLiveV2TileMigration<Failure: Error>(
     }) else {
         throw fail("live-v2: tail duplicated the stable semantic row (events \(tile.ingestedEvents.count), rows \(tile.qaRenderedCardCount))")
     }
+    // This is the production event path: supervisor delivery -> tile ingest ->
+    // compact phase projection. It deliberately does not call the geometry-only
+    // qaApplyCompactStatusFacts seam.
+    guard tile.qaCompactStatusPhase == .responding,
+          tile.qaCompactStatusActivityText == "Responding" else {
+        throw fail("live-v2: an ingested assistant delta did not drive the installed compact row (phase \(String(describing: tile.qaCompactStatusPhase)), activity \(tile.qaCompactStatusActivityText))")
+    }
+    guard tile.qaCompactStatusRowIsInstalled,
+          tile.qaCompactStatusAccessibilityLabel.contains("Home") else {
+        throw fail("live-v2: attach/replay left the compact status row uninstalled or without its location semantics")
+    }
+    guard tile.qaLocationActionButtonAccessibilityLabel == "Location actions",
+          tile.qaLocationActionButtonEnabled else {
+        throw fail("live-v2: the compact row lost its single accessible location action owner")
+    }
     guard tile.qaUsesV2Tile, tile.qaUsesFullTurnComposer,
           !tile.qaHasLegacyComposeField, !tile.qaHasPermanentApprovalDock,
           tile.qaV2RenderError == nil else {
@@ -6991,6 +7006,24 @@ private func checkLiveV2TileMigration<Failure: Error>(
 
     let subscribersBeforeDetach = supervisor.subscriberCount(for: agentID)
     tile.detach()
+    guard tile.qaCompactStatusPhase == nil,
+          tile.qaCompactStatusActivityText == "Unknown" else {
+        throw fail("live-v2: detach did not conservatively clear the compact lifecycle projection")
+    }
+    tile.attach(agentID: agentID, supervisor: supervisor)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        tile.attachedAgentID == agentID
+            && supervisor.subscriberCount(for: agentID) == subscribersBeforeDetach
+    }) else {
+        throw fail("live-v2: rebind task did not restore the subscription")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        tile.qaCompactStatusPhase == .ready
+            && tile.qaCompactStatusActivityText == "Ready"
+    }) else {
+        throw fail("live-v2: rebind did not replay lifecycle events into the compact row (phase \(String(describing: tile.qaCompactStatusPhase)), activity \(tile.qaCompactStatusActivityText))")
+    }
+    tile.detach()
     guard subscribersBeforeDetach == 1,
           await waitUntil(timeout: 5, pollInterval: 0.02, {
               supervisor.subscriberCount(for: agentID) == 0
@@ -6998,7 +7031,7 @@ private func checkLiveV2TileMigration<Failure: Error>(
           supervisor.records[agentID] != nil else {
         throw fail("live-v2: detach failed to cancel UI subscription or changed supervisor ownership")
     }
-    return "v2 tile replayed then tailed one stable semantic row, sent and history-recorded one AgentID-bound full-turn draft with no legacy field/dock, revealed one reducer-projected fixed-choice request whose choice press dispatched once and resolved NOTHING until the real runtime resolution turned it passive, kept fixedChoice([]) read-only, reattached with an exactly-once replay including resolved request history and a truthful no-chip branch refresh, detached cleanly, with the legacy path structurally unreachable"
+    return "v2 tile replayed then tailed one stable semantic row and drove compact status through real ingest, sent and history-recorded one AgentID-bound full-turn draft with no legacy field/dock, revealed one reducer-projected fixed-choice request whose choice press dispatched once and resolved NOTHING until the real runtime resolution turned it passive, kept fixedChoice([]) read-only, detached and rebound the compact lifecycle projection with an exactly-once replay including resolved request history and a truthful no-chip branch refresh, with the legacy path structurally unreachable"
 }
 
 /// The tile as a pure view over an agent's stream: attach replays the history,
