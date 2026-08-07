@@ -1,142 +1,185 @@
 # Managed Agent Tile Polish — Implementation Progress
 
-**Updated:** 2026-08-07 UTC
+**Updated:** 2026-08-07 UTC, end-of-night wave
 **Integration branch:** `array/integration`
-**Current integrated HEAD:** `3a9e0aa`
+**Latest integrated code commit:** `57b16e3`
 **Source plan:** `docs/38-tickets/91-agent-tile-ux/plan-managed-agent-tile-polish.md`
 
 ## Evidence labels
 
 - **Integrated:** committed on `array/integration` and checked from the main checkout.
-- **Component-complete:** implemented in an isolated branch; not production-wired.
-- **Rework:** secondary Sol review found blocking issues; do not merge the original commit.
-- **End-to-end:** exercised on the real managed-agent/Pi route. Nothing in this progress report is end-to-end unless explicitly labeled.
+- **Component-complete:** integrated reusable code exists, but the real tile route is not wired.
+- **Review-gated:** an isolated branch contains useful code, but review blockers remain; do not merge yet.
+- **End-to-end:** exercised on the real managed-agent/Pi route. Nothing below is end-to-end unless explicitly labeled.
 
 ## Integrated work
 
-| Commit | Scope | Evidence |
+| Commit(s) | Scope | Evidence |
 |---|---|---|
 | `8128eb9` | Shared thinking-indicator contract | Build passed. |
 | `bc41735` | Four throbber candidates and Component Lab motion study | Build, UI probes, geometry, contrast, deterministic snapshot, and supervised screenshot inspection passed. No winner selected or production-wired. |
 | `6ee129d` | Remove inert `Next turn`; preserve effort intrinsic width | Build and 320/480/560 geometry checks passed. |
 | `23e19d5` | Provider-neutral truthful context telemetry and Pi parsing | Build and Core checks passed. Unknown occupancy remains unknown. |
 | `befe4aa` | Image prompt/semantic/Pi argv foundations | Build, AgentContent checks, and focused Core image-contract checks passed. |
-| `3a9e0aa` | Bound long-stream reducer and visual-forwarding work | Main build, AgentContent checks, and UI geometry passed. Added a RED→GREEN witness for a single large multibyte provider delta and bounded every streamed text run. |
+| `3a9e0aa` | Bound long-stream reducer and visual-forwarding work | Main build, AgentContent checks, and UI geometry passed. RED→GREEN large multibyte-delta witness added. |
+| `68ec512` | Source plan, Luna High agent role, and implementation record | Documentation committed without adding STOP/unrelated ticket artifacts. |
+| `53a53d5` | Completed-reasoning disclosure foundation | Build and UI geometry passed; 13 deterministic lifecycle/semantic-host assertions. Not routed in production. |
+| `ddbf83d` → `494df07` | Transcript image/gallery renderer and Quick Preview/action foundations | Build and UI geometry passed; nine image/gallery states. Uses lazy bounded presentation, revision invalidation, ID-only actions, safe local-file helpers. Production resolver/actions unwired. |
+| `9b5b4a0`, `39b8c33`, `48aef37` | Compact status row and radial context meter components | Build, UI probe, geometry, and contrast passed. 13,794 state/layout assertions; manual lifecycle fix covers live↔snapshot transitions and detach/hide. Production composition unwired. |
+| `f1050fb`, `7e42483`, `4b6d1f4` | Composer image decoder/import seam, bounded thumbnail service, attachment rail | Build, component checks, and UI geometry passed: 16 ingestion, 30 thumbnail, and 26 rail assertions. Production paste/drop wiring unwired. |
+| `258b52a`, `96a4001`, `7056f78`, `57b16e3` | Streamed Markdown, semantic reconciliation, delayed pause flush, Markdown copy | Build, AgentContent, focused Core projection, UI probe, and UI geometry passed. Production timer uses the projection monotonic clock; 5,000-delta full projection path completed in 0.197s at 149 parses. Real Pi/GitHub paste remains unverified. |
 
-### Long-stream evidence captured on main
+## Main-checkout verification from the final wave
 
-- RED before the final reducer correction: one `8196`-byte multibyte provider delta produced one oversized run above the `4096`-byte cap.
-- GREEN after correction: AgentContent checks passed, including the new large-delta witness and existing 10,000-mutation workload.
-- `swift build` passed.
-- `CONTINUUM_SKIP_SURFACE_CHECKS=1 .build/debug/continuum-revived --ui-geometry-check` passed, including 5,000 semantic deltas coalesced into one visual apply.
+Successful commands included:
 
-## Isolated deliverables and review disposition
+- `swift build`
+- `swift run ContinuumRevivedAgentContentChecks`
+- `swift run ContinuumRevivedCoreChecks -- --agent-transcript-projection-check`
+- `CONTINUUM_SKIP_SURFACE_CHECKS=1 .build/debug/continuum-revived --ui-probe-check`
+- `CONTINUUM_SKIP_SURFACE_CHECKS=1 .build/debug/continuum-revived --ui-geometry-check`
+- `CONTINUUM_SKIP_SURFACE_CHECKS=1 .build/debug/continuum-revived --ui-contrast-check`
+- `CONTINUUM_SKIP_SURFACE_CHECKS=1 .build/debug/continuum-revived --composer-image-components-check`
 
-### Streamed Markdown and copy
+### Streamed Markdown evidence
 
-- Original consolidated implementation: `51bf777` in `/Users/dylan/.pi/worktrees/Array-luna-high-implementer-20260807T013334Z-e18e8f`.
-- Added streaming buffer/parser projection, semantic `replaceMarkup`, identity reconciliation, response Markdown on public `.string`, and explicit user/plain copy behavior.
-- Secondary Sol review: **REWORK**.
-- Blockers:
-  - A parse request arriving inside the 30 Hz window can remain semantically stale indefinitely if the provider pauses.
-  - The frozen-clock 5,000-delta test does not model production cadence or reducer/reconciliation cost.
-  - Production assistant/reasoning now bypasses the bounded `appendMarkup` route, so production-path performance needs a direct oracle.
-- Rework run: `luna-high-implementer-20260807T031240Z-a0ce13`.
-- Required result: consolidated branch based on `3a9e0aa`, one-shot delayed flush wired through the real tile/model lifecycle, realistic cadence/performance checks, and all current reducer/list optimizations preserved.
+- Assistant and reasoning use the same semantic parser path.
+- A delta inside the 30Hz window schedules a one-shot timer; a provider pause no longer leaves the previous semantic prefix indefinitely.
+- Completion, interruption, error, ready/stopped session state, stream boundary, reset, detach, and teardown flush/cancel paths are covered.
+- Stream accumulation stores chunks rather than copying answer-so-far per delta; final raw source is archived once.
+- `replaceMarkup` has direct forest, identity, move, revision, and patch checks.
+- Managed transcript equality includes visible raw compatibility state.
+- Response/reasoning selection puts normalized Markdown on `.string`; user/mixed/plain paths remain plain.
+- Real Pi output and real GitHub/Notion paste are still required before claiming end-to-end behavior.
+
+### Long-stream reducer evidence
+
+- RED before the correction: one `8196`-byte multibyte provider delta produced an oversized text run above the `4096`-byte cap.
+- GREEN after correction: all streamed runs remain bounded at valid Unicode-scalar boundaries while preserving exact source.
+- The 10,000-mutation reducer workload and 5,000-delta visual coalescing checks pass.
+
+## Integrated but not production-wired
+
+### Composer images
+
+Implemented components now provide:
+
+- PNG/JPEG/TIFF pasteboard decoding and per-item representation deduplication.
+- Mandatory injected managed import; no default external-file adoption.
+- Managed/readable/regular/ImageIO-supported result validation.
+- Canonical backing-pixel keys, decoded-cost cache accounting, request coalescing, cancellation-aware detached decoding, visible leases, offscreen/hide/detach cleanup, and no product count cap.
+- Lazy horizontal rail, state presentation, keyboard removal/navigation, and accessibility labels.
+
+Still needed:
+
+- Bind Lane A storage import closures.
+- Route real paste/drop events from `ComposerTextView`/`AgentComposerView`.
+- Persist draft attachment metadata and construct `AgentPrompt`.
+- Measure real RSS with many large originals.
+
+### Transcript images
+
+Implemented components now provide:
+
+- `.image`/`.imageGallery` renderer registration.
+- Opaque-ID state/revision snapshots and bounded thumbnail requests.
+- Lazy/reused per-occurrence presentation, including duplicate attachment IDs.
+- Processing/available/missing/failure transitions with measurement invalidation.
+- ID-only Preview/Copy/Save/Reveal intents; owner must re-resolve at click time.
+- Safe label/error presentation and local readable regular image validation.
+- Non-destructive Save As and actual image-content copy helpers.
+
+Still needed:
+
+- Bind the shared composer thumbnail service through `AgentImageResourceProvider`.
+- Inject the host-local resolver into the live tile render context.
+- Handle actions in the live tile and manually verify Quick Look/Finder/Save Panel/VoiceOver.
+
+### Bottom status/context row
+
+Implemented components now provide:
+
+- Explicit Starting/Thinking/Responding/Reading/Searching/Editing/Running/Waiting/Ready/Failed/Interrupted phase model.
+- SF Symbol location/activity icons and Home/Where/Activity/Context accessibility semantics without visible prefixes.
+- Injected indicator lifecycle with Reduced Motion, deterministic QA snapshot mode, hide/detach stop, and live restart.
+- Raw authoritative used/max tooltip arithmetic, render-only arc clamping, truthful unknown/stale state, and invalid-negative rejection.
+- Injected warning/critical policy; production default remains disabled until Dylan approves thresholds.
+
+Still needed:
+
+- Derive live phase/timestamps from provider/tool events.
+- Place row below composer and above provider controls.
+- Replace rather than duplicate the top location row.
+- Select and inject a throbber after human motion review.
+
+### Completed reasoning
+
+Implemented foundation uses finished `.reasoning` entries only, keeps active reasoning in live activity, renders every semantic block through the existing role-aware host/registry (including code and safe unknown fallback), persists entry-keyed disclosure state, and exposes remeasurement.
+
+Still needed: route reasoning entries at the transcript entry-row layer and supply authoritative duration.
+
+## Review-gated branches — do not merge yet
 
 ### Image storage and supervisor transport
 
-- Original storage commit: `74d601c`.
-- Original transport commit: `8c9d94f`.
-- Secondary Sol review: **REWORK**.
-- Blockers:
-  - Attachment resolution lacks expected-agent/all-or-nothing ownership validation.
-  - Accepted dispatch clears durable recovery before provider/turn acceptance is known.
-  - Pi stderr can echo managed `@path` arguments into runtime errors/transcript.
-  - Production action adapter does not echo `.sendPrompt(AgentPrompt)` into the semantic transcript.
-  - Symlink traversal, manifest rollback, cleanup failure, and fsync claims are insufficiently guarded.
-- Rework run: `luna-high-implementer-20260807T031240Z-97edeb`.
-- Required result: consolidated storage/transport branch based on `3a9e0aa`; final `.sendPrompt` tile echo remains a serialized coordinator hunk.
+Worktree: `/Users/dylan/.pi/worktrees/Array-luna-high-implementer-20260807T031240Z-97edeb`
 
-### Composer image ingestion, thumbnail service, and attachment rail
+Commits through `08bfc91` include expected-agent all-or-nothing preparation, ownership journals, durable submission states, Pi path redaction, image-only supervisor transport, and stronger AtomicWriter checks. The latest implementation final was corrupted by a watch/coordinator response, so the branch did not receive a clean final review.
 
-- Original component commit: `bba6c96`.
-- Secondary Sol review: **REWORK**.
-- Blockers:
-  - External file adoption was optional instead of requiring managed import.
-  - Multiple pasteboard representations of one item could duplicate attachments.
-  - Thumbnail cancellation did not reach detached decode work; offscreen cells retained thumbnails/tasks.
-  - Cache cost used compressed PNG bytes rather than decoded backing memory and had noncanonical keys.
-- Rework run: `luna-high-implementer-20260807T031240Z-4e5321`.
-- Production paste/drop/composer wiring remains deferred to a consolidated adapter wave.
+Remaining review concerns:
 
-### Transcript image/gallery and Quick Preview
+- Prove import rollback failures leave durable discoverable cleanup state, not only an error containing a path.
+- Recheck crash recovery around `confirming` ownership with a missing/removed journal.
+- Re-run fresh build/Core/supervisor checks from a clean artifact path.
+- Wire `.sendPrompt(AgentPrompt)` transcript echo and pre-start restore only after approval.
 
-- Original component commit: `ce624f3`.
-- Secondary Sol review: **REWORK**.
-- Blockers:
-  - Gallery eagerly rebuilt and resolved all cells/resources.
-  - Renderer retained full `NSImage`/file capabilities and actions carried those capabilities instead of opaque identity.
-  - Resource transitions lacked revision/invalidation.
-  - Display/error text could leak local data.
-  - Save As could delete source/destination before successful replacement; Copy could copy a URL instead of image content; Quick Look validation was too weak.
-- Rework run: `luna-high-implementer-20260807T031240Z-c33dd3`.
-- Production resolver/action wiring remains deferred to the serialized tile coordinator.
+### Host-local tool detail foundation
 
-### Compact bottom status row and radial context meter
+Worktree: `/Users/dylan/.pi/worktrees/Array-luna-high-implementer-20260807T030542Z-d50bb5`
 
-- Original component commit: `60ba955`.
-- Secondary Sol review: **REWORK**.
-- Blockers:
-  - Injected throbber never entered a live lifecycle and the no-op QA spy false-passed.
-  - Coarse status mapping could not represent Starting/Thinking/Responding/Reading/Searching/Running/failure/interruption.
-  - Tooltip clamped authoritative arithmetic and mishandled invalid negative occupancy.
-  - Warning/critical thresholds were hard-coded despite remaining a product decision.
-  - Geometry count did not independently prove labels/icons/lifecycle or production-like compression.
-  - Unicode icons and AX semantics did not meet the SF Symbol/Home/Where/What contract.
-- Rework run: `luna-high-implementer-20260807T031310Z-d20482`.
-- Warning policy must remain injected/undecided until approved; no throbber winner may be selected automatically.
+Commits `a80868b` + `76e8db5` add a non-Codable actor store, sanitization, truncation, expiry, ordering, affected-file tracking, and pure summaries. It remains review-gated because the security-sensitive rework has not received a final independent approval.
 
-## New last-wave foundations in progress
+Specific review concerns:
 
-| Run | Scope | Conflict rule |
-|---|---|---|
-| `luna-high-implementer-20260807T030542Z-2930d4` | Completed-reasoning disclosure presenter/view | New component files only; no list/tile/registry wiring. |
-| `luna-high-implementer-20260807T030542Z-d50bb5` | Host-local tool-detail store, redaction, truncation, presenter | New Core/presenter files only; does not widen `AgentRuntimeEvent`. |
+- Secret equality fingerprints currently use predictable SHA-256; evaluate keyed per-store HMAC to avoid low-entropy dictionary leakage.
+- Secret-bearing affected paths should probably be omitted rather than rewritten into fabricated local paths.
+- Bound compact command/query summaries to a single short line.
+- Decide deterministic ordering for same-ID updates with identical/missing provider timestamps.
+- Replace remaining source-scan boundary evidence if a stronger compile-negative seam is practical.
 
-## Integration ownership and order
+## Integration ownership and next order
 
-Only the Sol coordinator edits these hotspots on the integration branch:
+Only the Sol coordinator edits these hotspots:
 
 - `Sources/ContinuumRevived/Canvas/ManagedAgentTileNSView.swift`
 - `Sources/ContinuumRevived/Canvas/AgentTranscript/AgentTranscriptListView.swift`
 - `Sources/ContinuumRevivedAgentContent/AgentDocumentReducer.swift`
 - `Sources/ContinuumRevivedAgentContentChecks/DocumentReducerChecks.swift`
 
-Planned order after rework review:
+Next session:
 
-1. Integrate corrected Markdown/copy branch and rerun main build/content/core/UI checks.
-2. Integrate corrected storage/transport contracts.
-3. Integrate corrected shared thumbnail/import components.
-4. Integrate corrected lazy transcript image/gallery/action components.
-5. Integrate corrected status row/meter components.
-6. Build separate composer, transcript-media, and status adapters without editing the tile composition root in parallel.
-7. Perform one controlled `ManagedAgentTileNSView` composition pass.
-8. Integrate reasoning/tool disclosures, then overflow consolidation.
-9. Dylan selects a throbber from Component Lab; only then wire it.
+1. Final-review and either fix or reject the storage/transport branch.
+2. Build a composer adapter from approved storage + integrated rail/thumbnail contracts.
+3. Build a transcript media resolver/action adapter.
+4. Build a live status-phase adapter.
+5. Perform one controlled `ManagedAgentTileNSView` composition pass.
+6. Route completed reasoning disclosures.
+7. Final-review/integrate the host-local tool-detail foundation, then adapter and renderer.
+8. Consolidate overflow ownership.
+9. Dylan selects a throbber; wire only that candidate.
 10. Run real managed-agent/Pi acceptance.
 
-## Real-route work still required
+## Real-route acceptance still required
 
 Do not claim the overall feature is working until these are observed:
 
 - Real Pi streamed Markdown displays completed syntax semantically and a paused stream flushes promptly.
 - GitHub/browser `.string` paste receives Markdown; explicit plain-text copy remains available.
-- Paste/drop images appear in the composer, survive relaunch, send as Pi image input, and echo into the transcript without local paths.
-- Large/many-image behavior uses bounded decoded thumbnail memory and lazy visible-cell work.
-- Transcript gallery transitions, Quick Preview, Copy Image, Save As, Reveal, missing-file recovery, and cleanup work on the live route.
-- Bottom status row occupies the specified location, reports truthful context state, drives the selected indicator correctly, and passes Reduced Motion/VoiceOver.
-- Reasoning and tool disclosures remeasure correctly and never widen sync/privacy boundaries.
+- Paste/drop images appear in the composer, survive relaunch, send to Pi, and echo into the transcript without local paths.
+- Many-image behavior maintains bounded decoded thumbnail memory.
+- Transcript gallery transitions, Quick Preview, Copy Image, Save As, Reveal, missing-file recovery, and cleanup work live.
+- Bottom row appears in the required position and passes Reduced Motion/VoiceOver on the real tile.
+- Reasoning and tool disclosures remeasure correctly and preserve privacy boundaries.
 - Exactly one generic overflow remains.
 
 ## Scope decisions retained
