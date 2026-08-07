@@ -149,6 +149,17 @@ func runDualPlaneGyroChecks() {
             reducedMotion: true, bounds: bounds),
         "Dual-Plane Gyro: lifecycle and Reduced Motion gates must stop compositor motion")
 
+    let stableUpdate = DualPlaneGyroUpdateState(isActive: true, reducedMotion: false, theme: .light)
+    expect(stableUpdate.decision(for: stableUpdate) == .preserveMasterCycle,
+           "Dual-Plane Gyro: unchanged bridge inputs must preserve the CA master cycle")
+    expect(stableUpdate.decision(for: DualPlaneGyroUpdateState(
+        isActive: false, reducedMotion: false, theme: .light)) == .rebuild
+        && stableUpdate.decision(for: DualPlaneGyroUpdateState(
+            isActive: true, reducedMotion: true, theme: .light)) == .rebuild
+        && stableUpdate.decision(for: DualPlaneGyroUpdateState(
+            isActive: true, reducedMotion: false, theme: .dark)) == .rebuild,
+        "Dual-Plane Gyro: active, Reduced Motion, and theme changes must rebuild safely")
+
     let light = AccentToken.accentWorking.color.resolved(for: .light)
     let dark = AccentToken.accentWorking.color.resolved(for: .dark)
     expect(light != dark && LineToken.separator.color.resolved(for: .light)

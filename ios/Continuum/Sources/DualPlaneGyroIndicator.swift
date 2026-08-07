@@ -68,6 +68,8 @@ private final class DualPlaneGyroUIView: UIView {
     private var reducedMotion: Bool
     private var colorScheme: ColorScheme
     private var currentSnapshotPhase: CGFloat = 0
+    private var masterCycleStartTime: CFTimeInterval?
+    private var compositorCycleIsRunning = false
 
     init(isActive: Bool, reducedMotion: Bool, colorScheme: ColorScheme) {
         self.isActive = isActive
@@ -122,6 +124,14 @@ private final class DualPlaneGyroUIView: UIView {
     }
 
     func update(isActive: Bool, reducedMotion: Bool, colorScheme: ColorScheme) {
+        let nextState = DualPlaneGyroUpdateState(
+            isActive: isActive,
+            reducedMotion: reducedMotion,
+            theme: theme(for: colorScheme)
+        )
+        guard configurationState.decision(for: nextState) == .rebuild else { return }
+
+        captureCurrentAnimationPhase()
         let colorsChanged = self.colorScheme != colorScheme
         self.isActive = isActive
         self.reducedMotion = reducedMotion
@@ -137,10 +147,23 @@ private final class DualPlaneGyroUIView: UIView {
     }
 
     func stopAnimating() {
+        captureCurrentAnimationPhase()
         isActive = false
         isAccessibilityElement = false
         removeCompositorAnimations()
         applyStaticState(phase: currentSnapshotPhase)
+    }
+
+    private var configurationState: DualPlaneGyroUpdateState {
+        DualPlaneGyroUpdateState(
+            isActive: isActive,
+            reducedMotion: reducedMotion,
+            theme: theme(for: colorScheme)
+        )
+    }
+
+    private func theme(for colorScheme: ColorScheme) -> DualPlaneGyroUpdateState.Theme {
+        colorScheme == .dark ? .dark : .light
     }
 
     private var modelPhase: CGFloat {
@@ -238,6 +261,7 @@ private final class DualPlaneGyroUIView: UIView {
 
     private func reconcileAnimationState() {
         guard canAnimate else {
+            captureCurrentAnimationPhase()
             removeCompositorAnimations()
             applyStaticState(phase: modelPhase)
             return
@@ -254,14 +278,20 @@ private final class DualPlaneGyroUIView: UIView {
         }
         guard missing else { return }
 
+        let phase = currentAnimationPhase()
         removeCompositorAnimations()
+        currentSnapshotPhase = phase
         applyStaticState(phase: currentSnapshotPhase)
+        masterCycleStartTime = layer.convertTime(CACurrentMediaTime(), from: nil)
+            - CFTimeInterval(currentSnapshotPhase) * DualPlaneGyroIndicatorModel.masterDuration
+        compositorCycleIsRunning = true
+
         let keyTimes = (0...144).map { NSNumber(value: Double($0) / 144) }
         for (index, node) in nodeLayers.enumerated() {
             let states = (0...144).map { step in
                 DualPlaneGyroIndicatorModel.nodeStates(
                     in: bounds,
-                    phase: currentSnapshotPhase + CGFloat(step) / 144
+                    phase: CGFloat(step) / 144
                 )[index]
             }
 
@@ -288,6 +318,7 @@ private final class DualPlaneGyroUIView: UIView {
     }
 
     private func configure(_ animation: CAKeyframeAnimation, keyTimes: [NSNumber]) {
+        animation.beginTime = masterCycleStartTime ?? 0
         animation.keyTimes = keyTimes
         animation.duration = DualPlaneGyroIndicatorModel.masterDuration
         animation.repeatCount = .infinity
@@ -303,6 +334,23 @@ private final class DualPlaneGyroUIView: UIView {
             node.removeAnimation(forKey: animationKey(AnimationKey.opacity, index: index))
             node.removeAnimation(forKey: animationKey(AnimationKey.zPosition, index: index))
         }
+        compositorCycleIsRunning = false
+        masterCycleStartTime = nil
+    }
+
+    private func currentAnimationPhase() -> CGFloat {
+        guard compositorCycleIsRunning, let masterCycleStartTime else {
+            return currentSnapshotPhase
+        }
+        let elapsed = layer.convertTime(CACurrentMediaTime(), from: nil) - masterCycleStartTime
+        return DualPlaneGyroIndicatorModel.normalizedPhase(
+            CGFloat(elapsed / DualPlaneGyroIndicatorModel.masterDuration)
+        )
+    }
+
+    private func captureCurrentAnimationPhase() {
+        guard compositorCycleIsRunning else { return }
+        currentSnapshotPhase = currentAnimationPhase()
     }
 
     private func animationKey(_ base: String, index: Int) -> String {

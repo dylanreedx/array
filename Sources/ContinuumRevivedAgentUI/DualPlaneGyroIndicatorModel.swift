@@ -52,6 +52,35 @@ public struct DualPlaneGyroNodeState: Equatable, Sendable {
     }
 }
 
+public struct DualPlaneGyroUpdateState: Equatable, Sendable {
+    public enum Theme: String, Sendable {
+        case light
+        case dark
+    }
+
+    public enum Decision: Equatable, Sendable {
+        case preserveMasterCycle
+        case rebuild
+    }
+
+    public let isActive: Bool
+    public let reducedMotion: Bool
+    public let theme: Theme
+
+    public init(isActive: Bool, reducedMotion: Bool, theme: Theme) {
+        self.isActive = isActive
+        self.reducedMotion = reducedMotion
+        self.theme = theme
+    }
+
+    /// SwiftUI may call UIViewRepresentable.updateUIView for unrelated model
+    /// changes. Only the indicator's own inputs are allowed to rebuild its CA
+    /// state; unchanged inputs preserve the current master cycle.
+    public func decision(for next: Self) -> Decision {
+        self == next ? .preserveMasterCycle : .rebuild
+    }
+}
+
 public enum DualPlaneGyroIndicatorModel {
     public static let side: CGFloat = 18
     public static let masterDuration: TimeInterval = 7.20
