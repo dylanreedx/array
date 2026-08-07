@@ -1,4 +1,18 @@
+import ContinuumRevivedAgentContent
 import Foundation
+
+/// One host-local image attachment retained by an unfinished composer draft.
+/// The id is opaque and resolves only through `AgentComposerAttachmentStore`;
+/// no local path or provider-specific payload is persisted here.
+public struct AgentComposerDraftImageAttachment: Codable, Equatable, Sendable {
+    public var metadata: AgentImageAttachmentMetadata
+
+    public init(metadata: AgentImageAttachmentMetadata) {
+        self.metadata = metadata
+    }
+
+    public var attachmentID: AgentImageAttachmentID { metadata.id }
+}
 
 /// Host-local composer state. Prompt text deliberately lives outside
 /// `AgentRecord` and every sync model.
@@ -6,11 +20,40 @@ public struct AgentComposerDraft: Codable, Equatable, Sendable {
     public var text: String
     public var selection: Range<Int>
     public var updatedAt: Date
+    public var imageAttachments: [AgentComposerDraftImageAttachment]
 
-    public init(text: String, selection: Range<Int>, updatedAt: Date) {
+    public init(
+        text: String,
+        selection: Range<Int>,
+        updatedAt: Date,
+        imageAttachments: [AgentComposerDraftImageAttachment] = []
+    ) {
         self.text = text
         self.selection = selection
         self.updatedAt = updatedAt
+        self.imageAttachments = imageAttachments
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case text, selection, updatedAt, imageAttachments
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        text = try values.decode(String.self, forKey: .text)
+        selection = try values.decode(Range<Int>.self, forKey: .selection)
+        updatedAt = try values.decode(Date.self, forKey: .updatedAt)
+        imageAttachments = try values.decodeIfPresent([AgentComposerDraftImageAttachment].self, forKey: .imageAttachments) ?? []
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(text, forKey: .text)
+        try values.encode(selection, forKey: .selection)
+        try values.encode(updatedAt, forKey: .updatedAt)
+        if !imageAttachments.isEmpty {
+            try values.encode(imageAttachments, forKey: .imageAttachments)
+        }
     }
 }
 
@@ -44,6 +87,8 @@ public actor AgentComposerDraftStore {
 
     private let writer: AtomicWriter
     private let debounceNanoseconds: UInt64
+    private let attachmentStore: AgentComposerAttachmentStore?
+    private let clock: any Clock
     private let warn: @Sendable (String) -> Void
     private var pending: [AgentID: AgentComposerDraft] = [:]
     private var scheduledWrites: [AgentID: Task<Void, Never>] = [:]
@@ -57,6 +102,8 @@ public actor AgentComposerDraftStore {
     public init(
         applicationSupportDirectory: URL? = nil,
         debounceInterval: TimeInterval = 0.5,
+        attachmentStore: AgentComposerAttachmentStore? = nil,
+        clock: any Clock = SystemClock(),
         warn: @escaping @Sendable (String) -> Void = { fputs($0 + "\n", stderr) }
     ) {
         let root = applicationSupportDirectory
@@ -69,6 +116,8 @@ public actor AgentComposerDraftStore {
         // pruning fails. Temp-file + fsync + rename durability does not need backups.
         self.writer = AtomicWriter(backupsDirectory: nil, retainedBackups: 0)
         self.debounceNanoseconds = UInt64(max(0, debounceInterval) * 1_000_000_000)
+        self.attachmentStore = attachmentStore
+        self.clock = clock
         self.warn = warn
     }
 
@@ -146,7 +195,7 @@ public actor AgentComposerDraftStore {
 
     public func clear(for agentID: AgentID) {
         let newestEdit = newestSeen[agentID] ?? .distantPast
-        clearedThrough[agentID] = max(Date(), newestEdit)
+        clearedThrough[agentID] = max(clock.now(), newestEdit)
         scheduledWrites.removeValue(forKey: agentID)?.cancel()
         pending.removeValue(forKey: agentID)
         let url = layout.draftFile(for: agentID)
@@ -156,9 +205,25 @@ public actor AgentComposerDraftStore {
         }
     }
 
-    /// The send boundary: a rejected intent is intentionally a no-op.
-    public func resolveSendIntent(for agentID: AgentID, accepted: Bool) {
+    /// The send boundary: a rejected intent is intentionally a no-op. Accepted
+    /// sends first hand local attachment ownership to the sent/transcript side
+    /// when an attachment store is available; if that transfer fails, the draft
+    /// is preserved rather than orphaning files that may still be referenced.
+    public func resolveSendIntent(for agentID: AgentID, accepted: Bool, sentAt: Date? = nil) async {
         guard accepted else { return }
+        let attachmentIDs = (pending[agentID] ?? load(for: agentID))?.imageAttachments.map(\.attachmentID) ?? []
+        if let attachmentStore, !attachmentIDs.isEmpty {
+            do {
+                try await attachmentStore.transferDraftAttachmentsToSent(
+                    for: agentID,
+                    attachmentIDs: attachmentIDs,
+                    sentAt: sentAt
+                )
+            } catch {
+                warn("AgentComposerDraftStore.resolveSendIntent: preserving draft for \(agentID.rawValue) because attachment ownership transfer failed: \(error)")
+                return
+            }
+        }
         clear(for: agentID)
     }
 
