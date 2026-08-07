@@ -11,12 +11,18 @@ class GyroBrandDerivativeThinkingIndicatorView: NSView, AgentThinkingIndicatorAn
         case arrayEcho = "array-echo-gyro"
         case signalGrain = "signal-grain-gyro"
         case depthPulse = "depth-pulse-gyro"
+        case monochromatic = "monochromatic-gyro"
+        case ribbonNoise = "ribbon-noise-gyro"
+        case lattice = "lattice-gyro"
 
         var accessibilityName: String {
             switch self {
             case .arrayEcho: return "array echo gyro"
             case .signalGrain: return "signal grain gyro"
             case .depthPulse: return "depth pulse gyro"
+            case .monochromatic: return "monochromatic gyro"
+            case .ribbonNoise: return "ribbon noise gyro"
+            case .lattice: return "lattice gyro"
             }
         }
     }
@@ -42,6 +48,9 @@ class GyroBrandDerivativeThinkingIndicatorView: NSView, AgentThinkingIndicatorAn
         let minimumCenterClearance: CGFloat
         let usesDeterministicHarmonics: Bool
         let colorHandoffSamples: Int
+        let pathTopology: String
+        let nodeShape: String
+        let nodePathPointCount: Int
     }
 
     private enum Plane {
@@ -72,6 +81,7 @@ class GyroBrandDerivativeThinkingIndicatorView: NSView, AgentThinkingIndicatorAn
         static let majorRadiusScale: CGFloat = 0.296
         static let minorRadiusScale: CGFloat = 0.166
         static let guideLineWidthScale: CGFloat = 0.036
+        static let latticeRotation: CGFloat = 0.12
     }
 
     private struct NodeSpec {
@@ -270,10 +280,10 @@ class GyroBrandDerivativeThinkingIndicatorView: NSView, AgentThinkingIndicatorAn
     private func applyTokenColors() {
         qaColorResolutionGeneration += 1
         performWithoutLayerActions {
-            let hairline = AgentLineRole.decorativeHairline.color.cgColor(in: self)
-            primaryGuideLayer.strokeColor = hairline.copy(alpha: 0.30)
-            secondaryGuideLayer.strokeColor = hairline.copy(alpha: 0.22)
-            echoGuideLayer.strokeColor = hairline.copy(alpha: 0.16)
+            let guideColor = (variant == .monochromatic ? AccentToken.accentWorking.color : AgentLineRole.decorativeHairline.color).cgColor(in: self)
+            primaryGuideLayer.strokeColor = guideColor.copy(alpha: 0.30)
+            secondaryGuideLayer.strokeColor = guideColor.copy(alpha: 0.22)
+            echoGuideLayer.strokeColor = guideColor.copy(alpha: 0.16)
             for (index, node) in nodeLayers.enumerated() {
                 node.fillColor = Self.nodeState(index: index, phase: modelPhaseForCurrentMode(), geometry: Self.geometry(in: bounds), variant: variant).token.color.cgColor(in: self)
             }
@@ -292,13 +302,13 @@ class GyroBrandDerivativeThinkingIndicatorView: NSView, AgentThinkingIndicatorAn
             echoGuideLayer.frame = bounds
             echoGuideLayer.path = Self.guidePath(plane: .primary, phase: phase, geometry: geometry, variant: variant, guideIndex: 2)
             echoGuideLayer.lineWidth = geometry.guideLineWidth
-            echoGuideLayer.isHidden = variant != .arrayEcho
+            echoGuideLayer.isHidden = variant != .arrayEcho && variant != .lattice
 
             for (index, node) in nodeLayers.enumerated() {
                 let state = Self.nodeState(index: index, phase: phase, geometry: geometry, variant: variant)
                 let nodeBounds = CGRect(x: 0, y: 0, width: state.diameter, height: state.diameter)
                 node.bounds = nodeBounds
-                node.path = CGPath(ellipseIn: nodeBounds, transform: nil)
+                node.path = Self.nodePath(for: state.diameter, variant: variant)
                 node.position = state.position
                 node.transform = CATransform3DMakeScale(state.scale, state.scale, 1)
                 node.opacity = state.opacity
@@ -329,7 +339,7 @@ class GyroBrandDerivativeThinkingIndicatorView: NSView, AgentThinkingIndicatorAn
             [AnimationKey.position, AnimationKey.scale, AnimationKey.opacity, AnimationKey.zPosition, AnimationKey.fillColor]
                 .contains { node.animation(forKey: animationKey($0, index: index)) == nil }
         }
-        let needsEchoAnimation = variant == .arrayEcho && echoGuideLayer.animation(forKey: animationKey(AnimationKey.guidePath, index: 2)) == nil
+        let needsEchoAnimation = (variant == .arrayEcho || variant == .lattice) && echoGuideLayer.animation(forKey: animationKey(AnimationKey.guidePath, index: 2)) == nil
         guard needsNodeAnimations || needsEchoAnimation else { return }
         removeCompositorAnimations()
         applyModelState(phase: currentSnapshotPhase)
@@ -361,7 +371,7 @@ class GyroBrandDerivativeThinkingIndicatorView: NSView, AgentThinkingIndicatorAn
             node.add(fillColor, forKey: animationKey(AnimationKey.fillColor, index: index))
         }
 
-        guard variant == .arrayEcho else { return }
+        guard variant == .arrayEcho || variant == .lattice else { return }
         let echoPath = CAKeyframeAnimation(keyPath: "path")
         echoPath.values = phases.map { Self.guidePath(plane: .primary, phase: $0, geometry: geometry, variant: variant, guideIndex: 2) }
         configure(animation: echoPath, keyTimes: keyTimes)
@@ -424,6 +434,24 @@ class GyroBrandDerivativeThinkingIndicatorView: NSView, AgentThinkingIndicatorAn
         return layer
     }
 
+    private static func nodePath(for diameter: CGFloat, variant: Variant) -> CGPath {
+        let bounds = CGRect(x: 0, y: 0, width: diameter, height: diameter)
+        switch variant {
+        case .ribbonNoise:
+            return CGPath(roundedRect: CGRect(x: diameter * 0.04, y: diameter * 0.31, width: diameter * 0.92, height: diameter * 0.38), cornerWidth: diameter * 0.19, cornerHeight: diameter * 0.19, transform: nil)
+        case .lattice:
+            let path = CGMutablePath()
+            path.move(to: CGPoint(x: diameter * 0.50, y: 0))
+            path.addLine(to: CGPoint(x: diameter, y: diameter * 0.50))
+            path.addLine(to: CGPoint(x: diameter * 0.50, y: diameter))
+            path.addLine(to: CGPoint(x: 0, y: diameter * 0.50))
+            path.closeSubpath()
+            return path
+        default:
+            return CGPath(ellipseIn: bounds, transform: nil)
+        }
+    }
+
     private static func geometry(in bounds: CGRect) -> Geometry {
         let side = max(1, min(bounds.width, bounds.height))
         let drawingBounds = CGRect(x: bounds.midX - side / 2, y: bounds.midY - side / 2, width: side, height: side)
@@ -433,8 +461,14 @@ class GyroBrandDerivativeThinkingIndicatorView: NSView, AgentThinkingIndicatorAn
     private static func nodeState(index: Int, phase: CGFloat, geometry: Geometry, variant: Variant) -> NodeState {
         let spec = nodeSpecs[index]
         let normalized = normalizedPhase(phase)
-        let angle = spec.baseAngle + normalized * 2 * .pi * spec.turnsPerMaster
-        let position = projectedPoint(angle: angle, plane: spec.plane, geometry: geometry)
+        let noise = variant == .ribbonNoise ? organicModulation(phase: normalized, index: index) : 0
+        let angle = spec.baseAngle + normalized * 2 * .pi * spec.turnsPerMaster + noise * 0.24
+        let position: CGPoint
+        if variant == .lattice {
+            position = latticePoint(index: index, phase: normalized, geometry: geometry)
+        } else {
+            position = projectedPoint(angle: angle, plane: spec.plane, geometry: geometry, radialScale: 1 + noise * 0.18)
+        }
         let frontness = smoothstep((spec.plane.depthSign * sin(angle) + 1) / 2)
         let grain = variant == .signalGrain ? organicModulation(phase: normalized, index: index) : 0
         let crossing = smoothstep(1 - abs(frontness - 0.5) * 2)
@@ -445,13 +479,19 @@ class GyroBrandDerivativeThinkingIndicatorView: NSView, AgentThinkingIndicatorAn
             diameter = [3.85, 2.55, 3.25][index]
             scale = clamp(0.72 + 0.50 * frontness + 0.05 * crossing, lower: 0.68, upper: 1.24)
             opacity = Float(clamp(0.38 + 0.60 * frontness + 0.08 * crossing, lower: 0.34, upper: 1))
+        } else if variant == .ribbonNoise {
+            diameter = [3.65, 3.35, 3.05][index]
+            scale = clamp(0.86 + 0.26 * frontness + noise, lower: 0.76, upper: 1.18)
+            opacity = Float(clamp(0.47 + 0.45 * frontness + noise * 0.50, lower: 0.42, upper: 0.96))
         } else {
             diameter = spec.diameter
             scale = clamp(0.84 + 0.28 * frontness + grain, lower: 0.76, upper: 1.16)
             opacity = Float(clamp(0.48 + 0.44 * frontness + grain * 0.62, lower: 0.42, upper: 0.96))
         }
         let token: AccentToken
-        if variant == .depthPulse && frontness > 0.62 {
+        if variant == .monochromatic {
+            token = .accentWorking
+        } else if variant == .depthPulse && frontness > 0.62 {
             token = index == 2 ? .accentApproval : .accentWorking
         } else {
             token = spec.token
@@ -461,6 +501,14 @@ class GyroBrandDerivativeThinkingIndicatorView: NSView, AgentThinkingIndicatorAn
 
     private static func guidePath(plane: Plane, phase: CGFloat, geometry: Geometry, variant: Variant, guideIndex: Int) -> CGPath {
         let path = CGMutablePath()
+        if variant == .lattice && guideIndex == 2 {
+            let points = latticePoints(phase: phase, geometry: geometry)
+            path.move(to: points[0])
+            path.addLine(to: points[1])
+            path.addLine(to: points[2])
+            path.closeSubpath()
+            return path
+        }
         let offsetAmount: CGFloat
         if variant == .arrayEcho {
             offsetAmount = guideIndex == 2 ? 1.0 + 0.45 * sin(normalizedPhase(phase) * 2 * .pi) : (guideIndex == 1 ? -0.35 : 0)
@@ -478,10 +526,23 @@ class GyroBrandDerivativeThinkingIndicatorView: NSView, AgentThinkingIndicatorAn
         return path
     }
 
-    private static func projectedPoint(angle: CGFloat, plane: Plane, geometry: Geometry) -> CGPoint {
-        let localX = cos(angle) * geometry.majorRadius
-        let localY = sin(angle) * geometry.minorRadius
+    private static func projectedPoint(angle: CGFloat, plane: Plane, geometry: Geometry, radialScale: CGFloat = 1) -> CGPoint {
+        let localX = cos(angle) * geometry.majorRadius * radialScale
+        let localY = sin(angle) * geometry.minorRadius * radialScale
         return CGPoint(x: geometry.center.x + localX * cos(plane.tiltRadians) - localY * sin(plane.tiltRadians), y: geometry.center.y + localX * sin(plane.tiltRadians) + localY * cos(plane.tiltRadians))
+    }
+
+    private static func latticePoints(phase: CGFloat, geometry: Geometry) -> [CGPoint] {
+        let rotation = normalizedPhase(phase) * 2 * .pi + Metrics.latticeRotation
+        let angles: [CGFloat] = [-CGFloat.pi / 2, 5 * CGFloat.pi / 6, CGFloat.pi / 6]
+        return angles.map { angle in
+            CGPoint(x: geometry.center.x + cos(angle + rotation) * geometry.majorRadius * 0.78,
+                    y: geometry.center.y + sin(angle + rotation) * geometry.minorRadius * 1.28)
+        }
+    }
+
+    private static func latticePoint(index: Int, phase: CGFloat, geometry: Geometry) -> CGPoint {
+        latticePoints(phase: phase, geometry: geometry)[index]
     }
 
     private static func organicModulation(phase: CGFloat, index: Int) -> CGFloat {
@@ -566,12 +627,41 @@ class GyroBrandDerivativeThinkingIndicatorView: NSView, AgentThinkingIndicatorAn
     var qaAccessibilityLabel: String? { accessibilityLabel() }
     var qaIntrinsicSide: CGFloat { Metrics.side }
     var qaNodeStates: [QANodeState] { Self.qaNodeStates(phase: modelPhaseForCurrentMode(), geometry: Self.geometry(in: bounds), variant: variant) }
-    var qaUsesDeterministicHarmonics: Bool { variant == .signalGrain }
-    var qaGuideCount: Int { variant == .arrayEcho ? 3 : 2 }
+    var qaUsesDeterministicHarmonics: Bool { variant == .signalGrain || variant == .ribbonNoise }
+    var qaGuideCount: Int { variant == .arrayEcho || variant == .lattice ? 3 : 2 }
+    var qaPathTopology: String {
+        switch variant {
+        case .lattice: return "rotating-triangle"
+        case .ribbonNoise: return "band-limited-wobble"
+        default: return "dual-tilted-ellipse"
+        }
+    }
+    var qaNodeShape: String {
+        switch variant {
+        case .ribbonNoise: return "capsule-ribbon"
+        case .lattice: return "diamond"
+        default: return "circle"
+        }
+    }
+    var qaNodePathPointCount: Int {
+        switch variant {
+        case .ribbonNoise: return 4
+        case .lattice: return 4
+        default: return 0
+        }
+    }
     var qaFootprintFits: Bool { Self.pathFitsFootprint(geometry: Self.geometry(in: bounds), variant: variant) }
     var qaMinimumCenterClearance: CGFloat { Self.minimumClearance(geometry: Self.geometry(in: bounds), variant: variant) }
     var qaColorHandoffSamples: Int { Self.colorHandoffSamples(variant: variant) }
-    var qaReport: QAReport { QAReport(variant: variant.rawValue, footprintSide: Metrics.side, nodeCount: nodeLayers.count, guideCount: qaGuideCount, sampledPathFitsFootprint: qaFootprintFits, minimumCenterClearance: qaMinimumCenterClearance, usesDeterministicHarmonics: qaUsesDeterministicHarmonics, colorHandoffSamples: qaColorHandoffSamples) }
+    var qaReport: QAReport {
+        QAReport(variant: variant.rawValue, footprintSide: Metrics.side, nodeCount: nodeLayers.count,
+                 guideCount: qaGuideCount, sampledPathFitsFootprint: qaFootprintFits,
+                 minimumCenterClearance: qaMinimumCenterClearance,
+                 usesDeterministicHarmonics: qaUsesDeterministicHarmonics,
+                 colorHandoffSamples: qaColorHandoffSamples,
+                 pathTopology: qaPathTopology, nodeShape: qaNodeShape,
+                 nodePathPointCount: qaNodePathPointCount)
+    }
 }
 
 @MainActor
@@ -599,6 +689,36 @@ final class DepthPulseGyroThinkingIndicatorView: GyroBrandDerivativeThinkingIndi
     init(reducedMotion: Bool = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion) { super.init(variant: .depthPulse, reducedMotion: reducedMotion) }
     override init(frame frameRect: NSRect) {
         super.init(variant: .depthPulse, reducedMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+        frame = frameRect
+    }
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+}
+
+@MainActor
+final class MonochromeGyroThinkingIndicatorView: GyroBrandDerivativeThinkingIndicatorView {
+    init(reducedMotion: Bool = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion) { super.init(variant: .monochromatic, reducedMotion: reducedMotion) }
+    override init(frame frameRect: NSRect) {
+        super.init(variant: .monochromatic, reducedMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+        frame = frameRect
+    }
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+}
+
+@MainActor
+final class RibbonNoiseGyroThinkingIndicatorView: GyroBrandDerivativeThinkingIndicatorView {
+    init(reducedMotion: Bool = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion) { super.init(variant: .ribbonNoise, reducedMotion: reducedMotion) }
+    override init(frame frameRect: NSRect) {
+        super.init(variant: .ribbonNoise, reducedMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+        frame = frameRect
+    }
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+}
+
+@MainActor
+final class LatticeGyroThinkingIndicatorView: GyroBrandDerivativeThinkingIndicatorView {
+    init(reducedMotion: Bool = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion) { super.init(variant: .lattice, reducedMotion: reducedMotion) }
+    override init(frame frameRect: NSRect) {
+        super.init(variant: .lattice, reducedMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
         frame = frameRect
     }
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }

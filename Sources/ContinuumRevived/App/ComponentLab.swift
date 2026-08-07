@@ -2331,7 +2331,7 @@ enum LabCatalog {
             id: "managed-agent.tilted-variations",
             category: "Managed Agent",
             title: "Tilted Prism Variations — Motion Study",
-            summary: "Selected Tilted Prism baseline plus eight new named variations at true 18×18 scale, shown in live Normal and static Reduced Motion with compact status context. Review only; no production winner is selected.",
+            summary: "Four immediately distinct Gyro directions at true 18×18 scale, shown in live Normal and static Reduced Motion with compact status context. Review only; no production winner is selected.",
             content: .reviewSurface(preferredSize: TiltedVariationsGalleryView.preferredSize) {
                 LabCatalog.makeTiltedVariationsGalleryView(mode: .live)
             }
@@ -3837,12 +3837,11 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
                 try UIProbeGeometry.expectNoZeroSizeViews(gallery, label: label)
                 try UIProbeGeometry.expectNoClipping(gallery, label: label)
                 try UIProbeGeometry.expectNoBrokenRequiredSizeConstraints(gallery, label: label)
-                guard gallery.qaCandidateCount == expectedCandidates.count,
-                      gallery.qaFixtureCount == expectedCandidates.count * 2,
-                      expectedCandidates.contains(.arrayEchoGyro),
-                      expectedCandidates.contains(.signalGrainGyro),
-                      expectedCandidates.contains(.depthPulseGyro) else {
-                    throw fail("\(label): expected Tilted Prism baseline plus eight new variations in Normal and Reduced Motion")
+                guard gallery.qaCandidateCount == 4,
+                      gallery.qaFixtureCount == 8,
+                      expectedCandidates == [.dualPlaneGyro, .monochromeGyro, .ribbonNoiseGyro, .latticeGyro],
+                      !expectedCandidates.contains(where: { $0.rawValue.contains("Echo") || $0.rawValue.contains("Signal") || $0.rawValue.contains("Depth") }) else {
+                    throw fail("\(label): Gyro review surface must contain exactly four approved candidates in Normal and Reduced Motion")
                 }
                 for fixture in gallery.qaIndicatorFixtures {
                     let indicator = fixture.indicator
@@ -3869,7 +3868,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
                         let report = gyro.qaReport
                         guard report.footprintSide == 18,
                               report.nodeCount == 3,
-                              report.guideCount == (gyro.variant == .arrayEcho ? 3 : 2),
+                              report.guideCount == (gyro.variant == .arrayEcho || gyro.variant == .lattice ? 3 : 2),
                               report.sampledPathFitsFootprint,
                               report.minimumCenterClearance > 0,
                               report.colorHandoffSamples > 0 || gyro.variant != .depthPulse,
@@ -3879,10 +3878,40 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
                               }) else {
                             throw fail("\(label): \(fixture.candidate.rawValue) lost bounded geometry, open centre, semantic colour, or depth handoff")
                         }
-                        if gyro.variant == .signalGrain {
-                            guard report.usesDeterministicHarmonics else { throw fail("\(label): Signal Grain Gyro lost deterministic harmonic modulation") }
+                        if gyro.variant == .ribbonNoise {
+                            guard report.usesDeterministicHarmonics,
+                                  report.nodeShape == "capsule-ribbon",
+                                  report.pathTopology == "band-limited-wobble",
+                                  report.nodePathPointCount > 0 else {
+                                throw fail("\(label): Ribbon Noise Gyro lost its deterministic path noise or ribbon silhouette")
+                            }
+                        }
+                        if gyro.variant == .monochromatic {
+                            guard Set(gyro.qaNodeStates.map(\.tokenName)).count == 1,
+                                  gyro.qaNodeStates.allSatisfy({ $0.tokenName == AccentToken.accentWorking.rawValue }) else {
+                                throw fail("\(label): Monochrome Gyro used more than one semantic accent token")
+                            }
+                        }
+                        if gyro.variant == .lattice {
+                            guard report.pathTopology == "rotating-triangle",
+                                  report.nodeShape == "diamond",
+                                  report.guideCount == 3 else {
+                                throw fail("\(label): Lattice Gyro lost its triangular topology and diamond nodes")
+                            }
                         }
                     }
+                }
+                let normalFixtures = gallery.qaIndicatorFixtures.filter { !$0.reducedMotion }
+                let dual = normalFixtures.first(where: { $0.candidate == .dualPlaneGyro })?.indicator as? DualPlaneGyroTiltedThinkingIndicatorView
+                let ribbon = normalFixtures.first(where: { $0.candidate == .ribbonNoiseGyro })?.indicator as? GyroBrandDerivativeThinkingIndicatorView
+                let lattice = normalFixtures.first(where: { $0.candidate == .latticeGyro })?.indicator as? GyroBrandDerivativeThinkingIndicatorView
+                guard let dual, let ribbon, let lattice,
+                      dual.qaPlaneReport.primaryTiltDegrees != dual.qaPlaneReport.secondaryTiltDegrees,
+                      ribbon.qaPathTopology != "dual-tilted-ellipse",
+                      lattice.qaPathTopology == "rotating-triangle",
+                      ribbon.qaNodeStates.map(\.diameter) != dual.qaPlaneReport.reducedMotionNodeStates.map(\.diameter),
+                      ribbon.qaNodeShape != lattice.qaNodeShape else {
+                    throw fail("\(label): Gyro candidates lost measurable path, topology, or diameter distinctions")
                 }
                 contrast.merge(try UIProbeContrast.evaluate(probe))
             }

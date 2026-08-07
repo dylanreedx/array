@@ -1,9 +1,9 @@
 import AppKit
 import ContinuumRevivedAgentUI
 
-/// A coordinator-owned review surface for the selected Tilted Prism baseline and
-/// eight new variations. This is intentionally separate from both the original
-/// four-candidate study and Orbit Variations; no candidate is production-wired.
+/// A coordinator-owned review surface for four Dual-Plane Gyro directions. This
+/// is intentionally separate from both the original-candidate study and Orbit
+/// Variations; no candidate is production-wired.
 @MainActor
 final class TiltedVariationsGalleryView: NSView {
     enum Mode: Equatable {
@@ -12,65 +12,40 @@ final class TiltedVariationsGalleryView: NSView {
     }
 
     enum Candidate: String, CaseIterable {
-        case tiltedPrism = "Tilted Prism"
-        case chromaticDepthRelay = "Chromatic Depth Relay"
         case dualPlaneGyro = "Dual-Plane Gyro"
-        case auroraRibbon = "Aurora Ribbon"
-        case precessingPrism = "Precessing Prism"
-        case prismaticComet = "Prismatic Comet"
-        case arrayEchoGyro = "Array Echo Gyro"
-        case signalGrainGyro = "Signal Grain Gyro"
-        case depthPulseGyro = "Depth Pulse Gyro"
+        case monochromeGyro = "Monochrome Gyro"
+        case ribbonNoiseGyro = "Ribbon Noise Gyro"
+        case latticeGyro = "Lattice Gyro"
 
         var identifier: String {
             switch self {
-            case .tiltedPrism: return "tilted-prism"
-            case .chromaticDepthRelay: return "chromatic-depth-relay"
             case .dualPlaneGyro: return "dual-plane-gyro"
-            case .auroraRibbon: return "aurora-ribbon"
-            case .precessingPrism: return "precessing-prism"
-            case .prismaticComet: return "prismatic-comet"
-            case .arrayEchoGyro: return "array-echo-gyro"
-            case .signalGrainGyro: return "signal-grain-gyro"
-            case .depthPulseGyro: return "depth-pulse-gyro"
+            case .monochromeGyro: return "monochrome-gyro"
+            case .ribbonNoiseGyro: return "ribbon-noise-gyro"
+            case .latticeGyro: return "lattice-gyro"
             }
         }
 
         var direction: String {
             switch self {
-            case .tiltedPrism: return "Tilted plane"
-            case .chromaticDepthRelay: return "Depth relay"
-            case .dualPlaneGyro: return "Dual-plane gyro"
-            case .auroraRibbon: return "Aurora ribbon"
-            case .precessingPrism: return "Prism precession"
-            case .prismaticComet: return "Comet trail"
-            case .arrayEchoGyro: return "Staggered brand echoes"
-            case .signalGrainGyro: return "Harmonic signal grain"
-            case .depthPulseGyro: return "Crossing depth pulse"
+            case .dualPlaneGyro: return "Two tilted planes"
+            case .monochromeGyro: return "One semantic hue"
+            case .ribbonNoiseGyro: return "Ribbon path + smooth noise"
+            case .latticeGyro: return "Triangular handoff"
             }
         }
 
         @MainActor
         func makeIndicator(reducedMotion: Bool) -> NSView & AgentThinkingIndicatorAnimating {
             switch self {
-            case .tiltedPrism:
-                return TiltedPrismOrbitThinkingIndicatorView(reducedMotion: reducedMotion)
-            case .chromaticDepthRelay:
-                return ChromaticDepthRelayTiltedThinkingIndicatorView(reducedMotion: reducedMotion)
             case .dualPlaneGyro:
                 return DualPlaneGyroTiltedThinkingIndicatorView(reducedMotion: reducedMotion)
-            case .auroraRibbon:
-                return AuroraRibbonTiltedThinkingIndicatorView(reducedMotion: reducedMotion)
-            case .precessingPrism:
-                return PrecessingPrismTiltedThinkingIndicatorView(reducedMotion: reducedMotion)
-            case .prismaticComet:
-                return PrismaticCometTiltedThinkingIndicatorView(reducedMotion: reducedMotion)
-            case .arrayEchoGyro:
-                return ArrayEchoGyroThinkingIndicatorView(reducedMotion: reducedMotion)
-            case .signalGrainGyro:
-                return SignalGrainGyroThinkingIndicatorView(reducedMotion: reducedMotion)
-            case .depthPulseGyro:
-                return DepthPulseGyroThinkingIndicatorView(reducedMotion: reducedMotion)
+            case .monochromeGyro:
+                return MonochromeGyroThinkingIndicatorView(reducedMotion: reducedMotion)
+            case .ribbonNoiseGyro:
+                return RibbonNoiseGyroThinkingIndicatorView(reducedMotion: reducedMotion)
+            case .latticeGyro:
+                return LatticeGyroThinkingIndicatorView(reducedMotion: reducedMotion)
             }
         }
     }
@@ -86,7 +61,7 @@ final class TiltedVariationsGalleryView: NSView {
 
     static let preferredSize = NSSize(width: 960, height: 640)
     private let titleLabel = NSTextField(labelWithString: "Tilted Prism Variations — Motion Study")
-    private let subtitleLabel = NSTextField(labelWithString: "Selected Tilted Prism baseline plus eight new variations at true 18×18 scale. Compare the same compact status context in live Normal and static Reduced Motion; review only, with no production winner.")
+    private let subtitleLabel = NSTextField(labelWithString: "Four immediately distinct Gyros at true 18×18 scale. Compare the same compact status context in live Normal and static Reduced Motion; review only, with no production winner.")
     private let grid = NSView()
     private let mode: Mode
     private var cards: [TiltedVariationCardView] = []
@@ -170,11 +145,9 @@ final class TiltedVariationsGalleryView: NSView {
     }
 
     private func layoutCards() {
-        // Nine candidates reflow into a three-row contact sheet at the
-        // 960×640 review size. The wider six-column cards keep full candidate
-        // names and the compact status context readable while retaining both
-        // Normal and Reduced Motion fixtures in one visible surface.
-        let columns = 6
+        // Four candidates reflow into a two-row contact sheet at the
+        // 960×640 review size, retaining both Normal and Reduced Motion fixtures.
+        let columns = 4
         let rows = Int(ceil(Double(cards.count) / Double(columns)))
         let gap = CGFloat(Space.s)
         let width = floor((grid.bounds.width - gap * CGFloat(columns - 1)) / CGFloat(columns))
