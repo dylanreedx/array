@@ -974,6 +974,21 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--composer-image-components-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await UIProbeGeometry.runComposerImageComponentChecks()
+                    print("ContinuumRevivedComposerImageComponentsCheck passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--ui-pixel-check") {
             do {
                 _ = NSApplication.shared

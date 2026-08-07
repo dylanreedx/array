@@ -7463,6 +7463,245 @@ enum UIProbeGeometry {
         }
     }
 
+    static func runComposerImageComponentChecks() async throws {
+        _ = NSApplication.shared
+        NSApp.appearance = NSAppearance(named: .darkAqua)
+        let pasteboardAssertions = try await checkComposerImagePasteboardDecoder()
+        let thumbnailAssertions = try await checkComposerImageThumbnailPipeline()
+        let railAssertions = try await checkComposerImageAttachmentRail()
+        print("UIProbeGeometry: composer image components gated \(pasteboardAssertions) paste/drop decoding assertions, \(thumbnailAssertions) thumbnail-cache assertions, and \(railAssertions) rail geometry/accessibility/keyboard assertions")
+    }
+
+    private static func checkComposerImagePasteboardDecoder() async throws -> Int {
+        var assertions = 0
+        func require(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String) throws {
+            guard condition() else { throw fail(message()) }
+            assertions += 1
+        }
+
+        let png = try makeProbeImageData(width: 64, height: 32, type: .png)
+        let jpeg = try makeProbeImageData(width: 48, height: 24, type: .jpeg)
+        let tiff = try makeProbeImageData(width: 40, height: 20, type: .tiff)
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("continuum.composer.image.decoder.\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        let pngItem = NSPasteboardItem()
+        pngItem.setData(png, forType: .png)
+        let jpegItem = NSPasteboardItem()
+        jpegItem.setData(jpeg, forType: NSPasteboard.PasteboardType("public.jpeg"))
+        let tiffItem = NSPasteboardItem()
+        tiffItem.setData(tiff, forType: .tiff)
+        pasteboard.writeObjects([pngItem, jpegItem, tiffItem])
+        let decodedData = ComposerImagePasteboardDecoder.decodedItems(from: pasteboard)
+        try require(decodedData.count == 3, "composer image decoder did not recognize PNG/JPEG/TIFF pasteboard data without attachment storage")
+        try require(decodedData.map(\.contentType).contains("public.png"), "composer image decoder lost PNG content type")
+        try require(decodedData.map(\.contentType).contains("public.jpeg"), "composer image decoder lost JPEG content type")
+        try require(decodedData.map(\.contentType).contains("public.tiff"), "composer image decoder lost TIFF content type")
+        try require(decodedData.contains(where: { $0.pixelWidth == 64 && $0.pixelHeight == 32 }), "composer image decoder did not read PNG dimensions from ImageIO metadata")
+
+        let tempDir = try makeProbeTemporaryDirectory(named: "composer-image-decoder")
+        let fileURL = tempDir.appendingPathComponent("local-image.png")
+        try png.write(to: fileURL, options: .atomic)
+        let filePasteboard = NSPasteboard(name: NSPasteboard.Name("continuum.composer.image.file.\(UUID().uuidString)"))
+        filePasteboard.clearContents()
+        filePasteboard.writeObjects([fileURL as NSURL])
+        let decodedFiles = ComposerImagePasteboardDecoder.decodedItems(from: filePasteboard)
+        try require(decodedFiles.count == 1, "composer image decoder did not recognize local image file URLs")
+        try require(decodedFiles.first?.suggestedFilename == "local-image.png", "composer image decoder exposed more than the safe local filename")
+
+        let textPasteboard = NSPasteboard(name: NSPasteboard.Name("continuum.composer.image.text.\(UUID().uuidString)"))
+        textPasteboard.clearContents()
+        textPasteboard.setString("not an image", forType: .string)
+        try require(ComposerImagePasteboardDecoder.decodedItems(from: textPasteboard).isEmpty, "composer image decoder treated plain text as an image")
+
+        let repeated = Array(repeating: decodedData[0], count: 12)
+        let recorder = ComposerImageImportRecorder(directory: tempDir)
+        let importer = ComposerImageAttachmentImportPipeline(actions: .init(
+            storePastedImageData: { data, item in
+                try await recorder.store(data: data, item: item)
+            },
+            makeAttachmentID: {
+                AgentImageAttachmentID(rawValue: "qa-image-\(UUID().uuidString)")!
+            }
+        ))
+        let imported = await importer.importAttachments(from: repeated)
+        try require(imported.count == repeated.count, "composer image import imposed a product-level attachment count cap")
+        try require(imported.allSatisfy { if case .success = $0 { return true } else { return false } }, "composer image import did not preserve every decoded pasted image through the injected storage seam")
+        let storedNameCount = await recorder.storedNameCount()
+        try require(storedNameCount == repeated.count, "composer image import did not use the injected persistence closure for pasted bytes")
+        return assertions
+    }
+
+    private static func checkComposerImageThumbnailPipeline() async throws -> Int {
+        var assertions = 0
+        func require(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String) throws {
+            guard condition() else { throw fail(message()) }
+            assertions += 1
+        }
+
+        let tempDir = try makeProbeTemporaryDirectory(named: "composer-image-thumbnails")
+        let wideURL = tempDir.appendingPathComponent("wide.png")
+        try makeProbeImageData(width: 800, height: 400, type: .png).write(to: wideURL, options: .atomic)
+        let pipeline = ComposerImageIOThumbnailPipeline(configuration: .init(maximumEntries: 2, maximumBytes: 512 * 1024))
+        let thumbnail = try await pipeline.thumbnail(for: wideURL, maxPixelSize: 96)
+        try require(max(thumbnail.pixelWidth, thumbnail.pixelHeight) <= 96, "ImageIO thumbnail pipeline did not downsample to the requested bound")
+        try require(thumbnail.pixelWidth > thumbnail.pixelHeight, "ImageIO thumbnail pipeline did not preserve the source aspect orientation")
+        try require(!thumbnail.pngData.isEmpty, "ImageIO thumbnail pipeline returned an empty thumbnail payload")
+        _ = try await pipeline.thumbnail(for: wideURL, maxPixelSize: 96)
+        let cachedAfterRepeat = await pipeline.cachedEntryCount()
+        try require(cachedAfterRepeat == 1, "ImageIO thumbnail pipeline did not reuse a cached thumbnail")
+
+        for index in 0..<3 {
+            let url = tempDir.appendingPathComponent("extra-\(index).png")
+            try makeProbeImageData(width: 120 + index, height: 80, type: .png).write(to: url, options: .atomic)
+            _ = try await pipeline.thumbnail(for: url, maxPixelSize: 64)
+        }
+        let cachedAfterEviction = await pipeline.cachedEntryCount()
+        try require(cachedAfterEviction <= 2, "ImageIO thumbnail cache exceeded its configured entry bound")
+        return assertions
+    }
+
+    private static func checkComposerImageAttachmentRail() async throws -> Int {
+        var assertions = 0
+        func require(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String) throws {
+            guard condition() else { throw fail(message()) }
+            assertions += 1
+        }
+
+        let tempDir = try makeProbeTemporaryDirectory(named: "composer-image-rail")
+        let imageURL = tempDir.appendingPathComponent("rail.png")
+        try makeProbeImageData(width: 96, height: 48, type: .png).write(to: imageURL, options: .atomic)
+        let loader = StubComposerImageThumbnailLoader(thumbnail: ComposerImageThumbnail(
+            pngData: try makeProbeImageData(width: 32, height: 16, type: .png),
+            pixelWidth: 32,
+            pixelHeight: 16
+        ))
+        let rail = ComposerImageAttachmentRailView(
+            frame: NSRect(x: 0, y: 0, width: 620, height: ComposerImageAttachmentRailView.railHeight),
+            thumbnailLoader: loader
+        )
+        let window = NSWindow(contentRect: rail.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = rail
+
+        let states: [ComposerImageAttachmentState] = [.processing, .ready, .unsupported, .failed]
+        let items = (0..<24).map { index -> ComposerImageAttachmentRailItem in
+            let id = AgentImageAttachmentID(rawValue: "qa-rail-\(index)")!
+            let displayName = index == 0 ? "/Users/dylan/private/secret-image.png" : "image-\(index).png"
+            let metadata = AgentImageAttachmentMetadata(
+                id: id,
+                displayName: displayName,
+                contentType: "public.png",
+                byteCount: 128,
+                pixelWidth: 96,
+                pixelHeight: 48
+            )
+            return ComposerImageAttachmentRailItem(
+                attachment: AgentPromptImageAttachment(metadata: metadata, fileURL: imageURL),
+                state: index < states.count ? states[index] : .ready,
+                statusMessage: index == 3 ? "Decode failed" : nil
+            )
+        }
+        var removedIDs: [String] = []
+        rail.onRemoveAttachment = { removedIDs.append($0.metadata.id.rawValue) }
+        rail.setItems(items)
+        rail.layoutSubtreeIfNeeded()
+        rail.collectionView.layoutSubtreeIfNeeded()
+        try require(rail.qaItemCount == 24, "attachment rail imposed a product-level item-count cap")
+        try require(rail.collectionView.numberOfItems(inSection: 0) == 24, "attachment rail data source dropped items")
+        try require(rail.qaVisibleItemCount > 0 && rail.qaVisibleItemCount < rail.qaItemCount, "attachment rail did not use collection-view laziness for horizontal overflow")
+        try require(rail.scrollView.hasHorizontalScroller && !rail.scrollView.hasVerticalScroller, "attachment rail is not horizontally scrollable")
+        try require(Set(rail.qaVisibleStateLabels).isSuperset(of: ["Processing", "Ready", "Unsupported", "Decode failed"]), "attachment rail did not render processing/ready/unsupported/failed states")
+        try require(rail.qaVisibleAccessibilityLabels.contains(where: { label in
+            label.contains("secret-image.png") && !label.contains("/Users") && label.contains("PNG") && label.contains("96×48")
+        }), "attachment rail accessibility/tooling label leaked a path or lost safe type/dimensions")
+
+        rail.qaSelectItem(at: 0)
+        rail.qaMoveSelection(by: 1)
+        try require(rail.qaSelectedItemID == "qa-rail-1", "attachment rail right-arrow keyboard navigation did not move selection")
+        rail.qaMoveSelection(by: -1)
+        try require(rail.qaSelectedItemID == "qa-rail-0", "attachment rail left-arrow keyboard navigation did not move selection")
+        rail.qaRemoveSelectionFromKeyboard()
+        try require(removedIDs == ["qa-rail-0"], "attachment rail keyboard remove did not call back with the selected attachment")
+
+        for _ in 0..<20 where rail.qaThumbnailCount == 0 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            await Task.yield()
+        }
+        try require(rail.qaThumbnailCount > 0, "attachment rail did not request a visible ready thumbnail through the injected thumbnail loader")
+        try require(loader.requests.first?.lastPathComponent == "rail.png", "attachment rail thumbnail request did not use the local file capability")
+        window.contentView = nil
+        return assertions
+    }
+
+    private static func makeProbeTemporaryDirectory(named name: String) throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuum-\(name)-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    private static func makeProbeImageData(width: Int, height: Int, type: NSBitmapImageRep.FileType) throws -> Data {
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let bitmap = rep.bitmapData else {
+            throw fail("failed to create probe image bitmap")
+        }
+        for y in 0..<height {
+            let row = bitmap.advanced(by: y * rep.bytesPerRow)
+            for x in 0..<width {
+                let offset = x * 4
+                row[offset] = UInt8((x * 255) / max(width - 1, 1))
+                row[offset + 1] = UInt8((y * 255) / max(height - 1, 1))
+                row[offset + 2] = 160
+                row[offset + 3] = 255
+            }
+        }
+        guard let data = rep.representation(using: type, properties: [:]), !data.isEmpty else {
+            throw fail("failed to encode probe image")
+        }
+        return data
+    }
+
+}
+
+private actor ComposerImageImportRecorder {
+    let directory: URL
+    private var names: [String] = []
+
+    init(directory: URL) {
+        self.directory = directory
+    }
+
+    func store(data: Data, item: ComposerDecodedImagePasteboardItem) throws -> URL {
+        let url = directory.appendingPathComponent("stored-\(names.count).png")
+        try data.write(to: url, options: .atomic)
+        names.append(item.suggestedFilename)
+        return url
+    }
+
+    func storedNameCount() -> Int { names.count }
+}
+
+private final class StubComposerImageThumbnailLoader: ComposerImageThumbnailLoading, @unchecked Sendable {
+    let thumbnail: ComposerImageThumbnail
+    private(set) var requests: [URL] = []
+
+    init(thumbnail: ComposerImageThumbnail) {
+        self.thumbnail = thumbnail
+    }
+
+    func thumbnail(for fileURL: URL, maxPixelSize: Int) async throws -> ComposerImageThumbnail {
+        requests.append(fileURL)
+        return thumbnail
+    }
 }
 
 @MainActor
