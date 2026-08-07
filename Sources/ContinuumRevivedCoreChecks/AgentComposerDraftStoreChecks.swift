@@ -466,8 +466,11 @@ private func runAgentComposerAttachmentStoreChecks(
 
     let beganPreStart = try await lifecycleStore.beginSubmission(for: agentA, submittedAt: clock.now())
     let hiddenPreStart = await lifecycleStore.load(for: agentA)
+    let activePreStartState = try await lifecycleStore.submissionRecoveryState(for: agentA)
     expect(beganPreStart && hiddenPreStart == nil,
            "beginSubmission must clear visible state only after retaining a durable recovery snapshot")
+    expect(activePreStartState == .pending(active: true),
+           "a live pending submission must be reported active so composer rebind does not restore or remove it")
     let preStartRelaunched = AgentComposerDraftStore(
         applicationSupportDirectory: root,
         debounceInterval: 60,
@@ -480,14 +483,20 @@ private func runAgentComposerAttachmentStoreChecks(
 
     let beganConfirmed = try await lifecycleStore.beginSubmission(for: agentA, submittedAt: clock.now())
     let hiddenBeforeConfirm = await lifecycleStore.load(for: agentA)
+    let activeBeforeConfirm = try await lifecycleStore.submissionRecoveryState(for: agentA)
     expect(beganConfirmed && hiddenBeforeConfirm == nil,
            "confirmed-start path must start from a hidden visible draft plus durable recovery")
+    expect(activeBeforeConfirm == .pending(active: true),
+           "detach/rebind before turn completion must leave the active recovery journal authoritative")
     let confirmed = try await lifecycleStore.confirmSubmissionStarted(for: agentA, sentAt: clock.now())
     let acceptedDraft = await lifecycleStore.load(for: agentA)
     let sentPasted = try await attachmentStore.storedAttachment(for: pasted.manifest.id)
     let sentLocal = try await attachmentStore.storedAttachment(for: localFile.manifest.id)
+    let recoveryAfterCompletion = try await lifecycleStore.submissionRecoveryState(for: agentA)
     expect(confirmed && acceptedDraft == nil,
            "confirmed provider start must clear durable recovery without restoring visible draft")
+    expect(recoveryAfterCompletion == .absent,
+           "authoritative successful completion must confirm/transfer and remove the active recovery journal")
     expect(sentPasted?.manifest.ownership.state == .sent && sentLocal?.manifest.ownership.state == .sent,
            "confirmed provider start must transfer attachment ownership to sent instead of deleting originals")
     expect(FileManager.default.fileExists(atPath: sentPasted!.fileURL.path) && FileManager.default.fileExists(atPath: sentLocal!.fileURL.path),

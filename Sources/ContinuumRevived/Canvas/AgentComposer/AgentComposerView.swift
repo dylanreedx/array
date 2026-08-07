@@ -93,6 +93,10 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     private var restoreTask: Task<Void, Never>?
     private var pendingSubmittedPrompt: String?
     private var pendingSubmittedDraft: AgentComposerDraft?
+    private var pendingSubmittedDraftAgentID: AgentID?
+    /// Monotonic binding identity for every async composer task. Agent ID alone
+    /// is insufficient when the same composer view is rebound more than once.
+    private var bindingGeneration: UInt64 = 0
     private(set) var isEditorFocused = false
     private var isApplyingDraft = false
     private let heightController: ComposerHeightController
@@ -240,20 +244,36 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     /// this again is the detach/re-attach seam: the newly bound agent's local
     /// draft replaces the editor contents when its load completes.
     func bindAttachmentStore(_ store: AgentComposerAttachmentStore, agentID: AgentID) {
+        bindingGeneration &+= 1
         attachmentStore = store
         draftAgentID = agentID
     }
 
     func bindDraftStore(_ store: AgentComposerDraftStore, agentID: AgentID) {
+        bindingGeneration &+= 1
+        let generation = bindingGeneration
         draftStore = store
         draftAgentID = agentID
         restoreTask?.cancel()
-        restoreTask = Task { [weak self] in
+        restoreTask = Task { @MainActor [weak self] in
             // A relaunch can occur after the supervisor accepted a prompt but
             // before Pi emitted the first turn-start. Recover the durable
-            // submission journal before reading the ordinary draft file.
-            let recovered = try? await store.restoreSubmission(for: agentID)
+            // submission journal before reading the ordinary draft file. A
+            // journal still owned by a live submission is deliberately left
+            // untouched; completion/error recovery owns that decision.
+            let recoveryState = try? await store.submissionRecoveryState(for: agentID)
+            let shouldRecover: Bool
+            if case .some(.pending(active: true)) = recoveryState {
+                shouldRecover = false
+            } else if case .some(.confirming(active: true)) = recoveryState {
+                shouldRecover = false
+            } else {
+                shouldRecover = true
+            }
+            let recovered = shouldRecover ? (try? await store.restoreSubmission(for: agentID)) ?? nil : nil
             let hasRecovery = await store.hasSubmissionRecovery(for: agentID)
+            guard !Task.isCancelled, let self,
+                  self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
             let stored: ContinuumRevivedCore.AgentComposerDraft?
             if let recovered {
                 stored = recovered
@@ -264,7 +284,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
             } else {
                 stored = await store.load(for: agentID)
             }
-            guard !Task.isCancelled, let self, self.draftAgentID == agentID else { return }
+            guard !Task.isCancelled, self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
             guard let stored else {
                 self.importedAttachments = []
                 self.updateAttachmentRail()
@@ -272,13 +292,19 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
                 return
             }
             var resolved: [AgentPromptImageAttachment] = []
-            if let attachmentStore = self.attachmentStore {
+            let boundAttachmentStore = self.attachmentStore
+            if let boundAttachmentStore {
                 for attachment in stored.imageAttachments {
-                    if let storedAttachment = try? await attachmentStore.storedAttachment(for: attachment.attachmentID) {
+                    guard !Task.isCancelled,
+                          self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
+                    if let storedAttachment = try? await boundAttachmentStore.storedAttachment(for: attachment.attachmentID) {
+                        guard !Task.isCancelled,
+                              self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
                         resolved.append(storedAttachment.promptAttachment)
                     }
                 }
             }
+            guard !Task.isCancelled, self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
             self.importedAttachments = resolved
             self.updateAttachmentRail()
             self.apply(AgentComposerDraft(
@@ -291,6 +317,10 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
                 imageAttachments: resolved
             ))
         }
+    }
+
+    private func isCurrentBinding(agentID: AgentID, generation: UInt64) -> Bool {
+        draftAgentID == agentID && bindingGeneration == generation
     }
 
     /// Runtime command/file/skill adapters replace the bounded fixture registry at
@@ -407,11 +437,13 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
 
     func composerRequestedImageImport(_ textView: ComposerTextView, from pasteboard: NSPasteboard) {
         guard let attachmentStore, let agentID = draftAgentID else { return }
+        let generation = bindingGeneration
         let decoded = ComposerImagePasteboardDecoder.decodedItems(from: pasteboard)
         guard !decoded.isEmpty else { return }
         Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self, self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
             for item in decoded {
+                guard self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
                 do {
                     let validation = try AgentComposerImageValidation(
                         validatedContentType: item.contentType,
@@ -432,6 +464,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
                             validation: validation, forDraftOf: agentID
                         )
                     }
+                    guard self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
                     self.importedAttachments.append(stored.promptAttachment)
                 } catch {
                     // Import failures are intentionally local and bounded. The
@@ -568,17 +601,20 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         submittedRevision: UInt64
     ) {
         guard actionTask == nil, let actionSink, let agentID = draftAgentID else { return }
+        let generation = bindingGeneration
         let isPromptSubmission: Bool
         if case .sendPrompt = intent { isPromptSubmission = true } else { isPromptSubmission = false }
         actionTask = Task { @MainActor [weak self, weak actionSink] in
-            guard let self else { return }
+            guard let self, self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
             if isPromptSubmission {
                 do {
                     guard try await self.draftStore?.beginSubmission(
                         for: agentID,
                         draft: self.currentPersistedDraft()
-                    ) == true else { return }
+                    ) == true,
+                    self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
                     self.pendingSubmittedDraft = self.draft
+                    self.pendingSubmittedDraftAgentID = agentID
                 } catch {
                     return
                 }
@@ -588,16 +624,30 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
             // review correction, defect 3). Except when cancelled: cancel means a
             // rebind/unbind took ownership of the field, and a stale task must
             // not clear the task installed after it.
-            defer { if !Task.isCancelled { self.actionTask = nil } }
-            guard let acceptance = await actionSink?.accept(intent, for: agentID) else {
-                if isPromptSubmission { try? await self.draftStore?.restoreSubmission(for: agentID) }
+            defer {
+                if !Task.isCancelled, self.isCurrentBinding(agentID: agentID, generation: generation) {
+                    self.actionTask = nil
+                }
+            }
+            guard self.isCurrentBinding(agentID: agentID, generation: generation),
+                  let acceptance = await actionSink?.accept(intent, for: agentID),
+                  self.isCurrentBinding(agentID: agentID, generation: generation) else {
+                if isPromptSubmission,
+                   self.isCurrentBinding(agentID: agentID, generation: generation) {
+                    _ = try? await self.draftStore?.restoreSubmission(for: agentID)
+                }
                 return
             }
             guard acceptance == .accepted else {
-                if isPromptSubmission {
-                    if let restored = try? await self.draftStore?.restoreSubmission(for: agentID) {
-                        await self.applyPersistedDraft(restored)
-                    }
+                if isPromptSubmission,
+                   self.isCurrentBinding(agentID: agentID, generation: generation),
+                   let restored = try? await self.draftStore?.restoreSubmission(for: agentID) {
+                    guard self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
+                    await self.applyPersistedDraft(
+                        restored,
+                        agentID: agentID,
+                        generation: generation
+                    )
                 }
                 return
             }
@@ -634,16 +684,24 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         )
     }
 
-    private func applyPersistedDraft(_ persisted: ContinuumRevivedCore.AgentComposerDraft) async {
+    private func applyPersistedDraft(
+        _ persisted: ContinuumRevivedCore.AgentComposerDraft,
+        agentID: AgentID,
+        generation: UInt64
+    ) async {
+        guard !Task.isCancelled, isCurrentBinding(agentID: agentID, generation: generation) else { return }
         // Recovery is keyed by the durable draft references, not by whichever
         // tile happened to own the rail. Resolve the persisted list in order and
         // never filter it against the current tile's transient array.
         var resolved: [AgentPromptImageAttachment] = []
+        let boundAttachmentStore = attachmentStore
         for reference in persisted.imageAttachments {
+            guard !Task.isCancelled, isCurrentBinding(agentID: agentID, generation: generation) else { return }
             var didResolve = false
-            if let attachmentStore {
+            if let boundAttachmentStore {
                 do {
-                    if let stored = try await attachmentStore.storedAttachment(for: reference.attachmentID) {
+                    if let stored = try await boundAttachmentStore.storedAttachment(for: reference.attachmentID) {
+                        guard !Task.isCancelled, isCurrentBinding(agentID: agentID, generation: generation) else { return }
                         resolved.append(stored.promptAttachment)
                         didResolve = true
                     }
@@ -652,11 +710,13 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
                     // rebind can retry local capability resolution.
                 }
             }
+            guard !Task.isCancelled, isCurrentBinding(agentID: agentID, generation: generation) else { return }
             if !didResolve,
                let existing = importedAttachments.first(where: { $0.metadata.id == reference.attachmentID }) {
                 resolved.append(existing)
             }
         }
+        guard !Task.isCancelled, isCurrentBinding(agentID: agentID, generation: generation) else { return }
         importedAttachments = resolved
         apply(AgentComposerDraft(
             text: persisted.text,
@@ -670,13 +730,25 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     /// completion. Queue acceptance and `.turnStarted` deliberately leave the
     /// recovery journal intact so a later provider/runtime error can restore it.
     func confirmPromptSubmissionCompleted() {
-        guard let draftStore, let agentID = draftAgentID, pendingSubmittedDraft != nil else { return }
+        guard let draftStore,
+              let agentID = draftAgentID,
+              pendingSubmittedDraft != nil,
+              pendingSubmittedDraftAgentID == agentID else { return }
+        let generation = bindingGeneration
         pendingSubmittedDraft = nil
         Task { @MainActor [weak self] in
+            guard let self, self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
             do {
                 _ = try await draftStore.confirmSubmissionStarted(for: agentID)
+                guard self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
+                self.pendingSubmittedDraftAgentID = nil
             } catch {
-                self?.restorePromptSubmission()
+                guard self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
+                self.restorePromptSubmission(
+                    using: draftStore,
+                    agentID: agentID,
+                    generation: generation
+                )
             }
         }
     }
@@ -684,12 +756,27 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     /// Launch/start failures restore the exact durable draft and attachments.
     func restorePromptSubmission() {
         guard let draftStore, let agentID = draftAgentID else { return }
+        restorePromptSubmission(using: draftStore, agentID: agentID, generation: bindingGeneration)
+    }
+
+    private func restorePromptSubmission(
+        using draftStore: AgentComposerDraftStore,
+        agentID: AgentID,
+        generation: UInt64
+    ) {
         Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self, self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
             if let restored = try? await draftStore.restoreSubmission(for: agentID) {
-                await self.applyPersistedDraft(restored)
+                guard self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
+                await self.applyPersistedDraft(
+                    restored,
+                    agentID: agentID,
+                    generation: generation
+                )
             }
+            guard self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
             self.pendingSubmittedDraft = nil
+            self.pendingSubmittedDraftAgentID = nil
         }
     }
 

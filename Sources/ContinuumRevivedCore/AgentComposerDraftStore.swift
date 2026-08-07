@@ -92,6 +92,16 @@ public enum AgentComposerSubmissionState: String, Codable, Sendable {
     case confirmed
 }
 
+/// Read-only lifecycle information for a submission recovery journal. The
+/// `active` bit is process-local: it distinguishes a journal still owned by a
+/// live submission from one left behind by a failed/relaunched submission.
+public enum AgentComposerSubmissionRecoveryState: Equatable, Sendable {
+    case absent
+    case pending(active: Bool)
+    case confirming(active: Bool)
+    case confirmed
+}
+
 public enum AgentComposerDraftStoreError: Error, Equatable, CustomStringConvertible {
     case storageReadFailed(String)
 
@@ -149,6 +159,9 @@ public actor AgentComposerDraftStore {
 
     private let writer: AtomicWriter
     private let debounceNanoseconds: UInt64
+    /// Zero in production. Checks may inject a bounded delay to force a
+    /// rebind between recovery I/O and its main-actor apply.
+    private let submissionRecoveryDelayNanoseconds: UInt64
     private let attachmentStore: AgentComposerAttachmentStore?
     private let clock: any Clock
     private let warn: @Sendable (String) -> Void
@@ -162,11 +175,17 @@ public actor AgentComposerDraftStore {
     /// Prevents an already-enqueued UI save task from resurrecting a draft after
     /// its later accepted-send task reaches the actor first.
     private var clearedThrough: [AgentID: Date] = [:]
+    /// A journal is not recoverable merely because it is present. This
+    /// process-local marker remains set while the runner may still complete;
+    /// a relaunch has no live submission and therefore treats the journal as
+    /// recoverable.
+    private var activeSubmissionAgents: Set<AgentID> = []
 
     public init(
         applicationSupportDirectory: URL? = nil,
         debounceInterval: TimeInterval = 0.5,
         attachmentStore: AgentComposerAttachmentStore? = nil,
+        submissionRecoveryDelayNanoseconds: UInt64 = 0,
         clock: any Clock = SystemClock(),
         warn: @escaping @Sendable (String) -> Void = { fputs($0 + "\n", stderr) },
         submissionSnapshotWriter: (@Sendable (AgentComposerSubmissionSnapshot, URL) throws -> Void)? = nil,
@@ -182,6 +201,7 @@ public actor AgentComposerDraftStore {
         // pruning fails. Temp-file + fsync + rename durability does not need backups.
         self.writer = AtomicWriter(backupsDirectory: nil, retainedBackups: 0)
         self.debounceNanoseconds = UInt64(max(0, debounceInterval) * 1_000_000_000)
+        self.submissionRecoveryDelayNanoseconds = submissionRecoveryDelayNanoseconds
         self.attachmentStore = attachmentStore
         self.clock = clock
         self.warn = warn
@@ -268,7 +288,21 @@ public actor AgentComposerDraftStore {
         let stamp = submittedAt ?? clock.now()
         try persistSubmissionSnapshot(AgentComposerSubmissionSnapshot(draft: draft, submittedAt: stamp), for: agentID)
         clearVisibleDraft(for: agentID, clearThrough: max(stamp, draft.updatedAt))
+        activeSubmissionAgents.insert(agentID)
         return true
+    }
+
+    /// Reads the journal lifecycle without restoring, transferring, or removing
+    /// anything. A live pending/confirming journal must remain untouched while
+    /// its runner can still emit authoritative completion.
+    public func submissionRecoveryState(for agentID: AgentID) throws -> AgentComposerSubmissionRecoveryState {
+        guard let snapshot = try loadSubmissionSnapshot(for: agentID) else { return .absent }
+        let active = activeSubmissionAgents.contains(agentID)
+        switch snapshot.state {
+        case .pending: return .pending(active: active)
+        case .confirming: return .confirming(active: active)
+        case .confirmed: return .confirmed
+        }
     }
 
     /// True when a submission journal exists. Callers use this to avoid falling
@@ -284,6 +318,12 @@ public actor AgentComposerDraftStore {
     @discardableResult
     public func restoreSubmission(for agentID: AgentID) async throws -> AgentComposerDraft? {
         guard let snapshot = try loadSubmissionSnapshot(for: agentID) else { return nil }
+        // This is an explicit failure/recovery operation. Once it starts, the
+        // journal is no longer protected as an active live submission.
+        activeSubmissionAgents.remove(agentID)
+        if submissionRecoveryDelayNanoseconds > 0 {
+            try? await Task.sleep(nanoseconds: submissionRecoveryDelayNanoseconds)
+        }
         switch snapshot.state {
         case .pending:
             break
@@ -321,6 +361,11 @@ public actor AgentComposerDraftStore {
     public func confirmSubmissionStarted(for agentID: AgentID, sentAt: Date? = nil) async throws -> Bool {
         guard var snapshot = try loadSubmissionSnapshot(for: agentID) else { return false }
         let stamp = sentAt ?? clock.now()
+        // Completion may be delivered by the supervisor after the composer has
+        // detached. Keep the journal active until this authoritative operation
+        // either succeeds or fails into an explicitly recoverable record.
+        activeSubmissionAgents.insert(agentID)
+        defer { activeSubmissionAgents.remove(agentID) }
         if snapshot.state == .confirmed {
             try removeSubmissionSnapshot(for: agentID)
             clearVisibleDraft(for: agentID, clearThrough: max(stamp, snapshot.draft.updatedAt))

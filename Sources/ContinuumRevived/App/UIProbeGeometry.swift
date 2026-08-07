@@ -7851,7 +7851,51 @@ enum UIProbeGeometry {
         let pasteboardAssertions = try await checkComposerImagePasteboardDecoder()
         let thumbnailAssertions = try await checkComposerImageThumbnailPipeline()
         let railAssertions = try await checkComposerImageAttachmentRail()
-        print("UIProbeGeometry: composer image components gated \(pasteboardAssertions) paste/drop decoding assertions, \(thumbnailAssertions) thumbnail-cache assertions, and \(railAssertions) rail geometry/accessibility/keyboard assertions")
+        let rebindAssertions = try await checkComposerRebindIsolation()
+        print("UIProbeGeometry: composer image components gated \(pasteboardAssertions) paste/drop decoding assertions, \(thumbnailAssertions) thumbnail-cache assertions, \(railAssertions) rail geometry/accessibility/keyboard assertions, and \(rebindAssertions) delayed cross-agent rebind assertions")
+    }
+
+    /// Delays an old agent's attachment-resolution await while the real AppKit
+    /// composer is rebound to another agent. The stale task must not apply the
+    /// old text or attachment rail after the new binding is installed.
+    private static func checkComposerRebindIsolation() async throws -> Int {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ComposerRebindIsolation-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let agentA = AgentID(rawValue: UUID(uuidString: "C0000000-0000-4000-8000-0000000000A1")!)
+        let agentB = AgentID(rawValue: UUID(uuidString: "C0000000-0000-4000-8000-0000000000B1")!)
+        let store = AgentComposerDraftStore(
+            applicationSupportDirectory: root,
+            debounceInterval: 60,
+            submissionRecoveryDelayNanoseconds: 100_000_000
+        )
+        let draftA = ContinuumRevivedCore.AgentComposerDraft(
+            text: "agent A private draft", selection: 0..<21, updatedAt: Date()
+        )
+        let draftB = ContinuumRevivedCore.AgentComposerDraft(
+            text: "agent B draft", selection: 0..<13, updatedAt: Date().addingTimeInterval(1)
+        )
+        await store.save(draftA, for: agentA)
+        await store.flushAll()
+        _ = try await store.beginSubmission(for: agentA, submittedAt: Date())
+        await store.save(draftB, for: agentB)
+        await store.flushAll()
+
+        // The injected bounded recovery delay makes the old restore task
+        // deterministically cross the rebind boundary rather than relying on
+        // scheduler luck.
+        let composer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 420, height: 120))
+        composer.bindDraftStore(store, agentID: agentA)
+        composer.restorePromptSubmission()
+        try await Task.sleep(nanoseconds: 10_000_000)
+        composer.bindDraftStore(store, agentID: agentB)
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        guard composer.draft.text == draftB.text,
+              !composer.draft.text.contains("agent A private") else {
+            throw fail("delayed cross-agent composer rebind applied the stale agent A draft: \(composer.draft.text)")
+        }
+        return 2
     }
 
     private static func checkComposerImagePasteboardDecoder() async throws -> Int {
