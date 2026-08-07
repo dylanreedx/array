@@ -706,8 +706,12 @@ final class ManagedAgentTileNSView: TileNSView {
 
     func ingest(_ event: AgentRuntimeEvent) {
         switch event {
-        case .turnStarted:
-            v2Composer?.confirmPromptSubmissionStarted()
+        case let .turnCompleted(_, _, outcome, _):
+            if outcome == .completed {
+                v2Composer?.confirmPromptSubmissionCompleted()
+            } else {
+                v2Composer?.restorePromptSubmission()
+            }
         case .runtimeError, .sessionStateChanged(.stopped), .sessionStateChanged(.error):
             v2Composer?.restorePromptSubmission()
         default:

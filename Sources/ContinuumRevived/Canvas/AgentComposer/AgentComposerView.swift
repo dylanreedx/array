@@ -666,9 +666,10 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         ))
     }
 
-    /// Called by the tile only after a real provider turn-start event. Queue
-    /// acceptance alone does not consume the recovery journal.
-    func confirmPromptSubmissionStarted() {
+    /// Called by the tile only after an authoritative successful turn
+    /// completion. Queue acceptance and `.turnStarted` deliberately leave the
+    /// recovery journal intact so a later provider/runtime error can restore it.
+    func confirmPromptSubmissionCompleted() {
         guard let draftStore, let agentID = draftAgentID, pendingSubmittedDraft != nil else { return }
         pendingSubmittedDraft = nil
         Task { @MainActor [weak self] in

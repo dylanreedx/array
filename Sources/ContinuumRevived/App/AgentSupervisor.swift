@@ -892,11 +892,24 @@ final class AgentSupervisor {
     private var activeNameGenerations = 0
     private var nameGenerationTasks: [AgentID: Task<Void, Never>] = [:]
     private var nameGenerationRequestIDs: [AgentID: UUID] = [:]
+    /// Recovery operations are serialized per agent. Completion and teardown
+    /// events can arrive back-to-back; ordering them prevents a late restore from
+    /// racing a successful confirmation and makes replay/rebind idempotent.
+    private var submissionRecoveryTasks: [AgentID: Task<Void, Never>] = [:]
 
     /// Provider facts used by the v2 tile. Deliberately separate from `runners`:
     /// a provider process may remain alive while its turn is ready, and that must
     /// never paint Working. `runners` is consulted only when deciding whether the
     /// current send/stop transport can accept an action.
+    /// A prompt reaches the runner only after the attachment store has validated
+    /// every reference for this exact agent. The unchecked AgentPrompt remains a
+    /// public model for transcripts/providers, but it is never the internal send
+    /// capability for an image-bearing transport.
+    private struct PreparedAgentPrompt {
+        let prompt: AgentPrompt
+        let expectedAgentID: AgentID
+    }
+
     private struct TurnFacts {
         var execution: AgentTurnExecutionState = .ready
         var failureMessage: String?
@@ -1595,8 +1608,29 @@ final class AgentSupervisor {
     /// Runs `prompt` on the agent's own runner, off the main thread (`run` blocks).
     /// Events hop back via `DispatchQueue.main.async` — FIFO, which is what keeps
     /// the fan-out ordered; a `Task { @MainActor }` per event would not be.
+    /// Public compatibility seam for text-only callers. Image-bearing prompts
+    /// must use `accept(.sendPrompt:)`, which creates a prepared capability after
+    /// all-or-nothing ownership/path validation. Rejecting here closes the direct
+    /// `send(AgentPrompt,to:)` bypass instead of trusting caller-supplied URLs.
     @discardableResult
     func send(_ prompt: AgentPrompt, to id: AgentID) -> Bool {
+        guard prompt.imageAttachments.isEmpty else {
+            warn("AgentSupervisor.send: unmanaged image attachment transport refused")
+            return false
+        }
+        return sendPrepared(
+            PreparedAgentPrompt(prompt: prompt, expectedAgentID: id),
+            to: id
+        )
+    }
+
+    @discardableResult
+    private func sendPrepared(_ prepared: PreparedAgentPrompt, to id: AgentID) -> Bool {
+        guard prepared.expectedAgentID == id else {
+            warn("AgentSupervisor.send: prepared prompt agent mismatch")
+            return false
+        }
+        let prompt = prepared.prompt
         guard var record = records[id] else {
             warn("AgentSupervisor.send: no agent \(id.rawValue.uuidString)")
             return false
@@ -2766,7 +2800,10 @@ final class AgentSupervisor {
             let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !prompt.isEmpty else { return .refused(.emptyDraft) }
             guard snapshot.capabilities.canSend else { return .refused(.turnNotReady) }
-            guard send(AgentPrompt(prompt), to: agentID) else { return .refused(.invalidAttachment) }
+            guard sendPrepared(
+                PreparedAgentPrompt(prompt: AgentPrompt(prompt), expectedAgentID: agentID),
+                to: agentID
+            ) else { return .refused(.invalidAttachment) }
             return .accepted
         case .sendPrompt(let draft):
             var prompt = draft
@@ -2778,7 +2815,13 @@ final class AgentSupervisor {
                     for: agentID,
                     draftAttachments: prompt.imageAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) }
                 )
-                guard send(AgentPrompt(text: prompt.text, imageAttachments: prepared), to: agentID) else {
+                guard sendPrepared(
+                    PreparedAgentPrompt(
+                        prompt: AgentPrompt(text: prompt.text, imageAttachments: prepared),
+                        expectedAgentID: agentID
+                    ),
+                    to: agentID
+                ) else {
                     return .refused(.invalidAttachment)
                 }
             } catch {
@@ -3159,18 +3202,51 @@ final class AgentSupervisor {
         if subscribers[id]?.isEmpty == true { subscribers.removeValue(forKey: id) }
     }
 
+    private enum SubmissionRecoveryAction {
+        case confirmSuccess(Date)
+        case restore
+    }
+
+    /// Serialize recovery against the event order. The journal is deliberately
+    /// not consumed at `.turnStarted`: only a completed turn is authoritative.
+    /// Replayed completion/error events are harmless because the draft store's
+    /// remove/restore operations are idempotent once the journal is gone.
+    private func enqueueSubmissionRecovery(_ action: SubmissionRecoveryAction, for id: AgentID) {
+        guard submissionRecoveryStore != nil else { return }
+        let previous = submissionRecoveryTasks[id]
+        let task = Task { @MainActor [weak self] in
+            if let previous { await previous.value }
+            guard let self, let store = self.submissionRecoveryStore else { return }
+            do {
+                switch action {
+                case let .confirmSuccess(sentAt):
+                    do {
+                        _ = try await store.confirmSubmissionStarted(for: id, sentAt: sentAt)
+                    } catch {
+                        // A successful provider turn cannot silently discard a
+                        // draft when local acceptance persistence failed.
+                        _ = try? await store.restoreSubmission(for: id)
+                    }
+                case .restore:
+                    _ = try await store.restoreSubmission(for: id)
+                }
+            } catch {
+                self.warn("AgentSupervisor: composer recovery remained pending for agent \(id.rawValue.uuidString)")
+            }
+        }
+        submissionRecoveryTasks[id] = task
+    }
+
     private func deliver(_ event: AgentRuntimeEvent, to id: AgentID, now: Date = Date()) {
         switch event {
-        case .turnStarted:
-            Task {
-                do {
-                    _ = try await submissionRecoveryStore?.confirmSubmissionStarted(for: id, sentAt: now)
-                } catch {
-                    _ = try? await submissionRecoveryStore?.restoreSubmission(for: id)
-                }
+        case let .turnCompleted(_, _, outcome, _):
+            if outcome == .completed {
+                enqueueSubmissionRecovery(.confirmSuccess(now), for: id)
+            } else {
+                enqueueSubmissionRecovery(.restore, for: id)
             }
         case .runtimeError, .sessionStateChanged(.stopped), .sessionStateChanged(.error):
-            Task { _ = try? await submissionRecoveryStore?.restoreSubmission(for: id) }
+            enqueueSubmissionRecovery(.restore, for: id)
         default:
             break
         }
@@ -4113,6 +4189,139 @@ private func runCompletionComposerChecks() async throws -> Int {
     return 25
 }
 
+/// Gated on `--image-supervisor-check`. This is intentionally separate from the
+/// historical naming corpus: image transport ownership and recovery must remain
+/// executable evidence even when that older model-id expectation fails.
+@MainActor
+func runImageSupervisorProductionSeamChecks() async throws {
+    struct CheckError: Error, CustomStringConvertible {
+        let description: String
+    }
+    func fail(_ message: String) -> CheckError { CheckError(description: message) }
+
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-image-supervisor-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let config = AgentModelConfig.resolvedFromDefaults()
+    let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+    let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("agents", isDirectory: true))
+    let attachmentStore = AgentComposerAttachmentStore(
+        applicationSupportDirectory: root.appendingPathComponent("attachments", isDirectory: true))
+    let draftStore = AgentComposerDraftStore(
+        applicationSupportDirectory: root.appendingPathComponent("drafts", isDirectory: true),
+        debounceInterval: 60,
+        attachmentStore: attachmentStore)
+    let runner = ScriptedAgentRunner(
+        script: [
+            .turnStarted(threadId: "image-check", turnId: "image-check#1")
+        ],
+        holdUntilStopped: true)
+    let supervisor = AgentSupervisor(
+        store: store,
+        makeRunner: { _ in runner },
+        attachmentStore: attachmentStore,
+        submissionRecoveryStore: draftStore)
+    let agent = supervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, model: config.model, thinking: config.thinking)
+    let validation = try AgentComposerImageValidation(
+        validatedContentType: "image/png", pixelWidth: 80, pixelHeight: 60, byteCount: 3)
+    let managed = try await attachmentStore.importValidatedPastedImage(
+        Data([1, 2, 3]), displayName: "managed.png", validation: validation, forDraftOf: agent)
+
+    // RED witness for the unchecked transport seam: a caller-provided /tmp URL
+    // has no managed ownership and must never reach the runner.
+    let unmanaged = AgentPrompt(imageAttachments: [
+        AgentPromptImageAttachment(metadata: managed.manifest.metadata,
+                                   fileURL: URL(fileURLWithPath: "/tmp/unmanaged.png"))
+    ])
+    guard !supervisor.send(unmanaged, to: agent), runner.agentPrompts.isEmpty else {
+        throw fail("unmanaged direct AgentPrompt send reached the runner")
+    }
+
+    let draft = ContinuumRevivedCore.AgentComposerDraft(
+        text: "  inspect visible details @/tmp/not-a-capability.png  ",
+        selection: 0..<0,
+        updatedAt: Date(timeIntervalSinceReferenceDate: 807_803_000),
+        imageAttachments: [managed.draftAttachment])
+    await draftStore.save(draft, for: agent)
+    await draftStore.flushAll()
+    guard try await draftStore.beginSubmission(for: agent) else {
+        throw fail("image supervisor recovery fixture did not journal the draft")
+    }
+    guard await supervisor.accept(
+        .sendPrompt(AgentPrompt(text: draft.text, imageAttachments: [managed.promptAttachment])),
+        for: agent) == .accepted else {
+        throw fail("managed image prompt was refused at the supervisor production seam")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        runner.agentPrompts.count == 1
+            && supervisor.turnSnapshot(for: agent)?.state == .working
+    }) else {
+        throw fail("managed image prompt did not reach the runner")
+    }
+    guard runner.agentPrompts[0].imageAttachments.map(\.fileURL.path) == [managed.fileURL.path] else {
+        throw fail("managed image prompt did not preserve its Application Support capability")
+    }
+    guard await draftStore.hasSubmissionRecovery(for: agent) else {
+        throw fail("turnStarted consumed composer recovery before authoritative completion")
+    }
+    supervisor.stop(agent)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        !supervisor.isRunning(agent)
+    }) else {
+        throw fail("runtime/provider stop after turnStarted did not finish")
+    }
+    for _ in 0..<100 {
+        if !(await draftStore.hasSubmissionRecovery(for: agent)) { break }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+    let restoredDraft = await draftStore.load(for: agent)
+    guard restoredDraft == draft else {
+        throw fail("runtime/provider stop after turnStarted did not restore the exact draft")
+    }
+
+    // A successful turn is the only acceptance point that may consume recovery.
+    let successRunner = ScriptedAgentRunner(script: [
+        .turnStarted(threadId: "image-success", turnId: "image-success#1"),
+        .turnCompleted(threadId: "image-success", turnId: "image-success#1", outcome: .completed, errorMessage: nil)
+    ])
+    let successSupervisor = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("success-agents", isDirectory: true)),
+        makeRunner: { _ in successRunner },
+        attachmentStore: attachmentStore,
+        submissionRecoveryStore: draftStore)
+    let successAgent = successSupervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, model: config.model, thinking: config.thinking)
+    let successImage = try await attachmentStore.importValidatedPastedImage(
+        Data([4, 5, 6]), displayName: "success.png", validation: validation, forDraftOf: successAgent)
+    let successDraft = ContinuumRevivedCore.AgentComposerDraft(
+        text: "successful image acceptance",
+        selection: 0..<0,
+        updatedAt: Date(timeIntervalSinceReferenceDate: 807_803_001),
+        imageAttachments: [successImage.draftAttachment])
+    await draftStore.save(successDraft, for: successAgent)
+    await draftStore.flushAll()
+    guard try await draftStore.beginSubmission(for: successAgent),
+          await successSupervisor.accept(
+              .sendPrompt(AgentPrompt(imageAttachments: [successImage.promptAttachment])),
+              for: successAgent) == .accepted else {
+        throw fail("successful image recovery fixture was not accepted")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        successRunner.agentPrompts.count == 1 && !successSupervisor.isRunning(successAgent)
+    }) else {
+        throw fail("successful image turn did not complete")
+    }
+    for _ in 0..<100 {
+        if !(await draftStore.hasSubmissionRecovery(for: successAgent)) { break }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+    guard !(await draftStore.hasSubmissionRecovery(for: successAgent)),
+          await draftStore.load(for: successAgent) == nil else {
+        throw fail("successful turn did not authoritatively consume recovery")
+    }
+}
+
 /// Gated on `--agent-supervisor-check`.
 ///
 /// Deterministic and offline: a `ScriptedAgentRunner` replaces Pi, so what is under
@@ -4174,7 +4383,8 @@ func runAgentSupervisorChecks() async throws {
     // Image Wave 2A · Lane D — AgentPrompt reaches the real supervisor/runner
     // transport seam. This intentionally does not touch the composer UI: a
     // serialized coordinator that already owns attachments must call
-    // AgentSupervisor.accept(.sendPrompt(prompt), for:) or send(prompt, to:).
+    // AgentSupervisor.accept(.sendPrompt(prompt), for:); unchecked direct send
+    // rejects image-bearing prompts.
     let imageTransportStore = AgentStore(
         applicationSupportDirectory: root.appendingPathComponent("image-transport", isDirectory: true))
     let imageRunner = ScriptedAgentRunner(
@@ -4296,10 +4506,11 @@ func runAgentSupervisorChecks() async throws {
         model: config.model,
         thinking: config.thinking,
         projectId: nil)
+    let mixedImage = try await managedImageAttachment(
+        mixedAttachmentStore, displayName: "mixed visible image.png", for: mixedAgent)
     let mixedPrompt = AgentPrompt(
         text: "  Compare visible screen details Inspect(/Users/dylan/Private/name-leak.png) '@/tmp/quoted-name-leak.png' @/tmp/name-leak.png  ",
-        imageAttachments: [try await managedImageAttachment(
-            mixedAttachmentStore, displayName: "mixed visible image.png", for: mixedAgent)])
+        imageAttachments: [mixedImage])
     guard await mixedSupervisor.accept(.sendPrompt(mixedPrompt), for: mixedAgent) == .accepted else {
         throw fail("image transport: text plus image AgentPrompt was refused at the supervisor accept seam")
     }
@@ -4307,7 +4518,7 @@ func runAgentSupervisorChecks() async throws {
         throw fail("image transport: mixed AgentPrompt did not reach the runner")
     }
     guard mixedRunner.agentPrompts[0].text == "Compare visible screen details Inspect(/Users/dylan/Private/name-leak.png) '@/tmp/quoted-name-leak.png' @/tmp/name-leak.png",
-          mixedRunner.agentPrompts[0].imageAttachments.map(\.fileURL.path) == ["/tmp/mixed hidden.png"] else {
+          mixedRunner.agentPrompts[0].imageAttachments.map(\.fileURL.path) == [mixedImage.fileURL.path] else {
         throw fail("image transport: mixed prompt text/attachments were not preserved at the runner: \(mixedRunner.agentPrompts)")
     }
     let mixedName = mixedSupervisor.records[mixedAgent]?.displayName ?? ""

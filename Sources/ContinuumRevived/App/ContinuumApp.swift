@@ -1055,6 +1055,21 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--image-supervisor-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runImageSupervisorProductionSeamChecks()
+                    print("ContinuumRevivedImageSupervisorChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--agent-supervisor-check") {
             _ = NSApplication.shared
             Task { @MainActor in

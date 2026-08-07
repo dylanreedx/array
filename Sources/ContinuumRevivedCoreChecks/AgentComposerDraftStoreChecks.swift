@@ -85,6 +85,45 @@ func runAgentComposerDraftStoreChecks() async throws {
     )
     let draftB = AgentComposerDraft(text: "beta\nsecond line", selection: 2..<9, updatedAt: base.addingTimeInterval(1))
     let warnings = DraftWarningBox()
+
+    // Storage diagnostics are an opaque boundary: AtomicWriter's associated
+    // URL, a corrupt manifest, and a corrupt submission-recovery record must not
+    // reach warnings/UI with the Application Support path attached.
+    let diagnosticRoot = root.appendingPathComponent("diagnostic-path-leak", isDirectory: true)
+    let atomicDiagnostic = String(describing: AtomicWriterError.noValidBackup(path: diagnosticRoot.path))
+    expect(atomicDiagnostic == "no valid backup" && !atomicDiagnostic.contains(diagnosticRoot.path),
+           "AtomicWriter noValidBackup diagnostics must be bounded and path-free")
+    let diagnosticAttachmentStore = AgentComposerAttachmentStore(applicationSupportDirectory: diagnosticRoot)
+    let diagnosticAttachmentLayout = AgentComposerAttachmentStoreLayout(applicationSupportDirectory: diagnosticRoot)
+    let diagnosticAttachmentID = draftImageMetadata(99).id
+    try FileManager.default.createDirectory(
+        at: diagnosticAttachmentLayout.manifestsDirectory,
+        withIntermediateDirectories: true)
+    let corruptManifestURL = diagnosticAttachmentLayout.manifestFile(for: diagnosticAttachmentID)
+    try Data("not-json".utf8).write(to: corruptManifestURL)
+    do {
+        _ = try await diagnosticAttachmentStore.manifest(for: diagnosticAttachmentID)
+        expect(false, "corrupt manifest read must fail")
+    } catch {
+        let rendered = String(describing: error)
+        expect(!rendered.contains(diagnosticRoot.path) && !rendered.contains("/"),
+               "manifest read diagnostics must be bounded and path-free: \(rendered)")
+    }
+    let diagnosticDraftLayout = AgentComposerDraftStoreLayout(applicationSupportDirectory: diagnosticRoot)
+    try FileManager.default.createDirectory(
+        at: diagnosticDraftLayout.submissionRecoveryDirectory,
+        withIntermediateDirectories: true)
+    try Data("not-json".utf8).write(to: diagnosticDraftLayout.submissionRecoveryFile(for: agentA))
+    let diagnosticDraftStore = AgentComposerDraftStore(applicationSupportDirectory: diagnosticRoot)
+    do {
+        _ = try await diagnosticDraftStore.restoreSubmission(for: agentA)
+        expect(false, "corrupt submission recovery read must fail")
+    } catch {
+        let rendered = String(describing: error)
+        expect(!rendered.contains(diagnosticRoot.path) && !rendered.contains("/"),
+               "submission recovery diagnostics must be bounded and path-free: \(rendered)")
+    }
+
     let store = AgentComposerDraftStore(
         applicationSupportDirectory: root,
         debounceInterval: 60,

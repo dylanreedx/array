@@ -92,6 +92,19 @@ public enum AgentComposerSubmissionState: String, Codable, Sendable {
     case confirmed
 }
 
+public enum AgentComposerDraftStoreError: Error, Equatable, CustomStringConvertible {
+    case storageReadFailed(String)
+
+    /// Recovery diagnostics are deliberately bounded and path-free. The detail
+    /// is retained only as an opaque local category, never as a filesystem URL.
+    public var description: String {
+        switch self {
+        case .storageReadFailed:
+            return "composer recovery storage read failed"
+        }
+    }
+}
+
 public struct AgentComposerSubmissionSnapshot: Codable, Equatable, Sendable {
     public var draft: AgentComposerDraft
     public var submittedAt: Date
@@ -395,7 +408,13 @@ public actor AgentComposerDraftStore {
     private func loadSubmissionSnapshot(for agentID: AgentID) throws -> AgentComposerSubmissionSnapshot? {
         let file = layout.submissionRecoveryFile(for: agentID)
         guard FileManager.default.fileExists(atPath: file.path) else { return nil }
-        return try writer.read(at: file)
+        do {
+            return try writer.read(at: file)
+        } catch {
+            // AtomicWriter's noValidBackup(path:) and decoder context are local
+            // storage details; recovery callers receive only this opaque category.
+            throw AgentComposerDraftStoreError.storageReadFailed("submission recovery unavailable")
+        }
     }
 
     private func attachmentsAreAlreadySent(

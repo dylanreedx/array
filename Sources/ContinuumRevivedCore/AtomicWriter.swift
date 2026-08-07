@@ -1,8 +1,17 @@
 import Darwin
 import Foundation
 
-public enum AtomicWriterError: Error, Equatable {
+public enum AtomicWriterError: Error, Equatable, CustomStringConvertible {
     case noValidBackup(path: String)
+
+    /// The associated path is retained for local recovery code only. Never let
+    /// the filesystem location cross a warning/UI/diagnostic boundary.
+    public var description: String {
+        switch self {
+        case .noValidBackup:
+            return "no valid backup"
+        }
+    }
 }
 
 public struct AtomicWriterDescriptorOperations: Sendable {

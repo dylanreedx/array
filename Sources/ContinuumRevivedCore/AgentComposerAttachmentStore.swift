@@ -3,7 +3,7 @@ import CryptoKit
 import Darwin
 import Foundation
 
-public enum AgentComposerAttachmentStoreError: Error, Equatable {
+public enum AgentComposerAttachmentStoreError: Error, Equatable, CustomStringConvertible {
     // Associated strings are bounded identifiers/reasons only; never absolute
     // URLs or filesystem paths cross this UI-facing error boundary.
     case nonFileURL(String)
@@ -20,6 +20,29 @@ public enum AgentComposerAttachmentStoreError: Error, Equatable {
     case transferRecoveryFailed(journalPath: String, failures: [String])
     case imageInputNotValidated(String)
     case atomicWriteFailed(String)
+    case storageReadFailed(String)
+
+    /// Keep diagnostics bounded and opaque even when a future caller constructs
+    /// one of the associated-string cases with an accidental local path.
+    public var description: String {
+        switch self {
+        case .nonFileURL: return "attachment source is not a local file"
+        case .unreadableSource: return "attachment source is unavailable"
+        case .unsafeRelativePath: return "managed attachment path is invalid"
+        case .ownershipMismatch: return "managed attachment ownership mismatch"
+        case .manifestIdentityMismatch: return "managed attachment manifest identity mismatch"
+        case .draftMetadataMismatch: return "managed attachment metadata mismatch"
+        case .missingAttachment: return "managed attachment is missing"
+        case .unreadableManagedFile: return "managed attachment file is unavailable"
+        case .cleanupDeletionFailed: return "managed attachment cleanup failed"
+        case .importRollbackFailed: return "managed attachment import rollback failed"
+        case .transferRollbackFailed: return "managed attachment transfer rollback failed"
+        case .transferRecoveryFailed: return "managed attachment recovery failed"
+        case .imageInputNotValidated: return "attachment image validation failed"
+        case .atomicWriteFailed: return "managed attachment write failed"
+        case .storageReadFailed: return "managed attachment storage read failed"
+        }
+    }
 }
 
 /// Platform-neutral proof supplied by the AppKit/import boundary after it has
@@ -467,7 +490,16 @@ public actor AgentComposerAttachmentStore {
             options: [.skipsHiddenFiles]
         ).filter { $0.pathExtension == "json" }
         for journalURL in journalURLs {
-            let journal: AgentComposerOwnershipTransferJournal = try reader.read(at: journalURL)
+            let journal: AgentComposerOwnershipTransferJournal
+            do {
+                journal = try reader.read(at: journalURL)
+            } catch {
+                // AtomicWriter's local URL is an implementation detail. Replace
+                // every journal read failure before it can reach a caller/UI.
+                throw AgentComposerAttachmentStoreError.storageReadFailed(
+                    "ownership recovery journal unavailable"
+                )
+            }
             let manifests = journal.state == .pending ? journal.originals : journal.sent
             var failures: [String] = []
             for manifest in manifests {
@@ -669,7 +701,14 @@ public actor AgentComposerAttachmentStore {
     private func loadManifest(for id: AgentImageAttachmentID) throws -> AgentComposerAttachmentManifest? {
         let manifestFile = layout.manifestFile(for: id)
         guard FileManager.default.fileExists(atPath: manifestFile.path) else { return nil }
-        let manifest: AgentComposerAttachmentManifest = try reader.read(at: manifestFile)
+        let manifest: AgentComposerAttachmentManifest
+        do {
+            manifest = try reader.read(at: manifestFile)
+        } catch {
+            // Do not propagate AtomicWriterError.noValidBackup(path:) or a
+            // decoder's file context beyond this storage boundary.
+            throw AgentComposerAttachmentStoreError.storageReadFailed("attachment manifest unavailable")
+        }
         guard manifest.id == id else {
             throw AgentComposerAttachmentStoreError.manifestIdentityMismatch(expected: id, actual: manifest.id)
         }
