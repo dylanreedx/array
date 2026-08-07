@@ -204,7 +204,7 @@ func runAgentComposerDraftStoreChecks() async throws {
            "the negative witness must fail at the named production ordering assertion")
     print("AgentComposerDraftStore negative witness observed red (exit \(witness.terminationStatus)): \(expectedWitness)")
 
-    print("AgentComposerDraftStore checks passed: backward draft decoding, exact per-agent attachment restores, out-of-order rejection with subprocess red witness, debounced AtomicWriter persistence, rejected/accepted send boundaries, local attachment import/resolve/path safety/lifecycle cleanup, no prompt backups, private permissions, and safe corruption isolation")
+    print("AgentComposerDraftStore checks passed: backward draft decoding, exact per-agent attachment restores, out-of-order rejection with subprocess red witness, debounced AtomicWriter persistence, explicit submission recovery/confirmed-start lifecycle, all-or-nothing attachment batch preparation, caller-validated image imports, symlink/cross-agent/manifest/missing-item rejection, manifest-write rollback, honest cleanup failure reporting, no prompt backups, private permissions, and safe corruption isolation")
 }
 
 private func runAgentComposerAttachmentStoreChecks(
@@ -220,13 +220,24 @@ private func runAgentComposerAttachmentStoreChecks(
         warn: { warnings.append($0) }
     )
     let attachmentLayout = await attachmentStore.layout
+    let pngValidation = try AgentComposerImageValidation(
+        validatedContentType: "image/png",
+        pixelWidth: 2,
+        pixelHeight: 2
+    )
+    let jpegValidation = try AgentComposerImageValidation(validatedContentType: "image/jpeg")
 
-    let pasted = try await attachmentStore.importPastedBytes(
+    do {
+        _ = try AgentComposerImageValidation(validatedContentType: "text/plain")
+        expect(false, "Core import must require caller image validation before storage")
+    } catch AgentComposerAttachmentStoreError.imageInputNotValidated {
+        // Expected: Core is platform-neutral but the import caller must prove image-ness.
+    }
+
+    let pasted = try await attachmentStore.importValidatedPastedImage(
         Data([0x89, 0x50, 0x4E, 0x47]),
         displayName: "../pasted.png",
-        contentType: "image/png",
-        pixelWidth: 2,
-        pixelHeight: 2,
+        validation: pngValidation,
         forDraftOf: agentA
     )
     expect(pasted.manifest.metadata.displayName == "pasted.png",
@@ -246,11 +257,46 @@ private func runAgentComposerAttachmentStoreChecks(
     let source = root.appendingPathComponent("incoming/local-source.jpg")
     try FileManager.default.createDirectory(at: source.deletingLastPathComponent(), withIntermediateDirectories: true)
     try Data([0xFF, 0xD8, 0xFF]).write(to: source)
-    let localFile = try await attachmentStore.importLocalImageFile(source, forDraftOf: agentA)
+    let localFile = try await attachmentStore.importValidatedLocalImageFile(source, validation: jpegValidation, forDraftOf: agentA)
     expect(localFile.manifest.metadata.displayName == "local-source.jpg" && localFile.manifest.metadata.contentType == "image/jpeg",
            "local file import must copy bytes while retaining only path-free filename/type metadata")
     expect(localFile.fileURL != source && FileManager.default.fileExists(atPath: localFile.fileURL.path),
            "local file import must copy into managed storage rather than retaining the original absolute path")
+
+    let prepared = try await attachmentStore.preparePromptAttachments(
+        for: agentA,
+        draftAttachments: [pasted.draftAttachment, localFile.draftAttachment]
+    )
+    expect(prepared.map(\.metadata.id) == [pasted.manifest.id, localFile.manifest.id],
+           "batch preparation must preserve complete draft attachment count and order")
+    do {
+        _ = try await attachmentStore.preparePromptAttachments(for: agentB, draftAttachments: [pasted.draftAttachment])
+        expect(false, "cross-agent batch preparation must not resolve another agent's attachment")
+    } catch AgentComposerAttachmentStoreError.ownershipMismatch(let id, let expected, let actual) {
+        expect(id == pasted.manifest.id && expected == agentB && actual == agentA,
+               "cross-agent ownership mismatch must identify expected/actual ownership without preparing a partial batch")
+    }
+    do {
+        var tamperedDraft = pasted.draftAttachment
+        tamperedDraft.metadata.displayName = "tampered.png"
+        _ = try await attachmentStore.preparePromptAttachments(for: agentA, draftAttachments: [tamperedDraft])
+        expect(false, "draft/manifest metadata mismatch must fail all-or-nothing preparation")
+    } catch AgentComposerAttachmentStoreError.draftMetadataMismatch(let id) {
+        expect(id == pasted.manifest.id, "metadata mismatch should identify the tampered attachment id")
+    }
+    let missingDraft = AgentComposerDraftImageAttachment(
+        metadata: AgentImageAttachmentMetadata(
+            id: AgentImageAttachmentID(rawValue: "draft-missing-batch-item")!,
+            displayName: "missing.png",
+            contentType: "image/png"
+        )
+    )
+    do {
+        _ = try await attachmentStore.preparePromptAttachments(for: agentA, draftAttachments: [pasted.draftAttachment, missingDraft])
+        expect(false, "a missing item must fail batch preparation without returning a partial send")
+    } catch AgentComposerAttachmentStoreError.missingAttachment(let id) {
+        expect(id == missingDraft.attachmentID, "missing batch item should identify the absent attachment")
+    }
 
     let badID = AgentImageAttachmentID(rawValue: "draft-bad-relative-path")!
     let badManifest = AgentComposerAttachmentManifest(
@@ -270,12 +316,57 @@ private func runAgentComposerAttachmentStoreChecks(
         // Expected path safety oracle.
     }
 
+    let mismatchKeyID = AgentImageAttachmentID(rawValue: "draft-manifest-key-mismatch-key")!
+    let mismatchActualID = AgentImageAttachmentID(rawValue: "draft-manifest-key-mismatch-actual")!
+    let mismatchManifest = AgentComposerAttachmentManifest(
+        id: mismatchActualID,
+        metadata: AgentImageAttachmentMetadata(id: mismatchActualID, displayName: "mismatch.png"),
+        relativePath: pasted.manifest.relativePath,
+        ownership: .draft(agentID: agentA, at: clock.now()),
+        createdAt: clock.now(),
+        updatedAt: clock.now()
+    )
+    try JSONCodec.makeEncoder(prettyPrinted: true).encode(mismatchManifest).write(to: attachmentLayout.manifestFile(for: mismatchKeyID))
+    do {
+        _ = try await attachmentStore.preparePromptAttachments(
+            for: agentA,
+            draftAttachments: [AgentComposerDraftImageAttachment(metadata: AgentImageAttachmentMetadata(id: mismatchKeyID, displayName: "mismatch.png"))]
+        )
+        expect(false, "manifest key/id mismatch must fail before prompt preparation")
+    } catch AgentComposerAttachmentStoreError.manifestIdentityMismatch(let expected, let actual) {
+        expect(expected == mismatchKeyID && actual == mismatchActualID,
+               "manifest identity mismatch should bind the storage key to decoded id")
+    }
+    try? FileManager.default.removeItem(at: attachmentLayout.manifestFile(for: mismatchKeyID))
+
+    let symlinkID = AgentImageAttachmentID(rawValue: "draft-symlink-escape")!
+    let outside = root.appendingPathComponent("outside-symlink-target.png")
+    try Data([9, 9, 9]).write(to: outside)
+    let symlinkURL = attachmentLayout.objectsDirectory.appendingPathComponent("escape-link.bin")
+    try? FileManager.default.removeItem(at: symlinkURL)
+    try FileManager.default.createSymbolicLink(at: symlinkURL, withDestinationURL: outside)
+    let symlinkManifest = AgentComposerAttachmentManifest(
+        id: symlinkID,
+        metadata: AgentImageAttachmentMetadata(id: symlinkID, displayName: "escape.png", contentType: "image/png"),
+        relativePath: "objects/escape-link.bin",
+        ownership: .draft(agentID: agentA, at: clock.now()),
+        createdAt: clock.now(),
+        updatedAt: clock.now()
+    )
+    try JSONCodec.makeEncoder(prettyPrinted: true).encode(symlinkManifest).write(to: attachmentLayout.manifestFile(for: symlinkID))
+    do {
+        _ = try await attachmentStore.preparePromptAttachments(for: agentA, draftAttachments: [symlinkManifest.draftAttachment])
+        expect(false, "symlink escape under the managed root must be rejected before transport")
+    } catch AgentComposerAttachmentStoreError.unsafeRelativePath {
+        // Expected canonical containment oracle.
+    }
+
     var manyDraftAttachments: [AgentComposerDraftImageAttachment] = []
     for index in 0..<64 {
-        let imported = try await attachmentStore.importPastedBytes(
+        let imported = try await attachmentStore.importValidatedPastedImage(
             Data(repeating: UInt8(index), count: index + 1),
             displayName: "many-\(index).png",
-            contentType: "image/png",
+            validation: pngValidation,
             forDraftOf: agentB
         )
         manyDraftAttachments.append(imported.draftAttachment)
@@ -319,28 +410,84 @@ private func runAgentComposerAttachmentStoreChecks(
     expect(rejectedDraft == lifecycleDraft && rejectedManifest?.ownership.state == .draft,
            "rejected sends must preserve both the draft attachment refs and draft-owned files")
 
-    await lifecycleStore.resolveSendIntent(for: agentA, accepted: true, sentAt: clock.now())
+    let beganPreStart = try await lifecycleStore.beginSubmission(for: agentA, submittedAt: clock.now())
+    let hiddenPreStart = await lifecycleStore.load(for: agentA)
+    expect(beganPreStart && hiddenPreStart == nil,
+           "beginSubmission must clear visible state only after retaining a durable recovery snapshot")
+    let restoredPreStart = try await lifecycleStore.restoreSubmission(for: agentA)
+    let visibleAfterRestore = await lifecycleStore.load(for: agentA)
+    expect(restoredPreStart == lifecycleDraft && visibleAfterRestore == lifecycleDraft,
+           "pre-start rejection must restore the exact draft and attachment refs from recovery")
+
+    let beganConfirmed = try await lifecycleStore.beginSubmission(for: agentA, submittedAt: clock.now())
+    let hiddenBeforeConfirm = await lifecycleStore.load(for: agentA)
+    expect(beganConfirmed && hiddenBeforeConfirm == nil,
+           "confirmed-start path must start from a hidden visible draft plus durable recovery")
+    let confirmed = try await lifecycleStore.confirmSubmissionStarted(for: agentA, sentAt: clock.now())
     let acceptedDraft = await lifecycleStore.load(for: agentA)
     let sentPasted = try await attachmentStore.storedAttachment(for: pasted.manifest.id)
     let sentLocal = try await attachmentStore.storedAttachment(for: localFile.manifest.id)
-    expect(acceptedDraft == nil,
-           "accepted sends must clear the composer draft")
+    expect(confirmed && acceptedDraft == nil,
+           "confirmed provider start must clear durable recovery without restoring visible draft")
     expect(sentPasted?.manifest.ownership.state == .sent && sentLocal?.manifest.ownership.state == .sent,
-           "accepted sends must transfer attachment ownership to sent instead of deleting originals")
+           "confirmed provider start must transfer attachment ownership to sent instead of deleting originals")
     expect(FileManager.default.fileExists(atPath: sentPasted!.fileURL.path) && FileManager.default.fileExists(atPath: sentLocal!.fileURL.path),
-           "accepted send transfer must not prematurely delete files that transcript metadata may reference")
+           "confirmed-start transfer must not prematurely delete files that transcript metadata may reference")
 
-    let orphan = try await attachmentStore.importPastedBytes(
-        Data([1, 2, 3]),
-        displayName: "orphan.png",
-        contentType: "image/png",
+    let manifestFaultRoot = root.appendingPathComponent("manifest-fault", isDirectory: true)
+    let manifestFaultStore = AgentComposerAttachmentStore(
+        applicationSupportDirectory: manifestFaultRoot,
+        clock: clock,
+        manifestWriter: { _, _ in throw CocoaError(.fileWriteUnknown) }
+    )
+    do {
+        _ = try await manifestFaultStore.importValidatedPastedImage(
+            Data([7, 7, 7]),
+            displayName: "fault.png",
+            validation: pngValidation,
+            forDraftOf: agentA
+        )
+        expect(false, "manifest persistence failure must fail the import")
+    } catch {
+        let faultObjects = manifestFaultRoot
+            .appendingPathComponent("agent-composer-attachments/objects", isDirectory: true)
+        let remainingObjects = (try? FileManager.default.contentsOfDirectory(at: faultObjects, includingPropertiesForKeys: nil)) ?? []
+        expect(remainingObjects.isEmpty,
+               "object bytes written before a manifest fault must be rolled back")
+    }
+
+    let cleanupFaultRoot = root.appendingPathComponent("cleanup-fault", isDirectory: true)
+    let cleanupFaultStore = AgentComposerAttachmentStore(
+        applicationSupportDirectory: cleanupFaultRoot,
+        clock: clock,
+        removeItem: { _ in throw CocoaError(.fileWriteNoPermission) }
+    )
+    let cleanupFaultItem = try await cleanupFaultStore.importValidatedPastedImage(
+        Data([8, 8, 8]),
+        displayName: "cleanup-fault.png",
+        validation: pngValidation,
         forDraftOf: agentA
     )
-    let immediateCleanup = try await attachmentStore.cleanupUnreferencedDraftAttachments(retaining: [], graceInterval: 3_600)
+    clock.advance(by: 7_200)
+    do {
+        _ = try await cleanupFaultStore.cleanupUnreferencedDraftAttachments(retaining: [], graceInterval: 3_600)
+        expect(false, "cleanup deletion failures must be reported instead of counted as removed")
+    } catch AgentComposerAttachmentStoreError.cleanupDeletionFailed(let failures) {
+        expect(failures.contains { $0.contains(cleanupFaultItem.manifest.id.rawValue) },
+               "cleanup failure report should name the attachment id that could not be deleted")
+    }
+
+    let orphan = try await attachmentStore.importValidatedPastedImage(
+        Data([1, 2, 3]),
+        displayName: "orphan.png",
+        validation: pngValidation,
+        forDraftOf: agentA
+    )
+    let retainedID = manyDraftAttachments[0].attachmentID
+    let immediateCleanup = try await attachmentStore.cleanupUnreferencedDraftAttachments(retaining: [retainedID], graceInterval: 3_600)
     expect(!immediateCleanup.contains(orphan.manifest.id),
            "cleanup must honor the injected-clock grace seam and not delete fresh draft files")
     clock.advance(by: 7_200)
-    let retainedID = manyDraftAttachments[0].attachmentID
     let cleanup = try await attachmentStore.cleanupUnreferencedDraftAttachments(retaining: [retainedID], graceInterval: 3_600)
     expect(cleanup.contains(orphan.manifest.id),
            "stale unreferenced draft-owned files may be cleaned only after the grace seam")

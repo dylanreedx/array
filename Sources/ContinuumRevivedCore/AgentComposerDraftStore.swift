@@ -72,8 +72,26 @@ public struct AgentComposerDraftStoreLayout: Sendable {
         draftsDirectory.appendingPathComponent("backups", isDirectory: true)
     }
 
+    public var submissionRecoveryDirectory: URL {
+        draftsDirectory.appendingPathComponent("submission-recovery", isDirectory: true)
+    }
+
     public func draftFile(for agentID: AgentID) -> URL {
         draftsDirectory.appendingPathComponent("\(agentID.rawValue.uuidString).json", isDirectory: false)
+    }
+
+    public func submissionRecoveryFile(for agentID: AgentID) -> URL {
+        submissionRecoveryDirectory.appendingPathComponent("\(agentID.rawValue.uuidString).json", isDirectory: false)
+    }
+}
+
+public struct AgentComposerSubmissionSnapshot: Codable, Equatable, Sendable {
+    public var draft: AgentComposerDraft
+    public var submittedAt: Date
+
+    public init(draft: AgentComposerDraft, submittedAt: Date) {
+        self.draft = draft
+        self.submittedAt = submittedAt
     }
 }
 
@@ -168,17 +186,7 @@ public actor AgentComposerDraftStore {
         scheduledWrites[agentID] = nil
         guard let draft = pending.removeValue(forKey: agentID) else { return }
         do {
-            try FileManager.default.createDirectory(
-                at: layout.draftsDirectory,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            try FileManager.default.setAttributes(
-                [.posixPermissions: 0o700],
-                ofItemAtPath: layout.draftsDirectory.path
-            )
-            try writer.write(draft, to: layout.draftFile(for: agentID))
-            try Self.restrictPermissions(at: layout.draftsDirectory, file: layout.draftFile(for: agentID))
+            try persistDraft(draft, for: agentID)
         } catch {
             // Keep the newest value available for a later explicit flush instead of
             // losing it merely because this disk write failed.
@@ -194,8 +202,68 @@ public actor AgentComposerDraftStore {
     }
 
     public func clear(for agentID: AgentID) {
-        let newestEdit = newestSeen[agentID] ?? .distantPast
-        clearedThrough[agentID] = max(clock.now(), newestEdit)
+        clearVisibleDraft(for: agentID, clearThrough: max(clock.now(), newestSeen[agentID] ?? .distantPast))
+    }
+
+    /// Explicit submission lifecycle, replacing the old "accepted means delete"
+    /// model for prompt-capable callers. This persists a recoverable snapshot
+    /// before clearing visible composer state, so a pre-start/provider refusal can
+    /// restore the exact draft instead of losing local attachment references.
+    @discardableResult
+    public func beginSubmission(for agentID: AgentID, draft explicitDraft: AgentComposerDraft? = nil, submittedAt: Date? = nil) throws -> Bool {
+        guard let draft = explicitDraft ?? pending[agentID] ?? load(for: agentID) else { return false }
+        let stamp = submittedAt ?? clock.now()
+        try persistSubmissionSnapshot(AgentComposerSubmissionSnapshot(draft: draft, submittedAt: stamp), for: agentID)
+        clearVisibleDraft(for: agentID, clearThrough: max(stamp, draft.updatedAt))
+        return true
+    }
+
+    /// Restores the durable recoverable snapshot after a pre-start/provider
+    /// rejection. The snapshot is removed only after the visible draft has been
+    /// durably restored.
+    @discardableResult
+    public func restoreSubmission(for agentID: AgentID) throws -> AgentComposerDraft? {
+        guard let snapshot = try loadSubmissionSnapshot(for: agentID) else { return nil }
+        clearedThrough[agentID] = nil
+        newestSeen[agentID] = snapshot.draft.updatedAt
+        pending[agentID] = snapshot.draft
+        try persistDraft(snapshot.draft, for: agentID)
+        try removeSubmissionSnapshot(for: agentID)
+        return snapshot.draft
+    }
+
+    /// Confirms provider/turn start. Attachment ownership is transferred only
+    /// after the recoverable snapshot has been retained; if transfer fails, the
+    /// snapshot remains available for restore and the visible draft stays cleared.
+    @discardableResult
+    public func confirmSubmissionStarted(for agentID: AgentID, sentAt: Date? = nil) async throws -> Bool {
+        guard let snapshot = try loadSubmissionSnapshot(for: agentID) else { return false }
+        if let attachmentStore, !snapshot.draft.imageAttachments.isEmpty {
+            try await attachmentStore.transferDraftAttachmentsToSent(
+                for: agentID,
+                draftAttachments: snapshot.draft.imageAttachments,
+                sentAt: sentAt ?? clock.now()
+            )
+        }
+        try removeSubmissionSnapshot(for: agentID)
+        clearVisibleDraft(for: agentID, clearThrough: max(sentAt ?? clock.now(), snapshot.draft.updatedAt))
+        return true
+    }
+
+    /// Compatibility shim for existing text-only UI. New prompt-capable callers
+    /// must use begin/restore/confirm above so pre-start failures can recover.
+    public func resolveSendIntent(for agentID: AgentID, accepted: Bool, sentAt: Date? = nil) async {
+        guard accepted else { return }
+        do {
+            guard try beginSubmission(for: agentID, submittedAt: sentAt ?? clock.now()) else { return }
+            _ = try await confirmSubmissionStarted(for: agentID, sentAt: sentAt)
+        } catch {
+            warn("AgentComposerDraftStore.resolveSendIntent: preserving recoverable submission for \(agentID.rawValue) because confirmation failed: \(error)")
+        }
+    }
+
+    private func clearVisibleDraft(for agentID: AgentID, clearThrough: Date) {
+        clearedThrough[agentID] = clearThrough
         scheduledWrites.removeValue(forKey: agentID)?.cancel()
         pending.removeValue(forKey: agentID)
         let url = layout.draftFile(for: agentID)
@@ -205,26 +273,46 @@ public actor AgentComposerDraftStore {
         }
     }
 
-    /// The send boundary: a rejected intent is intentionally a no-op. Accepted
-    /// sends first hand local attachment ownership to the sent/transcript side
-    /// when an attachment store is available; if that transfer fails, the draft
-    /// is preserved rather than orphaning files that may still be referenced.
-    public func resolveSendIntent(for agentID: AgentID, accepted: Bool, sentAt: Date? = nil) async {
-        guard accepted else { return }
-        let attachmentIDs = (pending[agentID] ?? load(for: agentID))?.imageAttachments.map(\.attachmentID) ?? []
-        if let attachmentStore, !attachmentIDs.isEmpty {
-            do {
-                try await attachmentStore.transferDraftAttachmentsToSent(
-                    for: agentID,
-                    attachmentIDs: attachmentIDs,
-                    sentAt: sentAt
-                )
-            } catch {
-                warn("AgentComposerDraftStore.resolveSendIntent: preserving draft for \(agentID.rawValue) because attachment ownership transfer failed: \(error)")
-                return
-            }
+    private func persistDraft(_ draft: AgentComposerDraft, for agentID: AgentID) throws {
+        try FileManager.default.createDirectory(
+            at: layout.draftsDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: layout.draftsDirectory.path
+        )
+        try writer.write(draft, to: layout.draftFile(for: agentID))
+        try Self.restrictPermissions(at: layout.draftsDirectory, file: layout.draftFile(for: agentID))
+    }
+
+    private func persistSubmissionSnapshot(_ snapshot: AgentComposerSubmissionSnapshot, for agentID: AgentID) throws {
+        try FileManager.default.createDirectory(
+            at: layout.submissionRecoveryDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: layout.submissionRecoveryDirectory.path
+        )
+        let file = layout.submissionRecoveryFile(for: agentID)
+        try writer.write(snapshot, to: file)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    }
+
+    private func loadSubmissionSnapshot(for agentID: AgentID) throws -> AgentComposerSubmissionSnapshot? {
+        let file = layout.submissionRecoveryFile(for: agentID)
+        guard FileManager.default.fileExists(atPath: file.path) else { return nil }
+        return try writer.read(at: file)
+    }
+
+    private func removeSubmissionSnapshot(for agentID: AgentID) throws {
+        let file = layout.submissionRecoveryFile(for: agentID)
+        if FileManager.default.fileExists(atPath: file.path) {
+            try FileManager.default.removeItem(at: file)
         }
-        clear(for: agentID)
     }
 
     private static func hasValidSelection(_ draft: AgentComposerDraft) -> Bool {

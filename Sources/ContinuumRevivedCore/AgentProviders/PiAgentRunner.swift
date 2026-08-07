@@ -86,9 +86,18 @@ public final class PiAgentRunner: @unchecked Sendable {
         return segments.isEmpty ? [""] : segments
     }
 
-    public enum RunError: Error {
+    public enum RunError: Error, CustomStringConvertible {
         case launchFailed(String)
         case piFailed(exitCode: Int32, stderr: String)
+
+        public var description: String {
+            switch self {
+            case .launchFailed(let message):
+                return "launchFailed(\(SecretRedactor.redact(message)))"
+            case .piFailed(let exitCode, let stderr):
+                return "piFailed(exitCode: \(exitCode), stderr: \(SecretRedactor.redact(stderr)))"
+            }
+        }
     }
 
     /// How the runner will invoke Pi: an executable + the args that must

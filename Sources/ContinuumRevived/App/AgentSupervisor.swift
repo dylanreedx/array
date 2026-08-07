@@ -1668,7 +1668,7 @@ final class AgentSupervisor {
                     DispatchQueue.main.async { self?.deliver(bound, to: id) }
                 }
             } catch {
-                let message = String(describing: error)
+                let message = SecretRedactor.redact(String(describing: error))
                 fputs("AgentSupervisor: runner failed for agent \(id.rawValue.uuidString): \(message)\n", stderr)
                 DispatchQueue.main.async {
                     self?.deliver(.runtimeError(threadId: threadId, message: message), to: id)
@@ -3407,6 +3407,7 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
     private let script: [AgentRuntimeEvent]
     private let runtimeObservations: [AgentRuntimeObservation]
     private let holdUntilStopped: Bool
+    private let runError: Error?
     private let released = DispatchSemaphore(value: 0)
     private let lock = NSLock()
     private var stopCountStorage = 0
@@ -3421,11 +3422,13 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
     init(
         script: [AgentRuntimeEvent],
         runtimeObservations: [AgentRuntimeObservation] = [],
-        holdUntilStopped: Bool = false
+        holdUntilStopped: Bool = false,
+        runError: Error? = nil
     ) {
         self.script = script
         self.runtimeObservations = runtimeObservations
         self.holdUntilStopped = holdUntilStopped
+        self.runError = runError
     }
 
     var stopCount: Int { lock.withLock { stopCountStorage } }
@@ -3445,6 +3448,7 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
             agentPromptsStorage.append(prompt)
             liveHandler = onEvent
         }
+        if let runError { throw runError }
         if let observer = lock.withLock({ runtimeObservationHandler }) {
             for observation in runtimeObservations { observer(observation) }
         }
@@ -4179,6 +4183,39 @@ func runAgentSupervisorChecks() async throws {
     guard !containsAny(replayedImageJSON, secretImagePaths) else {
         throw fail("image transport: local image paths leaked into supervisor runtime events: \(replayedImageJSON)")
     }
+
+    let leakyManagedPath = root
+        .appendingPathComponent("agent-composer-attachments/objects/private-image.bin", isDirectory: false)
+        .path
+    let stderrLeakRunner = ScriptedAgentRunner(
+        script: [],
+        runError: PiAgentRunner.RunError.piFailed(
+            exitCode: 42,
+            stderr: "provider echoed argv @\(leakyManagedPath) and \(leakyManagedPath) before start"))
+    let stderrLeakSupervisor = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("stderr-leak", isDirectory: true)),
+        makeRunner: { _ in stderrLeakRunner })
+    let stderrLeakAgent = stderrLeakSupervisor.spawn(
+        role: nil,
+        prompt: nil,
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking,
+        projectId: nil)
+    guard await stderrLeakSupervisor.accept(.sendPrompt(AgentPrompt(imageAttachments: [imageAttachment("supervisor-image-leak", path: leakyManagedPath, displayName: "leak.png")])), for: stderrLeakAgent) == .accepted else {
+        throw fail("image transport: stderr leak fixture send was refused")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { !stderrLeakSupervisor.isRunning(stderrLeakAgent) }) else {
+        throw fail("image transport: stderr leak fixture did not finish")
+    }
+    let stderrLeakEvents = await replayedEvents(from: stderrLeakSupervisor, for: stderrLeakAgent, count: 1)
+    let stderrLeakJSON = String(decoding: try JSONEncoder().encode(stderrLeakEvents), as: UTF8.self)
+    guard !stderrLeakJSON.contains(leakyManagedPath),
+          !stderrLeakJSON.contains("@\(leakyManagedPath)"),
+          stderrLeakJSON.contains("[LOCAL-PATH]") else {
+        throw fail("image transport: runner stderr path leaked into runtime events/transcript source: \(stderrLeakJSON)")
+    }
+
     var imageProjection = AgentTranscriptProjection(threadId: "image-transport-thread")
     try imageProjection.appendUserPrompt(
         id: AgentNodeID(rawValue: "local:image-only-prompt")!,

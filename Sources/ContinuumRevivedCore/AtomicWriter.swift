@@ -85,7 +85,19 @@ public struct AtomicWriter: Sendable {
         try data.write(to: tmp)
         // fsync the temp's data to stable storage before rename.
         let fd = open(tmp.path, O_RDONLY)
-        if fd >= 0 { fsync(fd); close(fd) }
+        if fd >= 0 {
+            if fsync(fd) != 0 {
+                let err = errno
+                close(fd)
+                try? FileManager.default.removeItem(at: tmp)
+                throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
+            }
+            if close(fd) != 0 {
+                let err = errno
+                try? FileManager.default.removeItem(at: tmp)
+                throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
+            }
+        }
         // Atomic, same-volume rename. On failure, clean up the temp and rethrow.
         if rename(tmp.path, url.path) != 0 {
             let err = errno
@@ -94,7 +106,16 @@ public struct AtomicWriter: Sendable {
         }
         // fsync the parent directory so the directory entry (rename) is durable.
         let dfd = open(dir.path, O_RDONLY)
-        if dfd >= 0 { fsync(dfd); close(dfd) }
+        if dfd >= 0 {
+            if fsync(dfd) != 0 {
+                let err = errno
+                close(dfd)
+                throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
+            }
+            if close(dfd) != 0 {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+        }
     }
 
     private func backupExistingFile(at url: URL) throws {

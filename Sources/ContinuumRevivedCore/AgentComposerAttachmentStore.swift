@@ -8,7 +8,46 @@ public enum AgentComposerAttachmentStoreError: Error, Equatable {
     case unreadableSource(String)
     case unsafeRelativePath(String)
     case ownershipMismatch(id: AgentImageAttachmentID, expected: AgentID, actual: AgentID?)
+    case manifestIdentityMismatch(expected: AgentImageAttachmentID, actual: AgentImageAttachmentID)
+    case draftMetadataMismatch(id: AgentImageAttachmentID)
+    case missingAttachment(AgentImageAttachmentID)
+    case unreadableManagedFile(id: AgentImageAttachmentID, path: String)
+    case cleanupDeletionFailed([String])
+    case imageInputNotValidated(String)
     case atomicWriteFailed(String)
+}
+
+/// Platform-neutral proof supplied by the AppKit/import boundary after it has
+/// decoded or otherwise validated that the bytes are an image. Core intentionally
+/// does not import AppKit/ImageIO; it only requires callers to cross this typed
+/// seam before managed storage accepts image bytes.
+public struct AgentComposerImageValidation: Equatable, Sendable {
+    public var contentType: String
+    public var pixelWidth: UInt?
+    public var pixelHeight: UInt?
+    public var byteCount: UInt64?
+
+    public init(
+        validatedContentType contentType: String,
+        pixelWidth: UInt? = nil,
+        pixelHeight: UInt? = nil,
+        byteCount: UInt64? = nil
+    ) throws {
+        let normalized = contentType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard normalized.hasPrefix("image/"), normalized.count > "image/".count else {
+            throw AgentComposerAttachmentStoreError.imageInputNotValidated("caller validation must identify an image/* content type")
+        }
+        if let pixelWidth, pixelWidth == 0 {
+            throw AgentComposerAttachmentStoreError.imageInputNotValidated("validated pixel width must be positive when present")
+        }
+        if let pixelHeight, pixelHeight == 0 {
+            throw AgentComposerAttachmentStoreError.imageInputNotValidated("validated pixel height must be positive when present")
+        }
+        self.contentType = normalized
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
+        self.byteCount = byteCount
+    }
 }
 
 public struct AgentComposerAttachmentStoreLayout: Sendable {
@@ -120,20 +159,24 @@ public struct AgentComposerStoredAttachment: Equatable, Sendable {
 }
 
 /// Array-managed host-local storage for composer image originals. It imports
-/// bytes/files into Application Support, persists only opaque ids plus
-/// path-free metadata in drafts/transcripts, and resolves ids back to local file
-/// capabilities for provider adapters on this host.
+/// caller-validated image bytes/files into Application Support, persists only
+/// opaque ids plus path-free metadata in drafts/transcripts, and resolves ids
+/// back to local file capabilities for provider adapters on this host.
 public actor AgentComposerAttachmentStore {
     public let layout: AgentComposerAttachmentStoreLayout
 
-    private let writer = AtomicWriter(backupsDirectory: nil, retainedBackups: 0)
+    private let reader = AtomicWriter(backupsDirectory: nil, retainedBackups: 0)
     private let clock: any Clock
     private let warn: @Sendable (String) -> Void
+    private let writeManifest: @Sendable (AgentComposerAttachmentManifest, URL) throws -> Void
+    private let removeItem: @Sendable (URL) throws -> Void
 
     public init(
         applicationSupportDirectory: URL? = nil,
         clock: any Clock = SystemClock(),
-        warn: @escaping @Sendable (String) -> Void = { fputs($0 + "\n", stderr) }
+        warn: @escaping @Sendable (String) -> Void = { fputs($0 + "\n", stderr) },
+        manifestWriter: (@Sendable (AgentComposerAttachmentManifest, URL) throws -> Void)? = nil,
+        removeItem: (@Sendable (URL) throws -> Void)? = nil
     ) {
         let root = applicationSupportDirectory
             ?? AgentStore.resolveApplicationSupportDirectory(smokeTest: false)
@@ -141,32 +184,28 @@ public actor AgentComposerAttachmentStore {
         self.layout = AgentComposerAttachmentStoreLayout(applicationSupportDirectory: root)
         self.clock = clock
         self.warn = warn
+        self.writeManifest = manifestWriter ?? Self.defaultPersistManifest
+        self.removeItem = removeItem ?? { try FileManager.default.removeItem(at: $0) }
     }
 
-    public func importPastedBytes(
+    public func importValidatedPastedImage(
         _ data: Data,
         displayName: String? = nil,
-        contentType: String? = nil,
-        pixelWidth: UInt? = nil,
-        pixelHeight: UInt? = nil,
+        validation: AgentComposerImageValidation,
         forDraftOf agentID: AgentID
     ) throws -> AgentComposerStoredAttachment {
         try importManagedBytes(
             data,
             displayName: displayName,
-            contentType: contentType,
-            pixelWidth: pixelWidth,
-            pixelHeight: pixelHeight,
+            validation: validation,
             forDraftOf: agentID
         )
     }
 
-    public func importLocalImageFile(
+    public func importValidatedLocalImageFile(
         _ sourceURL: URL,
         displayName: String? = nil,
-        contentType: String? = nil,
-        pixelWidth: UInt? = nil,
-        pixelHeight: UInt? = nil,
+        validation: AgentComposerImageValidation,
         forDraftOf agentID: AgentID
     ) throws -> AgentComposerStoredAttachment {
         guard sourceURL.isFileURL else {
@@ -176,13 +215,14 @@ public actor AgentComposerAttachmentStore {
         guard (attributes[.type] as? FileAttributeType) == .typeRegular else {
             throw AgentComposerAttachmentStoreError.unreadableSource(sourceURL.path)
         }
+        guard FileManager.default.isReadableFile(atPath: sourceURL.path) else {
+            throw AgentComposerAttachmentStoreError.unreadableSource(sourceURL.path)
+        }
         let data = try Data(contentsOf: sourceURL)
         return try importManagedBytes(
             data,
             displayName: displayName ?? sourceURL.lastPathComponent,
-            contentType: contentType ?? Self.inferredContentType(from: sourceURL.pathExtension),
-            pixelWidth: pixelWidth,
-            pixelHeight: pixelHeight,
+            validation: validation,
             forDraftOf: agentID
         )
     }
@@ -201,8 +241,18 @@ public actor AgentComposerAttachmentStore {
         return url
     }
 
-    public func promptAttachment(for draftAttachment: AgentComposerDraftImageAttachment) throws -> AgentPromptImageAttachment? {
-        try storedAttachment(for: draftAttachment.attachmentID)?.promptAttachment
+    /// All-or-nothing transport preparation for the expected agent. Every draft
+    /// reference is validated before any prompt is returned: manifest storage key
+    /// and decoded ids must match, path-free draft metadata must match the
+    /// manifest, ownership must still be draft-owned by `agentID`, the managed
+    /// object must remain canonically under the attachment root (including
+    /// symlink resolution), and the object must be a readable regular file.
+    public func preparePromptAttachments(
+        for agentID: AgentID,
+        draftAttachments: [AgentComposerDraftImageAttachment]
+    ) throws -> [AgentPromptImageAttachment] {
+        try preparedDraftManifests(for: agentID, draftAttachments: draftAttachments)
+            .map { AgentComposerStoredAttachment(manifest: $0.manifest, fileURL: $0.fileURL).promptAttachment }
     }
 
     public func manifest(for id: AgentImageAttachmentID) throws -> AgentComposerAttachmentManifest? {
@@ -211,40 +261,40 @@ public actor AgentComposerAttachmentStore {
 
     public func transferDraftAttachmentsToSent(
         for agentID: AgentID,
+        draftAttachments: [AgentComposerDraftImageAttachment],
+        sentAt explicitSentAt: Date? = nil
+    ) throws {
+        let prepared = try preparedDraftManifests(for: agentID, draftAttachments: draftAttachments)
+        try transferPreparedDraftManifestsToSent(prepared.map(\.manifest), sentAt: explicitSentAt ?? clock.now())
+    }
+
+    public func transferDraftAttachmentsToSent(
+        for agentID: AgentID,
         attachmentIDs: [AgentImageAttachmentID],
         sentAt explicitSentAt: Date? = nil
     ) throws {
-        let sentAt = explicitSentAt ?? clock.now()
-        for id in attachmentIDs {
-            guard var manifest = try loadManifest(for: id) else { continue }
-            switch manifest.ownership.state {
-            case .draft:
-                guard manifest.ownership.agentID == agentID else {
-                    throw AgentComposerAttachmentStoreError.ownershipMismatch(
-                        id: id,
-                        expected: agentID,
-                        actual: manifest.ownership.agentID
-                    )
-                }
-                manifest.ownership = .sent(agentID: agentID, at: sentAt)
-                manifest.updatedAt = sentAt
-                try persist(manifest)
-            case .sent:
-                guard manifest.ownership.agentID == agentID else {
-                    throw AgentComposerAttachmentStoreError.ownershipMismatch(
-                        id: id,
-                        expected: agentID,
-                        actual: manifest.ownership.agentID
-                    )
-                }
+        let manifests = try attachmentIDs.map { id -> AgentComposerAttachmentManifest in
+            guard let manifest = try loadManifest(for: id) else {
+                throw AgentComposerAttachmentStoreError.missingAttachment(id)
             }
+            guard manifest.ownership.state == .draft, manifest.ownership.agentID == agentID else {
+                throw AgentComposerAttachmentStoreError.ownershipMismatch(
+                    id: id,
+                    expected: agentID,
+                    actual: manifest.ownership.agentID
+                )
+            }
+            _ = try validatedManagedFileURL(for: manifest)
+            return manifest
         }
+        try transferPreparedDraftManifestsToSent(manifests, sentAt: explicitSentAt ?? clock.now())
     }
 
     /// Conservative cleanup seam. Callers supply the current draft references;
     /// only stale draft-owned attachments outside that set are removed. Sent
     /// attachments are never removed here because transcripts may still refer to
-    /// their path-free metadata.
+    /// their path-free metadata. Any object/manifest deletion failure is surfaced
+    /// as a thrown error instead of being reported as a successful cleanup.
     @discardableResult
     public func cleanupUnreferencedDraftAttachments(
         retaining referencedIDs: Set<AgentImageAttachmentID>,
@@ -258,30 +308,100 @@ public actor AgentComposerAttachmentStore {
             options: [.skipsHiddenFiles]
         )
         var removed: [AgentImageAttachmentID] = []
+        var deletionFailures: [String] = []
         for manifestURL in manifestURLs where manifestURL.pathExtension == "json" {
             do {
-                let manifest: AgentComposerAttachmentManifest = try writer.read(at: manifestURL)
+                let manifest: AgentComposerAttachmentManifest = try reader.read(at: manifestURL)
+                guard manifest.id == manifest.metadata.id else {
+                    throw AgentComposerAttachmentStoreError.manifestIdentityMismatch(
+                        expected: manifest.id,
+                        actual: manifest.metadata.id
+                    )
+                }
                 guard manifest.ownership.state == .draft else { continue }
                 guard !referencedIDs.contains(manifest.id) else { continue }
                 guard manifest.updatedAt <= cutoff else { continue }
                 let objectURL = try fileURL(for: manifest)
-                try? FileManager.default.removeItem(at: objectURL)
-                try? FileManager.default.removeItem(at: manifestURL)
-                removed.append(manifest.id)
+                var objectDeleted = true
+                if FileManager.default.fileExists(atPath: objectURL.path) {
+                    do { try removeItem(objectURL) }
+                    catch {
+                        objectDeleted = false
+                        deletionFailures.append("object \(manifest.id.rawValue): \(error)")
+                    }
+                }
+                guard objectDeleted else { continue }
+                do {
+                    try removeItem(manifestURL)
+                    removed.append(manifest.id)
+                } catch {
+                    deletionFailures.append("manifest \(manifest.id.rawValue): \(error)")
+                }
             } catch {
                 warn("AgentComposerAttachmentStore.cleanup: skipped unreadable or unsafe manifest at \(manifestURL.path): \(error)")
                 continue
             }
         }
+        if !deletionFailures.isEmpty {
+            throw AgentComposerAttachmentStoreError.cleanupDeletionFailed(deletionFailures)
+        }
         return removed
+    }
+
+    private struct PreparedDraftManifest {
+        var manifest: AgentComposerAttachmentManifest
+        var fileURL: URL
+    }
+
+    private func preparedDraftManifests(
+        for agentID: AgentID,
+        draftAttachments: [AgentComposerDraftImageAttachment]
+    ) throws -> [PreparedDraftManifest] {
+        var prepared: [PreparedDraftManifest] = []
+        prepared.reserveCapacity(draftAttachments.count)
+        for draftAttachment in draftAttachments {
+            let id = draftAttachment.attachmentID
+            guard let manifest = try loadManifest(for: id) else {
+                throw AgentComposerAttachmentStoreError.missingAttachment(id)
+            }
+            guard manifest.draftAttachment == draftAttachment else {
+                throw AgentComposerAttachmentStoreError.draftMetadataMismatch(id: id)
+            }
+            guard manifest.ownership.state == .draft, manifest.ownership.agentID == agentID else {
+                throw AgentComposerAttachmentStoreError.ownershipMismatch(
+                    id: id,
+                    expected: agentID,
+                    actual: manifest.ownership.agentID
+                )
+            }
+            let url = try validatedManagedFileURL(for: manifest)
+            prepared.append(PreparedDraftManifest(manifest: manifest, fileURL: url))
+        }
+        return prepared
+    }
+
+    private func transferPreparedDraftManifestsToSent(_ manifests: [AgentComposerAttachmentManifest], sentAt: Date) throws {
+        var persistedOriginals: [AgentComposerAttachmentManifest] = []
+        do {
+            for original in manifests {
+                var manifest = original
+                manifest.ownership = .sent(agentID: original.ownership.agentID, at: sentAt)
+                manifest.updatedAt = sentAt
+                try persist(manifest)
+                persistedOriginals.append(original)
+            }
+        } catch {
+            for original in persistedOriginals.reversed() {
+                try? persist(original)
+            }
+            throw error
+        }
     }
 
     private func importManagedBytes(
         _ data: Data,
         displayName: String?,
-        contentType: String?,
-        pixelWidth: UInt?,
-        pixelHeight: UInt?,
+        validation: AgentComposerImageValidation,
         forDraftOf agentID: AgentID
     ) throws -> AgentComposerStoredAttachment {
         let now = clock.now()
@@ -289,10 +409,10 @@ public actor AgentComposerAttachmentStore {
         let metadata = AgentImageAttachmentMetadata(
             id: id,
             displayName: Self.safeDisplayName(displayName),
-            contentType: contentType,
-            byteCount: UInt64(data.count),
-            pixelWidth: pixelWidth,
-            pixelHeight: pixelHeight
+            contentType: validation.contentType,
+            byteCount: validation.byteCount ?? UInt64(data.count),
+            pixelWidth: validation.pixelWidth,
+            pixelHeight: validation.pixelHeight
         )
         let relativePath = layout.objectRelativePath(for: id)
         let manifest = AgentComposerAttachmentManifest(
@@ -306,7 +426,12 @@ public actor AgentComposerAttachmentStore {
         let fileURL = try fileURL(for: manifest)
         try prepareDirectories()
         try Self.atomicRestrictedWrite(data, to: fileURL)
-        try persist(manifest)
+        do {
+            try persist(manifest)
+        } catch {
+            try? removeItem(fileURL)
+            throw error
+        }
         return AgentComposerStoredAttachment(manifest: manifest, fileURL: fileURL)
     }
 
@@ -327,19 +452,43 @@ public actor AgentComposerAttachmentStore {
     private func persist(_ manifest: AgentComposerAttachmentManifest) throws {
         try prepareDirectories()
         let manifestFile = layout.manifestFile(for: manifest.id)
-        try writer.write(manifest, to: manifestFile)
+        try writeManifest(manifest, manifestFile)
+    }
+
+    private static func defaultPersistManifest(_ manifest: AgentComposerAttachmentManifest, to manifestFile: URL) throws {
+        try AtomicWriter(backupsDirectory: nil, retainedBackups: 0).write(manifest, to: manifestFile)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: manifestFile.path)
     }
 
     private func loadManifest(for id: AgentImageAttachmentID) throws -> AgentComposerAttachmentManifest? {
         let manifestFile = layout.manifestFile(for: id)
         guard FileManager.default.fileExists(atPath: manifestFile.path) else { return nil }
-        let manifest: AgentComposerAttachmentManifest = try writer.read(at: manifestFile)
+        let manifest: AgentComposerAttachmentManifest = try reader.read(at: manifestFile)
+        guard manifest.id == id else {
+            throw AgentComposerAttachmentStoreError.manifestIdentityMismatch(expected: id, actual: manifest.id)
+        }
+        guard manifest.metadata.id == id else {
+            throw AgentComposerAttachmentStoreError.manifestIdentityMismatch(expected: id, actual: manifest.metadata.id)
+        }
         return manifest
     }
 
     private func fileURL(for manifest: AgentComposerAttachmentManifest) throws -> URL {
         try Self.safeLocalURL(root: layout.attachmentsDirectory, relativePath: manifest.relativePath)
+    }
+
+    private func validatedManagedFileURL(for manifest: AgentComposerAttachmentManifest) throws -> URL {
+        let url = try fileURL(for: manifest)
+        var statBuffer = stat()
+        guard lstat(url.path, &statBuffer) == 0 else {
+            throw AgentComposerAttachmentStoreError.missingAttachment(manifest.id)
+        }
+        let fileKind = statBuffer.st_mode & S_IFMT
+        guard fileKind == S_IFREG, FileManager.default.isReadableFile(atPath: url.path) else {
+            throw AgentComposerAttachmentStoreError.unreadableManagedFile(id: manifest.id, path: url.path)
+        }
+        _ = try Self.safeLocalURL(root: layout.attachmentsDirectory, relativePath: manifest.relativePath)
+        return url
     }
 
     private static func makeOpaqueID() throws -> AgentImageAttachmentID {
@@ -356,18 +505,6 @@ public actor AgentComposerAttachmentStore {
         return URL(fileURLWithPath: trimmed).lastPathComponent
     }
 
-    private static func inferredContentType(from pathExtension: String) -> String? {
-        switch pathExtension.lowercased() {
-        case "png": return "image/png"
-        case "jpg", "jpeg": return "image/jpeg"
-        case "gif": return "image/gif"
-        case "webp": return "image/webp"
-        case "heic", "heif": return "image/heif"
-        case "tif", "tiff": return "image/tiff"
-        default: return nil
-        }
-    }
-
     private static func safeLocalURL(root: URL, relativePath: String) throws -> URL {
         guard !relativePath.isEmpty, !relativePath.hasPrefix("/") else {
             throw AgentComposerAttachmentStoreError.unsafeRelativePath(relativePath)
@@ -376,10 +513,11 @@ public actor AgentComposerAttachmentStore {
         guard parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
             throw AgentComposerAttachmentStoreError.unsafeRelativePath(relativePath)
         }
-        let rootURL = root.standardizedFileURL
+        let rootURL = root.standardizedFileURL.resolvingSymlinksInPath()
         let candidate = root.appendingPathComponent(relativePath, isDirectory: false).standardizedFileURL
+        let canonicalCandidate = candidate.resolvingSymlinksInPath()
         let rootPrefix = rootURL.path.hasSuffix("/") ? rootURL.path : rootURL.path + "/"
-        guard candidate.path.hasPrefix(rootPrefix) else {
+        guard canonicalCandidate.path.hasPrefix(rootPrefix) else {
             throw AgentComposerAttachmentStoreError.unsafeRelativePath(relativePath)
         }
         return candidate
@@ -413,8 +551,13 @@ public actor AgentComposerAttachmentStore {
                     pointer = pointer?.advanced(by: written)
                 }
             }
-            fsync(fd)
-            close(fd)
+            if fsync(fd) != 0 {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            if close(fd) != 0 {
+                closeNeeded = false
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
             closeNeeded = false
             if rename(tmp.path, url.path) != 0 {
                 let err = errno
@@ -422,7 +565,16 @@ public actor AgentComposerAttachmentStore {
                 throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
             }
             let dfd = open(dir.path, O_RDONLY)
-            if dfd >= 0 { fsync(dfd); close(dfd) }
+            if dfd >= 0 {
+                if fsync(dfd) != 0 {
+                    let err = errno
+                    close(dfd)
+                    throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
+                }
+                if close(dfd) != 0 {
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+            }
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         } catch {
             if closeNeeded { close(fd) }

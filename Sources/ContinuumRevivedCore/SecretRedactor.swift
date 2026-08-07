@@ -28,6 +28,19 @@ public enum SecretRedactor {
         redacted = replace(redacted, pattern: #"(?i)(password|passwd|pwd|secret|token|api[_-]?key|authorization|auth|credential|credentials|cookie|session|signing[_-]?key|signature|private[_-]?key|access[_-]?key|refresh[_-]?key|client[_-]?secret|ssh[_-]?key|jwt)(\s*[=:]\s*)([^\s\"'&,}]+)"#, template: "$1$2[REDACTED]")
         redacted = replace(redacted, pattern: #"(?i)(document\.querySelector\([^\n]+\)\.value\s*=\s*)['\"][^'\"]+['\"]"#, template: "$1'[REDACTED]'")
         redacted = replace(redacted, pattern: #"([?&][^=&#]+)=([^&#]*)"#, template: "$1=[REDACTED]")
+        return redactLocalPathReferences(redacted)
+    }
+
+    /// Removes local file capabilities from messages that may enter runtime
+    /// events, transcripts, activity sync, or logs. This catches Pi `@/path`
+    /// image argv echoes as well as ordinary absolute/file URLs while preserving
+    /// enough structure to understand that a local path was present.
+    public static func redactLocalPathReferences(_ text: String) -> String {
+        var redacted = text
+        redacted = replace(redacted, pattern: #"@(?:file://)?/(?:[^\s\"'`<>()\[\]{}]+)"#, template: "@[LOCAL-PATH]")
+        redacted = replace(redacted, pattern: #"(?:file://)?/(?:[^\s\"'`<>()\[\]{}]+)"#, template: "[LOCAL-PATH]")
+        redacted = replace(redacted, pattern: #"@~/(?:[^\s\"'`<>()\[\]{}]+)"#, template: "@[LOCAL-PATH]")
+        redacted = replace(redacted, pattern: #"~/(?:[^\s\"'`<>()\[\]{}]+)"#, template: "[LOCAL-PATH]")
         return redacted
     }
 
