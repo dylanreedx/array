@@ -135,10 +135,11 @@ final class AgentTranscriptListView: NSView {
     /// Immutable host-local bindings are supplied at the composition boundary;
     /// they are never inferred from the current turn while flattening history.
     private var toolDetailIdentityByEntryID: [AgentNodeID: AgentToolDetailKey] = [:]
+    private var toolDetailEntryLifecycleByID: [AgentNodeID: AgentEntry] = [:]
     private var runtimeIdentityByItemID: [AgentToolDetailID: Set<AgentToolDetailKey>] = [:]
     private var activeRuntimeScope: AgentToolDetailScope?
     private let toolDetailClock: @Sendable () -> Date
-    private let toolDetailTimeToLive: TimeInterval
+    private let toolDetailTimeToLive: TimeInterval?
     /// The list owns the view-state binding because the existing tile context
     /// deliberately carries only semantic render actions. Entry IDs remain the
     /// disclosure key; this opaque owner token prevents state crossing lists.
@@ -212,7 +213,7 @@ final class AgentTranscriptListView: NSView {
         } else if let toolDetailStore {
             self.toolDetailTimeToLive = toolDetailStore.timeToLive
         } else {
-            self.toolDetailTimeToLive = 0
+            self.toolDetailTimeToLive = nil
         }
         measurementCache = AgentBlockMeasurementCache()
         super.init(frame: .zero)
@@ -450,6 +451,7 @@ final class AgentTranscriptListView: NSView {
     /// unchanged IDs; reconfiguration is limited to rows touched by the patch.
     /// There is intentionally no reloadData path after (or before) initial load.
     private func applyCoalesced(document: AgentDocument) throws {
+        prepareToolDetailLifecycle(for: document)
         let flattened = try flatten(document)
         let oldIndexes = Dictionary(uniqueKeysWithValues: rows.enumerated().map { ($0.element.id, $0.offset) })
         let changedNodeIDs = Set(flattened.rows.compactMap { row -> AgentNodeID? in
@@ -470,6 +472,7 @@ final class AgentTranscriptListView: NSView {
         if let appliedVersion, patch.fromVersion != appliedVersion {
             throw UpdateError.versionMismatch(expected: appliedVersion, actual: patch.fromVersion)
         }
+        prepareToolDetailLifecycle(for: document)
         let flattened = try flatten(document)
         try applyWithScroll(
             document: document,
@@ -740,9 +743,78 @@ final class AgentTranscriptListView: NSView {
     }
 
     /// Binds a transcript entry to its immutable host-local provider identity.
-    /// Missing or mismatched bindings deliberately produce no detail at render.
-    func bindToolDetailIdentity(_ identity: AgentToolDetailKey, to entryID: AgentNodeID) {
-        toolDetailIdentityByEntryID[entryID] = identity
+    /// A conflicting lifecycle rebind is rejected; preserving the original
+    /// binding keeps already-rendered and cached identity from being rewritten.
+    @discardableResult
+    func bindToolDetailIdentity(_ identity: AgentToolDetailKey, to entryID: AgentNodeID) -> Bool {
+        guard let existing = toolDetailIdentityByEntryID[entryID] else {
+            toolDetailIdentityByEntryID[entryID] = identity
+            return true
+        }
+        return existing == identity
+    }
+
+    private func prepareToolDetailLifecycle(for document: AgentDocument) {
+        let incoming = Dictionary(uniqueKeysWithValues: document.entries.map { ($0.id, $0) })
+        var invalidatedEntryIDs = Set(toolDetailEntryLifecycleByID.keys).subtracting(incoming.keys)
+        invalidatedEntryIDs.formUnion(toolDetailEntryLifecycleByID.compactMap { id, oldEntry in
+            guard let newEntry = incoming[id], newEntry != oldEntry else { return nil }
+            return id
+        })
+        if !invalidatedEntryIDs.isEmpty {
+            purgeToolDetailState(for: invalidatedEntryIDs)
+        }
+        if incoming.isEmpty {
+            runtimeIdentityByItemID.removeAll()
+            activeRuntimeScope = nil
+        }
+        toolDetailEntryLifecycleByID = incoming
+    }
+
+    private func purgeToolDetailState(for entryIDs: Set<AgentNodeID>) {
+        guard !entryIDs.isEmpty else { return }
+        var identities = Set<AgentToolDetailKey>()
+        var blockIDs = Set<AgentNodeID>()
+        for entryID in entryIDs {
+            var hasToolDetailState = false
+            if let identity = toolDetailIdentityByEntryID.removeValue(forKey: entryID) {
+                identities.insert(identity)
+                hasToolDetailState = true
+            }
+            guard let entry = toolDetailEntryLifecycleByID[entryID] else { continue }
+            var pendingBlocks = entry.blocks
+            var entryBlockIDs = Set<AgentNodeID>()
+            while let block = pendingBlocks.popLast() {
+                entryBlockIDs.insert(block.id)
+                pendingBlocks.append(contentsOf: block.children)
+                if let identity = toolDetailIDByBlockID[block.id] {
+                    identities.insert(identity)
+                    hasToolDetailState = true
+                }
+            }
+            blockIDs.formUnion(entryBlockIDs)
+            if hasToolDetailState {
+                disclosureStateStore.removeSubtree(
+                    for: disclosureOwnerID,
+                    rootID: entryID,
+                    descendantIDs: entryBlockIDs
+                )
+            }
+        }
+        for blockID in blockIDs {
+            toolDetailIDByBlockID.removeValue(forKey: blockID)
+        }
+        for identity in identities {
+            toolDetailsByID.removeValue(forKey: identity)
+            if var runtimeIdentities = runtimeIdentityByItemID[identity.providerItemID] {
+                runtimeIdentities.remove(identity)
+                if runtimeIdentities.isEmpty {
+                    runtimeIdentityByItemID.removeValue(forKey: identity.providerItemID)
+                } else {
+                    runtimeIdentityByItemID[identity.providerItemID] = runtimeIdentities
+                }
+            }
+        }
     }
 
     private func uniqueRuntimeIdentity(for itemID: AgentToolDetailID) -> AgentToolDetailKey? {
@@ -816,13 +888,19 @@ final class AgentTranscriptListView: NSView {
               payload.status != .inProgress,
               let providerID = toolDetailIDByBlockID[block.id] else { return block }
         if let cached = toolDetailsByID[providerID],
-           toolDetailClock().timeIntervalSince(cached.updatedAt) >= toolDetailTimeToLive {
+           let timeToLive = toolDetailTimeToLive,
+           (timeToLive <= 0 || toolDetailClock().timeIntervalSince(cached.updatedAt) >= timeToLive) {
             toolDetailsByID.removeValue(forKey: providerID)
         }
         guard let candidate = toolDetailProvider?(providerID) ?? toolDetailsByID[providerID],
               candidate.identity == providerID else { return block }
-        let candidateIsFresh = toolDetailStore == nil ||
-            (toolDetailTimeToLive > 0 && toolDetailClock().timeIntervalSince(candidate.updatedAt) < toolDetailTimeToLive)
+        let candidateIsFresh: Bool
+        if let timeToLive = toolDetailTimeToLive {
+            candidateIsFresh = timeToLive > 0 &&
+                toolDetailClock().timeIntervalSince(candidate.updatedAt) < timeToLive
+        } else {
+            candidateIsFresh = true
+        }
         guard candidateIsFresh,
               candidate.status != .pending,
               candidate.status != .inProgress,

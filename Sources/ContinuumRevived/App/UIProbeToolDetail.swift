@@ -99,6 +99,111 @@ extension UIProbeGeometry {
         guard expiringList.qaPresentedToolSummary(for: blockID) == "Completed" else {
             throw GeometryError(message: "expired list-level tool snapshot remained presentable")
         }
-        return 3
+
+        // Hostile witness: an explicitly TTL-bound provider has no actor store,
+        // but must still use the injected clock and refresh the rendered snapshot.
+        let noStoreRecord = AgentToolDetailRecord(
+            identity: currentIdentity, toolName: "read", status: .completed,
+            updatedAt: clock.now()
+        )
+        let noStoreExpiringList = AgentTranscriptListView(
+            toolDetailProvider: { key in key == currentIdentity ? noStoreRecord : nil },
+            toolDetailClock: clock.now,
+            toolDetailTimeToLive: 10
+        )
+        noStoreExpiringList.bindToolDetailIdentity(currentIdentity, to: entryID)
+        try noStoreExpiringList.apply(
+            document: document,
+            patch: try AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: [blockID])
+        )
+        guard noStoreExpiringList.qaPresentedToolSummary(for: blockID)?.contains("Tool") == true else {
+            throw GeometryError(message: "fresh no-store TTL-bound provider detail was not presentable")
+        }
+        clock.advance(11)
+        noStoreExpiringList.refreshToolDetailPresentation()
+        guard noStoreExpiringList.qaPresentedToolSummary(for: blockID) == "Completed" else {
+            throw GeometryError(message: "no-store TTL-bound provider detail ignored injected-clock expiry/refresh")
+        }
+
+        // Hostile witness: an entry binding is lifecycle immutable. A conflicting
+        // rebind must not alter the identity used by a refreshed rendered snapshot.
+        let firstRecord = AgentToolDetailRecord(
+            identity: priorIdentity, toolName: "first-tool", status: .completed,
+            updatedAt: clock.now()
+        )
+        let secondRecord = AgentToolDetailRecord(
+            identity: currentIdentity, toolName: "second-tool", status: .completed,
+            updatedAt: clock.now()
+        )
+        let immutableList = AgentTranscriptListView(toolDetailProvider: { key in
+            switch key {
+            case priorIdentity: return firstRecord
+            case currentIdentity: return secondRecord
+            default: return nil
+            }
+        })
+        immutableList.bindToolDetailIdentity(priorIdentity, to: entryID)
+        try immutableList.apply(
+            document: document,
+            patch: try AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: [blockID])
+        )
+        guard immutableList.qaPresentedToolSummary(for: blockID)?.contains("first-tool") == true else {
+            throw GeometryError(message: "initial immutable host-local identity did not render")
+        }
+        guard !immutableList.bindToolDetailIdentity(currentIdentity, to: entryID) else {
+            throw GeometryError(message: "conflicting host-local rebind was not rejected")
+        }
+        immutableList.refreshToolDetailPresentation()
+        guard immutableList.qaPresentedToolSummary(for: blockID)?.contains("first-tool") == true else {
+            throw GeometryError(message: "conflicting host-local rebind retroactively changed rendered identity")
+        }
+
+        // Hostile witness: removal/reset must purge the old binding and its
+        // disclosure/expiry state before the same entry ID is reused.
+        let reusedIdentity = currentIdentity
+        let reusedBlockID = id("tool-disclosure-reused-block")
+        let reusedEntry = AgentEntry(
+            id: entryID, revision: 3, role: .assistant,
+            provenance: .providerItem(provider: "runtime", itemID: reusedIdentity.providerItemID.rawValue),
+            blocks: [AgentBlock(
+                id: reusedBlockID, revision: 1, kind: .toolCall,
+                payload: .toolCall(AgentToolCallPayload(name: "semantic-tool", summary: "Completed", status: .completed))
+            )]
+        )
+        let resetList = AgentTranscriptListView(toolDetailProvider: { key in
+            switch key {
+            case priorIdentity: return firstRecord
+            case currentIdentity: return secondRecord
+            default: return nil
+            }
+        })
+        resetList.bindToolDetailIdentity(priorIdentity, to: entryID)
+        try resetList.apply(
+            document: document,
+            patch: try AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: [blockID])
+        )
+        let replacementEntry = AgentEntry(
+            id: entryID, revision: 2, role: .assistant,
+            provenance: entry.provenance, blocks: [block]
+        )
+        try resetList.apply(
+            document: AgentDocument(version: 2, entries: [replacementEntry]),
+            patch: try AgentDocumentPatch(fromVersion: 1, toVersion: 2, updated: [entryID, blockID])
+        )
+        guard resetList.qaPresentedToolSummary(for: blockID) == "Completed" else {
+            throw GeometryError(message: "same-ID entry replacement inherited old host-local identity/cache state")
+        }
+        try resetList.apply(
+            document: AgentDocument(version: 3, entries: []),
+            patch: try AgentDocumentPatch(fromVersion: 2, toVersion: 3, removed: [entryID, blockID])
+        )
+        try resetList.apply(
+            document: AgentDocument(version: 4, entries: [reusedEntry]),
+            patch: try AgentDocumentPatch(fromVersion: 3, toVersion: 4, inserted: [reusedEntry.id, reusedBlockID])
+        )
+        guard resetList.qaPresentedToolSummary(for: reusedBlockID) == "Completed" else {
+            throw GeometryError(message: "reused entry ID inherited removed host-local identity/cache state")
+        }
+        return 8
     }
 }
