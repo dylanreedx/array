@@ -6047,6 +6047,11 @@ enum UIProbeGeometry {
         guard view.qaStreamingMarkupParseTimerActive else {
             throw fail("managed-agent streaming teardown did not schedule the paused parse timer")
         }
+        guard let scheduledInterval = view.qaStreamingMarkupParseTimerInterval,
+              scheduledInterval > 0.03,
+              scheduledInterval < 0.04 else {
+            throw fail("managed-agent streaming timer ignored the projection's injected monotonic clock: \(String(describing: view.qaStreamingMarkupParseTimerInterval))")
+        }
         let staleGeneration = view.qaStreamingMarkupParseTimerGeneration
         guard !view.qaSemanticMarkupIsSingleStrongText("bold") else {
             throw fail("managed-agent streaming teardown precondition failed: inside-window delta parsed before teardown")

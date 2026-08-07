@@ -313,6 +313,14 @@ enum UIProbeAppearance {
             ("appearance.agentComposer", NSSize(width: 480, height: 72), {
                 AgentComposerView(frame: NSRect(x: 0, y: 0, width: 480, height: 72))
             }),
+            // Last-wave image rail remains isolated until production composer
+            // wiring, but its token-owned chrome must already survive a live
+            // appearance flip.
+            ("appearance.composerImageRail", NSSize(width: 420, height: ComposerImageAttachmentRailView.railHeight), {
+                ComposerImageAttachmentRailView(
+                    frame: NSRect(x: 0, y: 0, width: 420, height: ComposerImageAttachmentRailView.railHeight)
+                )
+            }),
             // 91/P4.6: isolated until P5.2/P5.4 bind actions and the live tile.
             // Sweep the real custom control now so every token-owned layer color
             // must be reapplied across an effective-appearance flip.

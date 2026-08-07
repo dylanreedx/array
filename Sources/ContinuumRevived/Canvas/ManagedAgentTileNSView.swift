@@ -77,6 +77,7 @@ final class ManagedAgentTileNSView: TileNSView {
     private var locationProjectName: String?
     private var locationStaleTimer: Timer?
     private var streamingMarkupParseTimer: Timer?
+    private var streamingMarkupParseTimerScheduledDelay: TimeInterval?
     private var streamingMarkupParseTimerGeneration: UInt64 = 0
 
     private let transcriptCollectionFixture: AgentTranscriptListView?
@@ -867,6 +868,7 @@ final class ManagedAgentTileNSView: TileNSView {
     private func cancelStreamingMarkupParseTimer() {
         streamingMarkupParseTimer?.invalidate()
         streamingMarkupParseTimer = nil
+        streamingMarkupParseTimerScheduledDelay = nil
         streamingMarkupParseTimerGeneration &+= 1
     }
 
@@ -874,7 +876,8 @@ final class ManagedAgentTileNSView: TileNSView {
         cancelStreamingMarkupParseTimer()
         guard let deadline = model.nextStreamingMarkupParseDeadline else { return }
         let generation = streamingMarkupParseTimerGeneration
-        let delay = max(0, deadline - ProcessInfo.processInfo.systemUptime)
+        let delay = max(0, deadline - projectionMonotonicNow())
+        streamingMarkupParseTimerScheduledDelay = delay
         let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.streamingMarkupParseTimerFired(generation: generation)
@@ -887,6 +890,7 @@ final class ManagedAgentTileNSView: TileNSView {
     private func streamingMarkupParseTimerFired(generation: UInt64) {
         guard generation == streamingMarkupParseTimerGeneration else { return }
         streamingMarkupParseTimer = nil
+        streamingMarkupParseTimerScheduledDelay = nil
         if model.flushPendingStreamingMarkupIfDue() {
             synchronizeV2Transcript()
         }
@@ -1259,6 +1263,7 @@ final class ManagedAgentTileNSView: TileNSView {
     var qaWhatAccessibilityValue: String { locationStatus.qaWhatAccessibilityValue }
     var qaLocationStaleTimerActive: Bool { locationStaleTimer?.isValid == true }
     var qaStreamingMarkupParseTimerActive: Bool { streamingMarkupParseTimer?.isValid == true }
+    var qaStreamingMarkupParseTimerInterval: TimeInterval? { streamingMarkupParseTimerScheduledDelay }
     var qaStreamingMarkupParseTimerGeneration: UInt64 { streamingMarkupParseTimerGeneration }
     var qaStreamingMarkupParseCount: Int { model.streamingMarkupParseCount }
     func qaSemanticMarkupIsSingleStrongText(_ expected: String) -> Bool {
