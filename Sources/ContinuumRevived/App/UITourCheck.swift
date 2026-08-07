@@ -65,10 +65,28 @@ enum UITourCheck {
         let state: String
         let size: NSSize
         let appearance: NSAppearance.Name
+        let scale: CGFloat
         let make: () -> NSView
 
+        init(
+            surface: String,
+            state: String,
+            size: NSSize,
+            appearance: NSAppearance.Name,
+            scale: CGFloat = UIProbe.renderScale,
+            make: @escaping () -> NSView
+        ) {
+            self.surface = surface
+            self.state = state
+            self.size = size
+            self.appearance = appearance
+            self.scale = scale
+            self.make = make
+        }
+
         var fileName: String {
-            "\(surface)-\(state)-\(Int(size.width))x\(Int(size.height))-\(UITourCheck.shortName(appearance)).png"
+            let scaleSuffix = scale == UIProbe.renderScale ? "" : "-\(Int(scale))x"
+            return "\(surface)-\(state)-\(Int(size.width))x\(Int(size.height))-\(UITourCheck.shortName(appearance))\(scaleSuffix).png"
         }
     }
 
@@ -223,6 +241,20 @@ enum UITourCheck {
                     )
                 }
             ))
+        }
+
+        let throbberSize = ThrobberCandidateGalleryView.preferredSize
+        for scale in [CGFloat(1), CGFloat(2)] {
+            for appearance in appearances {
+                shots.append(Shot(
+                    surface: "throbber-candidates",
+                    state: "all-phases-\(Int(scale))x",
+                    size: throbberSize,
+                    appearance: appearance,
+                    scale: scale,
+                    make: { LabCatalog.makeThrobberCandidateGalleryView(mode: .snapshot) }
+                ))
+            }
         }
 
         for lab in labSurfaces {
@@ -397,7 +429,7 @@ enum UITourCheck {
 
         for shot in try plan() {
             let probe = try UIProbe.render(
-                UIProbe.Spec(id: shot.fileName, size: shot.size, appearance: shot.appearance),
+                UIProbe.Spec(id: shot.fileName, size: shot.size, appearance: shot.appearance, renderScale: shot.scale),
                 make: shot.make
             )
             try writePNG(probe.hostRep, to: directory.appendingPathComponent(shot.fileName))

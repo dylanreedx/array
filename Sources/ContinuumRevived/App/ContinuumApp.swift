@@ -11131,6 +11131,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             tile.frame = NSRect(x: 0, y: 0, width: 460, height: 520)
             content = tile
             backingSize = NSSize(width: 460, height: 520)
+        case "throbber-candidates":
+            let gallery = LabCatalog.makeThrobberCandidateGalleryView(mode: .snapshot)
+            gallery.frame = NSRect(origin: .zero, size: ThrobberCandidateGalleryView.preferredSize)
+            content = gallery
+            backingSize = ThrobberCandidateGalleryView.preferredSize
         default:
             FileHandle.standardError.write(Data("unknown component snapshot: \(name)\n".utf8))
             return false

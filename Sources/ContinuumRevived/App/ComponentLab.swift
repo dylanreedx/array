@@ -1169,7 +1169,7 @@ enum LabCatalog {
             sidebarLiveCard, activityDockCard, sidebarSelectedCard, managedAgentCard,
             managedAgentLocationStatusCard, managedAgentNarrowLocationTileCard,
             transcriptReviewCard, composerReviewCard, composerFullVariantCard,
-            composerCompactVariantCard, composerProviderControlsCard,
+            composerCompactVariantCard, composerProviderControlsCard, throbberCandidateGalleryCard,
 
             // MARK: night3-C cards
             managedAgentApprovalDockCard, newTileCwdPolicyCard,
@@ -2283,6 +2283,25 @@ enum LabCatalog {
                 footer.apply(.init(model: "openai-codex/gpt-5.4-mini", thinking: "xhigh"))
                 return footer
             }
+        )
+    }
+
+    private static var throbberCandidateGalleryCard: LabEntry {
+        LabEntry(
+            id: "managed-agent.throbber-candidates",
+            category: "Managed Agent",
+            title: "Throbber Candidates — Motion Study",
+            summary: "Four candidate thinking indicators in managed-agent tile chrome, with deterministic normal/reduced-motion phases for Starting, Thinking, and Responding.",
+            content: .reviewSurface(preferredSize: ThrobberCandidateGalleryView.preferredSize) {
+                LabCatalog.makeThrobberCandidateGalleryView(mode: .live)
+            }
+        )
+    }
+
+    static func makeThrobberCandidateGalleryView(mode: ThrobberCandidateGalleryView.Mode) -> ThrobberCandidateGalleryView {
+        ThrobberCandidateGalleryView(
+            frame: NSRect(origin: .zero, size: ThrobberCandidateGalleryView.preferredSize),
+            mode: mode
         )
     }
 
@@ -3514,6 +3533,164 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
     }
 
+    private static func runThrobberCandidateGalleryCheck(fail: (String) -> Error) throws {
+        let expectedIndicators = ThrobberCandidateGalleryView.Candidate.allCases.count
+            * ThrobberCandidateGalleryView.fixtures.count
+        let sizes = [ThrobberCandidateGalleryView.preferredSize]
+        let appearances: [NSAppearance.Name] = [.aqua, .darkAqua]
+        let scales = [CGFloat(1), CGFloat(2)]
+        var contrast = UIProbeContrast.Evaluation()
+        var probed = 0
+
+        for size in sizes {
+            for appearance in appearances {
+                for scale in scales {
+                    let probe = try UIProbe.render(
+                        UIProbe.Spec(
+                            id: "managed-agent.throbber-candidates.\(appearance.rawValue).\(Int(scale))x",
+                            size: size,
+                            appearance: appearance,
+                            renderScale: scale
+                        ),
+                        make: { LabCatalog.makeThrobberCandidateGalleryView(mode: .snapshot) }
+                    )
+                    guard let gallery = probe.view as? ThrobberCandidateGalleryView else {
+                        throw fail("throbber gallery probe did not render ThrobberCandidateGalleryView")
+                    }
+                    try UIProbeGeometry.expectNoZeroSizeViews(gallery, label: "throbber-candidates.\(appearance.rawValue).\(Int(scale))x")
+                    try UIProbeGeometry.expectNoClipping(gallery, label: "throbber-candidates.\(appearance.rawValue).\(Int(scale))x")
+                    try UIProbeGeometry.expectNoBrokenRequiredSizeConstraints(gallery, label: "throbber-candidates.\(appearance.rawValue).\(Int(scale))x")
+                    let renderedScale = CGFloat(probe.hostRep.pixelsWide) / max(1, size.width)
+                    guard abs(renderedScale - scale) < 0.001 else {
+                        throw fail("throbber gallery rendered at \(renderedScale)x, expected \(scale)x")
+                    }
+                    guard gallery.qaIndicatorViews.count == expectedIndicators,
+                          gallery.qaFixtureCount == 6,
+                          gallery.qaCandidateCount == 4,
+                          gallery.descendants(withPrefix: "throbberCandidates.candidate.").count == expectedIndicators,
+                          gallery.descendants(withPrefix: "throbberCandidates.fixture.").count == expectedIndicators,
+                          gallery.qaHeaderLabelPairs.count == expectedIndicators else {
+                        throw fail("throbber gallery lost candidates, fixtures, or labels")
+                    }
+                    for pair in gallery.qaHeaderLabelPairs {
+                        let label = "throbber-candidates.\(appearance.rawValue).\(Int(scale))x.\(pair.identifier)"
+                        let gap = pair.fixtureFrameInGallery.minX - pair.candidateFrameInGallery.maxX
+                        guard !pair.candidateTranslatesAutoresizingMask,
+                              !pair.fixtureTranslatesAutoresizingMask,
+                              !pair.candidateHasAmbiguousLayout,
+                              !pair.fixtureHasAmbiguousLayout else {
+                            throw fail("\(label) header labels kept autoresizing masks or ambiguous layout")
+                        }
+                        guard gap >= CGFloat(Space.xs) - 0.5,
+                              pair.candidateFrameInGallery.width + 0.5 >= pair.candidateIntrinsicWidth,
+                              pair.fixtureFrameInGallery.width + 0.5 >= pair.fixtureIntrinsicWidth,
+                              !pair.candidateFrameInGallery.intersects(pair.fixtureFrameInGallery),
+                              gallery.bounds.contains(pair.candidateFrameInGallery),
+                              gallery.bounds.contains(pair.fixtureFrameInGallery) else {
+                            throw fail("\(label) header labels overlap or are too close (gap \(gap)pt)")
+                        }
+                    }
+                    guard gallery.qaIndicatorFixtures.allSatisfy({ activeAnimationCount(in: $0.indicator) == 0 }) else {
+                        throw fail("throbber snapshot gallery installed live animations in a deterministic route")
+                    }
+                    for indicator in gallery.qaIndicatorViews {
+                        guard indicator.bounds.width == 18,
+                              indicator.bounds.height == 18,
+                              indicator.accessibilityRole() == .progressIndicator,
+                              indicator.accessibilityLabel()?.contains("Agent thinking") == true,
+                              gallery.bounds.contains(indicator.convert(indicator.bounds, to: gallery)) else {
+                            throw fail("throbber gallery indicator lost size, progress accessibility, label, or containment")
+                        }
+                    }
+                    contrast.merge(try UIProbeContrast.evaluate(probe))
+                    probed += 1
+                }
+            }
+        }
+        guard contrast.measured > 0, contrast.failures.isEmpty else {
+            throw fail("throbber gallery contrast failed: \(contrast.failures.joined(separator: "; "))")
+        }
+
+        let liveProbe = try UIProbe.render(
+            UIProbe.Spec(
+                id: "managed-agent.throbber-candidates.live.darkAqua",
+                size: ThrobberCandidateGalleryView.preferredSize,
+                appearance: .darkAqua
+            ),
+            make: { LabCatalog.makeThrobberCandidateGalleryView(mode: .live) }
+        )
+        guard let liveGallery = liveProbe.view as? ThrobberCandidateGalleryView else {
+            throw fail("live throbber gallery probe did not render ThrobberCandidateGalleryView")
+        }
+        let liveFixtures = liveGallery.qaIndicatorFixtures
+        guard liveFixtures.filter({ !$0.reducedMotion }).count == ThrobberCandidateGalleryView.Candidate.allCases.count * ThrobberCandidateGalleryView.Stage.allCases.count,
+              liveFixtures.filter({ $0.reducedMotion }).count == ThrobberCandidateGalleryView.Candidate.allCases.count * ThrobberCandidateGalleryView.Stage.allCases.count else {
+            throw fail("live throbber gallery lost normal/reduced fixture coverage")
+        }
+        for fixture in liveFixtures where fixture.reducedMotion {
+            guard activeAnimationCount(in: fixture.indicator) == 0 else {
+                throw fail("live throbber gallery animated reduced-motion fixture \(fixture.identifier)")
+            }
+        }
+        for fixture in liveFixtures where !fixture.reducedMotion {
+            guard activeAnimationCount(in: fixture.indicator) > 0 else {
+                throw fail("live throbber gallery did not animate normal fixture \(fixture.identifier)")
+            }
+        }
+
+        for candidate in ThrobberCandidateGalleryView.Candidate.allCases {
+            let indicator = candidate.makeIndicator()
+            indicator.frame = NSRect(x: 0, y: 0, width: 18, height: 18)
+            indicator.setSnapshotPhase(0.38)
+            indicator.startAnimating()
+            guard activeAnimationCount(in: indicator) == 0 else {
+                throw fail("\(candidate.rawValue) animated before entering a window")
+            }
+
+            let host = NSView(frame: NSRect(x: 0, y: 0, width: 40, height: 40))
+            let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = host
+            host.addSubview(indicator)
+            indicator.frame = NSRect(x: 11, y: 11, width: 18, height: 18)
+            host.layoutSubtreeIfNeeded()
+            indicator.setReducedMotion(false)
+            indicator.startAnimating()
+            guard activeAnimationCount(in: indicator) > 0 else {
+                throw fail("\(candidate.rawValue) did not install compositor animations when visible")
+            }
+            indicator.setReducedMotion(true)
+            guard activeAnimationCount(in: indicator) == 0 else {
+                throw fail("\(candidate.rawValue) kept animations under Reduced Motion")
+            }
+            indicator.setReducedMotion(false)
+            indicator.startAnimating()
+            indicator.isHidden = true
+            guard activeAnimationCount(in: indicator) == 0 else {
+                throw fail("\(candidate.rawValue) kept animations while hidden")
+            }
+            window.contentView = nil
+        }
+
+        guard probed == appearances.count * scales.count * sizes.count else {
+            throw fail("throbber gallery probe count \(probed) did not cover light/dark and 1x/2x")
+        }
+    }
+
+    private static func activeAnimationCount(in indicator: NSView & AgentThinkingIndicatorAnimating) -> Int {
+        switch indicator {
+        case let view as OrbitingTriadThinkingIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as ThinkingWaveIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as BreathingSparkIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as DrawingLoopIndicatorView:
+            return view.qaActiveAnimationCount
+        default:
+            return 0
+        }
+    }
+
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P2.6-slim-variant-parity.md
     /// A non-baseline live-tree witness for the slim row. The Component Lab owns
     /// the rendered catalogue, so this deliberately builds a small synthetic
@@ -3633,6 +3810,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         _ = NSApplication.shared
         try runPlanAndDiffRendererCheck(fail: fail)
         try runTranscriptReviewCheck(fail: fail)
+        try runThrobberCandidateGalleryCheck(fail: fail)
 
         let panel = ComponentLabPanel(env: LabEnvironment(ghostty: nil, browserEngine: nil))
         panel.show(near: nil)
@@ -3648,6 +3826,10 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard let transcriptEntry = entries.first(where: { $0.id == "agent.transcript.review" }),
               case .reviewSurface = transcriptEntry.content else {
             throw fail("missing supervised semantic transcript review surface")
+        }
+        guard let throbberEntry = entries.first(where: { $0.id == "managed-agent.throbber-candidates" }),
+              case .reviewSurface = throbberEntry.content else {
+            throw fail("missing throbber candidate review surface")
         }
         guard let composerEntry = entries.first(where: { $0.id == "agent.composer.review" }),
               case let .reviewSurface(composerSize, makeComposerView) = composerEntry.content,

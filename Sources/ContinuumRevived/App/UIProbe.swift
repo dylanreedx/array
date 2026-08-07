@@ -19,6 +19,7 @@ struct UIProbe {
         var id: String
         var size: NSSize
         var appearance: NSAppearance.Name
+        var renderScale: CGFloat = UIProbe.renderScale
     }
 
     /// One rendered probe. `window`/`host` are retained because a view's
@@ -90,7 +91,11 @@ struct UIProbe {
                 // actually look light, or the light pass is theatre.
                 host.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
                 host.layoutSubtreeIfNeeded()
-                built = .success((view, try bitmap(of: host, id: spec.id), try bitmap(of: view, id: "\(spec.id).content")))
+                built = .success((
+                    view,
+                    try bitmap(of: host, id: spec.id, scale: spec.renderScale),
+                    try bitmap(of: view, id: "\(spec.id).content", scale: spec.renderScale)
+                ))
             } catch {
                 built = .failure(error)
             }
@@ -129,15 +134,15 @@ struct UIProbe {
     // 2.0 rather than 1.0 deliberately: the committed baselines were blessed from 2x
     // renders, and 2x is what production Retina hardware draws, so a probe at 1x
     // would gate antialiasing no user sees.
-    static let renderScale: CGFloat = 2.0
+    nonisolated static let renderScale: CGFloat = 2.0
 
-    private static func bitmap(of view: NSView, id: String) throws -> NSBitmapImageRep {
+    private static func bitmap(of view: NSView, id: String, scale: CGFloat = renderScale) throws -> NSBitmapImageRep {
         guard view.bounds.width > 0, view.bounds.height > 0 else {
             throw fail("\(id): view laid out to \(view.bounds.width)x\(view.bounds.height)")
         }
         let points = view.bounds.size
-        let pixelsWide = Int((points.width * renderScale).rounded())
-        let pixelsHigh = Int((points.height * renderScale).rounded())
+        let pixelsWide = Int((points.width * scale).rounded())
+        let pixelsHigh = Int((points.height * scale).rounded())
         guard let rep = NSBitmapImageRep(
             bitmapDataPlanes: nil,
             pixelsWide: pixelsWide,
