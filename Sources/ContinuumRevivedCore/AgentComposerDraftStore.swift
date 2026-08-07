@@ -1,4 +1,5 @@
 import ContinuumRevivedAgentContent
+import Darwin
 import Foundation
 
 /// One host-local image attachment retained by an unfinished composer draft.
@@ -85,13 +86,43 @@ public struct AgentComposerDraftStoreLayout: Sendable {
     }
 }
 
+public enum AgentComposerSubmissionState: String, Codable, Sendable {
+    case pending
+    case confirming
+    case confirmed
+}
+
 public struct AgentComposerSubmissionSnapshot: Codable, Equatable, Sendable {
     public var draft: AgentComposerDraft
     public var submittedAt: Date
+    public var state: AgentComposerSubmissionState
 
-    public init(draft: AgentComposerDraft, submittedAt: Date) {
+    public init(
+        draft: AgentComposerDraft,
+        submittedAt: Date,
+        state: AgentComposerSubmissionState = .pending
+    ) {
         self.draft = draft
         self.submittedAt = submittedAt
+        self.state = state
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case draft, submittedAt, state
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        draft = try values.decode(AgentComposerDraft.self, forKey: .draft)
+        submittedAt = try values.decode(Date.self, forKey: .submittedAt)
+        state = try values.decodeIfPresent(AgentComposerSubmissionState.self, forKey: .state) ?? .pending
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(draft, forKey: .draft)
+        try values.encode(submittedAt, forKey: .submittedAt)
+        try values.encode(state, forKey: .state)
     }
 }
 
@@ -108,6 +139,8 @@ public actor AgentComposerDraftStore {
     private let attachmentStore: AgentComposerAttachmentStore?
     private let clock: any Clock
     private let warn: @Sendable (String) -> Void
+    private let writeSubmissionSnapshotFile: @Sendable (AgentComposerSubmissionSnapshot, URL) throws -> Void
+    private let removeItem: @Sendable (URL) throws -> Void
     private var pending: [AgentID: AgentComposerDraft] = [:]
     private var scheduledWrites: [AgentID: Task<Void, Never>] = [:]
     /// Highest edit timestamp accepted for each agent. UI callbacks enqueue
@@ -122,7 +155,9 @@ public actor AgentComposerDraftStore {
         debounceInterval: TimeInterval = 0.5,
         attachmentStore: AgentComposerAttachmentStore? = nil,
         clock: any Clock = SystemClock(),
-        warn: @escaping @Sendable (String) -> Void = { fputs($0 + "\n", stderr) }
+        warn: @escaping @Sendable (String) -> Void = { fputs($0 + "\n", stderr) },
+        submissionSnapshotWriter: (@Sendable (AgentComposerSubmissionSnapshot, URL) throws -> Void)? = nil,
+        removeItem: (@Sendable (URL) throws -> Void)? = nil
     ) {
         let root = applicationSupportDirectory
             ?? AgentStore.resolveApplicationSupportDirectory(smokeTest: false)
@@ -137,6 +172,11 @@ public actor AgentComposerDraftStore {
         self.attachmentStore = attachmentStore
         self.clock = clock
         self.warn = warn
+        self.writeSubmissionSnapshotFile = submissionSnapshotWriter ?? { snapshot, file in
+            try AtomicWriter(backupsDirectory: nil, retainedBackups: 0).write(snapshot, to: file)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        }
+        self.removeItem = removeItem ?? { try FileManager.default.removeItem(at: $0) }
     }
 
     public func save(_ draft: AgentComposerDraft, for agentID: AgentID) {
@@ -222,8 +262,30 @@ public actor AgentComposerDraftStore {
     /// rejection. The snapshot is removed only after the visible draft has been
     /// durably restored.
     @discardableResult
-    public func restoreSubmission(for agentID: AgentID) throws -> AgentComposerDraft? {
+    public func restoreSubmission(for agentID: AgentID) async throws -> AgentComposerDraft? {
         guard let snapshot = try loadSubmissionSnapshot(for: agentID) else { return nil }
+        switch snapshot.state {
+        case .pending:
+            break
+        case .confirming:
+            if let attachmentStore {
+                try await attachmentStore.recoverPendingOwnershipTransfers()
+            }
+            if let attachmentStore, !snapshot.draft.imageAttachments.isEmpty {
+                do {
+                    _ = try await attachmentStore.preparePromptAttachments(
+                        for: agentID,
+                        draftAttachments: snapshot.draft.imageAttachments
+                    )
+                } catch {
+                    warn("AgentComposerDraftStore.restoreSubmission: confirming snapshot for \(agentID.rawValue) is no longer draft-restorable: \(error)")
+                    return nil
+                }
+            }
+        case .confirmed:
+            try removeSubmissionSnapshot(for: agentID)
+            return nil
+        }
         clearedThrough[agentID] = nil
         newestSeen[agentID] = snapshot.draft.updatedAt
         pending[agentID] = snapshot.draft
@@ -237,16 +299,38 @@ public actor AgentComposerDraftStore {
     /// snapshot remains available for restore and the visible draft stays cleared.
     @discardableResult
     public func confirmSubmissionStarted(for agentID: AgentID, sentAt: Date? = nil) async throws -> Bool {
-        guard let snapshot = try loadSubmissionSnapshot(for: agentID) else { return false }
-        if let attachmentStore, !snapshot.draft.imageAttachments.isEmpty {
-            try await attachmentStore.transferDraftAttachmentsToSent(
-                for: agentID,
-                draftAttachments: snapshot.draft.imageAttachments,
-                sentAt: sentAt ?? clock.now()
-            )
+        guard var snapshot = try loadSubmissionSnapshot(for: agentID) else { return false }
+        let stamp = sentAt ?? clock.now()
+        if snapshot.state == .confirmed {
+            try removeSubmissionSnapshot(for: agentID)
+            clearVisibleDraft(for: agentID, clearThrough: max(stamp, snapshot.draft.updatedAt))
+            return true
         }
+        if snapshot.state == .pending {
+            snapshot.state = .confirming
+            try persistSubmissionSnapshot(snapshot, for: agentID)
+        }
+        if let attachmentStore, !snapshot.draft.imageAttachments.isEmpty {
+            do {
+                try await attachmentStore.transferDraftAttachmentsToSent(
+                    for: agentID,
+                    draftAttachments: snapshot.draft.imageAttachments,
+                    sentAt: stamp
+                )
+            } catch {
+                guard try await attachmentsAreAlreadySent(
+                    snapshot.draft.imageAttachments,
+                    for: agentID,
+                    in: attachmentStore
+                ) else {
+                    throw error
+                }
+            }
+        }
+        snapshot.state = .confirmed
+        try persistSubmissionSnapshot(snapshot, for: agentID)
         try removeSubmissionSnapshot(for: agentID)
-        clearVisibleDraft(for: agentID, clearThrough: max(sentAt ?? clock.now(), snapshot.draft.updatedAt))
+        clearVisibleDraft(for: agentID, clearThrough: max(stamp, snapshot.draft.updatedAt))
         return true
     }
 
@@ -268,7 +352,7 @@ public actor AgentComposerDraftStore {
         pending.removeValue(forKey: agentID)
         let url = layout.draftFile(for: agentID)
         if FileManager.default.fileExists(atPath: url.path) {
-            do { try FileManager.default.removeItem(at: url) }
+            do { try removeItem(url) }
             catch { warn("AgentComposerDraftStore.clear: could not remove \(url.path): \(error)") }
         }
     }
@@ -298,8 +382,7 @@ public actor AgentComposerDraftStore {
             ofItemAtPath: layout.submissionRecoveryDirectory.path
         )
         let file = layout.submissionRecoveryFile(for: agentID)
-        try writer.write(snapshot, to: file)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        try writeSubmissionSnapshotFile(snapshot, file)
     }
 
     private func loadSubmissionSnapshot(for agentID: AgentID) throws -> AgentComposerSubmissionSnapshot? {
@@ -308,10 +391,26 @@ public actor AgentComposerDraftStore {
         return try writer.read(at: file)
     }
 
+    private func attachmentsAreAlreadySent(
+        _ attachments: [AgentComposerDraftImageAttachment],
+        for agentID: AgentID,
+        in attachmentStore: AgentComposerAttachmentStore
+    ) async throws -> Bool {
+        for attachment in attachments {
+            guard let manifest = try await attachmentStore.manifest(for: attachment.attachmentID),
+                  manifest.ownership.state == .sent,
+                  manifest.ownership.agentID == agentID else {
+                return false
+            }
+        }
+        return true
+    }
+
     private func removeSubmissionSnapshot(for agentID: AgentID) throws {
         let file = layout.submissionRecoveryFile(for: agentID)
         if FileManager.default.fileExists(atPath: file.path) {
-            try FileManager.default.removeItem(at: file)
+            try removeItem(file)
+            try Self.fsyncDirectory(file.deletingLastPathComponent())
         }
     }
 
@@ -325,5 +424,20 @@ public actor AgentComposerDraftStore {
     private static func restrictPermissions(at directory: URL, file: URL) throws {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    }
+
+    private static func fsyncDirectory(_ directory: URL) throws {
+        let fd = open(directory.path, O_RDONLY)
+        guard fd >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        if fsync(fd) != 0 {
+            let err = errno
+            close(fd)
+            throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
+        }
+        if close(fd) != 0 {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
     }
 }

@@ -1668,7 +1668,7 @@ final class AgentSupervisor {
                     DispatchQueue.main.async { self?.deliver(bound, to: id) }
                 }
             } catch {
-                let message = SecretRedactor.redact(String(describing: error))
+                let message = SecretRedactor.redactLocalDiagnostics(String(describing: error))
                 fputs("AgentSupervisor: runner failed for agent \(id.rawValue.uuidString): \(message)\n", stderr)
                 DispatchQueue.main.async {
                     self?.deliver(.runtimeError(threadId: threadId, message: message), to: id)
@@ -1685,22 +1685,8 @@ final class AgentSupervisor {
 
     private nonisolated static func visibleNamingText(from prompt: AgentPrompt) -> String? {
         let bounded = String(prompt.text.prefix(AgentNameOneShot.maximumPromptLength))
-        let tokens = bounded
-            .split(whereSeparator: { $0.isWhitespace || $0.isNewline })
-            .map(String.init)
-            .filter { !isLocalPathReferenceToken($0) }
-        let visible = tokens.joined(separator: " ")
+        let visible = SecretRedactor.removeLocalPathReferences(bounded)
         return AgentName.normalizedLabel(visible)
-    }
-
-    private nonisolated static func isLocalPathReferenceToken(_ token: String) -> Bool {
-        let stripped = token.trimmingCharacters(in: CharacterSet(charactersIn: "\"'`()[]{}<>.,;:"))
-        return stripped.hasPrefix("@/")
-            || stripped.hasPrefix("@~/")
-            || stripped.hasPrefix("@file://")
-            || stripped.hasPrefix("/")
-            || stripped.hasPrefix("~/")
-            || stripped.hasPrefix("file://")
     }
 
     /// Terminates the in-flight runner and records the stop on the agent's stream.
@@ -4241,7 +4227,7 @@ func runAgentSupervisorChecks() async throws {
         thinking: config.thinking,
         projectId: nil)
     let mixedPrompt = AgentPrompt(
-        text: "  Compare visible screen details @/tmp/name-leak.png /Users/dylan/Private/name-leak.png  ",
+        text: "  Compare visible screen details Inspect(/Users/dylan/Private/name-leak.png) '@/tmp/quoted-name-leak.png' @/tmp/name-leak.png  ",
         imageAttachments: [imageAttachment("supervisor-image-3", path: "/tmp/mixed hidden.png", displayName: "mixed visible image.png")])
     guard await mixedSupervisor.accept(.sendPrompt(mixedPrompt), for: mixedAgent) == .accepted else {
         throw fail("image transport: text plus image AgentPrompt was refused at the supervisor accept seam")
@@ -4249,7 +4235,7 @@ func runAgentSupervisorChecks() async throws {
     guard await waitUntil(timeout: 5, pollInterval: 0.02, { mixedRunner.agentPrompts.count == 1 }) else {
         throw fail("image transport: mixed AgentPrompt did not reach the runner")
     }
-    guard mixedRunner.agentPrompts[0].text == "Compare visible screen details @/tmp/name-leak.png /Users/dylan/Private/name-leak.png",
+    guard mixedRunner.agentPrompts[0].text == "Compare visible screen details Inspect(/Users/dylan/Private/name-leak.png) '@/tmp/quoted-name-leak.png' @/tmp/name-leak.png",
           mixedRunner.agentPrompts[0].imageAttachments.map(\.fileURL.path) == ["/tmp/mixed hidden.png"] else {
         throw fail("image transport: mixed prompt text/attachments were not preserved at the runner: \(mixedRunner.agentPrompts)")
     }
@@ -4258,8 +4244,9 @@ func runAgentSupervisorChecks() async throws {
           !mixedName.contains("/"),
           !mixedName.contains("@"),
           !mixedName.contains("name-leak"),
+          !mixedName.contains("Users"),
           mixedName.contains("Compare visible screen details") else {
-        throw fail("image transport: first-prompt naming leaked path/@path text or exceeded the visible-text cap: \(mixedName)")
+        throw fail("image transport: first-prompt naming leaked embedded/quoted path/@path text or exceeded the visible-text cap: \(mixedName)")
     }
 
     // Queue 91 P3.6/P3.7 — Home may be changed only while the agent is still a

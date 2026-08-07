@@ -93,9 +93,9 @@ public final class PiAgentRunner: @unchecked Sendable {
         public var description: String {
             switch self {
             case .launchFailed(let message):
-                return "launchFailed(\(SecretRedactor.redact(message)))"
+                return "launchFailed(\(SecretRedactor.redactLocalDiagnostics(message)))"
             case .piFailed(let exitCode, let stderr):
-                return "piFailed(exitCode: \(exitCode), stderr: \(SecretRedactor.redact(stderr)))"
+                return "piFailed(exitCode: \(exitCode), stderr: \(SecretRedactor.redactLocalDiagnostics(stderr)))"
             }
         }
     }

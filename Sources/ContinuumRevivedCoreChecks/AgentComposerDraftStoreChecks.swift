@@ -19,6 +19,21 @@ private final class DraftWarningBox: @unchecked Sendable {
     }
 }
 
+private final class AttachmentWriteFaultBox: @unchecked Sendable {
+    enum Mode {
+        case normal
+        case failSecondSentAndFirstRollback(first: AgentImageAttachmentID, second: AgentImageAttachmentID)
+    }
+
+    var mode: Mode = .normal
+}
+
+private final class SubmissionFaultBox: @unchecked Sendable {
+    var failConfirmingRewrite = false
+    var failConfirmedRewrite = false
+    var failRecoveryDeletion = false
+}
+
 private func draftImageMetadata(_ index: Int) -> AgentImageAttachmentMetadata {
     AgentImageAttachmentMetadata(
         id: AgentImageAttachmentID(rawValue: "draft-local-image-\(index)")!,
@@ -414,10 +429,15 @@ private func runAgentComposerAttachmentStoreChecks(
     let hiddenPreStart = await lifecycleStore.load(for: agentA)
     expect(beganPreStart && hiddenPreStart == nil,
            "beginSubmission must clear visible state only after retaining a durable recovery snapshot")
-    let restoredPreStart = try await lifecycleStore.restoreSubmission(for: agentA)
-    let visibleAfterRestore = await lifecycleStore.load(for: agentA)
+    let preStartRelaunched = AgentComposerDraftStore(
+        applicationSupportDirectory: root,
+        debounceInterval: 60,
+        attachmentStore: attachmentStore,
+        clock: clock)
+    let restoredPreStart = try await preStartRelaunched.restoreSubmission(for: agentA)
+    let visibleAfterRestore = await preStartRelaunched.load(for: agentA)
     expect(restoredPreStart == lifecycleDraft && visibleAfterRestore == lifecycleDraft,
-           "pre-start rejection must restore the exact draft and attachment refs from recovery")
+           "pre-start rejection must restore the exact draft and attachment refs from pending recovery after relaunch")
 
     let beganConfirmed = try await lifecycleStore.beginSubmission(for: agentA, submittedAt: clock.now())
     let hiddenBeforeConfirm = await lifecycleStore.load(for: agentA)
@@ -455,6 +475,182 @@ private func runAgentComposerAttachmentStoreChecks(
         expect(remainingObjects.isEmpty,
                "object bytes written before a manifest fault must be rolled back")
     }
+
+    let importRollbackFaultRoot = root.appendingPathComponent("import-rollback-fault", isDirectory: true)
+    let importRollbackFaultStore = AgentComposerAttachmentStore(
+        applicationSupportDirectory: importRollbackFaultRoot,
+        clock: clock,
+        manifestWriter: { _, _ in throw CocoaError(.fileWriteUnknown) },
+        removeItem: { _ in throw CocoaError(.fileWriteNoPermission) }
+    )
+    do {
+        _ = try await importRollbackFaultStore.importValidatedPastedImage(
+            Data([7, 7, 8]),
+            displayName: "rollback-fault.png",
+            validation: pngValidation,
+            forDraftOf: agentA
+        )
+        expect(false, "manifest failure plus object rollback failure must surface a composite import error")
+    } catch AgentComposerAttachmentStoreError.importRollbackFailed(let manifestError, let objectPath, let rollbackError) {
+        expect(manifestError.contains("Cocoa") && rollbackError.contains("Cocoa"),
+               "composite import rollback error must preserve both root causes")
+        expect(FileManager.default.fileExists(atPath: objectPath),
+               "failed object rollback must leave the orphaned object path discoverable for cleanup")
+    }
+
+    let transferFaultRoot = root.appendingPathComponent("transfer-rollback-fault", isDirectory: true)
+    let transferFaults = AttachmentWriteFaultBox()
+    let transferFaultStore = AgentComposerAttachmentStore(
+        applicationSupportDirectory: transferFaultRoot,
+        clock: clock,
+        manifestWriter: { manifest, url in
+            switch transferFaults.mode {
+            case .normal:
+                break
+            case .failSecondSentAndFirstRollback(let first, let second):
+                if manifest.id == second && manifest.ownership.state == .sent {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                if manifest.id == first && manifest.ownership.state == .draft {
+                    throw CocoaError(.fileWriteNoPermission)
+                }
+            }
+            try AtomicWriter(backupsDirectory: nil, retainedBackups: 0).write(manifest, to: url)
+        }
+    )
+    let transferFirst = try await transferFaultStore.importValidatedPastedImage(
+        Data([4, 4, 4]), displayName: "transfer-first.png", validation: pngValidation, forDraftOf: agentA)
+    let transferSecond = try await transferFaultStore.importValidatedPastedImage(
+        Data([5, 5, 5]), displayName: "transfer-second.png", validation: pngValidation, forDraftOf: agentA)
+    transferFaults.mode = .failSecondSentAndFirstRollback(first: transferFirst.manifest.id, second: transferSecond.manifest.id)
+    do {
+        try await transferFaultStore.transferDraftAttachmentsToSent(
+            for: agentA,
+            draftAttachments: [transferFirst.draftAttachment, transferSecond.draftAttachment],
+            sentAt: clock.now())
+        expect(false, "partial ownership transfer plus rollback failure must throw a composite rollback error")
+    } catch AgentComposerAttachmentStoreError.transferRollbackFailed(let transferError, let rollbackFailures, let journalPath) {
+        expect(transferError.contains("Cocoa") && rollbackFailures.contains { $0.contains(transferFirst.manifest.id.rawValue) },
+               "transfer rollback error must preserve transfer and rollback root causes")
+        expect(FileManager.default.fileExists(atPath: journalPath),
+               "failed transfer rollback must leave a durable recovery journal")
+    }
+    let transferFirstMixed = try await transferFaultStore.manifest(for: transferFirst.manifest.id)
+    let transferSecondMixed = try await transferFaultStore.manifest(for: transferSecond.manifest.id)
+    expect(transferFirstMixed?.ownership.state == .sent && transferSecondMixed?.ownership.state == .draft,
+           "fault fixture must witness mixed ownership before journal recovery")
+    let transferRecoveryStore = AgentComposerAttachmentStore(applicationSupportDirectory: transferFaultRoot, clock: clock)
+    try await transferRecoveryStore.recoverPendingOwnershipTransfers()
+    let transferFirstRecovered = try await transferRecoveryStore.manifest(for: transferFirst.manifest.id)
+    let transferSecondRecovered = try await transferRecoveryStore.manifest(for: transferSecond.manifest.id)
+    expect(transferFirstRecovered?.ownership.state == .draft && transferSecondRecovered?.ownership.state == .draft,
+           "journal recovery must restore an interrupted pending ownership transfer to one coherent draft-owned state")
+
+    let snapshotRewriteRoot = root.appendingPathComponent("snapshot-rewrite-fault", isDirectory: true)
+    let snapshotRewriteAttachmentStore = AgentComposerAttachmentStore(applicationSupportDirectory: snapshotRewriteRoot, clock: clock)
+    let snapshotRewriteImage = try await snapshotRewriteAttachmentStore.importValidatedPastedImage(
+        Data([6, 6, 6]), displayName: "snapshot-rewrite.png", validation: pngValidation, forDraftOf: agentA)
+    let snapshotRewriteDraft = AgentComposerDraft(
+        text: "rewrite fail restore", selection: 0..<12, updatedAt: clock.now(), imageAttachments: [snapshotRewriteImage.draftAttachment])
+    let snapshotRewriteFaults = SubmissionFaultBox()
+    let snapshotRewriteStore = AgentComposerDraftStore(
+        applicationSupportDirectory: snapshotRewriteRoot,
+        debounceInterval: 60,
+        attachmentStore: snapshotRewriteAttachmentStore,
+        clock: clock,
+        submissionSnapshotWriter: { snapshot, url in
+            if snapshotRewriteFaults.failConfirmingRewrite && snapshot.state == .confirming {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            try AtomicWriter(backupsDirectory: nil, retainedBackups: 0).write(snapshot, to: url)
+        })
+    await snapshotRewriteStore.save(snapshotRewriteDraft, for: agentA)
+    await snapshotRewriteStore.flushAll()
+    let beganSnapshotRewrite = try await snapshotRewriteStore.beginSubmission(for: agentA, submittedAt: clock.now())
+    expect(beganSnapshotRewrite, "snapshot rewrite fixture must begin submission")
+    snapshotRewriteFaults.failConfirmingRewrite = true
+    do {
+        _ = try await snapshotRewriteStore.confirmSubmissionStarted(for: agentA, sentAt: clock.now())
+        expect(false, "confirming-state snapshot rewrite failure must throw before ownership transfer")
+    } catch {}
+    let restoredAfterRewriteFailure = try await snapshotRewriteStore.restoreSubmission(for: agentA)
+    let rewriteManifestAfterRestore = try await snapshotRewriteAttachmentStore.manifest(for: snapshotRewriteImage.manifest.id)
+    expect(restoredAfterRewriteFailure == snapshotRewriteDraft && rewriteManifestAfterRestore?.ownership.state == .draft,
+           "failure before durable confirmation must remain restorable as a draft")
+
+    let confirmingReloadRoot = root.appendingPathComponent("confirming-reload-fault", isDirectory: true)
+    let confirmingReloadDraft = AgentComposerDraft(
+        text: "confirming reload", selection: 0..<10, updatedAt: clock.now(), imageAttachments: [])
+    let confirmingReloadFaults = SubmissionFaultBox()
+    let confirmingReloadStore = AgentComposerDraftStore(
+        applicationSupportDirectory: confirmingReloadRoot,
+        debounceInterval: 60,
+        clock: clock,
+        submissionSnapshotWriter: { snapshot, url in
+            if confirmingReloadFaults.failConfirmedRewrite && snapshot.state == .confirmed {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            try AtomicWriter(backupsDirectory: nil, retainedBackups: 0).write(snapshot, to: url)
+        })
+    await confirmingReloadStore.save(confirmingReloadDraft, for: agentA)
+    await confirmingReloadStore.flushAll()
+    let beganConfirmingReload = try await confirmingReloadStore.beginSubmission(for: agentA, submittedAt: clock.now())
+    expect(beganConfirmingReload, "confirming reload fixture must begin submission")
+    confirmingReloadFaults.failConfirmedRewrite = true
+    do {
+        _ = try await confirmingReloadStore.confirmSubmissionStarted(for: agentA, sentAt: clock.now())
+        expect(false, "confirmed-state rewrite failure must leave a durable confirming recovery record")
+    } catch {}
+    let confirmingRelaunched = AgentComposerDraftStore(
+        applicationSupportDirectory: confirmingReloadRoot,
+        debounceInterval: 60,
+        clock: clock)
+    let restoredConfirmingAfterReload = try await confirmingRelaunched.restoreSubmission(for: agentA)
+    expect(restoredConfirmingAfterReload == confirmingReloadDraft,
+           "a durable confirming record that failed before confirmation must restore after crash/reload")
+
+    let snapshotDeleteRoot = root.appendingPathComponent("snapshot-delete-fault", isDirectory: true)
+    let snapshotDeleteAttachmentStore = AgentComposerAttachmentStore(applicationSupportDirectory: snapshotDeleteRoot, clock: clock)
+    let snapshotDeleteImage = try await snapshotDeleteAttachmentStore.importValidatedPastedImage(
+        Data([6, 7, 6]), displayName: "snapshot-delete.png", validation: pngValidation, forDraftOf: agentA)
+    let snapshotDeleteDraft = AgentComposerDraft(
+        text: "delete fail confirmed", selection: 0..<11, updatedAt: clock.now(), imageAttachments: [snapshotDeleteImage.draftAttachment])
+    let snapshotDeleteFaults = SubmissionFaultBox()
+    let snapshotDeleteLayout = AgentComposerDraftStoreLayout(applicationSupportDirectory: snapshotDeleteRoot)
+    let snapshotDeleteStore = AgentComposerDraftStore(
+        applicationSupportDirectory: snapshotDeleteRoot,
+        debounceInterval: 60,
+        attachmentStore: snapshotDeleteAttachmentStore,
+        clock: clock,
+        removeItem: { url in
+            if snapshotDeleteFaults.failRecoveryDeletion && url == snapshotDeleteLayout.submissionRecoveryFile(for: agentA) {
+                throw CocoaError(.fileWriteNoPermission)
+            }
+            try FileManager.default.removeItem(at: url)
+        })
+    await snapshotDeleteStore.save(snapshotDeleteDraft, for: agentA)
+    await snapshotDeleteStore.flushAll()
+    let beganSnapshotDelete = try await snapshotDeleteStore.beginSubmission(for: agentA, submittedAt: clock.now())
+    expect(beganSnapshotDelete, "snapshot delete fixture must begin submission")
+    snapshotDeleteFaults.failRecoveryDeletion = true
+    do {
+        _ = try await snapshotDeleteStore.confirmSubmissionStarted(for: agentA, sentAt: clock.now())
+        expect(false, "confirmed recovery snapshot deletion failure must be reported")
+    } catch {}
+    let snapshotDeleteManifest = try await snapshotDeleteAttachmentStore.manifest(for: snapshotDeleteImage.manifest.id)
+    expect(snapshotDeleteManifest?.ownership.state == .sent,
+           "delete failure after confirmation must not roll sent attachments back to drafts")
+    let snapshotDeleteRelaunched = AgentComposerDraftStore(
+        applicationSupportDirectory: snapshotDeleteRoot,
+        debounceInterval: 60,
+        attachmentStore: snapshotDeleteAttachmentStore,
+        clock: clock)
+    let restoredAfterConfirmedDeleteFault = try await snapshotDeleteRelaunched.restoreSubmission(for: agentA)
+    let visibleAfterConfirmedDeleteFault = await snapshotDeleteRelaunched.load(for: agentA)
+    expect(restoredAfterConfirmedDeleteFault == nil && visibleAfterConfirmedDeleteFault == nil,
+           "a leftover confirmed recovery record must never restore as a visible draft after relaunch")
+    expect(!FileManager.default.fileExists(atPath: snapshotDeleteLayout.submissionRecoveryFile(for: agentA).path),
+           "confirmed recovery deletion must be retryable on the next recovery interaction")
 
     let cleanupFaultRoot = root.appendingPathComponent("cleanup-fault", isDirectory: true)
     let cleanupFaultStore = AgentComposerAttachmentStore(

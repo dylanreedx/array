@@ -16,6 +16,16 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+private final class AtomicWriterOpenFaultState: @unchecked Sendable {
+    var failTempOpen = false
+    var failDirectoryOpen = false
+    var failTempFsync = false
+    var failDirectoryFsync = false
+    var failTempClose = false
+    var failDirectoryClose = false
+    var pathsByFD: [Int32: String] = [:]
+}
+
 if CommandLine.arguments.contains("--location-session-index-p5-check") {
     try runLocationSessionIndexP5Checks()
     Foundation.exit(0)
@@ -489,6 +499,92 @@ do {
     let genericRedacted = SecretRedactor.redact("Authorization: Bearer generic.token.value https://example.test/login?credential=querySecret&apikey=queryKey")
     expect(!genericRedacted.contains("generic.token.value"), "redactor must remove bearer token values without explicit secrets")
     expect(!genericRedacted.contains("querySecret") && !genericRedacted.contains("queryKey"), "redactor must remove query values without explicit secrets")
+    expect(genericRedacted.contains("https://example.test/login"),
+           "generic secret redaction must preserve HTTP(S) diagnostic URLs instead of treating //host/path as a local path")
+    let localDiagnostics = SecretRedactor.redactLocalDiagnostics(
+        "browser https://example.test/app.js provider @/Users/alice/private image and Inspect('/Users/alice/private file.png')")
+    expect(localDiagnostics.contains("https://example.test/app.js"),
+           "local diagnostics path redaction must still preserve HTTP(S) URLs")
+    expect(!localDiagnostics.contains("/Users/") && !localDiagnostics.contains("private file.png") && localDiagnostics.contains("[LOCAL-PATH]"),
+           "local diagnostics path redaction must remove embedded, quoted, and @path local capabilities")
+
+    let atomicFaultRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("AtomicWriterDescriptorFaults-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: atomicFaultRoot) }
+    try FileManager.default.createDirectory(at: atomicFaultRoot, withIntermediateDirectories: true)
+    let atomicFaultFile = atomicFaultRoot.appendingPathComponent("value.json")
+    let atomicFaultState = AtomicWriterOpenFaultState()
+    let atomicFaultWriter = AtomicWriter(
+        backupsDirectory: nil,
+        retainedBackups: 0,
+        descriptorOperations: AtomicWriterDescriptorOperations(
+            open: { path, flags in
+                if atomicFaultState.failTempOpen && URL(fileURLWithPath: path).lastPathComponent.hasPrefix(".value.json.tmp-") {
+                    errno = EACCES
+                    return -1
+                }
+                if atomicFaultState.failDirectoryOpen && path == atomicFaultRoot.path {
+                    errno = EACCES
+                    return -1
+                }
+                let fd = Darwin.open(path, flags)
+                if fd >= 0 { atomicFaultState.pathsByFD[fd] = path }
+                return fd
+            },
+            fsync: { fd in
+                let path = atomicFaultState.pathsByFD[fd] ?? ""
+                if atomicFaultState.failTempFsync && URL(fileURLWithPath: path).lastPathComponent.hasPrefix(".value.json.tmp-") {
+                    errno = EIO
+                    return -1
+                }
+                if atomicFaultState.failDirectoryFsync && path == atomicFaultRoot.path {
+                    errno = EIO
+                    return -1
+                }
+                return Darwin.fsync(fd)
+            },
+            close: { fd in
+                let path = atomicFaultState.pathsByFD.removeValue(forKey: fd) ?? ""
+                if atomicFaultState.failTempClose && URL(fileURLWithPath: path).lastPathComponent.hasPrefix(".value.json.tmp-") {
+                    _ = Darwin.close(fd)
+                    errno = EIO
+                    return -1
+                }
+                if atomicFaultState.failDirectoryClose && path == atomicFaultRoot.path {
+                    _ = Darwin.close(fd)
+                    errno = EIO
+                    return -1
+                }
+                return Darwin.close(fd)
+            }))
+    atomicFaultState.failTempOpen = true
+    expect((try? atomicFaultWriter.write(["value": "temp-open"], to: atomicFaultFile)) == nil,
+           "AtomicWriter must throw when the temp file descriptor open fails")
+    atomicFaultState.failTempOpen = false
+    atomicFaultState.failDirectoryOpen = true
+    expect((try? atomicFaultWriter.write(["value": "dir-open"], to: atomicFaultFile)) == nil,
+           "AtomicWriter must throw when the parent directory descriptor open fails")
+    atomicFaultState.failDirectoryOpen = false
+    atomicFaultState.failTempFsync = true
+    expect((try? atomicFaultWriter.write(["value": "temp-fsync"], to: atomicFaultFile)) == nil,
+           "AtomicWriter must throw when temp descriptor fsync fails")
+    atomicFaultState.failTempFsync = false
+    atomicFaultState.failDirectoryFsync = true
+    expect((try? atomicFaultWriter.write(["value": "dir-fsync"], to: atomicFaultFile)) == nil,
+           "AtomicWriter must throw when parent directory descriptor fsync fails")
+    atomicFaultState.failDirectoryFsync = false
+    atomicFaultState.failTempClose = true
+    expect((try? atomicFaultWriter.write(["value": "temp-close"], to: atomicFaultFile)) == nil,
+           "AtomicWriter must throw when temp descriptor close fails")
+    atomicFaultState.failTempClose = false
+    atomicFaultState.failDirectoryClose = true
+    expect((try? atomicFaultWriter.write(["value": "dir-close"], to: atomicFaultFile)) == nil,
+           "AtomicWriter must throw when parent directory descriptor close fails")
+    atomicFaultState.failDirectoryClose = false
+    try atomicFaultWriter.write(["value": "ok"], to: atomicFaultFile)
+    let atomicFaultDecoded: [String: String] = try atomicFaultWriter.read(at: atomicFaultFile)
+    expect(atomicFaultDecoded["value"] == "ok",
+           "AtomicWriter descriptor fault injection must not break the normal durable write path")
 
     let vaultScope = StoredCredentialScope(scheme: "HTTPS", host: "[Example.COM]", port: 443)
     expect(vaultScope == StoredCredentialScope(scheme: "https", host: "example.com", port: 443), "vault scopes should canonicalize scheme/host")

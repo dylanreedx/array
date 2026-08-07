@@ -13,6 +13,9 @@ public enum AgentComposerAttachmentStoreError: Error, Equatable {
     case missingAttachment(AgentImageAttachmentID)
     case unreadableManagedFile(id: AgentImageAttachmentID, path: String)
     case cleanupDeletionFailed([String])
+    case importRollbackFailed(manifestError: String, objectPath: String, rollbackError: String)
+    case transferRollbackFailed(transferError: String, rollbackFailures: [String], journalPath: String)
+    case transferRecoveryFailed(journalPath: String, failures: [String])
     case imageInputNotValidated(String)
     case atomicWriteFailed(String)
 }
@@ -67,6 +70,10 @@ public struct AgentComposerAttachmentStoreLayout: Sendable {
 
     public var manifestsDirectory: URL {
         attachmentsDirectory.appendingPathComponent("manifests", isDirectory: true)
+    }
+
+    public var ownershipTransactionsDirectory: URL {
+        attachmentsDirectory.appendingPathComponent("ownership-transactions", isDirectory: true)
     }
 
     public func objectRelativePath(for id: AgentImageAttachmentID) -> String {
@@ -156,6 +163,19 @@ public struct AgentComposerStoredAttachment: Equatable, Sendable {
     public var promptAttachment: AgentPromptImageAttachment {
         AgentPromptImageAttachment(metadata: manifest.metadata, fileURL: fileURL)
     }
+}
+
+private struct AgentComposerOwnershipTransferJournal: Codable, Sendable {
+    enum State: String, Codable, Sendable {
+        case pending
+        case committed
+    }
+
+    var id: UUID
+    var state: State
+    var originals: [AgentComposerAttachmentManifest]
+    var sent: [AgentComposerAttachmentManifest]
+    var updatedAt: Date
 }
 
 /// Array-managed host-local storage for composer image originals. It imports
@@ -264,6 +284,7 @@ public actor AgentComposerAttachmentStore {
         draftAttachments: [AgentComposerDraftImageAttachment],
         sentAt explicitSentAt: Date? = nil
     ) throws {
+        try recoverPendingOwnershipTransfers()
         let prepared = try preparedDraftManifests(for: agentID, draftAttachments: draftAttachments)
         try transferPreparedDraftManifestsToSent(prepared.map(\.manifest), sentAt: explicitSentAt ?? clock.now())
     }
@@ -273,6 +294,7 @@ public actor AgentComposerAttachmentStore {
         attachmentIDs: [AgentImageAttachmentID],
         sentAt explicitSentAt: Date? = nil
     ) throws {
+        try recoverPendingOwnershipTransfers()
         let manifests = try attachmentIDs.map { id -> AgentComposerAttachmentManifest in
             guard let manifest = try loadManifest(for: id) else {
                 throw AgentComposerAttachmentStoreError.missingAttachment(id)
@@ -380,21 +402,83 @@ public actor AgentComposerAttachmentStore {
         return prepared
     }
 
+    public func recoverPendingOwnershipTransfers() throws {
+        guard FileManager.default.fileExists(atPath: layout.ownershipTransactionsDirectory.path) else { return }
+        let journalURLs = try FileManager.default.contentsOfDirectory(
+            at: layout.ownershipTransactionsDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ).filter { $0.pathExtension == "json" }
+        for journalURL in journalURLs {
+            let journal: AgentComposerOwnershipTransferJournal = try reader.read(at: journalURL)
+            let manifests = journal.state == .pending ? journal.originals : journal.sent
+            var failures: [String] = []
+            for manifest in manifests {
+                do { try persist(manifest) }
+                catch { failures.append("manifest \(manifest.id.rawValue): \(error)") }
+            }
+            guard failures.isEmpty else {
+                throw AgentComposerAttachmentStoreError.transferRecoveryFailed(
+                    journalPath: journalURL.path,
+                    failures: failures
+                )
+            }
+            try removeDurably(journalURL)
+        }
+    }
+
     private func transferPreparedDraftManifestsToSent(_ manifests: [AgentComposerAttachmentManifest], sentAt: Date) throws {
+        guard !manifests.isEmpty else { return }
+        let sentManifests = manifests.map { original -> AgentComposerAttachmentManifest in
+            var manifest = original
+            manifest.ownership = .sent(agentID: original.ownership.agentID, at: sentAt)
+            manifest.updatedAt = sentAt
+            return manifest
+        }
+        let journalURL = layout.ownershipTransactionsDirectory
+            .appendingPathComponent("transfer-\(UUID().uuidString).json", isDirectory: false)
+        var journal = AgentComposerOwnershipTransferJournal(
+            id: UUID(),
+            state: .pending,
+            originals: manifests,
+            sent: sentManifests,
+            updatedAt: sentAt
+        )
+        try persistTransferJournal(journal, at: journalURL)
         var persistedOriginals: [AgentComposerAttachmentManifest] = []
         do {
-            for original in manifests {
-                var manifest = original
-                manifest.ownership = .sent(agentID: original.ownership.agentID, at: sentAt)
-                manifest.updatedAt = sentAt
+            for manifest in sentManifests {
                 try persist(manifest)
-                persistedOriginals.append(original)
+                if let original = manifests.first(where: { $0.id == manifest.id }) {
+                    persistedOriginals.append(original)
+                }
             }
+            journal.state = .committed
+            journal.updatedAt = sentAt
+            try persistTransferJournal(journal, at: journalURL)
         } catch {
+            var rollbackFailures: [String] = []
             for original in persistedOriginals.reversed() {
-                try? persist(original)
+                do { try persist(original) }
+                catch { rollbackFailures.append("manifest \(original.id.rawValue): \(error)") }
             }
-            throw error
+            if rollbackFailures.isEmpty {
+                try? removeDurably(journalURL)
+                throw error
+            }
+            throw AgentComposerAttachmentStoreError.transferRollbackFailed(
+                transferError: String(describing: error),
+                rollbackFailures: rollbackFailures,
+                journalPath: journalURL.path
+            )
+        }
+        do {
+            try removeDurably(journalURL)
+        } catch {
+            throw AgentComposerAttachmentStoreError.transferRecoveryFailed(
+                journalPath: journalURL.path,
+                failures: ["committed journal removal: \(error)"]
+            )
         }
     }
 
@@ -429,14 +513,22 @@ public actor AgentComposerAttachmentStore {
         do {
             try persist(manifest)
         } catch {
-            try? removeItem(fileURL)
+            do {
+                try removeItem(fileURL)
+            } catch let rollbackError {
+                throw AgentComposerAttachmentStoreError.importRollbackFailed(
+                    manifestError: String(describing: error),
+                    objectPath: fileURL.path,
+                    rollbackError: String(describing: rollbackError)
+                )
+            }
             throw error
         }
         return AgentComposerStoredAttachment(manifest: manifest, fileURL: fileURL)
     }
 
     private func prepareDirectories() throws {
-        for directory in [layout.attachmentsDirectory, layout.objectsDirectory, layout.manifestsDirectory] {
+        for directory in [layout.attachmentsDirectory, layout.objectsDirectory, layout.manifestsDirectory, layout.ownershipTransactionsDirectory] {
             try FileManager.default.createDirectory(
                 at: directory,
                 withIntermediateDirectories: true,
@@ -453,6 +545,34 @@ public actor AgentComposerAttachmentStore {
         try prepareDirectories()
         let manifestFile = layout.manifestFile(for: manifest.id)
         try writeManifest(manifest, manifestFile)
+    }
+
+    private func persistTransferJournal(_ journal: AgentComposerOwnershipTransferJournal, at url: URL) throws {
+        try prepareDirectories()
+        try AtomicWriter(backupsDirectory: nil, retainedBackups: 0).write(journal, to: url)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    private func removeDurably(_ url: URL) throws {
+        if FileManager.default.fileExists(atPath: url.path) {
+            try removeItem(url)
+            try Self.fsyncDirectory(url.deletingLastPathComponent())
+        }
+    }
+
+    private static func fsyncDirectory(_ directory: URL) throws {
+        let fd = open(directory.path, O_RDONLY)
+        guard fd >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        if fsync(fd) != 0 {
+            let err = errno
+            close(fd)
+            throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
+        }
+        if close(fd) != 0 {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
     }
 
     private static func defaultPersistManifest(_ manifest: AgentComposerAttachmentManifest, to manifestFile: URL) throws {
@@ -565,15 +685,16 @@ public actor AgentComposerAttachmentStore {
                 throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
             }
             let dfd = open(dir.path, O_RDONLY)
-            if dfd >= 0 {
-                if fsync(dfd) != 0 {
-                    let err = errno
-                    close(dfd)
-                    throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
-                }
-                if close(dfd) != 0 {
-                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-                }
+            guard dfd >= 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            if fsync(dfd) != 0 {
+                let err = errno
+                close(dfd)
+                throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
+            }
+            if close(dfd) != 0 {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             }
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         } catch {
