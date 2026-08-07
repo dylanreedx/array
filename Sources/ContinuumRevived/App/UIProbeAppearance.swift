@@ -1703,23 +1703,30 @@ enum UIProbeAppearance {
             throw fail("rich inline theme repaint changed semantic output or retained stale colors")
         }
 
+        let fullMarkdown = "plain **bold *italic*** `code` [safe](https://example.com/docs \"Docs\") [local](file:///Users/example/private.txt)  \nnext\nsoft"
         view.setSelectedRange(NSRange(location: 0, length: (view.string as NSString).length))
         view.copy(nil)
-        guard NSPasteboard.general.string(forType: .string) == view.string,
-              NSPasteboard.general.string(forType: RichInlineTextView.markdownPasteboardType) ==
-                "plain **bold *italic*** `code` [safe](https://example.com/docs \"Docs\") [local](file:///Users/example/private.txt)  \nnext\nsoft" else {
-            throw fail("rich inline copy did not provide exact plain-text and Markdown pasteboard forms")
+        guard NSPasteboard.general.string(forType: .string) == fullMarkdown,
+              NSPasteboard.general.string(forType: RichInlineTextView.markdownPasteboardType) == fullMarkdown else {
+            throw fail("rich inline copy did not put normalized Markdown on both pasteboard string types")
         }
 
         let partial = (view.string as NSString).range(of: "old italic code sa")
         view.setSelectedRange(partial)
         view.copy(nil)
+        guard NSPasteboard.general.string(forType: .string) == "**old *italic*** `code` [sa](https://example.com/docs \"Docs\")",
+              NSPasteboard.general.string(forType: RichInlineTextView.markdownPasteboardType) ==
+                "**old *italic*** `code` [sa](https://example.com/docs \"Docs\")" else {
+            throw fail("rich inline partial selection lost Markdown on public string pasteboard type")
+        }
+        view.stringPasteboardStyle = .plainText
+        view.copy(nil)
         guard NSPasteboard.general.string(forType: .string) == "old italic code sa",
               NSPasteboard.general.string(forType: RichInlineTextView.markdownPasteboardType) ==
                 "**old *italic*** `code` [sa](https://example.com/docs \"Docs\")" else {
-            throw fail("rich inline partial selection lost intersecting Markdown semantics")
+            throw fail("rich inline explicit plain-text copy path did not remain available")
         }
-        return 9
+        return 10
     }
 
     /// P3.4: the user role is a quiet Continuum surface, with authorship in the

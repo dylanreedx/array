@@ -292,9 +292,10 @@ final class AgentTranscriptListView: NSView {
         asMarkdown: Bool = false,
         pasteboard: NSPasteboard = .general
     ) {
-        let selected = collectionView.selectionIndexPaths
+        let selectedRows = collectionView.selectionIndexPaths
             .sorted { $0.item < $1.item }
-            .compactMap { rows.indices.contains($0.item) ? rows[$0.item].block : nil }
+            .compactMap { rows.indices.contains($0.item) ? rows[$0.item] : nil }
+        let selected = selectedRows.map(\.block)
         guard !selected.isEmpty else { return }
         if asMarkdown {
             let value = AgentTranscriptCopyController.markdown(for: selected)
@@ -302,7 +303,13 @@ final class AgentTranscriptListView: NSView {
             pasteboard.setString(value, forType: .string)
             pasteboard.setString(value, forType: NSPasteboard.PasteboardType("net.daringfireball.markdown"))
         } else {
-            AgentTranscriptCopyController.writeToPasteboard(blocks: selected, pasteboard: pasteboard)
+            let responseOnly = selectedRows.allSatisfy { $0.role == .assistant || $0.role == .reasoning }
+            let stringStyle: AgentTranscriptCopyController.StringPasteboardStyle = responseOnly ? .markdown : .plainText
+            AgentTranscriptCopyController.writeToPasteboard(
+                blocks: selected,
+                pasteboard: pasteboard,
+                stringPasteboardStyle: stringStyle
+            )
         }
     }
 

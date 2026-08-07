@@ -11,6 +11,7 @@ public enum AgentDocumentMutation: Codable, Equatable, Sendable {
         provenance: AgentProvenance
     )
     case appendMarkup(entryID: AgentNodeID, delta: String)
+    case replaceMarkup(entryID: AgentNodeID, blocks: [AgentBlock])
     case upsertStructured(entryID: AgentNodeID, block: AgentBlock)
     case completeBlock(id: AgentNodeID, status: AgentItemStatus)
     case finishEntry(id: AgentNodeID)
@@ -22,6 +23,7 @@ public enum AgentDocumentMutation: Codable, Equatable, Sendable {
 public enum AgentDocumentMutationOperation: String, Codable, Equatable, Sendable {
     case beginEntry
     case appendMarkup
+    case replaceMarkup
     case upsertStructured
     case completeBlock
     case finishEntry

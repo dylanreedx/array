@@ -12,11 +12,17 @@ public struct AgentTranscriptProjection: Sendable {
     public private(set) var currentStatus: AgentStatus = .configuring
     public private(set) var events: [AgentRuntimeEvent] = []
     public private(set) var rejectedMutationCount = 0
+    /// Production-facing deterministic oracle for streamed Markdown parser work.
+    /// Source deltas are still appended losslessly; this count advances only when
+    /// the accumulated source is reparsed for presentation.
+    public private(set) var streamingMarkupParseCount = 0
 
     private struct OpenStream: Equatable, Sendable {
         var turnID: String
         var kind: ContentStreamKind
         var entryID: AgentNodeID
+        var buffer: StreamingMarkupBuffer
+        var scheduler: StreamingMarkupParseScheduler
     }
 
     private static let eventWindow = 400
@@ -32,10 +38,20 @@ public struct AgentTranscriptProjection: Sendable {
     private var requestBlocks: [String: AgentNodeID] = [:]
     private var localSequence = 0
     private var runtimeErrorSequence = 0
+    private let markupParser = MarkdownAgentMarkupParser()
+    private let monotonicNow: @Sendable () -> TimeInterval
 
     public init(threadId: String) {
+        self.init(threadId: threadId, monotonicNow: { ProcessInfo.processInfo.systemUptime })
+    }
+
+    public init(
+        threadId: String,
+        monotonicNow: @escaping @Sendable () -> TimeInterval
+    ) {
         self.threadId = threadId
         self.reducer = AgentDocumentReducer()
+        self.monotonicNow = monotonicNow
     }
 
     public var document: AgentDocument { reducer.document }
@@ -46,6 +62,9 @@ public struct AgentTranscriptProjection: Sendable {
     /// events; callers should apply the returned mutations in order.
     public mutating func mutations(for event: AgentRuntimeEvent) -> [AgentDocumentMutation] {
         switch event {
+        case .sessionStateChanged(let state) where state == .ready || state == .stopped || state == .error:
+            return closeStreamingRun()
+
         case .turnStarted(let tid, _) where tid == threadId:
             return closeStreamingRun()
 
@@ -313,28 +332,59 @@ public struct AgentTranscriptProjection: Sendable {
         kind: ContentStreamKind,
         delta: String
     ) -> [AgentDocumentMutation] {
-        if let openStream, openStream.turnID == turnID, openStream.kind == kind {
-            return [.appendMarkup(entryID: openStream.entryID, delta: delta)]
+        if var stream = openStream, stream.turnID == turnID, stream.kind == kind {
+            stream.buffer.append(delta)
+            stream.scheduler.requestParse()
+            let result = scheduledMarkupMutations(for: &stream)
+            openStream = stream
+            return result
         }
         var result = closeStreamingRun()
         let entryID = makeID(scope: "turn", providerID: turnID, suffix: "\(kind.rawValue):\(nextRun(in: turnID))")
         compatibilityIDs[entryID] = "\(kind == .assistant ? "assistant" : "reasoning")-\(document.entries.count + result.beginEntryCount + 1)"
-        openStream = OpenStream(turnID: turnID, kind: kind, entryID: entryID)
+        var buffer = StreamingMarkupBuffer()
+        buffer.append(delta)
+        var stream = OpenStream(
+            turnID: turnID,
+            kind: kind,
+            entryID: entryID,
+            buffer: buffer,
+            scheduler: StreamingMarkupParseScheduler(maximumParsesPerSecond: 30)
+        )
+        stream.scheduler.requestParse()
         result += [
             .beginEntry(
                 id: entryID,
                 role: kind == .assistant ? .assistant : .reasoning,
                 provenance: .providerItem(provider: "runtime", itemID: turnID)
-            ),
-            .appendMarkup(entryID: entryID, delta: delta)
+            )
         ]
+        result += scheduledMarkupMutations(for: &stream)
+        openStream = stream
         return result
     }
 
+    private mutating func scheduledMarkupMutations(for stream: inout OpenStream) -> [AgentDocumentMutation] {
+        guard stream.scheduler.shouldParse(now: monotonicNow()) else { return [] }
+        return parsedMarkupMutations(for: stream)
+    }
+
+    private mutating func parsedMarkupMutations(for stream: OpenStream) -> [AgentDocumentMutation] {
+        streamingMarkupParseCount += 1
+        let previous = document.entries.first(where: { $0.id == stream.entryID })?.blocks ?? []
+        let parse = markupParser.parse(stream.buffer.source, entryID: stream.entryID, previous: previous)
+        return [.replaceMarkup(entryID: stream.entryID, blocks: parse.blocks)]
+    }
+
     private mutating func closeStreamingRun() -> [AgentDocumentMutation] {
-        guard let entryID = openStream?.entryID else { return [] }
+        guard var stream = openStream else { return [] }
+        var result: [AgentDocumentMutation] = []
+        if stream.scheduler.flush() {
+            result += parsedMarkupMutations(for: stream)
+        }
         openStream = nil
-        return [.finishEntry(id: entryID)]
+        result.append(.finishEntry(id: stream.entryID))
+        return result
     }
 
     private mutating func nextRun(in turnID: String) -> Int {

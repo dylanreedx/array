@@ -82,6 +82,47 @@ public struct AgentDocumentReducer: Sendable {
                 updated = [entryID]
             }
 
+        case let .replaceMarkup(entryID, incoming):
+            let entryIndex = try requireEntry(entryID, .replaceMarkup)
+            guard case .open = document.entries[entryIndex].lifecycle else {
+                throw AgentDocumentMutationError.entryFinished(entryID: entryID, operation: .replaceMarkup)
+            }
+            try validateForest(incoming)
+
+            let oldBlocks = document.entries[entryIndex].blocks
+            let oldIDs = oldBlocks.flatMap(allIDs)
+            let oldSet = Set(oldIDs)
+            for block in incoming { try validateFreshIDs(block, allowed: oldSet) }
+
+            let oldNodes = oldBlocks.reduce(into: [AgentNodeID: AgentBlock]()) { result, block in
+                result.merge(indexed(block)) { current, _ in current }
+            }
+            let replacements = try incoming.map { try reconcile($0, oldNodes: oldNodes) }
+            let newIDs = replacements.flatMap(allIDs)
+            let newSet = Set(newIDs)
+            let changed = replacements.flatMap { changedIDs($0, oldNodes: oldNodes) }.filter(oldSet.contains)
+            let oldPaths = paths(oldBlocks), newPaths = paths(replacements)
+            let oldLifecycle = document.entries[entryIndex].lifecycle
+            let newLifecycle: AgentEntryLifecycle = .open(markupBlockID: nil)
+
+            inserted = newIDs.filter { !oldSet.contains($0) }
+            removed = oldIDs.filter { !newSet.contains($0) }
+            moved = oldIDs.filter { newSet.contains($0) && oldPaths[$0] != newPaths[$0] }
+            let entryChanged = oldBlocks.count != replacements.count || oldLifecycle != newLifecycle ||
+                !inserted.isEmpty || !removed.isEmpty || !moved.isEmpty || !changed.isEmpty
+            guard entryChanged else { break }
+
+            let entryRevision = try nextRevision(document.entries[entryIndex].revision, id: entryID)
+            for block in oldBlocks { unindex(block) }
+            document.entries[entryIndex].blocks = replacements
+            document.entries[entryIndex].lifecycle = newLifecycle
+            document.entries[entryIndex].revision = entryRevision
+            for (blockIndex, block) in replacements.enumerated() {
+                index(block, owner: entryID, root: block.id, entry: entryIndex, path: [blockIndex])
+                topBlockLocations[block.id] = (entryIndex, blockIndex)
+            }
+            updated = unique([entryID] + changed.filter { $0 != entryID })
+
         case let .upsertStructured(entryID, incoming):
             let entryIndex = try requireEntry(entryID, .upsertStructured)
             guard case .open = document.entries[entryIndex].lifecycle else {
@@ -306,14 +347,17 @@ public struct AgentDocumentReducer: Sendable {
     }
 
     private func validateTree(_ block: AgentBlock) throws {
-        guard payloadMatchesKind(block) else { throw AgentDocumentMutationError.duplicateNodeID(id: block.id) }
+        try validateForest([block])
+    }
+
+    private func validateForest(_ blocks: [AgentBlock]) throws {
         var seen: Set<AgentNodeID> = []
         func visit(_ node: AgentBlock) throws {
             guard seen.insert(node.id).inserted else { throw AgentDocumentMutationError.duplicateNodeID(id: node.id) }
             guard payloadMatchesKind(node) else { throw AgentDocumentMutationError.duplicateNodeID(id: node.id) }
             for child in node.children { try visit(child) }
         }
-        try visit(block)
+        for block in blocks { try visit(block) }
     }
 
     private func validateFreshIDs(_ block: AgentBlock, allowed: Set<AgentNodeID>) throws {
@@ -458,12 +502,16 @@ public struct AgentDocumentReducer: Sendable {
     }
 
     private func paths(_ block: AgentBlock) -> [AgentNodeID: String] {
+        paths([block])
+    }
+
+    private func paths(_ blocks: [AgentBlock]) -> [AgentNodeID: String] {
         var result: [AgentNodeID: String] = [:]
         func visit(_ node: AgentBlock, _ path: String) {
             result[node.id] = path
             for (index, child) in node.children.enumerated() { visit(child, "\(path).\(index)") }
         }
-        visit(block, "0")
+        for (index, block) in blocks.enumerated() { visit(block, "\(index)") }
         return result
     }
 

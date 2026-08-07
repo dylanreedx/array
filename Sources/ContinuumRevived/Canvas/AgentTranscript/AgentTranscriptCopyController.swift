@@ -4,6 +4,11 @@ import ContinuumRevivedAgentContent
 /// Converts semantic blocks for pasteboard use. Rendering and provider payloads
 /// are intentionally not involved, so selection stays safe and deterministic.
 struct AgentTranscriptCopyController {
+    enum StringPasteboardStyle {
+        case plainText
+        case markdown
+    }
+
     static func plainText(for blocks: [AgentBlock]) -> String {
         blocks.map(plainText(for:)).joined(separator: "\n\n")
     }
@@ -12,10 +17,18 @@ struct AgentTranscriptCopyController {
         blocks.map(markdown(for:)).joined(separator: "\n\n")
     }
 
-    static func writeToPasteboard(blocks: [AgentBlock], pasteboard: NSPasteboard = .general) {
+    static func writeToPasteboard(
+        blocks: [AgentBlock],
+        pasteboard: NSPasteboard = .general,
+        stringPasteboardStyle: StringPasteboardStyle = .plainText
+    ) {
+        let markdownValue = markdown(for: blocks)
         pasteboard.clearContents()
-        pasteboard.setString(plainText(for: blocks), forType: .string)
-        pasteboard.setString(markdown(for: blocks), forType: NSPasteboard.PasteboardType("net.daringfireball.markdown"))
+        pasteboard.setString(
+            stringPasteboardStyle == .markdown ? markdownValue : plainText(for: blocks),
+            forType: .string
+        )
+        pasteboard.setString(markdownValue, forType: NSPasteboard.PasteboardType("net.daringfireball.markdown"))
     }
 
     private static func plainText(for block: AgentBlock) -> String {

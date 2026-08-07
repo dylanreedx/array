@@ -96,6 +96,7 @@ final class UserPromptView: NSView {
     func apply(block: AgentBlock, context: AgentRenderContext) {
         layer?.backgroundColor = Self.fillToken.color.cgColor(for: context.appearance)
         proseRenderer.update(view: proseView, block: block, context: context)
+        proseView.textFields.forEach { $0.stringPasteboardStyle = .plainText }
         identifier = NSUserInterfaceItemIdentifier("agent.userPrompt.\(block.id.rawValue)")
         applyAccessibility(block: block, context: context)
         needsLayout = true

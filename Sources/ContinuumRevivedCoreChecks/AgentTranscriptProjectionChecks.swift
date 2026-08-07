@@ -2,6 +2,27 @@ import ContinuumRevivedAgentContent
 import ContinuumRevivedCore
 import Foundation
 
+private func resetRevisions(_ block: AgentBlock) -> AgentBlock {
+    var result = block
+    result.revision = 0
+    result.children = block.children.map(resetRevisions)
+    return result
+}
+
+private final class DeterministicProjectionClock: @unchecked Sendable {
+    var time: TimeInterval
+
+    init(_ time: TimeInterval = 1_000) {
+        self.time = time
+    }
+
+    func now() -> TimeInterval { time }
+
+    func advance(_ interval: TimeInterval) {
+        time += interval
+    }
+}
+
 func runAgentTranscriptProjectionChecks() {
     let thread = "projection-thread"
     var projection = AgentTranscriptProjection(threadId: thread)
@@ -68,6 +89,84 @@ func runAgentTranscriptProjectionChecks() {
     expect(Set(boundaries.document.entries.map(\.id)).count == 4,
            "P1.5 every separated stream run must retain a distinct stable identity")
 
+    let markdownClock = DeterministicProjectionClock()
+    var markdownStream = AgentTranscriptProjection(threadId: thread, monotonicNow: markdownClock.now)
+    markdownStream.ingest(.turnStarted(threadId: thread, turnId: "turn-markdown"))
+    markdownStream.ingest(.contentDelta(threadId: thread, turnId: "turn-markdown", streamKind: .assistant, delta: "**bo"))
+    guard let partial = markdownStream.document.entries.first?.blocks.first,
+          case .paragraph([.text("**bo")]) = partial.payload else {
+        expect(false, "live Markdown stream must keep incomplete delimiters readable before they close")
+        return
+    }
+    markdownClock.advance(0.05)
+    markdownStream.ingest(.contentDelta(threadId: thread, turnId: "turn-markdown", streamKind: .assistant, delta: "ld**"))
+    guard let streamedEntry = markdownStream.document.entries.first,
+          case .paragraph([.strong([.text("bold")])]) = streamedEntry.blocks.first?.payload else {
+        expect(false, "split streamed Markdown delimiter **bo + ld** must become a semantic strong inline")
+        return
+    }
+    markdownStream.ingest(.turnCompleted(threadId: thread, turnId: "turn-markdown", outcome: .completed, errorMessage: nil))
+    let oneShot = MarkdownAgentMarkupParser().parse("**bold**", entryID: streamedEntry.id, previous: []).blocks.map(resetRevisions)
+    expect(markdownStream.document.entries.first?.blocks.map(resetRevisions) == oneShot,
+           "final streamed assistant Markdown must converge with one-shot parsing and stable block IDs")
+
+    let coalescedClock = DeterministicProjectionClock()
+    var coalesced = AgentTranscriptProjection(threadId: thread, monotonicNow: coalescedClock.now)
+    coalesced.ingest(.turnStarted(threadId: thread, turnId: "turn-coalesced"))
+    let deltaCount = 5_000
+    var coalescedSource = ""
+    for index in 0..<deltaCount {
+        let delta: String
+        switch index {
+        case 0: delta = "**"
+        case deltaCount - 1: delta = "**"
+        default: delta = "x"
+        }
+        coalescedSource += delta
+        coalesced.ingest(.contentDelta(threadId: thread, turnId: "turn-coalesced", streamKind: .assistant, delta: delta))
+    }
+    expect(coalesced.streamingMarkupParseCount == 1,
+           "5,000 fast assistant Markdown deltas must coalesce while source accumulates losslessly, not parse once per delta; got \(coalesced.streamingMarkupParseCount)")
+    coalesced.ingest(.turnCompleted(threadId: thread, turnId: "turn-coalesced", outcome: .completed, errorMessage: nil))
+    guard let coalescedEntry = coalesced.document.entries.first else {
+        expect(false, "coalesced Markdown stream must create one assistant entry")
+        return
+    }
+    let coalescedOneShot = MarkdownAgentMarkupParser().parse(coalescedSource, entryID: coalescedEntry.id, previous: []).blocks.map(resetRevisions)
+    expect(coalesced.streamingMarkupParseCount == 2,
+           "completion must flush exactly one pending final parse after a coalesced stream; got \(coalesced.streamingMarkupParseCount)")
+    expect(coalescedEntry.blocks.map(resetRevisions) == coalescedOneShot,
+           "coalesced 5,000-delta assistant Markdown must converge with one-shot parsing")
+
+    let reasoningClock = DeterministicProjectionClock()
+    var reasoning = AgentTranscriptProjection(threadId: thread, monotonicNow: reasoningClock.now)
+    reasoning.ingest(.contentDelta(threadId: thread, turnId: "turn-reasoning", streamKind: .reasoning, delta: "`rea"))
+    reasoning.ingest(.contentDelta(threadId: thread, turnId: "turn-reasoning", streamKind: .reasoning, delta: "son`"))
+    expect(reasoning.streamingMarkupParseCount == 1,
+           "reasoning Markdown deltas must use the same coalesced parser path as assistant streams")
+    reasoning.ingest(.runtimeError(threadId: thread, message: "runtime disconnected"))
+    guard let reasoningEntry = reasoning.document.entries.first else {
+        expect(false, "reasoning stream must create one reasoning entry before runtime-error boundary")
+        return
+    }
+    let reasoningOneShot = MarkdownAgentMarkupParser().parse("`reason`", entryID: reasoningEntry.id, previous: []).blocks.map(resetRevisions)
+    expect(reasoning.streamingMarkupParseCount == 2 && reasoningEntry.blocks.map(resetRevisions) == reasoningOneShot,
+           "runtime-error boundary must flush pending reasoning Markdown before closing the entry")
+
+    var interrupted = AgentTranscriptProjection(threadId: thread, monotonicNow: DeterministicProjectionClock().now)
+    interrupted.ingest(.contentDelta(threadId: thread, turnId: "turn-interrupted", streamKind: .assistant, delta: "_inter"))
+    interrupted.ingest(.contentDelta(threadId: thread, turnId: "turn-interrupted", streamKind: .assistant, delta: "rupted_"))
+    interrupted.ingest(.turnCompleted(threadId: thread, turnId: "turn-interrupted", outcome: .interrupted, errorMessage: nil))
+    expect(interrupted.streamingMarkupParseCount == 2,
+           "interrupted turn completion must flush pending streamed Markdown before finish")
+
+    var stopped = AgentTranscriptProjection(threadId: thread, monotonicNow: DeterministicProjectionClock().now)
+    stopped.ingest(.contentDelta(threadId: thread, turnId: "turn-stopped", streamKind: .assistant, delta: "_stop"))
+    stopped.ingest(.contentDelta(threadId: thread, turnId: "turn-stopped", streamKind: .assistant, delta: "ped_"))
+    stopped.ingest(.sessionStateChanged(.stopped))
+    expect(stopped.streamingMarkupParseCount == 2 && stopped.document.entries.first?.lifecycle == .finished,
+           "session stop/reset close path must flush pending streamed Markdown before finishing the open entry")
+
     var outputs = AgentTranscriptProjection(threadId: thread)
     outputs.ingest(.contentDelta(threadId: thread, turnId: "turn-output", streamKind: .commandOutput, delta: "build output"))
     outputs.ingest(.runtimeError(threadId: thread, message: "runtime disconnected"))
@@ -75,6 +174,8 @@ func runAgentTranscriptProjectionChecks() {
            "P1.5 command deltas and runtime errors must map to typed blocks")
     expect(outputs.compatibilityRows.map(\.body) == ["build output", "runtime disconnected"],
            "P1.5 explicit safe display text must survive projection")
+    expect(outputs.streamingMarkupParseCount == 0,
+           "explicit command-output/plain-text path must not invoke the Markdown parser")
 
     var filtering = AgentTranscriptProjection(threadId: thread)
     filtering.ingest(.contentDelta(threadId: "other-thread", turnId: "other-turn", streamKind: .assistant, delta: "must not appear"))

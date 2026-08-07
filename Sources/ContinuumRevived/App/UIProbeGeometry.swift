@@ -6207,12 +6207,13 @@ enum UIProbeGeometry {
             throw fail("transcript VoiceOver children did not follow document order or expose Jump to latest")
         }
 
-        // Standard block selection reaches semantic plain/Markdown copy and
-        // matches native inline behavior for soft breaks and embedded backticks.
+        // Standard assistant-response block selection reaches semantic Markdown
+        // on both public string types and matches native inline behavior for
+        // soft breaks and embedded backticks.
         anchorList.collectionView.selectionIndexPaths = [IndexPath(item: 0, section: 0)]
         let pasteboard = NSPasteboard(name: .init("continuum.transcript-copy.\(UUID().uuidString)"))
         anchorList.copySelectedBlocks(pasteboard: pasteboard)
-        guard pasteboard.string(forType: .string) == "Soft a`b\nEnd",
+        guard pasteboard.string(forType: .string) == "Soft\n`a\\`b`  \nEnd",
               pasteboard.string(forType: .init("net.daringfireball.markdown")) == "Soft\n`a\\`b`  \nEnd" else {
             throw fail("transcript copy diverged from native soft-break/code Markdown semantics")
         }

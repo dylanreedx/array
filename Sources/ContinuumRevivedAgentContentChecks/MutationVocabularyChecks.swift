@@ -28,6 +28,7 @@ func runMutationVocabularyChecks() {
     let mutations: [AgentDocumentMutation] = [
         .beginEntry(id: entryID, role: .assistant, provenance: .providerItem(provider: "fixture", itemID: "turn-7")),
         .appendMarkup(entryID: entryID, delta: "streamed **markup**"),
+        .replaceMarkup(entryID: entryID, blocks: [paragraph]),
         .upsertStructured(entryID: entryID, block: paragraph),
         .completeBlock(id: blockA, status: .completed),
         .finishEntry(id: entryID),
@@ -35,12 +36,12 @@ func runMutationVocabularyChecks() {
     ]
     let encoded = try! JSONEncoder().encode(mutations)
     let decoded = try! JSONDecoder().decode([AgentDocumentMutation].self, from: encoded)
-    expect(decoded == mutations, "all six mutation forms must survive a typed Codable round trip")
+    expect(decoded == mutations, "all seven mutation forms must survive a typed Codable round trip")
 
     let operations: [AgentDocumentMutationOperation] = [
-        .beginEntry, .appendMarkup, .upsertStructured, .completeBlock, .finishEntry, .removeEntry,
+        .beginEntry, .appendMarkup, .replaceMarkup, .upsertStructured, .completeBlock, .finishEntry, .removeEntry,
     ]
-    expect(Set(operations.map(\.rawValue)).count == 6,
+    expect(Set(operations.map(\.rawValue)).count == 7,
            "every mutation form must have a distinct operation key for explicit errors")
 
     let explicitErrors: [AgentDocumentMutationError] = [
@@ -117,5 +118,5 @@ func runMutationVocabularyChecks() {
         }
     } catch { fail("empty-patch overflow returned an unexpected error: \(error)") }
 
-    print("Mutation vocabulary checks passed: 6 mutations, 10 explicit errors, deterministic stable-ID patches")
+    print("Mutation vocabulary checks passed: 7 mutations, 10 explicit errors, deterministic stable-ID patches")
 }

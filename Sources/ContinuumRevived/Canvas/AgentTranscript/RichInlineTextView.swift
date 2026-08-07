@@ -7,7 +7,14 @@ import ContinuumRevivedAgentUI
 /// view; it reports an authorized semantic action through `AgentRenderContext`.
 @MainActor
 final class RichInlineTextView: NSTextView, NSTextViewDelegate {
+    enum StringPasteboardStyle {
+        case plainText
+        case markdown
+    }
+
     static let markdownPasteboardType = NSPasteboard.PasteboardType("net.daringfireball.markdown")
+
+    var stringPasteboardStyle: StringPasteboardStyle = .markdown
 
     private var runs: [AgentInline] = []
     private var renderContext = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
@@ -183,10 +190,11 @@ final class RichInlineTextView: NSTextView, NSTextViewDelegate {
         guard selection.length > 0 else { return }
         let plain = (string as NSString).substring(with: selection)
         let markdown = AgentTextStyleResolver.markdown(for: runs, selectedRange: selection)
+        let stringValue = stringPasteboardStyle == .markdown ? markdown : plain
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.declareTypes([.string, Self.markdownPasteboardType], owner: nil)
-        pasteboard.setString(plain, forType: .string)
+        pasteboard.setString(stringValue, forType: .string)
         pasteboard.setString(markdown, forType: Self.markdownPasteboardType)
     }
 }
