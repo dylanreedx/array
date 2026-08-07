@@ -378,7 +378,10 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         actionTask = nil
         guard let lease = submissionLease, let store = draftStore else { return }
         submissionLease = nil
-        let releaseTask = Task { await store.relinquishSubmission(for: lease.agentID, ownership: lease) }
+        let releaseTask = Task {
+            await store.relinquishSubmission(for: lease.agentID, ownership: lease)
+            _ = try? await store.restoreSubmission(for: lease.agentID, ownership: lease)
+        }
         submissionReleaseTask = releaseTask
         clearPendingSubmission(lease)
     }
@@ -679,7 +682,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
                 if let lease, let draftStore {
                     await draftStore.relinquishSubmission(for: agentID, ownership: lease)
                     if self.isCurrentBinding(agentID: agentID, generation: generation),
-                       let restored = try? await draftStore.restoreSubmission(for: agentID) {
+                       let restored = try? await draftStore.restoreSubmission(for: agentID, ownership: lease) {
                         guard self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
                         await self.applyPersistedDraft(
                             restored,
@@ -788,8 +791,16 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         Task { @MainActor [weak self] in
             guard let self, self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
             do {
-                _ = try await draftStore.confirmSubmissionStarted(for: agentID)
-                guard self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
+                let lease = self.pendingSubmittedLease
+                let confirmed: Bool
+                if let lease {
+                    confirmed = try await draftStore.confirmSubmissionStarted(
+                        for: agentID, ownership: lease
+                    )
+                } else {
+                    confirmed = try await draftStore.confirmSubmissionStarted(for: agentID)
+                }
+                guard confirmed, self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
                 self.pendingSubmittedDraftAgentID = nil
                 self.pendingSubmittedLease = nil
             } catch {

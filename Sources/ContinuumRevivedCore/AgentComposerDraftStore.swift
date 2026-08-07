@@ -129,6 +129,7 @@ public struct AgentComposerSubmissionSnapshot: Codable, Equatable, Sendable {
     public var draft: AgentComposerDraft
     public var submittedAt: Date
     public var state: AgentComposerSubmissionState
+    fileprivate var leaseToken: UUID?
 
     public init(
         draft: AgentComposerDraft,
@@ -138,10 +139,23 @@ public struct AgentComposerSubmissionSnapshot: Codable, Equatable, Sendable {
         self.draft = draft
         self.submittedAt = submittedAt
         self.state = state
+        self.leaseToken = nil
+    }
+
+    fileprivate init(
+        draft: AgentComposerDraft,
+        submittedAt: Date,
+        state: AgentComposerSubmissionState = .pending,
+        leaseToken: UUID
+    ) {
+        self.draft = draft
+        self.submittedAt = submittedAt
+        self.state = state
+        self.leaseToken = leaseToken
     }
 
     private enum CodingKeys: String, CodingKey {
-        case draft, submittedAt, state
+        case draft, submittedAt, state, leaseToken
     }
 
     public init(from decoder: Decoder) throws {
@@ -149,6 +163,7 @@ public struct AgentComposerSubmissionSnapshot: Codable, Equatable, Sendable {
         draft = try values.decode(AgentComposerDraft.self, forKey: .draft)
         submittedAt = try values.decode(Date.self, forKey: .submittedAt)
         state = try values.decodeIfPresent(AgentComposerSubmissionState.self, forKey: .state) ?? .pending
+        leaseToken = try values.decodeIfPresent(UUID.self, forKey: .leaseToken)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -156,6 +171,7 @@ public struct AgentComposerSubmissionSnapshot: Codable, Equatable, Sendable {
         try values.encode(draft, forKey: .draft)
         try values.encode(submittedAt, forKey: .submittedAt)
         try values.encode(state, forKey: .state)
+        try values.encodeIfPresent(leaseToken, forKey: .leaseToken)
     }
 }
 
@@ -193,6 +209,10 @@ public actor AgentComposerDraftStore {
     /// A lease token prevents a stale cancelled task from relinquishing a
     /// newer submission for the same agent after a rapid rebind.
     private var submissionOwnership: [AgentID: UUID] = [:]
+    /// A released pre-sink lease remains reserved until its exact owner either
+    /// restores or confirms it. This closes the gap between relinquish and the
+    /// follow-up recovery call: an unowned subscriber cannot consume the journal.
+    private var relinquishedSubmissionOwnership: [AgentID: UUID] = [:]
 
     public init(
         applicationSupportDirectory: URL? = nil,
@@ -226,6 +246,12 @@ public actor AgentComposerDraftStore {
     }
 
     public func save(_ draft: AgentComposerDraft, for agentID: AgentID) {
+        // Once a submission lease owns the agent, edits from another live
+        // composer are not a second draft: they are stale input racing the
+        // accepted handoff. Keep them out of the shared ordinary-draft slot;
+        // the lease journal remains the sole recoverable source.
+        guard submissionOwnership[agentID] == nil,
+              relinquishedSubmissionOwnership[agentID] == nil else { return }
         if let clearedAt = clearedThrough[agentID], draft.updatedAt <= clearedAt {
             return
         }
@@ -301,11 +327,26 @@ public actor AgentComposerDraftStore {
         draft explicitDraft: AgentComposerDraft? = nil,
         submittedAt: Date? = nil
     ) async throws -> AgentComposerSubmissionLease? {
+        // The journal and its in-memory owner form one admission boundary. Do
+        // not replace either half when another live composer already owns it,
+        // and do not overwrite a stale journal: recovery must explicitly settle
+        // that record before a new composer may acquire the agent.
+        let existingSnapshot = try loadSubmissionSnapshot(for: agentID)
+        guard existingSnapshot == nil else { return nil }
+        // Another live store may have authoritatively settled the journal. If
+        // the durable record is gone, discard only this actor's stale marker;
+        // never use an in-memory token to justify overwriting a journal.
+        submissionOwnership[agentID] = nil
+        relinquishedSubmissionOwnership[agentID] = nil
+        activeSubmissionAgents.remove(agentID)
         guard let draft = explicitDraft ?? pending[agentID] ?? load(for: agentID) else { return nil }
         let stamp = submittedAt ?? clock.now()
-        try persistSubmissionSnapshot(AgentComposerSubmissionSnapshot(draft: draft, submittedAt: stamp), for: agentID)
-        clearVisibleDraft(for: agentID, clearThrough: max(stamp, draft.updatedAt))
         let lease = AgentComposerSubmissionLease(agentID: agentID, token: UUID())
+        try persistSubmissionSnapshot(
+            AgentComposerSubmissionSnapshot(draft: draft, submittedAt: stamp, leaseToken: lease.token),
+            for: agentID
+        )
+        clearVisibleDraft(for: agentID, clearThrough: max(stamp, draft.updatedAt))
         activeSubmissionAgents.insert(agentID)
         submissionOwnership[agentID] = lease.token
         return lease
@@ -321,6 +362,7 @@ public actor AgentComposerDraftStore {
     public func relinquishSubmission(for agentID: AgentID, ownership lease: AgentComposerSubmissionLease) {
         guard lease.agentID == agentID, submissionOwnership[agentID] == lease.token else { return }
         submissionOwnership[agentID] = nil
+        relinquishedSubmissionOwnership[agentID] = lease.token
         activeSubmissionAgents.remove(agentID)
     }
 
@@ -349,11 +391,44 @@ public actor AgentComposerDraftStore {
     /// durably restored.
     @discardableResult
     public func restoreSubmission(for agentID: AgentID) async throws -> AgentComposerDraft? {
+        // A live owner, including the post-handoff window, remains authoritative.
+        // Relaunch recovery has no in-memory owner and may proceed; a pre-sink
+        // owner must use the lease-qualified overload below.
+        guard submissionOwnership[agentID] == nil,
+              relinquishedSubmissionOwnership[agentID] == nil else { return nil }
+        return try await restoreSubmissionAuthorized(for: agentID, ownership: nil)
+    }
+
+    /// Restores only the exact lease that relinquished before sink handoff.
+    /// A stale composer cannot consume a newer journal, even if the agent id is
+    /// unchanged after a rapid rebind.
+    @discardableResult
+    public func restoreSubmission(
+        for agentID: AgentID,
+        ownership lease: AgentComposerSubmissionLease
+    ) async throws -> AgentComposerDraft? {
+        guard lease.agentID == agentID else { return nil }
+        guard submissionOwnership[agentID] == lease.token
+                || relinquishedSubmissionOwnership[agentID] == lease.token else { return nil }
+        return try await restoreSubmissionAuthorized(for: agentID, ownership: lease)
+    }
+
+    private func restoreSubmissionAuthorized(
+        for agentID: AgentID,
+        ownership lease: AgentComposerSubmissionLease?
+    ) async throws -> AgentComposerDraft? {
         guard let snapshot = try loadSubmissionSnapshot(for: agentID) else { return nil }
+        if let lease {
+            guard snapshot.leaseToken == lease.token else { return nil }
+        } else {
+            guard submissionOwnership[agentID] == nil,
+                  relinquishedSubmissionOwnership[agentID] == nil else { return nil }
+        }
         // This is an explicit failure/recovery operation. Once it starts, the
         // journal is no longer protected as an active live submission.
         activeSubmissionAgents.remove(agentID)
         submissionOwnership[agentID] = nil
+        relinquishedSubmissionOwnership[agentID] = nil
         if submissionRecoveryDelayNanoseconds > 0 {
             try? await Task.sleep(nanoseconds: submissionRecoveryDelayNanoseconds)
         }
@@ -392,7 +467,35 @@ public actor AgentComposerDraftStore {
     /// snapshot remains available for restore and the visible draft stays cleared.
     @discardableResult
     public func confirmSubmissionStarted(for agentID: AgentID, sentAt: Date? = nil) async throws -> Bool {
+        // A caller without the exact lease is never allowed to consume a live
+        // journal. The supervisor uses the explicit authoritative handoff seam.
+        return false
+    }
+
+    /// Confirms the exact live lease. Composer-owned completion uses this form;
+    /// the supervisor uses the separate authoritative-handoff method below.
+    @discardableResult
+    public func confirmSubmissionStarted(
+        for agentID: AgentID,
+        ownership lease: AgentComposerSubmissionLease,
+        sentAt: Date? = nil
+    ) async throws -> Bool {
+        guard lease.agentID == agentID, submissionOwnership[agentID] == lease.token else { return false }
+        return try await confirmSubmissionStartedAuthorized(for: agentID, ownership: lease, sentAt: sentAt)
+    }
+
+    private func confirmSubmissionStartedAuthorized(
+        for agentID: AgentID,
+        ownership lease: AgentComposerSubmissionLease?,
+        sentAt: Date?
+    ) async throws -> Bool {
         guard var snapshot = try loadSubmissionSnapshot(for: agentID) else { return false }
+        if let lease {
+            guard snapshot.leaseToken == lease.token,
+                  submissionOwnership[agentID] == lease.token else { return false }
+        } else {
+            guard submissionOwnership[agentID] != nil else { return false }
+        }
         let stamp = sentAt ?? clock.now()
         // Completion may be delivered by the supervisor after the composer has
         // detached. Keep the journal active until this authoritative operation
@@ -401,6 +504,7 @@ public actor AgentComposerDraftStore {
         defer {
             activeSubmissionAgents.remove(agentID)
             submissionOwnership[agentID] = nil
+            relinquishedSubmissionOwnership[agentID] = nil
         }
         if snapshot.state == .confirmed {
             try removeSubmissionSnapshot(for: agentID)
@@ -435,13 +539,41 @@ public actor AgentComposerDraftStore {
         return true
     }
 
+    /// Authoritative runtime failure recovery. The supervisor calls this after a
+    /// sink-owned handoff fails; ordinary composers must use the lease-qualified
+    /// restore operation and cannot consume a live owner's journal.
+    @discardableResult
+    public func recoverSubmissionAfterAuthoritativeFailure(for agentID: AgentID) async throws -> AgentComposerDraft? {
+        if let token = submissionOwnership[agentID] {
+            let lease = AgentComposerSubmissionLease(agentID: agentID, token: token)
+            return try await restoreSubmissionAuthorized(for: agentID, ownership: lease)
+        }
+        return try await restoreSubmission(for: agentID)
+    }
+
+    /// Completion after the supervisor has observed the accepted sink handoff.
+    /// The store resolves the current token internally; an arbitrary composer
+    /// still cannot call the ordinary lease API without its exact token.
+    @discardableResult
+    public func confirmSubmissionAfterAuthoritativeHandoff(
+        for agentID: AgentID,
+        sentAt: Date? = nil
+    ) async throws -> Bool {
+        guard let token = submissionOwnership[agentID] else { return false }
+        return try await confirmSubmissionStartedAuthorized(
+            for: agentID,
+            ownership: AgentComposerSubmissionLease(agentID: agentID, token: token),
+            sentAt: sentAt
+        )
+    }
+
     /// Compatibility shim for existing text-only UI. New prompt-capable callers
     /// must use begin/restore/confirm above so pre-start failures can recover.
     public func resolveSendIntent(for agentID: AgentID, accepted: Bool, sentAt: Date? = nil) async {
         guard accepted else { return }
         do {
-            guard try await beginSubmission(for: agentID, submittedAt: sentAt ?? clock.now()) else { return }
-            _ = try await confirmSubmissionStarted(for: agentID, sentAt: sentAt)
+            guard let lease = try await beginSubmissionLease(for: agentID, submittedAt: sentAt ?? clock.now()) else { return }
+            _ = try await confirmSubmissionStarted(for: agentID, ownership: lease, sentAt: sentAt)
         } catch {
             warn("AgentComposerDraftStore.resolveSendIntent: preserving recoverable submission for agent \(agentID.rawValue)")
         }

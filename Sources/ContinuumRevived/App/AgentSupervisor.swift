@@ -3221,14 +3221,14 @@ final class AgentSupervisor {
                 switch action {
                 case let .confirmSuccess(sentAt):
                     do {
-                        _ = try await store.confirmSubmissionStarted(for: id, sentAt: sentAt)
+                        _ = try await store.confirmSubmissionAfterAuthoritativeHandoff(for: id, sentAt: sentAt)
                     } catch {
                         // A successful provider turn cannot silently discard a
                         // draft when local acceptance persistence failed.
-                        _ = try? await store.restoreSubmission(for: id)
+                        _ = try? await store.recoverSubmissionAfterAuthoritativeFailure(for: id)
                     }
                 case .restore:
-                    _ = try await store.restoreSubmission(for: id)
+                    _ = try await store.recoverSubmissionAfterAuthoritativeFailure(for: id)
                 }
             } catch {
                 self.warn("AgentSupervisor: composer recovery remained pending for agent \(id.rawValue.uuidString)")

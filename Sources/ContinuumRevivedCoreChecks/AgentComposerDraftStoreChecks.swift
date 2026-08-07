@@ -66,10 +66,87 @@ func runAgentComposerDraftStoreOrderingNegativeWitness() async throws {
     expect(restored == older, "negative witness: out-of-order save regressed the newest draft")
 }
 
+private func runExclusiveSubmissionLeaseChecks() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ExclusiveSubmissionLeaseChecks-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let agent = AgentID(rawValue: UUID(uuidString: "A0000000-0000-4000-8000-00000000944A")!)
+    let clock = FakeClock(start: Date(timeIntervalSince1970: 1_800_095_000))
+    let attachmentStore = AgentComposerAttachmentStore(applicationSupportDirectory: root, clock: clock)
+    let validation = try AgentComposerImageValidation(validatedContentType: "image/png", pixelWidth: 2, pixelHeight: 2)
+    let firstImage = try await attachmentStore.importValidatedPastedImage(
+        Data([41, 41]), displayName: "first-owner.png", validation: validation, forDraftOf: agent)
+    let secondImage = try await attachmentStore.importValidatedPastedImage(
+        Data([42, 42]), displayName: "second-loser.png", validation: validation, forDraftOf: agent)
+    let firstDraft = AgentComposerDraft(
+        text: "first owner", selection: 0..<11, updatedAt: clock.now(),
+        imageAttachments: [firstImage.draftAttachment]
+    )
+    let secondDraft = AgentComposerDraft(
+        text: "second loser", selection: 0..<12, updatedAt: clock.now().addingTimeInterval(1),
+        imageAttachments: [secondImage.draftAttachment]
+    )
+    let store = AgentComposerDraftStore(
+        applicationSupportDirectory: root, debounceInterval: 60, attachmentStore: attachmentStore, clock: clock)
+    await store.save(firstDraft, for: agent)
+    await store.flushAll()
+    let firstLease = try await store.beginSubmissionLease(for: agent, draft: firstDraft)
+    guard let firstLease else { throw CocoaError(.fileReadUnknown) }
+    let secondLease = try await store.beginSubmissionLease(for: agent, draft: secondDraft)
+    expect(secondLease == nil, "negative witness: second live composer overwrote the active submission lease")
+    await store.save(secondDraft, for: agent)
+    let loserEdit = await store.load(for: agent)
+    expect(loserEdit == nil,
+           "a loser edit must not overwrite the first owner's hidden ordinary draft slot")
+    let activeAfterRejection = try await store.submissionRecoveryState(for: agent)
+    expect(activeAfterRejection == .pending(active: true),
+           "the rejected second composer must leave the first owner's live journal active")
+    let loserRestore = try await store.restoreSubmission(for: agent)
+    expect(loserRestore == nil,
+           "a cancelled loser must not restore the first owner's shared journal")
+    let loserConfirm = try await store.confirmSubmissionStarted(for: agent)
+    expect(!loserConfirm,
+           "a cancelled loser must not confirm the first owner's shared journal")
+    let firstManifestAfterRejection = try await attachmentStore.manifest(for: firstImage.manifest.id)
+    expect(firstManifestAfterRejection?.ownership.state == .draft,
+           "the rejected loser must not change the first image ownership")
+
+    // First sink failure: only the exact owner may relinquish and restore its
+    // draft; the losing composer remains unable to touch the journal.
+    await store.relinquishSubmission(for: agent, ownership: firstLease)
+    let restored = try await store.restoreSubmission(for: agent, ownership: firstLease)
+    expect(restored == firstDraft, "first sink failure must restore the exact first draft")
+    let firstManifestAfterFailure = try await attachmentStore.manifest(for: firstImage.manifest.id)
+    expect(firstManifestAfterFailure?.ownership.state == .draft,
+           "first sink failure must preserve first image draft ownership")
+    let secondManifestAfterFailure = try await attachmentStore.manifest(for: secondImage.manifest.id)
+    expect(secondManifestAfterFailure?.ownership.state == .draft,
+           "second cancellation must preserve loser image draft ownership")
+
+    // First sink success after a fresh generation. An older lease cannot release
+    // this newer lease, and confirmation transfers only the first image.
+    let newerLease = try await store.beginSubmissionLease(for: agent, draft: firstDraft)
+    guard let newerLease else { throw CocoaError(.fileReadUnknown) }
+    await store.relinquishSubmission(for: agent, ownership: firstLease)
+    let activeAfterStaleRelease = try await store.submissionRecoveryState(for: agent)
+    expect(activeAfterStaleRelease == .pending(active: true),
+           "a stale lease must not release a newer active lease")
+    // Restore the exact active owner marker after the stale-release assertion.
+    let confirmed = try await store.confirmSubmissionStarted(for: agent, ownership: newerLease, sentAt: clock.now())
+    expect(confirmed, "first sink success must confirm the exact current lease")
+    let firstManifestAfterSuccess = try await attachmentStore.manifest(for: firstImage.manifest.id)
+    expect(firstManifestAfterSuccess?.ownership.state == .sent,
+           "first sink success must transfer only the first image to sent ownership")
+    let secondManifestAfterSuccess = try await attachmentStore.manifest(for: secondImage.manifest.id)
+    expect(secondManifestAfterSuccess?.ownership.state == .draft,
+           "second cancellation must leave the loser image draft-owned")
+}
+
 // Ticket 91/P4.4 + IMAGE WAVE 2A Lane A: sensitive unfinished prompts and
 // opaque local image attachment references are local, per-agent, debounced, and
 // cleared only at the accepted-send boundary after sent ownership is retained.
 func runAgentComposerDraftStoreChecks() async throws {
+    try await runExclusiveSubmissionLeaseChecks()
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("AgentComposerDraftStoreChecks-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -481,14 +558,16 @@ private func runAgentComposerAttachmentStoreChecks(
     expect(restoredPreStart == lifecycleDraft && visibleAfterRestore == lifecycleDraft,
            "pre-start rejection must restore the exact draft and attachment refs from pending recovery after relaunch")
 
-    let beganConfirmed = try await lifecycleStore.beginSubmission(for: agentA, submittedAt: clock.now())
+    let confirmedLease = try await lifecycleStore.beginSubmissionLease(for: agentA, submittedAt: clock.now())
+    let beganConfirmed = confirmedLease != nil
     let hiddenBeforeConfirm = await lifecycleStore.load(for: agentA)
     let activeBeforeConfirm = try await lifecycleStore.submissionRecoveryState(for: agentA)
     expect(beganConfirmed && hiddenBeforeConfirm == nil,
            "confirmed-start path must start from a hidden visible draft plus durable recovery")
     expect(activeBeforeConfirm == .pending(active: true),
            "detach/rebind before turn completion must leave the active recovery journal authoritative")
-    let confirmed = try await lifecycleStore.confirmSubmissionStarted(for: agentA, sentAt: clock.now())
+    let confirmed = try await lifecycleStore.confirmSubmissionStarted(
+        for: agentA, ownership: confirmedLease!, sentAt: clock.now())
     let acceptedDraft = await lifecycleStore.load(for: agentA)
     let sentPasted = try await attachmentStore.storedAttachment(for: pasted.manifest.id)
     let sentLocal = try await attachmentStore.storedAttachment(for: localFile.manifest.id)
@@ -629,11 +708,13 @@ private func runAgentComposerAttachmentStoreChecks(
         })
     await snapshotRewriteStore.save(snapshotRewriteDraft, for: agentA)
     await snapshotRewriteStore.flushAll()
-    let beganSnapshotRewrite = try await snapshotRewriteStore.beginSubmission(for: agentA, submittedAt: clock.now())
+    let snapshotRewriteLease = try await snapshotRewriteStore.beginSubmissionLease(for: agentA, submittedAt: clock.now())
+    let beganSnapshotRewrite = snapshotRewriteLease != nil
     expect(beganSnapshotRewrite, "snapshot rewrite fixture must begin submission")
     snapshotRewriteFaults.failConfirmingRewrite = true
     do {
-        _ = try await snapshotRewriteStore.confirmSubmissionStarted(for: agentA, sentAt: clock.now())
+        _ = try await snapshotRewriteStore.confirmSubmissionStarted(
+            for: agentA, ownership: snapshotRewriteLease!, sentAt: clock.now())
         expect(false, "confirming-state snapshot rewrite failure must throw before ownership transfer")
     } catch {}
     let restoredAfterRewriteFailure = try await snapshotRewriteStore.restoreSubmission(for: agentA)
@@ -657,11 +738,13 @@ private func runAgentComposerAttachmentStoreChecks(
         })
     await confirmingReloadStore.save(confirmingReloadDraft, for: agentA)
     await confirmingReloadStore.flushAll()
-    let beganConfirmingReload = try await confirmingReloadStore.beginSubmission(for: agentA, submittedAt: clock.now())
+    let confirmingReloadLease = try await confirmingReloadStore.beginSubmissionLease(for: agentA, submittedAt: clock.now())
+    let beganConfirmingReload = confirmingReloadLease != nil
     expect(beganConfirmingReload, "confirming reload fixture must begin submission")
     confirmingReloadFaults.failConfirmedRewrite = true
     do {
-        _ = try await confirmingReloadStore.confirmSubmissionStarted(for: agentA, sentAt: clock.now())
+        _ = try await confirmingReloadStore.confirmSubmissionStarted(
+            for: agentA, ownership: confirmingReloadLease!, sentAt: clock.now())
         expect(false, "confirmed-state rewrite failure must leave a durable confirming recovery record")
     } catch {}
     let confirmingRelaunched = AgentComposerDraftStore(
@@ -693,11 +776,13 @@ private func runAgentComposerAttachmentStoreChecks(
         })
     await snapshotDeleteStore.save(snapshotDeleteDraft, for: agentA)
     await snapshotDeleteStore.flushAll()
-    let beganSnapshotDelete = try await snapshotDeleteStore.beginSubmission(for: agentA, submittedAt: clock.now())
+    let snapshotDeleteLease = try await snapshotDeleteStore.beginSubmissionLease(for: agentA, submittedAt: clock.now())
+    let beganSnapshotDelete = snapshotDeleteLease != nil
     expect(beganSnapshotDelete, "snapshot delete fixture must begin submission")
     snapshotDeleteFaults.failRecoveryDeletion = true
     do {
-        _ = try await snapshotDeleteStore.confirmSubmissionStarted(for: agentA, sentAt: clock.now())
+        _ = try await snapshotDeleteStore.confirmSubmissionStarted(
+            for: agentA, ownership: snapshotDeleteLease!, sentAt: clock.now())
         expect(false, "confirmed recovery snapshot deletion failure must be reported")
     } catch {}
     let snapshotDeleteManifest = try await snapshotDeleteAttachmentStore.manifest(for: snapshotDeleteImage.manifest.id)
