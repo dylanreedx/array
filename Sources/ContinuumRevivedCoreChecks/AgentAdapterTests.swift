@@ -22,6 +22,7 @@ func runAgentAdapterTests() {
         .itemCompleted(threadId: threadId, itemId: "item-1", kind: .commandExecution, status: .completed),
         .turnCompleted(threadId: threadId, turnId: "turn-1", outcome: .completed, errorMessage: nil),
         .tokenUsageUpdated(threadId: threadId, snapshot: TokenUsageSnapshot(inputTokens: 12, outputTokens: 34, totalCostUsd: 0.05)),
+        .contextWindowUpdated(threadId: threadId, snapshot: AgentContextWindowSnapshot(usedTokens: 12, maxTokens: 48, observedAt: Date(timeIntervalSinceReferenceDate: 0), source: .providerSessionStats, freshness: .live)),
         .runtimeError(threadId: otherThreadId, message: "other thread failed")
     ]
 
@@ -50,6 +51,7 @@ func runAgentAdapterTests() {
         "itemCompleted",
         "turnCompleted",
         "tokenUsageUpdated",
+        "contextWindowUpdated",
         "runtimeError"
     ], "AgentRuntimeEvent JSON type discriminators must stay stable")
 

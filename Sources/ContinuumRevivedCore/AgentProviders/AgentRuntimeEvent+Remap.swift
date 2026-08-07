@@ -34,6 +34,8 @@ extension AgentRuntimeEvent {
             return .userInputResolved(threadId: threadId, requestId: requestId)
         case let .tokenUsageUpdated(_, snapshot):
             return .tokenUsageUpdated(threadId: threadId, snapshot: snapshot)
+        case let .contextWindowUpdated(_, snapshot):
+            return .contextWindowUpdated(threadId: threadId, snapshot: snapshot)
         case let .runtimeError(_, message):
             return .runtimeError(threadId: threadId, message: message)
         }

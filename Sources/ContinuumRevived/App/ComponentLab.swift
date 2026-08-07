@@ -1758,6 +1758,7 @@ enum LabCatalog {
         case .userInputRequested: return "userInputRequested"
         case .userInputResolved: return "userInputResolved"
         case .tokenUsageUpdated: return "tokenUsageUpdated"
+        case .contextWindowUpdated: return "contextWindowUpdated"
         case .runtimeError: return "runtimeError"
         }
     }

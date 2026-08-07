@@ -2878,7 +2878,7 @@ final class AgentSupervisor {
             return true
         case .sessionStateChanged, .turnCompleted, .itemStarted, .itemCompleted,
              .contentDelta, .requestOpened, .requestResolved, .userInputRequested,
-             .userInputResolved, .tokenUsageUpdated, .runtimeError:
+             .userInputResolved, .tokenUsageUpdated, .contextWindowUpdated, .runtimeError:
             return false
         }
     }
@@ -2899,7 +2899,7 @@ final class AgentSupervisor {
         case .turnStarted, .requestOpened, .userInputRequested:
             return true
         case .turnCompleted, .itemStarted, .itemCompleted, .contentDelta,
-             .requestResolved, .userInputResolved, .tokenUsageUpdated, .runtimeError:
+             .requestResolved, .userInputResolved, .tokenUsageUpdated, .contextWindowUpdated, .runtimeError:
             return false
         }
     }
@@ -3265,7 +3265,7 @@ final class AgentSupervisor {
                 record.failedAt = max(record.failedAt ?? .distantPast, now)
                 records[id] = record
             }
-        case .itemStarted, .itemCompleted, .contentDelta, .tokenUsageUpdated:
+        case .itemStarted, .itemCompleted, .contentDelta, .tokenUsageUpdated, .contextWindowUpdated:
             break
         }
         // The invariant this file owns, asserted in `--agent-supervisor-check`: a
@@ -3281,7 +3281,8 @@ final class AgentSupervisor {
         case .sessionStateChanged, .turnStarted, .turnCompleted, .runtimeError:
             return true
         case .itemStarted, .itemCompleted, .contentDelta, .requestOpened,
-             .requestResolved, .userInputRequested, .userInputResolved, .tokenUsageUpdated:
+             .requestResolved, .userInputRequested, .userInputResolved, .tokenUsageUpdated,
+             .contextWindowUpdated:
             return false
         }
     }
@@ -9631,6 +9632,7 @@ private func checkAutoUnsettle(
         .userInputRequested(threadId: provider, requestId: "q1", questions: []),
         .userInputResolved(threadId: provider, requestId: "q1"),
         .tokenUsageUpdated(threadId: provider, snapshot: TokenUsageSnapshot(inputTokens: 1, outputTokens: 1, totalCostUsd: nil)),
+        .contextWindowUpdated(threadId: provider, snapshot: AgentContextWindowSnapshot(observedAt: Date(timeIntervalSinceReferenceDate: 0), source: .piMessageUsage, freshness: .live)),
         .runtimeError(threadId: provider, message: "boom")
     ]
     for event in activity where !AgentSupervisor.isRealActivity(event) {
@@ -9643,8 +9645,8 @@ private func checkAutoUnsettle(
     // the exhaustive classifiers keep honest at compile time; the count guard
     // catches a case dropped from THIS table.
     let caseCount = activity.count + notActivity.count
-    guard caseCount == 17 else {
-        throw fail("auto-unsettle: the classifier table covers \(caseCount) event shapes, expected 17 — a case was added or dropped without a decision")
+    guard caseCount == 18 else {
+        throw fail("auto-unsettle: the classifier table covers \(caseCount) event shapes, expected 18 — a case was added or dropped without a decision")
     }
 
     // MARK: 2 · a settled agent, made settled by the store
@@ -10311,6 +10313,7 @@ private func eventLabel(_ event: AgentRuntimeEvent) -> String {
     case let .userInputRequested(threadId, requestId, _): return "userInputRequested:\(requestId)@\(threadId)"
     case let .userInputResolved(threadId, requestId): return "userInputResolved:\(requestId)@\(threadId)"
     case let .tokenUsageUpdated(threadId, snapshot): return "tokenUsage:\(snapshot.inputTokens)/\(snapshot.outputTokens)@\(threadId)"
+    case let .contextWindowUpdated(threadId, snapshot): return "contextWindow:\(String(describing: snapshot.occupancyPercentage))@\(threadId)"
     case let .runtimeError(threadId, message): return "runtimeError:\(message)@\(threadId ?? "-")"
     }
 }

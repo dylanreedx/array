@@ -61,9 +61,10 @@ public enum ManagedAgentActivityBridge {
             // I5: drop the raw message (provider stderr → paths/secrets). Local
             // tile keeps the detail; the phone gets only that an error occurred.
             return make(agentId, tileId, .error, "error", status, "Runtime error", now)
-        case .sessionStateChanged, .contentDelta, .userInputRequested, .userInputResolved, .tokenUsageUpdated:
+        case .sessionStateChanged, .contentDelta, .userInputRequested, .userInputResolved,
+             .tokenUsageUpdated, .contextWindowUpdated:
             // Status changes ride on the other events' `status` field; content
-            // deltas / token usage never cross (I5 + noise).
+            // deltas / token/context telemetry never cross (I5 + noise).
             return nil
         }
     }

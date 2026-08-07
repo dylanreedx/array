@@ -279,6 +279,128 @@ public struct TokenUsageSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
+    case piMessageUsage
+    case providerSessionStats
+    case unknown(String)
+
+    public var isAuthoritativeForContextOccupancy: Bool {
+        switch self {
+        case .providerSessionStats:
+            return true
+        case .piMessageUsage, .unknown:
+            return false
+        }
+    }
+
+    private var encodedValue: String {
+        switch self {
+        case .piMessageUsage: return "piMessageUsage"
+        case .providerSessionStats: return "providerSessionStats"
+        case .unknown(let raw): return raw
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        switch raw {
+        case "piMessageUsage": self = .piMessageUsage
+        case "providerSessionStats": self = .providerSessionStats
+        default: self = .unknown(raw)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(encodedValue)
+    }
+}
+
+public enum AgentContextWindowFreshness: Equatable, Sendable, Codable {
+    case live
+    case stale
+    case unknown(String)
+
+    private var encodedValue: String {
+        switch self {
+        case .live: return "live"
+        case .stale: return "stale"
+        case .unknown(let raw): return raw
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        switch raw {
+        case "live": self = .live
+        case "stale": self = .stale
+        default: self = .unknown(raw)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(encodedValue)
+    }
+}
+
+public struct AgentContextWindowSnapshot: Codable, Equatable, Sendable {
+    public var usedTokens: Int?
+    public var maxTokens: Int?
+    public var inputTokens: Int?
+    public var outputTokens: Int?
+    public var cacheReadTokens: Int?
+    public var cacheWriteTokens: Int?
+    public var totalProcessedTokens: Int?
+    public var totalCostUsd: Double?
+    public var automaticCompaction: Bool?
+    public var observedAt: Date
+    public var source: AgentContextWindowTelemetrySource
+    public var freshness: AgentContextWindowFreshness
+
+    public init(
+        usedTokens: Int? = nil,
+        maxTokens: Int? = nil,
+        inputTokens: Int? = nil,
+        outputTokens: Int? = nil,
+        cacheReadTokens: Int? = nil,
+        cacheWriteTokens: Int? = nil,
+        totalProcessedTokens: Int? = nil,
+        totalCostUsd: Double? = nil,
+        automaticCompaction: Bool? = nil,
+        observedAt: Date,
+        source: AgentContextWindowTelemetrySource,
+        freshness: AgentContextWindowFreshness
+    ) {
+        self.usedTokens = usedTokens
+        self.maxTokens = maxTokens
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.cacheReadTokens = cacheReadTokens
+        self.cacheWriteTokens = cacheWriteTokens
+        self.totalProcessedTokens = totalProcessedTokens
+        self.totalCostUsd = totalCostUsd
+        self.automaticCompaction = automaticCompaction
+        self.observedAt = observedAt
+        self.source = source
+        self.freshness = freshness
+    }
+
+    public var occupancyFraction: Double? {
+        guard source.isAuthoritativeForContextOccupancy,
+              let usedTokens,
+              let maxTokens,
+              usedTokens >= 0,
+              maxTokens > 0
+        else { return nil }
+        return Double(usedTokens) / Double(maxTokens)
+    }
+
+    public var occupancyPercentage: Double? {
+        occupancyFraction.map { $0 * 100 }
+    }
+}
+
 public struct AgentSession: Codable, Equatable, Sendable {
     public var threadId: String
     public var providerSessionId: String?
@@ -341,6 +463,7 @@ public enum AgentRuntimeEvent: Codable, Equatable, Sendable {
     case userInputRequested(threadId: String, requestId: String, questions: [UserInputQuestion])
     case userInputResolved(threadId: String, requestId: String)
     case tokenUsageUpdated(threadId: String, snapshot: TokenUsageSnapshot)
+    case contextWindowUpdated(threadId: String, snapshot: AgentContextWindowSnapshot)
     case runtimeError(threadId: String?, message: String) // [BODY]
 
     private enum CodingKeys: String, CodingKey {
@@ -375,6 +498,7 @@ public enum AgentRuntimeEvent: Codable, Equatable, Sendable {
         case userInputRequested
         case userInputResolved
         case tokenUsageUpdated
+        case contextWindowUpdated
         case runtimeError
     }
 
@@ -444,6 +568,11 @@ public enum AgentRuntimeEvent: Codable, Equatable, Sendable {
                 threadId: try container.decode(String.self, forKey: .threadId),
                 snapshot: try container.decode(TokenUsageSnapshot.self, forKey: .snapshot)
             )
+        case .contextWindowUpdated:
+            self = .contextWindowUpdated(
+                threadId: try container.decode(String.self, forKey: .threadId),
+                snapshot: try container.decode(AgentContextWindowSnapshot.self, forKey: .snapshot)
+            )
         case .runtimeError:
             self = .runtimeError(
                 threadId: try container.decodeIfPresent(String.self, forKey: .threadId),
@@ -507,6 +636,10 @@ public enum AgentRuntimeEvent: Codable, Equatable, Sendable {
             try container.encode(requestId, forKey: .requestId)
         case .tokenUsageUpdated(let threadId, let snapshot):
             try container.encode(Discriminator.tokenUsageUpdated, forKey: .type)
+            try container.encode(threadId, forKey: .threadId)
+            try container.encode(snapshot, forKey: .snapshot)
+        case .contextWindowUpdated(let threadId, let snapshot):
+            try container.encode(Discriminator.contextWindowUpdated, forKey: .type)
             try container.encode(threadId, forKey: .threadId)
             try container.encode(snapshot, forKey: .snapshot)
         case .runtimeError(let threadId, let message):

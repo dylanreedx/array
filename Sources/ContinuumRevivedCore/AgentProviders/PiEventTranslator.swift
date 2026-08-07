@@ -25,6 +25,7 @@ public struct PiEventTranslator {
     private var threadId: String = "pi-unknown"
     private var turnCounter: Int = 0
     private var currentTurnId: String = "pi-unknown#t0"
+    private var seenUsageSignatures = Set<String>()
     private var workingDirectory: URL?
     private let now: @Sendable () -> Date
 
@@ -94,6 +95,9 @@ public struct PiEventTranslator {
         case "message_update":
             return translateMessageUpdate(object)
 
+        case "message_end":
+            return translateUsageEvents(from: object)
+
         case "tool_execution_start":
             guard let toolCallId = object["toolCallId"] as? String,
                   let toolName = object["toolName"] as? String else { return [] }
@@ -135,7 +139,7 @@ public struct PiEventTranslator {
             )]
 
         case "turn_end":
-            return [.turnCompleted(
+            return translateUsageEvents(from: object) + [.turnCompleted(
                 threadId: threadId,
                 turnId: currentTurnId,
                 outcome: .completed,
@@ -154,6 +158,94 @@ public struct PiEventTranslator {
     /// Convenience: translate a whole stream (e.g. a captured `.log`).
     public mutating func translate(stream lines: [String]) -> [AgentRuntimeEvent] {
         lines.flatMap { translate(line: $0) }
+    }
+
+    // MARK: - context / token telemetry
+
+    private mutating func translateUsageEvents(from object: [String: Any]) -> [AgentRuntimeEvent] {
+        guard let message = object["message"] as? [String: Any],
+              let usage = message["usage"] as? [String: Any]
+        else { return [] }
+
+        let input = Self.intValue(usage["input"])
+        let output = Self.intValue(usage["output"])
+        let totalCost = (usage["cost"] as? [String: Any]).flatMap { Self.doubleValue($0["total"]) }
+        let observedAt = Self.observedAt(from: message) ?? now()
+        if let signature = Self.usageSignature(message: message, usage: usage) {
+            guard seenUsageSignatures.insert(signature).inserted else { return [] }
+        }
+
+        var events: [AgentRuntimeEvent] = []
+        if let input, let output {
+            events.append(.tokenUsageUpdated(
+                threadId: threadId,
+                snapshot: TokenUsageSnapshot(inputTokens: input, outputTokens: output, totalCostUsd: totalCost)
+            ))
+        }
+
+        let snapshot = AgentContextWindowSnapshot(
+            usedTokens: nil,
+            maxTokens: nil,
+            inputTokens: input,
+            outputTokens: output,
+            cacheReadTokens: Self.intValue(usage["cacheRead"]),
+            cacheWriteTokens: Self.intValue(usage["cacheWrite"]),
+            totalProcessedTokens: Self.intValue(usage["totalTokens"]),
+            totalCostUsd: totalCost,
+            automaticCompaction: nil,
+            observedAt: observedAt,
+            source: .piMessageUsage,
+            freshness: .live
+        )
+        if snapshot.inputTokens != nil || snapshot.outputTokens != nil || snapshot.cacheReadTokens != nil
+            || snapshot.cacheWriteTokens != nil || snapshot.totalProcessedTokens != nil || snapshot.totalCostUsd != nil {
+            events.append(.contextWindowUpdated(threadId: threadId, snapshot: snapshot))
+        }
+        return events
+    }
+
+    private static func observedAt(from message: [String: Any]) -> Date? {
+        guard let timestamp = doubleValue(message["timestamp"]) else { return nil }
+        // Pi's committed fixtures carry millisecond epoch timestamps.
+        return Date(timeIntervalSince1970: timestamp / 1000.0)
+    }
+
+    private static func usageSignature(message: [String: Any], usage: [String: Any]) -> String? {
+        let responseId = (message["responseId"] as? String) ?? ""
+        let timestamp = doubleValue(message["timestamp"]).map { String($0) } ?? ""
+        guard !responseId.isEmpty || !timestamp.isEmpty else { return nil }
+        let input = intValue(usage["input"]).map { String($0) } ?? ""
+        let output = intValue(usage["output"]).map { String($0) } ?? ""
+        let cacheRead = intValue(usage["cacheRead"]).map { String($0) } ?? ""
+        let cacheWrite = intValue(usage["cacheWrite"]).map { String($0) } ?? ""
+        let total = intValue(usage["totalTokens"]).map { String($0) } ?? ""
+        return [responseId, timestamp, input, output, cacheRead, cacheWrite, total].joined(separator: "|")
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        switch value {
+        case let value as Int:
+            return value
+        case let value as NSNumber:
+            return value.intValue
+        case let value as Double where value.isFinite:
+            return Int(value)
+        default:
+            return nil
+        }
+    }
+
+    private static func doubleValue(_ value: Any?) -> Double? {
+        switch value {
+        case let value as Double where value.isFinite:
+            return value
+        case let value as Int:
+            return Double(value)
+        case let value as NSNumber:
+            return value.doubleValue.isFinite ? value.doubleValue : nil
+        default:
+            return nil
+        }
     }
 
     // MARK: - message_update sub-protocol

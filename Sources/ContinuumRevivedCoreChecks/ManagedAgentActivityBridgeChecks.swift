@@ -29,9 +29,13 @@ func runManagedAgentActivityBridgeChecks() {
     expect(draft(.turnCompleted(threadId: thread, turnId: "t1", outcome: .completed, errorMessage: nil))?.kind == "turn.completed",
            "bridge: turnCompleted(.completed) → turn.completed")
 
-    // 2. Dropped events return nil (never cross): content deltas + token usage.
+    // 2. Dropped events return nil (never cross): content deltas + token/context telemetry.
     expect(draft(.contentDelta(threadId: thread, turnId: "t1", streamKind: .assistant, delta: "some assistant text")) == nil,
            "bridge: content deltas must NOT become activity (I5 + noise)")
+    expect(draft(.tokenUsageUpdated(threadId: thread, snapshot: TokenUsageSnapshot(inputTokens: 1, outputTokens: 2, totalCostUsd: nil))) == nil,
+           "bridge: token usage must NOT become synced activity (noise)")
+    expect(draft(.contextWindowUpdated(threadId: thread, snapshot: AgentContextWindowSnapshot(observedAt: Date(timeIntervalSinceReferenceDate: 0), source: .piMessageUsage, freshness: .live))) == nil,
+           "bridge: context telemetry must NOT become synced activity (privacy/noise)")
     expect(draft(.sessionStateChanged(.running)) == nil, "bridge: session state changes ride on other events' status")
 
     // 3. I5: raw error text must NEVER cross — it carries provider stderr
