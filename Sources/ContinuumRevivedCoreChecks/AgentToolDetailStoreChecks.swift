@@ -10,7 +10,7 @@ func runAgentToolDetailStoreChecks() async throws {
     try await runAgentToolDetailPresentationChecks()
     runAgentToolDetailSourceBoundaryChecks()
     try runAgentToolDetailCompileNegativeBoundaryCheck()
-    print("Agent tool detail store checks passed: privacy redaction/fail-closed output, provider ID bounds, argument/file bounds, truncation caps, start/end ordering, local expiry, same-ID concurrency, compact summaries, and source boundaries")
+    print("Agent tool detail store checks passed: privacy redaction/fail-closed output, implicit-path and compound-argv secret witnesses, cross-store reversed-arrival ties, provider ID bounds, argument/file bounds, truncation caps, start/end ordering, local expiry, same-ID concurrency, compact summaries, and source boundaries")
 }
 
 private func runAgentToolDetailPrivacyChecks() async throws {
@@ -169,7 +169,7 @@ private func runAgentToolDetailImplicitSensitivityChecks() async throws {
         ("argv whitespace", "runner --access-token implicit-argv-secret", "implicit-argv-secret"),
         ("argv equal", "runner --session-key=implicit-session-secret", "implicit-session-secret"),
         ("query", "https://example.test/?refresh_token=implicit-query-secret", "implicit-query-secret"),
-        ("header", "Authorization: Bearer implicit-header-secret", "implicit-header-secret"),
+        ("header", "X-Api-Key: implicit-header-secret", "implicit-header-secret"),
         ("json", #"{"private-signing-key":"implicit-json-secret"}"#, "implicit-json-secret")
     ]
     for testCase in implicitCases {
@@ -189,13 +189,16 @@ private func runAgentToolDetailImplicitSensitivityChecks() async throws {
     let outputSecret = "implicit-output-secret"
     _ = await outputStore.recordEnd(AgentToolDetailEnd(
         providerItemID: "implicit-output",
-        output: "Authorization: Bearer \(outputSecret)",
+        output: "X-Api-Key: \(outputSecret)",
         status: .completed,
         affectedFiles: [URL(fileURLWithPath: "/tmp/implicit-\(outputSecret)/output.swift")]
     ))
-    let outputFiles = await outputStore.detail(for: "implicit-output")?.affectedFiles ?? []
+    let outputDetail = await outputStore.detail(for: "implicit-output")
+    let outputFiles = outputDetail?.affectedFiles ?? []
     expect(outputFiles.isEmpty,
            "AgentToolDetailStore privacy: output-discovered secret must omit affected path without explicitSecrets")
+    expect(outputDetail?.output?.text.contains(outputSecret) == false,
+           "AgentToolDetailStore privacy: output-discovered header secret must be redacted without explicitSecrets")
 
     let argvCases: [(option: String, separator: String, secret: String)] = [
         ("--access-token", " ", "argv-access-secret"),
@@ -203,7 +206,11 @@ private func runAgentToolDetailImplicitSensitivityChecks() async throws {
         ("--private-signing-key", " ", "argv-signing-secret"),
         ("--api-password", "=", "argv-password-secret"),
         ("--client-secret", " ", "argv-client-secret"),
-        ("--credential", "=", "argv-credential-secret")
+        ("--credential", "=", "argv-credential-secret"),
+        ("--apiKey", " ", "argv-api-key-secret"),
+        ("--db-key", "=", "argv-db-key-secret"),
+        ("--oauth-token", " ", "argv-oauth-token-secret"),
+        ("--secret-value", "=", "argv-secret-value-secret")
     ]
     for testCase in argvCases {
         let redacted = SecretRedactor.redact("runner \(testCase.option)\(testCase.separator)\(testCase.secret)")

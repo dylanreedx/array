@@ -296,6 +296,7 @@ public struct AgentToolDetailSanitizer: Sendable {
     func sanitizeOutput(
         _ raw: String?,
         explicitSecrets: [String],
+        redactionSecrets: [String] = [],
         requiredStartFingerprints: Set<String>,
         associatedArguments: [AgentToolDetailArgument]
     ) -> AgentToolDetailBoundedText? {
@@ -308,7 +309,10 @@ public struct AgentToolDetailSanitizer: Sendable {
             .filter { $0.sensitiveKeyFiltered }
             .map { $0.value.text }
             .filter { !$0.isEmpty && $0 != "[REDACTED]" }
-        let redacted = SecretRedactor.redact(raw, explicitSecrets: explicitSecrets + filteredArgumentMarkers)
+        let redacted = SecretRedactor.redact(
+            raw,
+            explicitSecrets: explicitSecrets + redactionSecrets + filteredArgumentMarkers
+        )
         return boundText(
             redacted,
             maxBytes: limits.maxOutputBytes,
@@ -353,7 +357,7 @@ public struct AgentToolDetailSanitizer: Sendable {
         stableKey([
             toolName,
             arguments.map { stableArgumentKey($0) }.joined(separator: "\u{1f}"),
-            affectedFiles.map(\.absoluteString).joined(separator: "\u{1f}")
+            affectedFiles.map(\.absoluteString).sorted().joined(separator: "\u{1f}")
         ])
     }
 
@@ -367,7 +371,7 @@ public struct AgentToolDetailSanitizer: Sendable {
             stableTextKey(output),
             status.rawValue,
             exitCode.map(String.init) ?? "",
-            affectedFiles.map(\.absoluteString).joined(separator: "\u{1f}")
+            affectedFiles.map(\.absoluteString).sorted().joined(separator: "\u{1f}")
         ])
     }
 
@@ -572,6 +576,7 @@ public actor AgentToolDetailStore {
         let sanitizedOutput = sanitizer.sanitizeOutput(
             end.output,
             explicitSecrets: end.explicitSecrets,
+            redactionSecrets: implicitSecrets,
             requiredStartFingerprints: details[end.providerItemID]?.sensitiveStartFingerprints ?? [],
             associatedArguments: details[end.providerItemID]?.arguments ?? []
         )

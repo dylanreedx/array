@@ -134,7 +134,7 @@ public enum SecretRedactor {
             if !current.isEmpty { components.append(current.lowercased()) }
         }
         let sensitiveComponents: Set<String> = [
-            "password", "passwd", "pwd", "secret", "token", "key", "authorization", "auth",
+            "password", "passwd", "pwd", "secret", "token", "key", "apikey", "authorization", "auth",
             "credential", "credentials", "cookie", "session", "signature", "signing", "private",
             "access", "refresh", "client", "ssh", "jwt", "bearer"
         ]
