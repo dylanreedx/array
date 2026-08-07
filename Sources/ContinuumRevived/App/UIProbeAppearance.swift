@@ -786,11 +786,13 @@ enum UIProbeAppearance {
 
     /// Still painting literals, each with the ticket that retires them.
     ///
-    /// EMPTY since P1.11 — every layer colour painted anywhere this gate renders is
-    /// now a `DesignTokens` value. Kept as a declared (empty) escape hatch rather
-    /// than deleted, because the failure message below is what tells a future
-    /// adopter what to do; an owner that is neither adopted nor listed is red.
-    private static let literalOwnersPendingAdoption: [String: String] = [:]
+    /// The image attachment rail owns a deliberately transparent layer so its
+    /// collection view can coordinate appearance updates for visible cells. It
+    /// is not a visible palette surface; keep it explicit until the image rail
+    /// receives a dedicated transparent token.
+    private static let literalOwnersPendingAdoption: [String: String] = [
+        "ComposerImageAttachmentRailView": "Queue 91 image attachment rail — plan-managed-agent-tile-polish.md §6"
+    ]
 
     /// The values legal for a given KIND of layer colour in `theme`, in this gate's
     /// hex spelling. Scoped by kind rather than "any token", which says more: a fill
