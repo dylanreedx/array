@@ -7852,7 +7852,8 @@ enum UIProbeGeometry {
         let thumbnailAssertions = try await checkComposerImageThumbnailPipeline()
         let railAssertions = try await checkComposerImageAttachmentRail()
         let rebindAssertions = try await checkComposerRebindIsolation()
-        print("UIProbeGeometry: composer image components gated \(pasteboardAssertions) paste/drop decoding assertions, \(thumbnailAssertions) thumbnail-cache assertions, \(railAssertions) rail geometry/accessibility/keyboard assertions, and \(rebindAssertions) delayed cross-agent rebind assertions")
+        let submissionRecoveryAssertions = try await checkComposerSubmissionRebindRecovery()
+        print("UIProbeGeometry: composer image components gated \(pasteboardAssertions) paste/drop decoding assertions, \(thumbnailAssertions) thumbnail-cache assertions, \(railAssertions) rail geometry/accessibility/keyboard assertions, \(rebindAssertions) delayed cross-agent rebind assertions, and \(submissionRecoveryAssertions) pre-sink submission rebind recovery assertions")
     }
 
     /// Delays an old agent's attachment-resolution await while the real AppKit
@@ -7896,6 +7897,106 @@ enum UIProbeGeometry {
             throw fail("delayed cross-agent composer rebind applied the stale agent A draft: \(composer.draft.text)")
         }
         return 2
+    }
+
+    /// Deterministically crosses the exact pre-sink window: the store has
+    /// journaled and cleared agent A, then the composer is rebound before the
+    /// sink can be invoked. The next A bind must recover the durable draft.
+    private static func checkComposerSubmissionRebindRecovery() async throws -> Int {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ComposerSubmissionRebindRecovery-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let agentA = AgentID(rawValue: UUID(uuidString: "C0000000-0000-4000-8000-0000000000A2")!)
+        let agentB = AgentID(rawValue: UUID(uuidString: "C0000000-0000-4000-8000-0000000000B2")!)
+        let store = AgentComposerDraftStore(
+            applicationSupportDirectory: root,
+            debounceInterval: 60
+        )
+        let imageID = AgentImageAttachmentID(rawValue: "pre-sink-recovery-image")!
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let imageURL = root.appendingPathComponent("pre-sink-recovery.png")
+        try Data([0, 1, 2]).write(to: imageURL)
+        let image = AgentPromptImageAttachment(
+            metadata: AgentImageAttachmentMetadata(id: imageID, displayName: "pre-sink-recovery.png"),
+            fileURL: imageURL
+        )
+        let draft = ContinuumRevivedCore.AgentComposerDraft(
+            text: "pre-sink recovery draft", selection: 0..<23, updatedAt: Date(),
+            imageAttachments: [AgentComposerDraftImageAttachment(metadata: image.metadata)]
+        )
+        await store.save(draft, for: agentA)
+        await store.flushAll()
+        let snapshot = AgentTileTurnSnapshot(
+            state: .ready,
+            capabilities: AgentTurnCapabilities(canSend: true),
+            turnStartedAt: nil
+        )
+        let sink = ComposerSubmissionProbeSink()
+        let composer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 420, height: 120))
+        composer.bindActionSink(sink, agentID: agentA, snapshot: snapshot)
+        composer.bindDraftStore(store, agentID: agentA)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        composer.apply(AgentComposerDraft(
+            text: draft.text,
+            selection: NSRange(location: (draft.text as NSString).length, length: 0),
+            revision: 1,
+            imageAttachments: [image]
+        ))
+        composer.qaBeforeSubmissionSinkHandoff = {
+            composer.bindActionSink(sink, agentID: agentB, snapshot: snapshot)
+            composer.bindDraftStore(store, agentID: agentB)
+        }
+        composer.composerRequestedSend(composer.textView)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        guard await sink.invocationCount == 0 else {
+            throw fail("pre-sink rebind witness invoked the sink before cancellation")
+        }
+
+        composer.bindActionSink(sink, agentID: agentA, snapshot: snapshot)
+        composer.bindDraftStore(store, agentID: agentA)
+        try await Task.sleep(nanoseconds: 180_000_000)
+
+        guard composer.draft.text == draft.text else {
+            throw fail("next agent A bind left its pre-sink journal hidden: \(composer.draft.text)")
+        }
+        guard await sink.invocationCount == 0 else {
+            throw fail("pre-sink recovery duplicated sink delivery")
+        }
+
+        let handoffAgent = AgentID(rawValue: UUID(uuidString: "C0000000-0000-4000-8000-0000000000C2")!)
+        let handoffDraft = ContinuumRevivedCore.AgentComposerDraft(
+            text: "post-handoff stays hidden", selection: 0..<25, updatedAt: Date(),
+            imageAttachments: draft.imageAttachments
+        )
+        await store.save(handoffDraft, for: handoffAgent)
+        await store.flushAll()
+        let delayedSink = ComposerSubmissionProbeSink(delayNanoseconds: 100_000_000)
+        let handoffComposer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 420, height: 120))
+        handoffComposer.bindActionSink(delayedSink, agentID: handoffAgent, snapshot: snapshot)
+        handoffComposer.bindDraftStore(store, agentID: handoffAgent)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        handoffComposer.apply(AgentComposerDraft(
+            text: handoffDraft.text,
+            selection: NSRange(location: (handoffDraft.text as NSString).length, length: 0),
+            revision: 1,
+            imageAttachments: [image]
+        ))
+        handoffComposer.composerRequestedSend(handoffComposer.textView)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        guard await delayedSink.invocationCount == 1 else {
+            throw fail("post-handoff witness did not invoke the sink exactly once")
+        }
+        handoffComposer.bindActionSink(delayedSink, agentID: agentB, snapshot: snapshot)
+        handoffComposer.bindDraftStore(store, agentID: agentB)
+        try await Task.sleep(nanoseconds: 150_000_000)
+        handoffComposer.bindActionSink(delayedSink, agentID: handoffAgent, snapshot: snapshot)
+        handoffComposer.bindDraftStore(store, agentID: handoffAgent)
+        try await Task.sleep(nanoseconds: 180_000_000)
+        guard await delayedSink.invocationCount == 1,
+              handoffComposer.draft.text.isEmpty else {
+            throw fail("post-handoff rebind restored or duplicated an already handed-off prompt")
+        }
+        return 5
     }
 
     private static func checkComposerImagePasteboardDecoder() async throws -> Int {
@@ -8351,6 +8452,22 @@ enum UIProbeGeometry {
         return data
     }
 
+}
+
+@MainActor
+private final class ComposerSubmissionProbeSink: AgentTileActionSink {
+    private(set) var invocationCount = 0
+    let delayNanoseconds: UInt64
+
+    init(delayNanoseconds: UInt64 = 0) {
+        self.delayNanoseconds = delayNanoseconds
+    }
+
+    func accept(_ intent: AgentComposerIntent, for agentID: AgentID) async -> IntentAcceptance {
+        invocationCount += 1
+        if delayNanoseconds > 0 { try? await Task.sleep(nanoseconds: delayNanoseconds) }
+        return .accepted
+    }
 }
 
 private actor ComposerImageImportRecorder {

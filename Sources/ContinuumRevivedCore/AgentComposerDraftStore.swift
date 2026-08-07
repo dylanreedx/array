@@ -115,6 +115,16 @@ public enum AgentComposerDraftStoreError: Error, Equatable, CustomStringConverti
     }
 }
 
+public struct AgentComposerSubmissionLease: Equatable, Sendable {
+    public let agentID: AgentID
+    fileprivate let token: UUID
+
+    fileprivate init(agentID: AgentID, token: UUID) {
+        self.agentID = agentID
+        self.token = token
+    }
+}
+
 public struct AgentComposerSubmissionSnapshot: Codable, Equatable, Sendable {
     public var draft: AgentComposerDraft
     public var submittedAt: Date
@@ -180,6 +190,9 @@ public actor AgentComposerDraftStore {
     /// a relaunch has no live submission and therefore treats the journal as
     /// recoverable.
     private var activeSubmissionAgents: Set<AgentID> = []
+    /// A lease token prevents a stale cancelled task from relinquishing a
+    /// newer submission for the same agent after a rapid rebind.
+    private var submissionOwnership: [AgentID: UUID] = [:]
 
     public init(
         applicationSupportDirectory: URL? = nil,
@@ -283,13 +296,32 @@ public actor AgentComposerDraftStore {
     /// before clearing visible composer state, so a pre-start/provider refusal can
     /// restore the exact draft instead of losing local attachment references.
     @discardableResult
-    public func beginSubmission(for agentID: AgentID, draft explicitDraft: AgentComposerDraft? = nil, submittedAt: Date? = nil) throws -> Bool {
-        guard let draft = explicitDraft ?? pending[agentID] ?? load(for: agentID) else { return false }
+    public func beginSubmissionLease(
+        for agentID: AgentID,
+        draft explicitDraft: AgentComposerDraft? = nil,
+        submittedAt: Date? = nil
+    ) async throws -> AgentComposerSubmissionLease? {
+        guard let draft = explicitDraft ?? pending[agentID] ?? load(for: agentID) else { return nil }
         let stamp = submittedAt ?? clock.now()
         try persistSubmissionSnapshot(AgentComposerSubmissionSnapshot(draft: draft, submittedAt: stamp), for: agentID)
         clearVisibleDraft(for: agentID, clearThrough: max(stamp, draft.updatedAt))
+        let lease = AgentComposerSubmissionLease(agentID: agentID, token: UUID())
         activeSubmissionAgents.insert(agentID)
-        return true
+        submissionOwnership[agentID] = lease.token
+        return lease
+    }
+
+    @discardableResult
+    public func beginSubmission(for agentID: AgentID, draft explicitDraft: AgentComposerDraft? = nil, submittedAt: Date? = nil) async throws -> Bool {
+        try await beginSubmissionLease(for: agentID, draft: explicitDraft, submittedAt: submittedAt) != nil
+    }
+
+    /// Relinquishes only the exact pre-handoff lease. A stale task cannot
+    /// deactivate a newer submission for the same agent after a rebind.
+    public func relinquishSubmission(for agentID: AgentID, ownership lease: AgentComposerSubmissionLease) {
+        guard lease.agentID == agentID, submissionOwnership[agentID] == lease.token else { return }
+        submissionOwnership[agentID] = nil
+        activeSubmissionAgents.remove(agentID)
     }
 
     /// Reads the journal lifecycle without restoring, transferring, or removing
@@ -321,6 +353,7 @@ public actor AgentComposerDraftStore {
         // This is an explicit failure/recovery operation. Once it starts, the
         // journal is no longer protected as an active live submission.
         activeSubmissionAgents.remove(agentID)
+        submissionOwnership[agentID] = nil
         if submissionRecoveryDelayNanoseconds > 0 {
             try? await Task.sleep(nanoseconds: submissionRecoveryDelayNanoseconds)
         }
@@ -365,7 +398,10 @@ public actor AgentComposerDraftStore {
         // detached. Keep the journal active until this authoritative operation
         // either succeeds or fails into an explicitly recoverable record.
         activeSubmissionAgents.insert(agentID)
-        defer { activeSubmissionAgents.remove(agentID) }
+        defer {
+            activeSubmissionAgents.remove(agentID)
+            submissionOwnership[agentID] = nil
+        }
         if snapshot.state == .confirmed {
             try removeSubmissionSnapshot(for: agentID)
             clearVisibleDraft(for: agentID, clearThrough: max(stamp, snapshot.draft.updatedAt))
@@ -404,7 +440,7 @@ public actor AgentComposerDraftStore {
     public func resolveSendIntent(for agentID: AgentID, accepted: Bool, sentAt: Date? = nil) async {
         guard accepted else { return }
         do {
-            guard try beginSubmission(for: agentID, submittedAt: sentAt ?? clock.now()) else { return }
+            guard try await beginSubmission(for: agentID, submittedAt: sentAt ?? clock.now()) else { return }
             _ = try await confirmSubmissionStarted(for: agentID, sentAt: sentAt)
         } catch {
             warn("AgentComposerDraftStore.resolveSendIntent: preserving recoverable submission for agent \(agentID.rawValue)")
