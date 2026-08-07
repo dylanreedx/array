@@ -7942,7 +7942,9 @@ enum UIProbeGeometry {
             revision: 1,
             imageAttachments: [image]
         ))
-        composer.qaBeforeSubmissionSinkHandoff = {
+        // Regression witness A: rebind while beginSubmissionLease is at its actor
+        // await, before a lease can be installed on the composer.
+        composer.qaBeforeSubmissionLeaseAcquisition = {
             composer.bindActionSink(sink, agentID: agentB, snapshot: snapshot)
             composer.bindDraftStore(store, agentID: agentB)
         }
@@ -7961,6 +7963,87 @@ enum UIProbeGeometry {
         }
         guard await sink.invocationCount == 0 else {
             throw fail("pre-sink recovery duplicated sink delivery")
+        }
+
+        // Regression witness B: two live composers for one agent. The loser is
+        // rejected while the winner owns the journal, then must be able to
+        // submit after the winner completes; a latched actionTask fails the
+        // second send here.
+        let concurrentAgent = AgentID(rawValue: UUID(uuidString: "C0000000-0000-4000-8000-0000000000D2")!)
+        let winnerDraft = ContinuumRevivedCore.AgentComposerDraft(
+            text: "winner prompt", selection: 0..<13, updatedAt: Date(), imageAttachments: draft.imageAttachments
+        )
+        let loserDraft = ContinuumRevivedCore.AgentComposerDraft(
+            text: "loser prompt", selection: 0..<12, updatedAt: Date(), imageAttachments: draft.imageAttachments
+        )
+        await store.save(winnerDraft, for: concurrentAgent)
+        await store.flushAll()
+        let winnerSink = ComposerSubmissionProbeSink(delayNanoseconds: 100_000_000)
+        let loserSink = ComposerSubmissionProbeSink()
+        let winnerComposer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 420, height: 120))
+        let loserComposer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 420, height: 120))
+        winnerComposer.bindActionSink(winnerSink, agentID: concurrentAgent, snapshot: snapshot)
+        winnerComposer.bindDraftStore(store, agentID: concurrentAgent)
+        loserComposer.bindActionSink(loserSink, agentID: concurrentAgent, snapshot: snapshot)
+        loserComposer.bindDraftStore(store, agentID: concurrentAgent)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        winnerComposer.apply(AgentComposerDraft(
+            text: winnerDraft.text, selection: NSRange(location: 13, length: 0), revision: 1, imageAttachments: [image]
+        ))
+        loserComposer.apply(AgentComposerDraft(
+            text: loserDraft.text, selection: NSRange(location: 12, length: 0), revision: 1, imageAttachments: [image]
+        ))
+        winnerComposer.composerRequestedSend(winnerComposer.textView)
+        // Let the winner suspend inside its delayed sink acceptance, then send
+        // from the second live composer while the winner's lease is active.
+        try await Task.sleep(nanoseconds: 20_000_000)
+        loserComposer.composerRequestedSend(loserComposer.textView)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        guard await winnerSink.invocationCount == 1,
+              await loserSink.invocationCount == 0 else {
+            throw fail("two-composer witness did not reject the loser before sink handoff")
+        }
+        winnerComposer.confirmPromptSubmissionCompleted()
+        try await Task.sleep(nanoseconds: 120_000_000)
+        loserComposer.composerRequestedSend(loserComposer.textView)
+        try await Task.sleep(nanoseconds: 120_000_000)
+        guard await loserSink.invocationCount == 1 else {
+            throw fail("rejected second composer remained action-latched after winner completion")
+        }
+
+        // Sink-gone immediately after lease installation must take the same
+        // exact-token restore path, and the next acquire must remain possible.
+        let disappearingAgent = AgentID(rawValue: UUID(uuidString: "C0000000-0000-4000-8000-0000000000E2")!)
+        let disappearingDraft = ContinuumRevivedCore.AgentComposerDraft(
+            text: "sink disappeared", selection: 0..<16, updatedAt: Date(),
+            imageAttachments: draft.imageAttachments
+        )
+        await store.save(disappearingDraft, for: disappearingAgent)
+        await store.flushAll()
+        var disappearingSink: ComposerSubmissionProbeSink? = ComposerSubmissionProbeSink()
+        let disappearingComposer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 420, height: 120))
+        disappearingComposer.bindActionSink(disappearingSink!, agentID: disappearingAgent, snapshot: snapshot)
+        disappearingComposer.bindDraftStore(store, agentID: disappearingAgent)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        disappearingComposer.apply(AgentComposerDraft(
+            text: disappearingDraft.text, selection: NSRange(location: 16, length: 0),
+            revision: 1, imageAttachments: [image]
+        ))
+        disappearingComposer.qaBeforeSubmissionSinkHandoff = {
+            disappearingSink = nil
+        }
+        disappearingComposer.composerRequestedSend(disappearingComposer.textView)
+        try await Task.sleep(nanoseconds: 120_000_000)
+        guard disappearingComposer.draft.text == disappearingDraft.text else {
+            throw fail("sink-gone pre-handoff did not restore the exact leased draft")
+        }
+        let recoveredSink = ComposerSubmissionProbeSink()
+        disappearingComposer.bindActionSink(recoveredSink, agentID: disappearingAgent, snapshot: snapshot)
+        disappearingComposer.qaBeforeSubmissionSinkHandoff = nil
+        disappearingComposer.composerRequestedSend(disappearingComposer.textView)
+        try await Task.sleep(nanoseconds: 120_000_000)
+        guard await recoveredSink.invocationCount == 1 else {
+            throw fail("sink-gone restore left the next acquire blocked")
         }
 
         let handoffAgent = AgentID(rawValue: UUID(uuidString: "C0000000-0000-4000-8000-0000000000C2")!)

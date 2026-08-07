@@ -97,9 +97,13 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     private var pendingSubmittedDraft: AgentComposerDraft?
     private var pendingSubmittedDraftAgentID: AgentID?
     private var pendingSubmittedLease: AgentComposerSubmissionLease?
+    /// Deterministic component-check seam immediately before the draft-store
+    /// actor await. Production leaves this nil; checks use it to cancel/rebind
+    /// while lease admission is suspended without relying on scheduler timing.
+    var qaBeforeSubmissionLeaseAcquisition: (() -> Void)?
     /// Deterministic component-check seam immediately before the sink handoff.
     /// Production leaves this nil; checks use it to cross cancellation/rebind
-    /// without relying on scheduler timing.
+    /// after lease installation without relying on scheduler timing.
     var qaBeforeSubmissionSinkHandoff: (() -> Void)?
     /// Monotonic binding identity for every async composer task. Agent ID alone
     /// is insufficient when the same composer view is rebound more than once.
@@ -620,6 +624,33 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         }
     }
 
+    /// Completes the pre-handoff failure path for the exact lease that this
+    /// composer acquired. Relinquishing first records the token-qualified
+    /// authority required by the store's restore guard; no unqualified caller
+    /// can consume another live composer's journal.
+    private func restorePreHandoffSubmission(
+        _ lease: AgentComposerSubmissionLease,
+        store: AgentComposerDraftStore,
+        agentID: AgentID,
+        generation: UInt64
+    ) async {
+        await store.relinquishSubmission(for: agentID, ownership: lease)
+        guard let restored = try? await store.restoreSubmission(for: agentID, ownership: lease) else {
+            if isCurrentBinding(agentID: agentID, generation: generation) {
+                clearPendingSubmission(lease)
+            }
+            return
+        }
+        guard isCurrentBinding(agentID: agentID, generation: generation) else { return }
+        await applyPersistedDraft(
+            restored,
+            agentID: agentID,
+            generation: generation
+        )
+        guard isCurrentBinding(agentID: agentID, generation: generation) else { return }
+        clearPendingSubmission(lease)
+    }
+
     private func submitBoundIntent(
         _ intent: AgentComposerIntent,
         submittedPrompt: String?,
@@ -630,11 +661,19 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         let isPromptSubmission: Bool
         if case .sendPrompt = intent { isPromptSubmission = true } else { isPromptSubmission = false }
         actionTask = Task { @MainActor [weak self, weak actionSink] in
+            // Install this before any actor await. An exclusive-lease rejection,
+            // cancellation, or bind change must never strand this composer latch.
+            defer {
+                if let self, self.isCurrentBinding(agentID: agentID, generation: generation) {
+                    self.actionTask = nil
+                }
+            }
             guard let self, self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
             let draftStore = self.draftStore
             var lease: AgentComposerSubmissionLease?
             if isPromptSubmission {
                 do {
+                    self.qaBeforeSubmissionLeaseAcquisition?()
                     guard let draftStore,
                           let acquired = try await draftStore.beginSubmissionLease(
                             for: agentID,
@@ -643,7 +682,12 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
                     lease = acquired
                     guard !Task.isCancelled,
                           self.isCurrentBinding(agentID: agentID, generation: generation) else {
-                        await draftStore.relinquishSubmission(for: agentID, ownership: acquired)
+                        await self.restorePreHandoffSubmission(
+                            acquired,
+                            store: draftStore,
+                            agentID: agentID,
+                            generation: generation
+                        )
                         return
                     }
                     self.submissionLease = acquired
@@ -655,22 +699,18 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
                     return
                 }
             }
-            // Every exit — including the sink-gone and self-gone paths — must
-            // release the latch, or the composer can never submit again. A
-            // cancellation/rebind before this point relinquishes the exact lease;
-            // after this point the sink owns the outcome and recovery must not
+            // After this point the sink owns the outcome and recovery must not
             // duplicate delivery or restore it speculatively.
-            defer {
-                if !Task.isCancelled, self.isCurrentBinding(agentID: agentID, generation: generation) {
-                    self.actionTask = nil
-                }
-            }
             guard self.isCurrentBinding(agentID: agentID, generation: generation),
                   !Task.isCancelled,
                   let sink = actionSink else {
                 if let lease, let draftStore {
-                    await draftStore.relinquishSubmission(for: agentID, ownership: lease)
-                    self.clearPendingSubmission(lease)
+                    await self.restorePreHandoffSubmission(
+                        lease,
+                        store: draftStore,
+                        agentID: agentID,
+                        generation: generation
+                    )
                 }
                 return
             }
