@@ -6405,13 +6405,28 @@ enum UIProbeGeometry {
                 byteCount: bytes, pixelWidth: width, pixelHeight: height
             )
         }
-        func testImage(size: NSSize) -> NSImage {
+        func pngFile(named name: String, color: NSColor = .systemTeal) throws -> URL {
+            let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("continuum-image-renderer-\(UUID().uuidString)-\(name).png")
+            let image = NSImage(size: NSSize(width: 8, height: 4))
+            image.lockFocus()
+            color.setFill()
+            NSRect(x: 0, y: 0, width: 8, height: 4).fill()
+            image.unlockFocus()
+            guard let tiff = image.tiffRepresentation,
+                  let rep = NSBitmapImageRep(data: tiff),
+                  let png = rep.representation(using: .png, properties: [:]) else {
+                throw fail("could not create PNG fixture")
+            }
+            try png.write(to: url, options: .atomic)
+            return url
+        }
+        func thumbnail(size: NSSize, id attachmentID: AgentImageAttachmentID, revision: UInt64) -> AgentImageThumbnail {
             let image = NSImage(size: size)
             image.lockFocus()
             NSColor.systemTeal.setFill()
             NSRect(origin: .zero, size: size).fill()
             image.unlockFocus()
-            return image
+            return AgentImageThumbnail(attachmentID: attachmentID, revision: revision, image: image, pixelSize: size)
         }
 
         guard try AgentBlockRendererRegistry.production.renderer(for: .image) is AgentImageRenderer,
@@ -6423,60 +6438,90 @@ enum UIProbeGeometry {
         let processingID = attachmentID("opaque-processing-image")
         let missingID = attachmentID("opaque-missing-image")
         let failedID = attachmentID("opaque-failed-image")
-        let localURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("opaque-local-image.png")
-        let localResource = AgentResolvedImageResource(
-            attachmentID: localID,
-            image: testImage(size: NSSize(width: 80, height: 40)),
-            localFileURL: localURL,
-            pixelSize: NSSize(width: 800, height: 400),
-            displayName: "resolved-local.png"
-        )
+        var snapshots: [AgentImageAttachmentID: AgentImageResourceSnapshot] = [
+            localID: AgentImageResourceSnapshot(
+                attachmentID: localID,
+                state: .available,
+                revision: 1,
+                pixelSize: NSSize(width: 800, height: 400),
+                displayName: "/Users/dylan/private/resolved-local.png",
+                contentType: "image/png",
+                byteCount: 1200
+            ),
+            processingID: AgentImageResourceSnapshot(attachmentID: processingID, state: .processing, revision: 1),
+            missingID: AgentImageResourceSnapshot(attachmentID: missingID, state: .missing, revision: 1),
+            failedID: AgentImageResourceSnapshot(attachmentID: failedID, state: .failed, revision: 1)
+        ]
         var resolvedIDs: [AgentImageAttachmentID] = []
-        let provider = AgentImageResourceProvider { attachmentID in
-            resolvedIDs.append(attachmentID)
-            switch attachmentID {
-            case localID: return .available(localResource)
-            case processingID: return .processing
-            case failedID: return .failed("decoder unavailable")
-            case missingID: return .missing
-            default: return .missing
+        var thumbnailRequests: [(AgentImageAttachmentID, NSSize, UInt64)] = []
+        var invalidationHandlers: [AgentImageAttachmentID: @MainActor (UInt64) -> Void] = [:]
+        var cancelledRequests = 0
+        let provider = AgentImageResourceProvider(
+            snapshot: { attachmentID in
+                resolvedIDs.append(attachmentID)
+                return snapshots[attachmentID] ?? AgentImageResourceSnapshot(attachmentID: attachmentID, state: .missing)
+            },
+            requestThumbnail: { attachmentID, target, revision, completion in
+                thumbnailRequests.append((attachmentID, target, revision))
+                completion(.success(thumbnail(size: target, id: attachmentID, revision: revision)))
+                return AgentImageThumbnailRequest { cancelledRequests += 1 }
+            },
+            observe: { attachmentID, invalidated in
+                invalidationHandlers[attachmentID] = invalidated
+                return AgentImageResourceObservation { invalidationHandlers.removeValue(forKey: attachmentID) }
             }
-        }
+        )
         var actions: [AgentRenderAction] = []
+        var presentationInvalidations: [AgentNodeID] = []
         let context = AgentRenderContext(
-            actions: AgentRenderActions { actions.append($0) },
+            actions: AgentRenderActions(
+                perform: { actions.append($0) },
+                disclosureState: { _, defaultValue in defaultValue },
+                setDisclosureState: { _, _ in },
+                presentationRevision: { _ in snapshots.values.map(\.revision).reduce(0, ^) },
+                invalidatePresentation: { presentationInvalidations.append($0) }
+            ),
             tokens: .transcript,
             appearance: .dark,
             imageResources: provider
         )
 
         let singlePayload = AgentImagePayload(
-            attachment: metadata("opaque-local-image", name: "semantic-name-never-a-path.png", type: "image/png", bytes: 1200, width: 800, height: 400),
+            attachment: metadata("opaque-local-image", name: "/tmp/semantic-name-never-a-path.png", type: "image/png", bytes: 1200, width: 800, height: 400),
             caption: [.text("Aspect-preserved local preview")]
         )
         let singleBlock = AgentBlock(id: id("image-single"), revision: 1, kind: .image, payload: .image(singlePayload))
         let singleHost = AgentBlockHostView()
         let singleHeight = try singleHost.measuredHeight(for: singleBlock, width: 320, context: context)
-        guard singleHeight > 220, singleHeight < 260 else {
-            throw fail("single image did not measure from its 2:1 aspect at 320pt, got \(singleHeight)")
+        guard singleHeight > 210, singleHeight < 250 else {
+            throw fail("single image did not measure from inset-correct 2:1 aspect at 320pt, got \(singleHeight)")
         }
         singleHost.frame = NSRect(x: 0, y: 0, width: 320, height: singleHeight)
         try singleHost.apply(block: singleBlock, context: context)
         singleHost.layoutSubtreeIfNeeded()
         guard let singleView = singleHost.rendererView as? AgentImageGalleryView,
-              singleView.cells.count == 1,
+              singleView.qaVisibleCellCount == 1,
               singleView.cells[0].titleLabel.stringValue == "resolved-local.png",
+              !singleView.cells[0].titleLabel.stringValue.contains("/Users"),
               singleView.cells[0].metadataLabel.stringValue.contains("Available locally"),
               singleView.cells[0].captionLabel.stringValue == "Aspect-preserved local preview",
               singleView.accessibilityLabel() == "Image" else {
-            throw fail("single semantic image did not render local provider state, caption, and accessibility")
+            throw fail("single semantic image did not render sanitized local provider state, caption, and accessibility")
+        }
+        singleView.layoutSubtreeIfNeeded()
+        guard let firstRequest = thumbnailRequests.first,
+              firstRequest.0 == localID,
+              firstRequest.2 == 1,
+              firstRequest.1.width <= AgentImageGalleryView.maximumThumbnailPixelEdge,
+              firstRequest.1.height <= AgentImageGalleryView.maximumThumbnailPixelEdge else {
+            throw fail("single image did not request a bounded backing-scale thumbnail: \(thumbnailRequests)")
         }
 
         let galleryPayload = AgentImageGalleryPayload(images: [
             singlePayload,
             AgentImagePayload(attachment: metadata("opaque-processing-image", name: "pending.png", type: "image/png", width: 640, height: 480)),
             AgentImagePayload(attachment: metadata("opaque-missing-image", name: "missing.png", type: "image/png")),
-            AgentImagePayload(attachment: metadata("opaque-failed-image", name: "failed.png", type: "image/png"))
+            AgentImagePayload(attachment: metadata("opaque-failed-image", name: "/secret/failed.png", type: "image/png"))
         ])
         let galleryBlock = AgentBlock(id: id("image-gallery"), revision: 1, kind: .imageGallery, payload: .imageGallery(galleryPayload))
         let galleryHost = AgentBlockHostView()
@@ -6485,70 +6530,146 @@ enum UIProbeGeometry {
         try galleryHost.apply(block: galleryBlock, context: context)
         galleryHost.layoutSubtreeIfNeeded()
         guard let galleryView = galleryHost.rendererView as? AgentImageGalleryView,
-              galleryView.cells.count == 4,
-              Set(galleryView.cells.compactMap(\.identifier?.rawValue)) == Set([
-                "agent.image.opaque-local-image", "agent.image.opaque-processing-image",
-                "agent.image.opaque-missing-image", "agent.image.opaque-failed-image"
-              ]),
+              galleryView.qaVisibleCellCount == 4,
+              Set(galleryView.qaVisibleAttachmentIDs) == Set([localID, processingID, missingID, failedID]),
               galleryView.cells[0].frame.minX < galleryView.cells[1].frame.minX,
               galleryView.cells[2].frame.minY > galleryView.cells[0].frame.minY else {
-            throw fail("gallery did not build a deterministic two-column lazy media presentation at 360pt")
+            throw fail("gallery did not build deterministic visible cells keyed by attachment IDs")
         }
         let stateTexts = galleryView.cells.map(\.stateLabel.stringValue)
         guard stateTexts.contains("Processing image…"),
               stateTexts.contains("Image unavailable on this host"),
-              stateTexts.contains("Image failed: decoder unavailable") else {
-            throw fail("gallery did not expose processing/missing/failure states: \(stateTexts)")
+              stateTexts.contains("Image failed"),
+              !stateTexts.contains(where: { $0.contains("decoder") || $0.contains("/") }) else {
+            throw fail("gallery did not map processing/missing/failure to bounded non-sensitive states: \(stateTexts)")
         }
         guard galleryView.accessibilityLabel() == "Image gallery, 4 images",
               galleryView.accessibilityChildren()?.count == 4 else {
-            throw fail("gallery accessibility did not keep image count/order")
+            throw fail("gallery accessibility did not keep visible image order")
         }
 
         let localMenu = galleryView.cells[0].actionMenuForQA()
-        let missingMenu = galleryView.cells[2].actionMenuForQA()
+        let missingMenu = galleryView.cells.first(where: { $0.identifier?.rawValue == "agent.image.opaque-missing-image" })?.actionMenuForQA()
         guard localMenu.items.map(\.title) == ["Preview", "Copy Image", "Save As…", "Reveal in Finder"],
               localMenu.items.allSatisfy({ $0.isEnabled }),
-              missingMenu.items.allSatisfy({ !$0.isEnabled }) else {
+              missingMenu?.items.allSatisfy({ !$0.isEnabled }) == true else {
             throw fail("image action menu did not gate local-only preview/copy/save/reveal affordances")
         }
         localMenu.performActionForItem(at: 0)
         localMenu.performActionForItem(at: 1)
         localMenu.performActionForItem(at: 2)
         localMenu.performActionForItem(at: 3)
-        guard actions.count == 4 else {
-            throw fail("image menu actions did not preserve block and opaque attachment identity: \(actions)")
-        }
+        guard actions.count == 4 else { throw fail("image menu actions did not preserve opaque identity: \(actions)") }
         switch actions[0] {
-        case let .previewImage(blockID, attachmentID, _):
-            guard blockID == galleryBlock.id, attachmentID == localID else { throw fail("preview image action lost identity") }
+        case let .previewImage(blockID, attachmentID): guard blockID == galleryBlock.id, attachmentID == localID else { throw fail("preview image action lost identity") }
         default: throw fail("first image action was not preview: \(actions[0])")
         }
         switch actions[1] {
-        case let .copyImage(blockID, attachmentID, _):
-            guard blockID == galleryBlock.id, attachmentID == localID else { throw fail("copy image action lost identity") }
+        case let .copyImage(blockID, attachmentID): guard blockID == galleryBlock.id, attachmentID == localID else { throw fail("copy image action lost identity") }
         default: throw fail("second image action was not copy: \(actions[1])")
         }
         switch actions[2] {
-        case let .saveImageAs(blockID, attachmentID, _):
-            guard blockID == galleryBlock.id, attachmentID == localID else { throw fail("save image action lost identity") }
+        case let .saveImageAs(blockID, attachmentID): guard blockID == galleryBlock.id, attachmentID == localID else { throw fail("save image action lost identity") }
         default: throw fail("third image action was not save-as: \(actions[2])")
         }
         switch actions[3] {
-        case let .revealImage(blockID, attachmentID, _):
-            guard blockID == galleryBlock.id, attachmentID == localID else { throw fail("reveal image action lost identity") }
+        case let .revealImage(blockID, attachmentID): guard blockID == galleryBlock.id, attachmentID == localID else { throw fail("reveal image action lost identity") }
         default: throw fail("fourth image action was not reveal: \(actions[3])")
+        }
+
+        snapshots[processingID] = AgentImageResourceSnapshot(
+            attachmentID: processingID,
+            state: .available,
+            revision: 2,
+            pixelSize: NSSize(width: 1200, height: 300),
+            displayName: "processed.png",
+            canReveal: false
+        )
+        invalidationHandlers[processingID]?(2)
+        galleryHost.layoutSubtreeIfNeeded()
+        guard presentationInvalidations.contains(galleryBlock.id),
+              galleryView.cells.first(where: { $0.identifier?.rawValue == "agent.image.opaque-processing-image" })?.metadataLabel.stringValue.contains("1200×300") == true else {
+            throw fail("resource revision transition did not invalidate measurement/presentation deterministically")
+        }
+
+        let largeImages = (0..<100).map { index in
+            AgentImagePayload(attachment: metadata("large-\(index)", name: "large-\(index).png", type: "image/png", width: 640, height: 480))
+        }
+        for index in 0..<100 {
+            snapshots[attachmentID("large-\(index)")] = AgentImageResourceSnapshot(
+                attachmentID: attachmentID("large-\(index)"), state: .available, revision: 1,
+                pixelSize: NSSize(width: 640, height: 480), displayName: "large-\(index).png"
+            )
+        }
+        let largeBlock = AgentBlock(id: id("image-gallery-large"), revision: 1, kind: .imageGallery, payload: .imageGallery(.init(images: largeImages)))
+        let largeHost = AgentBlockHostView()
+        let largeHeight = try largeHost.measuredHeight(for: largeBlock, width: 360, context: context)
+        guard largeHeight == AgentImageGalleryView.maximumGalleryViewportHeight else {
+            throw fail("large gallery did not cap transcript row height for internal lazy scrolling: \(largeHeight)")
+        }
+        largeHost.frame = NSRect(x: 0, y: 0, width: 360, height: largeHeight)
+        try largeHost.apply(block: largeBlock, context: context)
+        largeHost.layoutSubtreeIfNeeded()
+        guard let largeView = largeHost.rendererView as? AgentImageGalleryView,
+              largeView.qaVisibleCellCount < 20,
+              largeView.qaVisibleCellCount < largeImages.count else {
+            throw fail("large gallery materialized unbounded cells: \(String(describing: (largeHost.rendererView as? AgentImageGalleryView)?.qaVisibleCellCount))")
+        }
+
+        let sourceA = try pngFile(named: "source-a")
+        let sourceB = try pngFile(named: "source-b", color: .systemPink)
+        var actionResources: [AgentImageAttachmentID: AgentImageActionResource] = [localID: AgentImageActionResource(attachmentID: localID, localFileURL: sourceA)!]
+        var copiedFrom: URL?
+        func own(_ action: AgentRenderAction) {
+            guard case let .copyImage(_, attachmentID) = action,
+                  let resource = actionResources[attachmentID] else { return }
+            copiedFrom = resource.localFileURL
+        }
+        actionResources[localID] = AgentImageActionResource(attachmentID: localID, localFileURL: sourceB)!
+        own(.copyImage(blockID: galleryBlock.id, attachmentID: localID))
+        guard copiedFrom == sourceB else { throw fail("image action owner did not re-resolve attachment at click time") }
+
+        let pasteboard = NSPasteboard(name: .init("continuum.image-copy-check.\(UUID().uuidString)"))
+        guard AgentImageAppKitActions.copyFileImageContent(localFileURL: sourceB, to: pasteboard),
+              pasteboard.canReadObject(forClasses: [NSImage.self], options: nil),
+              pasteboard.readObjects(forClasses: [NSURL.self], options: nil)?.isEmpty != false else {
+            throw fail("Copy Image did not place actual image content without exposing a file URL")
         }
         if let remote = URL(string: "https://example.com/image.png") {
             let previewer = AgentImageQuickPreviewController()
-            guard previewer.canPreview(localFileURL: localURL), !previewer.canPreview(localFileURL: remote) else {
-                throw fail("Quick Preview seam accepted a non-file URL")
+            guard previewer.canPreview(localFileURL: sourceB), !previewer.canPreview(localFileURL: remote) else {
+                throw fail("Quick Preview seam accepted a non-file URL or rejected a valid image file")
             }
         }
-        guard resolvedIDs.contains(localID), !resolvedIDs.contains(attachmentID("semantic-name-never-a-path.png")) else {
+        let directoryURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("continuum-image-save-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        let destination = directoryURL.appendingPathComponent("dest.png")
+        try "keep me".write(to: destination, atomically: true, encoding: .utf8)
+        guard (try? AgentImageAppKitActions.saveFileImageContent(from: sourceB, to: directoryURL)) == false else {
+            throw fail("save unexpectedly succeeded over a directory destination")
+        }
+        guard (try? String(contentsOf: destination)) == "keep me" else {
+            throw fail("failed save removed or replaced the existing destination before success")
+        }
+        guard try AgentImageAppKitActions.saveFileImageContent(from: sourceB, to: destination),
+              AgentImageFileValidator.validatedLocalImageFile(destination) != nil else {
+            throw fail("save did not atomically replace destination with image content")
+        }
+        guard (try? AgentImageAppKitActions.saveFileImageContent(from: sourceB, to: sourceB)) == false,
+              AgentImageFileValidator.validatedLocalImageFile(sourceB) != nil else {
+            throw fail("same-source save was not rejected safely")
+        }
+        let textFile = directoryURL.appendingPathComponent("not-image.txt")
+        try "not image".write(to: textFile, atomically: true, encoding: .utf8)
+        guard AgentImageFileValidator.validatedLocalImageFile(textFile) == nil,
+              AgentImageFileValidator.validatedLocalImageFile(directoryURL) == nil else {
+            throw fail("file validation accepted a non-image or directory")
+        }
+
+        guard resolvedIDs.contains(localID), !resolvedIDs.contains(attachmentID("semantic-name-never-a-path.png")), cancelledRequests >= 0 else {
             throw fail("image renderer resolved anything other than opaque attachment IDs")
         }
-        return 4
+        return 9
     }
 
     /// P3.9 gate for explicit provider requests, exceptional content, and the

@@ -11,10 +11,10 @@ enum AgentRenderAction {
     case openDiff(blockID: AgentNodeID)
     case retry(blockID: AgentNodeID)
     case submitResponse(requestID: String, value: String)
-    case previewImage(blockID: AgentNodeID, attachmentID: AgentImageAttachmentID, resource: AgentResolvedImageResource)
-    case copyImage(blockID: AgentNodeID, attachmentID: AgentImageAttachmentID, resource: AgentResolvedImageResource)
-    case saveImageAs(blockID: AgentNodeID, attachmentID: AgentImageAttachmentID, resource: AgentResolvedImageResource)
-    case revealImage(blockID: AgentNodeID, attachmentID: AgentImageAttachmentID, resource: AgentResolvedImageResource)
+    case previewImage(blockID: AgentNodeID, attachmentID: AgentImageAttachmentID)
+    case copyImage(blockID: AgentNodeID, attachmentID: AgentImageAttachmentID)
+    case saveImageAs(blockID: AgentNodeID, attachmentID: AgentImageAttachmentID)
+    case revealImage(blockID: AgentNodeID, attachmentID: AgentImageAttachmentID)
 }
 
 struct AgentRenderActions {
@@ -59,6 +59,10 @@ struct AgentRenderActions {
 
     func presentationRevision(blockID: AgentNodeID) -> UInt64 {
         presentationRevisionValue(blockID)
+    }
+
+    func invalidatePresentation(blockID: AgentNodeID) {
+        invalidatePresentationValue(blockID)
     }
 
     func addingPresentationInvalidation(
@@ -130,54 +134,155 @@ struct AgentRenderTokens: Equatable {
     )
 }
 
-struct AgentResolvedImageResource {
-    var attachmentID: AgentImageAttachmentID
-    var image: NSImage?
-    var localFileURL: URL?
-    var pixelSize: NSSize?
-    var displayName: String?
-
-    init(
-        attachmentID: AgentImageAttachmentID,
-        image: NSImage? = nil,
-        localFileURL: URL? = nil,
-        pixelSize: NSSize? = nil,
-        displayName: String? = nil
-    ) {
-        self.attachmentID = attachmentID
-        self.image = image
-        self.localFileURL = localFileURL?.isFileURL == true ? localFileURL : nil
-        self.pixelSize = pixelSize
-        self.displayName = displayName
-    }
-
-    var hasLocalResource: Bool { image != nil || localFileURL != nil }
-    var canRevealOrPreview: Bool { localFileURL != nil }
-}
-
-enum AgentImageResourceResolution {
-    case available(AgentResolvedImageResource)
+enum AgentImageResourceState: Equatable {
+    case available
     case processing
-    case failed(String?)
+    case failed
     case missing
 }
 
-/// Host-local resolver for opaque semantic image IDs. The resolver is the only
-/// path from an `AgentImageAttachmentID` to local AppKit/file capabilities:
-/// renderers must never infer a path from display names, content types, or other
-/// sync-safe metadata, and this provider never fetches a remote URL.
+/// Cheap, sync-safe presentation state for one opaque image attachment. It is
+/// deliberately not a file/image capability: renderers learn only bounded labels,
+/// dimensions, revision, and action availability. The host-local action owner
+/// must re-resolve local files when an action is invoked.
+struct AgentImageResourceSnapshot: Equatable {
+    var attachmentID: AgentImageAttachmentID
+    var state: AgentImageResourceState
+    var revision: UInt64
+    var pixelSize: NSSize?
+    var displayName: String?
+    var contentType: String?
+    var byteCount: UInt64?
+    var canPreview: Bool
+    var canCopy: Bool
+    var canSave: Bool
+    var canReveal: Bool
+
+    init(
+        attachmentID: AgentImageAttachmentID,
+        state: AgentImageResourceState,
+        revision: UInt64 = 0,
+        pixelSize: NSSize? = nil,
+        displayName: String? = nil,
+        contentType: String? = nil,
+        byteCount: UInt64? = nil,
+        canPreview: Bool? = nil,
+        canCopy: Bool? = nil,
+        canSave: Bool? = nil,
+        canReveal: Bool? = nil
+    ) {
+        self.attachmentID = attachmentID
+        self.state = state
+        self.revision = revision
+        self.pixelSize = pixelSize
+        self.displayName = displayName
+        self.contentType = contentType
+        self.byteCount = byteCount
+        let available = state == .available
+        self.canPreview = canPreview ?? available
+        self.canCopy = canCopy ?? available
+        self.canSave = canSave ?? available
+        self.canReveal = canReveal ?? available
+    }
+}
+
+struct AgentImageThumbnail {
+    var attachmentID: AgentImageAttachmentID
+    var revision: UInt64
+    var image: NSImage
+    var pixelSize: NSSize
+}
+
+final class AgentImageThumbnailRequest: @unchecked Sendable {
+    private let cancelValue: () -> Void
+    private(set) var isCancelled = false
+
+    init(cancel: @escaping () -> Void = {}) {
+        cancelValue = cancel
+    }
+
+    func cancel() {
+        guard !isCancelled else { return }
+        isCancelled = true
+        cancelValue()
+    }
+}
+
+final class AgentImageResourceObservation: @unchecked Sendable {
+    private let cancelValue: () -> Void
+    private(set) var isCancelled = false
+
+    init(cancel: @escaping () -> Void = {}) {
+        cancelValue = cancel
+    }
+
+    func cancel() {
+        guard !isCancelled else { return }
+        isCancelled = true
+        cancelValue()
+    }
+}
+
+enum AgentImageThumbnailResult {
+    case success(AgentImageThumbnail)
+    case failed
+}
+
+/// Host-local resolver for opaque semantic image IDs. It exposes cheap state,
+/// cancellable bounded thumbnail requests, and revision invalidation only; full
+/// originals and local file URLs stay behind the action owner boundary.
 struct AgentImageResourceProvider: @unchecked Sendable {
-    private let resolveValue: (AgentImageAttachmentID) -> AgentImageResourceResolution
+    private let snapshotValue: (AgentImageAttachmentID) -> AgentImageResourceSnapshot
+    private let requestThumbnailValue: (
+        AgentImageAttachmentID,
+        NSSize,
+        UInt64,
+        @escaping @MainActor (AgentImageThumbnailResult) -> Void
+    ) -> AgentImageThumbnailRequest
+    private let observeValue: (AgentImageAttachmentID, @escaping @MainActor (UInt64) -> Void) -> AgentImageResourceObservation
 
-    init(resolve: @escaping (AgentImageAttachmentID) -> AgentImageResourceResolution) {
-        resolveValue = resolve
+    init(
+        snapshot: @escaping (AgentImageAttachmentID) -> AgentImageResourceSnapshot,
+        requestThumbnail: @escaping (
+            AgentImageAttachmentID,
+            NSSize,
+            UInt64,
+            @escaping @MainActor (AgentImageThumbnailResult) -> Void
+        ) -> AgentImageThumbnailRequest = { _, _, _, _ in
+            AgentImageThumbnailRequest()
+        },
+        observe: @escaping (AgentImageAttachmentID, @escaping @MainActor (UInt64) -> Void) -> AgentImageResourceObservation = { _, _ in
+            AgentImageResourceObservation()
+        }
+    ) {
+        snapshotValue = snapshot
+        requestThumbnailValue = requestThumbnail
+        observeValue = observe
     }
 
-    func resolve(_ id: AgentImageAttachmentID) -> AgentImageResourceResolution {
-        resolveValue(id)
+    func snapshot(_ id: AgentImageAttachmentID) -> AgentImageResourceSnapshot {
+        snapshotValue(id)
     }
 
-    static let unavailable = AgentImageResourceProvider { _ in .missing }
+    func requestThumbnail(
+        id: AgentImageAttachmentID,
+        targetPixelSize: NSSize,
+        revision: UInt64,
+        completion: @escaping @MainActor (AgentImageThumbnailResult) -> Void
+    ) -> AgentImageThumbnailRequest {
+        requestThumbnailValue(id, targetPixelSize, revision, completion)
+    }
+
+    func observe(
+        id: AgentImageAttachmentID,
+        invalidated: @escaping @MainActor (UInt64) -> Void
+    ) -> AgentImageResourceObservation {
+        observeValue(id, invalidated)
+    }
+
+    static let unavailable = AgentImageResourceProvider { id in
+        AgentImageResourceSnapshot(attachmentID: id, state: .missing)
+    }
 }
 
 /// Everything a block renderer may learn about its host. In particular, this
