@@ -2973,7 +2973,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     )
     private lazy var agentSupervisor = AgentSupervisor(
         store: AgentStore(smokeTest: smokeTestEnabled),
-        attachmentStore: agentComposerAttachmentStore
+        attachmentStore: agentComposerAttachmentStore,
+        submissionRecoveryStore: agentComposerDraftStore
     )
     /// Host-local only: drafts are persisted by AgentID and accepted prompt history
     /// remains memory-only. Neither value enters AgentRecord or companion sync.

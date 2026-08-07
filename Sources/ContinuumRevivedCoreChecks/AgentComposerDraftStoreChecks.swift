@@ -492,10 +492,23 @@ private func runAgentComposerAttachmentStoreChecks(
         )
         expect(false, "manifest failure plus object rollback failure must surface a composite import error")
     } catch AgentComposerAttachmentStoreError.importRollbackFailed(let manifestError, let objectPath, let rollbackError) {
+        let renderedError = String(describing: AgentComposerAttachmentStoreError.importRollbackFailed(
+            manifestError: manifestError, objectPath: objectPath, rollbackError: rollbackError))
+        expect(!renderedError.contains(importRollbackFaultRoot.path),
+               "attachment store errors must not expose absolute local paths")
         expect(manifestError.contains("Cocoa") && rollbackError.contains("Cocoa"),
                "composite import rollback error must preserve both root causes")
-        expect(FileManager.default.fileExists(atPath: objectPath),
-               "failed object rollback must leave the orphaned object path discoverable for cleanup")
+        expect(FileManager.default.fileExists(
+            atPath: importRollbackFaultRoot.appendingPathComponent(
+                "agent-composer-attachments/\(objectPath)").path),
+               "failed object rollback must leave the orphaned object discoverable for cleanup")
+        let prejournalStore = AgentComposerAttachmentStore(
+            applicationSupportDirectory: importRollbackFaultRoot, clock: clock)
+        try await prejournalStore.recoverPendingImportCleanups()
+        expect(!FileManager.default.fileExists(
+            atPath: importRollbackFaultRoot.appendingPathComponent(
+                "agent-composer-attachments/\(objectPath)").path),
+               "prejournal cleanup record must recover an orphan after a later write failure")
     }
 
     let transferFaultRoot = root.appendingPathComponent("transfer-rollback-fault", isDirectory: true)
@@ -530,9 +543,11 @@ private func runAgentComposerAttachmentStoreChecks(
             sentAt: clock.now())
         expect(false, "partial ownership transfer plus rollback failure must throw a composite rollback error")
     } catch AgentComposerAttachmentStoreError.transferRollbackFailed(let transferError, let rollbackFailures, let journalPath) {
+        let transferFaultLayout = await transferFaultStore.layout
         expect(transferError.contains("Cocoa") && rollbackFailures.contains { $0.contains(transferFirst.manifest.id.rawValue) },
                "transfer rollback error must preserve transfer and rollback root causes")
-        expect(FileManager.default.fileExists(atPath: journalPath),
+        expect(FileManager.default.fileExists(
+            atPath: transferFaultLayout.ownershipTransactionsDirectory.appendingPathComponent(journalPath).path),
                "failed transfer rollback must leave a durable recovery journal")
     }
     let transferFirstMixed = try await transferFaultStore.manifest(for: transferFirst.manifest.id)

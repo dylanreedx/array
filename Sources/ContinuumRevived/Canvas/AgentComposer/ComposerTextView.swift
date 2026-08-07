@@ -11,6 +11,7 @@ protocol ComposerTextViewObserver: AnyObject {
     func composerSelectionDidChange(_ textView: ComposerTextView)
     func composerFocusDidChange(_ textView: ComposerTextView, focused: Bool)
     func composerRequestedSend(_ textView: ComposerTextView)
+    func composerHasSendableAttachments(_ textView: ComposerTextView) -> Bool
     func composerRequestedCompletionCommand(
         _ textView: ComposerTextView,
         command: ChoiceListCommand
@@ -160,7 +161,8 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate {
             for: event,
             hasMarkedText: hasMarkedText(),
             hasTrimmedContent: !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-            suggestionsVisible: suggestionsAreVisible
+            suggestionsVisible: suggestionsAreVisible,
+            hasAttachments: composerObserver?.composerHasSendableAttachments(self) ?? false
         )
         switch action {
         case .send:

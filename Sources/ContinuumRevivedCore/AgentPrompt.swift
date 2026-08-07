@@ -39,7 +39,11 @@ public struct AgentPrompt: Equatable, Sendable {
         self.init(text: text, imageAttachments: [])
     }
 
+    /// Whitespace-only prose is not a sendable prompt; a local attachment is.
+    /// Keep this provider-neutral predicate in one place so keyboard, composer,
+    /// and supervisor routes agree on image-only sends.
     public var isEmpty: Bool {
-        text.isEmpty && imageAttachments.isEmpty
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && imageAttachments.isEmpty
     }
 }

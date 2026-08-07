@@ -4,6 +4,8 @@ import Darwin
 import Foundation
 
 public enum AgentComposerAttachmentStoreError: Error, Equatable {
+    // Associated strings are bounded identifiers/reasons only; never absolute
+    // URLs or filesystem paths cross this UI-facing error boundary.
     case nonFileURL(String)
     case unreadableSource(String)
     case unsafeRelativePath(String)
@@ -169,9 +171,16 @@ public struct AgentComposerStoredAttachment: Equatable, Sendable {
     }
 }
 
-private struct AgentComposerImportCleanupJournal: Codable, Sendable {
-    var objectRelativePath: String
-    var createdAt: Date
+public struct AgentComposerImportCleanupJournal: Codable, Sendable {
+    public var attachmentID: AgentImageAttachmentID
+    public var objectRelativePath: String
+    public var createdAt: Date
+
+    public init(attachmentID: AgentImageAttachmentID, objectRelativePath: String, createdAt: Date) {
+        self.attachmentID = attachmentID
+        self.objectRelativePath = objectRelativePath
+        self.createdAt = createdAt
+    }
 }
 
 private struct AgentComposerOwnershipTransferJournal: Codable, Sendable {
@@ -198,6 +207,7 @@ public actor AgentComposerAttachmentStore {
     private let clock: any Clock
     private let warn: @Sendable (String) -> Void
     private let writeManifest: @Sendable (AgentComposerAttachmentManifest, URL) throws -> Void
+    private let writeImportCleanupJournal: @Sendable (AgentComposerImportCleanupJournal, URL) throws -> Void
     private let removeItem: @Sendable (URL) throws -> Void
 
     public init(
@@ -205,6 +215,7 @@ public actor AgentComposerAttachmentStore {
         clock: any Clock = SystemClock(),
         warn: @escaping @Sendable (String) -> Void = { fputs($0 + "\n", stderr) },
         manifestWriter: (@Sendable (AgentComposerAttachmentManifest, URL) throws -> Void)? = nil,
+        importCleanupJournalWriter: (@Sendable (AgentComposerImportCleanupJournal, URL) throws -> Void)? = nil,
         removeItem: (@Sendable (URL) throws -> Void)? = nil
     ) {
         let root = applicationSupportDirectory
@@ -214,6 +225,10 @@ public actor AgentComposerAttachmentStore {
         self.clock = clock
         self.warn = warn
         self.writeManifest = manifestWriter ?? Self.defaultPersistManifest
+        self.writeImportCleanupJournal = importCleanupJournalWriter ?? { journal, url in
+            try AtomicWriter(backupsDirectory: nil, retainedBackups: 0).write(journal, to: url)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        }
         self.removeItem = removeItem ?? { try FileManager.default.removeItem(at: $0) }
     }
 
@@ -240,14 +255,14 @@ public actor AgentComposerAttachmentStore {
     ) throws -> AgentComposerStoredAttachment {
         try recoverPendingImportCleanups()
         guard sourceURL.isFileURL else {
-            throw AgentComposerAttachmentStoreError.nonFileURL(sourceURL.absoluteString)
+            throw AgentComposerAttachmentStoreError.nonFileURL("source is not a local file")
         }
         let attributes = try FileManager.default.attributesOfItem(atPath: sourceURL.path)
         guard (attributes[.type] as? FileAttributeType) == .typeRegular else {
-            throw AgentComposerAttachmentStoreError.unreadableSource(sourceURL.path)
+            throw AgentComposerAttachmentStoreError.unreadableSource("source is unavailable")
         }
         guard FileManager.default.isReadableFile(atPath: sourceURL.path) else {
-            throw AgentComposerAttachmentStoreError.unreadableSource(sourceURL.path)
+            throw AgentComposerAttachmentStoreError.unreadableSource("source is unavailable")
         }
         let data = try Data(contentsOf: sourceURL)
         return try importManagedBytes(
@@ -360,7 +375,7 @@ public actor AgentComposerAttachmentStore {
                     do { try removeItem(objectURL) }
                     catch {
                         objectDeleted = false
-                        deletionFailures.append("object \(manifest.id.rawValue): \(error)")
+                        deletionFailures.append("object \(manifest.id.rawValue): deletion failed")
                     }
                 }
                 guard objectDeleted else { continue }
@@ -368,7 +383,7 @@ public actor AgentComposerAttachmentStore {
                     try removeItem(manifestURL)
                     removed.append(manifest.id)
                 } catch {
-                    deletionFailures.append("manifest \(manifest.id.rawValue): \(error)")
+                    deletionFailures.append("manifest \(manifest.id.rawValue): deletion failed")
                 }
             } catch {
                 warn("AgentComposerAttachmentStore.cleanup: skipped unreadable manifest (opaque local attachment state)")
@@ -424,10 +439,18 @@ public actor AgentComposerAttachmentStore {
             do {
                 let journal: AgentComposerImportCleanupJournal = try reader.read(at: journalURL)
                 let objectURL = try Self.safeLocalURL(root: layout.attachmentsDirectory, relativePath: journal.objectRelativePath)
-                if FileManager.default.fileExists(atPath: objectURL.path) { try removeItem(objectURL) }
+                let manifestURL = layout.manifestFile(for: journal.attachmentID)
+                // A manifest proves the import became durable. This also makes
+                // journal-removal failure safe: recovery must not delete a
+                // successfully imported object merely because its cleanup record
+                // survived a crash.
+                if !FileManager.default.fileExists(atPath: manifestURL.path),
+                   FileManager.default.fileExists(atPath: objectURL.path) {
+                    try removeItem(objectURL)
+                }
                 try removeDurably(journalURL)
             } catch {
-                failures.append("opaque import cleanup journal")
+                failures.append("opaque import cleanup journal: recovery failed")
             }
         }
         if !failures.isEmpty {
@@ -449,12 +472,12 @@ public actor AgentComposerAttachmentStore {
             var failures: [String] = []
             for manifest in manifests {
                 do { try persist(manifest) }
-                catch { failures.append("manifest \(manifest.id.rawValue): \(error)") }
+                catch { failures.append("manifest \(manifest.id.rawValue): recovery failed") }
             }
             guard failures.isEmpty else {
                 throw AgentComposerAttachmentStoreError.transferRecoveryFailed(
-                    journalPath: journalURL.path,
-                    failures: failures
+                    journalPath: journalURL.lastPathComponent,
+                    failures: failures.map { _ in "manifest recovery failed" }
                 )
             }
             try removeDurably(journalURL)
@@ -494,24 +517,33 @@ public actor AgentComposerAttachmentStore {
             var rollbackFailures: [String] = []
             for original in persistedOriginals.reversed() {
                 do { try persist(original) }
-                catch { rollbackFailures.append("manifest \(original.id.rawValue): \(error)") }
+                catch { rollbackFailures.append("manifest rollback failed") }
             }
             if rollbackFailures.isEmpty {
-                try? removeDurably(journalURL)
+                do {
+                    try removeDurably(journalURL)
+                } catch {
+                    throw AgentComposerAttachmentStoreError.transferRecoveryFailed(
+                        journalPath: journalURL.lastPathComponent,
+                        failures: ["rollback journal cleanup failed"]
+                    )
+                }
                 throw error
             }
             throw AgentComposerAttachmentStoreError.transferRollbackFailed(
-                transferError: String(describing: error),
-                rollbackFailures: rollbackFailures,
-                journalPath: journalURL.path
+                transferError: Self.safeDiagnostic(error),
+                rollbackFailures: rollbackFailures.isEmpty
+                    ? ["manifest rollback failed"]
+                    : manifests.map { "manifest \($0.id.rawValue): rollback failed" },
+                journalPath: journalURL.lastPathComponent
             )
         }
         do {
             try removeDurably(journalURL)
         } catch {
             throw AgentComposerAttachmentStoreError.transferRecoveryFailed(
-                journalPath: journalURL.path,
-                failures: ["committed journal removal: \(error)"]
+                journalPath: journalURL.lastPathComponent,
+                failures: ["committed journal removal failed"]
             )
         }
     }
@@ -543,26 +575,40 @@ public actor AgentComposerAttachmentStore {
         )
         let fileURL = try fileURL(for: manifest)
         try prepareDirectories()
+        // Discoverability is durable before object placement. A later manifest
+        // write or rollback failure therefore leaves a journal that a relaunch
+        // can recover; no best-effort journal write is allowed here.
+        let journalURL = layout.importCleanupDirectory
+            .appendingPathComponent("cleanup-\(UUID().uuidString).json", isDirectory: false)
+        let journal = AgentComposerImportCleanupJournal(
+            attachmentID: id, objectRelativePath: relativePath, createdAt: now
+        )
+        try writeImportCleanupJournal(journal, journalURL)
         try Self.atomicRestrictedWrite(data, to: fileURL)
         do {
             try persist(manifest)
-        } catch {
+        } catch let manifestError {
             do {
                 try removeItem(fileURL)
             } catch let rollbackError {
-                let journalURL = layout.importCleanupDirectory
-                    .appendingPathComponent("cleanup-\(UUID().uuidString).json", isDirectory: false)
-                let journal = AgentComposerImportCleanupJournal(
-                    objectRelativePath: relativePath, createdAt: now
-                )
-                try? AtomicWriter(backupsDirectory: nil, retainedBackups: 0).write(journal, to: journalURL)
                 throw AgentComposerAttachmentStoreError.importRollbackFailed(
-                    manifestError: String(describing: error),
-                    objectPath: fileURL.path,
-                    rollbackError: String(describing: rollbackError)
+                    manifestError: Self.safeDiagnostic(manifestError),
+                    objectPath: relativePath,
+                    rollbackError: Self.safeDiagnostic(rollbackError)
                 )
             }
-            throw error
+            // The journal remains until its durable removal succeeds.
+            try removeDurably(journalURL)
+            throw manifestError
+        }
+        do {
+            try removeDurably(journalURL)
+        } catch {
+            // The manifest is durable. Recovery sees it and removes only the
+            // stale journal, preserving the imported object. The failed cleanup
+            // is observable through the next recovery pass without replacing a
+            // successful import with a misleading user-facing failure.
+            warn("AgentComposerAttachmentStore.import: stale cleanup journal retained")
         }
         return AgentComposerStoredAttachment(manifest: manifest, fileURL: fileURL)
     }
@@ -645,10 +691,21 @@ public actor AgentComposerAttachmentStore {
         }
         let fileKind = statBuffer.st_mode & S_IFMT
         guard fileKind == S_IFREG, FileManager.default.isReadableFile(atPath: url.path) else {
-            throw AgentComposerAttachmentStoreError.unreadableManagedFile(id: manifest.id, path: url.path)
+            throw AgentComposerAttachmentStoreError.unreadableManagedFile(id: manifest.id, path: "managed attachment unavailable")
         }
         _ = try Self.safeLocalURL(root: layout.attachmentsDirectory, relativePath: manifest.relativePath)
         return url
+    }
+
+    private static func safeDiagnostic(_ error: Error) -> String {
+        // Preserve a short root-cause label for local debugging while replacing
+        // path-bearing tokens and bounding all user-facing diagnostics.
+        let description = String(describing: error)
+        let redacted = description
+            .split(whereSeparator: { $0.isWhitespace })
+            .map { token in token.contains("/") ? "[LOCAL]" : String(token) }
+            .joined(separator: " ")
+        return String(redacted.prefix(160))
     }
 
     private static func makeOpaqueID() throws -> AgentImageAttachmentID {
@@ -667,18 +724,18 @@ public actor AgentComposerAttachmentStore {
 
     private static func safeLocalURL(root: URL, relativePath: String) throws -> URL {
         guard !relativePath.isEmpty, !relativePath.hasPrefix("/") else {
-            throw AgentComposerAttachmentStoreError.unsafeRelativePath(relativePath)
+            throw AgentComposerAttachmentStoreError.unsafeRelativePath("managed path is invalid")
         }
         let parts = relativePath.split(separator: "/", omittingEmptySubsequences: false)
         guard parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
-            throw AgentComposerAttachmentStoreError.unsafeRelativePath(relativePath)
+            throw AgentComposerAttachmentStoreError.unsafeRelativePath("managed path is invalid")
         }
         let rootURL = root.standardizedFileURL.resolvingSymlinksInPath()
         let candidate = root.appendingPathComponent(relativePath, isDirectory: false).standardizedFileURL
         let canonicalCandidate = candidate.resolvingSymlinksInPath()
         let rootPrefix = rootURL.path.hasSuffix("/") ? rootURL.path : rootURL.path + "/"
         guard canonicalCandidate.path.hasPrefix(rootPrefix) else {
-            throw AgentComposerAttachmentStoreError.unsafeRelativePath(relativePath)
+            throw AgentComposerAttachmentStoreError.unsafeRelativePath("managed path is outside storage")
         }
         return candidate
     }
@@ -694,7 +751,7 @@ public actor AgentComposerAttachmentStore {
         let tmp = dir.appendingPathComponent(".\(url.lastPathComponent).tmp-\(UUID().uuidString)")
         let fd = open(tmp.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
         guard fd >= 0 else {
-            throw AgentComposerAttachmentStoreError.atomicWriteFailed(tmp.path)
+            throw AgentComposerAttachmentStoreError.atomicWriteFailed("managed write failed")
         }
         var closeNeeded = true
         do {

@@ -231,7 +231,7 @@ public actor AgentComposerDraftStore {
             // Keep the newest value available for a later explicit flush instead of
             // losing it merely because this disk write failed.
             pending[agentID] = draft
-            warn("AgentComposerDraftStore.save: could not persist draft for \(agentID.rawValue): \(error)")
+            warn("AgentComposerDraftStore.save: could not persist draft for agent \(agentID.rawValue)")
         }
     }
 
@@ -258,6 +258,13 @@ public actor AgentComposerDraftStore {
         return true
     }
 
+    /// True when a submission journal exists. Callers use this to avoid falling
+    /// back to an ordinary (cleared) draft when recovery itself is temporarily
+    /// blocked by local storage validation.
+    public func hasSubmissionRecovery(for agentID: AgentID) -> Bool {
+        FileManager.default.fileExists(atPath: layout.submissionRecoveryFile(for: agentID).path)
+    }
+
     /// Restores the durable recoverable snapshot after a pre-start/provider
     /// rejection. The snapshot is removed only after the visible draft has been
     /// durably restored.
@@ -268,17 +275,17 @@ public actor AgentComposerDraftStore {
         case .pending:
             break
         case .confirming:
+            // Ownership recovery precedes any prompt validation. A confirming
+            // record is still the durable source of the draft references; only a
+            // durable all-sent fact makes it safe to discard them.
             if let attachmentStore {
                 try await attachmentStore.recoverPendingOwnershipTransfers()
-            }
-            if let attachmentStore, !snapshot.draft.imageAttachments.isEmpty {
-                do {
-                    _ = try await attachmentStore.preparePromptAttachments(
-                        for: agentID,
-                        draftAttachments: snapshot.draft.imageAttachments
-                    )
-                } catch {
-                    warn("AgentComposerDraftStore.restoreSubmission: confirming snapshot for \(agentID.rawValue) is no longer draft-restorable: \(error)")
+                var manifests: [AgentComposerAttachmentManifest?] = []
+                for reference in snapshot.draft.imageAttachments {
+                    manifests.append(try await attachmentStore.manifest(for: reference.attachmentID))
+                }
+                if !manifests.isEmpty && manifests.allSatisfy({ $0?.ownership.state == .sent }) {
+                    try removeSubmissionSnapshot(for: agentID)
                     return nil
                 }
             }
@@ -342,7 +349,7 @@ public actor AgentComposerDraftStore {
             guard try beginSubmission(for: agentID, submittedAt: sentAt ?? clock.now()) else { return }
             _ = try await confirmSubmissionStarted(for: agentID, sentAt: sentAt)
         } catch {
-            warn("AgentComposerDraftStore.resolveSendIntent: preserving recoverable submission for \(agentID.rawValue) because confirmation failed: \(error)")
+            warn("AgentComposerDraftStore.resolveSendIntent: preserving recoverable submission for agent \(agentID.rawValue)")
         }
     }
 

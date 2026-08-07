@@ -864,6 +864,10 @@ final class AgentSupervisor {
     private let nameGenerationCapabilityProvider: (@Sendable () -> AgentNameGenerationCapability?)?
     private let nameGenerationTimeout: TimeInterval
     private let attachmentStore: AgentComposerAttachmentStore
+    /// App-lifetime recovery owner. This is deliberately independent of tile
+    /// subscriptions so launch failures and provider rejection restore drafts
+    /// even when no tile remains bound.
+    private let submissionRecoveryStore: AgentComposerDraftStore?
 
     /// The records this supervisor owns, in memory. `AgentStore` is the durable
     /// copy; this is the live one.
@@ -915,7 +919,8 @@ final class AgentSupervisor {
         upsertRecord: ((AgentRecord) throws -> Void)? = nil,
         nameGenerationCapabilityProvider: (@Sendable () -> AgentNameGenerationCapability?)? = nil,
         nameGenerationTimeout: TimeInterval = AgentNameOneShot.timeout,
-        attachmentStore: AgentComposerAttachmentStore? = nil
+        attachmentStore: AgentComposerAttachmentStore? = nil,
+        submissionRecoveryStore: AgentComposerDraftStore? = nil
     ) {
         self.store = store
         self.makeRunner = makeRunner
@@ -926,6 +931,7 @@ final class AgentSupervisor {
         self.attachmentStore = attachmentStore ?? AgentComposerAttachmentStore(
             applicationSupportDirectory: store.layout.applicationSupportDirectory
         )
+        self.submissionRecoveryStore = submissionRecoveryStore
     }
 
     /// The explicit action's cached capability gate. This is a snapshot only:
@@ -3154,6 +3160,20 @@ final class AgentSupervisor {
     }
 
     private func deliver(_ event: AgentRuntimeEvent, to id: AgentID, now: Date = Date()) {
+        switch event {
+        case .turnStarted:
+            Task {
+                do {
+                    _ = try await submissionRecoveryStore?.confirmSubmissionStarted(for: id, sentAt: now)
+                } catch {
+                    _ = try? await submissionRecoveryStore?.restoreSubmission(for: id)
+                }
+            }
+        case .runtimeError, .sessionStateChanged(.stopped), .sessionStateChanged(.error):
+            Task { _ = try? await submissionRecoveryStore?.restoreSubmission(for: id) }
+        default:
+            break
+        }
         updateTurnFacts(with: event, for: id, now: now)
         if let record = records[id] {
             ensureLocationProjector(for: record)
@@ -3524,6 +3544,24 @@ private func runComposerKeyContractChecks() throws -> Int {
             keyCode: keyCode
         ) else { throw fail("could not create synthetic key event") }
         return event
+    }
+
+    guard ComposerKeyPolicy.action(
+        for: try event(keyCode: 36, characters: "\r"),
+        hasMarkedText: false,
+        hasTrimmedContent: false,
+        suggestionsVisible: false,
+        hasAttachments: true
+    ) == .send else {
+        throw fail("image-only Return did not select the send route")
+    }
+    guard ComposerKeyPolicy.action(
+        for: try event(keyCode: 36, characters: "\r"),
+        hasMarkedText: false,
+        hasTrimmedContent: false,
+        suggestionsVisible: false
+    ) == .nativeTextSystem else {
+        throw fail("truly empty Return was not rejected")
     }
 
     // Exercise the production composer and its required observer contract, not a
@@ -4103,16 +4141,17 @@ func runAgentSupervisorChecks() async throws {
     let generatedNameReport = try await checkGeneratedNameOneShot(config: config, fail: fail)
     let namingReport = try await checkAgentNameContract(config: config, cwd: cwd, fail: fail)
 
-    func imageAttachment(_ id: String, path: String, displayName: String) -> AgentPromptImageAttachment {
-        AgentPromptImageAttachment(
-            metadata: AgentImageAttachmentMetadata(
-                id: AgentImageAttachmentID(rawValue: id)!,
-                displayName: displayName,
-                contentType: "image/png",
-                byteCount: 123,
-                pixelWidth: 80,
-                pixelHeight: 60),
-            fileURL: URL(fileURLWithPath: path))
+    func managedImageAttachment(
+        _ store: AgentComposerAttachmentStore,
+        displayName: String,
+        for agentID: AgentID
+    ) async throws -> AgentPromptImageAttachment {
+        let validation = try AgentComposerImageValidation(
+            validatedContentType: "image/png", pixelWidth: 80, pixelHeight: 60, byteCount: 123)
+        return try await store.importValidatedPastedImage(
+            Data(repeating: 7, count: 123), displayName: displayName,
+            validation: validation, forDraftOf: agentID
+        ).promptAttachment
     }
 
     func replayedEvents(
@@ -4144,7 +4183,10 @@ func runAgentSupervisorChecks() async throws {
             .contentDelta(threadId: "provider-image", turnId: "image-turn", streamKind: .assistant, delta: "received"),
         ],
         holdUntilStopped: true)
-    let imageSupervisor = AgentSupervisor(store: imageTransportStore, makeRunner: { _ in imageRunner })
+    let imageAttachmentStore = AgentComposerAttachmentStore(
+        applicationSupportDirectory: imageTransportStore.layout.applicationSupportDirectory)
+    let imageSupervisor = AgentSupervisor(
+        store: imageTransportStore, makeRunner: { _ in imageRunner }, attachmentStore: imageAttachmentStore)
     let imageAgent = imageSupervisor.spawn(
         role: nil,
         prompt: nil,
@@ -4152,12 +4194,11 @@ func runAgentSupervisorChecks() async throws {
         model: config.model,
         thinking: config.thinking,
         projectId: nil)
-    let firstImagePath = "/tmp/continuum hidden one.png"
-    let secondImagePath = "/Users/dylan/Pictures/private continuum hidden two.png"
-    let imageOnlyPrompt = AgentPrompt(imageAttachments: [
-        imageAttachment("supervisor-image-1", path: firstImagePath, displayName: "first visible image.png"),
-        imageAttachment("supervisor-image-2", path: secondImagePath, displayName: "second visible image.png"),
-    ])
+    let firstImage = try await managedImageAttachment(
+        imageAttachmentStore, displayName: "first visible image.png", for: imageAgent)
+    let secondImage = try await managedImageAttachment(
+        imageAttachmentStore, displayName: "second visible image.png", for: imageAgent)
+    let imageOnlyPrompt = AgentPrompt(imageAttachments: [firstImage, secondImage])
     guard await imageSupervisor.accept(.sendPrompt(imageOnlyPrompt), for: imageAgent) == .accepted else {
         throw fail("image transport: image-only AgentPrompt was refused at the supervisor accept seam")
     }
@@ -4165,15 +4206,17 @@ func runAgentSupervisorChecks() async throws {
         throw fail("image transport: prompt-capable accept did not reach the runner")
     }
     guard imageRunner.agentPrompts[0].text.isEmpty,
-          imageRunner.agentPrompts[0].imageAttachments.map(\.fileURL.path) == [firstImagePath, secondImagePath] else {
+          imageRunner.agentPrompts[0].imageAttachments.map(\.fileURL.path) == [firstImage.fileURL.path, secondImage.fileURL.path] else {
         throw fail("image transport: multiple attachment URLs did not reach the runner intact: \(imageRunner.agentPrompts)")
     }
     guard imageSupervisor.records[imageAgent]?.displayName == AgentRecord.defaultAgentName else {
         throw fail("image transport: image-only first prompt derived a name from a local path or attachment metadata")
     }
+    let refusalImage = try await managedImageAttachment(
+        imageAttachmentStore, displayName: "refused.png", for: imageAgent)
     let refusalPrompt = AgentPrompt(
         text: "do not clear this draft",
-        imageAttachments: [imageAttachment("supervisor-image-refusal", path: "/tmp/refused hidden.png", displayName: "refused.png")])
+        imageAttachments: [refusalImage])
     guard await imageSupervisor.accept(.sendPrompt(refusalPrompt), for: imageAgent) == .refused(.turnNotReady),
           imageRunner.agentPrompts.count == 1 else {
         throw fail("image transport: in-flight send was accepted or destructively replaced the runner prompt")
@@ -4183,7 +4226,7 @@ func runAgentSupervisorChecks() async throws {
 
     let replayedImageEvents = await replayedEvents(from: imageSupervisor, for: imageAgent, count: 3)
     let replayedImageJSON = String(decoding: try JSONEncoder().encode(replayedImageEvents), as: UTF8.self)
-    let secretImagePaths = [firstImagePath, secondImagePath, "@\(firstImagePath)", "@\(secondImagePath)"]
+    let secretImagePaths = [firstImage.fileURL.path, secondImage.fileURL.path, "@\(firstImage.fileURL.path)", "@\(secondImage.fileURL.path)"]
     guard !containsAny(replayedImageJSON, secretImagePaths) else {
         throw fail("image transport: local image paths leaked into supervisor runtime events: \(replayedImageJSON)")
     }
@@ -4196,9 +4239,13 @@ func runAgentSupervisorChecks() async throws {
         runError: PiAgentRunner.RunError.piFailed(
             exitCode: 42,
             stderr: "provider echoed argv @\(leakyManagedPath) and \(leakyManagedPath) before start"))
+    let stderrLeakStore = AgentStore(
+        applicationSupportDirectory: root.appendingPathComponent("stderr-leak", isDirectory: true))
+    let stderrLeakAttachmentStore = AgentComposerAttachmentStore(
+        applicationSupportDirectory: stderrLeakStore.layout.applicationSupportDirectory)
     let stderrLeakSupervisor = AgentSupervisor(
-        store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("stderr-leak", isDirectory: true)),
-        makeRunner: { _ in stderrLeakRunner })
+        store: stderrLeakStore, makeRunner: { _ in stderrLeakRunner },
+        attachmentStore: stderrLeakAttachmentStore)
     let stderrLeakAgent = stderrLeakSupervisor.spawn(
         role: nil,
         prompt: nil,
@@ -4206,7 +4253,9 @@ func runAgentSupervisorChecks() async throws {
         model: config.model,
         thinking: config.thinking,
         projectId: nil)
-    guard await stderrLeakSupervisor.accept(.sendPrompt(AgentPrompt(imageAttachments: [imageAttachment("supervisor-image-leak", path: leakyManagedPath, displayName: "leak.png")])), for: stderrLeakAgent) == .accepted else {
+    let stderrLeakImage = try await managedImageAttachment(
+        stderrLeakAttachmentStore, displayName: "leak.png", for: stderrLeakAgent)
+    guard await stderrLeakSupervisor.accept(.sendPrompt(AgentPrompt(imageAttachments: [stderrLeakImage])), for: stderrLeakAgent) == .accepted else {
         throw fail("image transport: stderr leak fixture send was refused")
     }
     guard await waitUntil(timeout: 5, pollInterval: 0.02, { !stderrLeakSupervisor.isRunning(stderrLeakAgent) }) else {
@@ -4228,15 +4277,18 @@ func runAgentSupervisorChecks() async throws {
     let imageTranscriptJSON = String(decoding: try JSONEncoder().encode(imageProjection.document), as: UTF8.self)
     guard !containsAny(imageTranscriptBody, secretImagePaths),
           !containsAny(imageTranscriptJSON, secretImagePaths),
-          imageTranscriptJSON.contains("supervisor-image-1"),
+          imageTranscriptJSON.contains(firstImage.metadata.id.rawValue),
           imageTranscriptJSON.contains("image-gallery") else {
         throw fail("image transport: transcript projection did not preserve path-free image metadata only; body=\(imageTranscriptBody), json=\(imageTranscriptJSON)")
     }
 
     let mixedRunner = ScriptedAgentRunner(script: [.sessionStateChanged(.ready)])
+    let mixedStore = AgentStore(
+        applicationSupportDirectory: root.appendingPathComponent("image-transport-mixed", isDirectory: true))
+    let mixedAttachmentStore = AgentComposerAttachmentStore(
+        applicationSupportDirectory: mixedStore.layout.applicationSupportDirectory)
     let mixedSupervisor = AgentSupervisor(
-        store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("image-transport-mixed", isDirectory: true)),
-        makeRunner: { _ in mixedRunner })
+        store: mixedStore, makeRunner: { _ in mixedRunner }, attachmentStore: mixedAttachmentStore)
     let mixedAgent = mixedSupervisor.spawn(
         role: nil,
         prompt: nil,
@@ -4246,7 +4298,8 @@ func runAgentSupervisorChecks() async throws {
         projectId: nil)
     let mixedPrompt = AgentPrompt(
         text: "  Compare visible screen details Inspect(/Users/dylan/Private/name-leak.png) '@/tmp/quoted-name-leak.png' @/tmp/name-leak.png  ",
-        imageAttachments: [imageAttachment("supervisor-image-3", path: "/tmp/mixed hidden.png", displayName: "mixed visible image.png")])
+        imageAttachments: [try await managedImageAttachment(
+            mixedAttachmentStore, displayName: "mixed visible image.png", for: mixedAgent)])
     guard await mixedSupervisor.accept(.sendPrompt(mixedPrompt), for: mixedAgent) == .accepted else {
         throw fail("image transport: text plus image AgentPrompt was refused at the supervisor accept seam")
     }

@@ -253,9 +253,14 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
             // before Pi emitted the first turn-start. Recover the durable
             // submission journal before reading the ordinary draft file.
             let recovered = try? await store.restoreSubmission(for: agentID)
+            let hasRecovery = await store.hasSubmissionRecovery(for: agentID)
             let stored: ContinuumRevivedCore.AgentComposerDraft?
             if let recovered {
                 stored = recovered
+            } else if hasRecovery {
+                // Keep the ordinary draft hidden while recovery is blocked; a
+                // later rebind/relaunch gets another chance without losing refs.
+                stored = nil
             } else {
                 stored = await store.load(for: agentID)
             }
@@ -450,6 +455,10 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         }
     }
 
+    func composerHasSendableAttachments(_ textView: ComposerTextView) -> Bool {
+        !importedAttachments.isEmpty
+    }
+
     func composerRequestedSend(_ textView: ComposerTextView) {
         let prompt = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty || !importedAttachments.isEmpty else { return }
@@ -587,7 +596,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
             guard acceptance == .accepted else {
                 if isPromptSubmission {
                     if let restored = try? await self.draftStore?.restoreSubmission(for: agentID) {
-                        self.applyPersistedDraft(restored)
+                        await self.applyPersistedDraft(restored)
                     }
                 }
                 return
@@ -625,9 +634,28 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         )
     }
 
-    private func applyPersistedDraft(_ persisted: ContinuumRevivedCore.AgentComposerDraft) {
-        let resolved = importedAttachments.filter { attachment in
-            persisted.imageAttachments.contains { $0.attachmentID == attachment.metadata.id }
+    private func applyPersistedDraft(_ persisted: ContinuumRevivedCore.AgentComposerDraft) async {
+        // Recovery is keyed by the durable draft references, not by whichever
+        // tile happened to own the rail. Resolve the persisted list in order and
+        // never filter it against the current tile's transient array.
+        var resolved: [AgentPromptImageAttachment] = []
+        for reference in persisted.imageAttachments {
+            var didResolve = false
+            if let attachmentStore {
+                do {
+                    if let stored = try await attachmentStore.storedAttachment(for: reference.attachmentID) {
+                        resolved.append(stored.promptAttachment)
+                        didResolve = true
+                    }
+                } catch {
+                    // Keep the durable reference in the draft store; a later
+                    // rebind can retry local capability resolution.
+                }
+            }
+            if !didResolve,
+               let existing = importedAttachments.first(where: { $0.metadata.id == reference.attachmentID }) {
+                resolved.append(existing)
+            }
         }
         importedAttachments = resolved
         apply(AgentComposerDraft(
@@ -658,7 +686,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         Task { @MainActor [weak self] in
             guard let self else { return }
             if let restored = try? await draftStore.restoreSubmission(for: agentID) {
-                self.applyPersistedDraft(restored)
+                await self.applyPersistedDraft(restored)
             }
             self.pendingSubmittedDraft = nil
         }
