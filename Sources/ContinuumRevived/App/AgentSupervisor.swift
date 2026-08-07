@@ -46,7 +46,7 @@ import Foundation
 protocol AgentRunning: AnyObject, Sendable {
     /// Blocking: runs one prompt to completion, streaming events to `onEvent` as
     /// they arrive. Called off the main thread by `send`.
-    func run(prompt: String, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws
+    func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws
     func stop()
     /// P2D.2 — the local-only `spawn_agent` side channel. Separate from `onEvent`
     /// because a `SpawnRequest` carries the call's ARGUMENTS, which may never enter
@@ -56,6 +56,13 @@ protocol AgentRunning: AnyObject, Sendable {
     /// Codable runtime and companion activity streams.
     func observeRuntimeObservations(
         _ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void)
+}
+
+extension AgentRunning {
+    /// Text-only compatibility wrapper for older supervisor checks/callers.
+    func run(prompt: String, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+        try run(prompt: AgentPrompt(prompt), onEvent: onEvent)
+    }
 }
 
 extension PiAgentRunner: AgentRunning {}
@@ -1577,7 +1584,7 @@ final class AgentSupervisor {
     /// Runs `prompt` on the agent's own runner, off the main thread (`run` blocks).
     /// Events hop back via `DispatchQueue.main.async` — FIFO, which is what keeps
     /// the fan-out ordered; a `Task { @MainActor }` per event would not be.
-    func send(_ prompt: String, to id: AgentID) {
+    func send(_ prompt: AgentPrompt, to id: AgentID) {
         guard var record = records[id] else {
             warn("AgentSupervisor.send: no agent \(id.rawValue.uuidString)")
             return
@@ -1592,13 +1599,15 @@ final class AgentSupervisor {
         // is `P5.7-steer-follow-up`'s, and inventing it here would be a second
         // answer to supersede.
         if let inFlight = runners[id] {
-            warn("AgentSupervisor.send: agent \(id.rawValue.uuidString) already has a prompt in flight (\(type(of: inFlight))); dropping \(prompt.count) chars")
+            warn("AgentSupervisor.send: agent \(id.rawValue.uuidString) already has a prompt in flight (\(type(of: inFlight))); dropping \(prompt.text.count) visible chars and \(prompt.imageAttachments.count) image attachment(s)")
             return
         }
-        // Keep only the first local prompt for the explicit naming action. This
-        // dictionary is memory-only; AgentRecord/AgentInventory never receive it.
-        if firstPromptByAgent[id] == nil {
-            firstPromptByAgent[id] = String(prompt.prefix(AgentNameOneShot.maximumPromptLength))
+        let firstPromptText = Self.visibleNamingText(from: prompt)
+        // Keep only the first local prompt's visible text for the explicit naming
+        // action. Local image paths/@path argv capabilities are never copied into
+        // this memory-only naming context.
+        if firstPromptByAgent[id] == nil, let firstPromptText {
+            firstPromptByAgent[id] = firstPromptText
         }
         // This is the ONE automatic naming funnel. The shared resolver applies
         // prompt, source-item, then parent-relative ordinal precedence; a later
@@ -1609,7 +1618,7 @@ final class AgentSupervisor {
            record.displayName == AgentRecord.defaultAgentName,
            record.displayNameSource == .sentinel,
            let proposal = AgentRecord.resolveDerivedDisplayName(
-               firstPrompt: prompt,
+               firstPrompt: firstPromptText,
                sourceItemId: record.sourceItemId,
                parentName: parentDisplayName(for: record),
                parentRelativeOrdinal: record.parentRelativeOrdinal,
@@ -1667,6 +1676,31 @@ final class AgentSupervisor {
             }
             DispatchQueue.main.async { self?.clearRunner(runner, for: id) }
         }
+    }
+
+    /// Text-only compatibility wrapper for existing callers and checks.
+    func send(_ prompt: String, to id: AgentID) {
+        send(AgentPrompt(prompt), to: id)
+    }
+
+    private nonisolated static func visibleNamingText(from prompt: AgentPrompt) -> String? {
+        let bounded = String(prompt.text.prefix(AgentNameOneShot.maximumPromptLength))
+        let tokens = bounded
+            .split(whereSeparator: { $0.isWhitespace || $0.isNewline })
+            .map(String.init)
+            .filter { !isLocalPathReferenceToken($0) }
+        let visible = tokens.joined(separator: " ")
+        return AgentName.normalizedLabel(visible)
+    }
+
+    private nonisolated static func isLocalPathReferenceToken(_ token: String) -> Bool {
+        let stripped = token.trimmingCharacters(in: CharacterSet(charactersIn: "\"'`()[]{}<>.,;:"))
+        return stripped.hasPrefix("@/")
+            || stripped.hasPrefix("@~/")
+            || stripped.hasPrefix("@file://")
+            || stripped.hasPrefix("/")
+            || stripped.hasPrefix("~/")
+            || stripped.hasPrefix("file://")
     }
 
     /// Terminates the in-flight runner and records the stop on the agent's stream.
@@ -2735,6 +2769,13 @@ final class AgentSupervisor {
             guard snapshot.capabilities.canSend else { return .refused(.turnNotReady) }
             send(prompt, to: agentID)
             return .accepted
+        case .sendPrompt(let draft):
+            var prompt = draft
+            prompt.text = prompt.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !prompt.isEmpty else { return .refused(.emptyDraft) }
+            guard snapshot.capabilities.canSend else { return .refused(.turnNotReady) }
+            send(prompt, to: agentID)
+            return .accepted
         case .stop:
             guard snapshot.capabilities.canStop, runners[agentID] != nil else {
                 return .refused(.noTurnInProgress)
@@ -3372,6 +3413,7 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
     private var runCountStorage = 0
     private var completedRunStorage = 0
     private var promptsStorage: [String] = []
+    private var agentPromptsStorage: [AgentPrompt] = []
     private var liveHandler: (@Sendable (AgentRuntimeEvent) -> Void)?
     private var spawnHandler: (@Sendable (SpawnRequest) -> Void)?
     private var runtimeObservationHandler: (@Sendable (AgentRuntimeObservation) -> Void)?
@@ -3394,11 +3436,13 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
     /// the blocked call. This counter is the only witness that the runner exited.
     var completedRuns: Int { lock.withLock { completedRunStorage } }
     var prompts: [String] { lock.withLock { promptsStorage } }
+    var agentPrompts: [AgentPrompt] { lock.withLock { agentPromptsStorage } }
 
-    func run(prompt: String, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+    func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
         lock.withLock {
             runCountStorage += 1
-            promptsStorage.append(prompt)
+            promptsStorage.append(prompt.text)
+            agentPromptsStorage.append(prompt)
             liveHandler = onEvent
         }
         if let observer = lock.withLock({ runtimeObservationHandler }) {
@@ -4050,6 +4094,136 @@ func runAgentSupervisorChecks() async throws {
     // than being masked by the broader historical naming corpus below.
     let generatedNameReport = try await checkGeneratedNameOneShot(config: config, fail: fail)
     let namingReport = try await checkAgentNameContract(config: config, cwd: cwd, fail: fail)
+
+    func imageAttachment(_ id: String, path: String, displayName: String) -> AgentPromptImageAttachment {
+        AgentPromptImageAttachment(
+            metadata: AgentImageAttachmentMetadata(
+                id: AgentImageAttachmentID(rawValue: id)!,
+                displayName: displayName,
+                contentType: "image/png",
+                byteCount: 123,
+                pixelWidth: 80,
+                pixelHeight: 60),
+            fileURL: URL(fileURLWithPath: path))
+    }
+
+    func replayedEvents(
+        from supervisor: AgentSupervisor,
+        for agentID: AgentID,
+        count: Int
+    ) async -> [AgentRuntimeEvent] {
+        var result: [AgentRuntimeEvent] = []
+        for await event in supervisor.events(for: agentID) {
+            result.append(event)
+            if result.count >= count { break }
+        }
+        return result
+    }
+
+    func containsAny(_ text: String, _ needles: [String]) -> Bool {
+        needles.contains { !$0.isEmpty && text.contains($0) }
+    }
+
+    // Image Wave 2A · Lane D — AgentPrompt reaches the real supervisor/runner
+    // transport seam. This intentionally does not touch the composer UI: a
+    // serialized coordinator that already owns attachments must call
+    // AgentSupervisor.accept(.sendPrompt(prompt), for:) or send(prompt, to:).
+    let imageTransportStore = AgentStore(
+        applicationSupportDirectory: root.appendingPathComponent("image-transport", isDirectory: true))
+    let imageRunner = ScriptedAgentRunner(
+        script: [
+            .turnStarted(threadId: "provider-image", turnId: "image-turn"),
+            .contentDelta(threadId: "provider-image", turnId: "image-turn", streamKind: .assistant, delta: "received"),
+        ],
+        holdUntilStopped: true)
+    let imageSupervisor = AgentSupervisor(store: imageTransportStore, makeRunner: { _ in imageRunner })
+    let imageAgent = imageSupervisor.spawn(
+        role: nil,
+        prompt: nil,
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking,
+        projectId: nil)
+    let firstImagePath = "/tmp/continuum hidden one.png"
+    let secondImagePath = "/Users/dylan/Pictures/private continuum hidden two.png"
+    let imageOnlyPrompt = AgentPrompt(imageAttachments: [
+        imageAttachment("supervisor-image-1", path: firstImagePath, displayName: "first visible image.png"),
+        imageAttachment("supervisor-image-2", path: secondImagePath, displayName: "second visible image.png"),
+    ])
+    guard await imageSupervisor.accept(.sendPrompt(imageOnlyPrompt), for: imageAgent) == .accepted else {
+        throw fail("image transport: image-only AgentPrompt was refused at the supervisor accept seam")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { imageRunner.agentPrompts.count == 1 }) else {
+        throw fail("image transport: prompt-capable accept did not reach the runner")
+    }
+    guard imageRunner.agentPrompts[0].text.isEmpty,
+          imageRunner.agentPrompts[0].imageAttachments.map(\.fileURL.path) == [firstImagePath, secondImagePath] else {
+        throw fail("image transport: multiple attachment URLs did not reach the runner intact: \(imageRunner.agentPrompts)")
+    }
+    guard imageSupervisor.records[imageAgent]?.displayName == AgentRecord.defaultAgentName else {
+        throw fail("image transport: image-only first prompt derived a name from a local path or attachment metadata")
+    }
+    let refusalPrompt = AgentPrompt(
+        text: "do not clear this draft",
+        imageAttachments: [imageAttachment("supervisor-image-refusal", path: "/tmp/refused hidden.png", displayName: "refused.png")])
+    guard await imageSupervisor.accept(.sendPrompt(refusalPrompt), for: imageAgent) == .refused(.turnNotReady),
+          imageRunner.agentPrompts.count == 1 else {
+        throw fail("image transport: in-flight send was accepted or destructively replaced the runner prompt")
+    }
+    imageSupervisor.stop(imageAgent)
+    _ = await waitUntil(timeout: 5, pollInterval: 0.02, { imageRunner.completedRuns == 1 })
+
+    let replayedImageEvents = await replayedEvents(from: imageSupervisor, for: imageAgent, count: 3)
+    let replayedImageJSON = String(decoding: try JSONEncoder().encode(replayedImageEvents), as: UTF8.self)
+    let secretImagePaths = [firstImagePath, secondImagePath, "@\(firstImagePath)", "@\(secondImagePath)"]
+    guard !containsAny(replayedImageJSON, secretImagePaths) else {
+        throw fail("image transport: local image paths leaked into supervisor runtime events: \(replayedImageJSON)")
+    }
+    var imageProjection = AgentTranscriptProjection(threadId: "image-transport-thread")
+    try imageProjection.appendUserPrompt(
+        id: AgentNodeID(rawValue: "local:image-only-prompt")!,
+        prompt: imageOnlyPrompt)
+    let imageTranscriptBody = imageProjection.compatibilityRows.map(\.body).joined(separator: "\n")
+    let imageTranscriptJSON = String(decoding: try JSONEncoder().encode(imageProjection.document), as: UTF8.self)
+    guard !containsAny(imageTranscriptBody, secretImagePaths),
+          !containsAny(imageTranscriptJSON, secretImagePaths),
+          imageTranscriptJSON.contains("supervisor-image-1"),
+          imageTranscriptJSON.contains("image-gallery") else {
+        throw fail("image transport: transcript projection did not preserve path-free image metadata only; body=\(imageTranscriptBody), json=\(imageTranscriptJSON)")
+    }
+
+    let mixedRunner = ScriptedAgentRunner(script: [.sessionStateChanged(.ready)])
+    let mixedSupervisor = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("image-transport-mixed", isDirectory: true)),
+        makeRunner: { _ in mixedRunner })
+    let mixedAgent = mixedSupervisor.spawn(
+        role: nil,
+        prompt: nil,
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking,
+        projectId: nil)
+    let mixedPrompt = AgentPrompt(
+        text: "  Compare visible screen details @/tmp/name-leak.png /Users/dylan/Private/name-leak.png  ",
+        imageAttachments: [imageAttachment("supervisor-image-3", path: "/tmp/mixed hidden.png", displayName: "mixed visible image.png")])
+    guard await mixedSupervisor.accept(.sendPrompt(mixedPrompt), for: mixedAgent) == .accepted else {
+        throw fail("image transport: text plus image AgentPrompt was refused at the supervisor accept seam")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { mixedRunner.agentPrompts.count == 1 }) else {
+        throw fail("image transport: mixed AgentPrompt did not reach the runner")
+    }
+    guard mixedRunner.agentPrompts[0].text == "Compare visible screen details @/tmp/name-leak.png /Users/dylan/Private/name-leak.png",
+          mixedRunner.agentPrompts[0].imageAttachments.map(\.fileURL.path) == ["/tmp/mixed hidden.png"] else {
+        throw fail("image transport: mixed prompt text/attachments were not preserved at the runner: \(mixedRunner.agentPrompts)")
+    }
+    let mixedName = mixedSupervisor.records[mixedAgent]?.displayName ?? ""
+    guard mixedName.count <= AgentName.maximumLength,
+          !mixedName.contains("/"),
+          !mixedName.contains("@"),
+          !mixedName.contains("name-leak"),
+          mixedName.contains("Compare visible screen details") else {
+        throw fail("image transport: first-prompt naming leaked path/@path text or exceeded the visible-text cap: \(mixedName)")
+    }
 
     // Queue 91 P3.6/P3.7 — Home may be changed only while the agent is still a
     // zero-turn/provisional record. After any session history exists, callers must
@@ -7793,7 +7967,7 @@ private func checkHeadlessAgents(
     guard headlessBranch.contains("promptForAgentTask("), headlessBranch.contains("prompt: prompt") else {
         throw fail("the headless spawn branch does not collect and pass a first prompt, so it spawns an agent that never runs:\n\(headlessBranch)")
     }
-    let spawnHelper = try paletteAgentSpawnBranch("private func spawnSupervisedAgent(tileId: UUID?, prompt: String? = nil) -> AgentID {")
+    let spawnHelper = try paletteAgentSpawnBranch("private func spawnSupervisedAgent(tileId: UUID?, prompt: String? = nil) -> AgentID? {")
     guard spawnHelper.contains("prompt: prompt") else {
         throw fail("the app's spawn helper drops the prompt, so the headless agent would not run:\n\(spawnHelper)")
     }
@@ -7832,13 +8006,18 @@ final class FixtureStreamRunner: AgentRunning, @unchecked Sendable {
     private var spawnHandler: (@Sendable (SpawnRequest) -> Void)?
     private var runtimeObservationHandler: (@Sendable (AgentRuntimeObservation) -> Void)?
     private var promptsStorage: [String] = []
+    private var agentPromptsStorage: [AgentPrompt] = []
 
     init(lines: [String]) { self.lines = lines }
 
     var prompts: [String] { lock.withLock { promptsStorage } }
+    var agentPrompts: [AgentPrompt] { lock.withLock { agentPromptsStorage } }
 
-    func run(prompt: String, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
-        lock.withLock { promptsStorage.append(prompt) }
+    func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+        lock.withLock {
+            promptsStorage.append(prompt.text)
+            agentPromptsStorage.append(prompt)
+        }
         var translator = PiEventTranslator()
         if let handler = lock.withLock({ spawnHandler }) {
             translator.onSpawnRequest = handler

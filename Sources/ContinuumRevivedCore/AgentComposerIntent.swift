@@ -6,7 +6,12 @@ import Foundation
 /// execute them. In particular, steer and queue are not implemented by replaying
 /// or delaying a normal send.
 public enum AgentComposerIntent: Equatable, Sendable {
+    /// Text-only compatibility case used by the existing composer UI.
     case send(String)
+    /// Prompt-capable send for coordinators that already own local attachments.
+    /// The UI text convenience above remains source-compatible until the composer
+    /// itself grows an attachment surface.
+    case sendPrompt(AgentPrompt)
     case stop
     case steer(String)
     case queue(String)
