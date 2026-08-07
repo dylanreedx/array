@@ -198,7 +198,10 @@ struct AgentCompactStatusPhaseAdapter {
             case .commandOutput:
                 return result(.running, startedAt: streamStartedAt ?? startedAt, evidence: "Command output stream is active.")
             case nil:
-                return result(.thinking, startedAt: startedAt, evidence: "An active turn is present without a more specific stream fact.")
+                // An active turn without an explicit stream does not identify
+                // thinking, responding, or tool work. Keep it explicitly
+                // unknown rather than fabricating a Thinking phase.
+                return .unknown
             }
         }
 

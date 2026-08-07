@@ -51,6 +51,13 @@ extension UIProbeGeometry {
             .init(session: .init(state: .running)), now: t1)
         try require(coarseRunning.phase == nil && coarseRunning.phaseStartedAt == nil,
                     "session running without turn/tool facts must remain unknown")
+        var activeWithoutStreamAdapter = AgentCompactStatusPhaseAdapter()
+        let activeWithoutStream = activeWithoutStreamAdapter.update(
+            .init(turn: .active(startedAt: t0, stream: nil, streamStartedAt: nil)), now: t1)
+        try require(activeWithoutStream.phase == nil && activeWithoutStream.phaseStartedAt == nil,
+                    "active turn without an explicit stream must remain unknown")
+        try require(activeWithoutStream.activityInput == nil,
+                    "active turn without an explicit stream must not create activity input")
 
         // Same-state updates never reset an authoritative phase anchor.
         let starting = adapter.update(
@@ -116,6 +123,31 @@ extension UIProbeGeometry {
             .init(session: .init(state: .stopped, startedAt: interruptedStart)), now: t3.addingTimeInterval(9))
         try require(interrupted.phase == .interrupted && interrupted.phaseStartedAt == interruptedStart,
                     "stopped session maps to Interrupted")
+
+        // Explicit terminal facts outrank contradictory stale tool evidence;
+        // expiration must not weaken failure/interruption precedence.
+        let contradictoryStaleTool = AgentObservedActivity(
+            operation: .running,
+            targetPath: location,
+            startedAt: t0,
+            updatedAt: t0,
+            evidenceSource: .toolEvent)
+        let failedWithStaleTool = adapter.update(
+            .init(
+                turn: .completed(outcome: .failed, phaseStartedAt: failedStart),
+                currentActivity: contradictoryStaleTool,
+                currentActivityExpiresAt: t1),
+            now: t2)
+        try require(failedWithStaleTool.phase == .failed && failedWithStaleTool.phaseStartedAt == failedStart,
+                    "failed terminal fact must outrank stale tool activity")
+        let interruptedWithStaleTool = adapter.update(
+            .init(
+                session: .init(state: .stopped, startedAt: interruptedStart),
+                currentActivity: contradictoryStaleTool,
+                currentActivityExpiresAt: t1),
+            now: t2)
+        try require(interruptedWithStaleTool.phase == .interrupted && interruptedWithStaleTool.phaseStartedAt == interruptedStart,
+                    "interrupted terminal fact must outrank stale tool activity")
 
         // Receipt time is never an elapsed anchor when the runtime omitted one.
         let noTimestamp = adapter.update(
