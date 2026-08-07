@@ -204,6 +204,64 @@ extension UIProbeGeometry {
         guard resetList.qaPresentedToolSummary(for: reusedBlockID) == "Completed" else {
             throw GeometryError(message: "reused entry ID inherited removed host-local identity/cache state")
         }
-        return 8
+
+        // Hostile witness: an ordinary assistant tool has persistent disclosure
+        // state even without provider identity/cache. Replacement and removal
+        // must clear that subtree before its entry/block IDs are reused.
+        let ordinaryEntryID = id("ordinary-tool-entry")
+        let ordinaryBlockID = id("ordinary-tool-block")
+        let ordinaryReplacementBlockID = id("ordinary-tool-replacement-block")
+        func ordinaryBlock(_ blockID: AgentNodeID, revision: UInt64) -> AgentBlock {
+            AgentBlock(
+                id: blockID, revision: revision, kind: .toolCall,
+                payload: .toolCall(AgentToolCallPayload(
+                    name: "ordinary-tool", summary: "Completed", status: .completed
+                ))
+            )
+        }
+        func ordinaryEntry(_ revision: UInt64, blocks: [AgentBlock]) -> AgentEntry {
+            AgentEntry(
+                id: ordinaryEntryID, revision: revision, role: .assistant,
+                provenance: .localNotice(reason: "ordinary assistant tool"), blocks: blocks
+            )
+        }
+        let ordinaryList = AgentTranscriptListView()
+        let ordinaryInitial = ordinaryEntry(1, blocks: [ordinaryBlock(ordinaryBlockID, revision: 1)])
+        try ordinaryList.apply(
+            document: AgentDocument(version: 1, entries: [ordinaryInitial]),
+            patch: try AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: [ordinaryBlockID])
+        )
+        ordinaryList.qaSetDisclosureState(for: ordinaryBlockID, expanded: true)
+        guard ordinaryList.qaDisclosureState(for: ordinaryBlockID) == true else {
+            throw GeometryError(message: "ordinary tool disclosure fixture did not establish persistent expanded state")
+        }
+        let ordinaryReplacement = ordinaryEntry(
+            2, blocks: [ordinaryBlock(ordinaryReplacementBlockID, revision: 2)]
+        )
+        try ordinaryList.apply(
+            document: AgentDocument(version: 2, entries: [ordinaryReplacement]),
+            patch: try AgentDocumentPatch(
+                fromVersion: 1, toVersion: 2,
+                updated: [ordinaryEntryID, ordinaryBlockID, ordinaryReplacementBlockID]
+            )
+        )
+        guard ordinaryList.qaDisclosureState(for: ordinaryBlockID) == nil,
+              ordinaryList.qaDisclosureState(for: ordinaryEntryID) == nil else {
+            throw GeometryError(message: "ordinary tool replacement retained disclosure state without provider detail")
+        }
+        try ordinaryList.apply(
+            document: AgentDocument(version: 3, entries: []),
+            patch: try AgentDocumentPatch(fromVersion: 2, toVersion: 3, removed: [ordinaryEntryID, ordinaryReplacementBlockID])
+        )
+        let ordinaryReused = ordinaryEntry(3, blocks: [ordinaryBlock(ordinaryBlockID, revision: 3)])
+        try ordinaryList.apply(
+            document: AgentDocument(version: 4, entries: [ordinaryReused]),
+            patch: try AgentDocumentPatch(fromVersion: 3, toVersion: 4, inserted: [ordinaryEntryID, ordinaryBlockID])
+        )
+        guard ordinaryList.qaDisclosureState(for: ordinaryBlockID) == nil,
+              ordinaryList.qaDisclosureState(for: ordinaryEntryID) == nil else {
+            throw GeometryError(message: "reused ordinary tool entry/block IDs inherited disclosure state")
+        }
+        return 11
     }
 }

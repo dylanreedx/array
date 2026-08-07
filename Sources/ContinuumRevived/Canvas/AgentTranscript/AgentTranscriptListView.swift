@@ -776,10 +776,8 @@ final class AgentTranscriptListView: NSView {
         var identities = Set<AgentToolDetailKey>()
         var blockIDs = Set<AgentNodeID>()
         for entryID in entryIDs {
-            var hasToolDetailState = false
             if let identity = toolDetailIdentityByEntryID.removeValue(forKey: entryID) {
                 identities.insert(identity)
-                hasToolDetailState = true
             }
             guard let entry = toolDetailEntryLifecycleByID[entryID] else { continue }
             var pendingBlocks = entry.blocks
@@ -789,11 +787,16 @@ final class AgentTranscriptListView: NSView {
                 pendingBlocks.append(contentsOf: block.children)
                 if let identity = toolDetailIDByBlockID[block.id] {
                     identities.insert(identity)
-                    hasToolDetailState = true
                 }
             }
             blockIDs.formUnion(entryBlockIDs)
-            if hasToolDetailState {
+            // Disclosure state is owned by the semantic tool-entry subtree, not
+            // by provider-detail state. Always purge it for ordinary assistant
+            // tool entries so an expanded/collapsed choice cannot leak across
+            // replacement, removal, reset, or ID reuse. Completed reasoning
+            // entries retain their preference on content updates; their removal
+            // cleanup remains owned by applyUnscrolled below.
+            if entry.role != .reasoning {
                 disclosureStateStore.removeSubtree(
                     for: disclosureOwnerID,
                     rootID: entryID,
@@ -1048,10 +1051,16 @@ final class AgentTranscriptListView: NSView {
 
     // Deterministic fixture observations; no production owner depends on these.
     var qaSemanticRowCount: Int { rows.count }
-    func qaDisclosureState(for entryID: AgentNodeID) -> Bool? {
+    func qaDisclosureState(for blockID: AgentNodeID) -> Bool? {
         disclosureStateStore.explicitState(for: ToolDisclosureKey(
-            agentID: disclosureOwnerID, blockID: entryID
+            agentID: disclosureOwnerID, blockID: blockID
         ))
+    }
+    func qaSetDisclosureState(for blockID: AgentNodeID, expanded: Bool) {
+        disclosureStateStore.setExpanded(
+            expanded,
+            for: ToolDisclosureKey(agentID: disclosureOwnerID, blockID: blockID)
+        )
     }
     func qaDisclosureRevision(for blockID: AgentNodeID) -> UInt64 {
         disclosureStateStore.presentationRevision(for: ToolDisclosureKey(
