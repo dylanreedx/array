@@ -51,6 +51,13 @@ if CommandLine.arguments.contains("--agent-location-presentation-check") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--agent-tool-detail-store-check") {
+    try runAsyncCheck {
+        try await runAgentToolDetailStoreChecks()
+    }
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--agent-completion-negative-witness") {
     runAgentCompletionNegativeWitness()
     Foundation.exit(0)
@@ -171,6 +178,9 @@ try runCompanionFreshnessChecks()
 runAgentContextGravityChecks()
 try runLocationSessionIndexP5Checks()
 runCanvasEntityIndexP7Checks()
+try runAsyncCheck {
+    try await runAgentToolDetailStoreChecks()
+}
 
 // Trap-testing hook: when invoked with this env var set, deliberately call
 // the operation under test so a subprocess check can assert the process
