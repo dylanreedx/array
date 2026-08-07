@@ -289,8 +289,8 @@ enum UIProbeGeometry {
         print("UIProbeGeometry: sidebar resize policy, delegate, cursor/AX, restore, and write timing held across \(sidebarResizeAssertions) assertions")
         // P5.5 acceptance: the legacy card-stack transcript and its approval dock
         // are deleted; the v2 composition root is gated by
-        // `checkLiveV2AgentTileLayout()` below (320/480/640/900 x both themes,
-        // fills, clipping, constraints, footer truncation) and the semantic
+        // `checkLiveV2AgentTileLayout()` below (320/480/560/640/900 x both themes,
+        // fills, clipping, constraints, footer effort sizing/truncation) and the semantic
         // transcript by `checkTranscriptCollectionList()`.
         try checkReusableAgentBlockHost()
         let composerCases = try checkGrowingComposerLayout()
@@ -314,7 +314,7 @@ enum UIProbeGeometry {
             sidebarGate.measured, sidebarGate.truncated
         ))
         print(String(
-            format: "UIProbeGeometry: reusable block host identity/reset and 8-dimensional measurement key gated; composer grows through %d width/draft cases with an eight-visual-line cap and stable constraints; custom choice popover gates %d keyboard, disabled, accessibility-state, appearance, and screen-placement cases; live v2 tile gated at 320/480/640/900 in both appearances with footer truncation measured; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, and %d exceptional states preserve request identity and opaque privacy at 320pt",
+            format: "UIProbeGeometry: reusable block host identity/reset and 8-dimensional measurement key gated; composer grows through %d width/draft cases with an eight-visual-line cap and stable constraints; custom choice popover gates %d keyboard, disabled, accessibility-state, appearance, and screen-placement cases; live v2 tile gated at 320/480/560/640/900 in both appearances with footer truncation measured across the required effort values; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, and %d exceptional states preserve request identity and opaque privacy at 320pt",
             composerCases, choiceCases, transcriptLiveHosts, streamingApplies, proseRows, userPromptRows, codeRows, operationRows, exceptionalRows
         ))
     }
@@ -5018,7 +5018,8 @@ enum UIProbeGeometry {
     /// Component Lab baseline intentionally remains on the rollback tile until P5.5,
     /// so this non-pixel gate covers the live v2 seam at all required widths/themes.
     private static func checkLiveV2AgentTileLayout() throws {
-        for width in [CGFloat(320), 480, 640, 900] {
+        let effortGeometryTileWidths = Set([CGFloat(320), 480, 560])
+        for width in [CGFloat(320), 480, 560, 640, 900] {
             for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
                 let label = "managedAgent.v2@\(Int(width))pt.\(appearanceName.rawValue)"
                 let probe = try UIProbe.render(
@@ -5059,28 +5060,75 @@ enum UIProbeGeometry {
                 try expectNoZeroSizeViews(tile, label: label)
                 try expectNoClipping(tile, label: label)
                 try expectNoBrokenRequiredSizeConstraints(tile, label: label)
-                // P5.5 defect 4: text truncation is invisible to the frame-only
-                // checks above — a label ellipsizing inside its own well-contained
-                // frame passes every one of them, which is how "Medi…" shipped at
-                // 750 pt. Whenever the footer's measured fit says its current
-                // titles fit, both pickers must hold their measured width and
-                // render the selected title verbatim.
+                // P5.5 defect 4 / Wave 1 footer sizing: text truncation is invisible
+                // to the frame-only checks above — a label ellipsizing inside its own
+                // well-contained frame passes every one of them. Whenever the footer's
+                // measured fit says its current titles fit, both pickers must hold
+                // their measured width and render the selected title verbatim. At the
+                // real 320/480/560 tile widths, the effort control is additionally
+                // driven through every required reasoning value and must outrank the
+                // flexible model control, so its selected title never ellipsizes while
+                // the model is the pressure-release valve.
                 let footer = tile.qaProviderFooterView
-                footer.layoutSubtreeIfNeeded()
-                if footer.qaFitsCurrentTitles {
-                    for (name, button) in [("model", footer.modelButton), ("effort", footer.effortButton)] {
-                        guard button.frame.width >= button.intrinsicContentSize.width - 0.5 else {
-                            throw fail("\(label): \(name) picker squeezed below its measured width (frame \(button.frame.width), needs \(button.intrinsicContentSize.width)) — its title will ellipsize")
-                        }
-                        button.layoutSubtreeIfNeeded()
-                        guard button.qaTitleDrawsWithoutTruncation else {
-                            throw fail("\(label): \(name) picker's label is narrower than its title '\(button.qaRenderedTitle)' needs — the cell will draw an ellipsis")
-                        }
-                    }
-                } else {
-                    throw fail("\(label): the footer's own measured fit rejects its current titles — the fit tiers (full → abbreviated → captionless) must converge at every gate width")
+                try checkFooterCurrentTitles(footer, label: label)
+                if effortGeometryTileWidths.contains(width) {
+                    try checkProviderFooterEffortSizing(tile, width: width, label: label)
                 }
             }
+        }
+    }
+
+    private static func checkFooterCurrentTitles(_ footer: AgentComposerFooterView, label: String) throws {
+        footer.layoutSubtreeIfNeeded()
+        guard !footer.qaHasVisibleContextLabel else {
+            throw fail("\(label): footer kept the visible inert Next turn label instead of leaving next-turn context to the picker accessibility labels")
+        }
+        guard footer.qaFitsCurrentTitles else {
+            throw fail("\(label): the footer's own measured fit rejects its current titles — the fit tiers (full → abbreviated) must converge at every gate width")
+        }
+        for (name, button) in [("model", footer.modelButton), ("effort", footer.effortButton)] {
+            guard button.frame.width >= button.intrinsicContentSize.width - 0.5 else {
+                throw fail("\(label): \(name) picker squeezed below its measured width (frame \(button.frame.width), needs \(button.intrinsicContentSize.width)) — its title will ellipsize")
+            }
+            try checkChoiceTitleDrawsWithoutTruncation(button, name: name, label: label)
+        }
+    }
+
+    private static func checkProviderFooterEffortSizing(_ tile: ManagedAgentTileNSView, width: CGFloat, label: String) throws {
+        let effortValues = ["minimal", "medium", "high", "xhigh"].filter {
+            AgentModelConfig.thinkingOptions.contains($0)
+        }
+        guard effortValues.count == 4 else {
+            throw fail("\(label): catalogue no longer contains the required effort geometry values; got \(AgentModelConfig.thinkingOptions)")
+        }
+        let stressModel = AgentModelConfig.modelOptions.last ?? AgentModelConfig.defaultModel
+        for effort in effortValues {
+            tile.applyProviderSettings(.init(model: stressModel, thinking: effort))
+            tile.layoutSubtreeIfNeeded()
+            let footer = tile.qaProviderFooterView
+            footer.layoutSubtreeIfNeeded()
+            let effortLabel = "\(label).effort=\(effort)"
+            guard footer.effortButton.contentCompressionResistancePriority(for: .horizontal).rawValue
+                    > footer.modelButton.contentCompressionResistancePriority(for: .horizontal).rawValue,
+                  footer.effortButton.contentHuggingPriority(for: .horizontal).rawValue
+                    > footer.modelButton.contentHuggingPriority(for: .horizontal).rawValue else {
+                throw fail("\(effortLabel): effort no longer has stronger compression resistance/hugging than the flexible model control")
+            }
+            try checkChoiceTitleDrawsWithoutTruncation(footer.effortButton, name: "effort", label: effortLabel)
+            guard footer.bounds.contains(footer.effortButton.frame),
+                  footer.effortButton.frame.width + 0.5 >= footer.effortButton.intrinsicContentSize.width else {
+                throw fail("\(effortLabel): effort control did not hold intrinsic width at real \(Int(width))pt tile width (frame \(footer.effortButton.frame.width), needs \(footer.effortButton.intrinsicContentSize.width))")
+            }
+            if footer.qaFitsCurrentTitles {
+                try checkFooterCurrentTitles(footer, label: effortLabel)
+            }
+        }
+    }
+
+    private static func checkChoiceTitleDrawsWithoutTruncation(_ button: ChoiceButton, name: String, label: String) throws {
+        button.layoutSubtreeIfNeeded()
+        guard button.qaTitleDrawsWithoutTruncation else {
+            throw fail("\(label): \(name) picker's title frame \(button.qaTitleFrameWidth)pt is narrower than measured title '\(button.qaRenderedTitle)' need \(button.qaMeasuredTitleWidth)pt — the cell will draw an ellipsis")
         }
     }
 

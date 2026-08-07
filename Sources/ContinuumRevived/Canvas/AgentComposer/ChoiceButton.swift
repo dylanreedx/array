@@ -274,9 +274,12 @@ final class ChoiceButton: NSControl, TokenThemed {
         popoverController.listView?.choose(id: id)
         return true
     }
+    var qaTitleFrameWidth: CGFloat { titleLabel.frame.width }
+    var qaMeasuredTitleWidth: CGFloat {
+        ceil((titleLabel.stringValue as NSString).size(withAttributes: [.font: NSFont.token(.label)]).width) + 4
+    }
     var qaTitleDrawsWithoutTruncation: Bool {
-        let needed = ceil((titleLabel.stringValue as NSString).size(withAttributes: [.font: NSFont.token(.label)]).width) + 4
-        return titleLabel.frame.width + 0.5 >= needed
+        titleLabel.frame.width + 0.5 >= qaMeasuredTitleWidth
     }
 
     private func updatePresentation() {

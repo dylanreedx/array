@@ -3869,6 +3869,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         footer.layoutSubtreeIfNeeded()
         let footerDescendants = descendants(in: footer)
         guard !footerDescendants.contains(where: { $0 is NSPopUpButton }),
+              !footer.qaHasVisibleContextLabel,
               footer.modelButton.accessibilityRole() == .popUpButton,
               footer.effortButton.accessibilityRole() == .popUpButton,
               footer.modelButton.accessibilityLabel() == "Model, next turn",
@@ -3876,7 +3877,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
               footer.qaModelTitles == AgentModelConfig.modelOptions.map(AgentComposerFooterView.abbreviatedModel),
               footer.qaEffortTitles == AgentModelConfig.thinkingOptions.map(AgentComposerFooterView.abbreviatedEffort),
               Set(footer.qaModelTitles).count == AgentModelConfig.modelOptions.count else {
-            throw fail("composer provider footer lost custom-only chrome, next-turn accessibility, or unambiguous narrow labels")
+            throw fail("composer provider footer lost custom-only chrome, hid Next turn accessibility, kept the visible inert Next turn label, or lost unambiguous narrow labels")
         }
         footer.frame.size.width = 640
         footer.layoutSubtreeIfNeeded()
@@ -3884,8 +3885,10 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
               footer.qaEffortTitles == AgentModelConfig.thinkingOptions.map(\.capitalized),
               footer.bounds.contains(footer.modelButton.frame),
               footer.bounds.contains(footer.effortButton.frame),
-              footer.modelButton.frame.width > footer.effortButton.frame.width else {
-            throw fail("composer provider footer did not restore full labels or keep both controls inside its wide layout")
+              footer.modelButton.frame.width > footer.effortButton.frame.width,
+              footer.effortButton.contentCompressionResistancePriority(for: .horizontal).rawValue > footer.modelButton.contentCompressionResistancePriority(for: .horizontal).rawValue,
+              footer.effortButton.contentHuggingPriority(for: .horizontal).rawValue > footer.modelButton.contentHuggingPriority(for: .horizontal).rawValue else {
+            throw fail("composer provider footer did not restore full labels, keep both controls inside its wide layout, or give effort stronger hold priority than the flexible model control")
         }
 
         // Render-state gate for the COMPOSED footer, not ChoiceButton in isolation.

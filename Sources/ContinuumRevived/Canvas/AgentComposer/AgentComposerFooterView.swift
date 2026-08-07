@@ -16,7 +16,6 @@ final class AgentComposerFooterView: NSView, TokenThemed {
 
     let modelButton = ChoiceButton(title: "Model")
     let effortButton = ChoiceButton(title: "Effort")
-    private let contextLabel = NSTextField(labelWithString: "Next turn")
     private var settings = AgentModelConfig.resolvedFromDefaults()
     private var usesCompactLabels = false
     private var contrastObservations: [NSKeyValueObservation] = []
@@ -28,14 +27,10 @@ final class AgentComposerFooterView: NSView, TokenThemed {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
 
-        contextLabel.font = .token(.caption)
-        contextLabel.setContentHuggingPriority(.required, for: .horizontal)
-        contextLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-        for button in [modelButton, effortButton] {
-            button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            button.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        }
+        modelButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        modelButton.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        effortButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        effortButton.setContentHuggingPriority(.required, for: .horizontal)
         modelButton.setAccessibilityLabel("Model, next turn")
         modelButton.setAccessibilityHelp("Choose the model for this agent's next turn")
         effortButton.setAccessibilityLabel("Reasoning effort, next turn")
@@ -55,7 +50,7 @@ final class AgentComposerFooterView: NSView, TokenThemed {
         let spacer = NSView()
         spacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
         spacer.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
-        let stack = NSStackView(views: [contextLabel, modelButton, effortButton, spacer])
+        let stack = NSStackView(views: [modelButton, effortButton, spacer])
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = CGFloat(Space.m)
@@ -94,12 +89,6 @@ final class AgentComposerFooterView: NSView, TokenThemed {
             usesCompactLabels = compact
             rebuildChoices()
         }
-        // Third tier for the tile-width floor: even compact titles may not fit
-        // beside the context caption. The caption is decoration — it yields
-        // before a single value character does (the buttons carry their own
-        // accessibility labels, so nothing is lost to a screen reader).
-        let hideContext = compact && requiredWidth(usingCompactLabels: true) > bounds.width
-        if contextLabel.isHidden != hideContext { contextLabel.isHidden = hideContext }
     }
 
     /// The row's fitting width for the CURRENT selection's titles: the same
@@ -108,8 +97,7 @@ final class AgentComposerFooterView: NSView, TokenThemed {
     private func requiredWidth(usingCompactLabels compact: Bool) -> CGFloat {
         let modelTitle = compact ? Self.abbreviatedModel(settings.model) : settings.model
         let effortTitle = compact ? Self.abbreviatedEffort(settings.thinking) : settings.thinking.capitalized
-        return contextLabel.intrinsicContentSize.width
-            + CGFloat(Space.m) + ChoiceButton.fittingWidth(forTitle: modelTitle)
+        return ChoiceButton.fittingWidth(forTitle: modelTitle)
             + CGFloat(Space.m) + ChoiceButton.fittingWidth(forTitle: effortTitle)
     }
 
@@ -130,8 +118,6 @@ final class AgentComposerFooterView: NSView, TokenThemed {
     }
 
     func applyTokens() {
-        let theme = effectiveTokenTheme
-        contextLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)
         modelButton.applyTokens()
         effortButton.applyTokens()
         preserveDisabledContrast()
@@ -214,13 +200,20 @@ final class AgentComposerFooterView: NSView, TokenThemed {
         }
     }
 
-    // Deterministic probes read the real label/control hierarchy and use the same
-    // selection path after the popover chooses.
+    // Deterministic probes read the installed controls and use the same selection
+    // path after the popover chooses. The context seams remain for the tile's older
+    // QA wrapper, but the footer no longer installs a visible Next turn label.
     var qaSettings: AgentModelConfig.Resolution { settings }
-    var qaContextText: String { contextLabel.stringValue }
-    var qaContextIsActionable: Bool {
-        contextLabel.isEditable || contextLabel.isSelectable
-            || contextLabel.action != nil || contextLabel.target != nil
+    var qaContextText: String { "" }
+    var qaContextIsActionable: Bool { false }
+    var qaHasVisibleContextLabel: Bool {
+        func containsVisibleContext(_ view: NSView) -> Bool {
+            if let label = view as? NSTextField,
+               !label.isHidden,
+               label.stringValue == "Next turn" { return true }
+            return view.subviews.contains(where: containsVisibleContext)
+        }
+        return containsVisibleContext(self)
     }
     var qaModelTitles: [String] { modelButton.items.map(\.title) }
     var qaEffortTitles: [String] { effortButton.items.map(\.title) }
@@ -228,9 +221,7 @@ final class AgentComposerFooterView: NSView, TokenThemed {
     /// true, both buttons must sit at (or above) their intrinsic width and render
     /// their selected titles without ellipsis — the truncation gate's precondition.
     var qaFitsCurrentTitles: Bool {
-        let caption = contextLabel.isHidden ? 0 : contextLabel.intrinsicContentSize.width + CGFloat(Space.m)
-        let needed = caption
-            + modelButton.intrinsicContentSize.width + CGFloat(Space.m)
+        let needed = modelButton.intrinsicContentSize.width + CGFloat(Space.m)
             + effortButton.intrinsicContentSize.width
         return bounds.width > 0 && needed <= bounds.width + 0.5
     }

@@ -10037,8 +10037,12 @@ private func checkPerAgentProviderSettings(
     guard tile.qaThinkingOptionTitles == AgentModelConfig.thinkingOptions else {
         throw fail("provider-settings: the thinking picker offers \(tile.qaThinkingOptionTitles), not AgentModelConfig.thinkingOptions \(AgentModelConfig.thinkingOptions)")
     }
-    guard tile.qaProviderNoticeIsPickable == false else {
-        throw fail("provider-settings: `\(ManagedAgentTileNSView.providerNoticeText)` came back pickable after NSMenu.update() — autoenablesItems is at AppKit's default, so a menu header re-derives itself live")
+    guard !tile.qaProviderFooterView.qaHasVisibleContextLabel,
+          !tile.qaModelOptionTitles.contains(ManagedAgentTileNSView.providerNoticeText),
+          !tile.qaProviderFooterView.qaEffortTitles.contains(ManagedAgentTileNSView.providerNoticeText),
+          tile.qaProviderFooterView.modelButton.accessibilityLabel() == "Model, next turn",
+          tile.qaProviderFooterView.effortButton.accessibilityLabel() == "Reasoning effort, next turn" else {
+        throw fail("provider-settings: the production footer kept a visible inert `\(ManagedAgentTileNSView.providerNoticeText)` label, exposed it as a choice, or lost its next-turn accessibility labels")
     }
 
     tile.attach(agentID: agentId, supervisor: supervisor)
@@ -10195,7 +10199,7 @@ private func checkPerAgentProviderSettings(
     }
     foreignTile.detach()
 
-    return "per-agent provider settings: a pick lands on the record and the disk and reaches --model/--thinking (\(pickedModel) / \(pickedThinking), both unlike the global default), two agents hold different models, a moved global default moves neither, \(3 + 1) off-catalogue values are refused while `off` is accepted, and the tile's \(tile.qaModelOptionTitles.count)+\(tile.qaThinkingOptionTitles.count) options are AgentModelConfig's own, unpickable notice included"
+    return "per-agent provider settings: a pick lands on the record and the disk and reaches --model/--thinking (\(pickedModel) / \(pickedThinking), both unlike the global default), two agents hold different models, a moved global default moves neither, \(3 + 1) off-catalogue values are refused while `off` is accepted, and the tile's \(tile.qaModelOptionTitles.count)+\(tile.qaThinkingOptionTitles.count) options are AgentModelConfig's own with no visible inert next-turn notice"
 }
 
 /// macOS temp directories live under a `/var` symlink to `/private/var`, and git
