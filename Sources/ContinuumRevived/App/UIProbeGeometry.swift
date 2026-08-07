@@ -3,6 +3,23 @@ import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
+@MainActor
+private final class CompactStatusProbeThinkingIndicatorView: NSView, AgentThinkingIndicatorAnimating {
+    private(set) var snapshotPhase: CGFloat = 0
+    override var intrinsicContentSize: NSSize { NSSize(width: 18, height: 18) }
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.progressIndicator)
+        setAccessibilityLabel("Injected thinking indicator probe")
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    func startAnimating() {}
+    func stopAnimating() {}
+    func setReducedMotion(_ enabled: Bool) {}
+    func setSnapshotPhase(_ phase: CGFloat) { snapshotPhase = phase }
+}
+
 /// Geometry assertions over a `UIProbe`-rendered tree — layout bugs caught with
 /// numbers instead of eyes.
 ///
@@ -296,6 +313,8 @@ enum UIProbeGeometry {
         let composerCases = try checkGrowingComposerLayout()
         let choiceCases = try checkChoicePopover()
         try checkAgentTileHeaderShell()
+        let compactStatusAssertions = try checkCompactStatusRow()
+        print("UIProbeGeometry: compact bottom status row held \(compactStatusAssertions) geometry, appearance, contrast, state, accessibility, and compression assertions at 320/480/560/wide in both appearances")
         try checkLiveV2AgentTileLayout()
         let transcriptLiveHosts = try checkTranscriptCollectionList()
         let streamingApplies = try checkIncrementalTranscriptBehavior()
@@ -319,6 +338,152 @@ enum UIProbeGeometry {
             format: "UIProbeGeometry: reusable block host identity/reset and 8-dimensional measurement key gated; composer grows through %d width/draft cases with an eight-visual-line cap and stable constraints; custom choice popover gates %d keyboard, disabled, accessibility-state, appearance, and screen-placement cases; live v2 tile gated at 320/480/560/640/900 in both appearances with footer truncation measured across the required effort values; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, %d image/gallery states preserve opaque local media actions, %d exceptional states preserve request identity and opaque privacy, and %d completed-reasoning disclosure states preserve scoped expansion at 320pt",
             composerCases, choiceCases, transcriptLiveHosts, streamingApplies, proseRows, userPromptRows, codeRows, operationRows, mediaRows, exceptionalRows, reasoningDisclosureRows
         ))
+    }
+
+    // MARK: - Compact bottom status row
+
+    private static func checkCompactStatusRow() throws -> Int {
+        var assertions = 0
+        func require(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String) throws {
+            guard condition() else { throw fail(message()) }
+            assertions += 1
+        }
+
+        let now = Date(timeIntervalSince1970: 1_000)
+        let checkout = URL(fileURLWithPath: "/Users/qa/Projects/continuum", isDirectory: true)
+        let home = AgentHome(projectId: nil, projectRoot: checkout, checkoutRoot: checkout)
+        let longInside = AgentLocationSnapshot(
+            home: home,
+            whereDirectory: checkout.appendingPathComponent(
+                "Sources/ContinuumRevived/Canvas/AgentActivity/Deeply/Nested/Status/Row/Fixture",
+                isDirectory: true))
+        let external = AgentLocationSnapshot(
+            home: home,
+            whereDirectory: URL(fileURLWithPath: "/Users/qa/References/neighbor-worktree", isDirectory: true))
+
+        let known = AgentContextWindowSnapshot(
+            usedTokens: 48_000, maxTokens: 128_000,
+            inputTokens: 1_200, outputTokens: 640, cacheReadTokens: 12_000,
+            totalCostUsd: 0.1234, observedAt: now,
+            source: .providerSessionStats, freshness: .live)
+        let warning = AgentContextWindowSnapshot(
+            usedTokens: 102_400, maxTokens: 128_000,
+            inputTokens: 3_000, outputTokens: 1_000, cacheWriteTokens: 800,
+            totalProcessedTokens: 4_800, observedAt: now,
+            source: .providerSessionStats, freshness: .live)
+        let critical = AgentContextWindowSnapshot(
+            usedTokens: 120_000, maxTokens: 128_000,
+            totalCostUsd: 1.2345, observedAt: now,
+            source: .providerSessionStats, freshness: .live)
+        let unknown = AgentContextWindowSnapshot(
+            inputTokens: 400, outputTokens: 50, cacheReadTokens: 900,
+            totalCostUsd: 0.0100, observedAt: now,
+            source: .piMessageUsage, freshness: .live)
+        let stale = AgentContextWindowSnapshot(
+            usedTokens: 64_000, maxTokens: 128_000,
+            inputTokens: 600, outputTokens: 90, observedAt: now.addingTimeInterval(-800),
+            source: .providerSessionStats, freshness: .stale)
+
+        let statePresentations: [(AgentRadialContextMeterState, AgentRadialContextMeterPresentation)] = [
+            (.known, AgentRadialContextMeterPresenter.present(known)),
+            (.warning, AgentRadialContextMeterPresenter.present(warning)),
+            (.critical, AgentRadialContextMeterPresenter.present(critical)),
+            (.unknown, AgentRadialContextMeterPresenter.present(unknown)),
+            (.stale, AgentRadialContextMeterPresenter.present(stale)),
+        ]
+        for (state, presentation) in statePresentations {
+            try require(presentation.state == state, "compact status context state \(state.rawValue) did not present truthfully")
+            try require(presentation.detailText.contains("Authoritative context"), "compact status context detail omits authoritative context line for \(state.rawValue)")
+            try require(presentation.detailText.contains("Per-message/cache/cost fields"), "compact status context detail omits usage/cache/cost distinction for \(state.rawValue)")
+            try require(presentation.detailText.contains("Freshness"), "compact status context detail omits freshness for \(state.rawValue)")
+        }
+        try require(statePresentations.first { $0.0 == .unknown }?.1.fraction == nil,
+                    "compact status unknown context fabricated an occupancy fraction")
+        try require(!(statePresentations.first { $0.0 == .unknown }?.1.label.contains("0%") ?? true),
+                    "compact status unknown context displayed fabricated 0%")
+        try require(statePresentations.first { $0.0 == .warning }?.1.warningMarker != nil
+                        && statePresentations.first { $0.0 == .warning }?.1.label.contains("%") == true,
+                    "compact status warning relies on color alone")
+        try require(statePresentations.first { $0.0 == .critical }?.1.label.contains("!") == true,
+                    "compact status critical lacks non-color marker")
+        try require(statePresentations.first { $0.0 == .stale }?.1.label.contains("stale") == true,
+                    "compact status stale context lacks visible stale state")
+
+        let tokenPairs: [TokenPair] = [
+            TokenPair(foreground: "compact.location", background: "tileChrome", color: TextToken.textSecondary.color, backgroundColor: SurfaceToken.tileChrome.color, floor: DesignTokens.textFloor),
+            TokenPair(foreground: "compact.working", background: "tileChrome", color: AccentToken.accentWorking.color, backgroundColor: SurfaceToken.tileChrome.color, floor: DesignTokens.textFloor),
+            TokenPair(foreground: "compact.warning", background: "tileChrome", color: AccentToken.accentApproval.color, backgroundColor: SurfaceToken.tileChrome.color, floor: DesignTokens.textFloor),
+            TokenPair(foreground: "compact.critical", background: "tileChrome", color: AccentToken.accentFailed.color, backgroundColor: SurfaceToken.tileChrome.color, floor: DesignTokens.textFloor),
+            TokenPair(foreground: "compact.known", background: "tileChrome", color: AccentToken.accentDone.color, backgroundColor: SurfaceToken.tileChrome.color, floor: DesignTokens.textFloor),
+            TokenPair(foreground: "compact.boundary", background: "tileChrome", color: LineToken.border.color, backgroundColor: SurfaceToken.tileChrome.color, floor: DesignTokens.lineFloor),
+        ]
+        for pair in tokenPairs {
+            for theme in [TokenTheme.light, .dark] {
+                try require(pair.ratio(for: theme) >= pair.floor,
+                            "compact status contrast \(pair.foreground) on \(pair.background) failed in \(theme.rawValue)")
+            }
+        }
+
+        let sizes: [(String, CGFloat, AgentCompactStatusPresentation)] = [
+            ("320", 320, AgentCompactStatusPresentation.present(
+                location: longInside, projectName: "continuum", status: .working,
+                startedAt: now.addingTimeInterval(-65), now: now, contextWindow: known)),
+            ("480", 480, AgentCompactStatusPresentation.present(
+                location: external, projectName: "continuum", status: .needsAttention,
+                startedAt: now.addingTimeInterval(-3_200), now: now, contextWindow: warning)),
+            ("560", 560, AgentCompactStatusPresentation.present(
+                location: longInside, projectName: "continuum", status: .working,
+                startedAt: now.addingTimeInterval(-122), now: now, contextWindow: critical)),
+            ("wide", 900, AgentCompactStatusPresentation.present(
+                location: longInside, projectName: "continuum", status: .idle,
+                startedAt: nil, now: now, contextWindow: unknown)),
+        ]
+
+        var appearanceDigests: [String: [String]] = [:]
+        for (name, width, presentation) in sizes {
+            for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+                let probe = try UIProbe.render(
+                    UIProbe.Spec(
+                        id: "compactStatusRow.\(name).\(appearanceName.rawValue)",
+                        size: NSSize(width: width, height: AgentCompactStatusRowView.preferredHeight),
+                        appearance: appearanceName)) {
+                    let row = AgentCompactStatusRowView(thinkingIndicatorFactory: { CompactStatusProbeThinkingIndicatorView() })
+                    row.apply(presentation)
+                    return row
+                }
+                guard let row = probe.view as? AgentCompactStatusRowView else {
+                    throw fail("compact status row probe did not return row view")
+                }
+                try expectNoClipping(row, label: "compactStatusRow@\(name).\(appearanceName.rawValue)")
+                try expectNoBrokenRequiredSizeConstraints(row, label: "compactStatusRow@\(name).\(appearanceName.rawValue)")
+                try require(row.qaContentFitsBounds, "compact status row content escapes bounds at \(name)/\(appearanceName.rawValue)")
+                try require(row.qaActivityAndContextVisible, "compact status row compressed activity/context before location at \(name)/\(appearanceName.rawValue)")
+                try require(row.qaLocationCompressionPriority < row.qaActivityCompressionPriority,
+                            "compact status row location is not first compression sacrifice")
+                try require(row.qaLocationCompressionPriority < row.qaContextCompressionPriority,
+                            "compact status row context can compress before location")
+                try require(row.qaActivityCompressionPriority >= NSLayoutConstraint.Priority.required.rawValue,
+                            "compact status row activity priority is not protected")
+                try require(row.qaContextCompressionPriority >= NSLayoutConstraint.Priority.required.rawValue,
+                            "compact status row context priority is not protected")
+                try require(!row.qaHasVisiblePrefixes, "compact status row leaked Home/Where/What visual prefixes at \(name)")
+                try require(row.qaContextMeterSide >= 18 && row.qaContextMeterSide <= 20,
+                            "compact status row radial meter side \(row.qaContextMeterSide) outside 18-20pt")
+                try require(row.qaContextDetail.contains("Authoritative context"), "compact status row context tooltip missing authoritative context")
+                try require(row.qaContextDetail.contains("Per-message/cache/cost fields"), "compact status row context tooltip missing per-message/cache/cost fields")
+                try require(row.qaContextDetail.contains("Freshness"), "compact status row context tooltip missing freshness")
+                try require(row.qaAccessibilityLabel.contains("Location") && row.qaAccessibilityLabel.contains("Activity") && row.qaAccessibilityLabel.contains("Context"),
+                            "compact status row AX label dropped one semantic fact")
+                if presentation.activity.showsThinkingIndicator {
+                    try require(row.qaThinkingSlotVisible, "compact status row hid injected thinking indicator while working")
+                }
+                appearanceDigests[name, default: []].append(probe.contentDigest)
+            }
+        }
+        for (name, digests) in appearanceDigests {
+            try require(Set(digests).count == 2, "compact status row \(name) aqua/darkAqua render did not differ")
+        }
+        return assertions
     }
 
     // MARK: - Sidebar width policy
