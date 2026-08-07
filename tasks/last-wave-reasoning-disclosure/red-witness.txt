@@ -1,0 +1,9 @@
+RED witness for focused reasoning foundation rework at be3d770:
+
+Sol inspection gaps were reproducible by source inspection before this patch:
+- CompletedReasoningDisclosurePresenter.presentation only guarded entry.role == .reasoning, so .open reasoning entries with prose blocks could produce completed rows.
+- The presenter flattened/filter-selected only paragraph/heading/list/list-item/quote blocks through proseBlocks(...), dropping fenced-code, thematic-break, and unknown/custom semantic blocks from expanded reasoning.
+- CompletedReasoningDisclosureView rebuilt AssistantProseView children on each expanded apply instead of using AgentBlockHostView with entryRole .reasoning and stable block identity.
+- The header drew a decorative ✓ completion glyph next to the disclosure arrow.
+
+This file is intentionally concise; generated swift-build/ui-geometry logs were removed from the deliverable.

@@ -304,6 +304,7 @@ enum UIProbeGeometry {
         let codeRows = try checkCodeBlockRenderer()
         let operationRows = try checkToolAndCommandRenderers()
         let exceptionalRows = try checkExceptionalRenderers()
+        let reasoningDisclosureRows = try checkCompletedReasoningDisclosure()
         // P0.4: the inbox measured at the widths it ships at, truncation gated
         // by drawable width against an explicit expected-defect table.
         let sidebarHeightAssertions = try checkSidebarContentDerivedHeights()
@@ -314,8 +315,8 @@ enum UIProbeGeometry {
             sidebarGate.measured, sidebarGate.truncated
         ))
         print(String(
-            format: "UIProbeGeometry: reusable block host identity/reset and 8-dimensional measurement key gated; composer grows through %d width/draft cases with an eight-visual-line cap and stable constraints; custom choice popover gates %d keyboard, disabled, accessibility-state, appearance, and screen-placement cases; live v2 tile gated at 320/480/560/640/900 in both appearances with footer truncation measured across the required effort values; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, and %d exceptional states preserve request identity and opaque privacy at 320pt",
-            composerCases, choiceCases, transcriptLiveHosts, streamingApplies, proseRows, userPromptRows, codeRows, operationRows, exceptionalRows
+            format: "UIProbeGeometry: reusable block host identity/reset and 8-dimensional measurement key gated; composer grows through %d width/draft cases with an eight-visual-line cap and stable constraints; custom choice popover gates %d keyboard, disabled, accessibility-state, appearance, and screen-placement cases; live v2 tile gated at 320/480/560/640/900 in both appearances with footer truncation measured across the required effort values; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, %d exceptional states preserve request identity and opaque privacy, and %d completed-reasoning disclosure states preserve scoped expansion at 320pt",
+            composerCases, choiceCases, transcriptLiveHosts, streamingApplies, proseRows, userPromptRows, codeRows, operationRows, exceptionalRows, reasoningDisclosureRows
         ))
     }
 
