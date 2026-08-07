@@ -159,6 +159,14 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
     }
 
     func applyConfiguration(_ next: AgentCompactStatusRowConfiguration) {
+        let changesSnapshotMode = configuration.deterministicSnapshotPhase != next.deterministicSnapshotPhase
+        if changesSnapshotMode {
+            // Candidate `setSnapshotPhase` implementations stop their animations.
+            // Reset our mirrored state as well so leaving QA snapshot mode starts
+            // live motion again instead of believing the stopped layers are active.
+            stopThinkingIndicatorIfNeeded()
+            thinkingIndicatorIsAnimating = false
+        }
         configuration = next
         thinkingIndicator?.setReducedMotion(next.reducedMotion)
         updateThinkingLifecycle()
@@ -225,7 +233,20 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
 
     override func viewDidMoveToSuperview() {
         super.viewDidMoveToSuperview()
-        if superview == nil { stopThinkingIndicatorIfNeeded() }
+        guard superview != nil else {
+            stopThinkingIndicatorIfNeeded()
+            return
+        }
+        updateThinkingLifecycle()
+    }
+
+    override func viewDidHide() {
+        super.viewDidHide()
+        stopThinkingIndicatorIfNeeded()
+    }
+
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
         updateThinkingLifecycle()
     }
 
@@ -286,7 +307,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
     }
 
     private var isVisibleInWindowTree: Bool {
-        guard window != nil else { return false }
+        guard window != nil, superview != nil else { return false }
         var view: NSView? = self
         while let current = view {
             if current.isHidden { return false }

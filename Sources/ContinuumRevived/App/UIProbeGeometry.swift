@@ -635,6 +635,13 @@ enum UIProbeGeometry {
         try require(spy.calls.contains(.start), "compact status thinking indicator did not start after window attachment")
         lifecycleRow.applyConfiguration(AgentCompactStatusRowConfiguration(reducedMotion: true, deterministicSnapshotPhase: nil))
         try require(spy.calls.contains(.reducedMotion(true)), "compact status thinking indicator did not receive Reduced Motion updates")
+        let startsBeforeSnapshot = spy.calls.filter { $0 == .start }.count
+        lifecycleRow.applyConfiguration(AgentCompactStatusRowConfiguration(reducedMotion: true, deterministicSnapshotPhase: 0.4))
+        try require(spy.calls.contains(.snapshot(0.4)) && spy.calls.last == .snapshot(0.4),
+                    "compact status live-to-snapshot transition did not stop and pin the indicator")
+        lifecycleRow.applyConfiguration(AgentCompactStatusRowConfiguration(reducedMotion: true, deterministicSnapshotPhase: nil))
+        try require(spy.calls.filter { $0 == .start }.count == startsBeforeSnapshot + 1,
+                    "compact status snapshot-to-live transition did not restart stopped indicator layers")
         lifecycleRow.isHidden = true
         try require(spy.calls.contains(.stop), "compact status thinking indicator did not stop when hidden")
         lifecycleRow.isHidden = false
