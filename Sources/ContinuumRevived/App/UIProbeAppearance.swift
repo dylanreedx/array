@@ -341,6 +341,30 @@ enum UIProbeAppearance {
                 ))
                 return header
             }),
+            // Last-wave compact status row: isolated until coordinator wires the
+            // production tile. The row and radial meter are TokenThemed, so they
+            // must participate in the stale-CGColor sentinel sweep now.
+            ("appearance.compactStatusRow", NSSize(width: 420, height: AgentCompactStatusRowView.preferredHeight), {
+                let now = Date(timeIntervalSince1970: 1_000)
+                let checkout = URL(fileURLWithPath: "/Users/qa/Projects/continuum", isDirectory: true)
+                let home = AgentHome(projectId: nil, projectRoot: checkout, checkoutRoot: checkout)
+                let row = AgentCompactStatusRowView(
+                    configuration: AgentCompactStatusRowConfiguration(reducedMotion: true, deterministicSnapshotPhase: 0.25),
+                    thinkingIndicatorFactory: { CompactStatusProbeThinkingIndicatorView() })
+                row.apply(AgentCompactStatusPresentation.present(
+                    location: AgentLocationSnapshot(home: home, whereDirectory: checkout),
+                    projectName: "continuum",
+                    activity: AgentCompactActivityInput(phase: .thinking, phaseStartedAt: now.addingTimeInterval(-42)),
+                    now: now,
+                    contextWindow: AgentContextWindowSnapshot(
+                        usedTokens: 96_000,
+                        maxTokens: 128_000,
+                        observedAt: now,
+                        source: .providerSessionStats,
+                        freshness: .live),
+                    contextPolicy: AgentRadialContextMeterPolicy.thresholds(warning: 0.75, critical: 0.90)))
+                return row
+            }),
             // 91/P4.7: the reusable control is intentionally isolated until P4.8
             // owns model/effort migration. Render its real button, list, and private
             // row descendants so none can retain a stale token CGColor meanwhile.

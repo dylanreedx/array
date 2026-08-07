@@ -9,7 +9,7 @@ import Foundation
 /// their existing snapshots.
 struct AgentCompactStatusPresentation: Equatable {
     struct Location: Equatable {
-        let icon: String
+        let symbolName: String
         let text: String
         let accessibilityLabel: String
         let detailText: String
@@ -17,7 +17,8 @@ struct AgentCompactStatusPresentation: Equatable {
     }
 
     struct Activity: Equatable {
-        let status: AgentStatus
+        let phase: AgentCompactActivityPhase
+        let symbolName: String
         let text: String
         let elapsedText: String?
         let accessibilityLabel: String
@@ -29,19 +30,72 @@ struct AgentCompactStatusPresentation: Equatable {
     let activity: Activity
     let context: AgentRadialContextMeterPresentation
 
+    /// Adapter seam for the current coarse facts. New provider/runtime wiring
+    /// should construct `AgentCompactActivityInput` directly; this adapter only
+    /// preserves today's `AgentStatus` + optional location evidence without
+    /// pretending `AgentLocationSnapshot.what` is the full lifecycle truth.
     static func present(
         location snapshot: AgentLocationSnapshot,
         projectName: String? = nil,
         status: AgentStatus,
         startedAt: Date?,
         now: Date,
-        contextWindow: AgentContextWindowSnapshot?
+        contextWindow: AgentContextWindowSnapshot?,
+        contextPolicy: AgentRadialContextMeterPolicy = .productionDefault
+    ) -> AgentCompactStatusPresentation {
+        present(
+            location: snapshot,
+            projectName: projectName,
+            activity: activityInput(status: status, location: snapshot, phaseStartedAt: startedAt),
+            now: now,
+            contextWindow: contextWindow,
+            contextPolicy: contextPolicy)
+    }
+
+    static func present(
+        location snapshot: AgentLocationSnapshot,
+        projectName: String? = nil,
+        activity: AgentCompactActivityInput,
+        now: Date,
+        contextWindow: AgentContextWindowSnapshot?,
+        contextPolicy: AgentRadialContextMeterPolicy = .productionDefault
     ) -> AgentCompactStatusPresentation {
         let locationDetail = AgentLocationStatusPresenter.present(snapshot, projectName: projectName)
         return AgentCompactStatusPresentation(
             location: presentLocation(snapshot, detail: locationDetail, projectName: projectName),
-            activity: presentActivity(status: status, startedAt: startedAt, now: now),
-            context: AgentRadialContextMeterPresenter.present(contextWindow))
+            activity: presentActivity(activity, now: now),
+            context: AgentRadialContextMeterPresenter.present(contextWindow, policy: contextPolicy))
+    }
+
+    static func activityInput(
+        status: AgentStatus,
+        location snapshot: AgentLocationSnapshot,
+        phaseStartedAt: Date?
+    ) -> AgentCompactActivityInput {
+        switch status {
+        case .configuring:
+            return AgentCompactActivityInput(phase: .starting, phaseStartedAt: phaseStartedAt)
+        case .working:
+            if let observed = snapshot.what {
+                return AgentCompactActivityInput(
+                    phase: AgentCompactActivityPhase(operation: observed.operation) ?? .thinking,
+                    phaseStartedAt: observed.startedAt,
+                    safeToolLabel: safeToolLabel(for: observed))
+            }
+            return AgentCompactActivityInput(
+                phase: .thinking,
+                phaseStartedAt: phaseStartedAt,
+                evidenceNote: "Coarse working status; no current provider-neutral activity fact.")
+        case .needsAttention:
+            return AgentCompactActivityInput(phase: .waiting, phaseStartedAt: phaseStartedAt)
+        case .idle, .done:
+            return AgentCompactActivityInput(phase: .ready, phaseStartedAt: nil)
+        case .stale:
+            return AgentCompactActivityInput(
+                phase: .ready,
+                phaseStartedAt: nil,
+                evidenceNote: "Coarse stale status; latest phase is not authoritative.")
+        }
     }
 
     private static func presentLocation(
@@ -49,10 +103,14 @@ struct AgentCompactStatusPresentation: Equatable {
         detail: AgentLocationStatusPresentation,
         projectName: String?
     ) -> Location {
+        let homeName = boundedSingleLine(
+            projectName,
+            fallback: snapshot.home.projectRoot?.lastPathComponent ?? snapshot.home.checkoutRoot.lastPathComponent,
+            maximumLength: 80)
         let rawText: String
         switch snapshot.workingLocation.relationToHome {
         case .root:
-            rawText = "."
+            rawText = homeName
         case .inside:
             rawText = snapshot.workingLocation.relativePath ?? snapshot.workingLocation.directory.lastPathComponent
         case .outside:
@@ -60,50 +118,67 @@ struct AgentCompactStatusPresentation: Equatable {
                 ? snapshot.workingLocation.directory.path
                 : snapshot.workingLocation.directory.lastPathComponent
         }
-        let text = boundedSingleLine(rawText, fallback: ".", maximumLength: 180)
+        let text = boundedSingleLine(rawText, fallback: homeName, maximumLength: 180)
         let relation: String
+        let symbolName: String
         switch snapshot.workingLocation.relationToHome {
-        case .root: relation = "project root"
-        case .inside: relation = "inside project"
-        case .outside: relation = "outside project"
+        case .root:
+            relation = "project root"
+            symbolName = "house"
+        case .inside:
+            relation = "inside Home"
+            symbolName = "folder"
+        case .outside:
+            relation = "outside Home"
+            symbolName = "arrow.up.forward.square"
         }
-        let project = projectName?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let projectPhrase = project?.isEmpty == false ? " in \(project!)" : ""
         return Location(
-            icon: snapshot.workingLocation.relationToHome == .outside ? "↗" : "⌂",
+            symbolName: symbolName,
             text: text,
-            accessibilityLabel: "Location\(projectPhrase): \(text), \(relation).",
+            accessibilityLabel: "Home and Where: \(text), \(relation).",
             detailText: detail.detailText,
             isExternal: snapshot.workingLocation.relationToHome == .outside)
     }
 
     private static func presentActivity(
-        status: AgentStatus,
-        startedAt: Date?,
+        _ input: AgentCompactActivityInput,
         now: Date
     ) -> Activity {
-        let display = StatusChipPresenter.display(for: status)
-        let elapsedSeconds = startedAt.map { max(0, now.timeIntervalSince($0)) }
-        let elapsed = elapsedSeconds.map(AgentElapsedFormatter.elapsedLabel)
-        let elapsedPhrase = elapsedSeconds.map { ", \(Int($0.rounded(.down))) seconds elapsed" } ?? ""
-        let text = status == .needsAttention ? "Attention" : display.label
+        let phase = input.phase
+        let label = input.visibleLabel
+        let elapsedSeconds = input.phaseStartedAt.map { max(0, now.timeIntervalSince($0)) }
+        let elapsed = phase.displaysElapsed ? elapsedSeconds.map(AgentElapsedFormatter.elapsedLabel) : nil
+        let elapsedPhrase = elapsedSeconds.map { ", phase elapsed \(Int($0.rounded(.down))) seconds" } ?? ""
+        var details = ["Activity phase: \(phase.spokenLabel)\(elapsedPhrase)."]
+        if let safeToolLabel = input.safeToolLabel, !safeToolLabel.isEmpty {
+            details.append("Safe tool label: \(safeToolLabel)")
+        }
+        if let evidenceNote = input.evidenceNote, !evidenceNote.isEmpty {
+            details.append("Evidence note: \(evidenceNote)")
+        }
         return Activity(
-            status: status,
-            text: text,
+            phase: phase,
+            symbolName: phase.symbolName,
+            text: label,
             elapsedText: elapsed,
-            accessibilityLabel: "Activity: \(display.label)\(elapsedPhrase).",
-            detailText: elapsed.map { "Lifecycle: \(display.label) — elapsed \($0)" }
-                ?? "Lifecycle: \(display.label)",
-            showsThinkingIndicator: status == .working)
+            accessibilityLabel: "Activity: \(phase.spokenLabel)\(elapsedPhrase).",
+            detailText: details.joined(separator: "\n"),
+            showsThinkingIndicator: phase.animatesThinkingIndicator)
+    }
+
+    private static func safeToolLabel(for observed: AgentObservedActivity) -> String? {
+        guard let targetPath = observed.targetPath else { return nil }
+        return boundedSingleLine(targetPath.lastPathComponent, fallback: nil, maximumLength: 48)
     }
 
     private static func boundedSingleLine(
         _ candidate: String?,
-        fallback: String,
+        fallback: String?,
         maximumLength: Int
     ) -> String {
         let source = candidate?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let chosen = source?.isEmpty == false ? source! : fallback
+        let fallbackSource = fallback?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let chosen = source?.isEmpty == false ? source! : (fallbackSource?.isEmpty == false ? fallbackSource! : "—")
         let flattened = chosen.unicodeScalars.map { scalar -> Character in
             CharacterSet.controlCharacters.contains(scalar) ? " " : Character(String(scalar))
         }
@@ -111,6 +186,131 @@ struct AgentCompactStatusPresentation: Equatable {
             .joined(separator: " ")
         guard normalized.count > maximumLength else { return normalized }
         return String(normalized.prefix(max(0, maximumLength - 1))) + "…"
+    }
+}
+
+struct AgentCompactActivityInput: Equatable {
+    let phase: AgentCompactActivityPhase
+    let phaseStartedAt: Date?
+    let safeToolLabel: String?
+    let evidenceNote: String?
+
+    init(
+        phase: AgentCompactActivityPhase,
+        phaseStartedAt: Date?,
+        safeToolLabel: String? = nil,
+        evidenceNote: String? = nil
+    ) {
+        self.phase = phase
+        self.phaseStartedAt = phaseStartedAt
+        self.safeToolLabel = Self.sanitizedToolLabel(safeToolLabel)
+        self.evidenceNote = evidenceNote
+    }
+
+    var visibleLabel: String {
+        guard let safeToolLabel, !safeToolLabel.isEmpty else { return phase.visibleLabel }
+        switch phase {
+        case .reading: return "Reading \(safeToolLabel)"
+        case .searching: return "Searching \(safeToolLabel)"
+        case .editing: return "Editing \(safeToolLabel)"
+        case .running: return "Running \(safeToolLabel)"
+        default: return phase.visibleLabel
+        }
+    }
+
+    private static func sanitizedToolLabel(_ candidate: String?) -> String? {
+        guard let candidate else { return nil }
+        let scalars = candidate.unicodeScalars.map { scalar -> Character in
+            if CharacterSet.alphanumerics.contains(scalar)
+                || CharacterSet(charactersIn: " ._+-@#").contains(scalar) {
+                return Character(String(scalar))
+            }
+            return " "
+        }
+        let normalized = String(scalars).split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        guard !normalized.isEmpty else { return nil }
+        return normalized.count <= 48 ? normalized : String(normalized.prefix(47)) + "…"
+    }
+}
+
+enum AgentCompactActivityPhase: String, Equatable, CaseIterable {
+    case starting
+    case thinking
+    case responding
+    case reading
+    case searching
+    case editing
+    case running
+    case waiting
+    case ready
+    case failed
+    case interrupted
+
+    init?(operation: AgentObservedActivity.Operation) {
+        switch operation {
+        case .reading, .inspecting: self = .reading
+        case .editing: self = .editing
+        case .running: self = .running
+        case .searching: self = .searching
+        case .thinking: self = .thinking
+        case .waiting: self = .waiting
+        case .completed: self = .ready
+        case .interrupted: self = .interrupted
+        case .failed: self = .failed
+        case .messaging: self = .responding
+        }
+    }
+
+    var visibleLabel: String {
+        switch self {
+        case .starting: return "Starting"
+        case .thinking: return "Thinking"
+        case .responding: return "Responding"
+        case .reading: return "Reading"
+        case .searching: return "Searching"
+        case .editing: return "Editing"
+        case .running: return "Running"
+        case .waiting: return "Waiting"
+        case .ready: return "Ready"
+        case .failed: return "Failed"
+        case .interrupted: return "Interrupted"
+        }
+    }
+
+    var spokenLabel: String { visibleLabel.lowercased() }
+
+    var symbolName: String {
+        switch self {
+        case .starting: return "play.circle"
+        case .thinking: return "ellipsis.bubble"
+        case .responding: return "text.bubble"
+        case .reading: return "doc.text"
+        case .searching: return "magnifyingglass"
+        case .editing: return "pencil"
+        case .running: return "terminal"
+        case .waiting: return "hourglass"
+        case .ready: return "checkmark.circle"
+        case .failed: return "xmark.octagon"
+        case .interrupted: return "pause.circle"
+        }
+    }
+
+    var animatesThinkingIndicator: Bool {
+        switch self {
+        case .starting, .thinking, .responding, .reading, .searching, .editing, .running:
+            return true
+        case .waiting, .ready, .failed, .interrupted:
+            return false
+        }
+    }
+
+    var displaysElapsed: Bool {
+        switch self {
+        case .ready:
+            return false
+        case .starting, .thinking, .responding, .reading, .searching, .editing, .running, .waiting, .failed, .interrupted:
+            return true
+        }
     }
 }
 
@@ -122,10 +322,23 @@ enum AgentRadialContextMeterState: String, Equatable, CaseIterable {
     case stale
 }
 
+struct AgentRadialContextMeterPolicy: Equatable {
+    let warningThreshold: Double?
+    let criticalThreshold: Double?
+
+    /// Production default until the owner/coordinator approves a warning policy:
+    /// show authoritative occupancy, but do not promote it to warning/critical.
+    static let productionDefault = AgentRadialContextMeterPolicy(warningThreshold: nil, criticalThreshold: nil)
+
+    static func thresholds(warning: Double, critical: Double) -> AgentRadialContextMeterPolicy {
+        AgentRadialContextMeterPolicy(warningThreshold: warning, criticalThreshold: critical)
+    }
+}
+
 struct AgentRadialContextMeterPresentation: Equatable {
     let state: AgentRadialContextMeterState
-    /// 0...1 only when authoritative occupancy exists. Unknown and
-    /// non-authoritative telemetry leave this nil; callers must not coerce nil to 0.
+    /// Authoritative raw fraction when valid. It may exceed 1.0; drawing clamps
+    /// the arc only, while labels/tooltips preserve the raw used/max arithmetic.
     let fraction: Double?
     let label: String
     let accessibilityLabel: String
@@ -134,28 +347,29 @@ struct AgentRadialContextMeterPresentation: Equatable {
 }
 
 enum AgentRadialContextMeterPresenter {
-    static let warningThreshold = 0.75
-    static let criticalThreshold = 0.90
-
-    static func present(_ snapshot: AgentContextWindowSnapshot?) -> AgentRadialContextMeterPresentation {
+    static func present(
+        _ snapshot: AgentContextWindowSnapshot?,
+        policy: AgentRadialContextMeterPolicy = .productionDefault
+    ) -> AgentRadialContextMeterPresentation {
         guard let snapshot else {
             return unknownPresentation(reason: "No context-window telemetry has been observed.")
         }
 
         let freshness = freshnessLabel(snapshot.freshness)
         let source = sourceLabel(snapshot.source)
-        let occupancy = snapshot.occupancyFraction.map { min(1, max(0, $0)) }
-        let percent = occupancy.map { Int(($0 * 100).rounded()) }
+        let arithmetic = authoritativeArithmetic(snapshot)
+        let rawPercent = arithmetic.map { Int(($0.fraction * 100).rounded()) }
+        let renderFraction = arithmetic?.fraction
         let state: AgentRadialContextMeterState
         let marker: String?
         if case .stale = snapshot.freshness {
             state = .stale
             marker = "⏱"
-        } else if let occupancy {
-            if occupancy >= criticalThreshold {
+        } else if let fraction = arithmetic?.fraction {
+            if let critical = policy.validCriticalThreshold, fraction >= critical {
                 state = .critical
                 marker = "!"
-            } else if occupancy >= warningThreshold {
+            } else if let warning = policy.validWarningThreshold, fraction >= warning {
                 state = .warning
                 marker = "⚠︎"
             } else {
@@ -168,7 +382,7 @@ enum AgentRadialContextMeterPresenter {
         }
 
         let visualLabel: String
-        switch (state, percent) {
+        switch (state, rawPercent) {
         case (.unknown, _):
             visualLabel = "unknown"
         case (.stale, let value?):
@@ -187,10 +401,10 @@ enum AgentRadialContextMeterPresenter {
 
         return AgentRadialContextMeterPresentation(
             state: state,
-            fraction: occupancy,
+            fraction: renderFraction,
             label: visualLabel,
-            accessibilityLabel: accessibilityLabel(state: state, percent: percent, freshness: freshness),
-            detailText: detailText(snapshot, source: source, freshness: freshness, percent: percent),
+            accessibilityLabel: accessibilityLabel(state: state, percent: rawPercent, freshness: freshness),
+            detailText: detailText(snapshot, source: source, freshness: freshness, arithmetic: arithmetic, policy: policy),
             warningMarker: marker)
     }
 
@@ -224,19 +438,26 @@ enum AgentRadialContextMeterPresenter {
         _ snapshot: AgentContextWindowSnapshot,
         source: String,
         freshness: String,
-        percent: Int?
+        arithmetic: (used: Int, max: Int, fraction: Double)?,
+        policy: AgentRadialContextMeterPolicy
     ) -> String {
         var lines: [String] = []
-        if snapshot.source.isAuthoritativeForContextOccupancy,
-           let used = snapshot.usedTokens,
-           let max = snapshot.maxTokens,
-           max > 0 {
-            let percentSuffix = percent.map { " (\($0)%)" } ?? ""
-            lines.append("Authoritative context: \(used) / \(max) tokens\(percentSuffix)")
+        if let arithmetic {
+            let percent = Int((arithmetic.fraction * 100).rounded())
+            lines.append("Authoritative context: \(arithmetic.used) / \(arithmetic.max) tokens (\(percent)%)")
         } else {
             lines.append("Authoritative context: unknown")
-            lines.append("Occupancy note: source is not authoritative for used/max context window.")
+            if !snapshot.source.isAuthoritativeForContextOccupancy {
+                lines.append("Occupancy note: source is not authoritative for used/max context window.")
+            } else if let used = snapshot.usedTokens, used < 0 {
+                lines.append("Occupancy note: invalid negative used token count was rejected.")
+            } else if let max = snapshot.maxTokens, max <= 0 {
+                lines.append("Occupancy note: invalid max token count was rejected.")
+            } else {
+                lines.append("Occupancy note: authoritative source did not provide valid used/max context window.")
+            }
         }
+        lines.append("Threshold policy: \(policy.detailLabel)")
         lines.append("Source: \(source)")
         lines.append("Freshness: \(freshness)")
         lines.append("Observed: \(ISO8601DateFormatter().string(from: snapshot.observedAt))")
@@ -260,6 +481,16 @@ enum AgentRadialContextMeterPresenter {
         return lines.joined(separator: "\n")
     }
 
+    private static func authoritativeArithmetic(_ snapshot: AgentContextWindowSnapshot) -> (used: Int, max: Int, fraction: Double)? {
+        guard snapshot.source.isAuthoritativeForContextOccupancy,
+              let used = snapshot.usedTokens,
+              let max = snapshot.maxTokens,
+              used >= 0,
+              max > 0
+        else { return nil }
+        return (used, max, Double(used) / Double(max))
+    }
+
     private static func sourceLabel(_ source: AgentContextWindowTelemetrySource) -> String {
         switch source {
         case .providerSessionStats: return "provider session stats"
@@ -273,6 +504,28 @@ enum AgentRadialContextMeterPresenter {
         case .live: return "live"
         case .stale: return "stale"
         case .unknown(let raw): return "unknown (\(raw))"
+        }
+    }
+}
+
+private extension AgentRadialContextMeterPolicy {
+    var validWarningThreshold: Double? {
+        guard let warningThreshold, warningThreshold >= 0 else { return nil }
+        if let criticalThreshold, criticalThreshold >= 0, warningThreshold > criticalThreshold { return nil }
+        return warningThreshold
+    }
+
+    var validCriticalThreshold: Double? {
+        guard let criticalThreshold, criticalThreshold >= 0 else { return nil }
+        return criticalThreshold
+    }
+
+    var detailLabel: String {
+        switch (validWarningThreshold, validCriticalThreshold) {
+        case (nil, nil): return "warning/critical disabled"
+        case (let warning?, let critical?): return "warning \(Int((warning * 100).rounded()))%, critical \(Int((critical * 100).rounded()))%"
+        case (let warning?, nil): return "warning \(Int((warning * 100).rounded()))%, critical disabled"
+        case (nil, let critical?): return "warning disabled, critical \(Int((critical * 100).rounded()))%"
         }
     }
 }

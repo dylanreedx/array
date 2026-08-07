@@ -4,20 +4,28 @@ import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
 @MainActor
-private final class CompactStatusProbeThinkingIndicatorView: NSView, AgentThinkingIndicatorAnimating {
+final class CompactStatusProbeThinkingIndicatorView: NSView, AgentThinkingIndicatorAnimating {
+    enum Call: Equatable { case start, stop, reducedMotion(Bool), snapshot(CGFloat) }
+
+    private(set) var calls: [Call] = []
     private(set) var snapshotPhase: CGFloat = 0
     override var intrinsicContentSize: NSSize { NSSize(width: 18, height: 18) }
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.systemBlue.cgColor
         setAccessibilityElement(true)
         setAccessibilityRole(.progressIndicator)
         setAccessibilityLabel("Injected thinking indicator probe")
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
-    func startAnimating() {}
-    func stopAnimating() {}
-    func setReducedMotion(_ enabled: Bool) {}
-    func setSnapshotPhase(_ phase: CGFloat) { snapshotPhase = phase }
+    func startAnimating() { calls.append(.start) }
+    func stopAnimating() { calls.append(.stop) }
+    func setReducedMotion(_ enabled: Bool) { calls.append(.reducedMotion(enabled)) }
+    func setSnapshotPhase(_ phase: CGFloat) {
+        snapshotPhase = phase
+        calls.append(.snapshot(phase))
+    }
 }
 
 /// Geometry assertions over a `UIProbe`-rendered tree — layout bugs caught with
@@ -348,10 +356,18 @@ enum UIProbeGeometry {
             guard condition() else { throw fail(message()) }
             assertions += 1
         }
+        func expectedRawPercent(used: Int, max: Int) -> Int {
+            Int(((Double(used) / Double(max)) * 100).rounded())
+        }
+        func requireDrawable(_ frame: NSRect?, width: CGFloat, _ message: @autoclosure () -> String) throws {
+            guard let frame, frame.width >= width, frame.height > 0 else { throw fail(message()) }
+            assertions += 1
+        }
 
         let now = Date(timeIntervalSince1970: 1_000)
         let checkout = URL(fileURLWithPath: "/Users/qa/Projects/continuum", isDirectory: true)
         let home = AgentHome(projectId: nil, projectRoot: checkout, checkoutRoot: checkout)
+        let root = AgentLocationSnapshot(home: home, whereDirectory: checkout)
         let longInside = AgentLocationSnapshot(
             home: home,
             whereDirectory: checkout.appendingPathComponent(
@@ -360,7 +376,15 @@ enum UIProbeGeometry {
         let external = AgentLocationSnapshot(
             home: home,
             whereDirectory: URL(fileURLWithPath: "/Users/qa/References/neighbor-worktree", isDirectory: true))
+        let readingWhat = AgentObservedActivity(
+            operation: .reading,
+            targetPath: checkout.appendingPathComponent("Sources/ContinuumRevived/Canvas/AgentActivity/AgentCompactStatusRowView.swift"),
+            startedAt: now.addingTimeInterval(-31),
+            updatedAt: now.addingTimeInterval(-3),
+            evidenceSource: .toolEvent)
+        let withReading = AgentLocationSnapshot(home: home, whereDirectory: checkout, what: readingWhat)
 
+        let policy = AgentRadialContextMeterPolicy.thresholds(warning: 0.75, critical: 0.90)
         let known = AgentContextWindowSnapshot(
             usedTokens: 48_000, maxTokens: 128_000,
             inputTokens: 1_200, outputTokens: 640, cacheReadTokens: 12_000,
@@ -375,6 +399,13 @@ enum UIProbeGeometry {
             usedTokens: 120_000, maxTokens: 128_000,
             totalCostUsd: 1.2345, observedAt: now,
             source: .providerSessionStats, freshness: .live)
+        let overCapacity = AgentContextWindowSnapshot(
+            usedTokens: 180_000, maxTokens: 128_000,
+            inputTokens: 4_000, outputTokens: 2_000, observedAt: now,
+            source: .providerSessionStats, freshness: .live)
+        let negativeUsed = AgentContextWindowSnapshot(
+            usedTokens: -1, maxTokens: 128_000,
+            observedAt: now, source: .providerSessionStats, freshness: .live)
         let unknown = AgentContextWindowSnapshot(
             inputTokens: 400, outputTokens: 50, cacheReadTokens: 900,
             totalCostUsd: 0.0100, observedAt: now,
@@ -384,12 +415,20 @@ enum UIProbeGeometry {
             inputTokens: 600, outputTokens: 90, observedAt: now.addingTimeInterval(-800),
             source: .providerSessionStats, freshness: .stale)
 
+        let productionWarningDisabled = AgentRadialContextMeterPresenter.present(warning)
+        try require(productionWarningDisabled.state == .known,
+                    "compact status production default must not hard-code warning/critical thresholds")
+        try require(productionWarningDisabled.label == "80%",
+                    "compact status disabled threshold label/state disagreed: \(productionWarningDisabled.label)")
+        try require(productionWarningDisabled.detailText.contains("warning/critical disabled"),
+                    "compact status tooltip must state disabled threshold policy")
+
         let statePresentations: [(AgentRadialContextMeterState, AgentRadialContextMeterPresentation)] = [
-            (.known, AgentRadialContextMeterPresenter.present(known)),
-            (.warning, AgentRadialContextMeterPresenter.present(warning)),
-            (.critical, AgentRadialContextMeterPresenter.present(critical)),
-            (.unknown, AgentRadialContextMeterPresenter.present(unknown)),
-            (.stale, AgentRadialContextMeterPresenter.present(stale)),
+            (.known, AgentRadialContextMeterPresenter.present(known, policy: policy)),
+            (.warning, AgentRadialContextMeterPresenter.present(warning, policy: policy)),
+            (.critical, AgentRadialContextMeterPresenter.present(critical, policy: policy)),
+            (.unknown, AgentRadialContextMeterPresenter.present(unknown, policy: policy)),
+            (.stale, AgentRadialContextMeterPresenter.present(stale, policy: policy)),
         ]
         for (state, presentation) in statePresentations {
             try require(presentation.state == state, "compact status context state \(state.rawValue) did not present truthfully")
@@ -402,12 +441,62 @@ enum UIProbeGeometry {
         try require(!(statePresentations.first { $0.0 == .unknown }?.1.label.contains("0%") ?? true),
                     "compact status unknown context displayed fabricated 0%")
         try require(statePresentations.first { $0.0 == .warning }?.1.warningMarker != nil
-                        && statePresentations.first { $0.0 == .warning }?.1.label.contains("%") == true,
-                    "compact status warning relies on color alone")
-        try require(statePresentations.first { $0.0 == .critical }?.1.label.contains("!") == true,
-                    "compact status critical lacks non-color marker")
-        try require(statePresentations.first { $0.0 == .stale }?.1.label.contains("stale") == true,
-                    "compact status stale context lacks visible stale state")
+                        && statePresentations.first { $0.0 == .warning }?.1.label == "⚠︎ 80%",
+                    "compact status warning marker/label/state disagree")
+        try require(statePresentations.first { $0.0 == .critical }?.1.label == "! 94%",
+                    "compact status critical label/state disagree")
+        try require(statePresentations.first { $0.0 == .stale }?.1.label == "stale 50%",
+                    "compact status stale context lacks exact stale state")
+
+        let over = AgentRadialContextMeterPresenter.present(overCapacity, policy: policy)
+        let overPercent = expectedRawPercent(used: 180_000, max: 128_000)
+        try require(over.fraction.map { $0 > 1.0 } == true,
+                    "compact status over-capacity raw fraction was clamped before presentation")
+        try require(over.label.contains("\(overPercent)%"),
+                    "compact status over-capacity label lost raw arithmetic")
+        try require(over.detailText.contains("180000 / 128000 tokens (\(overPercent)%)"),
+                    "compact status over-capacity tooltip lost authoritative raw used/max arithmetic")
+        let invalid = AgentRadialContextMeterPresenter.present(negativeUsed, policy: policy)
+        try require(invalid.state == .unknown && invalid.fraction == nil && invalid.label == "unknown",
+                    "compact status negative usedTokens was not rejected consistently")
+        try require(invalid.detailText.contains("invalid negative used token count"),
+                    "compact status negative witness lacks invalid arithmetic explanation")
+
+        let allPhases = AgentCompactActivityPhase.allCases.map {
+            AgentCompactActivityInput(phase: $0, phaseStartedAt: $0 == .ready ? nil : now.addingTimeInterval(-42), safeToolLabel: "Unsafe:/tmp/secret.swift")
+        }
+        for input in allPhases {
+            let presentation = AgentCompactStatusPresentation.present(
+                location: longInside,
+                projectName: "continuum",
+                activity: input,
+                now: now,
+                contextWindow: known,
+                contextPolicy: policy)
+            try require(presentation.activity.phase == input.phase,
+                        "compact status explicit phase \(input.phase.rawValue) was not preserved")
+            try require(!presentation.activity.text.contains("/") && !presentation.activity.text.contains(":"),
+                        "compact status tool label was not sanitized for \(input.phase.rawValue)")
+            try require(presentation.activity.showsThinkingIndicator == input.phase.animatesThinkingIndicator,
+                        "compact status active indicator flag disagrees with phase \(input.phase.rawValue)")
+            if input.phase == .ready {
+                try require(presentation.activity.elapsedText == nil, "ready phase should not show elapsed text")
+            } else {
+                try require(presentation.activity.elapsedText != nil, "phase \(input.phase.rawValue) dropped its phase-specific elapsed anchor")
+            }
+        }
+        let adapterPresentation = AgentCompactStatusPresentation.present(
+            location: withReading,
+            projectName: "continuum",
+            status: .working,
+            startedAt: now.addingTimeInterval(-100),
+            now: now,
+            contextWindow: known,
+            contextPolicy: policy)
+        try require(adapterPresentation.activity.phase == .reading,
+                    "compact status adapter did not map current provider-neutral activity operation to a phase")
+        try require(adapterPresentation.activity.elapsedText == AgentElapsedFormatter.elapsedLabel(31),
+                    "compact status adapter did not use the activity startedAt as the elapsed anchor")
 
         let tokenPairs: [TokenPair] = [
             TokenPair(foreground: "compact.location", background: "tileChrome", color: TextToken.textSecondary.color, backgroundColor: SurfaceToken.tileChrome.color, floor: DesignTokens.textFloor),
@@ -415,7 +504,7 @@ enum UIProbeGeometry {
             TokenPair(foreground: "compact.warning", background: "tileChrome", color: AccentToken.accentApproval.color, backgroundColor: SurfaceToken.tileChrome.color, floor: DesignTokens.textFloor),
             TokenPair(foreground: "compact.critical", background: "tileChrome", color: AccentToken.accentFailed.color, backgroundColor: SurfaceToken.tileChrome.color, floor: DesignTokens.textFloor),
             TokenPair(foreground: "compact.known", background: "tileChrome", color: AccentToken.accentDone.color, backgroundColor: SurfaceToken.tileChrome.color, floor: DesignTokens.textFloor),
-            TokenPair(foreground: "compact.boundary", background: "tileChrome", color: LineToken.border.color, backgroundColor: SurfaceToken.tileChrome.color, floor: DesignTokens.lineFloor),
+            TokenPair(foreground: "compact.meterSeparator", background: "tileChrome", color: LineToken.separator.color, backgroundColor: SurfaceToken.tileChrome.color, floor: 1.0),
         ]
         for pair in tokenPairs {
             for theme in [TokenTheme.light, .dark] {
@@ -424,65 +513,201 @@ enum UIProbeGeometry {
             }
         }
 
-        let sizes: [(String, CGFloat, AgentCompactStatusPresentation)] = [
-            ("320", 320, AgentCompactStatusPresentation.present(
-                location: longInside, projectName: "continuum", status: .working,
-                startedAt: now.addingTimeInterval(-65), now: now, contextWindow: known)),
-            ("480", 480, AgentCompactStatusPresentation.present(
-                location: external, projectName: "continuum", status: .needsAttention,
-                startedAt: now.addingTimeInterval(-3_200), now: now, contextWindow: warning)),
-            ("560", 560, AgentCompactStatusPresentation.present(
-                location: longInside, projectName: "continuum", status: .working,
-                startedAt: now.addingTimeInterval(-122), now: now, contextWindow: critical)),
-            ("wide", 900, AgentCompactStatusPresentation.present(
-                location: longInside, projectName: "continuum", status: .idle,
-                startedAt: nil, now: now, contextWindow: unknown)),
+        let locations: [(String, AgentLocationSnapshot, String, String)] = [
+            ("root", root, "continuum", "house"),
+            ("inside", longInside, "Sources/ContinuumRevived/Canvas/AgentActivity/Deeply/Nested/Status/Row/Fixture", "folder"),
+            ("outside", external, "neighbor-worktree", "arrow.up.forward.square"),
         ]
+        for (_, snapshot, expectedText, expectedSymbol) in locations {
+            let presentation = AgentCompactStatusPresentation.present(
+                location: snapshot,
+                projectName: "continuum",
+                activity: AgentCompactActivityInput(phase: .ready, phaseStartedAt: nil),
+                now: now,
+                contextWindow: known,
+                contextPolicy: policy)
+            try require(presentation.location.text == expectedText,
+                        "compact status location visible text \(presentation.location.text) did not match expected \(expectedText)")
+            try require(presentation.location.symbolName == expectedSymbol,
+                        "compact status location symbol \(presentation.location.symbolName) did not match expected \(expectedSymbol)")
+            try require(presentation.location.accessibilityLabel.contains("Home") && presentation.location.accessibilityLabel.contains("Where"),
+                        "compact status location accessibility dropped Home/Where semantics")
+            try require(!presentation.location.text.hasPrefix("Home") && !presentation.location.text.hasPrefix("Where"),
+                        "compact status location leaked semantic prefixes into visible text")
+        }
+
+        let contextCases: [(String, AgentContextWindowSnapshot?)] = [
+            ("known", known), ("warning", warning), ("critical", critical),
+            ("over", overCapacity), ("unknown", unknown), ("stale", stale)
+        ]
+        let phaseCases: [(String, AgentCompactActivityInput)] = [
+            ("starting", AgentCompactActivityInput(phase: .starting, phaseStartedAt: now.addingTimeInterval(-7))),
+            ("reading", AgentCompactActivityInput(phase: .reading, phaseStartedAt: now.addingTimeInterval(-65), safeToolLabel: "LongName.swift")),
+            ("waiting", AgentCompactActivityInput(phase: .waiting, phaseStartedAt: now.addingTimeInterval(-3_200))),
+            ("ready", AgentCompactActivityInput(phase: .ready, phaseStartedAt: nil)),
+            ("failed", AgentCompactActivityInput(phase: .failed, phaseStartedAt: now.addingTimeInterval(-12))),
+            ("interrupted", AgentCompactActivityInput(phase: .interrupted, phaseStartedAt: now.addingTimeInterval(-9))),
+        ]
+        let geometryWorstCases: [(String, AgentCompactStatusPresentation)] = locations.flatMap { locationName, snapshot, _, _ in
+            phaseCases.flatMap { phaseName, activity in
+                contextCases.map { contextName, context in
+                    (
+                        "\(locationName).\(phaseName).\(contextName)",
+                        AgentCompactStatusPresentation.present(
+                            location: snapshot,
+                            projectName: "continuum",
+                            activity: activity,
+                            now: now,
+                            contextWindow: context,
+                            contextPolicy: policy)
+                    )
+                }
+            }
+        }
 
         var appearanceDigests: [String: [String]] = [:]
-        for (name, width, presentation) in sizes {
+        let qaConfig = AgentCompactStatusRowConfiguration(reducedMotion: true, deterministicSnapshotPhase: 0.35)
+        for width in [CGFloat(320), 480, 560, 900] {
             for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
-                let probe = try UIProbe.render(
-                    UIProbe.Spec(
-                        id: "compactStatusRow.\(name).\(appearanceName.rawValue)",
-                        size: NSSize(width: width, height: AgentCompactStatusRowView.preferredHeight),
-                        appearance: appearanceName)) {
-                    let row = AgentCompactStatusRowView(thinkingIndicatorFactory: { CompactStatusProbeThinkingIndicatorView() })
-                    row.apply(presentation)
-                    return row
+                for (name, presentation) in geometryWorstCases {
+                    let probe = try UIProbe.render(
+                        UIProbe.Spec(
+                            id: "compactStatusRow.\(Int(width)).\(name).\(appearanceName.rawValue)",
+                            size: NSSize(width: width, height: AgentCompactStatusRowView.preferredHeight),
+                            appearance: appearanceName)) {
+                        let row = AgentCompactStatusRowView(configuration: qaConfig, thinkingIndicatorFactory: { CompactStatusProbeThinkingIndicatorView() })
+                        row.apply(presentation)
+                        return row
+                    }
+                    guard let row = probe.view as? AgentCompactStatusRowView else {
+                        throw fail("compact status row probe did not return row view")
+                    }
+                    try expectNoClipping(row, label: "compactStatusRow@\(Int(width)).\(name).\(appearanceName.rawValue)")
+                    try expectNoBrokenRequiredSizeConstraints(row, label: "compactStatusRow@\(Int(width)).\(name).\(appearanceName.rawValue)")
+                    try require(row.qaContentFitsBounds, "compact status row content escapes bounds at \(width)/\(name)/\(appearanceName.rawValue)")
+                    try require(row.qaActivityAndContextVisible, "compact status row compressed activity/context before location at \(width)/\(name)/\(appearanceName.rawValue)")
+                    try require(row.qaLocationCompressionPriority < row.qaActivityCompressionPriority,
+                                "compact status row location is not first compression sacrifice")
+                    try require(row.qaLocationCompressionPriority < row.qaContextCompressionPriority,
+                                "compact status row context can compress before location")
+                    try require(row.qaActivityCompressionPriority >= NSLayoutConstraint.Priority.required.rawValue,
+                                "compact status row activity priority is not protected")
+                    try require(row.qaContextCompressionPriority >= NSLayoutConstraint.Priority.required.rawValue,
+                                "compact status row context priority is not protected")
+                    try require(!row.qaHasVisiblePrefixes, "compact status row leaked Home/Where/What visual prefixes at \(name)")
+                    try require(row.qaLocationIconHasImage && row.qaActivityIconHasImage,
+                                "compact status row did not resolve SF Symbol images at \(name)")
+                    try require(row.qaProtectedDrawableWidths,
+                                "compact status row protected icon/label/meter lacks drawable width at \(width)/\(name)")
+                    try require(row.qaContextMeterSide >= 18 && row.qaContextMeterSide <= 20,
+                                "compact status row radial meter side \(row.qaContextMeterSide) outside 18-20pt")
+                    try require(row.qaContextDetail.contains("Authoritative context"), "compact status row context tooltip missing authoritative context")
+                    try require(row.qaContextDetail.contains("Per-message/cache/cost fields"), "compact status row context tooltip missing per-message/cache/cost fields")
+                    try require(row.qaContextDetail.contains("Freshness"), "compact status row context tooltip missing freshness")
+                    try require(row.qaAccessibilityLabel.contains("Home") && row.qaAccessibilityLabel.contains("Where") && row.qaAccessibilityLabel.contains("Activity") && row.qaAccessibilityLabel.contains("Context"),
+                                "compact status row AX label dropped one semantic fact")
+                    try require(row.qaAccessibilityChildrenCount == 0,
+                                "compact status row exposes duplicate accessibility children")
+                    if presentation.activity.showsThinkingIndicator {
+                        try require(row.qaThinkingSlotVisible, "compact status row hid injected thinking indicator while active")
+                    }
+                    appearanceDigests["\(Int(width)).\(name)", default: []].append(probe.contentDigest)
                 }
-                guard let row = probe.view as? AgentCompactStatusRowView else {
-                    throw fail("compact status row probe did not return row view")
-                }
-                try expectNoClipping(row, label: "compactStatusRow@\(name).\(appearanceName.rawValue)")
-                try expectNoBrokenRequiredSizeConstraints(row, label: "compactStatusRow@\(name).\(appearanceName.rawValue)")
-                try require(row.qaContentFitsBounds, "compact status row content escapes bounds at \(name)/\(appearanceName.rawValue)")
-                try require(row.qaActivityAndContextVisible, "compact status row compressed activity/context before location at \(name)/\(appearanceName.rawValue)")
-                try require(row.qaLocationCompressionPriority < row.qaActivityCompressionPriority,
-                            "compact status row location is not first compression sacrifice")
-                try require(row.qaLocationCompressionPriority < row.qaContextCompressionPriority,
-                            "compact status row context can compress before location")
-                try require(row.qaActivityCompressionPriority >= NSLayoutConstraint.Priority.required.rawValue,
-                            "compact status row activity priority is not protected")
-                try require(row.qaContextCompressionPriority >= NSLayoutConstraint.Priority.required.rawValue,
-                            "compact status row context priority is not protected")
-                try require(!row.qaHasVisiblePrefixes, "compact status row leaked Home/Where/What visual prefixes at \(name)")
-                try require(row.qaContextMeterSide >= 18 && row.qaContextMeterSide <= 20,
-                            "compact status row radial meter side \(row.qaContextMeterSide) outside 18-20pt")
-                try require(row.qaContextDetail.contains("Authoritative context"), "compact status row context tooltip missing authoritative context")
-                try require(row.qaContextDetail.contains("Per-message/cache/cost fields"), "compact status row context tooltip missing per-message/cache/cost fields")
-                try require(row.qaContextDetail.contains("Freshness"), "compact status row context tooltip missing freshness")
-                try require(row.qaAccessibilityLabel.contains("Location") && row.qaAccessibilityLabel.contains("Activity") && row.qaAccessibilityLabel.contains("Context"),
-                            "compact status row AX label dropped one semantic fact")
-                if presentation.activity.showsThinkingIndicator {
-                    try require(row.qaThinkingSlotVisible, "compact status row hid injected thinking indicator while working")
-                }
-                appearanceDigests[name, default: []].append(probe.contentDigest)
             }
         }
         for (name, digests) in appearanceDigests {
             try require(Set(digests).count == 2, "compact status row \(name) aqua/darkAqua render did not differ")
         }
+
+        let spy = CompactStatusProbeThinkingIndicatorView()
+        let lifecycleRow = AgentCompactStatusRowView(thinkingIndicatorFactory: { spy })
+        lifecycleRow.apply(AgentCompactStatusPresentation.present(
+            location: root,
+            projectName: "continuum",
+            activity: AgentCompactActivityInput(phase: .thinking, phaseStartedAt: now.addingTimeInterval(-5)),
+            now: now,
+            contextWindow: known,
+            contextPolicy: policy))
+        let hostWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 40), styleMask: [.borderless], backing: .buffered, defer: false)
+        hostWindow.contentView = lifecycleRow
+        hostWindow.orderFront(nil)
+        lifecycleRow.layoutSubtreeIfNeeded()
+        try require(spy.calls.contains(.start), "compact status thinking indicator did not start after window attachment")
+        lifecycleRow.applyConfiguration(AgentCompactStatusRowConfiguration(reducedMotion: true, deterministicSnapshotPhase: nil))
+        try require(spy.calls.contains(.reducedMotion(true)), "compact status thinking indicator did not receive Reduced Motion updates")
+        lifecycleRow.isHidden = true
+        try require(spy.calls.contains(.stop), "compact status thinking indicator did not stop when hidden")
+        lifecycleRow.isHidden = false
+        lifecycleRow.apply(AgentCompactStatusPresentation.present(
+            location: root,
+            projectName: "continuum",
+            activity: AgentCompactActivityInput(phase: .ready, phaseStartedAt: nil),
+            now: now,
+            contextWindow: known,
+            contextPolicy: policy))
+        let stopCountBeforeDetach = spy.calls.filter { $0 == .stop }.count
+        hostWindow.contentView = NSView()
+        hostWindow.close()
+        try require(spy.calls.filter { $0 == .stop }.count >= stopCountBeforeDetach,
+                    "compact status thinking indicator lifecycle did not tolerate detach after stop")
+
+        let snapshotSpy = CompactStatusProbeThinkingIndicatorView()
+        let snapshotRow = AgentCompactStatusRowView(
+            configuration: AgentCompactStatusRowConfiguration(reducedMotion: true, deterministicSnapshotPhase: 0.25),
+            thinkingIndicatorFactory: { snapshotSpy })
+        snapshotRow.apply(AgentCompactStatusPresentation.present(
+            location: root,
+            projectName: "continuum",
+            activity: AgentCompactActivityInput(phase: .thinking, phaseStartedAt: now.addingTimeInterval(-5)),
+            now: now,
+            contextWindow: known,
+            contextPolicy: policy))
+        try require(snapshotSpy.calls.contains(.snapshot(0.25)) && !snapshotSpy.calls.contains(.start),
+                    "compact status deterministic snapshot mode must be explicit and must not start animation")
+
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            let probe = try UIProbe.render(
+                UIProbe.Spec(
+                    id: "compactStatusRow.providerCompetition.\(appearanceName.rawValue)",
+                    size: NSSize(width: 320, height: AgentCompactStatusRowView.preferredHeight),
+                    appearance: appearanceName)) {
+                let stack = NSStackView()
+                stack.orientation = .horizontal
+                stack.alignment = .centerY
+                stack.spacing = CGFloat(Space.xs)
+                stack.translatesAutoresizingMaskIntoConstraints = false
+                let row = AgentCompactStatusRowView(configuration: qaConfig, thinkingIndicatorFactory: { CompactStatusProbeThinkingIndicatorView() })
+                row.identifier = NSUserInterfaceItemIdentifier("compactStatusCompetition.row")
+                row.apply(AgentCompactStatusPresentation.present(
+                    location: longInside,
+                    projectName: "continuum",
+                    activity: AgentCompactActivityInput(phase: .responding, phaseStartedAt: now.addingTimeInterval(-88)),
+                    now: now,
+                    contextWindow: critical,
+                    contextPolicy: policy))
+                let provider = NSTextField(labelWithString: "openai/gpt-5.6-high")
+                provider.font = .token(.captionMono)
+                provider.setContentCompressionResistancePriority(.required, for: .horizontal)
+                let stop = NSButton(title: "Stop", target: nil, action: nil)
+                stop.setContentCompressionResistancePriority(.required, for: .horizontal)
+                stack.addArrangedSubview(row)
+                stack.addArrangedSubview(provider)
+                stack.addArrangedSubview(stop)
+                row.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(10), for: .horizontal)
+                row.widthAnchor.constraint(greaterThanOrEqualToConstant: 170).isActive = true
+                return stack
+            }
+            guard let stack = probe.view as? NSStackView,
+                  let row = stack.arrangedSubviews.first(where: { $0.identifier?.rawValue == "compactStatusCompetition.row" }) as? AgentCompactStatusRowView else {
+                throw fail("compact status provider/action competition probe could not find row")
+            }
+            try expectNoClipping(stack, label: "compactStatusRow.providerCompetition.\(appearanceName.rawValue)")
+            try require(row.qaActivityAndContextVisible && row.qaProtectedDrawableWidths,
+                        "compact status row did not preserve activity/context in provider/action width competition")
+            try require(row.qaLocationCompressionPriority < row.qaActivityCompressionPriority,
+                        "compact status row location was not the lowest compression sink under provider/action competition")
+        }
+
         return assertions
     }
 
