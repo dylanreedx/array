@@ -844,6 +844,7 @@ func runManagedTranscriptCardProjectionChecks() {
     model.ingest(.contentDelta(
         threadId: "P19-source-of-truth", turnId: "turn-1", streamKind: .assistant, delta: " two"
     ))
+    model.flushPendingStreamingMarkup()
     expect(model.document != firstDocument && model.cards.single?.body == "one two",
            "P1.9 negative witness: cards must be freshly derived from the updated semantic document, not independently mutated or cached")
 

@@ -209,6 +209,70 @@ func runDocumentReducerChecks() {
     } catch { fail("nested reducer checks failed: \(error)") }
 
     do {
+        var replacement = AgentDocumentReducer()
+        let replacementEntry = reducerID("entry:replace-markup")
+        let paragraphID = reducerID("block:replace-paragraph")
+        let quoteID = reducerID("block:replace-quote")
+        let childID = reducerID("block:replace-child")
+        _ = try replacement.apply(.beginEntry(
+            id: replacementEntry,
+            role: .assistant,
+            provenance: .localNotice(reason: "replace")
+        ))
+        let paragraph = AgentBlock(
+            id: paragraphID,
+            revision: 99,
+            kind: .paragraph,
+            payload: .paragraph([.text("alpha")])
+        )
+        let child = AgentBlock(
+            id: childID,
+            revision: 88,
+            kind: .paragraph,
+            payload: .paragraph([.text("nested")])
+        )
+        let quote = AgentBlock(id: quoteID, revision: 77, kind: .quote, payload: .quote, children: [child])
+        let insertPatch = try replacement.apply(.replaceMarkup(entryID: replacementEntry, blocks: [paragraph, quote]))
+        expect(Set(insertPatch.inserted) == Set([paragraphID, quoteID, childID]) && insertPatch.updated == [replacementEntry],
+               "replaceMarkup must validate and insert the full forest")
+        expect(replacement.document.entries[0].blocks[0].revision == 0 &&
+               replacement.document.entries[0].blocks[1].children[0].revision == 0,
+               "replaceMarkup must normalize revisions for newly inserted forest nodes")
+        let firstReplacement = replacement.document
+        let noVisibleChange = try replacement.apply(.replaceMarkup(entryID: replacementEntry, blocks: [paragraph, quote]))
+        expect(noVisibleChange.isEmpty && replacement.document.entries == firstReplacement.entries,
+               "replaceMarkup with the same visible forest must preserve node identity and revision")
+
+        var changedChild = replacement.document.entries[0].blocks[1].children[0]
+        changedChild.payload = .paragraph([.text("nested β")])
+        let changedQuote = AgentBlock(id: quoteID, kind: .quote, payload: .quote, children: [changedChild])
+        let movePatch = try replacement.apply(.replaceMarkup(
+            entryID: replacementEntry,
+            blocks: [changedQuote, replacement.document.entries[0].blocks[0]]
+        ))
+        expect(Set(movePatch.moved) == Set([paragraphID, quoteID, childID]) &&
+               Set(movePatch.updated) == Set([replacementEntry, quoteID, childID]) &&
+               movePatch.inserted.isEmpty && movePatch.removed.isEmpty,
+               "replaceMarkup must report moved stable IDs separately from visible revisions")
+        expect(replacement.document.entries[0].blocks[0].id == quoteID &&
+               replacement.document.entries[0].blocks[0].revision == firstReplacement.entries[0].blocks[1].revision + 1 &&
+               replacement.document.entries[0].blocks[0].children[0].revision == firstReplacement.entries[0].blocks[1].children[0].revision + 1 &&
+               replacement.document.entries[0].blocks[1].revision == firstReplacement.entries[0].blocks[0].revision,
+               "replaceMarkup must preserve moved identity while revising only visibly changed nodes")
+        try replacement.document.validateIdentityInvariants(previous: firstReplacement)
+
+        do {
+            _ = try replacement.apply(.replaceMarkup(entryID: replacementEntry, blocks: [
+                AgentBlock(id: paragraphID, kind: .heading, payload: .heading(level: 2, content: [.text("wrong")]))
+            ]))
+            fail("replaceMarkup must reject kind changes for an existing node ID")
+        } catch let error as AgentDocumentMutationError {
+            expect(error == .duplicateNodeID(id: paragraphID),
+                   "replaceMarkup kind-change rejection must identify the reused node ID")
+        }
+    } catch { fail("replaceMarkup forest/revision checks failed: \(error)") }
+
+    do {
         var removal = AgentDocumentReducer()
         let first = reducerID("entry:remove-first")
         let removedEntry = reducerID("entry:remove-middle")

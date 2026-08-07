@@ -90,12 +90,14 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
         ManagedTranscriptCardProjection.project(
             document,
             itemKindsByItemID: legacyItemKindsByItemID,
-            itemStatusesByItemID: legacyItemStatusesByItemID
+            itemStatusesByItemID: legacyItemStatusesByItemID,
+            rawMarkupSourcesByEntryID: semanticProjection.compatibilityMarkupSourcesByEntryID
         )
     }
     public var currentStatus: AgentStatus { semanticProjection.currentStatus }
     public var events: [AgentRuntimeEvent] { semanticProjection.events }
     public var activeToolCount: Int { semanticProjection.activeToolCount }
+    public var nextStreamingMarkupParseDeadline: TimeInterval? { semanticProjection.nextStreamingMarkupParseDeadline }
 
     /// The semantic projection is the only mutable transcript owner. Legacy
     /// cards are rebuilt on read from its document; there is no second array to
@@ -154,6 +156,16 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
 
     public mutating func appendNotice(id: String, title: String, text: String) {
         semanticProjection.appendNotice(id: id, title: title, text: text)
+    }
+
+    @discardableResult
+    public mutating func flushPendingStreamingMarkupIfDue() -> Bool {
+        semanticProjection.flushPendingStreamingMarkupIfDue()
+    }
+
+    @discardableResult
+    public mutating func flushPendingStreamingMarkup() -> Bool {
+        semanticProjection.flushPendingStreamingMarkup()
     }
 
     public static func == (lhs: Self, rhs: Self) -> Bool {

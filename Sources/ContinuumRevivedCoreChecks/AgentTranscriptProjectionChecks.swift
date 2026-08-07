@@ -110,33 +110,88 @@ func runAgentTranscriptProjectionChecks() {
     expect(markdownStream.document.entries.first?.blocks.map(resetRevisions) == oneShot,
            "final streamed assistant Markdown must converge with one-shot parsing and stable block IDs")
 
+    let pauseClock = DeterministicProjectionClock()
+    var paused = AgentTranscriptProjection(threadId: thread, monotonicNow: pauseClock.now)
+    paused.ingest(.turnStarted(threadId: thread, turnId: "turn-paused"))
+    paused.ingest(.contentDelta(threadId: thread, turnId: "turn-paused", streamKind: .assistant, delta: "**pa"))
+    pauseClock.advance(0.001)
+    paused.ingest(.contentDelta(threadId: thread, turnId: "turn-paused", streamKind: .assistant, delta: "used**"))
+    expect(paused.streamingMarkupParseCount == 1,
+           "inside-window delta must remain coalesced until the delayed production flush")
+    pauseClock.advance(0.05)
+    expect(paused.flushPendingStreamingMarkupIfDue(),
+           "a paused provider must have a production scheduling seam that flushes after the coalescing deadline")
+    guard case .paragraph([.strong([.text("paused")])]) = paused.document.entries.first?.blocks.first?.payload else {
+        expect(false, "delayed flush must parse the latest lossless source after the provider pauses")
+        return
+    }
+    expect(paused.streamingMarkupParseCount == 2,
+           "pause-after-inside-window stream must parse once initially and once on the delayed flush")
+
+    let structuralClock = DeterministicProjectionClock()
+    var structural = AgentTranscriptProjection(threadId: thread, monotonicNow: structuralClock.now)
+    structural.ingest(.turnStarted(threadId: thread, turnId: "turn-structural"))
+    let structuralDeltas = [
+        "# Héading 🙂\n\n- café",
+        "\n- résumé\n\n> quo",
+        "te\n\n```swift\nlet beverage = \"☕️\"\n",
+        "```\n"
+    ]
+    var structuralSource = ""
+    for delta in structuralDeltas {
+        structuralSource += delta
+        structural.ingest(.contentDelta(threadId: thread, turnId: "turn-structural", streamKind: .assistant, delta: delta))
+        structuralClock.advance(0.05)
+        _ = structural.flushPendingStreamingMarkupIfDue()
+    }
+    structural.ingest(.turnCompleted(threadId: thread, turnId: "turn-structural", outcome: .completed, errorMessage: nil))
+    guard let structuralEntry = structural.document.entries.first else {
+        expect(false, "long Unicode structural stream must create an assistant entry")
+        return
+    }
+    let structuralOneShot = MarkdownAgentMarkupParser().parse(structuralSource, entryID: structuralEntry.id, previous: []).blocks.map(resetRevisions)
+    expect(structuralEntry.blocks.map(resetRevisions) == structuralOneShot,
+           "streamed Unicode heading/list/quote/fence Markdown must converge with one-shot parsing")
+
     let coalescedClock = DeterministicProjectionClock()
     var coalesced = AgentTranscriptProjection(threadId: thread, monotonicNow: coalescedClock.now)
     coalesced.ingest(.turnStarted(threadId: thread, turnId: "turn-coalesced"))
     let deltaCount = 5_000
     var coalescedSource = ""
+    var firstBlockID: AgentNodeID?
     for index in 0..<deltaCount {
         let delta: String
         switch index {
         case 0: delta = "**"
         case deltaCount - 1: delta = "**"
-        default: delta = "x"
+        case 1_500, 3_000: delta = "é"
+        default: delta = index.isMultiple(of: 97) ? "🙂" : "x"
         }
         coalescedSource += delta
         coalesced.ingest(.contentDelta(threadId: thread, turnId: "turn-coalesced", streamKind: .assistant, delta: delta))
+        if firstBlockID == nil { firstBlockID = coalesced.document.entries.first?.blocks.first?.id }
+        coalescedClock.advance(0.001)
     }
-    expect(coalesced.streamingMarkupParseCount == 1,
-           "5,000 fast assistant Markdown deltas must coalesce while source accumulates losslessly, not parse once per delta; got \(coalesced.streamingMarkupParseCount)")
+    let pacedParsesBeforeCompletion = coalesced.streamingMarkupParseCount
+    expect((120...180).contains(pacedParsesBeforeCompletion),
+           "5,000 paced assistant Markdown deltas over advancing monotonic time must parse near the 30Hz cadence, not once per token or only 1+flush; got \(pacedParsesBeforeCompletion)")
     coalesced.ingest(.turnCompleted(threadId: thread, turnId: "turn-coalesced", outcome: .completed, errorMessage: nil))
-    guard let coalescedEntry = coalesced.document.entries.first else {
-        expect(false, "coalesced Markdown stream must create one assistant entry")
+    guard let coalescedEntry = coalesced.document.entries.first,
+          let firstBlockID,
+          let finalBlock = coalescedEntry.blocks.first else {
+        expect(false, "coalesced Markdown stream must create one assistant entry with a stable markup block")
         return
     }
     let coalescedOneShot = MarkdownAgentMarkupParser().parse(coalescedSource, entryID: coalescedEntry.id, previous: []).blocks.map(resetRevisions)
-    expect(coalesced.streamingMarkupParseCount == 2,
-           "completion must flush exactly one pending final parse after a coalesced stream; got \(coalesced.streamingMarkupParseCount)")
+    expect(coalesced.streamingMarkupParseCount <= pacedParsesBeforeCompletion + 1,
+           "completion may add at most one pending final parse after a paced stream; got \(coalesced.streamingMarkupParseCount) from \(pacedParsesBeforeCompletion)")
+    expect(finalBlock.id == firstBlockID,
+           "production projection must reconcile replaceMarkup blocks by stable identity across paced parses")
+    expect(finalBlock.revision <= UInt64(coalesced.streamingMarkupParseCount + 1) &&
+           coalesced.document.version <= UInt64(coalesced.streamingMarkupParseCount + 2),
+           "projection/reducer revisions must be bounded by parsed presentations, not 5,000 raw deltas; block revision \(finalBlock.revision), document version \(coalesced.document.version), parses \(coalesced.streamingMarkupParseCount)")
     expect(coalescedEntry.blocks.map(resetRevisions) == coalescedOneShot,
-           "coalesced 5,000-delta assistant Markdown must converge with one-shot parsing")
+           "coalesced 5,000-delta assistant Markdown with Unicode must converge with one-shot parsing")
 
     let reasoningClock = DeterministicProjectionClock()
     var reasoning = AgentTranscriptProjection(threadId: thread, monotonicNow: reasoningClock.now)

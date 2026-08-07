@@ -76,6 +76,7 @@ final class ManagedAgentTileNSView: TileNSView {
     private var branchContext: AgentRowContext?
     private var locationProjectName: String?
     private var locationStaleTimer: Timer?
+    private var streamingMarkupParseTimer: Timer?
 
     private let transcriptCollectionFixture: AgentTranscriptListView?
     private let v2Composer: AgentComposerView?
@@ -210,7 +211,10 @@ final class ManagedAgentTileNSView: TileNSView {
         fatalError("init(coder:) is not supported")
     }
 
-    isolated deinit { locationStaleTimer?.invalidate() }
+    isolated deinit {
+        locationStaleTimer?.invalidate()
+        streamingMarkupParseTimer?.invalidate()
+    }
 
     /// The thread this tile's transcript filters on. The app rebinds incoming
     /// provider events to this before ingest (ticket 88.4b).
@@ -324,6 +328,8 @@ final class ManagedAgentTileNSView: TileNSView {
     /// is left alone, so a detached tile still SHOWS the agent it was following;
     /// `attach` is what clears it, on the next replay.
     func detach() {
+        flushPendingStreamingMarkupForBoundary(final: true)
+        cancelStreamingMarkupParseTimer()
         settleLocationForDetach()
         locationStaleTimer?.invalidate()
         locationStaleTimer = nil
@@ -593,6 +599,8 @@ final class ManagedAgentTileNSView: TileNSView {
 
     /// Drop the local projection so a replay renders exactly the agent it came from.
     private func resetProjection() {
+        flushPendingStreamingMarkupForBoundary(final: true)
+        cancelStreamingMarkupParseTimer()
         model = ManagedAgentTranscriptModel(threadId: threadId)
         startedAt = nil
         promptInFlight = false
@@ -643,10 +651,12 @@ final class ManagedAgentTileNSView: TileNSView {
 
     /// Shows the prompt the user just submitted as its own "you" entry.
     func appendUserPrompt(_ text: String) {
+        cancelStreamingMarkupParseTimer()
         model.appendUserPrompt(text)
         // The user's own prompt is a direct response to their keystroke; echo it
         // without waiting on the streaming gate.
         synchronizeV2Transcript(final: true)
+        scheduleStreamingMarkupParseTimerIfNeeded()
     }
 
     func ingest(_ event: AgentRuntimeEvent) {
@@ -689,7 +699,9 @@ final class ManagedAgentTileNSView: TileNSView {
         default:
             settles = false
         }
+        if settles { cancelStreamingMarkupParseTimer() }
         synchronizeV2Transcript(final: settles)
+        if !settles { scheduleStreamingMarkupParseTimerIfNeeded() }
     }
 
     /// Re-read the supervisor's turn truth and repaint everything derived from it:
@@ -848,6 +860,36 @@ final class ManagedAgentTileNSView: TileNSView {
             tokens: .transcript,
             appearance: effectiveTokenTheme
         )
+    }
+
+    private func cancelStreamingMarkupParseTimer() {
+        streamingMarkupParseTimer?.invalidate()
+        streamingMarkupParseTimer = nil
+    }
+
+    private func scheduleStreamingMarkupParseTimerIfNeeded() {
+        cancelStreamingMarkupParseTimer()
+        guard let deadline = model.nextStreamingMarkupParseDeadline else { return }
+        let delay = max(0, deadline - ProcessInfo.processInfo.systemUptime)
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.streamingMarkupParseTimerFired() }
+        }
+        streamingMarkupParseTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func streamingMarkupParseTimerFired() {
+        streamingMarkupParseTimer = nil
+        if model.flushPendingStreamingMarkupIfDue() {
+            synchronizeV2Transcript()
+        }
+        scheduleStreamingMarkupParseTimerIfNeeded()
+    }
+
+    private func flushPendingStreamingMarkupForBoundary(final: Bool) {
+        if model.flushPendingStreamingMarkup() {
+            synchronizeV2Transcript(final: final)
+        }
     }
 
     private func synchronizeV2Transcript(final: Bool = false) {

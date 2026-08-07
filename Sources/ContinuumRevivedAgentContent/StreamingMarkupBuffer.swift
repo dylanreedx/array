@@ -42,10 +42,18 @@ public struct StreamingMarkupParseScheduler: Equatable, Sendable {
         hasPendingRequest = true
     }
 
+    public func nextReadyTime(now: TimeInterval) -> TimeInterval? {
+        guard hasPendingRequest, now.isFinite else { return nil }
+        guard let lastParseTime else { return now }
+        guard now >= lastParseTime else { return lastParseTime + minimumInterval }
+        return now - lastParseTime < minimumInterval ? lastParseTime + minimumInterval : now
+    }
+
     public mutating func shouldParse(now: TimeInterval) -> Bool {
         guard hasPendingRequest, now.isFinite else { return false }
-        if let lastParseTime, now >= lastParseTime, now - lastParseTime < minimumInterval {
-            return false
+        if let lastParseTime {
+            guard now >= lastParseTime else { return false }
+            guard now - lastParseTime >= minimumInterval else { return false }
         }
         hasPendingRequest = false
         lastParseTime = now

@@ -17,7 +17,7 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
         guard !source.isEmpty else { return AgentMarkupParse(blocks: []) }
 
         let sourceMap = SourceMap(source: source)
-        let document = Document(parsing: sourceMap.normalized)
+        let document = Document(parsing: sourceMap.normalized, options: [.disableSmartOpts])
         var diagnostics: [AgentMarkupDiagnostic] = []
         let blocks = convertBlocks(
             document,

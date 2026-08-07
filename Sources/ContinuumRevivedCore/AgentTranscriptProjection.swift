@@ -34,6 +34,7 @@ public struct AgentTranscriptProjection: Sendable {
     private var activeItemIDs = Set<String>()
     private var completedStatuses: [String: ItemStatus] = [:]
     private var compatibilityIDs: [AgentNodeID: String] = [:]
+    private var rawMarkupSourcesByEntryID: [AgentNodeID: String] = [:]
     private var requestEntries: [String: AgentNodeID] = [:]
     private var requestBlocks: [String: AgentNodeID] = [:]
     private var localSequence = 0
@@ -56,6 +57,38 @@ public struct AgentTranscriptProjection: Sendable {
 
     public var document: AgentDocument { reducer.document }
     public var activeToolCount: Int { activeItemIDs.count }
+    public var compatibilityMarkupSourcesByEntryID: [AgentNodeID: String] { rawMarkupSourcesByEntryID }
+
+    /// Monotonic deadline for the delayed parse needed when a provider sends a
+    /// delta inside the coalescing window and then pauses. Nil means no streamed
+    /// Markdown parse is pending.
+    public var nextStreamingMarkupParseDeadline: TimeInterval? {
+        guard let openStream else { return nil }
+        return openStream.scheduler.nextReadyTime(now: monotonicNow())
+    }
+
+    /// Production timer seam: applies the pending parse only when the injected
+    /// monotonic clock has reached the scheduler deadline.
+    @discardableResult
+    public mutating func flushPendingStreamingMarkupIfDue() -> Bool {
+        guard var stream = openStream else { return false }
+        let mutations = scheduledMarkupMutations(for: &stream)
+        openStream = stream
+        guard !mutations.isEmpty else { return false }
+        apply(mutations)
+        return true
+    }
+
+    /// Boundary seam for a live view that is about to detach/reset. It parses the
+    /// latest lossless source without finishing the provider-owned open entry.
+    @discardableResult
+    public mutating func flushPendingStreamingMarkup() -> Bool {
+        guard var stream = openStream, stream.scheduler.flush() else { return false }
+        let mutations = parsedMarkupMutations(for: stream)
+        openStream = stream
+        apply(mutations)
+        return true
+    }
 
     /// Produces the small semantic writes for one event. Calling this method is
     /// stateful because stream boundaries and provider item completion span
@@ -334,6 +367,7 @@ public struct AgentTranscriptProjection: Sendable {
     ) -> [AgentDocumentMutation] {
         if var stream = openStream, stream.turnID == turnID, stream.kind == kind {
             stream.buffer.append(delta)
+            rawMarkupSourcesByEntryID[stream.entryID] = stream.buffer.source
             stream.scheduler.requestParse()
             let result = scheduledMarkupMutations(for: &stream)
             openStream = stream
@@ -351,6 +385,7 @@ public struct AgentTranscriptProjection: Sendable {
             buffer: buffer,
             scheduler: StreamingMarkupParseScheduler(maximumParsesPerSecond: 30)
         )
+        rawMarkupSourcesByEntryID[entryID] = buffer.source
         stream.scheduler.requestParse()
         result += [
             .beginEntry(
@@ -522,7 +557,8 @@ extension AgentTranscriptProjection: AgentTranscriptProjecting {
     }
 
     private func compatibilityBody(_ entry: AgentEntry) -> String {
-        entry.blocks.map { block in
+        if let rawMarkup = rawMarkupSourcesByEntryID[entry.id] { return rawMarkup }
+        return entry.blocks.map { block in
             switch block.payload {
             case .paragraph(let inlines):
                 return plainText(inlines)

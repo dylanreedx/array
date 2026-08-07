@@ -11,7 +11,8 @@ public enum ManagedTranscriptCardProjection {
     public static func project(
         _ document: AgentDocument,
         itemKindsByItemID: [String: ItemKind],
-        itemStatusesByItemID: [String: ItemStatus] = [:]
+        itemStatusesByItemID: [String: ItemStatus] = [:],
+        rawMarkupSourcesByEntryID: [AgentNodeID: String] = [:]
     ) -> [ManagedTranscriptCard] {
         // Request entries are v2 semantic blocks (P5.4). The legacy card stack
         // presents the same runtime events through its own approval dock and
@@ -29,7 +30,7 @@ public enum ManagedTranscriptCardProjection {
                 id: cardID(entry: entry, block: primary, position: index + 1),
                 kind: kind,
                 title: title(entry: entry, block: primary, kind: kind),
-                body: entry.blocks.map(plainText).joined(),
+                body: rawMarkupSourcesByEntryID[entry.id] ?? entry.blocks.map(plainText).joined(),
                 itemKind: itemKind(
                     entry: entry,
                     block: primary,
