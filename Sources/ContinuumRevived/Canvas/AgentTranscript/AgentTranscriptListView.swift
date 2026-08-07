@@ -468,6 +468,22 @@ final class AgentTranscriptListView: NSView {
     ) throws {
         let oldIDs = rows.map(\.id)
         let oldRowsByID = rowsByID
+        let oldReasoningIDs = Set(rows.compactMap(\.entry).map(\.id))
+        let newReasoningIDs = Set(flattened.rows.compactMap(\.entry).map(\.id))
+        let removedReasoningIDs = oldReasoningIDs.subtracting(newReasoningIDs)
+        if flattened.rows.isEmpty, !rows.isEmpty {
+            // resetProjection presents an empty document before replaying the
+            // next session. Clear the complete owner scope as well as the
+            // individual removals so a reused entry ID cannot inherit the old
+            // session's preference.
+            disclosureStateStore.removeAll(for: disclosureOwnerID)
+        } else {
+            for id in removedReasoningIDs {
+                disclosureStateStore.removeState(for: ToolDisclosureKey(
+                    agentID: disclosureOwnerID, blockID: id
+                ))
+            }
+        }
         rows = flattened.rows
         rowsByID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
         topLevelIDsByNodeID = flattened.topLevelIDsByNodeID
@@ -708,6 +724,16 @@ final class AgentTranscriptListView: NSView {
 
     // Deterministic fixture observations; no production owner depends on these.
     var qaSemanticRowCount: Int { rows.count }
+    func qaDisclosureState(for entryID: AgentNodeID) -> Bool? {
+        disclosureStateStore.explicitState(for: ToolDisclosureKey(
+            agentID: disclosureOwnerID, blockID: entryID
+        ))
+    }
+    func qaTranscriptRowHeight(for id: AgentNodeID) -> CGFloat? {
+        layoutSubtreeIfNeeded()
+        guard let index = rows.firstIndex(where: { $0.id == id }) else { return nil }
+        return collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0))?.frame.height
+    }
     var qaLiveHostCount: Int {
         trackedHosts = trackedHosts.filter { $0.value.value != nil }
         return trackedHosts.count

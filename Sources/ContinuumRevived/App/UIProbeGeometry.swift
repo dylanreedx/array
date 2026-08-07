@@ -6049,6 +6049,11 @@ enum UIProbeGeometry {
             lifecycle: .finished,
             blocks: [finishedParagraph, finishedCode, finishedUnknown]
         )
+        let removed = AgentEntry(
+            id: id("route-reasoning-removed"), revision: 1, role: .reasoning,
+            provenance: .providerItem(provider: "fixture", itemID: "removed"), lifecycle: .finished,
+            blocks: [paragraph("removed thought", id: "route-reasoning-removed-block")]
+        )
         let assistant = AgentEntry(
             id: id("route-assistant"), revision: 1, role: .assistant,
             provenance: .localNotice(reason: "fixture"), lifecycle: .finished,
@@ -6059,25 +6064,26 @@ enum UIProbeGeometry {
         let host = NSView(frame: list.frame)
         host.addSubview(list)
         list.autoresizingMask = [.width, .height]
-        let document = AgentDocument(version: 1, entries: [active, finished, assistant])
         try list.apply(
-            document: document,
+            document: AgentDocument(version: 1, entries: [active, finished, removed, assistant]),
             patch: try AgentDocumentPatch(
                 fromVersion: 0, toVersion: 1,
-                inserted: [active.id, finished.id, assistant.id]
+                inserted: [active.id, finished.id, removed.id, assistant.id]
             )
         )
         host.layoutSubtreeIfNeeded()
         list.collectionView.layoutSubtreeIfNeeded()
-        guard list.qaSemanticRowCount == 2 else {
-            throw GeometryError(message: "transcript entry routing rendered active reasoning or duplicated reasoning rows (got \(list.qaSemanticRowCount), expected 2)")
+        guard list.qaSemanticRowCount == 3 else {
+            throw GeometryError(message: "transcript entry routing rendered active reasoning or duplicated reasoning rows (got \(list.qaSemanticRowCount), expected 3)")
         }
-        guard let disclosure = list.accessibilityChildren()?.compactMap({ $0 as? CompletedReasoningDisclosureView }).first else {
+        guard let disclosure = list.accessibilityChildren()?.compactMap({ $0 as? CompletedReasoningDisclosureView })
+            .first(where: { $0.presentation?.entryID == finished.id }) else {
             throw GeometryError(message: "transcript entry/item path did not mount a completed reasoning disclosure")
         }
         guard disclosure.titleLabel.stringValue == "Thought",
-              !disclosure.isExpanded else {
-            throw GeometryError(message: "transcript reasoning route fabricated duration or defaulted expanded")
+              !disclosure.isExpanded,
+              let collapsedHeight = list.qaTranscriptRowHeight(for: finished.id) else {
+            throw GeometryError(message: "transcript reasoning route fabricated duration, defaulted expanded, or had no collapsed geometry")
         }
         _ = disclosure.accessibilityPerformPress()
         host.layoutSubtreeIfNeeded()
@@ -6085,23 +6091,57 @@ enum UIProbeGeometry {
         guard disclosure.isExpanded, disclosure.bodyHosts.count == 3,
               disclosure.bodyHosts.allSatisfy({ $0.representedRole == .reasoning }),
               disclosure.bodyHosts[1].rendererView is CodeBlockView,
-              disclosure.bodyHosts[2].rendererView is AgentUnknownBlockView else {
-            throw GeometryError(message: "transcript reasoning disclosure did not expand through its collection item and role-aware registry")
+              disclosure.bodyHosts[2].rendererView is AgentUnknownBlockView,
+              let expandedHeight = list.qaTranscriptRowHeight(for: finished.id),
+              expandedHeight > collapsedHeight + 1 else {
+            throw GeometryError(message: "transcript reasoning disclosure did not expand through its collection item and change row height")
+        }
+        guard list.qaDisclosureState(for: finished.id) == true else {
+            throw GeometryError(message: "transcript reasoning expansion was not stored by entry identity")
         }
         let revisedFinished = AgentEntry(
             id: finished.id, revision: 2, role: finished.role,
             provenance: finished.provenance, lifecycle: .finished,
             blocks: finished.blocks
         )
+
+        // Removing one entry must purge only that entry's preference; the
+        // unaffected expanded entry remains expanded after a content update.
         try list.apply(
             document: AgentDocument(version: 2, entries: [active, revisedFinished, assistant]),
-            patch: try AgentDocumentPatch(fromVersion: 1, toVersion: 2, updated: [finished.id])
+            patch: try AgentDocumentPatch(
+                fromVersion: 1, toVersion: 2, updated: [finished.id], removed: [removed.id]
+            )
         )
         host.layoutSubtreeIfNeeded()
         list.collectionView.layoutSubtreeIfNeeded()
-        guard disclosure.isExpanded, disclosure.bodyHosts.count == 3,
-              disclosure.titleLabel.stringValue == "Thought" else {
-            throw GeometryError(message: "transcript reasoning expansion state was not stable by entry identity")
+        guard list.qaDisclosureState(for: removed.id) == nil,
+              list.qaDisclosureState(for: finished.id) == true,
+              list.qaSemanticRowCount == 2 else {
+            throw GeometryError(message: "removed reasoning state was retained or unaffected expansion was lost")
+        }
+
+        // resetProjection presents an empty transcript between sessions. Reuse
+        // the same entry ID after that boundary and require the fresh session's
+        // default rather than the previous session's explicit expansion.
+        try list.apply(
+            document: AgentDocument(version: 3, entries: []),
+            patch: try AgentDocumentPatch(fromVersion: 2, toVersion: 3, removed: [finished.id, assistant.id])
+        )
+        guard list.qaDisclosureState(for: finished.id) == nil else {
+            throw GeometryError(message: "transcript reset did not clear all disclosure state")
+        }
+        try list.apply(
+            document: AgentDocument(version: 4, entries: [finished]),
+            patch: try AgentDocumentPatch(fromVersion: 3, toVersion: 4, inserted: [finished.id])
+        )
+        host.layoutSubtreeIfNeeded()
+        list.collectionView.layoutSubtreeIfNeeded()
+        guard let reusedDisclosure = list.accessibilityChildren()?.compactMap({ $0 as? CompletedReasoningDisclosureView })
+            .first(where: { $0.presentation?.entryID == finished.id }),
+            !reusedDisclosure.isExpanded,
+            list.qaDisclosureState(for: finished.id) == nil else {
+            throw GeometryError(message: "reused reasoning entry ID inherited expansion across transcript reset/session boundary")
         }
     }
 
