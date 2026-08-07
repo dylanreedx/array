@@ -208,7 +208,9 @@ public enum SecretRedactor {
         } else if hasPrefix("~/", at: start) || hasPrefix("@~/", at: start) || hasPrefix("@/", at: start) {
             begins = isBoundary(previous)
         } else if scalars[start] == "/" {
-            begins = previous != ":" && previous != "/"
+            // A URL path is not a host-local capability. Scan only the current
+            // token so `https://host/path` survives while `/Users/...` does not.
+            begins = previous != ":" && previous != "/" && !isHTTPURL(scalars, at: start)
         } else {
             begins = false
         }
@@ -247,5 +249,15 @@ public enum SecretRedactor {
     private static func isUnquotedPathTerminator(_ scalar: UnicodeScalar) -> Bool {
         CharacterSet.whitespacesAndNewlines.contains(scalar)
             || "\"'`()[]{}<>,;".unicodeScalars.contains(scalar)
+    }
+
+    private static func isHTTPURL(_ scalars: [UnicodeScalar], at start: Int) -> Bool {
+        var begin = start
+        while begin > 0,
+              !CharacterSet.whitespacesAndNewlines.contains(scalars[begin - 1]) {
+            begin -= 1
+        }
+        let token = String(String.UnicodeScalarView(scalars[begin..<start]))
+        return token.hasPrefix("http://") || token.hasPrefix("https://")
     }
 }

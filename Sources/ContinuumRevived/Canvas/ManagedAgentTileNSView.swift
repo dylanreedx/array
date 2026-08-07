@@ -34,8 +34,15 @@ private final class ManagedAgentTileActionAdapter: AgentTileActionSink {
     func accept(_ intent: AgentComposerIntent, for agentID: AgentID) async -> IntentAcceptance {
         guard let supervisor else { return .refused(.unknownAgent) }
         let result = await supervisor.accept(intent, for: agentID)
-        if result == .accepted, case let .send(prompt) = intent {
-            tile?.appendUserPrompt(prompt)
+        if result == .accepted {
+            switch intent {
+            case .send(let text):
+                tile?.appendUserPrompt(text)
+            case .sendPrompt(let prompt):
+                tile?.appendUserPrompt(prompt)
+            default:
+                break
+            }
         }
         return result
     }
@@ -92,6 +99,7 @@ final class ManagedAgentTileNSView: TileNSView {
     private let projectionMonotonicNow: @Sendable () -> TimeInterval
     private var v2ActionAdapter: ManagedAgentTileActionAdapter?
     private var v2DraftStore: AgentComposerDraftStore?
+    private var v2AttachmentStore: AgentComposerAttachmentStore?
     private var v2PromptHistory: AgentPromptHistory?
     private var v2CompletionRegistry: AgentCompletionProviderRegistry?
     private var v2TurnSnapshot: AgentTileTurnSnapshot?
@@ -257,11 +265,18 @@ final class ManagedAgentTileNSView: TileNSView {
     func bindV2ComposerState(
         draftStore: AgentComposerDraftStore,
         promptHistory: AgentPromptHistory,
+        attachmentStore: AgentComposerAttachmentStore? = nil,
         completionRegistry: AgentCompletionProviderRegistry? = nil
     ) {
         v2DraftStore = draftStore
+        v2AttachmentStore = attachmentStore
         v2PromptHistory = promptHistory
         v2CompletionRegistry = completionRegistry
+        if let agentID = attachedAgentID {
+            if let attachmentStore { v2Composer?.bindAttachmentStore(attachmentStore, agentID: agentID) }
+            v2Composer?.bindDraftStore(draftStore, agentID: agentID)
+            v2Composer?.bindPromptHistory(promptHistory, agentID: agentID)
+        }
         if let completionRegistry { v2Composer?.bindCompletionRegistry(completionRegistry) }
     }
 
@@ -318,6 +333,7 @@ final class ManagedAgentTileNSView: TileNSView {
             let adapter = ManagedAgentTileActionAdapter(tile: self, supervisor: supervisor)
             v2ActionAdapter = adapter
             composer.bindActionSink(adapter, agentID: agentID, snapshot: snapshot)
+            if let v2AttachmentStore { composer.bindAttachmentStore(v2AttachmentStore, agentID: agentID) }
             if let v2DraftStore { composer.bindDraftStore(v2DraftStore, agentID: agentID) }
             if let v2PromptHistory { composer.bindPromptHistory(v2PromptHistory, agentID: agentID) }
             if let v2CompletionRegistry { composer.bindCompletionRegistry(v2CompletionRegistry) }
@@ -675,8 +691,13 @@ final class ManagedAgentTileNSView: TileNSView {
 
     /// Shows the prompt the user just submitted as its own "you" entry.
     func appendUserPrompt(_ text: String) {
+        appendUserPrompt(AgentPrompt(text))
+    }
+
+    func appendUserPrompt(_ prompt: AgentPrompt) {
         cancelStreamingMarkupParseTimer()
-        model.appendUserPrompt(text)
+        guard let id = AgentNodeID(rawValue: "local-prompt-\(UUID().uuidString)") else { return }
+        model.appendUserPrompt(id: id, prompt: prompt)
         // The user's own prompt is a direct response to their keystroke; echo it
         // without waiting on the streaming gate.
         synchronizeV2Transcript(final: true)
@@ -684,6 +705,14 @@ final class ManagedAgentTileNSView: TileNSView {
     }
 
     func ingest(_ event: AgentRuntimeEvent) {
+        switch event {
+        case .turnStarted:
+            v2Composer?.confirmPromptSubmissionStarted()
+        case .runtimeError, .sessionStateChanged(.stopped), .sessionStateChanged(.error):
+            v2Composer?.restorePromptSubmission()
+        default:
+            break
+        }
         // Turn-local, not session-local: each new turn resets the semantic timer.
         // AgentTileHeaderView owns the one-second repaint and never touches the
         // transcript layout beneath it.

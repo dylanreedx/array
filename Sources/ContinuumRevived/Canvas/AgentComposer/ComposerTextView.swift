@@ -16,6 +16,7 @@ protocol ComposerTextViewObserver: AnyObject {
         command: ChoiceListCommand
     ) -> Bool
     func composerRequestedDismissSuggestions(_ textView: ComposerTextView)
+    func composerRequestedImageImport(_ textView: ComposerTextView, from pasteboard: NSPasteboard)
 }
 
 @MainActor
@@ -74,6 +75,7 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate {
         setAccessibilityRole(.textArea)
         setAccessibilityLabel("Agent prompt")
         setAccessibilityHelp("Enter a prompt for the agent")
+        registerForDraggedTypes([.fileURL, .png, .tiff, ComposerImagePasteboardDecoder.jpegPasteboardType])
     }
 
     /// TextKit's laid-out document height at the current tracked width. The shell
@@ -128,6 +130,26 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate {
     func recordAcceptedPrompt(_ prompt: String) {
         guard let promptHistory, let promptHistoryAgentID else { return }
         promptHistory.recordAccepted(prompt, for: promptHistoryAgentID)
+    }
+
+    override func paste(_ sender: Any?) {
+        let pasteboard = NSPasteboard.general
+        guard ComposerImagePasteboardDecoder.canDecode(pasteboard) else {
+            super.paste(sender)
+            return
+        }
+        composerObserver?.composerRequestedImageImport(self, from: pasteboard)
+    }
+
+    override func performDragOperation(_ draggingInfo: NSDraggingInfo) -> Bool {
+        let pasteboard = draggingInfo.draggingPasteboard
+        guard ComposerImagePasteboardDecoder.canDecode(pasteboard) else { return false }
+        composerObserver?.composerRequestedImageImport(self, from: pasteboard)
+        return true
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        ComposerImagePasteboardDecoder.canDecode(sender.draggingPasteboard) ? .copy : []
     }
 
     override func keyDown(with event: NSEvent) {

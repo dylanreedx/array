@@ -863,6 +863,7 @@ final class AgentSupervisor {
     /// process-free cache snapshot; it never invokes a shell from this actor.
     private let nameGenerationCapabilityProvider: (@Sendable () -> AgentNameGenerationCapability?)?
     private let nameGenerationTimeout: TimeInterval
+    private let attachmentStore: AgentComposerAttachmentStore
 
     /// The records this supervisor owns, in memory. `AgentStore` is the durable
     /// copy; this is the live one.
@@ -913,7 +914,8 @@ final class AgentSupervisor {
         warn: @escaping (String) -> Void = { fputs($0 + "\n", stderr) },
         upsertRecord: ((AgentRecord) throws -> Void)? = nil,
         nameGenerationCapabilityProvider: (@Sendable () -> AgentNameGenerationCapability?)? = nil,
-        nameGenerationTimeout: TimeInterval = AgentNameOneShot.timeout
+        nameGenerationTimeout: TimeInterval = AgentNameOneShot.timeout,
+        attachmentStore: AgentComposerAttachmentStore? = nil
     ) {
         self.store = store
         self.makeRunner = makeRunner
@@ -921,6 +923,9 @@ final class AgentSupervisor {
         self.upsertRecord = upsertRecord ?? { record in try store.upsert(record) }
         self.nameGenerationCapabilityProvider = nameGenerationCapabilityProvider
         self.nameGenerationTimeout = nameGenerationTimeout
+        self.attachmentStore = attachmentStore ?? AgentComposerAttachmentStore(
+            applicationSupportDirectory: store.layout.applicationSupportDirectory
+        )
     }
 
     /// The explicit action's cached capability gate. This is a snapshot only:
@@ -1584,10 +1589,11 @@ final class AgentSupervisor {
     /// Runs `prompt` on the agent's own runner, off the main thread (`run` blocks).
     /// Events hop back via `DispatchQueue.main.async` — FIFO, which is what keeps
     /// the fan-out ordered; a `Task { @MainActor }` per event would not be.
-    func send(_ prompt: AgentPrompt, to id: AgentID) {
+    @discardableResult
+    func send(_ prompt: AgentPrompt, to id: AgentID) -> Bool {
         guard var record = records[id] else {
             warn("AgentSupervisor.send: no agent \(id.rawValue.uuidString)")
-            return
+            return false
         }
         // ONE RUNNER PER AGENT, refused rather than replaced (from the
         // cross-review). Assigning over `runners[id]` would leave the first process
@@ -1600,7 +1606,7 @@ final class AgentSupervisor {
         // answer to supersede.
         if let inFlight = runners[id] {
             warn("AgentSupervisor.send: agent \(id.rawValue.uuidString) already has a prompt in flight (\(type(of: inFlight))); dropping \(prompt.text.count) visible chars and \(prompt.imageAttachments.count) image attachment(s)")
-            return
+            return false
         }
         let firstPromptText = Self.visibleNamingText(from: prompt)
         // Keep only the first local prompt's visible text for the explicit naming
@@ -1676,11 +1682,12 @@ final class AgentSupervisor {
             }
             DispatchQueue.main.async { self?.clearRunner(runner, for: id) }
         }
+        return true
     }
 
     /// Text-only compatibility wrapper for existing callers and checks.
     func send(_ prompt: String, to id: AgentID) {
-        send(AgentPrompt(prompt), to: id)
+        _ = send(AgentPrompt(prompt), to: id)
     }
 
     private nonisolated static func visibleNamingText(from prompt: AgentPrompt) -> String? {
@@ -2753,14 +2760,25 @@ final class AgentSupervisor {
             let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !prompt.isEmpty else { return .refused(.emptyDraft) }
             guard snapshot.capabilities.canSend else { return .refused(.turnNotReady) }
-            send(prompt, to: agentID)
+            guard send(AgentPrompt(prompt), to: agentID) else { return .refused(.invalidAttachment) }
             return .accepted
         case .sendPrompt(let draft):
             var prompt = draft
             prompt.text = prompt.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !prompt.isEmpty else { return .refused(.emptyDraft) }
             guard snapshot.capabilities.canSend else { return .refused(.turnNotReady) }
-            send(prompt, to: agentID)
+            do {
+                let prepared = try await attachmentStore.preparePromptAttachments(
+                    for: agentID,
+                    draftAttachments: prompt.imageAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) }
+                )
+                guard send(AgentPrompt(text: prompt.text, imageAttachments: prepared), to: agentID) else {
+                    return .refused(.invalidAttachment)
+                }
+            } catch {
+                warn("AgentSupervisor.accept: attachment preparation refused for agent \(agentID.rawValue.uuidString): invalid managed attachment")
+                return .refused(.invalidAttachment)
+            }
             return .accepted
         case .stop:
             guard snapshot.capabilities.canStop, runners[agentID] != nil else {

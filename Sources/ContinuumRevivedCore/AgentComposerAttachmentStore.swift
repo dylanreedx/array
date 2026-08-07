@@ -76,6 +76,10 @@ public struct AgentComposerAttachmentStoreLayout: Sendable {
         attachmentsDirectory.appendingPathComponent("ownership-transactions", isDirectory: true)
     }
 
+    public var importCleanupDirectory: URL {
+        attachmentsDirectory.appendingPathComponent("import-cleanup", isDirectory: true)
+    }
+
     public func objectRelativePath(for id: AgentImageAttachmentID) -> String {
         "objects/\(Self.storageKey(for: id)).bin"
     }
@@ -165,6 +169,11 @@ public struct AgentComposerStoredAttachment: Equatable, Sendable {
     }
 }
 
+private struct AgentComposerImportCleanupJournal: Codable, Sendable {
+    var objectRelativePath: String
+    var createdAt: Date
+}
+
 private struct AgentComposerOwnershipTransferJournal: Codable, Sendable {
     enum State: String, Codable, Sendable {
         case pending
@@ -214,7 +223,8 @@ public actor AgentComposerAttachmentStore {
         validation: AgentComposerImageValidation,
         forDraftOf agentID: AgentID
     ) throws -> AgentComposerStoredAttachment {
-        try importManagedBytes(
+        try recoverPendingImportCleanups()
+        return try importManagedBytes(
             data,
             displayName: displayName,
             validation: validation,
@@ -228,6 +238,7 @@ public actor AgentComposerAttachmentStore {
         validation: AgentComposerImageValidation,
         forDraftOf agentID: AgentID
     ) throws -> AgentComposerStoredAttachment {
+        try recoverPendingImportCleanups()
         guard sourceURL.isFileURL else {
             throw AgentComposerAttachmentStoreError.nonFileURL(sourceURL.absoluteString)
         }
@@ -360,7 +371,7 @@ public actor AgentComposerAttachmentStore {
                     deletionFailures.append("manifest \(manifest.id.rawValue): \(error)")
                 }
             } catch {
-                warn("AgentComposerAttachmentStore.cleanup: skipped unreadable or unsafe manifest at \(manifestURL.path): \(error)")
+                warn("AgentComposerAttachmentStore.cleanup: skipped unreadable manifest (opaque local attachment state)")
                 continue
             }
         }
@@ -402,7 +413,30 @@ public actor AgentComposerAttachmentStore {
         return prepared
     }
 
+    public func recoverPendingImportCleanups() throws {
+        guard FileManager.default.fileExists(atPath: layout.importCleanupDirectory.path) else { return }
+        let journalURLs = try FileManager.default.contentsOfDirectory(
+            at: layout.importCleanupDirectory, includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ).filter { $0.pathExtension == "json" }
+        var failures: [String] = []
+        for journalURL in journalURLs {
+            do {
+                let journal: AgentComposerImportCleanupJournal = try reader.read(at: journalURL)
+                let objectURL = try Self.safeLocalURL(root: layout.attachmentsDirectory, relativePath: journal.objectRelativePath)
+                if FileManager.default.fileExists(atPath: objectURL.path) { try removeItem(objectURL) }
+                try removeDurably(journalURL)
+            } catch {
+                failures.append("opaque import cleanup journal")
+            }
+        }
+        if !failures.isEmpty {
+            throw AgentComposerAttachmentStoreError.cleanupDeletionFailed(failures)
+        }
+    }
+
     public func recoverPendingOwnershipTransfers() throws {
+        try recoverPendingImportCleanups()
         guard FileManager.default.fileExists(atPath: layout.ownershipTransactionsDirectory.path) else { return }
         let journalURLs = try FileManager.default.contentsOfDirectory(
             at: layout.ownershipTransactionsDirectory,
@@ -516,6 +550,12 @@ public actor AgentComposerAttachmentStore {
             do {
                 try removeItem(fileURL)
             } catch let rollbackError {
+                let journalURL = layout.importCleanupDirectory
+                    .appendingPathComponent("cleanup-\(UUID().uuidString).json", isDirectory: false)
+                let journal = AgentComposerImportCleanupJournal(
+                    objectRelativePath: relativePath, createdAt: now
+                )
+                try? AtomicWriter(backupsDirectory: nil, retainedBackups: 0).write(journal, to: journalURL)
                 throw AgentComposerAttachmentStoreError.importRollbackFailed(
                     manifestError: String(describing: error),
                     objectPath: fileURL.path,
@@ -528,7 +568,7 @@ public actor AgentComposerAttachmentStore {
     }
 
     private func prepareDirectories() throws {
-        for directory in [layout.attachmentsDirectory, layout.objectsDirectory, layout.manifestsDirectory, layout.ownershipTransactionsDirectory] {
+        for directory in [layout.attachmentsDirectory, layout.objectsDirectory, layout.manifestsDirectory, layout.ownershipTransactionsDirectory, layout.importCleanupDirectory] {
             try FileManager.default.createDirectory(
                 at: directory,
                 withIntermediateDirectories: true,

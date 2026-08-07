@@ -208,7 +208,7 @@ public actor AgentComposerDraftStore {
         do {
             let draft: AgentComposerDraft = try writer.read(at: url)
             guard Self.hasValidSelection(draft) else {
-                warn("AgentComposerDraftStore.load: invalid selection in \(url.path)")
+                warn("AgentComposerDraftStore.load: invalid draft selection")
                 return nil
             }
             if newestSeen[agentID].map({ draft.updatedAt > $0 }) ?? true {
@@ -216,7 +216,7 @@ public actor AgentComposerDraftStore {
             }
             return draft
         } catch {
-            warn("AgentComposerDraftStore.load: unreadable draft at \(url.path): \(error)")
+            warn("AgentComposerDraftStore.load: unreadable draft")
             return nil
         }
     }
@@ -353,7 +353,7 @@ public actor AgentComposerDraftStore {
         let url = layout.draftFile(for: agentID)
         if FileManager.default.fileExists(atPath: url.path) {
             do { try removeItem(url) }
-            catch { warn("AgentComposerDraftStore.clear: could not remove \(url.path): \(error)") }
+            catch { warn("AgentComposerDraftStore.clear: could not remove draft") }
         }
     }
 

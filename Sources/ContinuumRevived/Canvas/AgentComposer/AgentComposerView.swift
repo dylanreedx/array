@@ -8,8 +8,9 @@ struct AgentComposerDraft: Equatable {
     var text: String
     var selection: NSRange
     var revision: UInt64
+    var imageAttachments: [AgentPromptImageAttachment] = []
 
-    static let empty = AgentComposerDraft(text: "", selection: NSRange(location: 0, length: 0), revision: 0)
+    static let empty = AgentComposerDraft(text: "", selection: NSRange(location: 0, length: 0), revision: 0, imageAttachments: [])
 }
 
 /// Presentation-only composer variants (P4.10 owner direction). The full-turn
@@ -67,6 +68,10 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     let textView: ComposerTextView
     private(set) var scrollView: NSScrollView
     private let placeholderLabel = NSTextField(labelWithString: "")
+    private let attachmentRail: ComposerImageAttachmentRailView
+    private let attachmentRailHeightConstraint: NSLayoutConstraint
+    private var attachmentStore: AgentComposerAttachmentStore?
+    private var importedAttachments: [AgentPromptImageAttachment] = []
 
     var onDraftChange: ((AgentComposerDraft) -> Void)?
     /// Existing fire-and-forget seam retained until live-tile migration. It does
@@ -87,6 +92,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     private var actionTask: Task<Void, Never>?
     private var restoreTask: Task<Void, Never>?
     private var pendingSubmittedPrompt: String?
+    private var pendingSubmittedDraft: AgentComposerDraft?
     private(set) var isEditorFocused = false
     private var isApplyingDraft = false
     private let heightController: ComposerHeightController
@@ -105,6 +111,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         )
         textView = ComposerTextView(frame: .zero)
         scrollView = NSScrollView(frame: .zero)
+        attachmentRail = ComposerImageAttachmentRailView(frame: .zero)
+        attachmentRailHeightConstraint = attachmentRail.heightAnchor.constraint(equalToConstant: 0)
         super.init(frame: frameRect)
 
         wantsLayer = true
@@ -119,6 +127,11 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         scrollView.scrollerStyle = .overlay
         scrollView.documentView = textView
         scrollView.translatesAutoresizingMaskIntoConstraints = false
+        attachmentRail.translatesAutoresizingMaskIntoConstraints = false
+        attachmentRail.onRemoveAttachment = { [weak self] attachment in
+            self?.removeAttachment(attachment)
+        }
+        addSubview(attachmentRail)
         addSubview(scrollView)
 
         placeholderLabel.stringValue = variant.placeholder
@@ -129,9 +142,13 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         addSubview(placeholderLabel)
 
         NSLayoutConstraint.activate([
+            attachmentRailHeightConstraint,
+            attachmentRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.internalPadding),
+            attachmentRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.internalPadding),
+            attachmentRail.topAnchor.constraint(equalTo: topAnchor),
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.internalPadding),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.internalPadding),
-            scrollView.topAnchor.constraint(equalTo: topAnchor, constant: Self.internalPadding),
+            scrollView.topAnchor.constraint(equalTo: attachmentRail.bottomAnchor, constant: Self.internalPadding),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.internalPadding),
             placeholderLabel.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
             placeholderLabel.trailingAnchor.constraint(lessThanOrEqualTo: scrollView.trailingAnchor),
@@ -175,9 +192,10 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
             editorHeight = textView.layoutManager?.defaultLineHeight(for: font)
                 ?? ceil(font.ascender - font.descender + font.leading)
         }
+        let railHeight = attachmentRail.isHidden ? 0 : ComposerImageAttachmentRailView.railHeight + Self.internalPadding
         return NSSize(
             width: NSView.noIntrinsicMetric,
-            height: editorHeight + (Self.internalPadding * 2)
+            height: editorHeight + (Self.internalPadding * 2) + railHeight
         )
     }
 
@@ -221,24 +239,51 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     /// Attaches persistence to agent identity rather than tile identity. Calling
     /// this again is the detach/re-attach seam: the newly bound agent's local
     /// draft replaces the editor contents when its load completes.
+    func bindAttachmentStore(_ store: AgentComposerAttachmentStore, agentID: AgentID) {
+        attachmentStore = store
+        draftAgentID = agentID
+    }
+
     func bindDraftStore(_ store: AgentComposerDraftStore, agentID: AgentID) {
         draftStore = store
         draftAgentID = agentID
         restoreTask?.cancel()
         restoreTask = Task { [weak self] in
-            let stored = await store.load(for: agentID)
+            // A relaunch can occur after the supervisor accepted a prompt but
+            // before Pi emitted the first turn-start. Recover the durable
+            // submission journal before reading the ordinary draft file.
+            let recovered = try? await store.restoreSubmission(for: agentID)
+            let stored: ContinuumRevivedCore.AgentComposerDraft?
+            if let recovered {
+                stored = recovered
+            } else {
+                stored = await store.load(for: agentID)
+            }
             guard !Task.isCancelled, let self, self.draftAgentID == agentID else { return }
             guard let stored else {
+                self.importedAttachments = []
+                self.updateAttachmentRail()
                 self.apply(.empty)
                 return
             }
+            var resolved: [AgentPromptImageAttachment] = []
+            if let attachmentStore = self.attachmentStore {
+                for attachment in stored.imageAttachments {
+                    if let storedAttachment = try? await attachmentStore.storedAttachment(for: attachment.attachmentID) {
+                        resolved.append(storedAttachment.promptAttachment)
+                    }
+                }
+            }
+            self.importedAttachments = resolved
+            self.updateAttachmentRail()
             self.apply(AgentComposerDraft(
                 text: stored.text,
                 selection: NSRange(
                     location: stored.selection.lowerBound,
                     length: stored.selection.count
                 ),
-                revision: 0
+                revision: 0,
+                imageAttachments: resolved
             ))
         }
     }
@@ -296,7 +341,14 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         isApplyingDraft = true
         if textView.string != newDraft.text { textView.string = newDraft.text }
         textView.setSelectedRange(safeSelection)
-        draft = AgentComposerDraft(text: newDraft.text, selection: safeSelection, revision: newDraft.revision)
+        importedAttachments = newDraft.imageAttachments
+        updateAttachmentRail()
+        draft = AgentComposerDraft(
+            text: newDraft.text,
+            selection: safeSelection,
+            revision: newDraft.revision,
+            imageAttachments: importedAttachments
+        )
         isApplyingDraft = false
         updatePlaceholder()
         editorContentsChanged()
@@ -348,6 +400,46 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         refreshCompletionSuggestions()
     }
 
+    func composerRequestedImageImport(_ textView: ComposerTextView, from pasteboard: NSPasteboard) {
+        guard let attachmentStore, let agentID = draftAgentID else { return }
+        let decoded = ComposerImagePasteboardDecoder.decodedItems(from: pasteboard)
+        guard !decoded.isEmpty else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            for item in decoded {
+                do {
+                    let validation = try AgentComposerImageValidation(
+                        validatedContentType: item.contentType,
+                        pixelWidth: item.pixelWidth,
+                        pixelHeight: item.pixelHeight,
+                        byteCount: item.byteCount
+                    )
+                    let stored: AgentComposerStoredAttachment
+                    switch item.source {
+                    case .data(let data):
+                        stored = try await attachmentStore.importValidatedPastedImage(
+                            data, displayName: item.suggestedFilename,
+                            validation: validation, forDraftOf: agentID
+                        )
+                    case .fileURL(let url):
+                        stored = try await attachmentStore.importValidatedLocalImageFile(
+                            url, displayName: item.suggestedFilename,
+                            validation: validation, forDraftOf: agentID
+                        )
+                    }
+                    self.importedAttachments.append(stored.promptAttachment)
+                } catch {
+                    // Import failures are intentionally local and bounded. The
+                    // rail retains successful items and the draft remains valid.
+                    continue
+                }
+            }
+            self.updateAttachmentRail()
+            self.publishDraftChange()
+            self.editorContentsChanged()
+        }
+    }
+
     func composerFocusDidChange(_ textView: ComposerTextView, focused: Bool) {
         isEditorFocused = focused
         applyTokens()
@@ -360,24 +452,31 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
 
     func composerRequestedSend(_ textView: ComposerTextView) {
         let prompt = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty else { return }
+        guard !prompt.isEmpty || !importedAttachments.isEmpty else { return }
         if let snapshot = turnSnapshot, actionSink != nil, draftAgentID != nil {
             let resolver = AgentComposerIntentState(
                 executionState: snapshot.executionState,
                 capabilities: snapshot.capabilities
             )
-            let intent = snapshot.executionState == .working
-                ? resolver.workingDraftIntent(draft: prompt)
-                : resolver.primaryIntent(draft: prompt)
+            let intent: AgentComposerIntent?
+            if !importedAttachments.isEmpty {
+                intent = .sendPrompt(AgentPrompt(text: prompt, imageAttachments: importedAttachments))
+            } else {
+                intent = snapshot.executionState == .working
+                    ? resolver.workingDraftIntent(draft: prompt)
+                    : resolver.primaryIntent(draft: prompt)
+            }
             guard let intent else { return }
-            submitBoundIntent(intent, submittedPrompt: prompt, submittedRevision: draft.revision)
+            submitBoundIntent(
+                intent,
+                submittedPrompt: prompt,
+                submittedRevision: draft.revision
+            )
         } else if let onSubmitIntent {
             pendingSubmittedPrompt = nil
             guard onSubmitIntent(prompt) else { return }
             completeAcceptedSend(prompt)
         } else if let onSubmitPrompt {
-            // A void callback cannot report acceptance. Preserve the draft and
-            // remember exactly which submitted prompt a later acknowledgement owns.
             pendingSubmittedPrompt = prompt
             onSubmitPrompt(prompt)
         }
@@ -439,14 +538,16 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         draft = AgentComposerDraft(
             text: textView.string,
             selection: textView.selectedRange(),
-            revision: textChanged ? draft.revision &+ 1 : draft.revision
+            revision: textChanged ? draft.revision &+ 1 : draft.revision,
+            imageAttachments: importedAttachments
         )
         onDraftChange?(draft)
         if let draftStore, let draftAgentID {
             let persisted = ContinuumRevivedCore.AgentComposerDraft(
                 text: draft.text,
                 selection: draft.selection.location..<(draft.selection.location + draft.selection.length),
-                updatedAt: Date()
+                updatedAt: Date(),
+                imageAttachments: importedAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) }
             )
             Task { await draftStore.save(persisted, for: draftAgentID) }
         }
@@ -458,36 +559,134 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         submittedRevision: UInt64
     ) {
         guard actionTask == nil, let actionSink, let agentID = draftAgentID else { return }
+        let isPromptSubmission: Bool
+        if case .sendPrompt = intent { isPromptSubmission = true } else { isPromptSubmission = false }
         actionTask = Task { @MainActor [weak self, weak actionSink] in
+            guard let self else { return }
+            if isPromptSubmission {
+                do {
+                    guard try await self.draftStore?.beginSubmission(
+                        for: agentID,
+                        draft: self.currentPersistedDraft()
+                    ) == true else { return }
+                    self.pendingSubmittedDraft = self.draft
+                } catch {
+                    return
+                }
+            }
             // Every exit — including the sink-gone and self-gone paths — must
             // release the latch, or the composer can never submit again (P5.5
             // review correction, defect 3). Except when cancelled: cancel means a
             // rebind/unbind took ownership of the field, and a stale task must
             // not clear the task installed after it.
-            defer { if !Task.isCancelled { self?.actionTask = nil } }
-            guard let acceptance = await actionSink?.accept(intent, for: agentID), let self else { return }
-            guard acceptance == .accepted else { return }
+            defer { if !Task.isCancelled { self.actionTask = nil } }
+            guard let acceptance = await actionSink?.accept(intent, for: agentID) else {
+                if isPromptSubmission { try? await self.draftStore?.restoreSubmission(for: agentID) }
+                return
+            }
+            guard acceptance == .accepted else {
+                if isPromptSubmission {
+                    if let restored = try? await self.draftStore?.restoreSubmission(for: agentID) {
+                        self.applyPersistedDraft(restored)
+                    }
+                }
+                return
+            }
             if let submittedPrompt {
-                self.completeAcceptedSend(submittedPrompt, submittedRevision: submittedRevision)
+                self.completeAcceptedSend(
+                    submittedPrompt,
+                    submittedRevision: submittedRevision,
+                    retainRecoveryUntilStart: isPromptSubmission
+                )
             }
         }
     }
 
-    private func completeAcceptedSend(_ prompt: String, submittedRevision: UInt64? = nil) {
+    private func completeAcceptedSend(
+        _ prompt: String,
+        submittedRevision: UInt64? = nil,
+        retainRecoveryUntilStart: Bool = false
+    ) {
         textView.recordAcceptedPrompt(prompt)
         pendingSubmittedPrompt = nil
         if let submittedRevision {
             let currentPrompt = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
             guard draft.revision == submittedRevision, currentPrompt == prompt else { return }
         }
-        clearAcceptedDraft()
+        clearAcceptedDraft(retainRecoveryUntilStart: retainRecoveryUntilStart)
     }
 
-    private func clearAcceptedDraft() {
-        if let draftStore, let draftAgentID {
+    private func currentPersistedDraft() -> ContinuumRevivedCore.AgentComposerDraft {
+        ContinuumRevivedCore.AgentComposerDraft(
+            text: draft.text,
+            selection: draft.selection.location..<(draft.selection.location + draft.selection.length),
+            updatedAt: Date(),
+            imageAttachments: importedAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) }
+        )
+    }
+
+    private func applyPersistedDraft(_ persisted: ContinuumRevivedCore.AgentComposerDraft) {
+        let resolved = importedAttachments.filter { attachment in
+            persisted.imageAttachments.contains { $0.attachmentID == attachment.metadata.id }
+        }
+        importedAttachments = resolved
+        apply(AgentComposerDraft(
+            text: persisted.text,
+            selection: NSRange(location: persisted.selection.lowerBound, length: persisted.selection.count),
+            revision: draft.revision &+ 1,
+            imageAttachments: resolved
+        ))
+    }
+
+    /// Called by the tile only after a real provider turn-start event. Queue
+    /// acceptance alone does not consume the recovery journal.
+    func confirmPromptSubmissionStarted() {
+        guard let draftStore, let agentID = draftAgentID, pendingSubmittedDraft != nil else { return }
+        pendingSubmittedDraft = nil
+        Task { @MainActor [weak self] in
+            do {
+                _ = try await draftStore.confirmSubmissionStarted(for: agentID)
+            } catch {
+                self?.restorePromptSubmission()
+            }
+        }
+    }
+
+    /// Launch/start failures restore the exact durable draft and attachments.
+    func restorePromptSubmission() {
+        guard let draftStore, let agentID = draftAgentID else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if let restored = try? await draftStore.restoreSubmission(for: agentID) {
+                self.applyPersistedDraft(restored)
+            }
+            self.pendingSubmittedDraft = nil
+        }
+    }
+
+    private func clearAcceptedDraft(retainRecoveryUntilStart: Bool = false) {
+        if !retainRecoveryUntilStart, let draftStore, let draftAgentID {
             Task { await draftStore.resolveSendIntent(for: draftAgentID, accepted: true) }
         }
         apply(.empty)
+    }
+
+    private func updateAttachmentRail() {
+        attachmentRail.setItems(importedAttachments.map { ComposerImageAttachmentRailItem(attachment: $0) })
+        attachmentRailHeightConstraint.constant = importedAttachments.isEmpty ? 0 : ComposerImageAttachmentRailView.railHeight
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
+    private func removeAttachment(_ attachment: AgentPromptImageAttachment) {
+        importedAttachments.removeAll { $0.metadata.id == attachment.metadata.id }
+        updateAttachmentRail()
+        publishDraftChange()
+        if let attachmentStore {
+            Task { try? await attachmentStore.cleanupUnreferencedDraftAttachments(
+                retaining: Set(importedAttachments.map { $0.metadata.id }), graceInterval: 60
+            ) }
+        }
     }
 
     private func updatePlaceholder() {

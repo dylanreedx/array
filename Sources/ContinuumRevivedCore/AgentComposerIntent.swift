@@ -36,6 +36,10 @@ public enum IntentRefusal: String, Equatable, Sendable {
     case turnNotReady
     case noTurnInProgress
     case emptyDraft
+    /// The supervisor could not prove every managed attachment belongs to this
+    /// agent and remains transportable. Keep this deliberately opaque: storage
+    /// paths and provider diagnostics never cross the UI-facing refusal seam.
+    case invalidAttachment
 }
 
 /// Provider response shape compiled at the provider-neutral seam. The current
