@@ -92,6 +92,12 @@ final class ManagedAgentTileNSView: TileNSView {
     private var capabilityObserverToken: UUID?
     private var v2RenderedDocument = AgentDocument()
     private var v2RenderError: Error?
+    /// Version of the reducer document this tile has already forwarded. The
+    /// reducer advances it exactly once per accepted mutation, so it is an O(1)
+    /// stand-in for "has the semantic document changed" — see
+    /// `synchronizeV2Transcript`. `nil` after a projection reset, which restarts
+    /// the reducer's numbering and must always resynchronize.
+    private var lastForwardedDocumentVersion: UInt64?
     private var isProbingV2HeaderActions = false
     /// P4.8: custom model and effort controls for THIS agent's next turn. The
     /// footer owns their presentation and emits partial writes; this tile remains
@@ -197,7 +203,7 @@ final class ManagedAgentTileNSView: TileNSView {
         v2ActionButton?.action = #selector(performV2PrimaryAction)
         setContentView(makeV2ContentView())
         applyHeader(status: self.descriptor.status)
-        synchronizeV2Transcript()
+        synchronizeV2Transcript(final: true)
     }
 
     required init?(coder: NSCoder) {
@@ -597,7 +603,10 @@ final class ManagedAgentTileNSView: TileNSView {
         locationStaleTimer = nil
         locationStatus.clear()
         applyHeader(status: model.currentStatus)
-        synchronizeV2Transcript()
+        // A reset restarts the reducer's version numbering, so the forwarded
+        // version can no longer be compared against it.
+        lastForwardedDocumentVersion = nil
+        synchronizeV2Transcript(final: true)
     }
 
     /// P2A.7: says that this agent came back from a previous launch.
@@ -629,13 +638,15 @@ final class ManagedAgentTileNSView: TileNSView {
         descriptor.statusUpdatedAt = Date()
         agentStatus = .idle
         applyHeader(status: .idle)
-        synchronizeV2Transcript()
+        synchronizeV2Transcript(final: true)
     }
 
     /// Shows the prompt the user just submitted as its own "you" entry.
     func appendUserPrompt(_ text: String) {
         model.appendUserPrompt(text)
-        synchronizeV2Transcript()
+        // The user's own prompt is a direct response to their keystroke; echo it
+        // without waiting on the streaming gate.
+        synchronizeV2Transcript(final: true)
     }
 
     func ingest(_ event: AgentRuntimeEvent) {
@@ -666,7 +677,19 @@ final class ManagedAgentTileNSView: TileNSView {
         model.ingest(event)
         refreshV2TurnSnapshot()
         refreshLocationStatus()
-        synchronizeV2Transcript()
+        // Streamed chunks ride the 30Hz visual gate. A turn boundary or an opened
+        // request is the last frame of that stream and the moment the reader acts
+        // on, so it presents immediately rather than waiting out the interval.
+        let settles: Bool
+        switch event {
+        case .turnCompleted, .runtimeError,
+             .sessionStateChanged(.ready), .sessionStateChanged(.stopped), .sessionStateChanged(.error),
+             .requestOpened, .requestResolved, .userInputRequested, .userInputResolved:
+            settles = true
+        default:
+            settles = false
+        }
+        synchronizeV2Transcript(final: settles)
     }
 
     /// Re-read the supervisor's turn truth and repaint everything derived from it:
@@ -827,7 +850,7 @@ final class ManagedAgentTileNSView: TileNSView {
         )
     }
 
-    private func synchronizeV2Transcript() {
+    private func synchronizeV2Transcript(final: Bool = false) {
         guard let transcript = transcriptCollectionFixture else { return }
         // The content reducer owns the semantic document (locked rule 6): request
         // blocks arrive from AgentTranscriptProjection like every other event, so
@@ -836,42 +859,35 @@ final class ManagedAgentTileNSView: TileNSView {
         // per mutation, the list contract requires exactly-once steps), and a
         // projection reset converges the same way: the emptied document diffs
         // against the last rendered snapshot and removes every stale row.
-        let entries = model.document.entries
-        guard entries != v2RenderedDocument.entries else { return }
-        let next = AgentDocument(version: v2RenderedDocument.version &+ 1, entries: entries)
-        let oldRows = v2RenderedDocument.entries.flatMap { entry in
-            entry.blocks.map { ($0.id, entry.role, $0) }
-        }
-        let newRows = next.entries.flatMap { entry in
-            entry.blocks.map { ($0.id, entry.role, $0) }
-        }
-        let oldByID = Dictionary(uniqueKeysWithValues: oldRows.map { ($0.0, ($0.1, $0.2)) })
-        let newByID = Dictionary(uniqueKeysWithValues: newRows.map { ($0.0, ($0.1, $0.2)) })
-        let oldIDs = oldRows.map(\.0)
-        let newIDs = newRows.map(\.0)
-        let inserted = newIDs.filter { oldByID[$0] == nil }
-        let removed = oldIDs.filter { newByID[$0] == nil }
-        let updated = newIDs.filter { id in
-            guard let old = oldByID[id], let new = newByID[id] else { return false }
-            return old.0 != new.0 || old.1 != new.1
-        }
-        let oldIndex = Dictionary(uniqueKeysWithValues: oldIDs.enumerated().map { ($0.element, $0.offset) })
-        let moved = newIDs.enumerated().compactMap { index, id in
-            oldIndex[id].map { $0 != index ? id : nil } ?? nil
-        }.filter { !inserted.contains($0) }
+        // Change detection is the reducer's version, not an `entries` comparison.
+        // `contentDelta` arrives once per streamed chunk, and comparing entries
+        // deep-compared every block's text in the entire transcript on every
+        // chunk — so per-chunk cost grew with conversation length and long
+        // sessions stalled the main thread.
+        let document = model.document
+        guard document.version != lastForwardedDocumentVersion else { return }
+        lastForwardedDocumentVersion = document.version
+        let next = AgentDocument(version: v2RenderedDocument.version &+ 1, entries: document.entries)
         do {
-            let patch = try AgentDocumentPatch(
-                fromVersion: v2RenderedDocument.version,
-                toVersion: next.version,
-                inserted: inserted,
-                updated: updated,
-                removed: removed,
-                moved: moved
+            // `enqueue` gates presentation at 30Hz and recomputes the touched rows
+            // from the document at flush time, so the enqueued patch only has to be
+            // one valid version step. Deriving node-level sets here re-scanned the
+            // whole document per chunk to build a diff the list then recomputed
+            // anyway, and calling `apply` directly bypassed the visual-update gate
+            // entirely — the one-apply-per-token shape P3.11's negative witness
+            // exists to fail.
+            try transcript.enqueue(
+                document: next,
+                patch: AgentDocumentPatch.empty(fromVersion: v2RenderedDocument.version),
+                final: final
             )
-            try transcript.apply(document: next, patch: patch)
             v2RenderedDocument = next
             v2RenderError = nil
             if case .needsAction = v2TurnSnapshot?.state {
+                // A pending request is an interaction boundary, not a streaming
+                // frame: present it before scrolling so the anchor resolves
+                // against the rows the reader is about to act on.
+                transcript.flushPendingVisualUpdate()
                 transcript.jumpToLatest()
             }
         } catch {

@@ -214,6 +214,12 @@ final class AgentTranscriptListView: NSView {
         }, final: final)
     }
 
+    /// Presents any enqueued-but-unpresented snapshot immediately. Callers that
+    /// need the rendered rows to match the semantic document right now — an
+    /// interaction boundary, a probe, a teardown — use this instead of dropping
+    /// back to the ungated `apply` path.
+    func flushPendingVisualUpdate() { updateScheduler.flush() }
+
     var qaVisualApplyCount: Int { updateScheduler.visualApplyCount }
     var qaLastInvalidatedTopLevelCount: Int { lastInvalidatedTopLevelCount }
     var qaRenderingErrorDescription: String? { renderingError.map(String.init(describing:)) }

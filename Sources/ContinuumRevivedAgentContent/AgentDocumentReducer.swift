@@ -67,7 +67,11 @@ public struct AgentDocumentReducer: Sendable {
                 updated = [entryID, blockID]
             } else {
                 let blockID = try markupID(entryID: entryID)
-                let block = AgentBlock(id: blockID, kind: .paragraph, payload: .paragraph([.text(delta)]))
+                let block = AgentBlock(
+                    id: blockID,
+                    kind: .paragraph,
+                    payload: .paragraph(appending(delta, to: []))
+                )
                 let blockIndex = document.entries[entryIndex].blocks.count
                 document.entries[entryIndex].blocks.append(block)
                 document.entries[entryIndex].lifecycle = .open(markupBlockID: blockID)
@@ -468,10 +472,73 @@ public struct AgentDocumentReducer: Sendable {
         return ids.filter { seen.insert($0).inserted }
     }
 
+    /// Streaming appends extend the trailing text run until it reaches this size,
+    /// then open a new run.
+    ///
+    /// A document snapshot is always live elsewhere while a turn streams (the
+    /// rendered snapshot the list holds), so the accumulated string is never
+    /// uniquely referenced and `+` must copy it. Concatenating into one
+    /// ever-growing run therefore copied the whole answer-so-far on every
+    /// streamed chunk, making a single long response cost O(length²) to
+    /// assemble — the reason a long turn degraded while total session length did
+    /// not matter. Capping the run bounds each append to a constant instead.
+    ///
+    /// The cap is well above ordinary content, so a normal block is still one
+    /// inline and finished transcripts keep their canonical single-run shape;
+    /// only genuinely long streamed answers split, and every reader already
+    /// treats `.paragraph` as a run sequence (emphasis, code and links produce
+    /// several runs today).
+    public static let maximumStreamingRunUTF8Length = 4096
+
     private func appending(_ delta: String, to inlines: [AgentInline]) -> [AgentInline] {
         var result = inlines
-        if case let .text(text) = result.last { result[result.count - 1] = .text(text + delta) }
-        else { result.append(.text(delta)) }
+        let cap = Self.maximumStreamingRunUTF8Length
+
+        // Keep the overwhelmingly common small-delta path direct. Checking both
+        // operands matters: merely checking that the existing run is below the
+        // cap lets one large provider delta create an arbitrarily oversized run.
+        if case let .text(text) = result.last {
+            let existingBytes = text.utf8.count
+            let deltaBytes = delta.utf8.count
+            if existingBytes <= cap, deltaBytes <= cap - existingBytes {
+                result[result.count - 1] = .text(text + delta)
+                return result
+            }
+        }
+
+        if delta.isEmpty {
+            result.append(.text(""))
+            return result
+        }
+
+        // Provider chunks are not size-bounded. Fill any remaining capacity and
+        // split a large delta at Unicode-scalar boundaries so every run remains
+        // valid UTF-8 while the concatenated source stays exact.
+        var buffer = ""
+        var bufferBytes = 0
+        var ownsTrailingTextRun = false
+        if case let .text(text) = result.last, text.utf8.count < cap {
+            buffer = text
+            bufferBytes = text.utf8.count
+            ownsTrailingTextRun = true
+            result.removeLast()
+        }
+
+        for scalar in delta.unicodeScalars {
+            let scalarText = String(scalar)
+            let scalarBytes = scalarText.utf8.count
+            if bufferBytes + scalarBytes > cap {
+                result.append(.text(buffer))
+                buffer = ""
+                bufferBytes = 0
+                ownsTrailingTextRun = false
+            }
+            buffer.append(contentsOf: scalarText)
+            bufferBytes += scalarBytes
+        }
+        if !buffer.isEmpty || ownsTrailingTextRun || (delta.isEmpty && result.isEmpty) {
+            result.append(.text(buffer))
+        }
         return result
     }
 }

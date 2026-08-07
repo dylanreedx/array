@@ -236,6 +236,51 @@ func runDocumentReducerChecks() {
         expect(fast.document.version == 10_001 && paragraphText(fast.document.entries[0].blocks[0])?.count == 10_000,
                "10,000 streaming mutations must be retained and versioned")
 
+        // Streamed text must land in BOUNDED runs. A single ever-growing run is
+        // never uniquely referenced while a snapshot is live, so every chunk
+        // copies the whole answer-so-far and one long response costs O(length²)
+        // to assemble — the shape that made a long turn degrade while total
+        // session length did not matter. Assert the representation that keeps
+        // each append constant-cost, and assert it in a way one run would fail:
+        // a lone 10,000-byte run trivially exceeds the cap.
+        guard case let .paragraph(streamedRuns) = fast.document.entries[0].blocks[0].payload else {
+            fail("streaming markup must project as a paragraph")
+        }
+        let runLengths = streamedRuns.map { run -> Int in
+            if case let .text(value) = run { return value.utf8.count }
+            return 0
+        }
+        let cap = AgentDocumentReducer.maximumStreamingRunUTF8Length
+        let oversized = runLengths.filter { $0 > cap }
+        expect(oversized.isEmpty,
+               "no streamed run may exceed \(cap) UTF-8 bytes; found \(oversized.count) oversized run(s) \(oversized.prefix(3))")
+        expect(runLengths.count == (10_000 + cap - 1) / cap && runLengths.reduce(0, +) == 10_000,
+               "10,000 streamed bytes must split into \((10_000 + cap - 1) / cap) bounded runs preserving every byte; measured \(runLengths.count) run(s) totalling \(runLengths.reduce(0, +))")
+
+        // A provider delta is not guaranteed to be one byte or smaller than the
+        // cap. One large, multibyte delta must be split at valid scalar boundaries
+        // while preserving its exact source and the same per-run bound.
+        var largeDeltaReducer = AgentDocumentReducer()
+        let largeDeltaEntry = reducerID("entry:large-stream-delta")
+        _ = try largeDeltaReducer.apply(.beginEntry(
+            id: largeDeltaEntry,
+            role: .assistant,
+            provenance: .localNotice(reason: "large delta")
+        ))
+        let largeDelta = String(repeating: "é", count: cap) + "tail"
+        _ = try largeDeltaReducer.apply(.appendMarkup(entryID: largeDeltaEntry, delta: largeDelta))
+        guard case let .paragraph(largeDeltaRuns) = largeDeltaReducer.document.entries[0].blocks[0].payload else {
+            fail("one large streaming delta must project as a paragraph")
+        }
+        let largeDeltaRunLengths = largeDeltaRuns.compactMap { run -> Int? in
+            if case let .text(value) = run { return value.utf8.count }
+            return nil
+        }
+        expect(largeDeltaRunLengths.allSatisfy { $0 <= cap },
+               "one large multibyte provider delta must not create a run above \(cap) UTF-8 bytes; measured \(largeDeltaRunLengths)")
+        expect(paragraphText(largeDeltaReducer.document.entries[0].blocks[0]) == largeDelta,
+               "splitting a large multibyte delta must preserve its exact source")
+
         // Populate many siblings, then repeatedly update one existing block.
         // Rebuilding the document-wide index on every upsert makes this witness
         // quadratic and exceed the focused budget.
