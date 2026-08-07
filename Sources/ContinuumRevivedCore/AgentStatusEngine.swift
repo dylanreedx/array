@@ -425,13 +425,23 @@ public struct AgentSessionStartInput: Codable, Equatable, Sendable {
     }
 }
 
-public struct AgentSendTurnInput: Codable, Equatable, Sendable {
+public struct AgentSendTurnInput: Equatable, Sendable {
     public var threadId: String
-    public var text: String
+    public var prompt: AgentPrompt
+
+    /// Text-only compatibility for the existing adapter contract.
+    public var text: String {
+        get { prompt.text }
+        set { prompt.text = newValue }
+    }
+
+    public init(threadId: String, prompt: AgentPrompt) {
+        self.threadId = threadId
+        self.prompt = prompt
+    }
 
     public init(threadId: String, text: String) {
-        self.threadId = threadId
-        self.text = text
+        self.init(threadId: threadId, prompt: AgentPrompt(text))
     }
 }
 

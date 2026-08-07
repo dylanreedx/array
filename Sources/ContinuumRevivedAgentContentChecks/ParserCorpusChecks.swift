@@ -27,6 +27,8 @@ func parserPlainText(_ blocks: [AgentBlock]) -> String {
         case let .plan(plan): own = plan.title ?? ""
         case let .diff(diff): own = diff.text
         case let .approval(request), let .question(request): own = corpusInlineText(request.prompt)
+        case let .image(image): own = image.attachment.displayName ?? ""
+        case let .imageGallery(gallery): own = gallery.images.compactMap { $0.attachment.displayName }.joined(separator: "\n")
         case let .error(error): own = error.message
         case let .notice(notice): own = corpusInlineText(notice.message)
         case let .opaque(opaque):

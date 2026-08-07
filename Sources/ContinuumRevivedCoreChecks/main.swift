@@ -102,6 +102,11 @@ if CommandLine.arguments.contains("--agent-transcript-projection-check") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--agent-prompt-image-contract-check") {
+    runAgentPromptImageContractChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--local-transcript-node-check") {
     runLocalTranscriptNodeChecks()
     Foundation.exit(0)
@@ -10136,6 +10141,7 @@ runCanvasMirrorShowOnCanvasChecks()
 runPiEventTranslatorChecks()
 runPiExecutableResolutionChecks()
 runPiSessionArgsChecks()
+runAgentPromptImageContractChecks()
 
 // Ticket: docs/38-tickets/90-agent-ux/P0.10-explicit-model-id.md
 runAgentModelConfigChecks()

@@ -75,6 +75,14 @@ func runDocumentSchemaChecks() {
                 AgentBlock(id: nodeID("block.diff.1"), kind: .diff, payload: .diff(.init(text: "@@ -1 +1 @@", language: "diff"))),
                 AgentBlock(id: nodeID("block.approval.1"), kind: .approval, payload: .approval(.init(prompt: [.text("Allow?")], status: .pending, choices: ["Allow", "Deny"]))),
                 AgentBlock(id: nodeID("block.question.1"), kind: .question, payload: .question(.init(prompt: [.text("Which option?")], status: .pending, choices: ["A", "B"]))),
+                AgentBlock(id: nodeID("block.image.1"), kind: .image, payload: .image(.init(
+                    attachment: .init(id: AgentImageAttachmentID(rawValue: "image-1")!, displayName: "sketch.png", contentType: "image/png", byteCount: 12, pixelWidth: 2, pixelHeight: 3),
+                    caption: [.text("Sketch")]
+                ))),
+                AgentBlock(id: nodeID("block.gallery.1"), kind: .imageGallery, payload: .imageGallery(.init(images: [
+                    .init(attachment: .init(id: AgentImageAttachmentID(rawValue: "image-2")!, displayName: "a.jpg")),
+                    .init(attachment: .init(id: AgentImageAttachmentID(rawValue: "image-3")!, displayName: "b.jpg"))
+                ]))),
                 AgentBlock(id: nodeID("block.error.1"), kind: .error, payload: .error(.init(message: "Runner stopped", code: "runner.exit", isRecoverable: true))),
                 AgentBlock(id: nodeID("block.notice.1"), kind: .notice, payload: .notice(.init(message: [.text("Detached")], status: .interrupted))),
                 AgentBlock(id: nodeID("block.unknown.1"), kind: AgentBlockKind(rawValue: "provider.future-card")!, payload: .opaque(.init(debugLabel: "future-card", value: .object(["version": .integer(2), "enabled": .bool(true), "ratio": .number(0.5), "items": .array([.null, .string("value")])]))))
@@ -98,9 +106,9 @@ func runDocumentSchemaChecks() {
 
     let builtIns: [AgentBlockKind] = [
         .paragraph, .heading, .list, .listItem, .quote, .thematicBreak, .fencedCode,
-        .toolCall, .commandOutput, .plan, .diff, .approval, .question, .error, .notice, .unknown
+        .toolCall, .commandOutput, .plan, .diff, .approval, .question, .image, .imageGallery, .error, .notice, .unknown
     ]
-    expect(Set(builtIns.map(\.rawValue)).count == 16, "all 16 built-in semantic block kinds must be distinct")
+    expect(Set(builtIns.map(\.rawValue)).count == 18, "all 18 built-in semantic block kinds must be distinct")
     expect(AgentBlockKind(rawValue: "extension.vendor-card.v2") != nil, "namespaced future block kind must be accepted")
 
     let invalidKinds = ["", "Paragraph", "tool call", "tool..call", "tool-", "_tool", "éclair"]
@@ -117,5 +125,5 @@ func runDocumentSchemaChecks() {
                "AgentBlockKind Codable accepted invalid semantic key \(invalidJSON)")
     }
 
-    print("Document schema checks passed: 4 entry roles, 16 built-in block kinds, 15 typed built-in payloads plus an opaque fallback, 7 inline forms, validated IDs/kinds/ranges, and exact mixed-document JSON round-trip")
+    print("Document schema checks passed: 4 entry roles, 18 built-in block kinds, 17 typed built-in payloads plus an opaque fallback, 7 inline forms, image/gallery payloads, validated IDs/kinds/ranges, and exact mixed-document JSON round-trip")
 }

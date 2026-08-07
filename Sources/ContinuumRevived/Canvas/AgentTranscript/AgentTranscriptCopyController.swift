@@ -36,6 +36,9 @@ struct AgentTranscriptCopyController {
             }).compactMap { $0 }
             return safe.isEmpty ? "File changes" : safe.joined(separator: "\n")
         case let .approval(request), let .question(request): return plainText(request.prompt)
+        case let .image(image): return image.attachment.displayName ?? "Image"
+        case let .imageGallery(gallery):
+            return gallery.images.map { $0.attachment.displayName ?? "Image" }.joined(separator: "\n")
         case .list, .listItem, .quote, .thematicBreak, .opaque: return block.children.map(plainText(for:)).joined(separator: "\n")
         }
     }

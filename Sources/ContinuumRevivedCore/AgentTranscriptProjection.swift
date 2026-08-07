@@ -218,21 +218,39 @@ public struct AgentTranscriptProjection: Sendable {
     @discardableResult
     public mutating func appendUserPrompt(
         id: AgentNodeID,
-        text: String
+        prompt: AgentPrompt
     ) throws -> [AgentDocumentPatch] {
         guard !document.entries.contains(where: { $0.id == id }) else { return [] }
 
         var patches = try applyReturningPatches(closeStreamingRun())
         compatibilityIDs[id] = id.rawValue
-        let blockID = childID(of: id, key: "prompt")
-        patches += try applyReturningPatches([
-            .beginEntry(id: id, role: .user, provenance: .localPrompt(promptID: id.rawValue)),
-            .upsertStructured(entryID: id, block: AgentBlock(
-                id: blockID, kind: .paragraph, payload: .paragraph([.text(text)])
-            )),
-            .finishEntry(id: id)
-        ])
+        var mutations: [AgentDocumentMutation] = [
+            .beginEntry(id: id, role: .user, provenance: .localPrompt(promptID: id.rawValue))
+        ]
+        if !prompt.text.isEmpty || prompt.imageAttachments.isEmpty {
+            let blockID = childID(of: id, key: "prompt")
+            mutations.append(.upsertStructured(entryID: id, block: AgentBlock(
+                id: blockID, kind: .paragraph, payload: .paragraph([.text(prompt.text)])
+            )))
+        }
+        if !prompt.imageAttachments.isEmpty {
+            let blockID = childID(of: id, key: "images")
+            mutations.append(.upsertStructured(entryID: id, block: AgentBlock(
+                id: blockID,
+                kind: .imageGallery,
+                payload: .imageGallery(.init(images: prompt.imageAttachments.map(\.imagePayload)))
+            )))
+        }
+        mutations.append(.finishEntry(id: id))
+        patches += try applyReturningPatches(mutations)
         return patches
+    }
+
+    public mutating func appendUserPrompt(
+        id: AgentNodeID,
+        text: String
+    ) throws -> [AgentDocumentPatch] {
+        try appendUserPrompt(id: id, prompt: AgentPrompt(text))
     }
 
     /// Adds an idempotent Continuum-authored notice. The heading child keeps

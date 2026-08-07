@@ -54,11 +54,36 @@ public final class PiAgentRunner: @unchecked Sendable {
     }
 
     /// The Pi args after the executable (and any `/usr/bin/env` prefix): the
-    /// json/model flags, the session flag, extras, then the prompt. Pure so it
-    /// can be pinned in the matrix.
-    public static func processArguments(model: String, thinking: String, sessionId: String?, extraArgs: [String], prompt: String) -> [String] {
+    /// json/model flags, the session flag, extras, then the provider prompt
+    /// segments. Pure so it can be pinned in the matrix.
+    public static func processArguments(model: String, thinking: String, sessionId: String?, extraArgs: [String], prompt: AgentPrompt) -> [String] {
         let sessionArgs = sessionId.map { ["--session-id", $0] } ?? ["--no-session"]
-        return ["-p", "--mode", "json", "--model", model, "--thinking", thinking] + sessionArgs + extraArgs + [prompt]
+        return ["-p", "--mode", "json", "--model", model, "--thinking", thinking]
+            + sessionArgs
+            + extraArgs
+            + promptArgumentSegments(prompt)
+    }
+
+    /// Text-only compatibility wrapper. Keeps the historical argv byte shape
+    /// for callers that have not adopted local attachments.
+    public static func processArguments(model: String, thinking: String, sessionId: String?, extraArgs: [String], prompt: String) -> [String] {
+        processArguments(
+            model: model,
+            thinking: thinking,
+            sessionId: sessionId,
+            extraArgs: extraArgs,
+            prompt: AgentPrompt(prompt)
+        )
+    }
+
+    /// Pi's print boundary receives safe argv elements, not a shell command.
+    /// The visible text stays separate from local image path capabilities, and
+    /// each image is materialized as its own `@/local/file` token.
+    public static func promptArgumentSegments(_ prompt: AgentPrompt) -> [String] {
+        var segments: [String] = []
+        if !prompt.text.isEmpty { segments.append(prompt.text) }
+        segments.append(contentsOf: prompt.imageAttachments.map(\.piPathReference))
+        return segments.isEmpty ? [""] : segments
     }
 
     public enum RunError: Error {
@@ -160,7 +185,7 @@ public final class PiAgentRunner: @unchecked Sendable {
     /// Runs Pi with `prompt`, streaming events to `onEvent` until Pi exits.
     /// Blocking; call off the main thread. `onEvent` is invoked on the
     /// runner's serial queue.
-    public func run(prompt: String, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+    public func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
         let process = Process()
         // Resolve `pi` to an absolute path so a GUI-launched app (thin PATH)
         // finds it; falls back to `/usr/bin/env pi` for shell launches. See
@@ -228,6 +253,11 @@ public final class PiAgentRunner: @unchecked Sendable {
         if process.terminationStatus != 0 {
             throw RunError.piFailed(exitCode: process.terminationStatus, stderr: errText)
         }
+    }
+
+    /// Text-only compatibility wrapper for existing managed-agent callers.
+    public func run(prompt: String, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+        try run(prompt: AgentPrompt(prompt), onEvent: onEvent)
     }
 
     public func stop() {

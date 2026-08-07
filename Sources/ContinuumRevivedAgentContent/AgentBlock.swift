@@ -59,6 +59,8 @@ public struct AgentBlockKind: RawRepresentable, Codable, Equatable, Hashable, Se
     public static let diff = Self(rawValue: "diff")!
     public static let approval = Self(rawValue: "approval")!
     public static let question = Self(rawValue: "question")!
+    public static let image = Self(rawValue: "image")!
+    public static let imageGallery = Self(rawValue: "image-gallery")!
     public static let error = Self(rawValue: "error")!
     public static let notice = Self(rawValue: "notice")!
     public static let unknown = Self(rawValue: "unknown")!
@@ -278,6 +280,8 @@ public enum AgentBlockPayload: Codable, Equatable, Sendable {
     case diff(AgentDiffPayload)
     case approval(AgentRequestPayload)
     case question(AgentRequestPayload)
+    case image(AgentImagePayload)
+    case imageGallery(AgentImageGalleryPayload)
     case error(AgentErrorPayload)
     case notice(AgentNoticePayload)
     case opaque(AgentOpaquePayload)
