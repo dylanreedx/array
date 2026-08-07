@@ -185,6 +185,18 @@ private func runAgentToolDetailImplicitSensitivityChecks() async throws {
         expect(files.isEmpty,
                "AgentToolDetailStore privacy: \(testCase.label) implicit secret must omit affected path without explicitSecrets, got \(files)")
     }
+    let hyphenStartStore = AgentToolDetailStore(clock: { clock.now() }, timeToLive: 60)
+    let hyphenStartSecret = "-leading-start-secret"
+    _ = await hyphenStartStore.recordStart(AgentToolDetailStart(
+        providerItemID: "implicit-hyphen-start",
+        toolName: "run",
+        arguments: [AgentToolDetailField(key: "command", value: "runner --access-token \(hyphenStartSecret)")],
+        affectedFiles: [URL(fileURLWithPath: "/tmp/implicit-\(hyphenStartSecret)/start.swift")]
+    ))
+    let hyphenStartFiles = await hyphenStartStore.detail(for: "implicit-hyphen-start")?.affectedFiles ?? []
+    expect(hyphenStartFiles.isEmpty,
+           "AgentToolDetailStore privacy: hyphen-leading argv secret must omit affected path without explicitSecrets")
+
     let outputStore = AgentToolDetailStore(clock: { clock.now() }, timeToLive: 60)
     let outputSecret = "implicit-output-secret"
     _ = await outputStore.recordEnd(AgentToolDetailEnd(
@@ -200,6 +212,20 @@ private func runAgentToolDetailImplicitSensitivityChecks() async throws {
     expect(outputDetail?.output?.text.contains(outputSecret) == false,
            "AgentToolDetailStore privacy: output-discovered header secret must be redacted without explicitSecrets")
 
+    let hyphenOutputStore = AgentToolDetailStore(clock: { clock.now() }, timeToLive: 60)
+    let hyphenOutputSecret = "-leading-output-secret"
+    _ = await hyphenOutputStore.recordEnd(AgentToolDetailEnd(
+        providerItemID: "implicit-hyphen-output",
+        output: "runner --access-token \(hyphenOutputSecret)",
+        status: .completed,
+        affectedFiles: [URL(fileURLWithPath: "/tmp/implicit-\(hyphenOutputSecret)/output.swift")]
+    ))
+    let hyphenOutputDetail = await hyphenOutputStore.detail(for: "implicit-hyphen-output")
+    expect(hyphenOutputDetail?.affectedFiles.isEmpty == true,
+           "AgentToolDetailStore privacy: hyphen-leading output secret must omit affected path without explicitSecrets")
+    expect(hyphenOutputDetail?.output?.text.contains(hyphenOutputSecret) == false,
+           "AgentToolDetailStore privacy: hyphen-leading output secret must be redacted without explicitSecrets")
+
     let argvCases: [(option: String, separator: String, secret: String)] = [
         ("--access-token", " ", "argv-access-secret"),
         ("--session-key", "=", "argv-session-secret"),
@@ -210,7 +236,8 @@ private func runAgentToolDetailImplicitSensitivityChecks() async throws {
         ("--apiKey", " ", "argv-api-key-secret"),
         ("--db-key", "=", "argv-db-key-secret"),
         ("--oauth-token", " ", "argv-oauth-token-secret"),
-        ("--secret-value", "=", "argv-secret-value-secret")
+        ("--secret-value", "=", "argv-secret-value-secret"),
+        ("--access-token", " ", "-leading-argv-secret")
     ]
     for testCase in argvCases {
         let redacted = SecretRedactor.redact("runner \(testCase.option)\(testCase.separator)\(testCase.secret)")
@@ -467,6 +494,49 @@ private func runAgentToolDetailConcurrencyChecks() async throws {
             let timestampLabel = timestamp == nil ? "absent" : "equal"
             expect(leftValue?.toolName == rightValue?.toolName && leftValue?.arguments == rightValue?.arguments,
                    "AgentToolDetailStore ordering: cross-store \(timestampLabel) secret-bearing start winner must not depend on random HMAC or arrival")
+        }
+    }
+
+    // Secret-only sanitized ties must merge their opaque associations. The
+    // subsequent end supplies only A: either arrival order must therefore
+    // produce the same honest fail-closed result in separate store lifecycles.
+    for timestamp in [base.addingTimeInterval(5), nil] {
+        for index in 0..<12 {
+            let secretA = "secret-only-start-a-\(index)"
+            let secretB = "secret-only-start-b-\(index)"
+            let providerItemID = AgentToolDetailID("tool-secret-only-start-\(index)")!
+            let a = AgentToolDetailStart(
+                providerItemID: providerItemID,
+                toolName: "bash",
+                arguments: [AgentToolDetailField(key: "password", value: secretA)],
+                startedAt: timestamp
+            )
+            let b = AgentToolDetailStart(
+                providerItemID: providerItemID,
+                toolName: "bash",
+                arguments: [AgentToolDetailField(key: "password", value: secretB)],
+                startedAt: timestamp
+            )
+            let left = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+            let right = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+            _ = await left.recordStart(a)
+            _ = await left.recordStart(b)
+            _ = await right.recordStart(b)
+            _ = await right.recordStart(a)
+            let end = AgentToolDetailEnd(
+                providerItemID: providerItemID,
+                output: "echoed \(secretA)",
+                status: .completed,
+                endedAt: timestamp,
+                explicitSecrets: [secretA]
+            )
+            let leftValue = await left.recordEnd(end)
+            let rightValue = await right.recordEnd(end)
+            let timestampLabel = timestamp == nil ? "absent" : "equal"
+            expect(leftValue.output?.text == AgentToolDetailSanitizer.redactionUnavailableMarker &&
+                   rightValue.output?.text == AgentToolDetailSanitizer.redactionUnavailableMarker &&
+                   leftValue.output == rightValue.output,
+                   "AgentToolDetailStore ordering: cross-store \(timestampLabel) secret-only start tie must merge associations before later output redaction")
         }
     }
 

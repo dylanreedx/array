@@ -20,7 +20,10 @@ public enum SecretRedactor {
         // Providers commonly serialize argv as `--token value`, not only as
         // `--token=value`. Parse an option/value pair with a bounded value and
         // redact only names made from credential words; near matches such as
-        // `--tokenize` and `--monkey` remain ordinary arguments.
+        // `--tokenize` and `--monkey` remain ordinary arguments. A token that
+        // starts with `-` is ambiguous with another option, so a sensitive
+        // option treats it as its value (fail closed) rather than dropping a
+        // possible credential.
         redacted = redactSensitiveArguments(redacted)
         redacted = replace(redacted, pattern: #"(?i)(password|passwd|pwd|secret|token|api[_-]?key|authorization|auth|credential|credentials|cookie|session|signing[_-]?key|signature|private[_-]?key|access[_-]?key|refresh[_-]?key|client[_-]?secret|ssh[_-]?key|jwt)(\s*[=:]\s*)([^\s\"'&,}]+)"#, template: "$1$2[REDACTED]")
         redacted = replace(redacted, pattern: #"(?i)(document\.querySelector\([^\n]+\)\.value\s*=\s*)['\"][^'\"]+['\"]"#, template: "$1'[REDACTED]'")
@@ -115,7 +118,7 @@ public enum SecretRedactor {
     private static func argvMatches(in text: String) -> [NSTextCheckingResult] {
         matches(
             in: text,
-            pattern: #"(?i)(^|[\s])(--?[A-Za-z0-9][A-Za-z0-9_-]{0,79})(=|[\t ]+)(\"(?:\\.|[^\"]){0,4095}\"|'(?:\\.|[^']){0,4095}'|[^\s-][^\s]{0,4095})"#
+            pattern: #"(?i)(^|[\s])(--?[A-Za-z0-9][A-Za-z0-9_-]{0,79})(=|[\t ]+)(\"(?:\\.|[^\"]){0,4095}\"|'(?:\\.|[^']){0,4095}'|[^\s][^\s]{0,4095})"#
         )
     }
 

@@ -557,6 +557,18 @@ public actor AgentToolDetailStore {
                !record.sensitiveStartFingerprints.isSubset(of: record.latestEndExplicitFingerprints) {
                 record.output = sanitizer.redactionUnavailableOutput()
             }
+        } else if record.latestStartTieKey == tieKey,
+                  record.latestStartTimestamp == start.startedAt {
+            // A fully sanitized tie key intentionally hides secret values. If
+            // two starts collide there, retain the union of their opaque
+            // same-lifecycle associations instead of whichever arrived first.
+            // This makes later output handling fail closed for every candidate
+            // secret while keeping the secrets themselves out of the record.
+            record.sensitiveStartFingerprints.formUnion(sensitiveFingerprints)
+            if record.output != nil,
+               !record.sensitiveStartFingerprints.isSubset(of: record.latestEndExplicitFingerprints) {
+                record.output = sanitizer.redactionUnavailableOutput()
+            }
         }
         record.updatedAt = observedAt
         record.affectedFiles = sanitizer.sanitizeFiles(start.affectedFiles, existing: record.affectedFiles, explicitSecrets: eventSecrets)
