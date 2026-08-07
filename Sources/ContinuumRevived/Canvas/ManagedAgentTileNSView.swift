@@ -77,10 +77,12 @@ final class ManagedAgentTileNSView: TileNSView {
     private var locationProjectName: String?
     private var locationStaleTimer: Timer?
     private var streamingMarkupParseTimer: Timer?
+    private var streamingMarkupParseTimerGeneration: UInt64 = 0
 
     private let transcriptCollectionFixture: AgentTranscriptListView?
     private let v2Composer: AgentComposerView?
     private let v2ActionButton: ComposerActionButton?
+    private let projectionMonotonicNow: @Sendable () -> TimeInterval
     private var v2ActionAdapter: ManagedAgentTileActionAdapter?
     private var v2DraftStore: AgentComposerDraftStore?
     private var v2PromptHistory: AgentPromptHistory?
@@ -156,10 +158,12 @@ final class ManagedAgentTileNSView: TileNSView {
     init(
         tile: Tile,
         threadId: String = "thread-main",
-        descriptor: AgentDescriptor? = nil
+        descriptor: AgentDescriptor? = nil,
+        monotonicNow: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     ) {
         self.threadId = threadId
-        self.model = ManagedAgentTranscriptModel(threadId: threadId)
+        self.projectionMonotonicNow = monotonicNow
+        self.model = ManagedAgentTranscriptModel(threadId: threadId, monotonicNow: monotonicNow)
         // P5.5 acceptance: v2 IS the tile. The reversible construction seam and
         // the legacy view-only card path were removed at this supervised gate.
         self.transcriptCollectionFixture = AgentTranscriptListView()
@@ -212,8 +216,8 @@ final class ManagedAgentTileNSView: TileNSView {
     }
 
     isolated deinit {
+        prepareStreamingMarkupForTeardown(final: true)
         locationStaleTimer?.invalidate()
-        streamingMarkupParseTimer?.invalidate()
     }
 
     /// The thread this tile's transcript filters on. The app rebinds incoming
@@ -328,8 +332,7 @@ final class ManagedAgentTileNSView: TileNSView {
     /// is left alone, so a detached tile still SHOWS the agent it was following;
     /// `attach` is what clears it, on the next replay.
     func detach() {
-        flushPendingStreamingMarkupForBoundary(final: true)
-        cancelStreamingMarkupParseTimer()
+        prepareStreamingMarkupForTeardown(final: true)
         settleLocationForDetach()
         locationStaleTimer?.invalidate()
         locationStaleTimer = nil
@@ -599,9 +602,8 @@ final class ManagedAgentTileNSView: TileNSView {
 
     /// Drop the local projection so a replay renders exactly the agent it came from.
     private func resetProjection() {
-        flushPendingStreamingMarkupForBoundary(final: true)
-        cancelStreamingMarkupParseTimer()
-        model = ManagedAgentTranscriptModel(threadId: threadId)
+        prepareStreamingMarkupForTeardown(final: true)
+        model = ManagedAgentTranscriptModel(threadId: threadId, monotonicNow: projectionMonotonicNow)
         startedAt = nil
         promptInFlight = false
         descriptor.status = model.currentStatus
@@ -865,20 +867,25 @@ final class ManagedAgentTileNSView: TileNSView {
     private func cancelStreamingMarkupParseTimer() {
         streamingMarkupParseTimer?.invalidate()
         streamingMarkupParseTimer = nil
+        streamingMarkupParseTimerGeneration &+= 1
     }
 
     private func scheduleStreamingMarkupParseTimerIfNeeded() {
         cancelStreamingMarkupParseTimer()
         guard let deadline = model.nextStreamingMarkupParseDeadline else { return }
+        let generation = streamingMarkupParseTimerGeneration
         let delay = max(0, deadline - ProcessInfo.processInfo.systemUptime)
         let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
-            Task { @MainActor in self?.streamingMarkupParseTimerFired() }
+            Task { @MainActor [weak self] in
+                self?.streamingMarkupParseTimerFired(generation: generation)
+            }
         }
         streamingMarkupParseTimer = timer
         RunLoop.main.add(timer, forMode: .common)
     }
 
-    private func streamingMarkupParseTimerFired() {
+    private func streamingMarkupParseTimerFired(generation: UInt64) {
+        guard generation == streamingMarkupParseTimerGeneration else { return }
         streamingMarkupParseTimer = nil
         if model.flushPendingStreamingMarkupIfDue() {
             synchronizeV2Transcript()
@@ -890,6 +897,11 @@ final class ManagedAgentTileNSView: TileNSView {
         if model.flushPendingStreamingMarkup() {
             synchronizeV2Transcript(final: final)
         }
+    }
+
+    private func prepareStreamingMarkupForTeardown(final: Bool) {
+        flushPendingStreamingMarkupForBoundary(final: final)
+        cancelStreamingMarkupParseTimer()
     }
 
     private func synchronizeV2Transcript(final: Bool = false) {
@@ -1246,7 +1258,26 @@ final class ManagedAgentTileNSView: TileNSView {
     var qaLocationAccessibilityValue: String { locationStatus.qaLocationAccessibilityValue }
     var qaWhatAccessibilityValue: String { locationStatus.qaWhatAccessibilityValue }
     var qaLocationStaleTimerActive: Bool { locationStaleTimer?.isValid == true }
+    var qaStreamingMarkupParseTimerActive: Bool { streamingMarkupParseTimer?.isValid == true }
+    var qaStreamingMarkupParseTimerGeneration: UInt64 { streamingMarkupParseTimerGeneration }
+    var qaStreamingMarkupParseCount: Int { model.streamingMarkupParseCount }
+    func qaSemanticMarkupIsSingleStrongText(_ expected: String) -> Bool {
+        guard let payload = model.document.entries.first?.blocks.first?.payload else { return false }
+        switch payload {
+        case .paragraph(let inlines):
+            guard inlines.count == 1,
+                  case .strong(let strongInlines) = inlines[0],
+                  strongInlines.count == 1,
+                  case .text(let text) = strongInlines[0] else { return false }
+            return text == expected
+        default:
+            return false
+        }
+    }
+    var qaTranscriptCompatibilityBodies: [String] { model.compatibilityRows.map(\.body) }
     func qaRefreshLocation(at now: Date) { refreshLocationStatus(at: now) }
+    func qaPrepareStreamingMarkupForTeardown() { prepareStreamingMarkupForTeardown(final: true) }
+    func qaFireStreamingMarkupTimer(generation: UInt64) { streamingMarkupParseTimerFired(generation: generation) }
     var qaBranchChipIsWarning: Bool {
         agentHeader.qaBranchIsWarning
     }

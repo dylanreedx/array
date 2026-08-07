@@ -154,6 +154,7 @@ func runAgentTranscriptProjectionChecks() {
            "streamed Unicode heading/list/quote/fence Markdown must converge with one-shot parsing")
 
     let coalescedClock = DeterministicProjectionClock()
+    let productionProjectionStarted = ContinuousClock.now
     var coalesced = AgentTranscriptProjection(threadId: thread, monotonicNow: coalescedClock.now)
     coalesced.ingest(.turnStarted(threadId: thread, turnId: "turn-coalesced"))
     let deltaCount = 5_000
@@ -175,6 +176,15 @@ func runAgentTranscriptProjectionChecks() {
     let pacedParsesBeforeCompletion = coalesced.streamingMarkupParseCount
     expect((120...180).contains(pacedParsesBeforeCompletion),
            "5,000 paced assistant Markdown deltas over advancing monotonic time must parse near the 30Hz cadence, not once per token or only 1+flush; got \(pacedParsesBeforeCompletion)")
+    expect(coalesced.finalizedCompatibilityMarkupSourceCount == 0,
+           "open streamed Markdown source must not be retained in the finalized raw-source map before close; reintroducing per-delta raw-map assignment turns this red")
+    let openCompatibilitySources = coalesced.compatibilityMarkupSourcesByEntryID
+    expect(openCompatibilitySources.count == 1 && openCompatibilitySources.values.first == coalescedSource,
+           "the one open compatibility source must be exposed on demand and remain lossless before close")
+    var mutatedSourceSnapshot = openCompatibilitySources
+    if let openEntryID = mutatedSourceSnapshot.keys.first { mutatedSourceSnapshot[openEntryID] = "MUTATED" }
+    expect(coalesced.compatibilityMarkupSourcesByEntryID.values.first == coalescedSource,
+           "compatibility source snapshots must not alias mutable projection storage")
     coalesced.ingest(.turnCompleted(threadId: thread, turnId: "turn-coalesced", outcome: .completed, errorMessage: nil))
     guard let coalescedEntry = coalesced.document.entries.first,
           let firstBlockID,
@@ -182,9 +192,18 @@ func runAgentTranscriptProjectionChecks() {
         expect(false, "coalesced Markdown stream must create one assistant entry with a stable markup block")
         return
     }
+    let productionProjectionElapsed = productionProjectionStarted.duration(to: .now)
+    let productionProjectionSeconds = Double(productionProjectionElapsed.components.seconds)
+        + Double(productionProjectionElapsed.components.attoseconds) / 1e18
+    let productionProjectionCeilingSeconds = 2.0
     let coalescedOneShot = MarkdownAgentMarkupParser().parse(coalescedSource, entryID: coalescedEntry.id, previous: []).blocks.map(resetRevisions)
     expect(coalesced.streamingMarkupParseCount <= pacedParsesBeforeCompletion + 1,
            "completion may add at most one pending final parse after a paced stream; got \(coalesced.streamingMarkupParseCount) from \(pacedParsesBeforeCompletion)")
+    expect(coalesced.finalizedCompatibilityMarkupSourceCount == 1
+               && coalesced.compatibilityMarkupSourcesByEntryID[coalescedEntry.id] == coalescedSource,
+           "closed streamed Markdown source must be archived exactly once and remain byte-for-byte lossless")
+    expect(productionProjectionSeconds < productionProjectionCeilingSeconds,
+           String(format: "5,000-delta production projection+replaceMarkup path took %.3f s, above fixed %.1f s ceiling", productionProjectionSeconds, productionProjectionCeilingSeconds))
     expect(finalBlock.id == firstBlockID,
            "production projection must reconcile replaceMarkup blocks by stable identity across paced parses")
     expect(finalBlock.revision <= UInt64(coalesced.streamingMarkupParseCount + 1) &&
@@ -244,7 +263,7 @@ func runAgentTranscriptProjectionChecks() {
     expect(!projected.contains(secretCommand),
            "P1.5 must not invent or interpolate raw tool arguments absent from AgentRuntimeEvent")
 
-    print("Agent transcript projection checks passed: six compatibility kinds, stable provenance, stream boundaries, command/error typing, and thread filter")
+    print(String(format: "Agent transcript projection checks passed: six compatibility kinds, stable provenance, stream boundaries, command/error typing, thread filter, and 5,000-delta production projection+replaceMarkup in %.3f s (%d parses, %d finalized raw source)", productionProjectionSeconds, coalesced.streamingMarkupParseCount, coalesced.finalizedCompatibilityMarkupSourceCount))
 }
 
 func runLocalTranscriptNodeChecks() {

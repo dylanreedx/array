@@ -324,6 +324,7 @@ enum UIProbeGeometry {
         let compactStatusAssertions = try checkCompactStatusRow()
         print("UIProbeGeometry: compact bottom status row held \(compactStatusAssertions) geometry, appearance, contrast, state, accessibility, and compression assertions at 320/480/560/wide in both appearances")
         try checkLiveV2AgentTileLayout()
+        try checkManagedAgentStreamingTeardown()
         let transcriptLiveHosts = try checkTranscriptCollectionList()
         let streamingApplies = try checkIncrementalTranscriptBehavior()
         let proseRows = try checkAssistantProseRenderer()
@@ -6019,6 +6020,55 @@ enum UIProbeGeometry {
     // 240pt viewport". The injection was then disabled and the same check passed.
 
     /// Deterministic P3.11 gate over the actual scheduler/list/controllers.
+    private static func checkManagedAgentStreamingTeardown() throws {
+        final class FixedClock: @unchecked Sendable {
+            var time: TimeInterval = 3_000
+            func now() -> TimeInterval { time }
+        }
+
+        let threadID = "ui-geometry-streaming-teardown"
+        let tile = Tile(
+            id: UUID(uuidString: "00000000-0000-0000-0000-00000000DE17")!,
+            kind: .managedAgent,
+            title: "teardown",
+            frame: TileFrame(x: 0, y: 0, width: 520, height: 320),
+            zPosition: .fromLegacyRank(1),
+            runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")
+        )
+        let clock = FixedClock()
+        let view = ManagedAgentTileNSView(tile: tile, threadId: threadID, monotonicNow: clock.now)
+        view.frame = NSRect(x: 0, y: 0, width: 520, height: 320)
+        view.layoutSubtreeIfNeeded()
+
+        view.ingest(.turnStarted(threadId: threadID, turnId: "turn-teardown"))
+        view.ingest(.contentDelta(threadId: threadID, turnId: "turn-teardown", streamKind: .assistant, delta: "**bo"))
+        view.ingest(.contentDelta(threadId: threadID, turnId: "turn-teardown", streamKind: .assistant, delta: "ld**"))
+        guard view.qaStreamingMarkupParseTimerActive else {
+            throw fail("managed-agent streaming teardown did not schedule the paused parse timer")
+        }
+        let staleGeneration = view.qaStreamingMarkupParseTimerGeneration
+        guard !view.qaSemanticMarkupIsSingleStrongText("bold") else {
+            throw fail("managed-agent streaming teardown precondition failed: inside-window delta parsed before teardown")
+        }
+
+        view.qaPrepareStreamingMarkupForTeardown()
+        guard view.qaSemanticMarkupIsSingleStrongText("bold") else {
+            throw fail("managed-agent streaming teardown did not promote pending Markdown source before cancellation")
+        }
+        guard !view.qaStreamingMarkupParseTimerActive else {
+            throw fail("managed-agent streaming teardown left the parse timer active")
+        }
+        let parseCountAfterTeardown = view.qaStreamingMarkupParseCount
+        let bodiesAfterTeardown = view.qaTranscriptCompatibilityBodies
+        view.qaFireStreamingMarkupTimer(generation: staleGeneration)
+        guard view.qaStreamingMarkupParseCount == parseCountAfterTeardown
+                && view.qaTranscriptCompatibilityBodies == bodiesAfterTeardown
+                && !view.qaStreamingMarkupParseTimerActive else {
+            throw fail("managed-agent streaming teardown allowed a queued stale timer callback to mutate after cancellation")
+        }
+    }
+
     /// It keeps reducer patch validity separate from visual coalescing and then
     /// checks the reader-facing policies on real AppKit scroll coordinates.
     private static func checkIncrementalTranscriptBehavior() throws -> Int {

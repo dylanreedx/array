@@ -75,10 +75,10 @@ private func verifyStreamingAccumulationNegativeWitness() {
 
         let bufferURL = copiedSources.appendingPathComponent("StreamingMarkupBuffer.swift")
         var source = try String(contentsOf: bufferURL, encoding: .utf8)
-        let correct = "source.append(contentsOf: delta)"
+        let correct = "chunks.append(delta)"
         expect(source.components(separatedBy: correct).count == 2,
                "negative witness must find exactly one source-accumulation expression")
-        source = source.replacingOccurrences(of: correct, with: "source = delta")
+        source = source.replacingOccurrences(of: correct, with: "chunks = [delta]")
         try source.write(to: bufferURL, atomically: true, encoding: .utf8)
 
         let package = """

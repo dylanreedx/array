@@ -506,6 +506,12 @@ private enum TranscriptCompatibilityScripts {
 
 // MARK: - the checks
 
+private final class DeterministicCompatibilityClock: @unchecked Sendable {
+    var time: TimeInterval
+    init(_ time: TimeInterval = 2_000) { self.time = time }
+    func now() -> TimeInterval { time }
+}
+
 func runAgentTranscriptCompatibilityChecks() {
     let cards = TranscriptProjectionUnderTest.cardModel
     let scripts = TranscriptCompatibilityScripts.self
@@ -847,6 +853,48 @@ func runManagedTranscriptCardProjectionChecks() {
     model.flushPendingStreamingMarkup()
     expect(model.document != firstDocument && model.cards.single?.body == "one two",
            "P1.9 negative witness: cards must be freshly derived from the updated semantic document, not independently mutated or cached")
+
+    let equalityClock = DeterministicCompatibilityClock()
+    var equalityLeft = ManagedAgentTranscriptModel(threadId: "P19-equality-window", monotonicNow: equalityClock.now)
+    var equalityRight = ManagedAgentTranscriptModel(threadId: "P19-equality-window", monotonicNow: equalityClock.now)
+    let seed = AgentRuntimeEvent.contentDelta(
+        threadId: "P19-equality-window", turnId: "turn-raw", streamKind: .assistant, delta: "seed"
+    )
+    equalityLeft.ingest(seed)
+    equalityRight.ingest(seed)
+    equalityLeft.ingest(.contentDelta(
+        threadId: "P19-equality-window", turnId: "turn-raw", streamKind: .assistant, delta: " LEFT-ONLY"
+    ))
+    let identicalInsideWindow = AgentRuntimeEvent.contentDelta(
+        threadId: "P19-equality-window", turnId: "turn-raw", streamKind: .assistant, delta: " x"
+    )
+    for _ in 0..<401 {
+        equalityLeft.ingest(identicalInsideWindow)
+        equalityRight.ingest(identicalInsideWindow)
+    }
+    expect(equalityLeft.events == equalityRight.events && equalityLeft.events.count == 400,
+           "P1.9 equality witness precondition: >400 repeated events must leave identical coalescing windows")
+    expect(equalityLeft.document == equalityRight.document,
+           "P1.9 equality witness precondition: inside-window raw deltas must not have advanced the semantic document")
+    expect(equalityLeft.cards.single?.body != equalityRight.cards.single?.body
+               && equalityLeft.compatibilityRows.single?.body != equalityRight.compatibilityRows.single?.body,
+           "P1.9 equality witness precondition: raw compatibility body must differ while the document and event window match")
+    expect(equalityLeft != equalityRight,
+           "P1.9 ManagedAgentTranscriptModel equality must include raw compatibility source/card state changed inside a coalescing window")
+
+    var equalityCloneA = ManagedAgentTranscriptModel(threadId: "P19-equality-clone", monotonicNow: equalityClock.now)
+    var equalityCloneB = ManagedAgentTranscriptModel(threadId: "P19-equality-clone", monotonicNow: equalityClock.now)
+    for index in 0..<405 {
+        let event = AgentRuntimeEvent.contentDelta(
+            threadId: "P19-equality-clone", turnId: "turn-raw", streamKind: .assistant, delta: index == 0 ? "same" : " y"
+        )
+        equalityCloneA.ingest(event)
+        equalityCloneB.ingest(event)
+    }
+    expect(equalityCloneA == equalityCloneB
+               && equalityCloneA.cards == equalityCloneB.cards
+               && equalityCloneA.compatibilityRows == equalityCloneB.compatibilityRows,
+           "P1.9 equal ManagedAgentTranscriptModel values must imply equal visible cards and compatibility rows after a >400-event coalescing window")
 
     var structuredModel = ManagedAgentTranscriptModel(threadId: "P19-item-kind")
     structuredModel.ingest(.itemStarted(

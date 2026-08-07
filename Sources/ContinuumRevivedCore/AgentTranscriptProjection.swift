@@ -57,7 +57,15 @@ public struct AgentTranscriptProjection: Sendable {
 
     public var document: AgentDocument { reducer.document }
     public var activeToolCount: Int { activeItemIDs.count }
-    public var compatibilityMarkupSourcesByEntryID: [AgentNodeID: String] { rawMarkupSourcesByEntryID }
+    public var compatibilityMarkupSourcesByEntryID: [AgentNodeID: String] {
+        guard let openStream else { return rawMarkupSourcesByEntryID }
+        var sources = rawMarkupSourcesByEntryID
+        sources[openStream.entryID] = openStream.buffer.source
+        return sources
+    }
+    /// Deterministic oracle: only closed entries are retained here. The one open
+    /// stream source is projected on demand by `compatibilityMarkupSourcesByEntryID`.
+    public var finalizedCompatibilityMarkupSourceCount: Int { rawMarkupSourcesByEntryID.count }
 
     /// Monotonic deadline for the delayed parse needed when a provider sends a
     /// delta inside the coalescing window and then pauses. Nil means no streamed
@@ -71,9 +79,7 @@ public struct AgentTranscriptProjection: Sendable {
     /// monotonic clock has reached the scheduler deadline.
     @discardableResult
     public mutating func flushPendingStreamingMarkupIfDue() -> Bool {
-        guard var stream = openStream else { return false }
-        let mutations = scheduledMarkupMutations(for: &stream)
-        openStream = stream
+        let mutations = scheduledMarkupMutationsForOpenStream()
         guard !mutations.isEmpty else { return false }
         apply(mutations)
         return true
@@ -83,9 +89,8 @@ public struct AgentTranscriptProjection: Sendable {
     /// latest lossless source without finishing the provider-owned open entry.
     @discardableResult
     public mutating func flushPendingStreamingMarkup() -> Bool {
-        guard var stream = openStream, stream.scheduler.flush() else { return false }
-        let mutations = parsedMarkupMutations(for: stream)
-        openStream = stream
+        guard openStream?.scheduler.flush() == true else { return false }
+        let mutations = parsedMarkupMutationsForOpenStream()
         apply(mutations)
         return true
     }
@@ -365,28 +370,24 @@ public struct AgentTranscriptProjection: Sendable {
         kind: ContentStreamKind,
         delta: String
     ) -> [AgentDocumentMutation] {
-        if var stream = openStream, stream.turnID == turnID, stream.kind == kind {
-            stream.buffer.append(delta)
-            rawMarkupSourcesByEntryID[stream.entryID] = stream.buffer.source
-            stream.scheduler.requestParse()
-            let result = scheduledMarkupMutations(for: &stream)
-            openStream = stream
-            return result
+        if openStream?.turnID == turnID, openStream?.kind == kind {
+            openStream!.buffer.append(delta)
+            openStream!.scheduler.requestParse()
+            return scheduledMarkupMutationsForOpenStream()
         }
         var result = closeStreamingRun()
         let entryID = makeID(scope: "turn", providerID: turnID, suffix: "\(kind.rawValue):\(nextRun(in: turnID))")
         compatibilityIDs[entryID] = "\(kind == .assistant ? "assistant" : "reasoning")-\(document.entries.count + result.beginEntryCount + 1)"
         var buffer = StreamingMarkupBuffer()
         buffer.append(delta)
-        var stream = OpenStream(
+        openStream = OpenStream(
             turnID: turnID,
             kind: kind,
             entryID: entryID,
             buffer: buffer,
             scheduler: StreamingMarkupParseScheduler(maximumParsesPerSecond: 30)
         )
-        rawMarkupSourcesByEntryID[entryID] = buffer.source
-        stream.scheduler.requestParse()
+        openStream!.scheduler.requestParse()
         result += [
             .beginEntry(
                 id: entryID,
@@ -394,31 +395,38 @@ public struct AgentTranscriptProjection: Sendable {
                 provenance: .providerItem(provider: "runtime", itemID: turnID)
             )
         ]
-        result += scheduledMarkupMutations(for: &stream)
-        openStream = stream
+        result += scheduledMarkupMutationsForOpenStream()
         return result
     }
 
-    private mutating func scheduledMarkupMutations(for stream: inout OpenStream) -> [AgentDocumentMutation] {
-        guard stream.scheduler.shouldParse(now: monotonicNow()) else { return [] }
-        return parsedMarkupMutations(for: stream)
+    private mutating func scheduledMarkupMutationsForOpenStream() -> [AgentDocumentMutation] {
+        guard openStream?.scheduler.shouldParse(now: monotonicNow()) == true else { return [] }
+        return parsedMarkupMutationsForOpenStream()
     }
 
-    private mutating func parsedMarkupMutations(for stream: OpenStream) -> [AgentDocumentMutation] {
+    private mutating func parsedMarkupMutationsForOpenStream() -> [AgentDocumentMutation] {
+        guard let stream = openStream else { return [] }
         streamingMarkupParseCount += 1
         let previous = document.entries.first(where: { $0.id == stream.entryID })?.blocks ?? []
         let parse = markupParser.parse(stream.buffer.source, entryID: stream.entryID, previous: previous)
         return [.replaceMarkup(entryID: stream.entryID, blocks: parse.blocks)]
     }
 
+    private mutating func archiveRawMarkupSourceForOpenStream() {
+        guard let stream = openStream, rawMarkupSourcesByEntryID[stream.entryID] == nil else { return }
+        rawMarkupSourcesByEntryID[stream.entryID] = stream.buffer.source
+    }
+
     private mutating func closeStreamingRun() -> [AgentDocumentMutation] {
-        guard var stream = openStream else { return [] }
+        guard openStream != nil else { return [] }
         var result: [AgentDocumentMutation] = []
-        if stream.scheduler.flush() {
-            result += parsedMarkupMutations(for: stream)
+        if openStream?.scheduler.flush() == true {
+            result += parsedMarkupMutationsForOpenStream()
         }
+        archiveRawMarkupSourceForOpenStream()
+        let entryID = openStream!.entryID
         openStream = nil
-        result.append(.finishEntry(id: stream.entryID))
+        result.append(.finishEntry(id: entryID))
         return result
     }
 
@@ -528,7 +536,8 @@ extension AgentTranscriptProjection: AgentTranscriptProjecting {
         // stack has its own approval dock and user-input card UI for the same
         // events, so projecting them here would duplicate the request as an
         // empty legacy card and move blessed legacy baselines.
-        document.entries.filter { entry in
+        let markupSources = compatibilityMarkupSourcesByEntryID
+        return document.entries.filter { entry in
             switch entry.blocks.first?.kind {
             case .approval?, .question?: return false
             default: return true
@@ -537,7 +546,7 @@ extension AgentTranscriptProjection: AgentTranscriptProjecting {
             AgentTranscriptCompatibilityRow(
                 id: compatibilityIDs[entry.id] ?? entry.id.rawValue,
                 kind: compatibilityKind(entry),
-                body: compatibilityBody(entry),
+                body: compatibilityBody(entry, markupSources: markupSources),
                 status: compatibilityStatus(entry)
             )
         }
@@ -556,8 +565,11 @@ extension AgentTranscriptProjection: AgentTranscriptProjecting {
         }
     }
 
-    private func compatibilityBody(_ entry: AgentEntry) -> String {
-        if let rawMarkup = rawMarkupSourcesByEntryID[entry.id] { return rawMarkup }
+    private func compatibilityBody(
+        _ entry: AgentEntry,
+        markupSources: [AgentNodeID: String]
+    ) -> String {
+        if let rawMarkup = markupSources[entry.id] { return rawMarkup }
         return entry.blocks.map { block in
             switch block.payload {
             case .paragraph(let inlines):

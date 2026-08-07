@@ -97,6 +97,7 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
     public var currentStatus: AgentStatus { semanticProjection.currentStatus }
     public var events: [AgentRuntimeEvent] { semanticProjection.events }
     public var activeToolCount: Int { semanticProjection.activeToolCount }
+    public var streamingMarkupParseCount: Int { semanticProjection.streamingMarkupParseCount }
     public var nextStreamingMarkupParseDeadline: TimeInterval? { semanticProjection.nextStreamingMarkupParseDeadline }
 
     /// The semantic projection is the only mutable transcript owner. Legacy
@@ -116,6 +117,13 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
 
     public init(threadId: String) {
         semanticProjection = AgentTranscriptProjection(threadId: threadId)
+    }
+
+    public init(
+        threadId: String,
+        monotonicNow: @escaping @Sendable () -> TimeInterval
+    ) {
+        semanticProjection = AgentTranscriptProjection(threadId: threadId, monotonicNow: monotonicNow)
     }
 
     public mutating func ingest(_ event: AgentRuntimeEvent) {
@@ -174,6 +182,9 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
             && lhs.currentStatus == rhs.currentStatus
             && lhs.events == rhs.events
             && lhs.activeToolCount == rhs.activeToolCount
+            && lhs.semanticProjection.compatibilityMarkupSourcesByEntryID == rhs.semanticProjection.compatibilityMarkupSourcesByEntryID
+            && lhs.cards == rhs.cards
+            && lhs.compatibilityRows == rhs.compatibilityRows
             && lhs.legacyItemKindsByItemID == rhs.legacyItemKindsByItemID
             && lhs.legacyItemStatusesByItemID == rhs.legacyItemStatusesByItemID
             && lhs.hasSeenTurnStart == rhs.hasSeenTurnStart

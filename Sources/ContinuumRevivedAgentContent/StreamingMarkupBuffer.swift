@@ -6,20 +6,26 @@ import Foundation
 /// this type separate from `StreamingMarkupParseScheduler` makes it impossible
 /// for a coalesced parse request to discard provider source.
 public struct StreamingMarkupBuffer: Equatable, Sendable {
-    public private(set) var source: String
+    private var chunks: [String]
 
     public init(source: String = "") {
-        self.source = source
+        self.chunks = source.isEmpty ? [] : [source]
     }
 
-    public var isEmpty: Bool { source.isEmpty }
+    /// Materializes the lossless source only at parser/compatibility boundaries.
+    /// Deltas are retained as appended chunks so accumulation itself is O(delta)
+    /// and does not repeatedly copy the answer-so-far string.
+    public var source: String { chunks.joined() }
+
+    public var isEmpty: Bool { chunks.isEmpty }
 
     public mutating func append(_ delta: String) {
-        source.append(contentsOf: delta)
+        guard !delta.isEmpty else { return }
+        chunks.append(delta)
     }
 
     public mutating func removeAll(keepingCapacity: Bool = false) {
-        source.removeAll(keepingCapacity: keepingCapacity)
+        chunks.removeAll(keepingCapacity: keepingCapacity)
     }
 }
 
