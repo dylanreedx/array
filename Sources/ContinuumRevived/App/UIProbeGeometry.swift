@@ -5452,6 +5452,7 @@ enum UIProbeGeometry {
                       tile.qaLocationContentFitsBounds else {
                     throw fail("\(label): integrated Home/Where/What lost its content or fixed external-marker lane")
                 }
+                try checkManagedTileCompactStatusComposition(tile, label: label)
                 try fills(child: transcript, parent: tile, minRatio: 0.95, label: "\(label): semantic transcript")
                 // P5.5 defect 6: a pixel gate cannot see this — the collection
                 // view's default background is `windowBackgroundColor`, which only
@@ -5478,6 +5479,116 @@ enum UIProbeGeometry {
                     try checkProviderFooterEffortSizing(tile, width: width, label: label)
                 }
             }
+        }
+    }
+
+    /// Composition-path witness for the approved phase adapter and compact row.
+    /// Each case feeds the installed managed tile row, rather than rendering a
+    /// standalone row or asserting only the adapter result. The missing-fact legs
+    /// specifically forbid a fabricated Thinking/elapsed claim and token-total
+    /// context arithmetic.
+    private static func checkManagedTileCompactStatusComposition(
+        _ tile: ManagedAgentTileNSView,
+        label: String
+    ) throws {
+        let now = Date(timeIntervalSinceReferenceDate: 900_100_000)
+        let root = URL(fileURLWithPath: "/Users/qa/Projects/continuum", isDirectory: true)
+        let home = AgentHome(projectId: nil, projectRoot: root, checkoutRoot: root)
+        let source = root.appendingPathComponent("Sources/ContinuumRevived", isDirectory: true)
+        let target = source.appendingPathComponent("ManagedAgentTileNSView.swift")
+        let location = AgentLocationSnapshot(home: home, whereDirectory: source)
+        let start = now.addingTimeInterval(-12)
+        func activity(_ operation: AgentObservedActivity.Operation) -> AgentObservedActivity {
+            AgentObservedActivity(
+                operation: operation,
+                targetPath: target,
+                startedAt: start,
+                updatedAt: start,
+                evidenceSource: .toolEvent)
+        }
+        let authoritative: [(AgentCompactActivityPhase, AgentCompactStatusPhaseFacts)] = [
+            (.starting, .init(session: .init(state: .starting))),
+            (.thinking, .init(turn: .active(startedAt: start, stream: .reasoning, streamStartedAt: start))),
+            (.responding, .init(turn: .active(startedAt: start, stream: .assistant, streamStartedAt: start))),
+            (.reading, .init(currentActivity: activity(.reading), currentActivityExpiresAt: now.addingTimeInterval(20))),
+            (.searching, .init(currentActivity: activity(.searching), currentActivityExpiresAt: now.addingTimeInterval(20))),
+            (.editing, .init(currentActivity: activity(.editing), currentActivityExpiresAt: now.addingTimeInterval(20))),
+            (.running, .init(turn: .active(startedAt: start, stream: .commandOutput, streamStartedAt: start))),
+            (.waiting, .init(interaction: .pending(startedAt: nil))),
+            (.ready, .init(turn: .completed(outcome: .completed, phaseStartedAt: nil))),
+            (.failed, .init(turn: .completed(outcome: .failed, phaseStartedAt: nil))),
+            (.interrupted, .init(session: .init(state: .stopped))),
+        ]
+        tile.qaResetCompactStatusComposition()
+        guard tile.qaCompactStatusRowIsInstalled else {
+            throw fail("\(label): compact status row was not installed in the managed tile composition")
+        }
+        let context = AgentContextWindowSnapshot(
+            usedTokens: 48_000,
+            maxTokens: 128_000,
+            observedAt: now,
+            source: .providerSessionStats,
+            freshness: .live)
+        for (expected, facts) in authoritative {
+            tile.qaApplyCompactStatusFacts(facts, location: location, contextWindow: context, now: now)
+            let row = tile.qaCompactStatusRow
+            row.layoutSubtreeIfNeeded()
+            guard tile.qaCompactStatusPhase == expected,
+                  row.qaActivityText != "Unknown",
+                  row.qaContextState == .known,
+                  row.qaContextFraction == 48_000.0 / 128_000.0,
+                  tile.qaCompactStatusContentFitsBounds,
+                  row.bounds.height >= AgentCompactStatusRowView.preferredHeight else {
+                throw fail("\(label): installed compact row lost \(expected.rawValue) phase, authoritative context, or geometry")
+            }
+        }
+
+        // No runtime facts means no phase, no elapsed anchor, and no token-total
+        // inference. The row remains visibly conservative through its unknown
+        // activity treatment and context meter.
+        tile.qaApplyCompactStatusFacts(.init(), location: location, now: now)
+        let unknownRow = tile.qaCompactStatusRow
+        unknownRow.layoutSubtreeIfNeeded()
+        guard tile.qaCompactStatusPhase == nil,
+              unknownRow.qaActivityText == "Unknown",
+              unknownRow.qaElapsedText == nil,
+              unknownRow.qaContextState == .unknown,
+              unknownRow.qaContextFraction == nil,
+              tile.qaCompactStatusAccessibilityLabel.contains("Activity unknown"),
+              tile.qaCompactStatusContentFitsBounds else {
+            throw fail("\(label): missing runtime/context facts produced a false phase, elapsed, or percentage in the installed row")
+        }
+
+        // A coarse running session and an active turn without a stream are both
+        // intentionally unresolved. A stale What must not resurrect Reading.
+        let stale = AgentObservedActivity(
+            operation: .inspecting,
+            targetPath: target,
+            startedAt: start,
+            updatedAt: start,
+            evidenceSource: .toolEvent)
+        tile.qaApplyCompactStatusFacts(
+            .init(session: .init(state: .running)), location: location, now: now)
+        guard tile.qaCompactStatusPhase == nil else {
+            throw fail("\(label): coarse running session fabricated a compact phase")
+        }
+        tile.qaApplyCompactStatusFacts(
+            .init(turn: .active(startedAt: start, stream: nil, streamStartedAt: nil)),
+            location: location,
+            now: now)
+        guard tile.qaCompactStatusPhase == nil else {
+            throw fail("\(label): active turn without a stream fabricated a compact phase")
+        }
+        tile.qaApplyCompactStatusFacts(
+            .init(
+                turn: .active(startedAt: start, stream: .reasoning, streamStartedAt: start),
+                currentActivity: stale,
+                currentActivityExpiresAt: now.addingTimeInterval(-1)),
+            location: location,
+            now: now)
+        guard tile.qaCompactStatusPhase == .thinking,
+              tile.qaCompactStatusRow.qaActivityText == "Thinking" else {
+            throw fail("\(label): expired inspecting activity overrode the current reasoning stream")
         }
     }
 

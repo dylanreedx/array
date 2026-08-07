@@ -71,7 +71,11 @@ final class ManagedAgentTileNSView: TileNSView {
     /// only under the v2 fixture flag. The compatibility shell and its baselines
     /// remain untouched until final live migration.
     private let agentHeader = AgentTileHeaderView()
+    /// The legacy Home/Where/What disclosure remains available to the host's
+    /// location action route, but the compact row is the one status surface
+    /// installed in the live managed-agent composition.
     private let locationStatus = AgentLocationStatusView()
+    private let compactStatusRow = AgentCompactStatusRowView()
     private var headerAgentName: String?
     private var branchContext: AgentRowContext?
     private var locationProjectName: String?
@@ -89,6 +93,15 @@ final class ManagedAgentTileNSView: TileNSView {
     private var v2PromptHistory: AgentPromptHistory?
     private var v2CompletionRegistry: AgentCompletionProviderRegistry?
     private var v2TurnSnapshot: AgentTileTurnSnapshot?
+    // The compact row consumes only facts observed on this tile's managed-agent
+    // stream. In particular, no receipt-time Date is promoted to a phase anchor;
+    // the supervisor's stamped turn start is the only turn anchor available here.
+    private var compactStatusPhaseAdapter = AgentCompactStatusPhaseAdapter()
+    private var compactStatusSession: AgentCompactStatusPhaseFacts.Session?
+    private var compactStatusTurn: AgentCompactStatusPhaseFacts.Turn?
+    private var compactStatusInteraction: AgentCompactStatusPhaseFacts.Interaction?
+    private var compactContextWindow: AgentContextWindowSnapshot?
+    private var compactStatusResolution = AgentCompactStatusPhaseResolution.unknown
     /// Subscription to the supervisor's turn-capability seam. The runner slot
     /// frees strictly after the last runtime event a tile ingests, so without
     /// this the composer's last repaint shows `canSend == false` forever
@@ -209,6 +222,7 @@ final class ManagedAgentTileNSView: TileNSView {
         v2ActionButton?.action = #selector(performV2PrimaryAction)
         setContentView(makeV2ContentView())
         applyHeader(status: self.descriptor.status)
+        applyUnknownCompactStatus()
         synchronizeV2Transcript(final: true)
     }
 
@@ -349,6 +363,7 @@ final class ManagedAgentTileNSView: TileNSView {
         v2Composer?.unbindActionSink()
         v2ActionAdapter = nil
         v2TurnSnapshot = nil
+        resetCompactStatusProjection()
         attachedAgentID = nil
         agentSource = nil
         updateV2ComposerPresentation()
@@ -613,6 +628,7 @@ final class ManagedAgentTileNSView: TileNSView {
         locationStaleTimer?.invalidate()
         locationStaleTimer = nil
         locationStatus.clear()
+        resetCompactStatusProjection()
         applyHeader(status: model.currentStatus)
         // A reset restarts the reducer's version numbering, so the forwarded
         // version can no longer be compared against it.
@@ -689,6 +705,7 @@ final class ManagedAgentTileNSView: TileNSView {
         }
         model.ingest(event)
         refreshV2TurnSnapshot()
+        updateCompactStatusFacts(for: event)
         refreshLocationStatus()
         // Streamed chunks ride the 30Hz visual gate. A turn boundary or an opened
         // request is the last frame of that stream and the moment the reader acts
@@ -705,6 +722,200 @@ final class ManagedAgentTileNSView: TileNSView {
         if settles { cancelStreamingMarkupParseTimer() }
         synchronizeV2Transcript(final: settles)
         if !settles { scheduleStreamingMarkupParseTimerIfNeeded() }
+    }
+
+    /// Update the compact-row facts from the same managed-agent event stream as
+    /// the transcript. Events do not carry provider timestamps, so only the
+    /// supervisor's stamped turn start is used as an elapsed anchor; interaction
+    /// and session receipt times remain nil rather than becoming fake precision.
+    private func updateCompactStatusFacts(for event: AgentRuntimeEvent) {
+        switch event {
+        case let .sessionStateChanged(state):
+            compactStatusSession = AgentCompactStatusPhaseFacts.Session(state: state)
+            // A session lifecycle event does not carry a turn/stream fact;
+            // never retain a completed or prior-turn phase across it.
+            compactStatusTurn = nil
+            if state == .ready || state == .stopped || state == .error {
+                compactStatusInteraction = nil
+            }
+        case .turnStarted:
+            compactStatusSession = .init(state: .running, startedAt: nil)
+            let start = v2TurnSnapshot?.turnStartedAt
+            compactStatusTurn = .active(startedAt: start, stream: nil, streamStartedAt: nil)
+        case let .contentDelta(_, _, streamKind, _):
+            let start: Date?
+            if case let .active(turnStart, _, _) = compactStatusTurn {
+                start = turnStart
+            } else {
+                start = v2TurnSnapshot?.turnStartedAt
+            }
+            compactStatusSession = .init(state: .running, startedAt: nil)
+            compactStatusTurn = .active(startedAt: start, stream: streamKind, streamStartedAt: start)
+        case let .turnCompleted(_, _, outcome, _):
+            compactStatusTurn = .completed(outcome: outcome, phaseStartedAt: nil)
+            compactStatusSession = .init(state: .ready, startedAt: nil)
+            compactStatusInteraction = .clear
+        case .requestOpened, .userInputRequested:
+            compactStatusInteraction = .pending(startedAt: nil)
+        case .requestResolved, .userInputResolved:
+            compactStatusInteraction = .clear
+        case .runtimeError:
+            compactStatusTurn = .completed(outcome: .failed, phaseStartedAt: nil)
+            compactStatusSession = .init(state: .error, startedAt: nil)
+            compactStatusInteraction = .clear
+        case .itemStarted, .itemCompleted, .tokenUsageUpdated:
+            break
+        case let .contextWindowUpdated(_, snapshot):
+            compactContextWindow = snapshot
+        }
+    }
+
+    private func refreshCompactStatus(at now: Date = Date(), location: AgentLocationSnapshot? = nil) {
+        guard let snapshot = location ?? projectedAgentID.flatMap({
+            agentSource?.locationSnapshot(for: $0, at: now)
+        }) else {
+            applyUnknownCompactStatus()
+            return
+        }
+        let facts = AgentCompactStatusPhaseFacts(
+            session: compactStatusSession,
+            turn: compactStatusTurn,
+            location: snapshot,
+            interaction: compactStatusInteraction)
+        let resolution = compactStatusPhaseAdapter.update(facts, now: now)
+        compactStatusResolution = resolution
+        let activity: AgentCompactStatusPresentation.Activity
+        if let input = resolution.activityInput {
+            let presented = AgentCompactStatusPresentation.present(
+                location: snapshot,
+                projectName: locationProjectName ?? branchContext?.projectName,
+                activity: input,
+                now: now,
+                contextWindow: compactContextWindow)
+            compactStatusRow.apply(presented)
+            return
+        }
+        activity = unknownCompactActivity()
+        let locationPresentation = AgentLocationStatusPresenter.present(
+            snapshot,
+            projectName: locationProjectName ?? branchContext?.projectName)
+        compactStatusRow.apply(AgentCompactStatusPresentation(
+            location: compactLocationPresentation(snapshot, detail: locationPresentation),
+            activity: activity,
+            context: AgentRadialContextMeterPresenter.present(compactContextWindow)))
+    }
+
+    private func resetCompactStatusProjection(at now: Date = Date()) {
+        compactStatusPhaseAdapter.reset()
+        compactStatusResolution = .unknown
+        compactStatusSession = nil
+        compactStatusTurn = nil
+        compactStatusInteraction = nil
+        compactContextWindow = nil
+        let snapshot = projectedAgentID.flatMap { agentSource?.locationSnapshot(for: $0, at: now) }
+        if let snapshot {
+            let detail = AgentLocationStatusPresenter.present(
+                snapshot,
+                projectName: locationProjectName ?? branchContext?.projectName)
+            compactStatusRow.apply(AgentCompactStatusPresentation(
+                location: compactLocationPresentation(snapshot, detail: detail),
+                activity: unknownCompactActivity(),
+                context: AgentRadialContextMeterPresenter.present(nil)))
+        } else {
+            applyUnknownCompactStatus()
+        }
+    }
+
+    private func applyUnknownCompactStatus() {
+        compactStatusResolution = .unknown
+        compactStatusRow.apply(AgentCompactStatusPresentation(
+            location: .init(
+                symbolName: "house",
+                text: "—",
+                accessibilityLabel: "Home and Where: unknown.",
+                detailText: "Location unavailable",
+                isExternal: false),
+            activity: unknownCompactActivity(),
+            context: AgentRadialContextMeterPresenter.present(nil)))
+    }
+
+    private func unknownCompactActivity() -> AgentCompactStatusPresentation.Activity {
+        .init(
+            phase: .ready,
+            symbolName: "questionmark.circle",
+            text: "Unknown",
+            elapsedText: nil,
+            accessibilityLabel: "Activity unknown; no authoritative phase fact.",
+            detailText: "Activity phase: unknown. No authoritative session, turn, interaction, or current-tool phase fact.",
+            showsThinkingIndicator: false)
+    }
+
+    private func compactLocationPresentation(
+        _ snapshot: AgentLocationSnapshot,
+        detail: AgentLocationStatusPresentation
+    ) -> AgentCompactStatusPresentation.Location {
+        let text: String
+        switch snapshot.workingLocation.relationToHome {
+        case .root:
+            text = snapshot.home.projectRoot?.lastPathComponent
+                ?? snapshot.home.checkoutRoot.lastPathComponent
+        case .inside:
+            text = snapshot.workingLocation.relativePath
+                ?? snapshot.workingLocation.directory.lastPathComponent
+        case .outside:
+            text = snapshot.workingLocation.directory.lastPathComponent.isEmpty
+                ? snapshot.workingLocation.directory.path
+                : snapshot.workingLocation.directory.lastPathComponent
+        }
+        let symbol: String
+        switch snapshot.workingLocation.relationToHome {
+        case .root: symbol = "house"
+        case .inside: symbol = "folder"
+        case .outside: symbol = "arrow.up.forward.square"
+        }
+        return .init(
+            symbolName: symbol,
+            text: text.isEmpty ? "—" : text,
+            accessibilityLabel: detail.locationAccessibilityValue,
+            detailText: detail.detailText,
+            isExternal: snapshot.workingLocation.relationToHome == .outside)
+    }
+
+    /// QA uses the same tile composition seam to feed deterministic facts. This
+    /// is intentionally a view probe, not an adapter-only assertion: the call
+    /// resolves the adapter and paints the installed row in the real hierarchy.
+    func qaApplyCompactStatusFacts(
+        _ facts: AgentCompactStatusPhaseFacts,
+        location: AgentLocationSnapshot,
+        contextWindow: AgentContextWindowSnapshot? = nil,
+        now: Date
+    ) {
+        compactStatusSession = facts.session
+        compactStatusTurn = facts.turn
+        compactStatusInteraction = facts.interaction
+        compactContextWindow = contextWindow
+        let resolution = compactStatusPhaseAdapter.update(facts, now: now)
+        compactStatusResolution = resolution
+        if let input = resolution.activityInput {
+            compactStatusRow.apply(AgentCompactStatusPresentation.present(
+                location: location,
+                projectName: locationProjectName ?? branchContext?.projectName,
+                activity: input,
+                now: now,
+                contextWindow: contextWindow))
+        } else {
+            let detail = AgentLocationStatusPresenter.present(
+                location,
+                projectName: locationProjectName ?? branchContext?.projectName)
+            compactStatusRow.apply(AgentCompactStatusPresentation(
+                location: compactLocationPresentation(location, detail: detail),
+                activity: unknownCompactActivity(),
+                context: AgentRadialContextMeterPresenter.present(contextWindow)))
+        }
+    }
+
+    func qaResetCompactStatusComposition() {
+        resetCompactStatusProjection()
     }
 
     /// Re-read the supervisor's turn truth and repaint everything derived from it:
@@ -758,6 +969,7 @@ final class ManagedAgentTileNSView: TileNSView {
         header.layer?.backgroundColor = SurfaceToken.tileChrome.color.cgColor(for: theme)
         composeBackdrop.layer?.backgroundColor = SurfaceToken.tileChrome.color.cgColor(for: theme)
         locationStatus.applyTokens()
+        compactStatusRow.applyTokens()
         // Idle v2 agent tiles do not claim a state-bearing perimeter edge.
         // Keyboard focus and needs-attention remain the canvas-owned strong
         // overlays; the surface ladder supplies the quiet containment.
@@ -797,6 +1009,7 @@ final class ManagedAgentTileNSView: TileNSView {
         transcript.translatesAutoresizingMaskIntoConstraints = false
         composer.translatesAutoresizingMaskIntoConstraints = false
         providerFooter.translatesAutoresizingMaskIntoConstraints = false
+        compactStatusRow.translatesAutoresizingMaskIntoConstraints = false
         actionButton.translatesAutoresizingMaskIntoConstraints = false
         providerFooter.onSettingsWrite = { [weak self] model, thinking in
             self?.writeProviderSettings(model: model, thinking: thinking) ?? false
@@ -817,7 +1030,10 @@ final class ManagedAgentTileNSView: TileNSView {
         actionButton.setContentHuggingPriority(.required, for: .horizontal)
         actionButton.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        let composeColumn = NSStackView(views: [composer, footerRow])
+        // The compact status row is deliberately between the input and the
+        // provider controls. It is the sole live activity surface in this tile;
+        // the older location disclosure is not duplicated into this stack.
+        let composeColumn = NSStackView(views: [composer, compactStatusRow, footerRow])
         composeColumn.orientation = .vertical
         composeColumn.alignment = .leading
         composeColumn.spacing = CGFloat(Space.m)
@@ -846,6 +1062,8 @@ final class ManagedAgentTileNSView: TileNSView {
             composeColumn.bottomAnchor.constraint(equalTo: composeBackdrop.bottomAnchor),
             composer.widthAnchor.constraint(equalTo: composeColumn.widthAnchor, constant: -Inset.row.horizontal),
             footerRow.widthAnchor.constraint(equalTo: composeColumn.widthAnchor, constant: -Inset.row.horizontal),
+            compactStatusRow.widthAnchor.constraint(equalTo: composeColumn.widthAnchor, constant: -Inset.row.horizontal),
+            compactStatusRow.heightAnchor.constraint(equalToConstant: AgentCompactStatusRowView.preferredHeight),
             providerFooter.heightAnchor.constraint(equalToConstant: AgentComposerFooterView.height),
             actionButton.heightAnchor.constraint(equalToConstant: ComposerActionButton.controlHeight),
         ])
@@ -1112,6 +1330,7 @@ final class ManagedAgentTileNSView: TileNSView {
         locationStatus.apply(AgentLocationStatusPresenter.present(
             snapshot,
             projectName: locationProjectName ?? branchContext?.projectName))
+        refreshCompactStatus(at: now, location: snapshot)
         guard let expiresAt = snapshot.whatExpiresAt, expiresAt > now else { return }
         let timer = Timer(timeInterval: expiresAt.timeIntervalSince(now), repeats: false) {
             [weak self] _ in
@@ -1137,6 +1356,17 @@ final class ManagedAgentTileNSView: TileNSView {
         transcriptCollectionFixture?.qaSemanticRowCount ?? 0
     }
     var qaTranscriptCollectionFixture: AgentTranscriptListView? { transcriptCollectionFixture }
+    /// The compact row is exposed only as a deterministic geometry/AX witness;
+    /// production updates it through `refreshCompactStatus` above.
+    var qaCompactStatusRow: AgentCompactStatusRowView { compactStatusRow }
+    var qaCompactStatusPhase: AgentCompactActivityPhase? { compactStatusResolution.phase }
+    var qaCompactStatusContextState: AgentRadialContextMeterState { compactStatusRow.qaContextState }
+    var qaCompactStatusContextFraction: Double? { compactStatusRow.qaContextFraction }
+    var qaCompactStatusActivityText: String { compactStatusRow.qaActivityText }
+    var qaCompactStatusAccessibilityLabel: String { compactStatusRow.qaAccessibilityLabel }
+    var qaCompactStatusHasVisiblePrefixes: Bool { compactStatusRow.qaHasVisiblePrefixes }
+    var qaCompactStatusContentFitsBounds: Bool { compactStatusRow.qaContentFitsBounds }
+    var qaCompactStatusRowIsInstalled: Bool { compactStatusRow.superview != nil }
     var qaComposeEnabled: Bool {
         !composeIsBusy
     }
