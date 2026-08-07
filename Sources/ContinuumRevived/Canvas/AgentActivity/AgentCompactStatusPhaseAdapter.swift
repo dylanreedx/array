@@ -183,7 +183,10 @@ struct AgentCompactStatusPhaseAdapter {
 
         // Specific tool/message observations outrank a generic active-turn
         // fact. Generic lifecycle thinking/waiting observations do not: they
-        // must not hide a more precise assistant or reasoning stream.
+        // must not hide a more precise assistant or reasoning stream. Session
+        // inspection is an explicit command/MCP tool fact, so a fresh
+        // inspection belongs with the specific tool observations and maps to
+        // Reading; expiry above removes it before this precedence decision.
         if let activity = currentActivity,
            isSpecificActivity(activity.operation) {
             return activityResult(activity)
@@ -233,9 +236,9 @@ struct AgentCompactStatusPhaseAdapter {
 
     private static func isSpecificActivity(_ operation: AgentObservedActivity.Operation) -> Bool {
         switch operation {
-        case .reading, .editing, .running, .searching, .messaging:
+        case .reading, .editing, .running, .searching, .messaging, .inspecting:
             return true
-        case .thinking, .waiting, .completed, .interrupted, .failed, .inspecting:
+        case .thinking, .waiting, .completed, .interrupted, .failed:
             return false
         }
     }

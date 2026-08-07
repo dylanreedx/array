@@ -98,6 +98,102 @@ extension UIProbeGeometry {
         try require(tool.activityInput?.visibleLabel == "Reading Agent.swift",
                     "tool label is bounded and safe for later composition")
 
+        // An explicit inspection tool fact is still tool evidence. It must
+        // outrank a concurrent provider stream while it is fresh, but expiry
+        // must reveal the more specific live stream again.
+        let inspectingStart = t3.addingTimeInterval(3)
+        let inspecting = AgentObservedActivity(
+            operation: .inspecting,
+            targetPath: location,
+            startedAt: inspectingStart,
+            updatedAt: inspectingStart,
+            evidenceSource: .toolEvent)
+        var inspectingAdapter = AgentCompactStatusPhaseAdapter()
+        let freshInspecting = inspectingAdapter.update(
+            .init(
+                turn: .active(startedAt: t3, stream: .assistant, streamStartedAt: t3),
+                currentActivity: inspecting,
+                currentActivityExpiresAt: t3.addingTimeInterval(30)),
+            now: t3.addingTimeInterval(4))
+        try require(freshInspecting.phase == .reading && freshInspecting.phaseStartedAt == inspectingStart,
+                    "fresh inspecting tool activity must outrank an active assistant stream and map to Reading")
+        let freshInspectingReasoning = inspectingAdapter.update(
+            .init(
+                turn: .active(startedAt: t3, stream: .reasoning, streamStartedAt: t3.addingTimeInterval(5)),
+                currentActivity: inspecting,
+                currentActivityExpiresAt: t3.addingTimeInterval(30)),
+            now: t3.addingTimeInterval(6))
+        try require(freshInspectingReasoning.phase == .reading && freshInspectingReasoning.phaseStartedAt == inspectingStart,
+                    "fresh inspecting tool activity must also outrank an active reasoning stream")
+        let staleInspecting = inspectingAdapter.update(
+            .init(
+                turn: .active(startedAt: t3, stream: .reasoning, streamStartedAt: t3.addingTimeInterval(5)),
+                currentActivity: inspecting,
+                currentActivityExpiresAt: t1),
+            now: t2)
+        try require(staleInspecting.phase == .thinking && staleInspecting.phaseStartedAt == t3.addingTimeInterval(5),
+                    "stale inspecting activity must not override the current reasoning stream")
+
+        // Completed and cancelled tool activity has terminal presentation
+        // semantics when it is the current fresh fact.
+        let completedActivity = AgentObservedActivity(
+            operation: .completed,
+            targetPath: location,
+            startedAt: inspectingStart,
+            updatedAt: inspectingStart,
+            evidenceSource: .toolEvent)
+        let cancelledStart = t3.addingTimeInterval(6)
+        let cancelledActivity = AgentObservedActivity(
+            operation: .interrupted,
+            targetPath: location,
+            startedAt: cancelledStart,
+            updatedAt: cancelledStart,
+            evidenceSource: .toolEvent)
+        var completedActivityAdapter = AgentCompactStatusPhaseAdapter()
+        let completedActivityResult = completedActivityAdapter.update(
+            .init(currentActivity: completedActivity, currentActivityExpiresAt: t3.addingTimeInterval(30)),
+            now: t3.addingTimeInterval(7))
+        try require(completedActivityResult.phase == .ready && completedActivityResult.phaseStartedAt == nil,
+                    "completed activity must map to Ready without an elapsed anchor")
+        let cancelledActivityResult = completedActivityAdapter.update(
+            .init(currentActivity: cancelledActivity, currentActivityExpiresAt: t3.addingTimeInterval(30)),
+            now: t3.addingTimeInterval(8))
+        try require(cancelledActivityResult.phase == .interrupted && cancelledActivityResult.phaseStartedAt == cancelledStart,
+                    "cancelled activity must map to Interrupted with its observed anchor")
+
+        // A fresh terminal failure/interruption still wins over contradictory
+        // active assistant/reasoning streams.
+        let activityFailedStart = t3.addingTimeInterval(9)
+        let activityInterruptedStart = t3.addingTimeInterval(10)
+        let failedActivity = AgentObservedActivity(
+            operation: .failed,
+            targetPath: location,
+            startedAt: activityFailedStart,
+            updatedAt: activityFailedStart,
+            evidenceSource: .toolEvent)
+        let interruptedActivity = AgentObservedActivity(
+            operation: .interrupted,
+            targetPath: location,
+            startedAt: activityInterruptedStart,
+            updatedAt: activityInterruptedStart,
+            evidenceSource: .toolEvent)
+        let failedWithActiveStream = completedActivityAdapter.update(
+            .init(
+                turn: .active(startedAt: t3, stream: .assistant, streamStartedAt: t3),
+                currentActivity: failedActivity,
+                currentActivityExpiresAt: t3.addingTimeInterval(30)),
+            now: t3.addingTimeInterval(11))
+        try require(failedWithActiveStream.phase == .failed && failedWithActiveStream.phaseStartedAt == activityFailedStart,
+                    "fresh failed activity must outrank a contradictory assistant stream")
+        let interruptedWithActiveStream = completedActivityAdapter.update(
+            .init(
+                turn: .active(startedAt: t3, stream: .reasoning, streamStartedAt: t3),
+                currentActivity: interruptedActivity,
+                currentActivityExpiresAt: t3.addingTimeInterval(30)),
+            now: t3.addingTimeInterval(12))
+        try require(interruptedWithActiveStream.phase == .interrupted && interruptedWithActiveStream.phaseStartedAt == activityInterruptedStart,
+                    "fresh interrupted activity must outrank a contradictory reasoning stream")
+
         // A real phase change replaces the anchor, even when both phases are
         // active. No old elapsed time leaks across the transition.
         let editStart = t3.addingTimeInterval(4)

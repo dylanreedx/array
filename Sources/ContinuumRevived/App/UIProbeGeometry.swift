@@ -306,7 +306,7 @@ enum UIProbeGeometry {
 
     static func runGeometryChecks() throws {
         let compactStatusPhaseAssertions = try runCompactStatusPhaseAdapterChecks()
-        print("UIProbeGeometry: compact status phase adapter held \(compactStatusPhaseAssertions) deterministic transition, anchor, failure/interruption, missing-timestamp, and stale-context assertions")
+        print("UIProbeGeometry: compact status phase adapter held \(compactStatusPhaseAssertions) deterministic transition, anchor, fresh/stale-inspecting precedence, completed/cancelled activity, failure/interruption, missing-timestamp, and stale-context assertions")
         _ = NSApplication.shared
         // Production pins the app appearance at launch; reproduce it so a probe
         // that failed to set its own appearance could not pass the .aqua pass.
