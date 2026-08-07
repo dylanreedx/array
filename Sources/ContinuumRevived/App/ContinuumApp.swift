@@ -11195,6 +11195,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             gallery.frame = NSRect(origin: .zero, size: OrbitVariationsGalleryView.preferredSize)
             content = gallery
             backingSize = OrbitVariationsGalleryView.preferredSize
+        case "tilted-variations":
+            let gallery = LabCatalog.makeTiltedVariationsGalleryView(mode: .snapshot)
+            gallery.frame = NSRect(origin: .zero, size: TiltedVariationsGalleryView.preferredSize)
+            content = gallery
+            backingSize = TiltedVariationsGalleryView.preferredSize
         default:
             FileHandle.standardError.write(Data("unknown component snapshot: \(name)\n".utf8))
             return false

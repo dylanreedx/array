@@ -1170,7 +1170,7 @@ enum LabCatalog {
             managedAgentLocationStatusCard, managedAgentNarrowLocationTileCard,
             transcriptReviewCard, composerReviewCard, composerFullVariantCard,
             composerCompactVariantCard, composerProviderControlsCard, throbberCandidateGalleryCard,
-            orbitVariationsGalleryCard,
+            orbitVariationsGalleryCard, tiltedVariationsGalleryCard,
 
             // MARK: night3-C cards
             managedAgentApprovalDockCard, newTileCwdPolicyCard,
@@ -2322,6 +2322,25 @@ enum LabCatalog {
     static func makeOrbitVariationsGalleryView(mode: OrbitVariationsGalleryView.Mode) -> OrbitVariationsGalleryView {
         OrbitVariationsGalleryView(
             frame: NSRect(origin: .zero, size: OrbitVariationsGalleryView.preferredSize),
+            mode: mode
+        )
+    }
+
+    private static var tiltedVariationsGalleryCard: LabEntry {
+        LabEntry(
+            id: "managed-agent.tilted-variations",
+            category: "Managed Agent",
+            title: "Tilted Prism Variations — Motion Study",
+            summary: "Selected Tilted Prism baseline plus five new named variations at true 18×18 scale, shown in live Normal and static Reduced Motion with compact status context. Review only; no production winner is selected.",
+            content: .reviewSurface(preferredSize: TiltedVariationsGalleryView.preferredSize) {
+                LabCatalog.makeTiltedVariationsGalleryView(mode: .live)
+            }
+        )
+    }
+
+    static func makeTiltedVariationsGalleryView(mode: TiltedVariationsGalleryView.Mode) -> TiltedVariationsGalleryView {
+        TiltedVariationsGalleryView(
+            frame: NSRect(origin: .zero, size: TiltedVariationsGalleryView.preferredSize),
             mode: mode
         )
     }
@@ -3793,6 +3812,114 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
     }
 
+    private static func runTiltedVariationsGalleryCheck(fail: (String) -> Error) throws {
+        let appearances: [NSAppearance.Name] = [.aqua, .darkAqua]
+        var contrast = UIProbeContrast.Evaluation()
+        let expectedCandidates = TiltedVariationsGalleryView.Candidate.allCases
+        guard TiltedVariationsGalleryView.preferredSize == NSSize(width: 960, height: 640) else {
+            throw fail("tilted variations preferred size drifted from 960×640")
+        }
+        for appearance in appearances {
+            for scale in [CGFloat(1), CGFloat(2)] {
+                let label = "tilted-variations.\(appearance.rawValue).\(Int(scale))x"
+                let probe = try UIProbe.render(
+                    UIProbe.Spec(
+                        id: "managed-agent.tilted-variations.\(appearance.rawValue).\(Int(scale))x",
+                        size: TiltedVariationsGalleryView.preferredSize,
+                        appearance: appearance,
+                        renderScale: scale
+                    ),
+                    make: { LabCatalog.makeTiltedVariationsGalleryView(mode: .snapshot) }
+                )
+                guard let gallery = probe.view as? TiltedVariationsGalleryView else {
+                    throw fail("\(label): probe did not render TiltedVariationsGalleryView")
+                }
+                try UIProbeGeometry.expectNoZeroSizeViews(gallery, label: label)
+                try UIProbeGeometry.expectNoClipping(gallery, label: label)
+                try UIProbeGeometry.expectNoBrokenRequiredSizeConstraints(gallery, label: label)
+                guard gallery.qaCandidateCount == expectedCandidates.count,
+                      gallery.qaFixtureCount == expectedCandidates.count * 2 else {
+                    throw fail("\(label): expected Tilted Prism baseline plus five new variations in Normal and Reduced Motion")
+                }
+                for fixture in gallery.qaIndicatorFixtures {
+                    let indicator = fixture.indicator
+                    guard indicator.bounds.size == NSSize(width: 18, height: 18),
+                          indicator.accessibilityRole() == .progressIndicator,
+                          indicator.accessibilityLabel()?.contains("Agent thinking") == true,
+                          gallery.bounds.contains(indicator.convert(indicator.bounds, to: gallery)),
+                          fixture.nameLabel.stringValue == fixture.candidate.rawValue,
+                          expectedCandidates.contains(fixture.candidate),
+                          fixture.directionLabel.stringValue == fixture.candidate.direction,
+                          !fixture.directionLabel.stringValue.isEmpty,
+                          !fixture.statusLabel.stringValue.isEmpty,
+                          fixture.nameLabel.maximumNumberOfLines == 2,
+                          fixture.directionLabel.maximumNumberOfLines == 2,
+                          fixture.nameLabel.frame.width > 0,
+                          fixture.directionLabel.frame.width > 0,
+                          fixture.statusLabel.frame.width > 0 else {
+                        throw fail("\(label): \(fixture.candidate.rawValue) lost 18×18 geometry, exact name/direction, AX, or compact status context")
+                    }
+                    guard activeAnimationCount(in: indicator) == 0 else {
+                        throw fail("\(label): snapshot route installed animation for \(fixture.candidate.rawValue)")
+                    }
+                }
+                contrast.merge(try UIProbeContrast.evaluate(probe))
+            }
+        }
+        guard contrast.measured > 0, contrast.failures.isEmpty else {
+            throw fail("tilted variations contrast/color-hygiene check failed: \(contrast.failures.joined(separator: "; "))")
+        }
+
+        let liveProbe = try UIProbe.render(
+            UIProbe.Spec(
+                id: "managed-agent.tilted-variations.live.darkAqua",
+                size: TiltedVariationsGalleryView.preferredSize,
+                appearance: .darkAqua
+            ),
+            make: { LabCatalog.makeTiltedVariationsGalleryView(mode: .live) }
+        )
+        guard let liveGallery = liveProbe.view as? TiltedVariationsGalleryView else {
+            throw fail("tilted variations live probe did not render gallery")
+        }
+        let liveFixtures = liveGallery.qaIndicatorFixtures
+        guard liveFixtures.filter({ $0.reducedMotion }).count == expectedCandidates.count,
+              liveFixtures.filter({ !$0.reducedMotion }).count == expectedCandidates.count else {
+            throw fail("tilted variations live route lost Normal/Reduced Motion coverage")
+        }
+        for fixture in liveFixtures {
+            let count = activeAnimationCount(in: fixture.indicator)
+            if fixture.reducedMotion {
+                guard count == 0 else { throw fail("tilted variations Reduced Motion animated \(fixture.candidate.rawValue)") }
+            } else {
+                guard count > 0 else { throw fail("tilted variations Normal Motion did not animate \(fixture.candidate.rawValue)") }
+            }
+        }
+
+        // Exercise the real window/appearance seam: each candidate must repaint
+        // from semantic dynamic tokens and restart its requested live animation
+        // after the effective appearance changes in both directions.
+        let host = NSView(frame: NSRect(origin: .zero, size: TiltedVariationsGalleryView.preferredSize))
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.appearance = NSAppearance(named: .aqua)
+        window.contentView = host
+        host.addSubview(liveGallery)
+        liveGallery.frame = host.bounds
+        host.layoutSubtreeIfNeeded()
+        for appearance in [NSAppearance.Name.darkAqua, .aqua] {
+            window.appearance = NSAppearance(named: appearance)
+            host.layoutSubtreeIfNeeded()
+            for fixture in liveGallery.qaIndicatorFixtures {
+                let count = activeAnimationCount(in: fixture.indicator)
+                if fixture.reducedMotion {
+                    guard count == 0 else { throw fail("tilted variations appearance redraw animated Reduced Motion \(fixture.candidate.rawValue)") }
+                } else {
+                    guard count > 0 else { throw fail("tilted variations appearance redraw failed to restart \(fixture.candidate.rawValue) in \(appearance.rawValue)") }
+                }
+            }
+        }
+        window.contentView = nil
+    }
+
     private static func activeAnimationCount(in indicator: NSView & AgentThinkingIndicatorAnimating) -> Int {
         switch indicator {
         case let view as OrbitingTriadThinkingIndicatorView:
@@ -3812,6 +3939,16 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         case let view as SolarHandoffOrbitThinkingIndicatorView:
             return view.qaActiveAnimationCount
         case let view as AngularSlingshotOrbitThinkingIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as ChromaticDepthRelayTiltedThinkingIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as DualPlaneGyroTiltedThinkingIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as AuroraRibbonTiltedThinkingIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as PrecessingPrismTiltedThinkingIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as PrismaticCometTiltedThinkingIndicatorView:
             return view.qaActiveAnimationCount
         default:
             return 0
@@ -3939,6 +4076,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         try runTranscriptReviewCheck(fail: fail)
         try runThrobberCandidateGalleryCheck(fail: fail)
         try runOrbitVariationsGalleryCheck(fail: fail)
+        try runTiltedVariationsGalleryCheck(fail: fail)
 
         let panel = ComponentLabPanel(env: LabEnvironment(ghostty: nil, browserEngine: nil))
         panel.show(near: nil)
@@ -3963,6 +4101,13 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
               orbitVariationsEntry.title == "Orbit Variations — Motion Study",
               case .reviewSurface = orbitVariationsEntry.content else {
             throw fail("missing Orbit Variations motion study review surface")
+        }
+        guard let tiltedVariationsEntry = entries.first(where: { $0.id == "managed-agent.tilted-variations" }),
+              tiltedVariationsEntry.title == "Tilted Prism Variations — Motion Study",
+              case let .reviewSurface(size, makeView) = tiltedVariationsEntry.content,
+              size == NSSize(width: 960, height: 640),
+              makeView() is TiltedVariationsGalleryView else {
+            throw fail("missing Tilted Prism Variations motion study review surface")
         }
         guard let composerEntry = entries.first(where: { $0.id == "agent.composer.review" }),
               case let .reviewSurface(composerSize, makeComposerView) = composerEntry.content,

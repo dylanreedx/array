@@ -59,13 +59,6 @@ final class ChromaticDepthRelayTiltedThinkingIndicatorView: NSView, AgentThinkin
         let dominantAccent: AccentToken
     }
 
-    private struct ColorComponents {
-        let red: CGFloat
-        let green: CGFloat
-        let blue: CGFloat
-        let alpha: CGFloat
-    }
-
     private static let side: CGFloat = 18
     private static let nodeDiameter: CGFloat = 3.35
     private static let duration: CFTimeInterval = 1.62
@@ -376,29 +369,12 @@ final class ChromaticDepthRelayTiltedThinkingIndicatorView: NSView, AgentThinkin
     }
 
     private func resolvedRelayColor(for state: NodeState) -> CGColor {
-        let tokenColors = Self.roleAccents.map { components(for: $0) }
-        let mixed = zip(tokenColors, state.relayWeights).reduce(ColorComponents(red: 0, green: 0, blue: 0, alpha: 0)) { partial, pair in
-            let (color, weight) = pair
-            return ColorComponents(
-                red: partial.red + color.red * weight,
-                green: partial.green + color.green * weight,
-                blue: partial.blue + color.blue * weight,
-                alpha: partial.alpha + color.alpha * weight
-            )
-        }
-        let alpha = min(1, max(0, mixed.alpha * state.chromaAlpha))
-        return CGColor(red: mixed.red, green: mixed.green, blue: mixed.blue, alpha: alpha)
-    }
-
-    private func components(for accent: AccentToken) -> ColorComponents {
-        let cgColor = accent.color.cgColor(in: self)
-        let nsColor = NSColor(cgColor: cgColor)?.usingColorSpace(.sRGB)
-        return ColorComponents(
-            red: nsColor?.redComponent ?? 0,
-            green: nsColor?.greenComponent ?? 0,
-            blue: nsColor?.blueComponent ?? 0,
-            alpha: nsColor?.alphaComponent ?? 1
-        )
+        // Keep the relay chroma semantic: the dominant role selects an existing
+        // dynamic accent token, while relay weights still drive which role leads.
+        // No literal or fixed-theme colour is introduced by this candidate.
+        let color = state.dominantAccent.color.cgColor(in: self)
+        let alpha = min(1, max(0, state.chromaAlpha))
+        return color.copy(alpha: alpha) ?? color
     }
 
     private func performWithoutLayerActions(_ work: () -> Void) {
