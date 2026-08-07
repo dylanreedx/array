@@ -21,6 +21,12 @@ final class AgentImageQuickPreviewController: NSObject, @preconcurrency QLPrevie
             Self.retainedControllers.removeValue(forKey: ObjectIdentifier(self))
             return
         }
+        if let previous = panel.dataSource as? AgentImageQuickPreviewController, previous !== self {
+            Self.retainedControllers.removeValue(forKey: ObjectIdentifier(previous))
+        }
+        if let previous = panel.delegate as? AgentImageQuickPreviewController, previous !== self {
+            Self.retainedControllers.removeValue(forKey: ObjectIdentifier(previous))
+        }
         panel.dataSource = self
         panel.delegate = self
         panel.reloadData()
@@ -93,6 +99,36 @@ enum AgentImageFileValidator {
     }
 }
 
+struct AgentImageFileOperations: @unchecked Sendable {
+    var fileExists: (_ path: String, _ isDirectory: UnsafeMutablePointer<ObjCBool>?) -> Bool
+    var createDirectory: (_ url: URL, _ withIntermediateDirectories: Bool) throws -> Void
+    var copyItem: (_ source: URL, _ destination: URL) throws -> Void
+    var replaceItem: (_ destination: URL, _ source: URL) throws -> URL?
+    var moveItem: (_ source: URL, _ destination: URL) throws -> Void
+    var removeItem: (_ url: URL) throws -> Void
+
+    static let fileManager = AgentImageFileOperations(
+        fileExists: { path, isDirectory in
+            FileManager.default.fileExists(atPath: path, isDirectory: isDirectory)
+        },
+        createDirectory: { url, withIntermediateDirectories in
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: withIntermediateDirectories)
+        },
+        copyItem: { source, destination in
+            try FileManager.default.copyItem(at: source, to: destination)
+        },
+        replaceItem: { destination, source in
+            try FileManager.default.replaceItemAt(destination, withItemAt: source, backupItemName: nil, options: [])
+        },
+        moveItem: { source, destination in
+            try FileManager.default.moveItem(at: source, to: destination)
+        },
+        removeItem: { url in
+            try FileManager.default.removeItem(at: url)
+        }
+    )
+}
+
 @MainActor
 enum AgentImageAppKitActions {
     @discardableResult
@@ -131,38 +167,36 @@ enum AgentImageAppKitActions {
     }
 
     @discardableResult
-    static func saveFileImageContent(from source: URL, to destination: URL) throws -> Bool {
+    static func saveFileImageContent(
+        from source: URL,
+        to destination: URL,
+        fileOperations: AgentImageFileOperations = .fileManager
+    ) throws -> Bool {
         guard let source = AgentImageFileValidator.validatedLocalImageFile(source), destination.isFileURL else { return false }
         let destination = destination.standardizedFileURL
         guard !AgentImageFileValidator.isSameFile(source, destination) else { return false }
 
-        let fileManager = FileManager.default
         var destinationIsDirectory: ObjCBool = false
-        if fileManager.fileExists(atPath: destination.path, isDirectory: &destinationIsDirectory), destinationIsDirectory.boolValue {
+        if fileOperations.fileExists(destination.path, &destinationIsDirectory), destinationIsDirectory.boolValue {
             return false
         }
         let directory = destination.deletingLastPathComponent()
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        try fileOperations.createDirectory(directory, true)
         let temp = directory.appendingPathComponent(".\(destination.lastPathComponent).continuum-\(UUID().uuidString).tmp")
         var tempCreated = false
         do {
-            try fileManager.copyItem(at: source, to: temp)
+            try fileOperations.copyItem(source, temp)
             tempCreated = true
-            if fileManager.fileExists(atPath: destination.path) {
-                _ = try fileManager.replaceItemAt(
-                    destination,
-                    withItemAt: temp,
-                    backupItemName: nil,
-                    options: []
-                )
+            if fileOperations.fileExists(destination.path, nil) {
+                _ = try fileOperations.replaceItem(destination, temp)
                 tempCreated = false
             } else {
-                try fileManager.moveItem(at: temp, to: destination)
+                try fileOperations.moveItem(temp, destination)
                 tempCreated = false
             }
             return true
         } catch {
-            if tempCreated { try? fileManager.removeItem(at: temp) }
+            if tempCreated { try? fileOperations.removeItem(temp) }
             throw error
         }
     }

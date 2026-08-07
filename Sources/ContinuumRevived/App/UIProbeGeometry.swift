@@ -6456,6 +6456,7 @@ enum UIProbeGeometry {
         var thumbnailRequests: [(AgentImageAttachmentID, NSSize, UInt64)] = []
         var invalidationHandlers: [AgentImageAttachmentID: @MainActor (UInt64) -> Void] = [:]
         var cancelledRequests = 0
+        var pendingLargeThumbnailCompletions: [AgentImageAttachmentID: @MainActor (AgentImageThumbnailResult) -> Void] = [:]
         let provider = AgentImageResourceProvider(
             snapshot: { attachmentID in
                 resolvedIDs.append(attachmentID)
@@ -6463,6 +6464,13 @@ enum UIProbeGeometry {
             },
             requestThumbnail: { attachmentID, target, revision, completion in
                 thumbnailRequests.append((attachmentID, target, revision))
+                if attachmentID.rawValue.hasPrefix("large-") {
+                    pendingLargeThumbnailCompletions[attachmentID] = completion
+                    return AgentImageThumbnailRequest {
+                        cancelledRequests += 1
+                        pendingLargeThumbnailCompletions.removeValue(forKey: attachmentID)
+                    }
+                }
                 completion(.success(thumbnail(size: target, id: attachmentID, revision: revision)))
                 return AgentImageThumbnailRequest { cancelledRequests += 1 }
             },
@@ -6513,15 +6521,18 @@ enum UIProbeGeometry {
               firstRequest.0 == localID,
               firstRequest.2 == 1,
               firstRequest.1.width <= AgentImageGalleryView.maximumThumbnailPixelEdge,
-              firstRequest.1.height <= AgentImageGalleryView.maximumThumbnailPixelEdge else {
-            throw fail("single image did not request a bounded backing-scale thumbnail: \(thumbnailRequests)")
+              firstRequest.1.height <= AgentImageGalleryView.maximumThumbnailPixelEdge,
+              singleView.cells[0].imageView.image != nil,
+              !singleView.cells[0].imageView.isHidden,
+              singleView.cells[0].stateLabel.isHidden else {
+            throw fail("single image did not request and visibly install a synchronous bounded thumbnail: \(thumbnailRequests)")
         }
 
         let galleryPayload = AgentImageGalleryPayload(images: [
             singlePayload,
             AgentImagePayload(attachment: metadata("opaque-processing-image", name: "pending.png", type: "image/png", width: 640, height: 480)),
             AgentImagePayload(attachment: metadata("opaque-missing-image", name: "missing.png", type: "image/png")),
-            AgentImagePayload(attachment: metadata("opaque-failed-image", name: "/secret/failed.png", type: "image/png"))
+            AgentImagePayload(attachment: metadata("opaque-failed-image", name: "/secret/failed.png", type: "image/png\n/private/" + String(repeating: "x", count: 120)))
         ])
         let galleryBlock = AgentBlock(id: id("image-gallery"), revision: 1, kind: .imageGallery, payload: .imageGallery(galleryPayload))
         let galleryHost = AgentBlockHostView()
@@ -6549,7 +6560,7 @@ enum UIProbeGeometry {
         }
 
         let localMenu = galleryView.cells[0].actionMenuForQA()
-        let missingMenu = galleryView.cells.first(where: { $0.identifier?.rawValue == "agent.image.opaque-missing-image" })?.actionMenuForQA()
+        let missingMenu = galleryView.cells.first(where: { $0.titleLabel.stringValue == "missing.png" })?.actionMenuForQA()
         guard localMenu.items.map(\.title) == ["Preview", "Copy Image", "Save As…", "Reveal in Finder"],
               localMenu.items.allSatisfy({ $0.isEnabled }),
               missingMenu?.items.allSatisfy({ !$0.isEnabled }) == true else {
@@ -6576,7 +6587,16 @@ enum UIProbeGeometry {
         case let .revealImage(blockID, attachmentID): guard blockID == galleryBlock.id, attachmentID == localID else { throw fail("reveal image action lost identity") }
         default: throw fail("fourth image action was not reveal: \(actions[3])")
         }
+        guard galleryView.cells[0].acceptsFirstResponder,
+              galleryView.cells[0].performPreviewForQA(),
+              actions.count == 5,
+              galleryView.accessibilityChildren()?.count == galleryPayload.images.count else {
+            throw fail("image gallery did not expose focusable cell and full logical AX preview traversal")
+        }
 
+        presentationInvalidations.removeAll()
+        try galleryHost.apply(block: galleryBlock, context: context)
+        galleryHost.layoutSubtreeIfNeeded()
         snapshots[processingID] = AgentImageResourceSnapshot(
             attachmentID: processingID,
             state: .available,
@@ -6587,9 +6607,27 @@ enum UIProbeGeometry {
         )
         invalidationHandlers[processingID]?(2)
         galleryHost.layoutSubtreeIfNeeded()
-        guard presentationInvalidations.contains(galleryBlock.id),
-              galleryView.cells.first(where: { $0.identifier?.rawValue == "agent.image.opaque-processing-image" })?.metadataLabel.stringValue.contains("1200×300") == true else {
-            throw fail("resource revision transition did not invalidate measurement/presentation deterministically")
+        guard presentationInvalidations == [galleryBlock.id],
+              galleryView.cells.first(where: { $0.titleLabel.stringValue == "processed.png" })?.metadataLabel.stringValue.contains("1200×300") == true else {
+            throw fail("resource apply-again revision transition did not invalidate measurement/presentation with current gated actions")
+        }
+        let metadataStrings = galleryView.cells.map(\.metadataLabel.stringValue)
+        guard !metadataStrings.contains(where: { $0.contains("/private") || $0.contains("\n") || $0.contains(String(repeating: "x", count: 80)) }) else {
+            throw fail("image metadata exposed unsanitized or unbounded content type: \(metadataStrings)")
+        }
+
+        let duplicatePayload = AgentImageGalleryPayload(images: [singlePayload, singlePayload, AgentImagePayload(attachment: metadata("opaque-missing-image", name: "missing.png", type: "image/png"))])
+        let duplicateBlock = AgentBlock(id: id("image-gallery-duplicates"), revision: 1, kind: .imageGallery, payload: .imageGallery(duplicatePayload))
+        let duplicateHost = AgentBlockHostView()
+        let duplicateHeight = try duplicateHost.measuredHeight(for: duplicateBlock, width: 360, context: context)
+        duplicateHost.frame = NSRect(x: 0, y: 0, width: 360, height: duplicateHeight)
+        try duplicateHost.apply(block: duplicateBlock, context: context)
+        duplicateHost.layoutSubtreeIfNeeded()
+        guard let duplicateView = duplicateHost.rendererView as? AgentImageGalleryView,
+              duplicateView.qaVisibleAttachmentIDs.filter({ $0 == localID }).count == 2,
+              duplicateView.cells.filter({ $0.titleLabel.stringValue == "resolved-local.png" }).count == 2,
+              Set(duplicateView.cells.map { ObjectIdentifier($0) }).count == duplicateView.cells.count else {
+            throw fail("duplicate attachment IDs were not represented as distinct presentation occurrences")
         }
 
         let largeImages = (0..<100).map { index in
@@ -6603,17 +6641,45 @@ enum UIProbeGeometry {
         }
         let largeBlock = AgentBlock(id: id("image-gallery-large"), revision: 1, kind: .imageGallery, payload: .imageGallery(.init(images: largeImages)))
         let largeHost = AgentBlockHostView()
+        largeHost.translatesAutoresizingMaskIntoConstraints = true
         let largeHeight = try largeHost.measuredHeight(for: largeBlock, width: 360, context: context)
-        guard largeHeight == AgentImageGalleryView.maximumGalleryViewportHeight else {
-            throw fail("large gallery did not cap transcript row height for internal lazy scrolling: \(largeHeight)")
+        guard largeHeight > AgentImageGalleryView.maximumGalleryViewportHeight else {
+            throw fail("large gallery did not hand full height to the outer transcript scroll owner: \(largeHeight)")
         }
         largeHost.frame = NSRect(x: 0, y: 0, width: 360, height: largeHeight)
+        let outerTranscriptScroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 360, height: AgentImageGalleryView.maximumGalleryViewportHeight))
+        outerTranscriptScroll.drawsBackground = false
+        outerTranscriptScroll.hasVerticalScroller = true
+        outerTranscriptScroll.documentView = largeHost
+        outerTranscriptScroll.contentView.postsBoundsChangedNotifications = true
+        outerTranscriptScroll.contentView.setBoundsOrigin(NSPoint(x: 0, y: max(0, largeHeight - AgentImageGalleryView.maximumGalleryViewportHeight)))
         try largeHost.apply(block: largeBlock, context: context)
+        outerTranscriptScroll.layoutSubtreeIfNeeded()
         largeHost.layoutSubtreeIfNeeded()
         guard let largeView = largeHost.rendererView as? AgentImageGalleryView,
               largeView.qaVisibleCellCount < 20,
               largeView.qaVisibleCellCount < largeImages.count else {
-            throw fail("large gallery materialized unbounded cells: \(String(describing: (largeHost.rendererView as? AgentImageGalleryView)?.qaVisibleCellCount))")
+            throw fail("large gallery materialized unbounded cells before outer scroll: \(String(describing: (largeHost.rendererView as? AgentImageGalleryView)?.qaVisibleCellCount))")
+        }
+        let initialLargeIDs = largeView.qaVisibleAttachmentIDs
+        let initialLargeCells = Set(largeView.cells.map { ObjectIdentifier($0) })
+        let cancelledBeforeScroll = cancelledRequests
+        outerTranscriptScroll.contentView.setBoundsOrigin(.zero)
+        outerTranscriptScroll.reflectScrolledClipView(outerTranscriptScroll.contentView)
+        NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: outerTranscriptScroll.contentView)
+        largeView.needsLayout = true
+        largeView.layoutSubtreeIfNeeded()
+        largeHost.layoutSubtreeIfNeeded()
+        let scrolledLargeIDs = largeView.qaVisibleAttachmentIDs
+        let scrolledLargeCells = Set(largeView.cells.map { ObjectIdentifier($0) })
+        guard !initialLargeIDs.isEmpty,
+              !scrolledLargeIDs.isEmpty,
+              initialLargeIDs != scrolledLargeIDs,
+              largeView.qaVisibleCellCount < 20,
+              !initialLargeCells.intersection(scrolledLargeCells).isEmpty,
+              cancelledRequests > cancelledBeforeScroll,
+              largeView.qaReusePoolCount < 20 else {
+            throw fail("large gallery did not scroll lazily with reuse/pool/cancellation checks: before=\(initialLargeIDs.prefix(4)) after=\(scrolledLargeIDs.prefix(4)) visible=\(largeView.qaVisibleCellCount) pool=\(largeView.qaReusePoolCount) cancelled=\(cancelledRequests - cancelledBeforeScroll)")
         }
 
         let sourceA = try pngFile(named: "source-a")
@@ -6650,6 +6716,16 @@ enum UIProbeGeometry {
         }
         guard (try? String(contentsOf: destination)) == "keep me" else {
             throw fail("failed save removed or replaced the existing destination before success")
+        }
+        enum InducedReplaceFailure: Error { case fail }
+        var failingOperations = AgentImageFileOperations.fileManager
+        failingOperations.replaceItem = { _, _ in throw InducedReplaceFailure.fail }
+        do {
+            _ = try AgentImageAppKitActions.saveFileImageContent(from: sourceB, to: destination, fileOperations: failingOperations)
+            throw fail("save unexpectedly succeeded when destination replacement was induced to fail")
+        } catch InducedReplaceFailure.fail {}
+        guard (try? String(contentsOf: destination)) == "keep me" else {
+            throw fail("induced replacement failure did not preserve the original destination")
         }
         guard try AgentImageAppKitActions.saveFileImageContent(from: sourceB, to: destination),
               AgentImageFileValidator.validatedLocalImageFile(destination) != nil else {

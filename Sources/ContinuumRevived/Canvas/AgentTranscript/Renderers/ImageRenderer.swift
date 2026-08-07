@@ -66,11 +66,11 @@ final class AgentImageGalleryView: NSView {
     static let maximumThumbnailPixelEdge: CGFloat = 768
 
     private let mode: Mode
-    private let scrollView = NSScrollView(frame: .zero)
     private let contentView = LazyImageGalleryContentView(frame: .zero)
     private var blockID: AgentNodeID?
     private var images: [AgentImagePayload] = []
-    private var snapshots: [AgentImageAttachmentID: AgentImageResourceSnapshot] = [:]
+    private var occurrenceKeys: [ImageOccurrenceKey] = []
+    private var snapshots: [ImageOccurrenceKey: AgentImageResourceSnapshot] = [:]
     private var observations: [AgentImageAttachmentID: AgentImageResourceObservation] = [:]
     private var context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
 
@@ -88,13 +88,7 @@ final class AgentImageGalleryView: NSView {
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
 
-        scrollView.drawsBackground = false
-        scrollView.borderType = .noBorder
-        scrollView.hasHorizontalScroller = false
-        scrollView.hasVerticalScroller = mode == .gallery
-        scrollView.autohidesScrollers = true
-        scrollView.documentView = contentView
-        addSubview(scrollView)
+        addSubview(contentView)
 
         contentView.onVisibleCellsChanged = { [weak self] in
             guard let self else { return }
@@ -117,13 +111,11 @@ final class AgentImageGalleryView: NSView {
         self.blockID = blockID
         self.images = images
         self.context = context
-        snapshots = Dictionary(uniqueKeysWithValues: images.map { payload in
-            let snapshot = context.imageResources.snapshot(payload.attachment.id)
-            return (payload.attachment.id, snapshot)
-        })
+        occurrenceKeys = Self.occurrenceKeys(for: images)
+        snapshots = Self.snapshotMap(images: images, keys: occurrenceKeys, context: context)
         replaceObservations(blockID: blockID, images: images, context: context)
         identifier = NSUserInterfaceItemIdentifier("agent.imageGallery.\(blockID.rawValue)")
-        contentView.apply(blockID: blockID, images: images, snapshots: snapshots, context: context)
+        contentView.apply(blockID: blockID, images: images, occurrenceKeys: occurrenceKeys, snapshots: snapshots, context: context)
         applyAccessibility(blockID: blockID, images: images, context: context)
         applyTokens()
         needsLayout = true
@@ -132,16 +124,16 @@ final class AgentImageGalleryView: NSView {
     func applyAccessibility(blockID: AgentNodeID, images: [AgentImagePayload], context: AgentRenderContext) {
         let countText = images.count == 1 ? "Image" : "Image gallery, \(images.count) images"
         setAccessibilityLabel(countText)
-        setAccessibilityChildren(contentView.qaVisibleCells)
+        setAccessibilityChildren(contentView.qaAccessibilityChildren)
     }
 
     override func layout() {
         super.layout()
-        scrollView.frame = bounds
-        let frames = Self.itemFrames(images: images, width: bounds.width, snapshots: snapshots, context: context, mode: mode)
+        let frames = Self.itemFrames(images: images, keys: occurrenceKeys, width: bounds.width, snapshots: snapshots, context: context, mode: mode)
         let contentHeight = Self.contentHeight(for: frames)
         contentView.frame = NSRect(x: 0, y: 0, width: bounds.width, height: contentHeight)
-        contentView.applyLayout(frames: frames, viewport: scrollView.contentView.documentVisibleRect)
+        let viewport = contentView.convert(visibleRect, from: self)
+        contentView.applyLayout(frames: frames, viewport: viewport.isEmpty ? contentView.bounds : viewport)
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -164,30 +156,49 @@ final class AgentImageGalleryView: NSView {
         guard !images.isEmpty else {
             return verticalInset * 2 + titleHeight
         }
-        let snapshots = Dictionary(uniqueKeysWithValues: images.map { payload in
-            (payload.attachment.id, context.imageResources.snapshot(payload.attachment.id))
-        })
-        let frames = itemFrames(images: images, width: width, snapshots: snapshots, context: context, mode: mode)
+        let keys = occurrenceKeys(for: images)
+        let snapshots = snapshotMap(images: images, keys: keys, context: context)
+        let frames = itemFrames(images: images, keys: keys, width: width, snapshots: snapshots, context: context, mode: mode)
         let fullHeight = max(verticalInset * 2 + titleHeight, contentHeight(for: frames))
-        guard mode == .gallery else { return fullHeight }
-        return min(fullHeight, maximumGalleryViewportHeight)
+        return fullHeight
     }
 
     private func replaceObservations(blockID: AgentNodeID, images: [AgentImagePayload], context: AgentRenderContext) {
-        let nextIDs = Set(images.map(\.attachment.id))
-        for (id, observation) in observations where !nextIDs.contains(id) {
-            observation.cancel()
-        }
-        observations = observations.filter { nextIDs.contains($0.key) }
-        for id in nextIDs where observations[id] == nil {
+        observations.values.forEach { $0.cancel() }
+        observations.removeAll(keepingCapacity: true)
+        for id in Set(images.map(\.attachment.id)) {
             observations[id] = context.imageResources.observe(id: id) { [weak self] _ in
                 guard let self, self.blockID == blockID else { return }
-                self.snapshots[id] = context.imageResources.snapshot(id)
-                self.contentView.updateSnapshot(self.snapshots[id], for: id)
+                let snapshot = context.imageResources.snapshot(id)
+                for key in self.occurrenceKeys where key.attachmentID == id {
+                    self.snapshots[key] = snapshot
+                }
+                self.contentView.updateSnapshot(snapshot, for: id)
                 context.actions.invalidatePresentation(blockID: blockID)
                 self.needsLayout = true
             }
         }
+    }
+
+    private static func occurrenceKeys(for images: [AgentImagePayload]) -> [ImageOccurrenceKey] {
+        var counts: [AgentImageAttachmentID: Int] = [:]
+        return images.map { payload in
+            let ordinal = counts[payload.attachment.id, default: 0]
+            counts[payload.attachment.id] = ordinal + 1
+            return ImageOccurrenceKey(attachmentID: payload.attachment.id, ordinal: ordinal)
+        }
+    }
+
+    private static func snapshotMap(
+        images: [AgentImagePayload],
+        keys: [ImageOccurrenceKey],
+        context: AgentRenderContext
+    ) -> [ImageOccurrenceKey: AgentImageResourceSnapshot] {
+        var map: [ImageOccurrenceKey: AgentImageResourceSnapshot] = [:]
+        for (index, payload) in images.enumerated() where keys.indices.contains(index) {
+            map[keys[index]] = context.imageResources.snapshot(payload.attachment.id)
+        }
+        return map
     }
 
     private static func contentHeight(for frames: [NSRect]) -> CGFloat {
@@ -196,8 +207,9 @@ final class AgentImageGalleryView: NSView {
 
     private static func itemFrames(
         images: [AgentImagePayload],
+        keys: [ImageOccurrenceKey],
         width: CGFloat,
-        snapshots: [AgentImageAttachmentID: AgentImageResourceSnapshot],
+        snapshots: [ImageOccurrenceKey: AgentImageResourceSnapshot],
         context: AgentRenderContext,
         mode: Mode
     ) -> [NSRect] {
@@ -206,8 +218,9 @@ final class AgentImageGalleryView: NSView {
         let availableWidth = max(1, safeWidth - horizontalInset * 2 - CGFloat(max(0, columns - 1)) * itemGap)
         let cellWidth = max(1, floor(availableWidth / CGFloat(columns)))
         let imageAreaWidth = max(1, cellWidth - cellInset * 2)
-        let imageHeights = images.map { payload -> CGFloat in
-            let snapshot = snapshots[payload.attachment.id] ?? context.imageResources.snapshot(payload.attachment.id)
+        let imageHeights = images.enumerated().map { index, payload -> CGFloat in
+            let key = keys.indices.contains(index) ? keys[index] : ImageOccurrenceKey(attachmentID: payload.attachment.id, ordinal: index)
+            let snapshot = snapshots[key] ?? context.imageResources.snapshot(payload.attachment.id)
             let ratio = aspectRatio(for: payload, snapshot: snapshot)
             let raw = imageAreaWidth / max(0.1, ratio)
             let cap = mode == .single ? maximumSingleImageHeight : maximumGalleryImageHeight
@@ -276,17 +289,24 @@ final class AgentImageGalleryView: NSView {
 private final class LazyImageGalleryContentView: NSView {
     private var blockID: AgentNodeID?
     private var images: [AgentImagePayload] = []
-    private var snapshots: [AgentImageAttachmentID: AgentImageResourceSnapshot] = [:]
+    private var occurrenceKeys: [ImageOccurrenceKey] = []
+    private var snapshots: [ImageOccurrenceKey: AgentImageResourceSnapshot] = [:]
     private var context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
     private var frames: [NSRect] = []
-    private var visibleCellsByID: [AgentImageAttachmentID: AgentImageCellView] = [:]
+    private var visibleCellsByKey: [ImageOccurrenceKey: AgentImageCellView] = [:]
     private var reusePool: [AgentImageCellView] = []
+    private var accessibilityElementsByKey: [ImageOccurrenceKey: AgentImageAccessibilityElement] = [:]
 
     var onVisibleCellsChanged: (() -> Void)?
-    var qaVisibleCellCount: Int { visibleCellsByID.count }
-    var qaVisibleAttachmentIDs: [AgentImageAttachmentID] { images.compactMap { visibleCellsByID[$0.attachment.id] == nil ? nil : $0.attachment.id } }
+    var qaVisibleCellCount: Int { visibleCellsByKey.count }
+    var qaVisibleAttachmentIDs: [AgentImageAttachmentID] { occurrenceKeys.compactMap { visibleCellsByKey[$0] == nil ? nil : $0.attachmentID } }
     var qaReusePoolCount: Int { reusePool.count }
-    var qaVisibleCells: [AgentImageCellView] { images.compactMap { visibleCellsByID[$0.attachment.id] } }
+    var qaVisibleCells: [AgentImageCellView] { occurrenceKeys.compactMap { visibleCellsByKey[$0] } }
+    var qaAccessibilityChildren: [Any] {
+        occurrenceKeys.enumerated().map { index, key in
+            visibleCellsByKey[key] ?? accessibilityElement(for: key, index: index)
+        }
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -298,17 +318,16 @@ private final class LazyImageGalleryContentView: NSView {
 
     override var isFlipped: Bool { true }
 
+    private weak var observedClipView: NSClipView?
+
     override func viewDidMoveToSuperview() {
         super.viewDidMoveToSuperview()
-        if let clipView = enclosingScrollView?.contentView {
-            clipView.postsBoundsChangedNotifications = true
-            NotificationCenter.default.addObserver(
-                self,
-                selector: #selector(clipBoundsDidChange(_:)),
-                name: NSView.boundsDidChangeNotification,
-                object: clipView
-            )
-        }
+        updateObservedClipView()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateObservedClipView()
     }
 
     deinit {
@@ -318,14 +337,17 @@ private final class LazyImageGalleryContentView: NSView {
     func apply(
         blockID: AgentNodeID,
         images: [AgentImagePayload],
-        snapshots: [AgentImageAttachmentID: AgentImageResourceSnapshot],
+        occurrenceKeys: [ImageOccurrenceKey],
+        snapshots: [ImageOccurrenceKey: AgentImageResourceSnapshot],
         context: AgentRenderContext
     ) {
         self.blockID = blockID
         self.images = images
+        self.occurrenceKeys = occurrenceKeys
         self.snapshots = snapshots
         self.context = context
-        recycleCellsNotIn(Set(images.map(\.attachment.id)))
+        accessibilityElementsByKey = accessibilityElementsByKey.filter { occurrenceKeys.contains($0.key) }
+        recycleCellsNotIn(Set(occurrenceKeys))
         needsLayout = true
     }
 
@@ -335,57 +357,116 @@ private final class LazyImageGalleryContentView: NSView {
     }
 
     func updateSnapshot(_ snapshot: AgentImageResourceSnapshot?, for id: AgentImageAttachmentID) {
-        snapshots[id] = snapshot
-        if let cell = visibleCellsByID[id], let index = images.firstIndex(where: { $0.attachment.id == id }), let blockID {
-            cell.frame = frames.indices.contains(index) ? frames[index] : cell.frame
-            cell.apply(blockID: blockID, index: index, image: images[index], snapshot: snapshot ?? fallbackSnapshot(for: id), context: context)
+        for (index, key) in occurrenceKeys.enumerated() where key.attachmentID == id {
+            let nextSnapshot = snapshot ?? fallbackSnapshot(for: id)
+            snapshots[key] = nextSnapshot
+            accessibilityElementsByKey[key]?.configure(
+                label: accessibilityLabel(for: index, key: key, snapshot: nextSnapshot),
+                enabled: nextSnapshot.state == .available && nextSnapshot.canPreview,
+                performPreview: { [weak self] in self?.performPreview(for: key) ?? false }
+            )
+            if let cell = visibleCellsByKey[key], images.indices.contains(index), let blockID {
+                cell.frame = frames.indices.contains(index) ? frames[index] : cell.frame
+                cell.apply(blockID: blockID, index: index, occurrenceKey: key, image: images[index], snapshot: nextSnapshot, context: context)
+            }
         }
     }
 
     func applyTokens(theme: TokenTheme, context: AgentRenderContext) {
-        visibleCellsByID.values.forEach { $0.applyTokens(theme: theme, context: context) }
+        visibleCellsByKey.values.forEach { $0.applyTokens(theme: theme, context: context) }
         reusePool.forEach { $0.applyTokens(theme: theme, context: context) }
     }
 
     override func layout() {
         super.layout()
-        updateVisibleCells(viewport: enclosingScrollView?.contentView.documentVisibleRect ?? bounds)
+        updateVisibleCells(viewport: currentViewport())
     }
 
     @objc private func clipBoundsDidChange(_ note: Notification) {
-        updateVisibleCells(viewport: enclosingScrollView?.contentView.documentVisibleRect ?? bounds)
+        updateVisibleCells(viewport: currentViewport())
+    }
+
+    private func updateObservedClipView() {
+        let nextClipView = enclosingScrollView?.contentView
+        guard observedClipView !== nextClipView else { return }
+        if let observedClipView {
+            NotificationCenter.default.removeObserver(self, name: NSView.boundsDidChangeNotification, object: observedClipView)
+        }
+        observedClipView = nextClipView
+        if let nextClipView {
+            nextClipView.postsBoundsChangedNotifications = true
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(clipBoundsDidChange(_:)),
+                name: NSView.boundsDidChangeNotification,
+                object: nextClipView
+            )
+        }
     }
 
     private func updateVisibleCells(viewport: NSRect) {
         guard let blockID else { return }
         let paddedViewport = viewport.insetBy(dx: 0, dy: -AgentImageGalleryView.maximumGalleryImageHeight)
         let visibleIndexes = Set(frames.indices.filter { frames[$0].intersects(paddedViewport) })
-        let visibleIDs = Set(visibleIndexes.map { images[$0].attachment.id })
-        recycleCellsNotIn(visibleIDs)
-        for index in visibleIndexes.sorted() {
+        let visibleKeys = Set(visibleIndexes.compactMap { occurrenceKeys.indices.contains($0) ? occurrenceKeys[$0] : nil })
+        recycleCellsNotIn(visibleKeys)
+        for index in visibleIndexes.sorted() where images.indices.contains(index) && occurrenceKeys.indices.contains(index) {
             let payload = images[index]
-            let id = payload.attachment.id
-            let cell = visibleCellsByID[id] ?? dequeueCell(for: id)
+            let key = occurrenceKeys[index]
+            let cell = visibleCellsByKey[key] ?? dequeueCell(for: key)
             cell.frame = frames[index]
-            cell.apply(blockID: blockID, index: index, image: payload, snapshot: snapshots[id] ?? fallbackSnapshot(for: id), context: context)
+            cell.apply(blockID: blockID, index: index, occurrenceKey: key, image: payload, snapshot: snapshots[key] ?? fallbackSnapshot(for: key.attachmentID), context: context)
         }
         onVisibleCellsChanged?()
     }
 
-    private func dequeueCell(for id: AgentImageAttachmentID) -> AgentImageCellView {
+    private func dequeueCell(for key: ImageOccurrenceKey) -> AgentImageCellView {
         let cell = reusePool.popLast() ?? AgentImageCellView(frame: .zero)
-        visibleCellsByID[id] = cell
+        visibleCellsByKey[key] = cell
         if cell.superview !== self { addSubview(cell) }
         return cell
     }
 
-    private func recycleCellsNotIn(_ ids: Set<AgentImageAttachmentID>) {
-        for (id, cell) in visibleCellsByID where !ids.contains(id) {
+    private func recycleCellsNotIn(_ keys: Set<ImageOccurrenceKey>) {
+        for (key, cell) in visibleCellsByKey where !keys.contains(key) {
             cell.cancelThumbnailRequest()
             cell.removeFromSuperview()
-            visibleCellsByID.removeValue(forKey: id)
+            visibleCellsByKey.removeValue(forKey: key)
             reusePool.append(cell)
         }
+    }
+
+    private func currentViewport() -> NSRect {
+        guard let clipView = enclosingScrollView?.contentView, let documentView = clipView.documentView else {
+            return visibleRect.isEmpty ? bounds : visibleRect
+        }
+        return convert(clipView.documentVisibleRect, from: documentView)
+    }
+
+    private func accessibilityElement(for key: ImageOccurrenceKey, index: Int) -> AgentImageAccessibilityElement {
+        if let element = accessibilityElementsByKey[key] { return element }
+        let element = AgentImageAccessibilityElement()
+        element.setAccessibilityRole(.button)
+        element.setAccessibilityParent(self)
+        let snapshot = snapshots[key] ?? fallbackSnapshot(for: key.attachmentID)
+        element.configure(
+            label: accessibilityLabel(for: index, key: key, snapshot: snapshot),
+            enabled: snapshot.state == .available && snapshot.canPreview,
+            performPreview: { [weak self] in self?.performPreview(for: key) ?? false }
+        )
+        accessibilityElementsByKey[key] = element
+        return element
+    }
+
+    private func accessibilityLabel(for index: Int, key: ImageOccurrenceKey, snapshot: AgentImageResourceSnapshot) -> String {
+        guard images.indices.contains(index) else { return "Image, Missing" }
+        return AgentImageCellView.accessibilityLabelText(for: images[index], snapshot: snapshot, index: index)
+    }
+
+    private func performPreview(for key: ImageOccurrenceKey) -> Bool {
+        guard let blockID, let snapshot = snapshots[key], snapshot.state == .available, snapshot.canPreview else { return false }
+        context.actions.perform(.previewImage(blockID: blockID, attachmentID: key.attachmentID))
+        return true
     }
 
     private func fallbackSnapshot(for id: AgentImageAttachmentID) -> AgentImageResourceSnapshot {
@@ -407,6 +488,7 @@ final class AgentImageCellView: NSView {
     private var context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
     private var thumbnailRequest: AgentImageThumbnailRequest?
     private var requestedThumbnailKey: ThumbnailKey?
+    private var thumbnailGeneration: UInt64 = 0
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -433,7 +515,8 @@ final class AgentImageCellView: NSView {
         addSubview(stateLabel)
         addSubview(captionLabel)
         setAccessibilityElement(true)
-        setAccessibilityRole(.group)
+        setAccessibilityRole(.button)
+        setAccessibilityHelp("Press Return or Space to preview the image")
     }
 
     @available(*, unavailable)
@@ -441,7 +524,7 @@ final class AgentImageCellView: NSView {
 
     override var isFlipped: Bool { true }
 
-    func apply(blockID: AgentNodeID, index: Int, image: AgentImagePayload, snapshot: AgentImageResourceSnapshot, context: AgentRenderContext) {
+    func apply(blockID: AgentNodeID, index: Int, occurrenceKey: ImageOccurrenceKey, image: AgentImagePayload, snapshot: AgentImageResourceSnapshot, context: AgentRenderContext) {
         if payload?.attachment.id != image.attachment.id || self.snapshot.revision != snapshot.revision {
             cancelThumbnailRequest()
             imageView.image = nil
@@ -480,13 +563,14 @@ final class AgentImageCellView: NSView {
             stateLabel.isHidden = false
         }
 
-        identifier = NSUserInterfaceItemIdentifier("agent.image.\(image.attachment.id.rawValue)")
+        identifier = NSUserInterfaceItemIdentifier("agent.image.\(image.attachment.id.rawValue).\(occurrenceKey.ordinal)")
         applyAccessibility(title: title)
         applyTokens(theme: context.appearance, context: context)
         needsLayout = true
     }
 
     func cancelThumbnailRequest() {
+        thumbnailGeneration &+= 1
         thumbnailRequest?.cancel()
         thumbnailRequest = nil
         requestedThumbnailKey = nil
@@ -520,6 +604,22 @@ final class AgentImageCellView: NSView {
         requestThumbnailIfNeeded()
     }
 
+    override var acceptsFirstResponder: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        switch event.charactersIgnoringModifiers {
+        case "\r", " ": previewImage(event)
+        default: super.keyDown(with: event)
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard event.buttonNumber == 0 else { return super.mouseUp(with: event) }
+        previewImage(event)
+    }
+
+    override func accessibilityPerformPress() -> Bool { performPreviewForQA() }
+
     override func menu(for event: NSEvent) -> NSMenu? { actionMenuForQA() }
 
     func actionMenuForQA() -> NSMenu {
@@ -531,7 +631,7 @@ final class AgentImageCellView: NSView {
         return menu
     }
 
-    @objc func previewImage(_ sender: Any?) { performAction { context.actions.perform(.previewImage(blockID: $0, attachmentID: $1)) } }
+    @objc func previewImage(_ sender: Any?) { _ = performPreviewForQA() }
     @objc func copyImage(_ sender: Any?) { performAction { context.actions.perform(.copyImage(blockID: $0, attachmentID: $1)) } }
     @objc func saveImageAs(_ sender: Any?) { performAction { context.actions.perform(.saveImageAs(blockID: $0, attachmentID: $1)) } }
     @objc func revealImage(_ sender: Any?) { performAction { context.actions.perform(.revealImage(blockID: $0, attachmentID: $1)) } }
@@ -543,6 +643,13 @@ final class AgentImageCellView: NSView {
         menu.addItem(item)
     }
 
+    @discardableResult
+    func performPreviewForQA() -> Bool {
+        guard let blockID, let attachmentID = payload?.attachment.id, snapshot.state == .available, snapshot.canPreview else { return false }
+        context.actions.perform(.previewImage(blockID: blockID, attachmentID: attachmentID))
+        return true
+    }
+
     private func performAction(_ send: (AgentNodeID, AgentImageAttachmentID) -> Void) {
         guard let blockID, let attachmentID = payload?.attachment.id, snapshot.state == .available else { return }
         send(blockID, attachmentID)
@@ -552,16 +659,22 @@ final class AgentImageCellView: NSView {
         guard snapshot.state == .available, let attachmentID = payload?.attachment.id else { return }
         let target = Self.boundedTargetPixelSize(for: imageView.bounds.size, scale: backingScale)
         guard target.width >= 1, target.height >= 1 else { return }
-        let key = ThumbnailKey(attachmentID: attachmentID, revision: snapshot.revision, width: Int(target.width), height: Int(target.height))
+        let key = ThumbnailKey(attachmentID: attachmentID, revision: snapshot.revision, width: Int(target.width), height: Int(target.height), scale: Int((backingScale * 1000).rounded()))
         guard requestedThumbnailKey != key else { return }
+        thumbnailGeneration &+= 1
+        let generation = thumbnailGeneration
         thumbnailRequest?.cancel()
+        thumbnailRequest = nil
         requestedThumbnailKey = key
         imageView.image = nil
         imageView.isHidden = true
         stateLabel.stringValue = "Image ready"
         stateLabel.isHidden = false
-        thumbnailRequest = context.imageResources.requestThumbnail(id: attachmentID, targetPixelSize: target, revision: snapshot.revision) { [weak self] result in
-            guard let self, self.requestedThumbnailKey == key, !self.thumbnailRequest.map(\.isCancelled, default: true) else { return }
+        var completedBeforeAssignment = false
+        let request = context.imageResources.requestThumbnail(id: attachmentID, targetPixelSize: target, revision: snapshot.revision) { [weak self] result in
+            completedBeforeAssignment = true
+            guard let self, self.thumbnailGeneration == generation, self.requestedThumbnailKey == key else { return }
+            self.thumbnailRequest = nil
             switch result {
             case .success(let thumbnail) where thumbnail.attachmentID == attachmentID && thumbnail.revision == self.snapshot.revision:
                 self.imageView.image = thumbnail.image
@@ -570,17 +683,31 @@ final class AgentImageCellView: NSView {
                 self.stateLabel.isHidden = true
                 self.applyAccessibility(title: self.titleLabel.stringValue)
             case .success, .failed:
+                self.requestedThumbnailKey = nil
                 self.imageView.image = nil
                 self.imageView.isHidden = true
                 self.stateLabel.stringValue = "Image unavailable on this host"
                 self.stateLabel.isHidden = false
             }
         }
+        if thumbnailGeneration == generation, requestedThumbnailKey == key, !completedBeforeAssignment {
+            thumbnailRequest = request
+        } else if thumbnailGeneration != generation || requestedThumbnailKey != key {
+            request.cancel()
+        }
     }
 
     private var backingScale: CGFloat {
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         return max(1, scale)
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        guard snapshot.state == .available else { return }
+        cancelThumbnailRequest()
+        imageView.image = nil
+        needsLayout = true
     }
 
     private func applyAccessibility(title: String) {
@@ -593,7 +720,11 @@ final class AgentImageCellView: NSView {
         setAccessibilityChildren(children)
     }
 
-    private static func displayName(for payload: AgentImagePayload, snapshot: AgentImageResourceSnapshot, index: Int) -> String {
+    fileprivate static func accessibilityLabelText(for payload: AgentImagePayload, snapshot: AgentImageResourceSnapshot, index: Int) -> String {
+        "Image, \(displayName(for: payload, snapshot: snapshot, index: index)), \(statusText(snapshot))"
+    }
+
+    fileprivate static func displayName(for payload: AgentImagePayload, snapshot: AgentImageResourceSnapshot, index: Int) -> String {
         if let name = safeDisplayLabel(snapshot.displayName), !name.isEmpty { return name }
         if let name = safeDisplayLabel(payload.attachment.displayName), !name.isEmpty { return name }
         return "Image \(index + 1)"
@@ -601,7 +732,7 @@ final class AgentImageCellView: NSView {
 
     private static func metadataText(for metadata: AgentImageAttachmentMetadata, snapshot: AgentImageResourceSnapshot) -> String {
         var parts: [String] = []
-        if let type = safeSingleLine(snapshot.contentType ?? metadata.contentType), !type.isEmpty { parts.append(type) }
+        if let type = safeContentType(snapshot.contentType ?? metadata.contentType), !type.isEmpty { parts.append(type) }
         if let pixelSize = snapshot.pixelSize, pixelSize.width > 0, pixelSize.height > 0 {
             parts.append("\(Int(pixelSize.width))×\(Int(pixelSize.height))")
         } else if let width = metadata.pixelWidth, let height = metadata.pixelHeight, width > 0, height > 0 {
@@ -612,7 +743,7 @@ final class AgentImageCellView: NSView {
         return parts.joined(separator: " · ")
     }
 
-    private static func statusText(_ snapshot: AgentImageResourceSnapshot) -> String {
+    fileprivate static func statusText(_ snapshot: AgentImageResourceSnapshot) -> String {
         switch snapshot.state {
         case .available: return "Available locally"
         case .processing: return "Processing"
@@ -637,6 +768,15 @@ final class AgentImageCellView: NSView {
         value?.split(whereSeparator: { $0.isNewline }).first.map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private static func safeContentType(_ value: String?) -> String? {
+        guard let safe = safeSingleLine(value), !safe.isEmpty else { return nil }
+        let scalars = safe.unicodeScalars.map { scalar in
+            CharacterSet.controlCharacters.contains(scalar) ? UnicodeScalar(0xFFFD)! : scalar
+        }
+        let filtered = String(String.UnicodeScalarView(scalars))
+        return String(filtered.prefix(64))
+    }
+
     private static func boundedTargetPixelSize(for size: NSSize, scale: CGFloat) -> NSSize {
         let width = max(1, ceil(size.width * scale))
         let height = max(1, ceil(size.height * scale))
@@ -651,12 +791,25 @@ final class AgentImageCellView: NSView {
         var revision: UInt64
         var width: Int
         var height: Int
+        var scale: Int
     }
 }
 
-private extension Optional where Wrapped == AgentImageThumbnailRequest {
-    func map<T>(_ transform: (Wrapped) -> T, default defaultValue: T) -> T {
-        guard let value = self else { return defaultValue }
-        return transform(value)
+struct ImageOccurrenceKey: Hashable {
+    var attachmentID: AgentImageAttachmentID
+    var ordinal: Int
+}
+
+private final class AgentImageAccessibilityElement: NSAccessibilityElement {
+    private var performPreviewValue: (() -> Bool)?
+
+    func configure(label: String, enabled: Bool, performPreview: @escaping () -> Bool) {
+        setAccessibilityLabel(label)
+        setAccessibilityEnabled(enabled)
+        performPreviewValue = performPreview
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        performPreviewValue?() ?? false
     }
 }
