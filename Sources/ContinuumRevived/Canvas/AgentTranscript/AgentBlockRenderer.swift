@@ -11,6 +11,10 @@ enum AgentRenderAction {
     case openDiff(blockID: AgentNodeID)
     case retry(blockID: AgentNodeID)
     case submitResponse(requestID: String, value: String)
+    case previewImage(blockID: AgentNodeID, attachmentID: AgentImageAttachmentID, resource: AgentResolvedImageResource)
+    case copyImage(blockID: AgentNodeID, attachmentID: AgentImageAttachmentID, resource: AgentResolvedImageResource)
+    case saveImageAs(blockID: AgentNodeID, attachmentID: AgentImageAttachmentID, resource: AgentResolvedImageResource)
+    case revealImage(blockID: AgentNodeID, attachmentID: AgentImageAttachmentID, resource: AgentResolvedImageResource)
 }
 
 struct AgentRenderActions {
@@ -126,12 +130,65 @@ struct AgentRenderTokens: Equatable {
     )
 }
 
+struct AgentResolvedImageResource {
+    var attachmentID: AgentImageAttachmentID
+    var image: NSImage?
+    var localFileURL: URL?
+    var pixelSize: NSSize?
+    var displayName: String?
+
+    init(
+        attachmentID: AgentImageAttachmentID,
+        image: NSImage? = nil,
+        localFileURL: URL? = nil,
+        pixelSize: NSSize? = nil,
+        displayName: String? = nil
+    ) {
+        self.attachmentID = attachmentID
+        self.image = image
+        self.localFileURL = localFileURL?.isFileURL == true ? localFileURL : nil
+        self.pixelSize = pixelSize
+        self.displayName = displayName
+    }
+
+    var hasLocalResource: Bool { image != nil || localFileURL != nil }
+    var canRevealOrPreview: Bool { localFileURL != nil }
+}
+
+enum AgentImageResourceResolution {
+    case available(AgentResolvedImageResource)
+    case processing
+    case failed(String?)
+    case missing
+}
+
+/// Host-local resolver for opaque semantic image IDs. The resolver is the only
+/// path from an `AgentImageAttachmentID` to local AppKit/file capabilities:
+/// renderers must never infer a path from display names, content types, or other
+/// sync-safe metadata, and this provider never fetches a remote URL.
+struct AgentImageResourceProvider: @unchecked Sendable {
+    private let resolveValue: (AgentImageAttachmentID) -> AgentImageResourceResolution
+
+    init(resolve: @escaping (AgentImageAttachmentID) -> AgentImageResourceResolution) {
+        resolveValue = resolve
+    }
+
+    func resolve(_ id: AgentImageAttachmentID) -> AgentImageResourceResolution {
+        resolveValue(id)
+    }
+
+    static let unavailable = AgentImageResourceProvider { _ in .missing }
+}
+
 /// Everything a block renderer may learn about its host. In particular, this
-/// type deliberately has no AgentSupervisor, provider, parser, or document owner.
+/// type deliberately has no AgentSupervisor, parser, document owner, or concrete
+/// storage path resolver. Host-local media capability is injected explicitly via
+/// `imageResources` and remains keyed by opaque semantic attachment IDs.
 struct AgentRenderContext {
     var actions: AgentRenderActions
     var tokens: AgentRenderTokens
     var appearance: TokenTheme
+    var imageResources: AgentImageResourceProvider = .unavailable
 }
 
 /// One AppKit renderer for one semantic block family. `update` and

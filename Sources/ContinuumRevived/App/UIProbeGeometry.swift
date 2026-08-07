@@ -303,6 +303,7 @@ enum UIProbeGeometry {
         let userPromptRows = try checkUserPromptRenderer()
         let codeRows = try checkCodeBlockRenderer()
         let operationRows = try checkToolAndCommandRenderers()
+        let mediaRows = try checkImageRenderers()
         let exceptionalRows = try checkExceptionalRenderers()
         let reasoningDisclosureRows = try checkCompletedReasoningDisclosure()
         // P0.4: the inbox measured at the widths it ships at, truncation gated
@@ -315,8 +316,8 @@ enum UIProbeGeometry {
             sidebarGate.measured, sidebarGate.truncated
         ))
         print(String(
-            format: "UIProbeGeometry: reusable block host identity/reset and 8-dimensional measurement key gated; composer grows through %d width/draft cases with an eight-visual-line cap and stable constraints; custom choice popover gates %d keyboard, disabled, accessibility-state, appearance, and screen-placement cases; live v2 tile gated at 320/480/560/640/900 in both appearances with footer truncation measured across the required effort values; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, %d exceptional states preserve request identity and opaque privacy, and %d completed-reasoning disclosure states preserve scoped expansion at 320pt",
-            composerCases, choiceCases, transcriptLiveHosts, streamingApplies, proseRows, userPromptRows, codeRows, operationRows, exceptionalRows, reasoningDisclosureRows
+            format: "UIProbeGeometry: reusable block host identity/reset and 8-dimensional measurement key gated; composer grows through %d width/draft cases with an eight-visual-line cap and stable constraints; custom choice popover gates %d keyboard, disabled, accessibility-state, appearance, and screen-placement cases; live v2 tile gated at 320/480/560/640/900 in both appearances with footer truncation measured across the required effort values; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, %d image/gallery states preserve opaque local media actions, %d exceptional states preserve request identity and opaque privacy, and %d completed-reasoning disclosure states preserve scoped expansion at 320pt",
+            composerCases, choiceCases, transcriptLiveHosts, streamingApplies, proseRows, userPromptRows, codeRows, operationRows, mediaRows, exceptionalRows, reasoningDisclosureRows
         ))
     }
 
@@ -6383,6 +6384,171 @@ enum UIProbeGeometry {
             throw fail("tool statuses lost non-color semantics or disclosure emitted an agent action/stale layout invalidation")
         }
         return presentations.count + 4
+    }
+
+    /// Deterministic IMAGE WAVE 2A gate for semantic transcript media. The
+    /// renderer consumes only opaque attachment IDs through an injected host-local
+    /// provider; display names and content types never become paths or fetches.
+    private static func checkImageRenderers() throws -> Int {
+        func id(_ value: String) -> AgentNodeID { AgentNodeID(rawValue: value)! }
+        func attachmentID(_ value: String) -> AgentImageAttachmentID { AgentImageAttachmentID(rawValue: value)! }
+        func metadata(
+            _ rawID: String,
+            name: String? = nil,
+            type: String? = nil,
+            bytes: UInt64? = nil,
+            width: UInt? = nil,
+            height: UInt? = nil
+        ) -> AgentImageAttachmentMetadata {
+            AgentImageAttachmentMetadata(
+                id: attachmentID(rawID), displayName: name, contentType: type,
+                byteCount: bytes, pixelWidth: width, pixelHeight: height
+            )
+        }
+        func testImage(size: NSSize) -> NSImage {
+            let image = NSImage(size: size)
+            image.lockFocus()
+            NSColor.systemTeal.setFill()
+            NSRect(origin: .zero, size: size).fill()
+            image.unlockFocus()
+            return image
+        }
+
+        guard try AgentBlockRendererRegistry.production.renderer(for: .image) is AgentImageRenderer,
+              try AgentBlockRendererRegistry.production.renderer(for: .imageGallery) is AgentImageGalleryRenderer else {
+            throw fail("production registry did not resolve image and image-gallery renderers")
+        }
+
+        let localID = attachmentID("opaque-local-image")
+        let processingID = attachmentID("opaque-processing-image")
+        let missingID = attachmentID("opaque-missing-image")
+        let failedID = attachmentID("opaque-failed-image")
+        let localURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("opaque-local-image.png")
+        let localResource = AgentResolvedImageResource(
+            attachmentID: localID,
+            image: testImage(size: NSSize(width: 80, height: 40)),
+            localFileURL: localURL,
+            pixelSize: NSSize(width: 800, height: 400),
+            displayName: "resolved-local.png"
+        )
+        var resolvedIDs: [AgentImageAttachmentID] = []
+        let provider = AgentImageResourceProvider { attachmentID in
+            resolvedIDs.append(attachmentID)
+            switch attachmentID {
+            case localID: return .available(localResource)
+            case processingID: return .processing
+            case failedID: return .failed("decoder unavailable")
+            case missingID: return .missing
+            default: return .missing
+            }
+        }
+        var actions: [AgentRenderAction] = []
+        let context = AgentRenderContext(
+            actions: AgentRenderActions { actions.append($0) },
+            tokens: .transcript,
+            appearance: .dark,
+            imageResources: provider
+        )
+
+        let singlePayload = AgentImagePayload(
+            attachment: metadata("opaque-local-image", name: "semantic-name-never-a-path.png", type: "image/png", bytes: 1200, width: 800, height: 400),
+            caption: [.text("Aspect-preserved local preview")]
+        )
+        let singleBlock = AgentBlock(id: id("image-single"), revision: 1, kind: .image, payload: .image(singlePayload))
+        let singleHost = AgentBlockHostView()
+        let singleHeight = try singleHost.measuredHeight(for: singleBlock, width: 320, context: context)
+        guard singleHeight > 220, singleHeight < 260 else {
+            throw fail("single image did not measure from its 2:1 aspect at 320pt, got \(singleHeight)")
+        }
+        singleHost.frame = NSRect(x: 0, y: 0, width: 320, height: singleHeight)
+        try singleHost.apply(block: singleBlock, context: context)
+        singleHost.layoutSubtreeIfNeeded()
+        guard let singleView = singleHost.rendererView as? AgentImageGalleryView,
+              singleView.cells.count == 1,
+              singleView.cells[0].titleLabel.stringValue == "resolved-local.png",
+              singleView.cells[0].metadataLabel.stringValue.contains("Available locally"),
+              singleView.cells[0].captionLabel.stringValue == "Aspect-preserved local preview",
+              singleView.accessibilityLabel() == "Image" else {
+            throw fail("single semantic image did not render local provider state, caption, and accessibility")
+        }
+
+        let galleryPayload = AgentImageGalleryPayload(images: [
+            singlePayload,
+            AgentImagePayload(attachment: metadata("opaque-processing-image", name: "pending.png", type: "image/png", width: 640, height: 480)),
+            AgentImagePayload(attachment: metadata("opaque-missing-image", name: "missing.png", type: "image/png")),
+            AgentImagePayload(attachment: metadata("opaque-failed-image", name: "failed.png", type: "image/png"))
+        ])
+        let galleryBlock = AgentBlock(id: id("image-gallery"), revision: 1, kind: .imageGallery, payload: .imageGallery(galleryPayload))
+        let galleryHost = AgentBlockHostView()
+        let galleryHeight = try galleryHost.measuredHeight(for: galleryBlock, width: 360, context: context)
+        galleryHost.frame = NSRect(x: 0, y: 0, width: 360, height: galleryHeight)
+        try galleryHost.apply(block: galleryBlock, context: context)
+        galleryHost.layoutSubtreeIfNeeded()
+        guard let galleryView = galleryHost.rendererView as? AgentImageGalleryView,
+              galleryView.cells.count == 4,
+              Set(galleryView.cells.compactMap(\.identifier?.rawValue)) == Set([
+                "agent.image.opaque-local-image", "agent.image.opaque-processing-image",
+                "agent.image.opaque-missing-image", "agent.image.opaque-failed-image"
+              ]),
+              galleryView.cells[0].frame.minX < galleryView.cells[1].frame.minX,
+              galleryView.cells[2].frame.minY > galleryView.cells[0].frame.minY else {
+            throw fail("gallery did not build a deterministic two-column lazy media presentation at 360pt")
+        }
+        let stateTexts = galleryView.cells.map(\.stateLabel.stringValue)
+        guard stateTexts.contains("Processing image…"),
+              stateTexts.contains("Image unavailable on this host"),
+              stateTexts.contains("Image failed: decoder unavailable") else {
+            throw fail("gallery did not expose processing/missing/failure states: \(stateTexts)")
+        }
+        guard galleryView.accessibilityLabel() == "Image gallery, 4 images",
+              galleryView.accessibilityChildren()?.count == 4 else {
+            throw fail("gallery accessibility did not keep image count/order")
+        }
+
+        let localMenu = galleryView.cells[0].actionMenuForQA()
+        let missingMenu = galleryView.cells[2].actionMenuForQA()
+        guard localMenu.items.map(\.title) == ["Preview", "Copy Image", "Save As…", "Reveal in Finder"],
+              localMenu.items.allSatisfy({ $0.isEnabled }),
+              missingMenu.items.allSatisfy({ !$0.isEnabled }) else {
+            throw fail("image action menu did not gate local-only preview/copy/save/reveal affordances")
+        }
+        localMenu.performActionForItem(at: 0)
+        localMenu.performActionForItem(at: 1)
+        localMenu.performActionForItem(at: 2)
+        localMenu.performActionForItem(at: 3)
+        guard actions.count == 4 else {
+            throw fail("image menu actions did not preserve block and opaque attachment identity: \(actions)")
+        }
+        switch actions[0] {
+        case let .previewImage(blockID, attachmentID, _):
+            guard blockID == galleryBlock.id, attachmentID == localID else { throw fail("preview image action lost identity") }
+        default: throw fail("first image action was not preview: \(actions[0])")
+        }
+        switch actions[1] {
+        case let .copyImage(blockID, attachmentID, _):
+            guard blockID == galleryBlock.id, attachmentID == localID else { throw fail("copy image action lost identity") }
+        default: throw fail("second image action was not copy: \(actions[1])")
+        }
+        switch actions[2] {
+        case let .saveImageAs(blockID, attachmentID, _):
+            guard blockID == galleryBlock.id, attachmentID == localID else { throw fail("save image action lost identity") }
+        default: throw fail("third image action was not save-as: \(actions[2])")
+        }
+        switch actions[3] {
+        case let .revealImage(blockID, attachmentID, _):
+            guard blockID == galleryBlock.id, attachmentID == localID else { throw fail("reveal image action lost identity") }
+        default: throw fail("fourth image action was not reveal: \(actions[3])")
+        }
+        if let remote = URL(string: "https://example.com/image.png") {
+            let previewer = AgentImageQuickPreviewController()
+            guard previewer.canPreview(localFileURL: localURL), !previewer.canPreview(localFileURL: remote) else {
+                throw fail("Quick Preview seam accepted a non-file URL")
+            }
+        }
+        guard resolvedIDs.contains(localID), !resolvedIDs.contains(attachmentID("semantic-name-never-a-path.png")) else {
+            throw fail("image renderer resolved anything other than opaque attachment IDs")
+        }
+        return 4
     }
 
     /// P3.9 gate for explicit provider requests, exceptional content, and the
