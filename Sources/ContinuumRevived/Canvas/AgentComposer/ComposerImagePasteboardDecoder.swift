@@ -30,14 +30,8 @@ struct ComposerImagePasteboardDecoder {
         }
 
         for item in pasteboard.pasteboardItems ?? [] {
-            for candidate in dataCandidates(in: item) {
-                guard let decoded = ComposerDecodedImagePasteboardItem(
-                    data: candidate.data,
-                    contentType: candidate.contentType,
-                    suggestedFilename: candidate.suggestedFilename
-                ) else { continue }
-                results.append(decoded)
-            }
+            guard let decoded = decodedDataCandidate(in: item) else { continue }
+            results.append(decoded)
         }
 
         return results
@@ -56,6 +50,18 @@ struct ComposerImagePasteboardDecoder {
             guard let url = object as? URL, url.isFileURL else { return nil }
             return url
         }
+    }
+
+    private static func decodedDataCandidate(in item: NSPasteboardItem) -> ComposerDecodedImagePasteboardItem? {
+        for candidate in dataCandidates(in: item) {
+            guard let decoded = ComposerDecodedImagePasteboardItem(
+                data: candidate.data,
+                contentType: candidate.contentType,
+                suggestedFilename: candidate.suggestedFilename
+            ) else { continue }
+            return decoded
+        }
+        return nil
     }
 
     private static func dataCandidates(in item: NSPasteboardItem) -> [(data: Data, contentType: String, suggestedFilename: String)] {
@@ -101,10 +107,11 @@ struct ComposerDecodedImagePasteboardItem: Equatable, Sendable {
     }
 
     init?(fileURL: URL) {
-        guard fileURL.isFileURL,
-              let metadata = ComposerImageMetadataReader.metadata(for: fileURL),
-              metadata.isSupportedImage
-        else { return nil }
+        guard fileURL.isFileURL else { return nil }
+        let metadata = ComposerImageSecurityScopedURLAccess.withAccess(to: fileURL) {
+            ComposerImageMetadataReader.metadata(for: fileURL)
+        }
+        guard let metadata, metadata.isSupportedImage else { return nil }
         source = .fileURL(fileURL)
         suggestedFilename = ComposerImageDisplay.sanitizedFilename(fileURL.lastPathComponent)
         contentType = metadata.contentType ?? Self.contentType(fromExtensionOf: fileURL)
@@ -123,23 +130,30 @@ struct ComposerDecodedImagePasteboardItem: Equatable, Sendable {
 struct ComposerImageAttachmentImportPipeline: Sendable {
     struct ImportActions: Sendable {
         /// Persists pasted image bytes into Lane A's local/private attachment
-        /// store and returns the local provider-capability URL. This is injected
+        /// store and returns the managed local file capability. This is injected
         /// so reusable UI never chooses storage, sync, or import policy.
-        var storePastedImageData: @Sendable (Data, ComposerDecodedImagePasteboardItem) async throws -> URL
-        /// Adopts or copies a local image file into Lane A storage. The default
-        /// preserves the local file capability exactly as dropped/pasted.
-        var adoptImageFileURL: @Sendable (URL, ComposerDecodedImagePasteboardItem) async throws -> URL
+        var importPastedImageData: @Sendable (Data, ComposerDecodedImagePasteboardItem) async throws -> URL
+        /// Copies/adopts a dropped external image file into Lane A's managed
+        /// attachment store and returns the managed local file capability. This
+        /// action is mandatory: reusable UI must never retain an arbitrary
+        /// external file URL as draft state.
+        var importImageFileURL: @Sendable (URL, ComposerDecodedImagePasteboardItem) async throws -> URL
+        /// Confirms that an importer result belongs to the managed attachment
+        /// store. Lane A supplies the actual ownership/root check.
+        var isManagedFileURL: @Sendable (URL) async throws -> Bool
         var makeAttachmentID: @Sendable () -> AgentImageAttachmentID
 
         init(
-            storePastedImageData: @escaping @Sendable (Data, ComposerDecodedImagePasteboardItem) async throws -> URL,
-            adoptImageFileURL: @escaping @Sendable (URL, ComposerDecodedImagePasteboardItem) async throws -> URL = { url, _ in url },
+            importPastedImageData: @escaping @Sendable (Data, ComposerDecodedImagePasteboardItem) async throws -> URL,
+            importImageFileURL: @escaping @Sendable (URL, ComposerDecodedImagePasteboardItem) async throws -> URL,
+            isManagedFileURL: @escaping @Sendable (URL) async throws -> Bool,
             makeAttachmentID: @escaping @Sendable () -> AgentImageAttachmentID = {
                 AgentImageAttachmentID(rawValue: UUID().uuidString)!
             }
         ) {
-            self.storePastedImageData = storePastedImageData
-            self.adoptImageFileURL = adoptImageFileURL
+            self.importPastedImageData = importPastedImageData
+            self.importImageFileURL = importImageFileURL
+            self.isManagedFileURL = isManagedFileURL
             self.makeAttachmentID = makeAttachmentID
         }
     }
@@ -160,11 +174,13 @@ struct ComposerImageAttachmentImportPipeline: Sendable {
                 let fileURL: URL
                 switch item.source {
                 case .fileURL(let url):
-                    fileURL = try await actions.adoptImageFileURL(url, item)
+                    fileURL = try await ComposerImageSecurityScopedURLAccess.withAccess(to: url) {
+                        try await actions.importImageFileURL(url, item)
+                    }
                 case .data(let data):
-                    fileURL = try await actions.storePastedImageData(data, item)
+                    fileURL = try await actions.importPastedImageData(data, item)
                 }
-                guard fileURL.isFileURL else { throw ComposerImageImportError.nonFileURL }
+                try await validateManagedReadableRegularFile(fileURL)
                 let metadata = AgentImageAttachmentMetadata(
                     id: actions.makeAttachmentID(),
                     displayName: item.suggestedFilename,
@@ -180,15 +196,57 @@ struct ComposerImageAttachmentImportPipeline: Sendable {
         }
         return results
     }
+
+    private func validateManagedReadableRegularFile(_ fileURL: URL) async throws {
+        guard fileURL.isFileURL else { throw ComposerImageImportError.nonFileURL }
+        let values: URLResourceValues
+        do {
+            values = try fileURL.resourceValues(forKeys: [.isRegularFileKey, .isReadableKey])
+        } catch {
+            throw ComposerImageImportError.unreadableManagedFile
+        }
+        guard values.isRegularFile == true else { throw ComposerImageImportError.notRegularFile }
+        guard values.isReadable == true else { throw ComposerImageImportError.unreadableManagedFile }
+        guard try await actions.isManagedFileURL(fileURL) else { throw ComposerImageImportError.unmanagedFileURL }
+        guard ComposerImageMetadataReader.metadata(for: fileURL)?.isSupportedImage == true else {
+            throw ComposerImageImportError.unsupportedManagedImage
+        }
+    }
 }
 
 enum ComposerImageImportError: Error, Equatable, CustomStringConvertible {
     case nonFileURL
+    case notRegularFile
+    case unreadableManagedFile
+    case unmanagedFileURL
+    case unsupportedManagedImage
 
     var description: String {
         switch self {
         case .nonFileURL: return "composer image import returned a non-file URL"
+        case .notRegularFile: return "composer image import returned a non-regular file URL"
+        case .unreadableManagedFile: return "composer image import returned an unreadable managed file URL"
+        case .unmanagedFileURL: return "composer image import returned a file outside managed storage"
+        case .unsupportedManagedImage: return "composer image import returned an unsupported managed image file"
         }
+    }
+}
+
+enum ComposerImageSecurityScopedURLAccess {
+    static func withAccess<T>(to url: URL, _ body: () throws -> T) rethrows -> T {
+        let didStart = url.startAccessingSecurityScopedResource()
+        defer {
+            if didStart { url.stopAccessingSecurityScopedResource() }
+        }
+        return try body()
+    }
+
+    static func withAccess<T>(to url: URL, _ body: () async throws -> T) async rethrows -> T {
+        let didStart = url.startAccessingSecurityScopedResource()
+        defer {
+            if didStart { url.stopAccessingSecurityScopedResource() }
+        }
+        return try await body()
     }
 }
 

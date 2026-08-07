@@ -7490,10 +7490,14 @@ enum UIProbeGeometry {
         jpegItem.setData(jpeg, forType: NSPasteboard.PasteboardType("public.jpeg"))
         let tiffItem = NSPasteboardItem()
         tiffItem.setData(tiff, forType: .tiff)
-        pasteboard.writeObjects([pngItem, jpegItem, tiffItem])
+        let multiRepresentationItem = NSPasteboardItem()
+        multiRepresentationItem.setData(png, forType: .png)
+        multiRepresentationItem.setData(jpeg, forType: NSPasteboard.PasteboardType("public.jpeg"))
+        multiRepresentationItem.setData(tiff, forType: .tiff)
+        pasteboard.writeObjects([pngItem, jpegItem, tiffItem, multiRepresentationItem])
         let decodedData = ComposerImagePasteboardDecoder.decodedItems(from: pasteboard)
-        try require(decodedData.count == 3, "composer image decoder did not recognize PNG/JPEG/TIFF pasteboard data without attachment storage")
-        try require(decodedData.map(\.contentType).contains("public.png"), "composer image decoder lost PNG content type")
+        try require(decodedData.count == 4, "composer image decoder did not deduplicate multiple representations of one pasteboard item")
+        try require(decodedData.map(\.contentType).filter { $0 == "public.png" }.count == 2, "composer image decoder did not prefer one PNG candidate for a multi-representation item")
         try require(decodedData.map(\.contentType).contains("public.jpeg"), "composer image decoder lost JPEG content type")
         try require(decodedData.map(\.contentType).contains("public.tiff"), "composer image decoder lost TIFF content type")
         try require(decodedData.contains(where: { $0.pixelWidth == 64 && $0.pixelHeight == 32 }), "composer image decoder did not read PNG dimensions from ImageIO metadata")
@@ -7516,8 +7520,14 @@ enum UIProbeGeometry {
         let repeated = Array(repeating: decodedData[0], count: 12)
         let recorder = ComposerImageImportRecorder(directory: tempDir)
         let importer = ComposerImageAttachmentImportPipeline(actions: .init(
-            storePastedImageData: { data, item in
+            importPastedImageData: { data, item in
                 try await recorder.store(data: data, item: item)
+            },
+            importImageFileURL: { url, item in
+                try await recorder.importFile(url: url, item: item)
+            },
+            isManagedFileURL: { url in
+                await recorder.isManagedFileURL(url)
             },
             makeAttachmentID: {
                 AgentImageAttachmentID(rawValue: "qa-image-\(UUID().uuidString)")!
@@ -7528,6 +7538,31 @@ enum UIProbeGeometry {
         try require(imported.allSatisfy { if case .success = $0 { return true } else { return false } }, "composer image import did not preserve every decoded pasted image through the injected storage seam")
         let storedNameCount = await recorder.storedNameCount()
         try require(storedNameCount == repeated.count, "composer image import did not use the injected persistence closure for pasted bytes")
+
+        let importedFiles = await importer.importAttachments(from: decodedFiles)
+        try require(importedFiles.count == 1 && importedFiles.allSatisfy { if case .success = $0 { return true } else { return false } }, "composer image import did not require dropped files to pass through the injected managed-file importer")
+        let importedExternalFileCount = await recorder.importedExternalFileCount()
+        try require(importedExternalFileCount == 1, "composer image import retained an external file URL instead of invoking the mandatory file importer")
+        if case .success(let attachment)? = importedFiles.first {
+            let isManaged = await recorder.isManagedFileURL(attachment.fileURL)
+            try require(attachment.fileURL != fileURL && isManaged, "composer image import did not return a managed file capability for a dropped file")
+        }
+
+        let unmanagedImporter = ComposerImageAttachmentImportPipeline(actions: .init(
+            importPastedImageData: { _, _ in fileURL },
+            importImageFileURL: { url, _ in url },
+            isManagedFileURL: { _ in false }
+        ))
+        let unmanaged = await unmanagedImporter.importAttachments(from: [decodedFiles[0]])
+        try require(unmanaged.first?.failureDescription == ComposerImageImportError.unmanagedFileURL.description, "composer image import accepted an unmanaged external URL")
+
+        let directoryImporter = ComposerImageAttachmentImportPipeline(actions: .init(
+            importPastedImageData: { _, _ in tempDir },
+            importImageFileURL: { _, _ in tempDir },
+            isManagedFileURL: { _ in true }
+        ))
+        let nonRegular = await directoryImporter.importAttachments(from: [decodedData[0]])
+        try require(nonRegular.first?.failureDescription == ComposerImageImportError.notRegularFile.description, "composer image import accepted a managed directory instead of a readable regular file")
         return assertions
     }
 
@@ -7540,8 +7575,8 @@ enum UIProbeGeometry {
 
         let tempDir = try makeProbeTemporaryDirectory(named: "composer-image-thumbnails")
         let wideURL = tempDir.appendingPathComponent("wide.png")
-        try makeProbeImageData(width: 800, height: 400, type: .png).write(to: wideURL, options: .atomic)
-        let pipeline = ComposerImageIOThumbnailPipeline(configuration: .init(maximumEntries: 2, maximumBytes: 512 * 1024))
+        try makeProbeImageData(width: 1200, height: 600, type: .png).write(to: wideURL, options: .atomic)
+        let pipeline = ComposerImageIOThumbnailPipeline(configuration: .init(maximumEntries: 2, maximumBytes: 512 * 1024, maximumPixelSize: 1024))
         let thumbnail = try await pipeline.thumbnail(for: wideURL, maxPixelSize: 96)
         try require(max(thumbnail.pixelWidth, thumbnail.pixelHeight) <= 96, "ImageIO thumbnail pipeline did not downsample to the requested bound")
         try require(thumbnail.pixelWidth > thumbnail.pixelHeight, "ImageIO thumbnail pipeline did not preserve the source aspect orientation")
@@ -7550,13 +7585,61 @@ enum UIProbeGeometry {
         let cachedAfterRepeat = await pipeline.cachedEntryCount()
         try require(cachedAfterRepeat == 1, "ImageIO thumbnail pipeline did not reuse a cached thumbnail")
 
-        for index in 0..<3 {
-            let url = tempDir.appendingPathComponent("extra-\(index).png")
-            try makeProbeImageData(width: 120 + index, height: 80, type: .png).write(to: url, options: .atomic)
-            _ = try await pipeline.thumbnail(for: url, maxPixelSize: 64)
+        let transcriptSized = try await pipeline.thumbnail(for: wideURL, maxPixelSize: 700)
+        try require(max(transcriptSized.pixelWidth, transcriptSized.pixelHeight) > 512 && max(transcriptSized.pixelWidth, transcriptSized.pixelHeight) <= 700, "ImageIO thumbnail pipeline still capped transcript-size requests at 512px")
+        _ = try await pipeline.thumbnail(for: wideURL, maxPixelSize: 4096)
+        _ = try await pipeline.thumbnail(for: wideURL, maxPixelSize: 9999)
+        let canonicalHugeSize = await pipeline.qaCanonicalPixelSize(for: 9999)
+        let clampedCacheEntryCount = await pipeline.cachedEntryCount()
+        try require(canonicalHugeSize == 1024, "ImageIO thumbnail pipeline did not expose a configurable safe target-pixel ceiling")
+        try require(clampedCacheEntryCount <= 2, "ImageIO thumbnail cache key did not canonicalize equivalent clamped target sizes")
+
+        let costPipeline = ComposerImageIOThumbnailPipeline(configuration: .init(maximumEntries: 20, maximumBytes: 300 * 1024, maximumPixelSize: 512))
+        for index in 0..<2 {
+            let url = tempDir.appendingPathComponent("decoded-cost-\(index).png")
+            try makeProbeImageData(width: 512, height: 512, type: .png).write(to: url, options: .atomic)
+            _ = try await costPipeline.thumbnail(for: url, maxPixelSize: 256)
         }
-        let cachedAfterEviction = await pipeline.cachedEntryCount()
-        try require(cachedAfterEviction <= 2, "ImageIO thumbnail cache exceeded its configured entry bound")
+        let decodedCost = await costPipeline.cachedDecodedByteCost()
+        let decodedCostEntryCount = await costPipeline.cachedEntryCount()
+        try require(decodedCost <= 300 * 1024, "ImageIO thumbnail cache did not evict by decoded pixel cost")
+        try require(decodedCostEntryCount == 1, "ImageIO thumbnail decoded-cost eviction kept too many thumbnails")
+
+        let coalescingPipeline = ComposerImageIOThumbnailPipeline(configuration: .init(maximumEntries: 20, maximumBytes: 4 * 1024 * 1024, maximumPixelSize: 1024, decodeStartDelayNanosecondsForChecks: 60_000_000))
+        try await withThrowingTaskGroup(of: ComposerImageThumbnail.self) { group in
+            for _ in 0..<12 {
+                group.addTask { try await coalescingPipeline.thumbnail(for: wideURL, maxPixelSize: 512) }
+            }
+            var count = 0
+            for try await result in group {
+                try require(max(result.pixelWidth, result.pixelHeight) <= 512, "ImageIO thumbnail coalescing returned an oversized thumbnail")
+                count += 1
+            }
+            try require(count == 12, "ImageIO thumbnail coalescing lost duplicate callers")
+        }
+        let coalescedRenderCount = await coalescingPipeline.qaRenderInvocationCount()
+        try require(coalescedRenderCount == 1, "ImageIO thumbnail pipeline did not coalesce in-flight duplicate requests")
+
+        let cancellationPipeline = ComposerImageIOThumbnailPipeline(configuration: .init(maximumEntries: 20, maximumBytes: 4 * 1024 * 1024, maximumPixelSize: 1024, decodeStartDelayNanosecondsForChecks: 500_000_000))
+        let cancellable = Task { try await cancellationPipeline.thumbnail(for: wideURL, maxPixelSize: 512) }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        cancellable.cancel()
+        do {
+            _ = try await cancellable.value
+            throw fail("ImageIO thumbnail cancellation unexpectedly returned a thumbnail")
+        } catch is CancellationError {
+            // Expected.
+        }
+        for _ in 0..<20 {
+            if await cancellationPipeline.qaInFlightCount() == 0 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let inFlightAfterCancellation = await cancellationPipeline.qaInFlightCount()
+        let cachedAfterCancellation = await cancellationPipeline.cachedEntryCount()
+        let cancelledRenderCount = await cancellationPipeline.qaCancelledRenderCount()
+        try require(inFlightAfterCancellation == 0, "ImageIO thumbnail cancellation stranded an in-flight decode task")
+        try require(cachedAfterCancellation == 0, "ImageIO thumbnail cancellation cached a cancelled decode")
+        try require(cancelledRenderCount >= 1, "ImageIO thumbnail cancellation did not reach the actual decode task")
         return assertions
     }
 
@@ -7626,8 +7709,70 @@ enum UIProbeGeometry {
             try await Task.sleep(nanoseconds: 10_000_000)
             await Task.yield()
         }
-        try require(rail.qaThumbnailCount > 0, "attachment rail did not request a visible ready thumbnail through the injected thumbnail loader")
-        try require(loader.requests.first?.lastPathComponent == "rail.png", "attachment rail thumbnail request did not use the local file capability")
+        let loaderRequestCount = await loader.requestCount()
+        try require(rail.qaThumbnailCount > 0, "attachment rail did not request a visible ready thumbnail through the injected thumbnail loader (tasks: \(rail.qaThumbnailTaskCount), requests: \(loaderRequestCount), leases: \(rail.qaVisibleThumbnailLeaseIDs.sorted()))")
+        let firstThumbnailRequest = await loader.firstRequestLastPathComponent()
+        try require(firstThumbnailRequest == "rail.png", "attachment rail thumbnail request did not use the local file capability")
+
+        let cancellationLoader = StubComposerImageThumbnailLoader(
+            thumbnail: ComposerImageThumbnail(
+                pngData: try makeProbeImageData(width: 32, height: 16, type: .png),
+                pixelWidth: 32,
+                pixelHeight: 16
+            ),
+            delayNanoseconds: 500_000_000
+        )
+        let cancellationRail = ComposerImageAttachmentRailView(
+            frame: NSRect(x: 0, y: 0, width: 170, height: ComposerImageAttachmentRailView.railHeight),
+            thumbnailLoader: cancellationLoader
+        )
+        let cancellationWindow = NSWindow(contentRect: cancellationRail.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        cancellationWindow.contentView = cancellationRail
+        let manyItems = (0..<80).map { index -> ComposerImageAttachmentRailItem in
+            let id = AgentImageAttachmentID(rawValue: "qa-cancel-\(index)")!
+            let metadata = AgentImageAttachmentMetadata(
+                id: id,
+                displayName: "many-\(index).png",
+                contentType: "public.png",
+                byteCount: 128,
+                pixelWidth: 96,
+                pixelHeight: 48
+            )
+            return ComposerImageAttachmentRailItem(
+                attachment: AgentPromptImageAttachment(metadata: metadata, fileURL: imageURL),
+                state: .ready
+            )
+        }
+        cancellationRail.setItems(manyItems)
+        cancellationRail.layoutSubtreeIfNeeded()
+        cancellationRail.collectionView.layoutSubtreeIfNeeded()
+        cancellationRail.qaSyncVisibleThumbnailLeases()
+        for _ in 0..<20 {
+            if await cancellationLoader.requestCount() > 0 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+            cancellationRail.qaSyncVisibleThumbnailLeases()
+        }
+        let initiallyVisibleTasks = cancellationRail.qaThumbnailTaskIDs
+        try require(cancellationRail.qaItemCount == 80, "attachment rail did not retain many items without a product count cap")
+        try require(!initiallyVisibleTasks.isEmpty, "attachment rail did not lease thumbnails for visible ready items")
+        cancellationRail.collectionView.scrollToItems(at: [IndexPath(item: 60, section: 0)], scrollPosition: .centeredHorizontally)
+        cancellationRail.layoutSubtreeIfNeeded()
+        cancellationRail.collectionView.layoutSubtreeIfNeeded()
+        cancellationRail.qaSyncVisibleThumbnailLeases()
+        for _ in 0..<20 {
+            if await cancellationLoader.cancellationCount() > 0 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+            cancellationRail.qaSyncVisibleThumbnailLeases()
+        }
+        let railCancellationCount = await cancellationLoader.cancellationCount()
+        try require(railCancellationCount > 0, "attachment rail did not cancel thumbnail work for offscreen/reused items")
+        try require(cancellationRail.qaThumbnailTaskIDs.intersection(initiallyVisibleTasks).isEmpty, "attachment rail stranded thumbnail tasks after visible item reuse")
+        cancellationRail.setItems([])
+        for _ in 0..<20 where cancellationRail.qaThumbnailTaskCount != 0 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try require(cancellationRail.qaThumbnailTaskCount == 0 && cancellationRail.qaThumbnailCount == 0, "attachment rail did not cancel and release thumbnails when items were removed")
+        cancellationWindow.contentView = nil
         window.contentView = nil
         return assertions
     }
@@ -7675,6 +7820,7 @@ enum UIProbeGeometry {
 private actor ComposerImageImportRecorder {
     let directory: URL
     private var names: [String] = []
+    private var importedExternalFiles = 0
 
     init(directory: URL) {
         self.directory = directory
@@ -7687,20 +7833,56 @@ private actor ComposerImageImportRecorder {
         return url
     }
 
+    func importFile(url: URL, item: ComposerDecodedImagePasteboardItem) throws -> URL {
+        let destination = directory.appendingPathComponent("imported-\(importedExternalFiles)-\(item.suggestedFilename)")
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        try FileManager.default.copyItem(at: url, to: destination)
+        importedExternalFiles += 1
+        return destination
+    }
+
     func storedNameCount() -> Int { names.count }
+    func importedExternalFileCount() -> Int { importedExternalFiles }
+
+    func isManagedFileURL(_ url: URL) -> Bool {
+        url.standardizedFileURL.path.hasPrefix(directory.standardizedFileURL.path + "/")
+    }
 }
 
-private final class StubComposerImageThumbnailLoader: ComposerImageThumbnailLoading, @unchecked Sendable {
+private actor StubComposerImageThumbnailLoader: ComposerImageThumbnailLoading {
     let thumbnail: ComposerImageThumbnail
-    private(set) var requests: [URL] = []
+    let delayNanoseconds: UInt64
+    private var requests: [URL] = []
+    private var cancellations = 0
 
-    init(thumbnail: ComposerImageThumbnail) {
+    init(thumbnail: ComposerImageThumbnail, delayNanoseconds: UInt64 = 0) {
         self.thumbnail = thumbnail
+        self.delayNanoseconds = delayNanoseconds
     }
 
     func thumbnail(for fileURL: URL, maxPixelSize: Int) async throws -> ComposerImageThumbnail {
         requests.append(fileURL)
-        return thumbnail
+        do {
+            if delayNanoseconds > 0 { try await Task.sleep(nanoseconds: delayNanoseconds) }
+            try Task.checkCancellation()
+            return thumbnail
+        } catch is CancellationError {
+            cancellations += 1
+            throw CancellationError()
+        }
+    }
+
+    func firstRequestLastPathComponent() -> String? { requests.first?.lastPathComponent }
+    func requestCount() -> Int { requests.count }
+    func cancellationCount() -> Int { cancellations }
+}
+
+private extension Result {
+    var failureDescription: String? {
+        guard case .failure(let error) = self else { return nil }
+        return String(describing: error)
     }
 }
 

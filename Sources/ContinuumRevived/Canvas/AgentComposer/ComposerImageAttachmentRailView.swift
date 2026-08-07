@@ -71,6 +71,7 @@ final class ComposerImageAttachmentRailView: NSView, TokenThemed {
     private var itemsByID: [String: ComposerImageAttachmentRailItem] = [:]
     private var thumbnailsByID: [String: ComposerImageThumbnail] = [:]
     private var thumbnailTasks: [String: Task<Void, Never>] = [:]
+    private var visibleThumbnailIDs = Set<String>()
 
     init(
         frame frameRect: NSRect,
@@ -109,14 +110,26 @@ final class ComposerImageAttachmentRailView: NSView, TokenThemed {
     }
 
     func setItems(_ newItems: [ComposerImageAttachmentRailItem]) {
+        let previousItemsByID = itemsByID
         items = newItems
         itemsByID = Dictionary(uniqueKeysWithValues: newItems.map { ($0.id, $0) })
         let ids = Set(newItems.map(\.id))
-        for (id, task) in thumbnailTasks where !ids.contains(id) {
-            task.cancel()
-            thumbnailTasks[id] = nil
-            thumbnailsByID[id] = nil
+        for (id, task) in thumbnailTasks {
+            let current = itemsByID[id]
+            let previous = previousItemsByID[id]
+            if current == nil || current?.state != .ready || current?.attachment.fileURL != previous?.attachment.fileURL {
+                task.cancel()
+                thumbnailTasks[id] = nil
+            }
         }
+        for id in Array(thumbnailsByID.keys) {
+            let current = itemsByID[id]
+            let previous = previousItemsByID[id]
+            if current == nil || current?.state != .ready || current?.attachment.fileURL != previous?.attachment.fileURL {
+                thumbnailsByID[id] = nil
+            }
+        }
+        visibleThumbnailIDs.formIntersection(ids)
 
         if collectionView.bounds.height <= 0 {
             collectionView.setFrameSize(NSSize(width: max(bounds.width, 1), height: max(bounds.height, Self.railHeight)))
@@ -183,6 +196,7 @@ final class ComposerImageAttachmentRailView: NSView, TokenThemed {
             ComposerImageAttachmentRailCollectionItem.self,
             forItemWithIdentifier: ComposerImageAttachmentRailCollectionItem.identifier
         )
+        collectionView.delegate = self
         collectionView.onRemoveSelected = { [weak self] in self?.removeSelectedAttachment() }
         collectionView.setAccessibilityRole(.list)
         collectionView.setAccessibilityLabel("Image attachment rail")
@@ -221,13 +235,31 @@ final class ComposerImageAttachmentRailView: NSView, TokenThemed {
                 theme: self.effectiveTokenTheme,
                 onRemove: { [weak self] removed in self?.onRemoveAttachment?(removed) }
             )
+            self.visibleThumbnailIDs.insert(id)
             self.startThumbnailIfNeeded(for: item)
             return cell
         }
     }
 
+    private func syncVisibleThumbnailLeases() {
+        let liveVisibleIDs = Set(collectionView.indexPathsForVisibleItems().compactMap { indexPath -> String? in
+            guard items.indices.contains(indexPath.item) else { return nil }
+            return items[indexPath.item].id
+        })
+        guard !liveVisibleIDs.isEmpty else { return }
+        for id in visibleThumbnailIDs where !liveVisibleIDs.contains(id) {
+            cancelThumbnailLease(for: id, removeThumbnail: true)
+        }
+        visibleThumbnailIDs = liveVisibleIDs
+        for id in liveVisibleIDs {
+            guard let item = itemsByID[id] else { continue }
+            startThumbnailIfNeeded(for: item)
+        }
+    }
+
     private func startThumbnailIfNeeded(for item: ComposerImageAttachmentRailItem) {
-        guard item.state == .ready,
+        guard visibleThumbnailIDs.contains(item.id),
+              item.state == .ready,
               thumbnailsByID[item.id] == nil,
               thumbnailTasks[item.id] == nil
         else { return }
@@ -239,7 +271,10 @@ final class ComposerImageAttachmentRailView: NSView, TokenThemed {
                 let thumbnail = try await loader.thumbnail(for: fileURL, maxPixelSize: Self.thumbnailMaxPixelSize)
                 guard !Task.isCancelled else { return }
                 await MainActor.run { [weak self] in
-                    guard let self, self.itemsByID[id]?.attachment.fileURL == fileURL else { return }
+                    guard let self,
+                          self.visibleThumbnailIDs.contains(id),
+                          self.itemsByID[id]?.attachment.fileURL == fileURL
+                    else { return }
                     self.thumbnailTasks[id] = nil
                     self.thumbnailsByID[id] = thumbnail
                     self.reloadItem(id: id)
@@ -256,6 +291,20 @@ final class ComposerImageAttachmentRailView: NSView, TokenThemed {
                 }
             }
         }
+    }
+
+    private func cancelThumbnailLease(for id: String, removeThumbnail: Bool) {
+        thumbnailTasks[id]?.cancel()
+        thumbnailTasks[id] = nil
+        visibleThumbnailIDs.remove(id)
+        if removeThumbnail { thumbnailsByID[id] = nil }
+    }
+
+    private func cancelAllThumbnailLeases(removeThumbnails: Bool) {
+        for task in thumbnailTasks.values { task.cancel() }
+        thumbnailTasks.removeAll()
+        visibleThumbnailIDs.removeAll()
+        if removeThumbnails { thumbnailsByID.removeAll() }
     }
 
     private func reloadItem(id: String) {
@@ -277,6 +326,37 @@ final class ComposerImageAttachmentRailView: NSView, TokenThemed {
               items.indices.contains(indexPath.item)
         else { return }
         onRemoveAttachment?(items[indexPath.item].attachment)
+    }
+}
+
+extension ComposerImageAttachmentRailView: NSCollectionViewDelegate {
+    func collectionView(
+        _ collectionView: NSCollectionView,
+        willDisplay item: NSCollectionViewItem,
+        forRepresentedObjectAt indexPath: IndexPath
+    ) {
+        guard items.indices.contains(indexPath.item) else { return }
+        let railItem = items[indexPath.item]
+        visibleThumbnailIDs.insert(railItem.id)
+        startThumbnailIfNeeded(for: railItem)
+    }
+
+    func collectionView(
+        _ collectionView: NSCollectionView,
+        didEndDisplaying item: NSCollectionViewItem,
+        forRepresentedObjectAt indexPath: IndexPath
+    ) {
+        guard items.indices.contains(indexPath.item) else { return }
+        let id = items[indexPath.item].id
+        DispatchQueue.main.async { [weak self, weak collectionView] in
+            guard let self else { return }
+            let stillVisible = collectionView?.indexPathsForVisibleItems().contains { visibleIndexPath in
+                self.items.indices.contains(visibleIndexPath.item) && self.items[visibleIndexPath.item].id == id
+            } ?? false
+            if !stillVisible {
+                self.cancelThumbnailLease(for: id, removeThumbnail: true)
+            }
+        }
     }
 }
 
@@ -323,6 +403,11 @@ final class ComposerImageAttachmentRailCollectionItem: NSCollectionViewItem {
 
     override func loadView() {
         view = ComposerImageAttachmentCellView(frame: NSRect(origin: .zero, size: ComposerImageAttachmentRailView.itemSize))
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        cellView.prepareForReuseForAttachmentRail()
     }
 
     func configure(
@@ -392,6 +477,15 @@ final class ComposerImageAttachmentCellView: NSView {
         setAccessibilityLabel(accessibility)
         toolTip = accessibility
         applyTokens(theme: theme)
+    }
+
+    func prepareForReuseForAttachmentRail() {
+        imageView.image = nil
+        placeholderLabel.isHidden = false
+        item = nil
+        onRemove = nil
+        toolTip = nil
+        setAccessibilityLabel(nil)
     }
 
     func applyTokens(theme: TokenTheme) {
@@ -520,6 +614,9 @@ extension ComposerImageAttachmentRailView {
     var qaItemCount: Int { items.count }
     var qaVisibleItemCount: Int { collectionView.visibleItems().count }
     var qaThumbnailCount: Int { thumbnailsByID.count }
+    var qaThumbnailTaskCount: Int { thumbnailTasks.count }
+    var qaVisibleThumbnailLeaseIDs: Set<String> { visibleThumbnailIDs }
+    var qaThumbnailTaskIDs: Set<String> { Set(thumbnailTasks.keys) }
     var qaVisibleStateLabels: [String] {
         collectionView.visibleItems().compactMap { item in
             (item as? ComposerImageAttachmentRailCollectionItem)?.cellView.qaStateLabel
@@ -548,6 +645,14 @@ extension ComposerImageAttachmentRailView {
 
     func qaRemoveSelectionFromKeyboard() {
         removeSelectedAttachment()
+    }
+
+    func qaSyncVisibleThumbnailLeases() {
+        syncVisibleThumbnailLeases()
+    }
+
+    func qaCancelVisibleThumbnailLease(id: String) {
+        cancelThumbnailLease(for: id, removeThumbnail: true)
     }
 }
 
