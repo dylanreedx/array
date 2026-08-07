@@ -336,6 +336,7 @@ enum UIProbeGeometry {
         let mediaRows = try checkImageRenderers()
         let exceptionalRows = try checkExceptionalRenderers()
         let reasoningDisclosureRows = try checkCompletedReasoningDisclosure()
+        try checkCompletedReasoningTranscriptRoute()
         // P0.4: the inbox measured at the widths it ships at, truncation gated
         // by drawable width against an explicit expected-defect table.
         let sidebarHeightAssertions = try checkSidebarContentDerivedHeights()
@@ -6012,6 +6013,96 @@ enum UIProbeGeometry {
             throw fail("incremental transcript updates retained \(list.qaLiveHostCount) live hosts")
         }
         return live
+    }
+
+    /// Production entry/item acceptance check for the completed-reasoning route.
+    /// Before routing, its row-count and mounted-disclosure assertions were the
+    /// RED witness: the foundation probe above intentionally bypassed this real
+    /// document -> flatten -> diffable item path.
+    private static func checkCompletedReasoningTranscriptRoute() throws {
+        func id(_ value: String) -> AgentNodeID { AgentNodeID(rawValue: value)! }
+        func paragraph(_ value: String, id valueID: String) -> AgentBlock {
+            AgentBlock(
+                id: id(valueID), revision: 1, kind: .paragraph,
+                payload: .paragraph([.text(value)])
+            )
+        }
+        let active = AgentEntry(
+            id: id("route-reasoning-active"), revision: 1, role: .reasoning,
+            provenance: .providerItem(provider: "fixture", itemID: "active"),
+            lifecycle: .open(markupBlockID: id("route-reasoning-active-block")),
+            blocks: [paragraph("still thinking", id: "route-reasoning-active-block")]
+        )
+        let finishedParagraph = paragraph("completed thought", id: "route-reasoning-finished-block")
+        let finishedCode = AgentBlock(
+            id: id("route-reasoning-finished-code"), revision: 1, kind: .fencedCode,
+            payload: .fencedCode(.init(language: "swift", code: "let answer = 42", isComplete: true))
+        )
+        let finishedUnknownKind = AgentBlockKind(rawValue: "route.unsupported")!
+        let finishedUnknown = AgentBlock(
+            id: id("route-reasoning-finished-unknown"), revision: 1, kind: finishedUnknownKind,
+            payload: .opaque(.init(debugLabel: "route-fixture", value: .null))
+        )
+        let finished = AgentEntry(
+            id: id("route-reasoning-finished"), revision: 1, role: .reasoning,
+            provenance: .providerItem(provider: "fixture", itemID: "finished"),
+            lifecycle: .finished,
+            blocks: [finishedParagraph, finishedCode, finishedUnknown]
+        )
+        let assistant = AgentEntry(
+            id: id("route-assistant"), revision: 1, role: .assistant,
+            provenance: .localNotice(reason: "fixture"), lifecycle: .finished,
+            blocks: [paragraph("answer", id: "route-assistant-block")]
+        )
+        let list = AgentTranscriptListView()
+        list.frame = NSRect(x: 0, y: 0, width: 320, height: 240)
+        let host = NSView(frame: list.frame)
+        host.addSubview(list)
+        list.autoresizingMask = [.width, .height]
+        let document = AgentDocument(version: 1, entries: [active, finished, assistant])
+        try list.apply(
+            document: document,
+            patch: try AgentDocumentPatch(
+                fromVersion: 0, toVersion: 1,
+                inserted: [active.id, finished.id, assistant.id]
+            )
+        )
+        host.layoutSubtreeIfNeeded()
+        list.collectionView.layoutSubtreeIfNeeded()
+        guard list.qaSemanticRowCount == 2 else {
+            throw GeometryError(message: "transcript entry routing rendered active reasoning or duplicated reasoning rows (got \(list.qaSemanticRowCount), expected 2)")
+        }
+        guard let disclosure = list.accessibilityChildren()?.compactMap({ $0 as? CompletedReasoningDisclosureView }).first else {
+            throw GeometryError(message: "transcript entry/item path did not mount a completed reasoning disclosure")
+        }
+        guard disclosure.titleLabel.stringValue == "Thought",
+              !disclosure.isExpanded else {
+            throw GeometryError(message: "transcript reasoning route fabricated duration or defaulted expanded")
+        }
+        _ = disclosure.accessibilityPerformPress()
+        host.layoutSubtreeIfNeeded()
+        list.collectionView.layoutSubtreeIfNeeded()
+        guard disclosure.isExpanded, disclosure.bodyHosts.count == 3,
+              disclosure.bodyHosts.allSatisfy({ $0.representedRole == .reasoning }),
+              disclosure.bodyHosts[1].rendererView is CodeBlockView,
+              disclosure.bodyHosts[2].rendererView is AgentUnknownBlockView else {
+            throw GeometryError(message: "transcript reasoning disclosure did not expand through its collection item and role-aware registry")
+        }
+        let revisedFinished = AgentEntry(
+            id: finished.id, revision: 2, role: finished.role,
+            provenance: finished.provenance, lifecycle: .finished,
+            blocks: finished.blocks
+        )
+        try list.apply(
+            document: AgentDocument(version: 2, entries: [active, revisedFinished, assistant]),
+            patch: try AgentDocumentPatch(fromVersion: 1, toVersion: 2, updated: [finished.id])
+        )
+        host.layoutSubtreeIfNeeded()
+        list.collectionView.layoutSubtreeIfNeeded()
+        guard disclosure.isExpanded, disclosure.bodyHosts.count == 3,
+              disclosure.titleLabel.stringValue == "Thought" else {
+            throw GeometryError(message: "transcript reasoning expansion state was not stable by entry identity")
+        }
     }
 
     // Negative witness (P3.10, exercised 2026-07-30):

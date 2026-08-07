@@ -1,18 +1,23 @@
 import AppKit
 import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
+import ContinuumRevivedCore
 
 @MainActor
 private final class AgentTranscriptCollectionItem: NSCollectionViewItem {
     private(set) var hostView: AgentBlockHostView?
+    private(set) var reasoningDisclosureView: CompletedReasoningDisclosureView?
 
     override func loadView() {
         view = NSView(frame: .zero)
     }
 
     func installHost(registry: AgentBlockRendererRegistry, cache: AgentBlockMeasurementCache) -> AgentBlockHostView {
+        reasoningDisclosureView?.removeFromSuperview()
+        reasoningDisclosureView = nil
         if let hostView { return hostView }
         let host = AgentBlockHostView(registry: registry, measurementCache: cache)
+        host.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(host)
         NSLayoutConstraint.activate([
             host.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -24,9 +29,30 @@ private final class AgentTranscriptCollectionItem: NSCollectionViewItem {
         return host
     }
 
+    func installCompletedReasoningDisclosure() -> CompletedReasoningDisclosureView {
+        hostView?.resetForReuse()
+        hostView?.removeFromSuperview()
+        hostView = nil
+        if let reasoningDisclosureView { return reasoningDisclosureView }
+        let disclosure = CompletedReasoningDisclosureView(frame: .zero)
+        disclosure.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(disclosure)
+        NSLayoutConstraint.activate([
+            disclosure.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            disclosure.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            disclosure.topAnchor.constraint(equalTo: view.topAnchor),
+            disclosure.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        reasoningDisclosureView = disclosure
+        return disclosure
+    }
+
     override func prepareForReuse() {
         super.prepareForReuse()
         hostView?.resetForReuse()
+        reasoningDisclosureView?.apply(entry: nil, authoritativeDuration: nil, context: .init(
+            actions: .disabled, tokens: .transcript, appearance: .dark
+        ))
     }
 }
 
@@ -59,8 +85,37 @@ final class AgentTranscriptListView: NSView {
     }
 
     struct Row {
-        let block: AgentBlock
+        enum Content: Equatable {
+            case block(AgentBlock)
+            case completedReasoning(AgentEntry)
+        }
+
+        let content: Content
         let role: AgentEntryRole
+
+        var id: AgentNodeID {
+            switch content {
+            case let .block(block): return block.id
+            case let .completedReasoning(entry): return entry.id
+            }
+        }
+
+        var block: AgentBlock? {
+            guard case let .block(block) = content else { return nil }
+            return block
+        }
+
+        var entry: AgentEntry? {
+            guard case let .completedReasoning(entry) = content else { return nil }
+            return entry
+        }
+
+        var copyBlocks: [AgentBlock] {
+            switch content {
+            case let .block(block): return [block]
+            case let .completedReasoning(entry): return entry.blocks
+            }
+        }
     }
 
     let scrollView = NSScrollView(frame: .zero)
@@ -69,6 +124,15 @@ final class AgentTranscriptListView: NSView {
 
     private let registry: AgentBlockRendererRegistry
     private let measurementCache: AgentBlockMeasurementCache
+    /// The list owns the view-state binding because the existing tile context
+    /// deliberately carries only semantic render actions. Entry IDs remain the
+    /// disclosure key; this opaque owner token prevents state crossing lists.
+    private let disclosureStateStore = DisclosureStateStore()
+    private let disclosureOwnerID: AgentID
+    /// Duration is an optional host-attested presentation input. The current
+    /// transcript model has no duration field, so the production default is nil
+    /// rather than a locally inferred or fabricated clock.
+    private let authoritativeReasoningDuration: (AgentEntry) -> TimeInterval?
     private var dataSource: NSCollectionViewDiffableDataSource<Int, AgentNodeID>!
     private var rows: [Row] = []
     private var rowsByID: [AgentNodeID: Row] = [:]
@@ -108,12 +172,16 @@ final class AgentTranscriptListView: NSView {
         registry: AgentBlockRendererRegistry = .production,
         renderContext: AgentRenderContext = AgentRenderContext(
             actions: .disabled, tokens: .transcript, appearance: .dark
-        )
+        ),
+        authoritativeReasoningDuration: @escaping (AgentEntry) -> TimeInterval? = { _ in nil }
     ) {
         self.registry = registry
+        disclosureOwnerID = AgentID(rawValue: UUID())
         self.renderContext = renderContext
+        self.authoritativeReasoningDuration = authoritativeReasoningDuration
         measurementCache = AgentBlockMeasurementCache()
         super.init(frame: .zero)
+        self.renderContext = contextWithDisclosureState(renderContext)
         configureCollectionView()
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
@@ -160,13 +228,24 @@ final class AgentTranscriptListView: NSView {
             guard let self, rows.indices.contains(index) else { return 1 }
             let row = rows[index]
             do {
-                return try measurementCache.height(
-                    for: row.block,
-                    width: width,
-                    context: renderContext,
-                    entryRole: row.role,
-                    renderer: registry.renderer(for: row.block.kind, entryRole: row.role)
-                )
+                switch row.content {
+                case let .block(block):
+                    return try measurementCache.height(
+                        for: block,
+                        width: width,
+                        context: renderContext,
+                        entryRole: row.role,
+                        renderer: registry.renderer(for: block.kind, entryRole: row.role)
+                    )
+                case let .completedReasoning(entry):
+                    return CompletedReasoningDisclosureView.measuredHeight(
+                        for: entry,
+                        authoritativeDuration: authoritativeReasoningDuration(entry),
+                        width: width,
+                        context: renderContext,
+                        registry: registry
+                    )
+                }
             } catch {
                 renderingError = error
                 return 24
@@ -179,10 +258,21 @@ final class AgentTranscriptListView: NSView {
             let identifier = NSUserInterfaceItemIdentifier("AgentTranscriptCollectionItem")
             guard let item = collectionView.makeItem(withIdentifier: identifier, for: indexPath)
                 as? AgentTranscriptCollectionItem else { return nil }
-            let host = item.installHost(registry: registry, cache: measurementCache)
-            track(host)
             do {
-                try host.apply(block: row.block, entryRole: row.role, context: renderContext)
+                switch row.content {
+                case let .block(block):
+                    let host = item.installHost(registry: registry, cache: measurementCache)
+                    track(host)
+                    try host.apply(block: block, entryRole: row.role, context: renderContext)
+                case let .completedReasoning(entry):
+                    let disclosure = item.installCompletedReasoningDisclosure()
+                    disclosure.apply(
+                        entry: entry,
+                        authoritativeDuration: authoritativeReasoningDuration(entry),
+                        context: renderContext,
+                        registry: registry
+                    )
+                }
             } catch {
                 renderingError = error
             }
@@ -228,13 +318,16 @@ final class AgentTranscriptListView: NSView {
         // Expose the actual virtualized semantic hosts in collection/document
         // order instead of trusting AppKit's reuse-pool traversal order. Each
         // host then forwards its heading/link/code/disclosure/action children.
-        let orderedHosts: [(Int, AgentBlockHostView)] = collectionView.visibleItems().compactMap { item in
+        let orderedChildren: [(Int, Any)] = collectionView.visibleItems().compactMap { item in
             guard let item = item as? AgentTranscriptCollectionItem,
-                  let indexPath = collectionView.indexPath(for: item),
-                  let host = item.hostView else { return nil }
-            return (indexPath.item, host)
+                  let indexPath = collectionView.indexPath(for: item) else { return nil }
+            if let host = item.hostView { return (indexPath.item, host as Any) }
+            if let disclosure = item.reasoningDisclosureView {
+                return (indexPath.item, disclosure as Any)
+            }
+            return nil
         }
-        var children: [Any] = orderedHosts.sorted { $0.0 < $1.0 }.map { $0.1 as Any }
+        var children: [Any] = orderedChildren.sorted { $0.0 < $1.0 }.map { $0.1 }
         if !jumpToLatestButton.isHidden { children.append(jumpToLatestButton) }
         return children
     }
@@ -277,14 +370,14 @@ final class AgentTranscriptListView: NSView {
         var lastID: AgentNodeID?
         for (index, row) in rows.enumerated() {
             guard let frame = collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0))?.frame else { continue }
-            if frame.maxY >= y { return row.block.id }
-            lastID = row.block.id
+            if frame.maxY >= y { return row.id }
+            lastID = row.id
         }
         return lastID
     }
 
     private func transcriptY(for id: AgentNodeID) -> CGFloat? {
-        guard let index = rows.firstIndex(where: { $0.block.id == id }) else { return nil }
+        guard let index = rows.firstIndex(where: { $0.id == id }) else { return nil }
         return collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0))?.frame.minY
     }
 
@@ -295,7 +388,7 @@ final class AgentTranscriptListView: NSView {
         let selectedRows = collectionView.selectionIndexPaths
             .sorted { $0.item < $1.item }
             .compactMap { rows.indices.contains($0.item) ? rows[$0.item] : nil }
-        let selected = selectedRows.map(\.block)
+        let selected = selectedRows.flatMap(\.copyBlocks)
         guard !selected.isEmpty else { return }
         if asMarkdown {
             let value = AgentTranscriptCopyController.markdown(for: selected)
@@ -318,14 +411,14 @@ final class AgentTranscriptListView: NSView {
     /// There is intentionally no reloadData path after (or before) initial load.
     private func applyCoalesced(document: AgentDocument) throws {
         let flattened = try Self.flatten(document)
-        let oldIndexes = Dictionary(uniqueKeysWithValues: rows.enumerated().map { ($0.element.block.id, $0.offset) })
+        let oldIndexes = Dictionary(uniqueKeysWithValues: rows.enumerated().map { ($0.element.id, $0.offset) })
         let changedNodeIDs = Set(flattened.rows.compactMap { row -> AgentNodeID? in
-            guard let old = rowsByID[row.block.id] else { return nil }
-            return old.block != row.block || old.role != row.role ? row.block.id : nil
+            guard let old = rowsByID[row.id] else { return nil }
+            return old.content != row.content || old.role != row.role ? row.id : nil
         })
         let moved = flattened.rows.enumerated().compactMap { index, row -> AgentNodeID? in
-            guard let oldIndex = oldIndexes[row.block.id], oldIndex != index else { return nil }
-            return row.block.id
+            guard let oldIndex = oldIndexes[row.id], oldIndex != index else { return nil }
+            return row.id
         }
         try applyWithScroll(document: document, flattened: flattened, changedNodeIDs: changedNodeIDs.union(moved))
     }
@@ -373,10 +466,10 @@ final class AgentTranscriptListView: NSView {
         flattened: (rows: [Row], topLevelIDsByNodeID: [AgentNodeID: Set<AgentNodeID>]),
         changedNodeIDs: Set<AgentNodeID>
     ) throws {
-        let oldIDs = rows.map(\.block.id)
+        let oldIDs = rows.map(\.id)
         let oldRowsByID = rowsByID
         rows = flattened.rows
-        rowsByID = Dictionary(uniqueKeysWithValues: rows.map { ($0.block.id, $0) })
+        rowsByID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
         topLevelIDsByNodeID = flattened.topLevelIDsByNodeID
         renderingError = nil
 
@@ -391,7 +484,7 @@ final class AgentTranscriptListView: NSView {
             }
         }
 
-        let newIDs = rows.map(\.block.id)
+        let newIDs = rows.map(\.id)
         var snapshot = NSDiffableDataSourceSnapshot<Int, AgentNodeID>()
         snapshot.appendSections([0])
         snapshot.appendItems(newIDs, toSection: 0)
@@ -401,8 +494,8 @@ final class AgentTranscriptListView: NSView {
         // bookkeeping update out to every sibling; only a role change affects all
         // renderer families in the entry.
         changedTopLevelIDs.formUnion(rows.compactMap { row in
-            guard let old = oldRowsByID[row.block.id], old.role != row.role else { return nil }
-            return row.block.id
+            guard let old = oldRowsByID[row.id], old.role != row.role else { return nil }
+            return row.id
         })
         let survivingChanged = changedTopLevelIDs.intersection(newIDs)
         lastInvalidatedTopLevelCount = survivingChanged.count
@@ -441,36 +534,88 @@ final class AgentTranscriptListView: NSView {
     }
 
     func updateRenderContext(_ context: AgentRenderContext) throws {
-        renderContext = context
+        renderContext = contextWithDisclosureState(context)
         measurementCache.removeAll()
         transcriptLayout.invalidateForStructureChange()
         try updateVisibleHosts(ids: Set(rowsByID.keys))
     }
 
+    private func contextWithDisclosureState(_ context: AgentRenderContext) -> AgentRenderContext {
+        var context = context
+        context.actions = disclosureStateStore.renderActions(
+            for: disclosureOwnerID,
+            perform: context.actions.perform,
+            invalidatePresentation: { [weak self] id in
+                self?.remeasureDisclosure(id: id)
+            }
+        )
+        return context
+    }
+
     private func measuredHeight(for row: Row, width: CGFloat) throws -> CGFloat {
-        do {
-            return measurementCache.height(
-                for: row.block,
+        switch row.content {
+        case let .block(block):
+            do {
+                let renderer = try registry.renderer(for: block.kind, entryRole: row.role)
+                return measurementCache.height(
+                    for: block,
+                    width: width,
+                    context: renderContext,
+                    entryRole: row.role,
+                    renderer: renderer
+                )
+            } catch {
+                throw UpdateError.renderer(error)
+            }
+        case let .completedReasoning(entry):
+            return CompletedReasoningDisclosureView.measuredHeight(
+                for: entry,
+                authoritativeDuration: authoritativeReasoningDuration(entry),
                 width: width,
                 context: renderContext,
-                entryRole: row.role,
-                renderer: try registry.renderer(for: row.block.kind, entryRole: row.role)
+                registry: registry
             )
-        } catch {
-            throw UpdateError.renderer(error)
         }
     }
 
     private func updateVisibleHosts(ids: Set<AgentNodeID>) throws {
         for case let item as AgentTranscriptCollectionItem in collectionView.visibleItems() {
-            guard let host = item.hostView, let id = host.representedID,
+            guard let id = item.hostView?.representedID ?? item.reasoningDisclosureView?.presentation?.entryID,
                   ids.contains(id), let row = rowsByID[id] else { continue }
             do {
-                try host.apply(block: row.block, entryRole: row.role, context: renderContext)
+                switch row.content {
+                case let .block(block):
+                    let host = item.installHost(registry: registry, cache: measurementCache)
+                    try host.apply(block: block, entryRole: row.role, context: renderContext)
+                case let .completedReasoning(entry):
+                    let disclosure = item.installCompletedReasoningDisclosure()
+                    disclosure.apply(
+                        entry: entry,
+                        authoritativeDuration: authoritativeReasoningDuration(entry),
+                        context: renderContext,
+                        registry: registry
+                    )
+                }
             } catch {
                 throw UpdateError.renderer(error)
             }
         }
+    }
+
+    private func remeasureDisclosure(id: AgentNodeID) {
+        guard let content = rowsByID[id]?.content, case .completedReasoning = content else { return }
+        scrollController.apply(
+            in: scrollView,
+            idAtY: { [weak self] y in self?.transcriptID(at: y) },
+            yForID: { [weak self] id in self?.transcriptY(for: id) },
+            isSelecting: { [weak self] in self?.hasActiveTextSelection() ?? false },
+            update: { [weak self] in
+                guard let self else { return }
+                transcriptLayout.invalidate(changedIDs: [id])
+                layoutSubtreeIfNeeded()
+            }
+        )
+        jumpToLatestButton.isHidden = !scrollController.showsJumpToLatest
     }
 
     override func layout() {
@@ -525,11 +670,30 @@ final class AgentTranscriptListView: NSView {
             block.children.forEach { index($0, owner: owner) }
         }
         for entry in document.entries {
+            if entry.role == .reasoning {
+                // Open reasoning is represented by the surrounding activity/status
+                // owner, not by a second transcript row. Finished reasoning is one
+                // stable entry row whose body remains semantic and role-aware inside
+                // CompletedReasoningDisclosureView.
+                guard entry.lifecycle == .finished, !entry.blocks.isEmpty else {
+                    continue
+                }
+                guard topLevelIDs.insert(entry.id).inserted else {
+                    throw UpdateError.duplicateTopLevelBlock(entry.id)
+                }
+                rows.append(Row(content: .completedReasoning(entry), role: .reasoning))
+                owners[entry.id] = [entry.id]
+                for block in entry.blocks {
+                    index(block, owner: entry.id)
+                }
+                continue
+            }
+
             for block in entry.blocks {
                 guard topLevelIDs.insert(block.id).inserted else {
                     throw UpdateError.duplicateTopLevelBlock(block.id)
                 }
-                rows.append(Row(block: block, role: entry.role))
+                rows.append(Row(content: .block(block), role: entry.role))
                 index(block, owner: block.id)
             }
             owners[entry.id] = []
@@ -561,16 +725,20 @@ final class AgentTranscriptListView: NSView {
     /// retained item, so incremental identity checks include a reused host that is
     /// not discoverable through `visibleItems()`.
     func qaExerciseReuseBoundary(from oldID: AgentNodeID, to newID: AgentNodeID) throws {
-        guard let oldRow = rowsByID[oldID] else { throw UpdateError.missingQARow(oldID) }
-        guard let newRow = rowsByID[newID] else { throw UpdateError.missingQARow(newID) }
+        guard let oldRow = rowsByID[oldID], let oldBlock = oldRow.block else {
+            throw UpdateError.missingQARow(oldID)
+        }
+        guard let newRow = rowsByID[newID], let newBlock = newRow.block else {
+            throw UpdateError.missingQARow(newID)
+        }
         let item = AgentTranscriptCollectionItem()
         _ = item.view
         let host = item.installHost(registry: registry, cache: measurementCache)
         track(host)
         do {
-            try host.apply(block: oldRow.block, entryRole: oldRow.role, context: renderContext)
+            try host.apply(block: oldBlock, entryRole: oldRow.role, context: renderContext)
             item.prepareForReuse()
-            try host.apply(block: newRow.block, entryRole: newRow.role, context: renderContext)
+            try host.apply(block: newBlock, entryRole: newRow.role, context: renderContext)
         } catch {
             throw UpdateError.renderer(error)
         }

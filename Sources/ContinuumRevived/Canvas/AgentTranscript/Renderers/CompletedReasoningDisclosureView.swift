@@ -2,9 +2,9 @@ import AppKit
 import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 
-/// AppKit disclosure component for one completed reasoning entry. Production
-/// routing is intentionally absent in this foundation ticket; the coordinator can
-/// later mount this at the entry row seam when `AgentEntry.role == .reasoning`.
+/// AppKit disclosure component for one completed reasoning entry. The transcript
+/// list mounts this at the semantic entry row seam; its body remains a collection
+/// of role-aware AgentBlockHostView instances rather than flattened presentation.
 @MainActor
 final class CompletedReasoningDisclosureView: NSView {
     static let headerHeight = CGFloat(Space.xxl + Space.m)
@@ -24,6 +24,7 @@ final class CompletedReasoningDisclosureView: NSView {
     var onNeedsRemeasure: (() -> Void)?
 
     private var context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
+    private var registry: AgentBlockRendererRegistry = .production
     private let measurementCache = AgentBlockMeasurementCache()
     private var bodyHostsByBlockID: [AgentNodeID: AgentBlockHostView] = [:]
 
@@ -57,9 +58,11 @@ final class CompletedReasoningDisclosureView: NSView {
         entry: AgentEntry?,
         authoritativeDuration: TimeInterval?,
         context: AgentRenderContext,
+        registry: AgentBlockRendererRegistry = .production,
         onNeedsRemeasure: (() -> Void)? = nil
     ) {
         self.context = context
+        self.registry = registry
         self.onNeedsRemeasure = onNeedsRemeasure
         guard let presentation = CompletedReasoningDisclosurePresenter.presentation(
             for: entry,
@@ -147,7 +150,8 @@ final class CompletedReasoningDisclosureView: NSView {
         for entry: AgentEntry?,
         authoritativeDuration: TimeInterval?,
         width: CGFloat,
-        context: AgentRenderContext
+        context: AgentRenderContext,
+        registry: AgentBlockRendererRegistry = .production
     ) -> CGFloat {
         guard let presentation = CompletedReasoningDisclosurePresenter.presentation(
             for: entry,
@@ -156,7 +160,7 @@ final class CompletedReasoningDisclosureView: NSView {
         ) else { return 0 }
         guard presentation.isExpanded else { return headerHeight }
         let bodyWidth = max(1, width - horizontalInset * 2)
-        let measurementHost = AgentBlockHostView()
+        let measurementHost = AgentBlockHostView(registry: registry)
         let bodyHeight = presentation.bodyBlocks.enumerated().reduce(CGFloat.zero) { total, pair in
             total
                 + measuredBlockHeight(for: pair.element, host: measurementHost, width: bodyWidth, context: context)
@@ -187,7 +191,7 @@ final class CompletedReasoningDisclosureView: NSView {
 
         for block in blocks {
             let host = reusableHosts.removeValue(forKey: block.id)
-                ?? AgentBlockHostView(measurementCache: measurementCache)
+                ?? AgentBlockHostView(registry: registry, measurementCache: measurementCache)
             do {
                 try host.apply(block: block, entryRole: .reasoning, context: context)
             } catch {
