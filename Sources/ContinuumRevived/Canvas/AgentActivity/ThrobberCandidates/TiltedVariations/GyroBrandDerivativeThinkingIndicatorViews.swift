@@ -81,6 +81,7 @@ class GyroBrandDerivativeThinkingIndicatorView: NSView, AgentThinkingIndicatorAn
         static let majorRadiusScale: CGFloat = 0.296
         static let minorRadiusScale: CGFloat = 0.166
         static let guideLineWidthScale: CGFloat = 0.036
+        static let monochromeFootprintScale: CGFloat = 1.20
         static let latticeRotation: CGFloat = 0.12
     }
 
@@ -467,7 +468,12 @@ class GyroBrandDerivativeThinkingIndicatorView: NSView, AgentThinkingIndicatorAn
         if variant == .lattice {
             position = latticePoint(index: index, phase: normalized, geometry: geometry)
         } else {
-            position = projectedPoint(angle: angle, plane: spec.plane, geometry: geometry, radialScale: 1 + noise * 0.18)
+            let footprintScale = variant == .monochromatic ? Metrics.monochromeFootprintScale : 1
+            position = projectedPoint(
+                angle: angle,
+                plane: spec.plane,
+                geometry: geometry,
+                radialScale: footprintScale * (1 + noise * 0.18))
         }
         let frontness = smoothstep((spec.plane.depthSign * sin(angle) + 1) / 2)
         let grain = variant == .signalGrain ? organicModulation(phase: normalized, index: index) : 0
@@ -484,7 +490,7 @@ class GyroBrandDerivativeThinkingIndicatorView: NSView, AgentThinkingIndicatorAn
             scale = clamp(0.86 + 0.26 * frontness + noise, lower: 0.76, upper: 1.18)
             opacity = Float(clamp(0.47 + 0.45 * frontness + noise * 0.50, lower: 0.42, upper: 0.96))
         } else {
-            diameter = spec.diameter
+            diameter = spec.diameter * (variant == .monochromatic ? Metrics.monochromeFootprintScale : 1)
             scale = clamp(0.84 + 0.28 * frontness + grain, lower: 0.76, upper: 1.16)
             opacity = Float(clamp(0.48 + 0.44 * frontness + grain * 0.62, lower: 0.42, upper: 0.96))
         }
@@ -518,7 +524,8 @@ class GyroBrandDerivativeThinkingIndicatorView: NSView, AgentThinkingIndicatorAn
         let centerOffset = CGPoint(x: offsetAmount * cos(plane.tiltRadians), y: offsetAmount * sin(plane.tiltRadians))
         for step in 0...72 {
             let angle = CGFloat(step) / 72 * 2 * .pi + (variant == .arrayEcho && guideIndex == 2 ? normalizedPhase(phase) * .pi / 8 : 0)
-            let point = projectedPoint(angle: angle, plane: plane, geometry: geometry)
+            let footprintScale = variant == .monochromatic ? Metrics.monochromeFootprintScale : 1
+            let point = projectedPoint(angle: angle, plane: plane, geometry: geometry, radialScale: footprintScale)
             let shifted = CGPoint(x: point.x + centerOffset.x, y: point.y + centerOffset.y)
             if step == 0 { path.move(to: shifted) } else { path.addLine(to: shifted) }
         }

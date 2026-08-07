@@ -1,9 +1,10 @@
 import AppKit
 import ContinuumRevivedAgentUI
 
-/// A coordinator-owned review surface for four Dual-Plane Gyro directions. This
-/// is intentionally separate from both the original-candidate study and Orbit
-/// Variations; no candidate is production-wired.
+/// A coordinator-owned archive for the selected Dual-Plane Gyro and three
+/// retained alternatives. This is intentionally separate from both the
+/// original-candidate study and Orbit Variations; selection does not itself
+/// production-wire the component.
 @MainActor
 final class TiltedVariationsGalleryView: NSView {
     enum Mode: Equatable {
@@ -28,7 +29,7 @@ final class TiltedVariationsGalleryView: NSView {
 
         var direction: String {
             switch self {
-            case .dualPlaneGyro: return "Two tilted planes"
+            case .dualPlaneGyro: return "Selected default · two tilted planes"
             case .monochromeGyro: return "One semantic hue"
             case .ribbonNoiseGyro: return "Ribbon path + smooth noise"
             case .latticeGyro: return "Triangular handoff"
@@ -60,8 +61,9 @@ final class TiltedVariationsGalleryView: NSView {
     }
 
     static let preferredSize = NSSize(width: 960, height: 640)
+    static let selectedCandidate: Candidate = .dualPlaneGyro
     private let titleLabel = NSTextField(labelWithString: "Tilted Prism Variations — Motion Study")
-    private let subtitleLabel = NSTextField(labelWithString: "Four immediately distinct Gyros at true 18×18 scale. Compare the same compact status context in live Normal and static Reduced Motion; review only, with no production winner.")
+    private let subtitleLabel = NSTextField(labelWithString: "Dual-Plane Gyro is the selected default at true 18×18 scale. Monochrome, Ribbon Noise, and Lattice remain available here for future review; none is production-wired by this archive.")
     private let grid = NSView()
     private let mode: Mode
     private var cards: [TiltedVariationCardView] = []
