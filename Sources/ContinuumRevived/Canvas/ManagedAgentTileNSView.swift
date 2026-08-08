@@ -124,6 +124,7 @@ final class ManagedAgentTileNSView: TileNSView {
     private var capabilityObserverToken: UUID?
     private var runtimeObservationObserverToken: UUID?
     private let toolDetailStore = AgentToolDetailStore()
+    private let managedImageThumbnailPipeline = ComposerImageIOThumbnailPipeline()
     private var managedImageMetadata: [AgentImageAttachmentID: AgentImageAttachmentMetadata] = [:]
     private var managedImageRevisions: [AgentImageAttachmentID: UInt64] = [:]
     private var managedImageAvailable: Set<AgentImageAttachmentID> = []
@@ -170,6 +171,10 @@ final class ManagedAgentTileNSView: TileNSView {
     /// agent it was following, so attaching a different one after a detach must
     /// still clear that transcript.
     private var projectedAgentID: AgentID?
+    /// Transcript attachment ownership survives a live detach. It is cleared only
+    /// when the semantic projection resets/rebinds, never merely because the view
+    /// stops following the running agent.
+    private var transcriptAttachmentOwnerAgentID: AgentID?
     var onUserInputSubmit: ((String, UserInputAnswers) -> Void)?
     /// Explicit provider response transport for v2 request blocks. Production
     /// binds nothing today because no compiled `AgentAdapter` response conformer
@@ -331,6 +336,7 @@ final class ManagedAgentTileNSView: TileNSView {
         if replayingIntoAProjection { resetProjection() }
         attachedAgentID = agentID
         projectedAgentID = agentID
+        transcriptAttachmentOwnerAgentID = agentID
         transcriptCollectionFixture?.bindToolDetailAgent(agentID)
         // The stream is created HERE, not inside the task: the snapshot is taken
         // when `events(for:)` is called, so deferring it to the task's first
@@ -382,10 +388,14 @@ final class ManagedAgentTileNSView: TileNSView {
                 // carrying the agent's thread are rebound on the way in — the same
                 // rebinding the app did at this boundary before the tile owned it.
                 let bound = event.withThreadId(self.threadId)
-                self.ingest(bound)
+                // Capture the provider event before host-local transcript remapping;
+                // the original runtime thread is immutable tool identity, not a
+                // display-routing convenience.
+                self.ingest(bound, originalEvent: event)
                 self.onIngestedEvent?(bound)
             }
         }
+        refreshTranscriptThinkingIndicator()
     }
 
     /// Stop following the agent. Cancels the subscription and nothing else: the
@@ -395,6 +405,10 @@ final class ManagedAgentTileNSView: TileNSView {
     /// `attach` is what clears it, on the next replay.
     func detach() {
         prepareStreamingMarkupForTeardown(final: true)
+        // Detach is an immediate visual/lifecycle boundary: a retained transcript
+        // may remain visible, but its live Gyro tail must stop and leave the list
+        // document before any later reuse.
+        transcriptCollectionFixture?.setThinkingIndicatorVisible(false)
         // Clear lifecycle facts before the detached-location demotion so the
         // final compact projection keeps recent What without retaining a live
         // phase claim.
@@ -417,10 +431,8 @@ final class ManagedAgentTileNSView: TileNSView {
         }
         v2Composer?.unbindActionSink()
         managedImageBindingGeneration &+= 1
-        managedImageMetadata.removeAll()
-        managedImageRevisions.removeAll()
-        managedImageAvailable.removeAll()
-        managedImageHydrating.removeAll()
+        // Keep transcript-owned image metadata/capabilities alive while the
+        // transcript remains on screen; resetProjection owns their purge.
         transcriptCollectionFixture?.bindToolDetailAgent(nil)
         v2ActionAdapter = nil
         v2TurnSnapshot = nil
@@ -689,6 +701,12 @@ final class ManagedAgentTileNSView: TileNSView {
         locationStaleTimer = nil
         lastLocationPresentation = nil
         resetCompactStatusProjection()
+        transcriptAttachmentOwnerAgentID = nil
+        managedImageBindingGeneration &+= 1
+        managedImageMetadata.removeAll()
+        managedImageRevisions.removeAll()
+        managedImageAvailable.removeAll()
+        managedImageHydrating.removeAll()
         applyHeader(status: model.currentStatus)
         refreshTranscriptThinkingIndicator()
         // A reset restarts the reducer's version numbering, so the forwarded
@@ -745,7 +763,7 @@ final class ManagedAgentTileNSView: TileNSView {
         scheduleStreamingMarkupParseTimerIfNeeded()
     }
 
-    func ingest(_ event: AgentRuntimeEvent) {
+    func ingest(_ event: AgentRuntimeEvent, originalEvent: AgentRuntimeEvent? = nil) {
         switch event {
         case let .turnCompleted(_, _, outcome, _):
             if outcome == .completed {
@@ -782,16 +800,23 @@ final class ManagedAgentTileNSView: TileNSView {
         default:
             break
         }
+        let captureEvent = originalEvent ?? event
+        let priorEntryIDs = Set(model.document.entries.map(\.id))
+        let capturedIdentity = transcriptCollectionFixture?.captureRuntimeEvent(captureEvent)
         model.ingest(event)
-        if let identity = transcriptCollectionFixture?.captureRuntimeEvent(event),
-           case let .itemStarted(_, itemID, _, _) = event,
-           let entry = model.document.entries.first(where: {
-               guard case let .providerItem(provider, providerItemID) = $0.provenance else { return false }
-               return provider == "runtime" && providerItemID == itemID
-           }) {
-            // Bind the exact stable semantic entry after the reducer creates it;
-            // item ID alone is never used to attach a historical row.
-            _ = transcriptCollectionFixture?.bindToolDetailIdentity(identity, to: entry.id)
+        if let identity = capturedIdentity,
+           case let .itemStarted(_, itemID, _, _) = captureEvent {
+            // Bind only the entry created by this exact item event. A historical
+            // same-ID row is not a valid fallback; if the reducer did not create
+            // one unambiguously, the host-local detail remains fail-closed.
+            let candidates = model.document.entries.filter { entry in
+                guard !priorEntryIDs.contains(entry.id),
+                      case let .providerItem(provider, providerItemID) = entry.provenance else { return false }
+                return provider == identity.scope.provider && providerItemID == itemID
+            }
+            if candidates.count == 1 {
+                _ = transcriptCollectionFixture?.bindToolDetailIdentity(identity, to: candidates[0].id)
+            }
         }
         refreshV2TurnSnapshot()
         updateCompactStatusFacts(for: event)
@@ -1208,7 +1233,15 @@ final class ManagedAgentTileNSView: TileNSView {
 
     private func refreshTranscriptThinkingIndicator() {
         guard let transcriptCollectionFixture else { return }
-        let statusIsActive = descriptor.status == .working || descriptor.status == .configuring
+        let statusIsActive: Bool
+        if let agentID = attachedAgentID,
+           let agentSource,
+           eventSubscription != nil,
+           descriptor.status == .working {
+            statusIsActive = agentSource.isRunning(agentID)
+        } else {
+            statusIsActive = false
+        }
         let latestStreamIsVisible = model.document.entries.last.map { entry in
             guard entry.role == .assistant || entry.role == .reasoning else { return false }
             if case .open = entry.lifecycle { return true }
@@ -1245,7 +1278,7 @@ final class ManagedAgentTileNSView: TileNSView {
         let state: AgentImageResourceState
         if managedImageAvailable.contains(id) {
             state = .available
-        } else if v2AttachmentStore != nil, attachedAgentID != nil {
+        } else if v2AttachmentStore != nil, transcriptAttachmentOwnerAgentID != nil {
             state = .processing
         } else {
             state = .missing
@@ -1268,7 +1301,7 @@ final class ManagedAgentTileNSView: TileNSView {
         revision: UInt64,
         completion: @escaping @MainActor (AgentImageThumbnailResult) -> Void
     ) -> AgentImageThumbnailRequest {
-        guard let store = v2AttachmentStore, let agentID = attachedAgentID else {
+        guard let store = v2AttachmentStore, let agentID = transcriptAttachmentOwnerAgentID else {
             completion(.failed)
             return AgentImageThumbnailRequest()
         }
@@ -1280,13 +1313,30 @@ final class ManagedAgentTileNSView: TileNSView {
                   let stored = try? await store.storedAttachment(for: id),
                   Self.isManagedImage(stored, for: agentID),
                   let localURL = AgentImageFileValidator.validatedLocalImageFile(stored.fileURL),
-                  let image = NSImage(contentsOf: localURL),
                   !request.isCancelled else {
                 if !request.isCancelled { completion(.failed) }
                 return
             }
-            completion(.success(AgentImageThumbnail(
-                attachmentID: id, revision: revision, image: image, pixelSize: target)))
+            do {
+                let maxPixelSize = max(1, Int(ceil(max(target.width, target.height))))
+                let thumbnail = try await managedImageThumbnailPipeline.thumbnail(
+                    for: localURL, maxPixelSize: maxPixelSize)
+                guard !request.isCancelled,
+                      self.managedImageBindingGeneration == bindingGeneration,
+                      let image = NSImage(data: thumbnail.pngData) else {
+                    return
+                }
+                completion(.success(AgentImageThumbnail(
+                    attachmentID: id,
+                    revision: revision,
+                    image: image,
+                    pixelSize: NSSize(width: thumbnail.pixelWidth, height: thumbnail.pixelHeight))))
+            } catch is CancellationError {
+                // A reused/offscreen cell cancelled its lease; do not publish a
+                // stale completion into the new cell.
+            } catch {
+                if !request.isCancelled { completion(.failed) }
+            }
         }
         return request
     }
@@ -1302,7 +1352,8 @@ final class ManagedAgentTileNSView: TileNSView {
     }
 
     private func hydrateManagedImagesFromDocument() {
-        guard let store = v2AttachmentStore, let agentID = attachedAgentID else { return }
+        guard let store = v2AttachmentStore,
+              let agentID = transcriptAttachmentOwnerAgentID else { return }
         var metadataByID: [AgentImageAttachmentID: AgentImageAttachmentMetadata] = [:]
         func collect(_ block: AgentBlock) {
             switch block.payload {
@@ -1340,11 +1391,11 @@ final class ManagedAgentTileNSView: TileNSView {
     ) {
         guard imageAttachment(attachmentID, belongsTo: blockID),
               let store = v2AttachmentStore,
-              let agentID = attachedAgentID else { return }
+              let agentID = transcriptAttachmentOwnerAgentID else { return }
         let bindingGeneration = managedImageBindingGeneration
         Task { @MainActor [weak self] in
             guard let self, self.managedImageBindingGeneration == bindingGeneration,
-                  self.attachedAgentID == agentID,
+                  self.transcriptAttachmentOwnerAgentID == agentID,
                   let stored = try? await store.storedAttachment(for: attachmentID),
                   Self.isManagedImage(stored, for: agentID),
                   let resource = AgentImageActionResource(

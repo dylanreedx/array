@@ -327,6 +327,7 @@ enum UIProbeGeometry {
         print("UIProbeGeometry: compact bottom status row held \(compactStatusAssertions) geometry, appearance, contrast, state, accessibility, and compression assertions at 320/480/560/wide in both appearances")
         try checkLiveV2AgentTileLayout()
         try checkManagedAgentStreamingTeardown()
+        try checkThinkingTailProductionSeams()
         let transcriptLiveHosts = try checkTranscriptCollectionList()
         let toolCompositionAssertions = try checkHostLocalToolDisclosureComposition()
         let streamingApplies = try checkIncrementalTranscriptBehavior()
@@ -5466,8 +5467,8 @@ enum UIProbeGeometry {
                       !tile.qaStatusThinkingIndicatorVisible else {
                     throw fail("\(label): default production order or compact-row thinking-indicator boundary regressed (placement=\(tile.qaStatusRowPlacement.rawValue), order=\(tile.qaCompositionIdentifiers), status=\(tile.qaStatusThinkingIndicatorVisible))")
                 }
-                guard tile.qaThinkingIndicatorVisible else {
-                    throw fail("\(label): active thinking/tool fixture did not mount the selected transcript-tail Dual-Plane Gyro")
+                guard !tile.qaThinkingIndicatorVisible else {
+                    throw fail("\(label): unattached/configuring fixture advertised an active transcript-tail Dual-Plane Gyro")
                 }
                 tile.ingest(.contentDelta(
                     threadId: tile.wiringThreadId, turnId: "gyro-yield",
@@ -6168,6 +6169,56 @@ enum UIProbeGeometry {
         return live
     }
 
+    /// The Gyro must be a virtual collection tail, not a viewport overlay. This
+    /// negative seam also pins the unattached/configuring and detached gates: no
+    /// live agent means no indicator row, regardless of a stale-looking status.
+    private static func checkThinkingTailProductionSeams() throws {
+        func fail(_ message: String) -> GeometryError {
+            GeometryError(message: "thinking-tail: \(message)")
+        }
+        let list = AgentTranscriptListView()
+        list.frame = NSRect(x: 0, y: 0, width: 320, height: 180)
+        let host = NSView(frame: list.frame)
+        host.addSubview(list)
+        list.autoresizingMask = [.width, .height]
+        list.layoutSubtreeIfNeeded()
+        let emptyHeight = list.qaTranscriptDocumentHeight
+        list.setThinkingIndicatorVisible(true)
+        list.layoutSubtreeIfNeeded()
+        guard list.qaThinkingIndicatorVisible,
+              list.qaTailIsVirtualDocumentRow,
+              list.qaTranscriptDocumentHeight > emptyHeight,
+              list.qaThinkingIndicatorFrame.width == DualPlaneGyroIndicatorModel.side,
+              list.qaThinkingIndicatorFrame.height == DualPlaneGyroIndicatorModel.side,
+              list.qaThinkingIndicatorFrame.maxY <= list.bounds.height else {
+            throw fail("visible Gyro did not occupy a bounded collection-document tail row")
+        }
+        list.setThinkingIndicatorVisible(false)
+        list.layoutSubtreeIfNeeded()
+        guard !list.qaThinkingIndicatorVisible,
+              !list.qaTailIsVirtualDocumentRow,
+              list.qaTranscriptDocumentHeight <= emptyHeight + 0.5 else {
+            throw fail("hiding the Gyro did not remove its document extent immediately")
+        }
+
+        let tile = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(uuidString: "00000000-0000-0000-0000-0000000009a1")!,
+            kind: .managedAgent,
+            title: "UNATTACHED_GYRO",
+            frame: TileFrame(x: 0, y: 0, width: 320, height: 240),
+            zPosition: .fromLegacyRank(1),
+            runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")
+        ))
+        guard !tile.qaThinkingIndicatorVisible else {
+            throw fail("fresh unattached/configuring tile advertised an active Gyro")
+        }
+        tile.detach()
+        guard !tile.qaThinkingIndicatorVisible else {
+            throw fail("detached tile retained live Gyro state")
+        }
+    }
+
     /// Composition gate for the host-local tool-detail adapter. The provider
     /// record is intentionally supplied through the production resolver seam,
     /// while the semantic document remains free of local summary/path text.
@@ -6186,20 +6237,34 @@ enum UIProbeGeometry {
         // The observation intentionally arrives before itemStarted, matching the
         // Pi side-channel order; production must hold it until exact identity exists.
         captureList.captureRuntimeObservation(.toolActivity(itemId: "capture-item", activity: captureActivity))
-        guard let capturedIdentity = captureList.captureRuntimeEvent(
+        // Same provider item IDs are legal across turns. A pending observation
+        // from the old scope must be discarded before the new item can start.
+        captureList.captureRuntimeEvent(.turnStarted(threadId: "capture-thread", turnId: "capture-next-turn"))
+        guard captureList.qaPendingRuntimeObservationCount == 0,
+              let nextIdentity = captureList.captureRuntimeEvent(
+                  .itemStarted(threadId: "capture-thread", itemId: "capture-item", kind: .commandExecution, title: "read-next")
+              ),
+              nextIdentity.scope.turnID == "capture-next-turn" else {
+            throw fail("runtime observation crossed a turn boundary for a reused item ID")
+        }
+        let originalScopeList = AgentTranscriptListView(toolDetailStore: AgentToolDetailStore())
+        originalScopeList.bindToolDetailAgent(captureAgent)
+        originalScopeList.captureRuntimeEvent(.turnStarted(threadId: "capture-thread", turnId: "capture-turn"))
+        guard let capturedIdentity = originalScopeList.captureRuntimeEvent(
             .itemStarted(threadId: "capture-thread", itemId: "capture-item", kind: .commandExecution, title: "read")
         ),
         capturedIdentity.scope.agentID == captureAgent.rawValue.uuidString,
         capturedIdentity.scope.threadID == "capture-thread",
         capturedIdentity.scope.turnID == "capture-turn",
         capturedIdentity.scope.provider == "runtime",
-        captureList.bindToolDetailIdentity(capturedIdentity, to: id("capture-entry")) else {
+        originalScopeList.bindToolDetailIdentity(capturedIdentity, to: id("capture-entry")) else {
             throw fail("production tool capture did not fail closed into exact agent/thread/turn/provider identity")
         }
         let blockID = id("tool-composition-block")
         let itemID: AgentToolDetailID = "tool-composition-item"
+        let compositionAgentID = AgentID(rawValue: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!)
         let scope = AgentToolDetailScope(
-            agentID: "composition-agent", threadID: "composition-thread",
+            agentID: compositionAgentID.rawValue.uuidString, threadID: "composition-thread",
             turnID: "composition-turn", provider: "runtime"
         )!
         let identity = AgentToolDetailKey(scope: scope, providerItemID: itemID)
@@ -6235,6 +6300,9 @@ enum UIProbeGeometry {
         let list = AgentTranscriptListView(toolDetailProvider: { key in
             key == identity ? record : nil
         })
+        // The semantic row is intentionally paired with the exact same host
+        // owner as the local record; a mismatched tile must fail closed.
+        list.bindToolDetailAgent(compositionAgentID)
         list.bindToolDetailIdentity(identity, to: entry.id)
         list.frame = NSRect(x: 0, y: 0, width: 320, height: 120)
         let host = NSView(frame: list.frame)
