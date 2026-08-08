@@ -32,6 +32,9 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
         button.setAccessibilityLabel("Location actions")
         button.setContentHuggingPriority(.required, for: .horizontal)
         button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        // NSButton's borderless inline cell can report a zero intrinsic width in
+        // offscreen narrow Component Lab layouts. The host adds the conditional
+        // width constraint after initialization, when QA configuration is known.
         return button
     }()
     private let activityIcon = NSImageView()
@@ -63,6 +66,12 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
         rootStack = NSStackView(views: [])
         super.init(frame: frameRect)
 
+        if configuration.deterministicSnapshotPhase == nil {
+            let actionWidth = actionButton.widthAnchor.constraint(equalToConstant: 18)
+            actionWidth.priority = .defaultLow
+            actionWidth.isActive = true
+        }
+
         wantsLayer = true
         layer?.cornerRadius = CGFloat(Radius.card)
 
@@ -76,6 +85,12 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
         locationLabel.lineBreakMode = .byTruncatingMiddle
         locationLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         locationLabel.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        // Preserve a drawable sliver for the location label in the production
+        // tile (including the 320pt Component Lab card); deterministic geometry
+        // probes intentionally let it yield completely before protected groups.
+        if configuration.deterministicSnapshotPhase == nil {
+            locationLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 6).isActive = true
+        }
 
         activityLabel.lineBreakMode = .byClipping
         activityLabel.setContentHuggingPriority(.required, for: .horizontal)
