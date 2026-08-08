@@ -5459,6 +5459,23 @@ enum UIProbeGeometry {
                       tile.qaLocationContentFitsBounds else {
                     throw fail("\(label): integrated Home/Where/What lost its content or fixed external-marker lane")
                 }
+                guard tile.qaStatusRowPlacement == .aboveComposer,
+                      tile.qaCompositionIdentifiers == [
+                          "agentTile.statusRow", "agentTile.composer", "agentTile.providerControls"
+                      ],
+                      !tile.qaStatusThinkingIndicatorVisible else {
+                    throw fail("\(label): default production order or compact-row thinking-indicator boundary regressed (placement=\(tile.qaStatusRowPlacement.rawValue), order=\(tile.qaCompositionIdentifiers), status=\(tile.qaStatusThinkingIndicatorVisible))")
+                }
+                guard tile.qaThinkingIndicatorVisible else {
+                    throw fail("\(label): active thinking/tool fixture did not mount the selected transcript-tail Dual-Plane Gyro")
+                }
+                tile.ingest(.contentDelta(
+                    threadId: tile.wiringThreadId, turnId: "gyro-yield",
+                    streamKind: .assistant, delta: "assistant delta"))
+                guard !tile.qaThinkingIndicatorVisible,
+                      !tile.qaStatusThinkingIndicatorVisible else {
+                    throw fail("\(label): transcript-tail gyro did not yield immediately on assistant content")
+                }
                 try checkManagedTileCompactStatusComposition(tile, label: label)
                 try fills(child: transcript, parent: tile, minRatio: 0.95, label: "\(label): semantic transcript")
                 // P5.5 defect 6: a pixel gate cannot see this — the collection
@@ -5486,6 +5503,24 @@ enum UIProbeGeometry {
                     try checkProviderFooterEffortSizing(tile, width: width, label: label)
                 }
             }
+        }
+
+        let belowTile = ManagedAgentTileNSView(
+            tile: Tile(
+                id: UUID(), kind: .managedAgent, title: "placement",
+                frame: TileFrame(x: 0, y: 0, width: 520, height: 560),
+                zPosition: .fromLegacyRank(1), runtimeRef: nil,
+                metadata: TileMetadata(launchProfileId: "managed")
+            ),
+            statusRowPlacement: .belowComposer)
+        belowTile.frame = NSRect(x: 0, y: 0, width: 520, height: 560)
+        belowTile.layoutSubtreeIfNeeded()
+        guard belowTile.qaStatusRowPlacement == .belowComposer,
+              belowTile.qaCompositionIdentifiers == [
+                  "agentTile.composer", "agentTile.statusRow",
+                  "agentTile.statusProviderSpacing", "agentTile.providerControls"
+              ] else {
+            throw fail("managedAgent.v2 placement alternate did not preserve composer → status → deliberate spacing → provider controls")
         }
     }
 
@@ -6138,6 +6173,29 @@ enum UIProbeGeometry {
     /// while the semantic document remains free of local summary/path text.
     private static func checkHostLocalToolDisclosureComposition() throws -> Int {
         func id(_ value: String) -> AgentNodeID { AgentNodeID(rawValue: value)! }
+        let captureAgent = AgentID(rawValue: UUID(uuidString: "91000000-0000-4000-8000-000000000091")!)
+        let captureList = AgentTranscriptListView(toolDetailStore: AgentToolDetailStore())
+        captureList.bindToolDetailAgent(captureAgent)
+        captureList.captureRuntimeEvent(.turnStarted(threadId: "capture-thread", turnId: "capture-turn"))
+        let captureActivity = AgentObservedActivity(
+            operation: .reading,
+            targetPath: URL(fileURLWithPath: "/private/capture/secret.swift"),
+            startedAt: Date(timeIntervalSinceReferenceDate: 100),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 100),
+            evidenceSource: .toolEvent)
+        // The observation intentionally arrives before itemStarted, matching the
+        // Pi side-channel order; production must hold it until exact identity exists.
+        captureList.captureRuntimeObservation(.toolActivity(itemId: "capture-item", activity: captureActivity))
+        guard let capturedIdentity = captureList.captureRuntimeEvent(
+            .itemStarted(threadId: "capture-thread", itemId: "capture-item", kind: .commandExecution, title: "read")
+        ),
+        capturedIdentity.scope.agentID == captureAgent.rawValue.uuidString,
+        capturedIdentity.scope.threadID == "capture-thread",
+        capturedIdentity.scope.turnID == "capture-turn",
+        capturedIdentity.scope.provider == "runtime",
+        captureList.bindToolDetailIdentity(capturedIdentity, to: id("capture-entry")) else {
+            throw fail("production tool capture did not fail closed into exact agent/thread/turn/provider identity")
+        }
         let blockID = id("tool-composition-block")
         let itemID: AgentToolDetailID = "tool-composition-item"
         let scope = AgentToolDetailScope(

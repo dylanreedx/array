@@ -864,6 +864,7 @@ final class AgentSupervisor {
     private let nameGenerationCapabilityProvider: (@Sendable () -> AgentNameGenerationCapability?)?
     private let nameGenerationTimeout: TimeInterval
     private let attachmentStore: AgentComposerAttachmentStore
+    private var runtimeObservationObservers: [AgentID: [UUID: (AgentRuntimeObservation) -> Void]] = [:]
     /// App-lifetime recovery owner. This is deliberately independent of tile
     /// subscriptions so launch failures and provider rejection restore drafts
     /// even when no tile remains bound.
@@ -1043,6 +1044,23 @@ final class AgentSupervisor {
             whereDirectory: checkout)
     }
 
+    @discardableResult
+    func addRuntimeObservationObserver(
+        for id: AgentID,
+        _ observer: @escaping (AgentRuntimeObservation) -> Void
+    ) -> UUID {
+        let token = UUID()
+        runtimeObservationObservers[id, default: [:]][token] = observer
+        return token
+    }
+
+    func removeRuntimeObservationObserver(_ token: UUID, for id: AgentID) {
+        runtimeObservationObservers[id]?[token] = nil
+        if runtimeObservationObservers[id]?.isEmpty == true {
+            runtimeObservationObservers[id] = nil
+        }
+    }
+
     private func ingestRuntimeObservation(
         _ observation: AgentRuntimeObservation,
         for id: AgentID
@@ -1050,6 +1068,10 @@ final class AgentSupervisor {
         guard let record = records[id] else { return }
         ensureLocationProjector(for: record)
         locationProjectors[id]?.ingest(observation)
+        // The projector and the transcript list consume the same sanitized,
+        // non-Codable side channel. Observers are host-local and scoped by the
+        // immutable agent ID; no raw runtime payload or path enters the event log.
+        runtimeObservationObservers[id]?.values.forEach { $0(observation) }
     }
 
     /// True once there is user/session work that makes Home retargeting unsafe.

@@ -48,6 +48,11 @@ private final class ManagedAgentTileActionAdapter: AgentTileActionSink {
     }
 }
 
+enum AgentStatusRowPlacement: String, CaseIterable, Sendable {
+    case aboveComposer
+    case belowComposer
+}
+
 @MainActor
 final class ManagedAgentTileNSView: TileNSView {
     /// P1.9: the three views this tile paints layer fills on are stored so
@@ -117,6 +122,15 @@ final class ManagedAgentTileNSView: TileNSView {
     /// this the composer's last repaint shows `canSend == false` forever
     /// (P5.5 live finding, `plan-P5.5-review-corrections.md` defect 1).
     private var capabilityObserverToken: UUID?
+    private var runtimeObservationObserverToken: UUID?
+    private let toolDetailStore = AgentToolDetailStore()
+    private var managedImageMetadata: [AgentImageAttachmentID: AgentImageAttachmentMetadata] = [:]
+    private var managedImageRevisions: [AgentImageAttachmentID: UInt64] = [:]
+    private var managedImageAvailable: Set<AgentImageAttachmentID> = []
+    private var managedImageHydrating: Set<AgentImageAttachmentID> = []
+    private var managedImageBindingGeneration: UInt64 = 0
+    private let imagePreviewController = AgentImageQuickPreviewController()
+    private let statusRowPlacement: AgentStatusRowPlacement
     private var v2RenderedDocument = AgentDocument()
     private var v2RenderError: Error?
     /// Version of the reducer document this tile has already forwarded. The
@@ -130,6 +144,7 @@ final class ManagedAgentTileNSView: TileNSView {
     /// footer owns their presentation and emits partial writes; this tile remains
     /// the production composition root and the supervisor remains state owner.
     private let providerFooter = AgentComposerFooterView()
+    private var v2ComposeColumn: NSStackView?
     /// What the two custom controls are currently showing. Seeded from the global default
     /// (`AgentModelConfig`) for a tile with no agent, and replaced by the RECORD's
     /// values the moment one attaches — after that the global default is never
@@ -183,14 +198,16 @@ final class ManagedAgentTileNSView: TileNSView {
         tile: Tile,
         threadId: String = "thread-main",
         descriptor: AgentDescriptor? = nil,
+        statusRowPlacement: AgentStatusRowPlacement = .aboveComposer,
         monotonicNow: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     ) {
         self.threadId = threadId
+        self.statusRowPlacement = statusRowPlacement
         self.projectionMonotonicNow = monotonicNow
         self.model = ManagedAgentTranscriptModel(threadId: threadId, monotonicNow: monotonicNow)
         // P5.5 acceptance: v2 IS the tile. The reversible construction seam and
         // the legacy view-only card path were removed at this supervised gate.
-        self.transcriptCollectionFixture = AgentTranscriptListView()
+        self.transcriptCollectionFixture = AgentTranscriptListView(toolDetailStore: toolDetailStore)
         self.v2Composer = AgentComposerView(frame: .zero, variant: .fullTurn)
         self.v2ActionButton = ComposerActionButton(
             presentation: .resolve(
@@ -233,6 +250,7 @@ final class ManagedAgentTileNSView: TileNSView {
         setContentView(makeV2ContentView())
         applyHeader(status: self.descriptor.status)
         applyUnknownCompactStatus()
+        refreshTranscriptThinkingIndicator()
         synchronizeV2Transcript(final: true)
     }
 
@@ -251,6 +269,10 @@ final class ManagedAgentTileNSView: TileNSView {
     var transcriptCardCount: Int { model.cards.count }
     var activeToolCount: Int { model.activeToolCount }
     var currentAgentStatus: AgentStatus { descriptor.status }
+    var qaStatusRowPlacement: AgentStatusRowPlacement { statusRowPlacement }
+    var qaCompositionIdentifiers: [String] {
+        v2ComposeColumn?.arrangedSubviews.compactMap { $0.identifier?.rawValue } ?? []
+    }
 
     /// The raw events this tile has ingested, in order — its local projection of the
     /// agent's stream. Read by `--agent-supervisor-check`; the transcript itself is
@@ -278,6 +300,8 @@ final class ManagedAgentTileNSView: TileNSView {
             v2Composer?.bindPromptHistory(promptHistory, agentID: agentID)
         }
         if let completionRegistry { v2Composer?.bindCompletionRegistry(completionRegistry) }
+        hydrateManagedImagesFromDocument()
+        try? transcriptCollectionFixture?.updateRenderContext(v2RenderContext)
     }
 
     /// Become a view of `agentID`'s stream: replay the history the supervisor holds,
@@ -307,6 +331,7 @@ final class ManagedAgentTileNSView: TileNSView {
         if replayingIntoAProjection { resetProjection() }
         attachedAgentID = agentID
         projectedAgentID = agentID
+        transcriptCollectionFixture?.bindToolDetailAgent(agentID)
         // The stream is created HERE, not inside the task: the snapshot is taken
         // when `events(for:)` is called, so deferring it to the task's first
         // suspension would widen the window in which events land in neither the
@@ -345,6 +370,10 @@ final class ManagedAgentTileNSView: TileNSView {
             }
             updateV2ComposerPresentation()
         }
+        runtimeObservationObserverToken = supervisor.addRuntimeObservationObserver(for: agentID) { [weak self] observation in
+            self?.transcriptCollectionFixture?.captureRuntimeObservation(observation)
+        }
+        hydrateManagedImagesFromDocument()
         let stream = supervisor.events(for: agentID)
         eventSubscription = Task { @MainActor [weak self] in
             for await event in stream {
@@ -379,10 +408,20 @@ final class ManagedAgentTileNSView: TileNSView {
             agentSource?.removeTurnCapabilitiesObserver(capabilityObserverToken)
             self.capabilityObserverToken = nil
         }
+        if let runtimeObservationObserverToken, let agentID = attachedAgentID {
+            agentSource?.removeRuntimeObservationObserver(runtimeObservationObserverToken, for: agentID)
+            self.runtimeObservationObserverToken = nil
+        }
         if let agentID = attachedAgentID, let v2DraftStore {
             Task { await v2DraftStore.flush(agentID: agentID) }
         }
         v2Composer?.unbindActionSink()
+        managedImageBindingGeneration &+= 1
+        managedImageMetadata.removeAll()
+        managedImageRevisions.removeAll()
+        managedImageAvailable.removeAll()
+        managedImageHydrating.removeAll()
+        transcriptCollectionFixture?.bindToolDetailAgent(nil)
         v2ActionAdapter = nil
         v2TurnSnapshot = nil
         attachedAgentID = nil
@@ -651,6 +690,7 @@ final class ManagedAgentTileNSView: TileNSView {
         lastLocationPresentation = nil
         resetCompactStatusProjection()
         applyHeader(status: model.currentStatus)
+        refreshTranscriptThinkingIndicator()
         // A reset restarts the reducer's version numbering, so the forwarded
         // version can no longer be compared against it.
         lastForwardedDocumentVersion = nil
@@ -686,6 +726,7 @@ final class ManagedAgentTileNSView: TileNSView {
         descriptor.statusUpdatedAt = Date()
         agentStatus = .idle
         applyHeader(status: .idle)
+        refreshTranscriptThinkingIndicator()
         synchronizeV2Transcript(final: true)
     }
 
@@ -742,9 +783,20 @@ final class ManagedAgentTileNSView: TileNSView {
             break
         }
         model.ingest(event)
+        if let identity = transcriptCollectionFixture?.captureRuntimeEvent(event),
+           case let .itemStarted(_, itemID, _, _) = event,
+           let entry = model.document.entries.first(where: {
+               guard case let .providerItem(provider, providerItemID) = $0.provenance else { return false }
+               return provider == "runtime" && providerItemID == itemID
+           }) {
+            // Bind the exact stable semantic entry after the reducer creates it;
+            // item ID alone is never used to attach a historical row.
+            _ = transcriptCollectionFixture?.bindToolDetailIdentity(identity, to: entry.id)
+        }
         refreshV2TurnSnapshot()
         updateCompactStatusFacts(for: event)
         refreshLocationStatus()
+        refreshTranscriptThinkingIndicator()
         // Streamed chunks ride the 30Hz visual gate. A turn boundary or an opened
         // request is the last frame of that stream and the moment the reader acts
         // on, so it presents immediately rather than waiting out the interval.
@@ -834,14 +886,14 @@ final class ManagedAgentTileNSView: TileNSView {
                 activity: input,
                 now: now,
                 contextWindow: compactContextWindow)
-            compactStatusRow.apply(presented)
+            compactStatusRow.apply(presentationWithoutThinkingIndicator(presented))
             return
         }
         activity = unknownCompactActivity()
-        compactStatusRow.apply(AgentCompactStatusPresentation(
+        compactStatusRow.apply(presentationWithoutThinkingIndicator(AgentCompactStatusPresentation(
             location: compactLocationPresentation(snapshot, detail: locationPresentation),
             activity: activity,
-            context: AgentRadialContextMeterPresenter.present(compactContextWindow)))
+            context: AgentRadialContextMeterPresenter.present(compactContextWindow))))
     }
 
     private func resetCompactStatusProjection(at now: Date = Date()) {
@@ -857,10 +909,10 @@ final class ManagedAgentTileNSView: TileNSView {
                 snapshot,
                 projectName: locationProjectName ?? branchContext?.projectName)
             lastLocationPresentation = detail
-            compactStatusRow.apply(AgentCompactStatusPresentation(
+            compactStatusRow.apply(presentationWithoutThinkingIndicator(AgentCompactStatusPresentation(
                 location: compactLocationPresentation(snapshot, detail: detail),
                 activity: unknownCompactActivity(),
-                context: AgentRadialContextMeterPresenter.present(nil)))
+                context: AgentRadialContextMeterPresenter.present(nil))))
         } else {
             applyUnknownCompactStatus()
         }
@@ -869,7 +921,7 @@ final class ManagedAgentTileNSView: TileNSView {
     private func applyUnknownCompactStatus() {
         lastLocationPresentation = nil
         compactStatusResolution = .unknown
-        compactStatusRow.apply(AgentCompactStatusPresentation(
+        compactStatusRow.apply(presentationWithoutThinkingIndicator(AgentCompactStatusPresentation(
             location: .init(
                 symbolName: "house",
                 text: "—",
@@ -877,7 +929,24 @@ final class ManagedAgentTileNSView: TileNSView {
                 detailText: "Location unavailable",
                 isExternal: false),
             activity: unknownCompactActivity(),
-            context: AgentRadialContextMeterPresenter.present(nil)))
+            context: AgentRadialContextMeterPresenter.present(nil))))
+    }
+
+    private func presentationWithoutThinkingIndicator(
+        _ presentation: AgentCompactStatusPresentation
+    ) -> AgentCompactStatusPresentation {
+        let activity = presentation.activity
+        return AgentCompactStatusPresentation(
+            location: presentation.location,
+            activity: .init(
+                phase: activity.phase,
+                symbolName: activity.symbolName,
+                text: activity.text,
+                elapsedText: activity.elapsedText,
+                accessibilityLabel: activity.accessibilityLabel,
+                detailText: activity.detailText,
+                showsThinkingIndicator: false),
+            context: presentation.context)
     }
 
     private func unknownCompactActivity() -> AgentCompactStatusPresentation.Activity {
@@ -997,6 +1066,7 @@ final class ManagedAgentTileNSView: TileNSView {
         agentStatus = status
         applyHeader(status: status)
         updateV2ComposerPresentation()
+        refreshTranscriptThinkingIndicator()
     }
 
     /// This tile's own layer fills, on top of the base tile's (P1.9), now on
@@ -1075,15 +1145,32 @@ final class ManagedAgentTileNSView: TileNSView {
         actionButton.setContentHuggingPriority(.required, for: .horizontal)
         actionButton.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        // The compact status row is deliberately between the input and the
-        // provider controls. It is the sole live activity surface in this tile;
-        // the older location disclosure is not duplicated into this stack.
-        let composeColumn = NSStackView(views: [composer, compactStatusRow, footerRow])
+        // Status placement is an injected composition choice. The default keeps
+        // transcript → status → composer → provider controls; the alternate puts
+        // status below the composer and inserts deliberate breathing room before
+        // provider/model/effort/send controls.
+        let statusSpacer = NSView()
+        statusSpacer.identifier = NSUserInterfaceItemIdentifier("agentTile.statusProviderSpacing")
+        statusSpacer.translatesAutoresizingMaskIntoConstraints = false
+        let composeViews: [NSView]
+        switch statusRowPlacement {
+        case .aboveComposer:
+            composeViews = [compactStatusRow, composer, footerRow]
+        case .belowComposer:
+            composeViews = [composer, compactStatusRow, statusSpacer, footerRow]
+            statusSpacer.heightAnchor.constraint(equalToConstant: CGFloat(Space.l)).isActive = true
+        }
+        let composeColumn = NSStackView(views: composeViews)
+        composeColumn.identifier = NSUserInterfaceItemIdentifier("agentTile.composeColumn")
+        v2ComposeColumn = composeColumn
         composeColumn.orientation = .vertical
         composeColumn.alignment = .leading
         composeColumn.spacing = CGFloat(Space.m)
         composeColumn.edgeInsets = NSEdgeInsets(Inset.row)
         composeColumn.translatesAutoresizingMaskIntoConstraints = false
+        compactStatusRow.identifier = NSUserInterfaceItemIdentifier("agentTile.statusRow")
+        composer.identifier = NSUserInterfaceItemIdentifier("agentTile.composer")
+        footerRow.identifier = NSUserInterfaceItemIdentifier("agentTile.providerControls")
         composeBackdrop.addSubview(composeColumn)
 
         locationStatus.isHidden = true
@@ -1119,13 +1206,186 @@ final class ManagedAgentTileNSView: TileNSView {
         return root
     }
 
+    private func refreshTranscriptThinkingIndicator() {
+        guard let transcriptCollectionFixture else { return }
+        let statusIsActive = descriptor.status == .working || descriptor.status == .configuring
+        let latestStreamIsVisible = model.document.entries.last.map { entry in
+            guard entry.role == .assistant || entry.role == .reasoning else { return false }
+            if case .open = entry.lifecycle { return true }
+            return false
+        } ?? false
+        // A working/configuring status is the only lifecycle authority used here;
+        // an open assistant/reasoning entry yields immediately on its first delta.
+        transcriptCollectionFixture.setThinkingIndicatorVisible(statusIsActive && !latestStreamIsVisible)
+    }
+
+    private var managedImageResourceProvider: AgentImageResourceProvider {
+        AgentImageResourceProvider(
+            snapshot: { [weak self] id in
+                MainActor.assumeIsolated {
+                    self?.managedImageSnapshot(id)
+                        ?? AgentImageResourceSnapshot(attachmentID: id, state: .missing)
+                }
+            },
+            requestThumbnail: { [weak self] id, target, revision, completion in
+                MainActor.assumeIsolated {
+                    self?.requestManagedImageThumbnail(
+                        id: id, target: target, revision: revision, completion: completion
+                    ) ?? AgentImageThumbnailRequest()
+                }
+            },
+            observe: { _, _ in AgentImageResourceObservation() }
+        )
+    }
+
+    private func managedImageSnapshot(_ id: AgentImageAttachmentID) -> AgentImageResourceSnapshot {
+        guard let metadata = managedImageMetadata[id] else {
+            return AgentImageResourceSnapshot(attachmentID: id, state: .missing)
+        }
+        let state: AgentImageResourceState
+        if managedImageAvailable.contains(id) {
+            state = .available
+        } else if v2AttachmentStore != nil, attachedAgentID != nil {
+            state = .processing
+        } else {
+            state = .missing
+        }
+        return AgentImageResourceSnapshot(
+            attachmentID: id,
+            state: state,
+            revision: managedImageRevisions[id] ?? 0,
+            pixelSize: metadata.pixelWidth.flatMap { width in
+                metadata.pixelHeight.map { NSSize(width: CGFloat(width), height: CGFloat($0)) }
+            },
+            displayName: metadata.displayName,
+            contentType: metadata.contentType,
+            byteCount: metadata.byteCount)
+    }
+
+    private func requestManagedImageThumbnail(
+        id: AgentImageAttachmentID,
+        target: NSSize,
+        revision: UInt64,
+        completion: @escaping @MainActor (AgentImageThumbnailResult) -> Void
+    ) -> AgentImageThumbnailRequest {
+        guard let store = v2AttachmentStore, let agentID = attachedAgentID else {
+            completion(.failed)
+            return AgentImageThumbnailRequest()
+        }
+        let bindingGeneration = managedImageBindingGeneration
+        var task: Task<Void, Never>?
+        let request = AgentImageThumbnailRequest { task?.cancel() }
+        task = Task { @MainActor [weak self] in
+            guard let self, self.managedImageBindingGeneration == bindingGeneration, !request.isCancelled,
+                  let stored = try? await store.storedAttachment(for: id),
+                  Self.isManagedImage(stored, for: agentID),
+                  let localURL = AgentImageFileValidator.validatedLocalImageFile(stored.fileURL),
+                  let image = NSImage(contentsOf: localURL),
+                  !request.isCancelled else {
+                if !request.isCancelled { completion(.failed) }
+                return
+            }
+            completion(.success(AgentImageThumbnail(
+                attachmentID: id, revision: revision, image: image, pixelSize: target)))
+        }
+        return request
+    }
+
+    private static func isManagedImage(
+        _ stored: AgentComposerStoredAttachment,
+        for agentID: AgentID
+    ) -> Bool {
+        guard stored.manifest.ownership.agentID == agentID else { return false }
+        switch stored.manifest.ownership.state {
+        case .draft, .sent: return true
+        }
+    }
+
+    private func hydrateManagedImagesFromDocument() {
+        guard let store = v2AttachmentStore, let agentID = attachedAgentID else { return }
+        var metadataByID: [AgentImageAttachmentID: AgentImageAttachmentMetadata] = [:]
+        func collect(_ block: AgentBlock) {
+            switch block.payload {
+            case let .image(payload): metadataByID[payload.attachment.id] = payload.attachment
+            case let .imageGallery(payload):
+                payload.images.forEach { metadataByID[$0.attachment.id] = $0.attachment }
+            default: break
+            }
+            block.children.forEach(collect)
+        }
+        model.document.entries.flatMap(\.blocks).forEach(collect)
+        let bindingGeneration = managedImageBindingGeneration
+        for (id, metadata) in metadataByID {
+            managedImageMetadata[id] = metadata
+            guard !managedImageAvailable.contains(id), !managedImageHydrating.contains(id) else { continue }
+            managedImageHydrating.insert(id)
+            Task { @MainActor [weak self] in
+                defer { self?.managedImageHydrating.remove(id) }
+                guard let self, self.managedImageBindingGeneration == bindingGeneration,
+                      let stored = try? await store.storedAttachment(for: id),
+                      Self.isManagedImage(stored, for: agentID),
+                      AgentImageFileValidator.validatedLocalImageFile(stored.fileURL) != nil else { return }
+                self.managedImageMetadata[id] = stored.manifest.metadata
+                self.managedImageAvailable.insert(id)
+                self.managedImageRevisions[id, default: 0] &+= 1
+                try? self.transcriptCollectionFixture?.updateRenderContext(self.v2RenderContext)
+            }
+        }
+    }
+
+    private func resolveManagedImageAction(
+        blockID: AgentNodeID,
+        attachmentID: AgentImageAttachmentID,
+        action: AgentRenderAction
+    ) {
+        guard imageAttachment(attachmentID, belongsTo: blockID),
+              let store = v2AttachmentStore,
+              let agentID = attachedAgentID else { return }
+        let bindingGeneration = managedImageBindingGeneration
+        Task { @MainActor [weak self] in
+            guard let self, self.managedImageBindingGeneration == bindingGeneration,
+                  self.attachedAgentID == agentID,
+                  let stored = try? await store.storedAttachment(for: attachmentID),
+                  Self.isManagedImage(stored, for: agentID),
+                  let resource = AgentImageActionResource(
+                    attachmentID: attachmentID,
+                    localFileURL: stored.fileURL,
+                    displayName: stored.manifest.metadata.displayName) else { return }
+            switch action {
+            case .previewImage: self.imagePreviewController.preview(localFileURL: resource.localFileURL)
+            case .copyImage: _ = AgentImageAppKitActions.copy(resource)
+            case .saveImageAs: AgentImageAppKitActions.saveAs(resource, from: self)
+            case .revealImage: AgentImageAppKitActions.reveal(resource)
+            default: break
+            }
+        }
+    }
+
+    private func imageAttachment(
+        _ attachmentID: AgentImageAttachmentID,
+        belongsTo blockID: AgentNodeID
+    ) -> Bool {
+        func contains(_ block: AgentBlock) -> Bool {
+            switch block.payload {
+            case let .image(payload):
+                return payload.attachment.id == attachmentID
+            case let .imageGallery(payload):
+                return payload.images.contains { $0.attachment.id == attachmentID }
+            default:
+                return block.children.contains(where: contains)
+            }
+        }
+        return model.document.entries.flatMap(\.blocks).first(where: { $0.id == blockID }).map(contains) == true
+    }
+
     private var v2RenderContext: AgentRenderContext {
         AgentRenderContext(
             actions: AgentRenderActions { [weak self] action in
                 self?.performV2RenderAction(action)
             },
             tokens: .transcript,
-            appearance: effectiveTokenTheme
+            appearance: effectiveTokenTheme,
+            imageResources: managedImageResourceProvider
         )
     }
 
@@ -1187,6 +1447,7 @@ final class ManagedAgentTileNSView: TileNSView {
         // chunk — so per-chunk cost grew with conversation length and long
         // sessions stalled the main thread.
         let document = model.document
+        hydrateManagedImagesFromDocument()
         guard document.version != lastForwardedDocumentVersion else { return }
         lastForwardedDocumentVersion = document.version
         let next = AgentDocument(version: v2RenderedDocument.version &+ 1, entries: document.entries)
@@ -1218,6 +1479,18 @@ final class ManagedAgentTileNSView: TileNSView {
     }
 
     private func performV2RenderAction(_ action: AgentRenderAction) {
+        switch action {
+        case let .previewImage(blockID, attachmentID),
+             let .copyImage(blockID, attachmentID),
+             let .saveImageAs(blockID, attachmentID),
+             let .revealImage(blockID, attachmentID):
+            resolveManagedImageAction(blockID: blockID, attachmentID: attachmentID, action: action)
+            return
+        case .submitResponse:
+            break
+        default:
+            return
+        }
         guard case let .submitResponse(requestID, value) = action else { return }
         // Only a real supplied choice on a still-pending projected request may
         // reach the transport seam; anything else is a stale or fabricated action.
@@ -1400,6 +1673,8 @@ final class ManagedAgentTileNSView: TileNSView {
     /// The compact row is exposed only as a deterministic geometry/AX witness;
     /// production updates it through `refreshCompactStatus` above.
     var qaCompactStatusRow: AgentCompactStatusRowView { compactStatusRow }
+    var qaThinkingIndicatorVisible: Bool { transcriptCollectionFixture?.qaThinkingIndicatorVisible == true }
+    var qaStatusThinkingIndicatorVisible: Bool { compactStatusRow.qaThinkingSlotVisible }
     var qaCompactStatusPhase: AgentCompactActivityPhase? { compactStatusResolution.phase }
     var qaCompactStatusContextState: AgentRadialContextMeterState { compactStatusRow.qaContextState }
     var qaCompactStatusContextFraction: Double? { compactStatusRow.qaContextFraction }
