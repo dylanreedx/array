@@ -769,12 +769,16 @@ final class AgentTranscriptListView: NSView {
             let newBlockIDs = toolDetailBlockIDs(in: newEntry)
             let removedBlockIDs = oldBlockIDs.subtracting(newBlockIDs)
             guard !removedBlockIDs.isEmpty else { continue }
-            // A wholly replaced entry has no surviving block identity, so its
-            // provider binding/cache is invalid too. With surviving siblings,
-            // remove only the old disclosure/detail subtrees that disappeared.
-            if oldBlockIDs.isDisjoint(with: newBlockIDs) {
+            // A removed/replaced tool block invalidates the owning entry even
+            // when a paragraph or another sibling survives. The provider
+            // identity is entry-scoped, so a selective child purge would let
+            // that identity/cache/runtime binding reach the replacement tool.
+            let removedToolBlockIDs = toolBlockIDs(in: oldEntry).subtracting(toolBlockIDs(in: newEntry))
+            if !removedToolBlockIDs.isEmpty || oldBlockIDs.isDisjoint(with: newBlockIDs) {
                 invalidatedEntryIDs.insert(id)
             } else {
+                // Non-tool sibling removal has no provider identity of its own;
+                // retain the entry binding while clearing its local disclosure.
                 removedBlockIDsByEntry[id] = removedBlockIDs
             }
         }
@@ -796,6 +800,16 @@ final class AgentTranscriptListView: NSView {
         var pendingBlocks = entry.blocks
         while let block = pendingBlocks.popLast() {
             ids.insert(block.id)
+            pendingBlocks.append(contentsOf: block.children)
+        }
+        return ids
+    }
+
+    private func toolBlockIDs(in entry: AgentEntry) -> Set<AgentNodeID> {
+        var ids = Set<AgentNodeID>()
+        var pendingBlocks = entry.blocks
+        while let block = pendingBlocks.popLast() {
+            if case .toolCall = block.payload { ids.insert(block.id) }
             pendingBlocks.append(contentsOf: block.children)
         }
         return ids
