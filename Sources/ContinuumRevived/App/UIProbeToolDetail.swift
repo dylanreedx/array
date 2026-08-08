@@ -182,20 +182,30 @@ extension UIProbeGeometry {
             document: document,
             patch: try AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: [blockID])
         )
+        let resetReplacementBlockID = id("tool-disclosure-reset-replacement-block")
+        let replacementBlock = AgentBlock(
+            id: resetReplacementBlockID, revision: 1, kind: .toolCall,
+            payload: .toolCall(AgentToolCallPayload(
+                name: "semantic-tool", summary: "Completed", status: .completed
+            ))
+        )
         let replacementEntry = AgentEntry(
             id: entryID, revision: 2, role: .assistant,
-            provenance: entry.provenance, blocks: [block]
+            provenance: entry.provenance, blocks: [replacementBlock]
         )
         try resetList.apply(
             document: AgentDocument(version: 2, entries: [replacementEntry]),
-            patch: try AgentDocumentPatch(fromVersion: 1, toVersion: 2, updated: [entryID, blockID])
+            patch: try AgentDocumentPatch(
+                fromVersion: 1, toVersion: 2,
+                updated: [entryID, blockID, resetReplacementBlockID]
+            )
         )
-        guard resetList.qaPresentedToolSummary(for: blockID) == "Completed" else {
-            throw GeometryError(message: "same-ID entry replacement inherited old host-local identity/cache state")
+        guard resetList.qaPresentedToolSummary(for: resetReplacementBlockID) == "Completed" else {
+            throw GeometryError(message: "different-block entry replacement inherited old host-local identity/cache state")
         }
         try resetList.apply(
             document: AgentDocument(version: 3, entries: []),
-            patch: try AgentDocumentPatch(fromVersion: 2, toVersion: 3, removed: [entryID, blockID])
+            patch: try AgentDocumentPatch(fromVersion: 2, toVersion: 3, removed: [entryID, resetReplacementBlockID])
         )
         try resetList.apply(
             document: AgentDocument(version: 4, entries: [reusedEntry]),
@@ -211,11 +221,16 @@ extension UIProbeGeometry {
         let ordinaryEntryID = id("ordinary-tool-entry")
         let ordinaryBlockID = id("ordinary-tool-block")
         let ordinaryReplacementBlockID = id("ordinary-tool-replacement-block")
-        func ordinaryBlock(_ blockID: AgentNodeID, revision: UInt64) -> AgentBlock {
+        func ordinaryBlock(
+            _ blockID: AgentNodeID,
+            revision: UInt64,
+            summary: String,
+            status: AgentItemStatus
+        ) -> AgentBlock {
             AgentBlock(
                 id: blockID, revision: revision, kind: .toolCall,
                 payload: .toolCall(AgentToolCallPayload(
-                    name: "ordinary-tool", summary: "Completed", status: .completed
+                    name: "ordinary-tool", summary: summary, status: status
                 ))
             )
         }
@@ -226,7 +241,10 @@ extension UIProbeGeometry {
             )
         }
         let ordinaryList = AgentTranscriptListView()
-        let ordinaryInitial = ordinaryEntry(1, blocks: [ordinaryBlock(ordinaryBlockID, revision: 1)])
+        let ordinaryInitial = ordinaryEntry(
+            1,
+            blocks: [ordinaryBlock(ordinaryBlockID, revision: 1, summary: "Working", status: .inProgress)]
+        )
         try ordinaryList.apply(
             document: AgentDocument(version: 1, entries: [ordinaryInitial]),
             patch: try AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: [ordinaryBlockID])
@@ -235,13 +253,31 @@ extension UIProbeGeometry {
         guard ordinaryList.qaDisclosureState(for: ordinaryBlockID) == true else {
             throw GeometryError(message: "ordinary tool disclosure fixture did not establish persistent expanded state")
         }
-        let ordinaryReplacement = ordinaryEntry(
-            2, blocks: [ordinaryBlock(ordinaryReplacementBlockID, revision: 2)]
+        // RED witness: the ordinary tool keeps its entry and block IDs while
+        // status/summary/revision change from active to completed. The explicit
+        // user choice must survive this content-only update.
+        let ordinaryCompleted = ordinaryEntry(
+            2,
+            blocks: [ordinaryBlock(ordinaryBlockID, revision: 2, summary: "Completed in 2s", status: .completed)]
         )
         try ordinaryList.apply(
-            document: AgentDocument(version: 2, entries: [ordinaryReplacement]),
+            document: AgentDocument(version: 2, entries: [ordinaryCompleted]),
             patch: try AgentDocumentPatch(
                 fromVersion: 1, toVersion: 2,
+                updated: [ordinaryEntryID, ordinaryBlockID]
+            )
+        )
+        guard ordinaryList.qaDisclosureState(for: ordinaryBlockID) == true else {
+            throw GeometryError(message: "same-ID ordinary tool content update discarded explicit disclosure state")
+        }
+        let ordinaryReplacement = ordinaryEntry(
+            3,
+            blocks: [ordinaryBlock(ordinaryReplacementBlockID, revision: 3, summary: "Completed", status: .completed)]
+        )
+        try ordinaryList.apply(
+            document: AgentDocument(version: 3, entries: [ordinaryReplacement]),
+            patch: try AgentDocumentPatch(
+                fromVersion: 2, toVersion: 3,
                 updated: [ordinaryEntryID, ordinaryBlockID, ordinaryReplacementBlockID]
             )
         )
@@ -250,13 +286,16 @@ extension UIProbeGeometry {
             throw GeometryError(message: "ordinary tool replacement retained disclosure state without provider detail")
         }
         try ordinaryList.apply(
-            document: AgentDocument(version: 3, entries: []),
-            patch: try AgentDocumentPatch(fromVersion: 2, toVersion: 3, removed: [ordinaryEntryID, ordinaryReplacementBlockID])
+            document: AgentDocument(version: 4, entries: []),
+            patch: try AgentDocumentPatch(fromVersion: 3, toVersion: 4, removed: [ordinaryEntryID, ordinaryReplacementBlockID])
         )
-        let ordinaryReused = ordinaryEntry(3, blocks: [ordinaryBlock(ordinaryBlockID, revision: 3)])
+        let ordinaryReused = ordinaryEntry(
+            4,
+            blocks: [ordinaryBlock(ordinaryBlockID, revision: 4, summary: "Completed", status: .completed)]
+        )
         try ordinaryList.apply(
-            document: AgentDocument(version: 4, entries: [ordinaryReused]),
-            patch: try AgentDocumentPatch(fromVersion: 3, toVersion: 4, inserted: [ordinaryEntryID, ordinaryBlockID])
+            document: AgentDocument(version: 5, entries: [ordinaryReused]),
+            patch: try AgentDocumentPatch(fromVersion: 4, toVersion: 5, inserted: [ordinaryEntryID, ordinaryBlockID])
         )
         guard ordinaryList.qaDisclosureState(for: ordinaryBlockID) == nil,
               ordinaryList.qaDisclosureState(for: ordinaryEntryID) == nil else {

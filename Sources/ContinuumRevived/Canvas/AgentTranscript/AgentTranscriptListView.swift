@@ -757,18 +757,48 @@ final class AgentTranscriptListView: NSView {
     private func prepareToolDetailLifecycle(for document: AgentDocument) {
         let incoming = Dictionary(uniqueKeysWithValues: document.entries.map { ($0.id, $0) })
         var invalidatedEntryIDs = Set(toolDetailEntryLifecycleByID.keys).subtracting(incoming.keys)
-        invalidatedEntryIDs.formUnion(toolDetailEntryLifecycleByID.compactMap { id, oldEntry in
-            guard let newEntry = incoming[id], newEntry != oldEntry else { return nil }
-            return id
-        })
+        var removedBlockIDsByEntry: [AgentNodeID: Set<AgentNodeID>] = [:]
+        for (id, oldEntry) in toolDetailEntryLifecycleByID {
+            guard let newEntry = incoming[id] else { continue }
+            guard oldEntry.role == newEntry.role,
+                  oldEntry.provenance == newEntry.provenance else {
+                invalidatedEntryIDs.insert(id)
+                continue
+            }
+            let oldBlockIDs = toolDetailBlockIDs(in: oldEntry)
+            let newBlockIDs = toolDetailBlockIDs(in: newEntry)
+            let removedBlockIDs = oldBlockIDs.subtracting(newBlockIDs)
+            guard !removedBlockIDs.isEmpty else { continue }
+            // A wholly replaced entry has no surviving block identity, so its
+            // provider binding/cache is invalid too. With surviving siblings,
+            // remove only the old disclosure/detail subtrees that disappeared.
+            if oldBlockIDs.isDisjoint(with: newBlockIDs) {
+                invalidatedEntryIDs.insert(id)
+            } else {
+                removedBlockIDsByEntry[id] = removedBlockIDs
+            }
+        }
         if !invalidatedEntryIDs.isEmpty {
             purgeToolDetailState(for: invalidatedEntryIDs)
+        }
+        for (entryID, blockIDs) in removedBlockIDsByEntry where !invalidatedEntryIDs.contains(entryID) {
+            purgeToolDetailBlockState(for: blockIDs)
         }
         if incoming.isEmpty {
             runtimeIdentityByItemID.removeAll()
             activeRuntimeScope = nil
         }
         toolDetailEntryLifecycleByID = incoming
+    }
+
+    private func toolDetailBlockIDs(in entry: AgentEntry) -> Set<AgentNodeID> {
+        var ids = Set<AgentNodeID>()
+        var pendingBlocks = entry.blocks
+        while let block = pendingBlocks.popLast() {
+            ids.insert(block.id)
+            pendingBlocks.append(contentsOf: block.children)
+        }
+        return ids
     }
 
     private func purgeToolDetailState(for entryIDs: Set<AgentNodeID>) {
@@ -790,23 +820,36 @@ final class AgentTranscriptListView: NSView {
                 }
             }
             blockIDs.formUnion(entryBlockIDs)
-            // Disclosure state is owned by the semantic tool-entry subtree, not
-            // by provider-detail state. Always purge it for ordinary assistant
-            // tool entries so an expanded/collapsed choice cannot leak across
-            // replacement, removal, reset, or ID reuse. Completed reasoning
-            // entries retain their preference on content updates; their removal
-            // cleanup remains owned by applyUnscrolled below.
-            if entry.role != .reasoning {
-                disclosureStateStore.removeSubtree(
-                    for: disclosureOwnerID,
-                    rootID: entryID,
-                    descendantIDs: entryBlockIDs
-                )
-            }
+            // This method is reached only for removal or an identity-changing
+            // replacement. Content updates with the same entry/block IDs never
+            // arrive here, so purge the complete old disclosure subtree for all
+            // roles, including reasoning, before any ID can be reused.
+            disclosureStateStore.removeSubtree(
+                for: disclosureOwnerID,
+                rootID: entryID,
+                descendantIDs: entryBlockIDs
+            )
         }
         for blockID in blockIDs {
             toolDetailIDByBlockID.removeValue(forKey: blockID)
         }
+        removeToolDetailIdentities(identities)
+    }
+
+    private func purgeToolDetailBlockState(for blockIDs: Set<AgentNodeID>) {
+        guard !blockIDs.isEmpty else { return }
+        for blockID in blockIDs {
+            disclosureStateStore.removeState(for: ToolDisclosureKey(
+                agentID: disclosureOwnerID,
+                blockID: blockID
+            ))
+            // The owning entry identity still survives this selective diff, so
+            // retain its provider record/cache for any surviving sibling block.
+            toolDetailIDByBlockID.removeValue(forKey: blockID)
+        }
+    }
+
+    private func removeToolDetailIdentities(_ identities: Set<AgentToolDetailKey>) {
         for identity in identities {
             toolDetailsByID.removeValue(forKey: identity)
             if var runtimeIdentities = runtimeIdentityByItemID[identity.providerItemID] {
