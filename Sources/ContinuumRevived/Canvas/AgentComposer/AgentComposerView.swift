@@ -720,18 +720,16 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
             let acceptance = await sink.accept(intent, for: agentID)
             guard acceptance == .accepted else {
                 if let lease, let draftStore {
-                    await draftStore.relinquishSubmission(for: agentID, ownership: lease)
-                    if self.isCurrentBinding(agentID: agentID, generation: generation),
-                       let restored = try? await draftStore.restoreSubmission(for: agentID, ownership: lease) {
-                        guard self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
-                        await self.applyPersistedDraft(
-                            restored,
-                            agentID: agentID,
-                            generation: generation
-                        )
-                    } else {
-                        self.clearPendingSubmission(lease)
-                    }
+                    // The sink may have suspended after this task cleared
+                    // submissionLease. Refusal still owns the exact durable
+                    // journal; restore it independently of the old view
+                    // generation, then let generation gate only UI application.
+                    await self.restorePreHandoffSubmission(
+                        lease,
+                        store: draftStore,
+                        agentID: agentID,
+                        generation: generation
+                    )
                 }
                 return
             }

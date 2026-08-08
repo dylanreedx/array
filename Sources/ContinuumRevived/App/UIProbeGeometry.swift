@@ -7853,7 +7853,8 @@ enum UIProbeGeometry {
         let railAssertions = try await checkComposerImageAttachmentRail()
         let rebindAssertions = try await checkComposerRebindIsolation()
         let submissionRecoveryAssertions = try await checkComposerSubmissionRebindRecovery()
-        print("UIProbeGeometry: composer image components gated \(pasteboardAssertions) paste/drop decoding assertions, \(thumbnailAssertions) thumbnail-cache assertions, \(railAssertions) rail geometry/accessibility/keyboard assertions, \(rebindAssertions) delayed cross-agent rebind assertions, and \(submissionRecoveryAssertions) pre-sink submission rebind recovery assertions")
+        let asyncRefusalAssertions = try await checkAsyncRefusalRebindRecovery()
+        print("UIProbeGeometry: composer image components gated \(pasteboardAssertions) paste/drop decoding assertions, \(thumbnailAssertions) thumbnail-cache assertions, \(railAssertions) rail geometry/accessibility/keyboard assertions, \(rebindAssertions) delayed cross-agent rebind assertions, \(submissionRecoveryAssertions) pre-sink submission rebind recovery assertions, and \(asyncRefusalAssertions) suspended sink-refusal/rebind assertions")
     }
 
     /// Delays an old agent's attachment-resolution await while the real AppKit
@@ -8080,6 +8081,122 @@ enum UIProbeGeometry {
             throw fail("post-handoff rebind restored or duplicated an already handed-off prompt")
         }
         return 5
+    }
+
+    /// The winner owns a durable draft while its sink is suspended. A rebind crosses
+    /// the old UI generation before the sink refuses; recovery must still settle the
+    /// exact lease, while only applying the restored draft to the current generation.
+    /// A second live composer proves refusal does not strand its latch or journal.
+    private static func checkAsyncRefusalRebindRecovery() async throws -> Int {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ComposerAsyncRefusalRebind-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let agentA = AgentID(rawValue: UUID(uuidString: "C0000000-0000-4000-8000-0000000000F2")!)
+        let agentB = AgentID(rawValue: UUID(uuidString: "C0000000-0000-4000-8000-0000000000F3")!)
+        let attachmentStore = AgentComposerAttachmentStore(applicationSupportDirectory: root)
+        let store = AgentComposerDraftStore(
+            applicationSupportDirectory: root,
+            debounceInterval: 60,
+            attachmentStore: attachmentStore
+        )
+        let imageData = try makeProbeImageData(width: 64, height: 32, type: .png)
+        let storedImage = try await attachmentStore.importValidatedPastedImage(
+            imageData,
+            displayName: "refusal-rebind.png",
+            validation: AgentComposerImageValidation(
+                validatedContentType: "image/png", pixelWidth: 64, pixelHeight: 32,
+                byteCount: UInt64(imageData.count)
+            ),
+            forDraftOf: agentA
+        )
+        let draft = ContinuumRevivedCore.AgentComposerDraft(
+            text: "async refusal recoverable draft",
+            selection: 31..<31,
+            updatedAt: Date(),
+            imageAttachments: [AgentComposerDraftImageAttachment(metadata: storedImage.promptAttachment.metadata)]
+        )
+        await store.save(draft, for: agentA)
+        await store.flushAll()
+        let snapshot = AgentTileTurnSnapshot(
+            state: .ready,
+            capabilities: AgentTurnCapabilities(canSend: true),
+            turnStartedAt: nil
+        )
+        let refusingSink = ComposerSubmissionProbeSink(
+            delayNanoseconds: 180_000_000,
+            acceptance: .refused(.unsupported)
+        )
+        let loserSink = ComposerSubmissionProbeSink()
+        let winner = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 420, height: 120))
+        let loser = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 420, height: 120))
+        for composer in [winner, loser] {
+            composer.bindActionSink(
+                composer === winner ? refusingSink : loserSink,
+                agentID: agentA,
+                snapshot: snapshot
+            )
+            composer.bindAttachmentStore(attachmentStore, agentID: agentA)
+            composer.bindDraftStore(store, agentID: agentA)
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let prompt = AgentPromptImageAttachment(
+            metadata: storedImage.promptAttachment.metadata,
+            fileURL: storedImage.promptAttachment.fileURL
+        )
+        winner.apply(AgentComposerDraft(
+            text: draft.text,
+            selection: NSRange(location: (draft.text as NSString).length, length: 0),
+            revision: 1,
+            imageAttachments: [prompt]
+        ))
+        loser.apply(AgentComposerDraft(
+            text: draft.text,
+            selection: NSRange(location: (draft.text as NSString).length, length: 0),
+            revision: 1,
+            imageAttachments: [prompt]
+        ))
+        winner.composerRequestedSend(winner.textView)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        guard await refusingSink.invocationCount == 1 else {
+            throw fail("suspended refusal witness did not enter the sink await")
+        }
+        // Rebind after the lease marker has been cleared for sink handoff. The
+        // refusing task is still live and must restore despite this old generation.
+        winner.bindActionSink(loserSink, agentID: agentB, snapshot: snapshot)
+        winner.bindDraftStore(store, agentID: agentB)
+        loser.composerRequestedSend(loser.textView)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        guard await loserSink.invocationCount == 0 else {
+            throw fail("loser composer acquired the winner journal during suspended refusal")
+        }
+        try await Task.sleep(nanoseconds: 220_000_000)
+        let restored = await store.load(for: agentA)
+        guard let restored else {
+            throw fail("async sink refusal did not restore a draft")
+        }
+        guard restored.text == draft.text else {
+            throw fail("async sink refusal changed restored text")
+        }
+        guard restored.selection == draft.selection else {
+            throw fail("async sink refusal changed restored selection: \(restored.selection) vs \(draft.selection)")
+        }
+        guard restored.imageAttachments == draft.imageAttachments else {
+            throw fail("async sink refusal changed restored image references")
+        }
+        guard !(await store.hasSubmissionRecovery(for: agentA)) else {
+            throw fail("async sink refusal left the submission journal behind")
+        }
+        guard (try await attachmentStore.storedAttachment(for: storedImage.manifest.id)) != nil else {
+            throw fail("async sink refusal lost the managed image capability")
+        }
+        loser.composerRequestedSend(loser.textView)
+        try await Task.sleep(nanoseconds: 120_000_000)
+        guard await loserSink.invocationCount == 1 else {
+            throw fail("loser composer remained latched after winner refusal/rebind recovery")
+        }
+        loser.confirmPromptSubmissionCompleted()
+        try await Task.sleep(nanoseconds: 120_000_000)
+        return 6
     }
 
     private static func checkComposerImagePasteboardDecoder() async throws -> Int {
@@ -8541,15 +8658,24 @@ enum UIProbeGeometry {
 private final class ComposerSubmissionProbeSink: AgentTileActionSink {
     private(set) var invocationCount = 0
     let delayNanoseconds: UInt64
+    let acceptance: IntentAcceptance
 
-    init(delayNanoseconds: UInt64 = 0) {
+    init(delayNanoseconds: UInt64 = 0, acceptance: IntentAcceptance = .accepted) {
         self.delayNanoseconds = delayNanoseconds
+        self.acceptance = acceptance
     }
 
     func accept(_ intent: AgentComposerIntent, for agentID: AgentID) async -> IntentAcceptance {
         invocationCount += 1
-        if delayNanoseconds > 0 { try? await Task.sleep(nanoseconds: delayNanoseconds) }
-        return .accepted
+        if delayNanoseconds > 0 {
+            // Keep the production sink await suspended even when the old
+            // composer task is cancelled by a rebind.
+            let delay = delayNanoseconds
+            _ = await Task.detached {
+                try? await Task.sleep(nanoseconds: delay)
+            }.value
+        }
+        return acceptance
     }
 }
 
