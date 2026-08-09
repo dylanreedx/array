@@ -114,6 +114,7 @@ html[data-theme="dark"] .theme-toggle__moon { opacity: 1; transform: scale(1) ro
 h1 em, h2 em { color: var(--array-deep); font-style: normal; font-weight: inherit; }
 .hero__copy > p { max-width: 690px; margin: 0; color: var(--ink-soft); font-size: clamp(18px, 1.6vw, 22px); line-height: 1.52; letter-spacing: -.025em; }
 .hero__actions { display: flex; align-items: center; gap: 28px; margin-top: 36px; }
+.hero__requirements { margin: 14px 0 0; color: var(--ink-soft); font-size: 13px; }
 .hero__visual { margin-top: 76px; }
 
 .app-demo { position: relative; overflow: hidden; aspect-ratio: 1.83 / 1; color: #f2f4f8; background: var(--dark); border: 1px solid #303a3f; border-radius: 26px; box-shadow: 0 40px 100px rgba(14,21,26,.2); font-family: var(--font-sans); }
@@ -461,6 +462,7 @@ html[data-theme="dark"] .access-logo--light { display: none; }
 html[data-theme="dark"] .access-logo--dark { display: block; }
 .access-section__copy h2 { max-width: 720px; font-size: clamp(40px, 4vw, 62px); }
 .access-section__copy p { max-width: 650px; margin: 18px 0 0; color: var(--ink-soft); font-size: 14px; line-height: 1.65; }
+.access-section__actions { display: flex; align-items: center; gap: 24px; }
 .access-section > .button { min-width: 180px; }
 
 .site-footer { min-height: 120px; display: grid; grid-template-columns: 1fr 1fr 1fr; align-items: center; color: var(--ink-soft); font-size: 11px; }
