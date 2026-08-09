@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-APP_BIN="$ROOT_DIR/.build/debug/continuum-revived"
+APP_BIN="$ROOT_DIR/.build/debug/Array"
 BUNDLE_ID="dev.dylanreedx.continuum"
 DEVICE=""
 OUT=""
@@ -68,7 +68,7 @@ fi
 echo "push-sim-test: out=$OUT"
 
 if [[ ! -x "$APP_BIN" ]]; then
-  echo "push-sim-test: building continuum-revived"
+  echo "push-sim-test: building Array"
   (cd "$ROOT_DIR" && swift build)
 fi
 

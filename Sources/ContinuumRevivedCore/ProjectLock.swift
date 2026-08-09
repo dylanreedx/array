@@ -14,7 +14,7 @@ public final class ProjectLock {
 
     public init(root: URL) {
         self.root = root
-        self.lockFile = root.appendingPathComponent(".continuum-revived", isDirectory: true)
+        self.lockFile = root.appendingPathComponent(".array", isDirectory: true)
             .appendingPathComponent("lock", isDirectory: false)
     }
 

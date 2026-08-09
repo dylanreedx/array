@@ -3,7 +3,7 @@ import Foundation
 /// Resolves the URL used when spawning a browser tile without an explicit URL.
 /// Persisted via UserDefaults so users can override the product-safe default:
 ///
-///     defaults write com.continuum.revived continuum.defaultBrowserURL https://example.com
+///     defaults write dev.arrayapp.macos continuum.defaultBrowserURL https://example.com
 ///
 /// Invalid or empty values fall back to `about:blank` rather than launching an
 /// arbitrary development server.

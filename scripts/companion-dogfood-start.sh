@@ -226,13 +226,13 @@ fi
 health_json="$artifact_dir/health.json"
 health_err="$artifact_dir/health.stderr.txt"
 if [[ -n "$DESKTOP_APP" && "$DESKTOP_APP" == *.app ]]; then
-  desktop_executable="$DESKTOP_APP/Contents/MacOS/continuum-revived"
+  desktop_executable="$DESKTOP_APP/Contents/MacOS/Array"
   [[ -x "$desktop_executable" ]] || { echo "Desktop app executable not found: $desktop_executable" >&2; exit 1; }
   "$desktop_executable" --companion-sync-health-check >"$health_json" 2>"$health_err"
 elif [[ -n "$DESKTOP_APP" ]]; then
   "$DESKTOP_APP" --companion-sync-health-check >"$health_json" 2>"$health_err"
 else
-  .build/debug/continuum-revived --companion-sync-health-check >"$health_json" 2>"$health_err"
+  .build/debug/Array --companion-sync-health-check >"$health_json" 2>"$health_err"
 fi
 if [[ "$ALLOW_UNENTITLED" -ne 1 ]] && ! grep -Eq '"desktopSignedWithICloudEntitlement"[[:space:]]*:[[:space:]]*true' "$health_json"; then
   echo "Health check did not report desktopSignedWithICloudEntitlement=true; refusing to call this CloudKit proof. See $health_json and $health_err." >&2

@@ -8,7 +8,7 @@ let package = Package(
         .iOS(.v17)
     ],
     products: [
-        .executable(name: "continuum-revived", targets: ["ContinuumRevived"]),
+        .executable(name: "Array", targets: ["ContinuumRevived"]),
         .executable(name: "ContinuumRevivedPaletteChecks", targets: ["ContinuumRevivedPaletteChecks"]),
         .library(name: "ContinuumRevivedAgentContent", targets: ["ContinuumRevivedAgentContent"]),
         .library(name: "ContinuumRevivedAgentUI", targets: ["ContinuumRevivedAgentUI"]),

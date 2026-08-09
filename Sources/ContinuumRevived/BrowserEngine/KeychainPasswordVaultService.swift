@@ -3,7 +3,7 @@ import Foundation
 import Security
 
 final class KeychainPasswordVaultService: PasswordVaultService {
-    static let namespaceMarker = "com.continuum-revived.password-vault.v1"
+    static let namespaceMarker = "dev.arrayapp.macos.password-vault.v1"
     static let accessibility = kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String
 
     private let namespace: String

@@ -13,7 +13,7 @@ public struct ProjectStoreLayout: Sendable {
     }
 
     public var stateRoot: URL {
-        projectRoot.appendingPathComponent(".continuum-revived", isDirectory: true)
+        projectRoot.appendingPathComponent(".array", isDirectory: true)
     }
 
     public var projectFile: URL {

@@ -1796,7 +1796,7 @@ final class TileSpawner {
             "dynamicDefaultInspectable": dynamicDefaultInspectable,
             "dynamicOptInInspectable": dynamicOptInInspectable,
             "existingWebViewCanBeReappliedAfterPreferenceChange": existingWebViewCanBeReappliedAfterPreferenceChange,
-            "settingsSurfacePath": "Continuum Revived > Settings… > Browser > Enable Safari Web Inspector for Browser Tiles (open from Safari Develop)",
+            "settingsSurfacePath": "Array > Settings… > Browser > Enable Safari Web Inspector for Browser Tiles (open from Safari Develop)",
             "settingsSurfaceContainsWebInspectorToggle": settingsSurfaceContainsWebInspectorToggle,
             "settingsSurfaceRendered": settingsSurfaceRendered,
             "settingsToggleRoundTrips": settingsToggleRoundTrips,
@@ -4799,7 +4799,7 @@ final class TileSpawner {
         if let detail {
             message += " \(detail)"
         }
-        message += " This is recoverable: remove/recreate the file-tree tile or repair .continuum-revived/file-tree/index.json."
+        message += " This is recoverable: remove/recreate the file-tree tile or repair .array/file-tree/index.json."
         return message
     }
 

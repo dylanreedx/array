@@ -133,7 +133,7 @@ public actor CompanionAuthService {
     public init(
         authDirectory: URL,
         clock: any Clock = SystemClock(),
-        instanceDisplayName: String = "Continuum"
+        instanceDisplayName: String = "Array"
     ) throws {
         self.clock = clock
         let databaseURL = AuthDatabase.url(in: authDirectory)

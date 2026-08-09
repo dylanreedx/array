@@ -38,7 +38,7 @@ public struct ProjectRootResolver: Sendable {
             },
             continuumDirectoryExists: { path in
                 var isDirectory: ObjCBool = false
-                let statePath = URL(fileURLWithPath: path).appendingPathComponent(".continuum-revived").path
+                let statePath = URL(fileURLWithPath: path).appendingPathComponent(".array").path
                 return FileManager.default.fileExists(atPath: statePath, isDirectory: &isDirectory) && isDirectory.boolValue
             },
             canCreateContinuumDirectory: { path in

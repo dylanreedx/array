@@ -6,11 +6,11 @@ import Foundation
 /// kill-session argv construction, and persisted config/detection helpers.
 public enum TmuxSession {
     public static func sessionName(tileId: UUID) -> String {
-        "continuum-\(tileId.uuidString)"
+        "array-\(tileId.uuidString)"
     }
 
     public static func viewSessionName(tileId: UUID) -> String {
-        "continuum-view-\(tileId.uuidString)"
+        "array-view-\(tileId.uuidString)"
     }
 
     public static func wrap(
@@ -117,12 +117,12 @@ public enum TmuxSession {
     /// Project-scoped session name (phase 1+). `ZoneRuntimeController` is the
     /// only authoritative caller — see `ZoneRuntimeController.projectSessionName()`.
     public static func projectSessionName(projectId: UUID) -> String {
-        "continuum-proj-\(projectId.uuidString)"
+        "array-proj-\(projectId.uuidString)"
     }
 
     /// Ambient/workspace-scoped session name (phase 1 fallback promotion).
     public static func ambientSessionName(workspaceId: UUID) -> String {
-        "continuum-ws-\(workspaceId.uuidString)"
+        "array-ws-\(workspaceId.uuidString)"
     }
 
     /// Project-scoped kill-session argv — mirrors `killSessionCommand(tileId:tmuxPath:)`.

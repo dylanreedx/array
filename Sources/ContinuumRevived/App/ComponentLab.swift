@@ -4614,9 +4614,9 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             }
             return field.stringValue
         }
-        let expectedProjectLabel = "projectSessionName  → continuum-proj-00000000-0000-0000-0000-000000000001"
-        let expectedAmbientLabel = "ambientSessionName  → continuum-ws-00000000-0000-0000-0000-000000000001"
-        let expectedSessionLabel = "sessionName(tileId) → continuum-00000000-0000-0000-0000-000000000001"
+        let expectedProjectLabel = "projectSessionName  → array-proj-00000000-0000-0000-0000-000000000001"
+        let expectedAmbientLabel = "ambientSessionName  → array-ws-00000000-0000-0000-0000-000000000001"
+        let expectedSessionLabel = "sessionName(tileId) → array-00000000-0000-0000-0000-000000000001"
         let projectLabel = try labelText("sessionNaming.projectSessionName")
         let ambientLabel = try labelText("sessionNaming.ambientSessionName")
         let sessionLabel = try labelText("sessionNaming.sessionName")

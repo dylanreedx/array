@@ -78,7 +78,7 @@ public struct KeychainPairedCompanionSessionStore: PairedCompanionSessionStoring
     private let service: String
     private let account: String
 
-    public init(service: String = "dev.dylanreed.continuum.companion-session", account: String = "paired-session") {
+    public init(service: String = "dev.arrayapp.macos.companion-session", account: String = "paired-session") {
         self.service = service
         self.account = account
     }

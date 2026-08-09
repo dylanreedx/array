@@ -116,7 +116,7 @@ private func checkCompanionDogfoodDryRunScript() throws {
 
     let realProof = Process()
     realProof.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-    realProof.arguments = ["bash", script, "--desktop-app", ".build/debug/continuum-revived"]
+    realProof.arguments = ["bash", script, "--desktop-app", ".build/debug/Array"]
     let realPipe = Pipe()
     realProof.standardOutput = realPipe
     realProof.standardError = realPipe

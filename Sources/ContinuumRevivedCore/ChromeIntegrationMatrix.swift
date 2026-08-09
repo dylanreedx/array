@@ -41,9 +41,9 @@ public enum ChromeIntegrationMatrix {
     ) -> ChromeIntegrationVerdict {
         switch method {
         case .directProfileDatabaseRead:
-            return .rejected(reason: "Continuum must not read Chrome profile databases or secret stores directly.")
+            return .rejected(reason: "Array must not read Chrome profile databases or secret stores directly.")
         case .liveProfileReuseAsContinuumProfile:
-            return .rejected(reason: "Continuum WKWebView profiles must be app-owned; never reuse the user's live Chrome profile.")
+            return .rejected(reason: "Array WKWebView profiles must be app-owned; never reuse the user's live Chrome profile.")
         case .chromeSyncReuse:
             return .unavailable(reason: "Chrome Sync is not an available third-party app integration path and must not be treated as supported.")
         case .cdpAttachDefaultUserProfile:

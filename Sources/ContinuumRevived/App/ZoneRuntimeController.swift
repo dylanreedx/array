@@ -149,7 +149,7 @@ final class ZoneRuntimeController {
     }
 
     /// The single authoritative call site for this controller's project session name.
-    /// No other code should construct a `continuum-proj-` name by hand.
+    /// No other code should construct an `array-proj-` name by hand.
     func projectSessionName() -> String {
         TmuxSession.projectSessionName(projectId: project.id)
     }
@@ -1098,8 +1098,8 @@ final class ZoneRuntimeController {
         // calling TmuxSession.projectSessionName/killProjectSessionCommand, so this check can
         // catch a bug in either those functions or the controller's delegation to them, not
         // merely prove the two agree with each other.
-        let expectedNameA = "continuum-proj-\(projectIdA.uuidString)"
-        let expectedNameB = "continuum-proj-\(projectIdB.uuidString)"
+        let expectedNameA = "array-proj-\(projectIdA.uuidString)"
+        let expectedNameB = "array-proj-\(projectIdB.uuidString)"
         let controllerNameA = controllerA.projectSessionName()
         let controllerNameB = controllerB.projectSessionName()
 
@@ -1109,7 +1109,7 @@ final class ZoneRuntimeController {
 
         let tmuxPath = "/usr/bin/tmux"
         let expectedKillCommandA = tmuxPath
-        let expectedKillArgumentsA = ["kill-session", "-t", "continuum-proj-\(projectIdA.uuidString)"]
+        let expectedKillArgumentsA = ["kill-session", "-t", "array-proj-\(projectIdA.uuidString)"]
         let controllerKillArgsA = controllerA.killProjectSessionCommand(tmuxPath: tmuxPath)
         try expect(controllerKillArgsA.command == expectedKillCommandA, "controller.killProjectSessionCommand command mismatch: expected \(expectedKillCommandA) got \(controllerKillArgsA.command)")
         try expect(controllerKillArgsA.arguments == expectedKillArgumentsA, "controller.killProjectSessionCommand arguments mismatch: expected \(expectedKillArgumentsA) got \(controllerKillArgsA.arguments)")

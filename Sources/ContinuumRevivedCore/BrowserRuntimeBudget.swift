@@ -10,7 +10,7 @@ public struct BrowserRuntimeBudget: Equatable {
     }
 
     public static let defaultMaxLive = 6
-    public static let bundledDefaultsDomain = "com.continuum.revived"
+    public static let bundledDefaultsDomain = "dev.arrayapp.macos"
     public static let legacyDefaultsDomain = "continuum.revived"
     public static let defaultsKey = "continuum.browserLiveBudget"
 

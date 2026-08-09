@@ -1600,9 +1600,9 @@ do {
 // MARK: - Project lock policy
 
 do {
-    let lockFile = URL(fileURLWithPath: "/tmp/continuum-project/.continuum-revived/lock")
+    let lockFile = URL(fileURLWithPath: "/tmp/array-project/.array/lock")
     let config = ProjectLockPolicy.alertConfiguration(lockFile: lockFile)
-    expect(config.message == "This project is already open in another Continuum window.", "project lock alert message")
+    expect(config.message == "This project is already open in another Array window.", "project lock alert message")
     expect(config.informative.contains(lockFile.path), "project lock alert cites lock file")
     expect(config.informative.contains("Open Anyway proceeds without the project lock"), "project lock alert explains unsafe bypass")
     expect(config.buttonTitles == ["Choose Another Project", "Open Anyway", "Quit"], "project lock buttons order")
@@ -2672,7 +2672,7 @@ do {
     var foundProjectCanvas = false
     if let enumerator = FileManager.default.enumerator(at: scratch, includingPropertiesForKeys: nil) {
         for case let fileURL as URL in enumerator {
-            if fileURL.path.hasSuffix(".continuum-revived/canvas.json") {
+            if fileURL.path.hasSuffix(".array/canvas.json") {
                 foundProjectCanvas = true
             }
         }
@@ -3599,11 +3599,11 @@ do {
     expect(loadedProject == project, "ProjectStore.loadProject returns saved value")
     expect(
         FileManager.default.fileExists(atPath: store.layout.projectFile.path),
-        "project.json lands inside .continuum-revived/"
+        "project.json lands inside .array/"
     )
     expect(
         FileManager.default.fileExists(atPath: store.layout.stateRoot.appendingPathComponent("project.json").path),
-        "stateRoot equals projectRoot/.continuum-revived"
+        "stateRoot equals projectRoot/.array"
     )
 
     let canvas = CanvasState(
@@ -3716,7 +3716,7 @@ do {
     expect(loadedReviewState == reviewState, "ReviewCommentState round trip")
     expect(
         FileManager.default.fileExists(atPath: store.layout.stateRoot.appendingPathComponent("reviews/\(reviewId.uuidString).json").path),
-        "review comments persist project-locally under .continuum-revived/reviews/"
+        "review comments persist project-locally under .array/reviews/"
     )
     let missingReview = try store.tryLoadReviewCommentState(reviewId: UUID())
     expect(missingReview == nil, "tryLoadReviewCommentState returns nil when no review file exists")
@@ -3731,7 +3731,7 @@ do {
         expect(false, "ReviewCommentState future schema should throw ProjectStoreError, got \(error)")
     }
 
-    // Resaving project should produce a backup under .continuum-revived/backups/
+    // Resaving project should produce a backup under .array/backups/
     let updated = Project(
         id: project.id,
         name: "test-project",
@@ -4094,8 +4094,8 @@ do {
     // The default Application Support path should at least include the app name.
     let defaultDir = RegistryStore.defaultApplicationSupportDirectory()
     expect(
-        defaultDir.path.hasSuffix("/continuum-revived") || defaultDir.path.contains("continuum-revived/"),
-        "Default registry directory ends with /continuum-revived, got \(defaultDir.path)"
+        defaultDir.path.hasSuffix("/Array") || defaultDir.path.contains("Array/"),
+        "Default registry directory ends with /Array, got \(defaultDir.path)"
     )
 }
 

@@ -223,14 +223,14 @@ expect(LaunchPaletteModel.isFileURL(root.appendingPathComponent("Sources/App.swi
 expect(!LaunchPaletteModel.isFileURL(URL(fileURLWithPath: "/tmp/continuum/project-sibling/README.md"), insideProjectRoot: root), "sibling prefix path is rejected")
 expect(!LaunchPaletteModel.isFileURL(URL(fileURLWithPath: "/tmp/continuum/other.txt"), insideProjectRoot: root), "outside project path is rejected")
 
-let build = try runSwift(["build", "--product", "continuum-revived"])
+let build = try runSwift(["build", "--product", "Array"])
 guard build.status == 0 else { Foundation.exit(build.status) }
 
 let binPath = try runSwift(["build", "--show-bin-path"], captureOutput: true)
 guard binPath.status == 0 else { Foundation.exit(binPath.status) }
 
 let appPath = URL(fileURLWithPath: binPath.output.trimmingCharacters(in: .whitespacesAndNewlines))
-    .appendingPathComponent("continuum-revived")
+    .appendingPathComponent("Array")
 
 for flag in ["--palette-duplicate-root-check", "--palette-first-responder-restore-check", "--palette-zone-check"] {
     let process = Process()

@@ -9,7 +9,7 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/make-app-bundle.sh [--configuration debug|release] --output <path>
 
-Builds the SwiftPM continuum-revived executable and assembles a macOS .app bundle.
+Builds the SwiftPM Array executable and assembles a macOS .app bundle.
 This bundle is unsigned/unprovisioned CloudKit-wise; use
 scripts/provisioned-cloudkit-app.sh for real iCloud/CloudKit proof.
 USAGE
@@ -47,10 +47,10 @@ esac
 [[ -n "$OUTPUT" ]] || { echo "--output <path> is required" >&2; usage >&2; exit 2; }
 
 cd "$ROOT_DIR"
-swift build -c "$CONFIGURATION" --product continuum-revived
+swift build -c "$CONFIGURATION" --product Array
 
 BUILD_DIR="$ROOT_DIR/.build/$CONFIGURATION"
-EXECUTABLE="$BUILD_DIR/continuum-revived"
+EXECUTABLE="$BUILD_DIR/Array"
 PLIST_SOURCE="$ROOT_DIR/Packaging/Info.plist"
 ICON_SOURCE="$ROOT_DIR/Packaging/AppIcon.icns"
 
@@ -60,8 +60,8 @@ ICON_SOURCE="$ROOT_DIR/Packaging/AppIcon.icns"
 
 rm -rf "$OUTPUT"
 mkdir -p "$OUTPUT/Contents/MacOS" "$OUTPUT/Contents/Resources"
-cp "$EXECUTABLE" "$OUTPUT/Contents/MacOS/continuum-revived"
-chmod 0755 "$OUTPUT/Contents/MacOS/continuum-revived"
+cp "$EXECUTABLE" "$OUTPUT/Contents/MacOS/Array"
+chmod 0755 "$OUTPUT/Contents/MacOS/Array"
 cp "$PLIST_SOURCE" "$OUTPUT/Contents/Info.plist"
 cp "$ICON_SOURCE" "$OUTPUT/Contents/Resources/AppIcon.icns"
 

@@ -4,7 +4,7 @@ import Foundation
 /// with no project (`projectId == nil`). Persisted via UserDefaults so users can
 /// configure a home directory other than `$HOME`:
 ///
-///     defaults write com.continuum.revived continuum.ambientZoneHome /Users/dylan/Projects
+///     defaults write dev.arrayapp.macos continuum.ambientZoneHome /Users/dylan/Projects
 ///
 /// Empty, whitespace-only, or non-existent directory overrides fall back to
 /// `$HOME` so a typo can never root an ambient zone at a bogus path.

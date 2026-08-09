@@ -9,7 +9,7 @@ import Foundation
 // same store shape (`AtomicWriter`, one JSON file per record, upsert / load /
 // delete / loadAll) rooted in APPLICATION SUPPORT instead:
 //
-//   ~/Library/Application Support/continuum-revived/agents/<agentId>.json
+//   ~/Library/Application Support/Array/agents/<agentId>.json
 //
 // The project store is deliberately NOT reused — that root is the mistake being
 // fixed, not an implementation detail. No migration of existing managed records
@@ -65,7 +65,7 @@ public final class AgentStore: @unchecked Sendable {
 
     /// `applicationSupportDirectory == nil` resolves the root the way the app
     /// does — `CONTINUUM_APP_SUPPORT` first, then the canonical
-    /// `continuum-revived` directory `RegistryStore` and `WorkspaceStore`
+    /// `Array` directory `RegistryStore` and `WorkspaceStore`
     /// already use. Going straight to the canonical path here would make a
     /// default-constructed store ignore the override the whole matrix runs
     /// under, which is the packet's watch-out with the sign flipped. Checks pass

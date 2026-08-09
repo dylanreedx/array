@@ -4,9 +4,9 @@ import Foundation
 /// destroying the tile. Persisted via UserDefaults so the user can change the
 /// behavior without restarting the app:
 ///
-///     defaults write com.continuum.revived continuum.deleteConfirmPolicy never
-///     defaults write com.continuum.revived continuum.deleteConfirmPolicy runtimes
-///     defaults write com.continuum.revived continuum.deleteConfirmPolicy always
+///     defaults write dev.arrayapp.macos continuum.deleteConfirmPolicy never
+///     defaults write dev.arrayapp.macos continuum.deleteConfirmPolicy runtimes
+///     defaults write dev.arrayapp.macos continuum.deleteConfirmPolicy always
 ///
 /// Default `.runtimes` confirms only `.terminal` and `.browser` tiles, where a
 /// running PTY or WKWebView session may be lost. Notes/files/file-tree tiles
@@ -18,7 +18,7 @@ public enum DeleteConfirmPolicy: String, Sendable {
     case always
 
     public static let userDefaultsKey = "continuum.deleteConfirmPolicy"
-    public static let bundledDefaultsDomain = "com.continuum.revived"
+    public static let bundledDefaultsDomain = "dev.arrayapp.macos"
     public static let legacyDefaultsDomain = "continuum-revived"
 
     public static var current: DeleteConfirmPolicy {

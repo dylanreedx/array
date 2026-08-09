@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT_DIR"
 
-APP="${CONTINUUM_PERF_APP:-.build/debug/continuum-revived}"
+APP="${CONTINUUM_PERF_APP:-.build/debug/Array}"
 BASELINE="${CONTINUUM_QA_PERF_BASELINE:-$ROOT_DIR/qa/perf-baseline.json}"
 RUN_ID="${CONTINUUM_PERF_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${CONTINUUM_PERF_OUT:-$ROOT_DIR/qa-runs/$RUN_ID/perf}"

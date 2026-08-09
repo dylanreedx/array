@@ -5,7 +5,7 @@ import Foundation
 /// Default is on so each zone surfaces its header + agent/QA rollup.
 /// Users can disable the overlay with:
 ///
-///     defaults write com.continuum.revived continuum.zoneChrome.enabled -bool false
+///     defaults write dev.arrayapp.macos continuum.zoneChrome.enabled -bool false
 public enum ZoneChromeFeature: Sendable {
     public static let userDefaultsKey = "continuum.zoneChrome.enabled"
 

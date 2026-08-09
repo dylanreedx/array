@@ -3,7 +3,7 @@ import Foundation
 public enum ProjectLockPolicy: Sendable {
     public static func alertConfiguration(lockFile: URL) -> ProjectLockAlertConfiguration {
         ProjectLockAlertConfiguration(
-            message: "This project is already open in another Continuum window.",
+            message: "This project is already open in another Array window.",
             informative: "Lock file: \(lockFile.path)\n\nOpen Anyway proceeds without the project lock and can risk conflicting writes. Choose Another Project is the safe default.",
             buttonTitles: ["Choose Another Project", "Open Anyway", "Quit"],
             defaultButtonIndex: 0,

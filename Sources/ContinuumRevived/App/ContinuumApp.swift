@@ -711,7 +711,7 @@ private func hasMainBundleICloudEntitlement(containerIdentifier: String) -> Bool
 private func runCompanionSyncHealthCheck() throws {
     let config = DesktopCompanionSyncConfiguration(
         containerIdentifier: CompanionSyncConfig.cloudKitContainerIdentifier,
-        desktopBundleIdentifier: Bundle.main.bundleIdentifier ?? "com.continuum.revived",
+        desktopBundleIdentifier: Bundle.main.bundleIdentifier ?? "dev.arrayapp.macos",
         iosBundleIdentifier: "dev.dylanreedx.continuum",
         signedWithICloudEntitlement: hasMainBundleICloudEntitlement(containerIdentifier: CompanionSyncConfig.cloudKitContainerIdentifier)
     )
@@ -754,11 +754,11 @@ private func writePushPayloadDump(to directory: URL) throws {
 private func runPushPayloadDump(arguments: [String]) throws {
     guard let flagIndex = arguments.firstIndex(of: "--push-payload-dump"),
           arguments.indices.contains(arguments.index(after: flagIndex)) else {
-        throw PushPayloadDumpError(description: "usage: continuum-revived --push-payload-dump <dir>")
+        throw PushPayloadDumpError(description: "usage: Array --push-payload-dump <dir>")
     }
     let path = arguments[arguments.index(after: flagIndex)]
     guard !path.isEmpty else {
-        throw PushPayloadDumpError(description: "usage: continuum-revived --push-payload-dump <dir>")
+        throw PushPayloadDumpError(description: "usage: Array --push-payload-dump <dir>")
     }
     try writePushPayloadDump(to: URL(fileURLWithPath: path, isDirectory: true))
 }
@@ -2429,7 +2429,7 @@ enum ContinuumApp {
             }
         }
 
-        let executablePath = CommandLine.arguments.first ?? "continuum-revived"
+        let executablePath = CommandLine.arguments.first ?? "Array"
         let ghosttyInitStatus = executablePath.withCString { executablePointer in
             var argv: [UnsafeMutablePointer<CChar>?] = [
                 UnsafeMutablePointer(mutating: executablePointer),
@@ -2657,7 +2657,7 @@ enum ContinuumApp {
 
     @MainActor
     private static func installMainMenu() {
-        let appName = "Continuum Revived"
+        let appName = "Array"
         let mainMenu = NSMenu(title: "Main Menu")
 
         let appMenuItem = NSMenuItem(title: appName, action: nil, keyEquivalent: "")
@@ -2737,15 +2737,15 @@ enum ContinuumApp {
     @MainActor
     private static func runMenuContractSelfCheck() throws {
         guard let mainMenu = NSApp.mainMenu else { throw SelfCheckError("missing NSApp.mainMenu") }
-        guard mainMenu.items.first?.title == "Continuum Revived",
+        guard mainMenu.items.first?.title == "Array",
               let appMenu = mainMenu.items.first?.submenu,
-              appMenu.title == "Continuum Revived" else { throw SelfCheckError("missing Continuum Revived app menu") }
-        try expectMenuItem(appMenu, title: "About Continuum Revived", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+              appMenu.title == "Array" else { throw SelfCheckError("missing Array app menu") }
+        try expectMenuItem(appMenu, title: "About Array", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         guard appMenu.item(withTitle: "Services")?.submenu === NSApp.servicesMenu else { throw SelfCheckError("missing Services menu") }
-        try expectMenuItem(appMenu, title: "Hide Continuum Revived", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        try expectMenuItem(appMenu, title: "Hide Array", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         try expectMenuItem(appMenu, title: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h", modifiers: [.command, .option])
         try expectMenuItem(appMenu, title: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
-        try expectMenuItem(appMenu, title: "Quit Continuum Revived", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        try expectMenuItem(appMenu, title: "Quit Array", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
         guard let editMenu = mainMenu.item(withTitle: "Edit")?.submenu else { throw SelfCheckError("missing Edit menu") }
         try expectMenuItem(editMenu, title: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
@@ -3103,7 +3103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // Ticket 87: headless component snapshot for Layer-2 vision QA. Renders
         // a Component Lab gallery to a PNG and exits, with zero project/boot
         // machinery — the reusable primitive for automated visual review.
-        //   CONTINUUM_COMPONENT_SNAPSHOT=<name> CONTINUUM_SNAPSHOT_OUT=<path> continuum-revived
+        //   CONTINUUM_COMPONENT_SNAPSHOT=<name> CONTINUUM_SNAPSHOT_OUT=<path> Array
         if let snapshot = ProcessInfo.processInfo.environment["CONTINUUM_COMPONENT_SNAPSHOT"] {
             let out = ProcessInfo.processInfo.environment["CONTINUUM_SNAPSHOT_OUT"] ?? "component-snapshot.png"
             let ok = Self.renderComponentSnapshot(named: snapshot, to: out)
@@ -11182,7 +11182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private static func resolveProjectRoot(smokeTest: Bool, registry: Registry) throws -> URL {
         if smokeTest, ProcessInfo.processInfo.environment["CONTINUUM_PROJECT_ROOT"] == nil {
             let temp = FileManager.default.temporaryDirectory
-                .appendingPathComponent("continuum-smoke-project-\(UUID().uuidString)", isDirectory: true)
+                .appendingPathComponent("array-smoke-project-\(UUID().uuidString)", isDirectory: true)
             try? FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
             return temp
         }
@@ -11370,7 +11370,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try projectStore.saveNoteState(noteState)
 
         let smokeFileURL = projectRoot
-            .appendingPathComponent(".continuum-revived", isDirectory: true)
+            .appendingPathComponent(".array", isDirectory: true)
             .appendingPathComponent("smoke-file.txt", isDirectory: false)
         try FileManager.default.createDirectory(
             at: smokeFileURL.deletingLastPathComponent(),
@@ -11381,7 +11381,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try smokeFileData.write(to: smokeFileURL, options: .atomic)
 
         let smokeTreeRoot = projectRoot
-            .appendingPathComponent(".continuum-revived", isDirectory: true)
+            .appendingPathComponent(".array", isDirectory: true)
             .appendingPathComponent("smoke-tree", isDirectory: true)
         try FileManager.default.createDirectory(
             at: smokeTreeRoot.appendingPathComponent("b", isDirectory: true),
@@ -11859,9 +11859,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if let registry,
            let workspaceId = registry.lastActiveWorkspaceId,
            let workspace = registry.workspaces.first(where: { $0.id == workspaceId }) {
-            return "\(workspace.name) — Continuum"
+            return "\(workspace.name) — Array"
         }
-        return "\(project.name) — Continuum"
+        return "\(project.name) — Array"
     }
 
     static func runAddZoneSelfCheck() throws -> URL {
@@ -12045,8 +12045,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(zoneRegistry.liveProjectIds == Set([projectP]),
                    "assertion 6: projectId-keyed registry should only contain P (not polluted by group zone)")
         // acquireLock: false — no lock file must materialise in the ambient root.
-        // (acquireLock: true would create <root>/.continuum-revived/lock via ProjectLock.acquire().)
-        let ambientLockFile = hgroup.appendingPathComponent(".continuum-revived/lock")
+        // (acquireLock: true would create <root>/.array/lock via ProjectLock.acquire().)
+        let ambientLockFile = hgroup.appendingPathComponent(".array/lock")
         try expect(!fm.fileExists(atPath: ambientLockFile.path),
                    "assertion 6: group/ambient controller must NOT hold a project lock (acquireLock:false); lock file unexpectedly exists at \(ambientLockFile.path)")
 
@@ -12195,11 +12195,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 return $0 == usablePath
             },
             continuumDirectoryExists: {
-                probedPaths.append($0 + "/.continuum-revived")
+                probedPaths.append($0 + "/.array")
                 return $0 == usablePath
             },
             canCreateContinuumDirectory: {
-                probedPaths.append($0 + "/.continuum-revived:create")
+                probedPaths.append($0 + "/.array:create")
                 return false
             }
         )
@@ -12222,7 +12222,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 terminalClosePolicy: .askWhenRunning
             )
         )
-        try expect(mainWindowTitle(for: titleProbe) == "Usable — Continuum", "window title includes active project name")
+        try expect(mainWindowTitle(for: titleProbe) == "Usable — Array", "window title includes active project name")
 
         let registryDecision = ProjectLaunchCoordinator.decide(environment: [:], registry: registry, fileSystem: probes)
         try expect(registryDecision == .open(URL(fileURLWithPath: usablePath)), "usable registry last-active root opens")
@@ -12234,7 +12234,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(request.reason == .noUsableProject, "missing registry root uses noUsableProject picker reason")
         try expect(ProjectLaunchCoordinator.selectProject(id: usableId, from: request) == URL(fileURLWithPath: usablePath), "picker selection returns usable registry URL")
         try expect(!probedPaths.contains(cwdProbe), "resolver must not probe cwd")
-        try expect(!probedPaths.contains(cwdProbe + "/.continuum-revived"), "resolver must not probe cwd continuum directory")
+        try expect(!probedPaths.contains(cwdProbe + "/.array"), "resolver must not probe cwd continuum directory")
 
         let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent("continuum-workspace-resolution-\(UUID().uuidString)", isDirectory: true)
         let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
@@ -12297,7 +12297,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         if ProcessInfo.processInfo.environment["CONTINUUM_PROJECT_ROOT"] == nil {
             let smokeRoot = try resolveProjectRoot(smokeTest: true, registry: .empty())
-            try expect(smokeRoot.lastPathComponent.hasPrefix("continuum-smoke-project-"), "smoke path still bypasses picker with temp root")
+            try expect(smokeRoot.lastPathComponent.hasPrefix("array-smoke-project-"), "smoke path still bypasses picker with temp root")
             try expect(FileManager.default.fileExists(atPath: smokeRoot.path), "smoke temp root is created")
             try? FileManager.default.removeItem(at: smokeRoot)
         }
@@ -13013,7 +13013,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                    let fileView = self.canvasView?.tileView(for: fileTile.id) as? FileTileNSView {
                     self.canvasView?.bringToFront(tileId: fileTile.id)
                     fileView.layoutSubtreeIfNeeded()
-                    let metadataPathMatches = fileTile.metadata.filePath?.hasSuffix(".continuum-revived/smoke-file.txt") ?? false
+                    let metadataPathMatches = fileTile.metadata.filePath?.hasSuffix(".array/smoke-file.txt") ?? false
                     let bodyMatches = fileView.textView.string.contains(Self.smokeFileBody)
                     let lineCountMatches = fileView.textView.string.components(separatedBy: "\n").count >= 90
                     let evidence = fileView.textVisibilityEvidence(containing: Self.smokeFileBody)
@@ -13036,7 +13036,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     let fileTreeState = try self.projectStore?.tryLoadFileTreeState()
                     let stateMatches = fileTreeState?.tiles.contains(where: {
                         $0.tileId == Self.smokeFileTreeTileId
-                            && $0.rootPath.hasSuffix(".continuum-revived/smoke-tree")
+                            && $0.rootPath.hasSuffix(".array/smoke-tree")
                             && $0.gitBadges == .cheap
                     }) ?? false
                     let fileTreeView = self.canvasView?.tileView(for: fileTreeTile.id) as? FileTreeTileNSView
@@ -15548,7 +15548,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(deleteTmuxControl.log[0] == .killWindow(target: terminalWindowTarget), "terminal tile close must first target captured tmux pane id, got \(deleteTmuxControl.log)")
         try expect(deleteTmuxControl.log[1] == .killSession(name: expectedViewSessionName), "terminal tile close must then kill the grouped view session, got \(deleteTmuxControl.log)")
         try expect(!deleteTmuxControl.log.contains { call in
-            if case let .killSession(name) = call { return name.hasPrefix("continuum-proj-") }
+            if case let .killSession(name) = call { return name.hasPrefix("array-proj-") }
             return false
         }, "terminal close path must not kill a project session directly: \(deleteTmuxControl.log)")
         try expect(!deleteCanvas.canvasState.tiles.contains(where: { $0.id == terminalTileId }), "terminal tile close should remove tile through delete path")
@@ -15705,10 +15705,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         let sentinelTmuxControl = InMemoryTmuxControl()
         try expect(Self.runTmuxControlOperationSync({
-            _ = try await sentinelTmuxControl.newSession(name: "continuum-proj-sentinel", cwd: tempRoot.path, innerCommand: nil)
-            try await sentinelTmuxControl.killSession(name: "continuum-proj-sentinel")
+            _ = try await sentinelTmuxControl.newSession(name: "array-proj-sentinel", cwd: tempRoot.path, innerCommand: nil)
+            try await sentinelTmuxControl.killSession(name: "array-proj-sentinel")
         }) == nil, "sentinel tmux control operation should run")
-        let sentinelKillDetected = sentinelTmuxControl.log.contains(.killSession(name: "continuum-proj-sentinel"))
+        let sentinelKillDetected = sentinelTmuxControl.log.contains(.killSession(name: "array-proj-sentinel"))
         try expect(sentinelKillDetected, "sentinel should prove InMemoryTmuxControl records killSession")
 
         let workspaceDeleteTmuxControl = InMemoryTmuxControl()
@@ -15745,9 +15745,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "workspace delete should kill the ambient workspace tmux session before deleting registry entry, got \(workspaceDeleteTmuxControl.log)"
         )
         try expect(!workspaceDeleteTmuxControl.log.contains { call in
-            if case let .killSession(name) = call { return name.hasPrefix("continuum-proj-") || name.hasPrefix("continuum-") && !name.hasPrefix("continuum-ws-") }
+            if case let .killSession(name) = call { return name.hasPrefix("array-proj-") || name.hasPrefix("array-") && !name.hasPrefix("array-ws-") }
             return false
-        }, "workspace delete must target only continuum-ws session, got \(workspaceDeleteTmuxControl.log)")
+        }, "workspace delete must target only array-ws session, got \(workspaceDeleteTmuxControl.log)")
 
         let disabledTmuxControl = InMemoryTmuxControl()
         let disabledRoot = tempRoot.appendingPathComponent("disabled", isDirectory: true)

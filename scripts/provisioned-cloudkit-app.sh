@@ -326,7 +326,7 @@ verify_app_shape() {
   local app="$1"
   [[ -d "$app" ]] || fail_diagnostic "missing-app-bundle" "App bundle not found: $app"
   [[ -f "$app/Contents/Info.plist" ]] || fail_diagnostic "invalid-app-bundle" "Missing Contents/Info.plist: $app"
-  [[ -x "$app/Contents/MacOS/continuum-revived" ]] || fail_diagnostic "invalid-app-bundle" "Missing executable Contents/MacOS/continuum-revived: $app"
+  [[ -x "$app/Contents/MacOS/Array" ]] || fail_diagnostic "invalid-app-bundle" "Missing executable Contents/MacOS/Array: $app"
   local actual_bundle_id
   actual_bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")
   [[ "$actual_bundle_id" == "$bundle_id" ]] || fail_diagnostic "wrong-bundle-identifier" "Expected $bundle_id, got $actual_bundle_id in $app"
@@ -381,7 +381,7 @@ diagnose_signed_app() {
   fi
 
   set +e
-  "$app/Contents/MacOS/continuum-revived" --companion-sync-health-check >"$HEALTH_JSON" 2>"$HEALTH_ERR"
+  "$app/Contents/MacOS/Array" --companion-sync-health-check >"$HEALTH_JSON" 2>"$HEALTH_ERR"
   health_status=$?
   set -e
   if [[ "$health_status" -ne 0 ]]; then

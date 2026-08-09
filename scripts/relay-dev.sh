@@ -238,7 +238,7 @@ status_service() {
   else
     printf 'mac-config: url=%s (expected %s)\n' "${configured_url:-missing}" "$url"; failures=1
   fi
-  sync_log="$HOME/Library/Application Support/continuum-revived/companion-sync.log"
+  sync_log="$HOME/Library/Application Support/Array/companion-sync.log"
   if [[ -f "$sync_log" ]]; then
     sync_line=$(tail -n 1 "$sync_log" | sed -E 's/(Bearer[[:space:]]+)[^[:space:]]+/\1<redacted>/Ig; s/([Tt]oken[=:])[A-Za-z0-9._~-]+/\1<redacted>/g; s/[A-Fa-f0-9]{32,}/<redacted>/g')
     printf 'mac-sync-latest: %s\n' "$sync_line"

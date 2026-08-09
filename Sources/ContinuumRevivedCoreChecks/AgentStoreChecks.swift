@@ -72,15 +72,15 @@ private func agentId(_ suffix: String) -> AgentID {
 }
 
 // 1 · The root. `ManagedAgentSessionStore` writes into the PROJECT
-// (`<project>/.continuum-revived/managed-sessions/`), which is why a
+// (`<project>/.array/managed-sessions/`), which is why a
 // cross-project inbox is impossible today; this store must be somewhere no
 // project owns. Asserted as a path relationship rather than a string literal, so
 // it stays true if the app-support directory name ever moves.
 // NEGATIVE TEST (observed red): rooting `agentsDirectory` at
 // `ProjectStoreLayout(projectRoot: applicationSupportDirectory).managedSessionsDirectory`
 // → "FAIL: AgentStore files are <app-support>/agents/<agentId>.json — got
-// …/location/.continuum-revived/managed-sessions/agents/2A200000-…-000000000001.json".
-// The exact-path assertion is the one that fires; the `.continuum-revived`
+// …/location/.array/managed-sessions/agents/2A200000-…-000000000001.json".
+// The exact-path assertion is the one that fires; the `.array`
 // assertion below is defence in depth for a root this one does not pin.
 private func runAgentStoreLocationCheck(root: URL) throws {
     let base = root.appendingPathComponent("location", isDirectory: true)
@@ -90,8 +90,8 @@ private func runAgentStoreLocationCheck(root: URL) throws {
 
     expect(file.path == base.appendingPathComponent("agents/\(id.rawValue.uuidString).json").path,
            "AgentStore files are <app-support>/agents/<agentId>.json — got \(file.path)")
-    expect(!file.path.contains("/.continuum-revived/"),
-           "AgentStore keeps agents outside any project's .continuum-revived directory — \(file.path)")
+    expect(!file.path.contains("/.array/"),
+           "AgentStore keeps agents outside any project's .array directory — \(file.path)")
     expect(store.layout.backupsDirectory.path.hasPrefix(store.layout.agentsDirectory.path),
            "AgentStore backups live under the agents directory — \(store.layout.backupsDirectory.path)")
 
@@ -110,7 +110,7 @@ private func runAgentStoreLocationCheck(root: URL) throws {
     // NEGATIVE TEST (observed red): `init(applicationSupportDirectory:)`'s nil
     // branch going straight to `RegistryStore.defaultApplicationSupportDirectory()`
     // → "FAIL: a default-constructed AgentStore honours CONTINUUM_APP_SUPPORT
-    // rather than the real store — got …/Library/Application Support/continuum-revived/agents".
+    // rather than the real store — got …/Library/Application Support/Array/agents".
     let overrideRoot = root.appendingPathComponent("env-override", isDirectory: true)
     let overridden = AgentStore(smokeTest: false, environment: ["CONTINUUM_APP_SUPPORT": overrideRoot.path])
     expect(overridden.layout.agentsDirectory.path == overrideRoot.appendingPathComponent("agents").path,

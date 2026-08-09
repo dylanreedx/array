@@ -117,10 +117,10 @@ public struct DefaultWorkspaceMigration: Sendable {
         guard args.count >= 2 else { return false }
         for index in args.indices.dropLast() where args[index] == "-s" {
             let name = args[args.index(after: index)]
-            if name.hasPrefix("continuum-"),
-               !name.hasPrefix("continuum-proj-"),
-               !name.hasPrefix("continuum-ws-"),
-               !name.hasPrefix("continuum-view-") {
+            if name.hasPrefix("array-"),
+               !name.hasPrefix("array-proj-"),
+               !name.hasPrefix("array-ws-"),
+               !name.hasPrefix("array-view-") {
                 return true
             }
         }

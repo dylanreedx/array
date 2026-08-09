@@ -28,7 +28,7 @@ public struct RegistryStore: Sendable {
             .first
             ?? URL(fileURLWithPath: NSHomeDirectory())
                 .appendingPathComponent("Library/Application Support", isDirectory: true)
-        return appSupport.appendingPathComponent("continuum-revived", isDirectory: true)
+        return appSupport.appendingPathComponent("Array", isDirectory: true)
     }
 
     public func save(_ registry: Registry) throws {
