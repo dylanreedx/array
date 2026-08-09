@@ -37,9 +37,15 @@ Status as of 2026-08-09 (end of day):
   first-run onboarding panel + Help menu (Environment Setup…, Report a Problem…)
   shipped; ticket-42 hook consent deferred (machinery not built yet — correction to
   the plan, which assumed it existed).
-- Remaining: 0.2.1 release (first appcast-backed release — auto-update goes live),
-  Phase 5 (RELEASE.md runbook + clean-machine test, which re-verifies the update
-  prompt UX against the real feed).
+- **Array 0.2.1 (build 3) SHIPPED (2026-08-09, evening)** — first appcast-backed
+  release; auto-update is LIVE. Notarized + stapled, spctl-clean; v0.2.1 on
+  array-releases with both assets (public download verified byte-identical);
+  `https://arrayapp.dev/appcast.xml` serving the signed item. Update PROMPT UX
+  verified by Dylan on the local feed (prompt → install → relaunch) before shipping.
+  0.2.0 installs make one final manual download.
+- Remaining: Phase 5 clean-machine pass (fresh install of 0.2.1 from the site on a
+  second machine/account — witnesses Gatekeeper, first-run onboarding on a truly
+  fresh profile, and the next release's update against the real feed).
 
 ## Goal
 
