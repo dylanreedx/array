@@ -1,6 +1,33 @@
 # 95 — Go-live: first external release (friends alpha)
 
-Status: planned 2026-08-09. Nothing in this doc has been started.
+Status as of 2026-08-09 (end of day):
+
+- **Phase 0 (identity) DONE · Phase 1 (sign/notarize) DONE · Phase 3 (downloads) DONE
+  except the appcast (Phase 2 coupling).**
+- **Array 0.2.0 (build 2) is live**: notarized + stapled DMG published at
+  `dylanreedx/array-releases` release v0.2.0; stable URL
+  `https://github.com/dylanreedx/array-releases/releases/latest/download/Array.dmg`
+  (asset name is constant across releases — never version it).
+- **arrayapp.dev serves the Download button** (hero/nav/access + report-a-problem →
+  array-releases issues). Vercel deploys from `dylanreedx/continuum` branch `main`;
+  local work happens on `array/integration` and fast-forwards to main.
+- Also landed 2026-08-09, outside the original plan: merged the 42-commit managed-agent
+  tile production wiring (shared prefix of the `agent/luna-max-implementer-20260809*`
+  branches — their three divergent live-tile-prototype TIP commits remain unmerged,
+  awaiting Dylan's review); fixed status/context "unknown" via supervisor seeding
+  (`contextWindowSnapshot(for:)` seam, telemetry persisted on `AgentRecord`,
+  authoritative 0% for zero-turn sessions); finished the identity tail
+  (`array-agent-` Pi session ids, check expectations).
+- **Verification state**: full build, bundle harness, CoreChecks suite, geometry,
+  supervisor/restore/tmux/topology legs all green. Two KNOWN-RED gates, both
+  pre-existing (verified failing at pre-work HEAD `566e615`): `--component-lab-check`
+  pixel baselines (36 stale; integration waves ran `CONTINUUM_SKIP_SURFACE_CHECKS=1`;
+  needs a supervised re-bless with Dylan reviewing diffs) and the
+  `--agent-supervisor-check` NAMING section (timing flake, three distinct failure
+  messages across runs; the context-seam assertions behind it run once naming is
+  fixed — the standalone CoreChecks suite covers the rest).
+- Remaining: Phase 2 (Sparkle), Phase 4 (PATH fix + onboarding — the gate before
+  actually sending friends the link), Phase 5 (runbook + clean-machine test).
 
 ## Goal
 
@@ -18,7 +45,7 @@ install per release.
 - Small-team relay (queue 92) stays paused. Phone sync is a v0.2+ story.
 - No App Store, no sandboxing, no CI. Manual releases are fine at friend scale.
 
-## Current state (audited 2026-08-09)
+## Current state (audited 2026-08-09, morning — HISTORICAL; see status above)
 
 - Bundle is hand-assembled and unsigned: `scripts/make-app-bundle.sh` (prints
   "unsigned/unprovisioned"); `scripts/check-app-bundle.sh` ad-hoc signs for QA only.
@@ -243,19 +270,19 @@ Open implementation questions to resolve while building (not blockers):
 - Whether `swift build` needs `--disable-sandbox` quirks for the binary target (no
   indication it will; check on first build).
 
-## Phase 3 — Website download
+## Phase 3 — Website download — DONE (2026-08-09) except appcast
 
-- [ ] Create the public releases repo (suggestion: `dylanreedx/array-releases`): DMGs as
-      GitHub Release assets, release notes as the release body.
-- [ ] Download button on `website/src/pages/index.astro`: hero + nav CTA →
-      `https://github.com/dylanreedx/array-releases/releases/latest/download/Array.dmg`
-      (stable "latest" URL, no per-release site edits).
-- [ ] Requirements line under the button: macOS 14+, Apple Silicon; works with Claude
-      Code and Codex CLI; needs tmux (see Phase 4 audit — bundle or document it).
-- [ ] Keep a "something broken? request access to the group?" link — repoint the existing
-      GitHub-issue CTA at the public releases repo's issues.
+- [x] Public releases repo `dylanreedx/array-releases` created; v0.2.0 published with
+      release notes and TWO assets: `Array.dmg` (stable name — the latest-download URL
+      depends on it staying constant) and `Array-<version>.dmg` (permalink for the
+      future appcast). Download verified byte-identical to the notarized artifact.
+- [x] Download button live on arrayapp.dev: hero + nav + access CTAs →
+      `https://github.com/dylanreedx/array-releases/releases/latest/download/Array.dmg`.
+- [x] Requirements line under the hero button (macOS 14+ · Apple Silicon · free while
+      in alpha). tmux bundling/guidance still owned by Phase 4's audit.
+- [x] "Report a problem" → array-releases issues (code repo stays private).
 - [ ] `website/public/appcast.xml` + a minimal `/releases` (or changelog) page fed from
-      the same release notes, so "what's new" has a URL.
+      the same release notes, so "what's new" has a URL. (Belongs to Phase 2 step 6.)
 
 ## Phase 4 — Onboarding + CLI connect/verify
 
