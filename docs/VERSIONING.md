@@ -41,9 +41,8 @@ The two move together: every shipped `X.Y.Z` gets the next build number
   the appcast is generated from it.
 - **Never commit:** the Sparkle private EdDSA key (Keychain-only — back it
   up), `releases/`, `.env`, QA stores, signing material.
-- **Append a row to the ledger below on every release**, and the abbreviated
-  copy in `CLAUDE.md`. Why: this table is how future sessions know which
-  build number is next.
+- **Append a row to the ledger below on every release.** Why: this table is
+  how future sessions know which build number is next.
 - **Branch topology:** work lands on `array/integration`, fast-forwards to
   `main`.
 - **Identity:** the app is Array, bundle id `dev.arrayapp.macos`. Internal
