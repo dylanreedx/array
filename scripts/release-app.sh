@@ -105,8 +105,10 @@ BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST")
 DMG="$OUTPUT_DIR/Array-$VERSION.dmg"
 log "version: $VERSION ($BUILD)"
 
-# Sign inside-out: embedded frameworks/dylibs/XPC first (none today; Sparkle
-# lands here in phase 2), then the app itself with hardened runtime.
+# Sign inside-out: embedded frameworks/dylibs/XPC first (today: Sparkle and its
+# updater pieces), then the app itself with hardened runtime. Sparkle's
+# Autoupdate is a bare executable, hence the extra -name; its XPC services
+# carry sandbox entitlements that must survive re-signing.
 SIGN_FLAGS=(--force --options runtime --sign "$IDENTITY")
 if [[ "$ADHOC" == 0 ]]; then
   SIGN_FLAGS+=(--timestamp)
@@ -115,8 +117,12 @@ log "==> codesign (hardened runtime)"
 if [[ -d "$APP/Contents/Frameworks" ]]; then
   while IFS= read -r -d '' nested; do
     log "    signing nested: $nested"
-    codesign "${SIGN_FLAGS[@]}" "$nested" >>"$LOG" 2>&1
-  done < <(find "$APP/Contents/Frameworks" -depth \( -name '*.framework' -o -name '*.dylib' -o -name '*.xpc' -o -name '*.app' \) -print0)
+    nested_flags=("${SIGN_FLAGS[@]}")
+    if [[ "$nested" == *.xpc ]]; then
+      nested_flags+=(--preserve-metadata=entitlements)
+    fi
+    codesign "${nested_flags[@]}" "$nested" >>"$LOG" 2>&1
+  done < <(find "$APP/Contents/Frameworks" -depth \( -name '*.framework' -o -name '*.dylib' -o -name '*.xpc' -o -name '*.app' -o -name 'Autoupdate' \) -print0)
 fi
 codesign "${SIGN_FLAGS[@]}" "$APP" >>"$LOG" 2>&1
 codesign --verify --deep --strict --verbose=2 "$APP" >>"$LOG" 2>&1

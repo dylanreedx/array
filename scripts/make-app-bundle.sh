@@ -53,17 +53,31 @@ BUILD_DIR="$ROOT_DIR/.build/$CONFIGURATION"
 EXECUTABLE="$BUILD_DIR/Array"
 PLIST_SOURCE="$ROOT_DIR/Packaging/Info.plist"
 ICON_SOURCE="$ROOT_DIR/Packaging/AppIcon.icns"
+# Sparkle ships as an SPM binary artifact; layout pinned 2026-08-09 (Sparkle
+# 2.9.5): bin/ tools + the xcframework live under .build/artifacts/sparkle.
+SPARKLE_FRAMEWORK="$ROOT_DIR/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
 
 [[ -x "$EXECUTABLE" ]] || { echo "built executable not found: $EXECUTABLE" >&2; exit 1; }
 [[ -f "$PLIST_SOURCE" ]] || { echo "Info.plist source not found: $PLIST_SOURCE" >&2; exit 1; }
 [[ -f "$ICON_SOURCE" ]] || { echo "icon source not found: $ICON_SOURCE" >&2; exit 1; }
+[[ -d "$SPARKLE_FRAMEWORK" ]] || { echo "Sparkle.framework not found: $SPARKLE_FRAMEWORK (run swift build first)" >&2; exit 1; }
 
 rm -rf "$OUTPUT"
-mkdir -p "$OUTPUT/Contents/MacOS" "$OUTPUT/Contents/Resources"
+mkdir -p "$OUTPUT/Contents/MacOS" "$OUTPUT/Contents/Resources" "$OUTPUT/Contents/Frameworks"
 cp "$EXECUTABLE" "$OUTPUT/Contents/MacOS/Array"
 chmod 0755 "$OUTPUT/Contents/MacOS/Array"
 cp "$PLIST_SOURCE" "$OUTPUT/Contents/Info.plist"
 cp "$ICON_SOURCE" "$OUTPUT/Contents/Resources/AppIcon.icns"
+
+# Sparkle: SwiftPM links the executable against @rpath/Sparkle.framework/… but
+# only stamps rpaths for the bare-binary layout (@loader_path). Embed the
+# framework where a bundle expects it and add the matching rpath.
+ditto "$SPARKLE_FRAMEWORK" "$OUTPUT/Contents/Frameworks/Sparkle.framework"
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$OUTPUT/Contents/MacOS/Array"
+# install_name_tool invalidates the linker's ad-hoc signature and arm64 refuses
+# to run unsigned binaries; re-sign ad hoc (release-app.sh re-signs with
+# Developer ID over this).
+codesign --force --sign - "$OUTPUT/Contents/MacOS/Array"
 
 # GhosttyKit is currently linked statically by SwiftPM. Do not copy the full
 # xcframework unless a future otool -L check shows a runtime Ghostty dependency.

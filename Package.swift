@@ -19,7 +19,11 @@ let package = Package(
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.11.1"),
         // Reviewed source: https://github.com/swiftlang/swift-markdown/tree/0.8.0
         // Apache-2.0 with Runtime Library Exception: LICENSE.txt at that tag.
-        .package(url: "https://github.com/swiftlang/swift-markdown.git", exact: "0.8.0")
+        .package(url: "https://github.com/swiftlang/swift-markdown.git", exact: "0.8.0"),
+        // Go-live Phase 2 (docs/38-tickets/95-go-live.md): auto-update. Binary
+        // XCFramework target; app target only — the updater must never reach
+        // Core/Sync, and QA legs running the bare binary keep it inert.
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.8.0")
     ],
     targets: [
         .binaryTarget(
@@ -111,7 +115,8 @@ let package = Package(
                 "ContinuumRevivedFileTree",
                 "ContinuumRevivedCore",
                 "ContinuumRevivedSync",
-                "GhosttyKit"
+                "GhosttyKit",
+                .product(name: "Sparkle", package: "Sparkle")
             ],
             exclude: [
                 "Canvas/FileTreeGitStatusProbe.swift",

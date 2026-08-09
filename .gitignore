@@ -10,6 +10,9 @@ ThirdParty/
 .pi/cache/
 .pi/tmp/
 qa-runs/
+# Go-live Phase 2: local archive of shipped DMGs the appcast is generated from
+# (scripts/generate-appcast.sh). Big binaries — back it up, don't commit it.
+releases/
 .swiftpm/
 # P2C.1: per-agent git worktrees live at <repo>/.worktrees/<slug>.
 .worktrees/

@@ -110,6 +110,28 @@ assert_eq "14.0" "$minimum_system" "LSMinimumSystemVersion"
 [[ -n "$bundle_version" ]] || { echo "FAIL: missing bundle version" >&2; exit 1; }
 [[ -f "$RESOURCES/${icon_file%.icns}.icns" || -f "$RESOURCES/$icon_file" ]] || { echo "FAIL: missing icon resource for $icon_file" >&2; exit 1; }
 
+# Sparkle (go-live Phase 2): feed keys in the plist, framework embedded with
+# its updater pieces, and the rpath that lets the bundled binary find it. The
+# launch probe below is the behavioral proof the rpath resolves.
+su_feed_url=$(/usr/libexec/PlistBuddy -c 'Print :SUFeedURL' "$PLIST")
+su_public_ed_key=$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$PLIST")
+assert_eq "https://arrayapp.dev/appcast.xml" "$su_feed_url" "SUFeedURL"
+[[ -n "$su_public_ed_key" ]] || { echo "FAIL: missing SUPublicEDKey" >&2; exit 1; }
+if /usr/libexec/PlistBuddy -c 'Print :SUEnableAutomaticChecks' "$PLIST" >/dev/null 2>&1; then
+  echo "FAIL: SUEnableAutomaticChecks must stay unset (Sparkle asks the user on second launch)" >&2
+  exit 1
+fi
+SPARKLE_BUNDLED="$BUNDLE_PATH/Contents/Frameworks/Sparkle.framework"
+[[ -f "$SPARKLE_BUNDLED/Versions/B/Sparkle" ]] || { echo "FAIL: missing embedded Sparkle.framework binary" >&2; exit 1; }
+[[ -d "$SPARKLE_BUNDLED/Versions/B/XPCServices/Downloader.xpc" ]] || { echo "FAIL: missing Sparkle Downloader.xpc" >&2; exit 1; }
+[[ -d "$SPARKLE_BUNDLED/Versions/B/XPCServices/Installer.xpc" ]] || { echo "FAIL: missing Sparkle Installer.xpc" >&2; exit 1; }
+[[ -d "$SPARKLE_BUNDLED/Versions/B/Updater.app" ]] || { echo "FAIL: missing Sparkle Updater.app" >&2; exit 1; }
+[[ -f "$SPARKLE_BUNDLED/Versions/B/Autoupdate" ]] || { echo "FAIL: missing Sparkle Autoupdate" >&2; exit 1; }
+if ! /usr/bin/otool -l "$EXE" | grep -q '@executable_path/../Frameworks'; then
+  echo "FAIL: executable missing @executable_path/../Frameworks rpath" >&2
+  exit 1
+fi
+
 /usr/bin/file "$EXE" | tee "$FILE_LOG"
 /usr/bin/otool -L "$EXE" | tee "$OTOOL_LOG"
 find "$BUNDLE_PATH" \( -path '*GhosttyKit*' -o -name 'libghostty*' \) -print | sort | tee "$GHOSTTY_LOG"
@@ -250,6 +272,7 @@ CODESIGN_LOG="$CODESIGN_LOG" LAUNCH_LOG="$LAUNCH_LOG" LAUNCH_SENTINEL="$LAUNCH_S
 bundle_id="$bundle_id" bundle_executable="$bundle_executable" bundle_name="$bundle_name" \
 bundle_package="$bundle_package" icon_file="$icon_file" minimum_system="$minimum_system" \
 forbidden_slices_absent="$forbidden_slices_absent" ghostty_runtime_dependency="$ghostty_runtime_dependency" \
+su_feed_url="$su_feed_url" su_public_ed_key="$su_public_ed_key" \
 persistent_pollution="$persistent_pollution" real_defaults_pollution="$real_defaults_pollution" \
 defaults_key="continuum.deleteConfirmPolicy" old_defaults_domain="continuum-revived" \
 isolated_home="$isolated_home" cf_fixed_user_home="$isolated_home" \
@@ -275,6 +298,7 @@ manifest = {
     "iconFile": os.environ["icon_file"],
     "ghosttyRuntimeDependency": os.environ["ghostty_runtime_dependency"] == "true",
     "ghosttyForbiddenSlicesAbsent": os.environ["forbidden_slices_absent"] == "true",
+    "sparkle": {"frameworkEmbedded": True, "feedURL": os.environ["su_feed_url"], "publicEDKeyPresent": bool(os.environ["su_public_ed_key"])},
     "persistentAppSupportPollution": os.environ["persistent_pollution"] == "true",
     "realDefaultsPollution": os.environ["real_defaults_pollution"] == "true",
     "menuContract": menu,

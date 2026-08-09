@@ -26,5 +26,9 @@
 	<string>14.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>SUFeedURL</key>
+	<string>https://arrayapp.dev/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>o3eIWuneUYLaNxzh0Z1A8NSAPBnTINnpqprZQLennHE=</string>
 </dict>
 </plist>

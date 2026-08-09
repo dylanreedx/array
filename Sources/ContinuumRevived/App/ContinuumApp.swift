@@ -7,6 +7,7 @@ import Foundation
 import GhosttyKit
 import os
 import Security
+import Sparkle
 import WebKit
 
 private actor DesktopCompanionLogFreshnessPublisher: CompanionLifecycleHintPublishing {
@@ -2681,8 +2682,30 @@ enum ContinuumApp {
 
         application.delegate = delegate
         application.setActivationPolicy(.regular)
+        if updaterPermitted() {
+            updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+        }
         installMainMenu()
         application.run()
+    }
+
+    // Go-live Phase 2 (docs/38-tickets/95-go-live.md): the auto-updater may only
+    // start inside the real distributed bundle. The QA matrix runs the bare
+    // binary (bundleIdentifier == nil), self-check legs pass `--*-check` flags,
+    // and isolated QA runs of the bundle mark themselves with CONTINUUM_* env —
+    // in all of those the updater must stay inert: no network, no prompts.
+    @MainActor
+    private static var updaterController: SPUStandardUpdaterController?
+
+    private static func updaterPermitted() -> Bool {
+        guard Bundle.main.bundleIdentifier == "dev.arrayapp.macos" else { return false }
+        let environment = ProcessInfo.processInfo.environment
+        if environment["CONTINUUM_APP_SUPPORT"] != nil { return false }
+        if environment["CONTINUUM_SMOKE_TEST"] == "1" { return false }
+        if environment["CONTINUUM_QA_FLOW"] != nil { return false }
+        if environment["CONTINUUM_COMPONENT_SNAPSHOT"] != nil { return false }
+        if CommandLine.arguments.contains(where: { $0.hasPrefix("--") }) { return false }
+        return true
     }
 
     @MainActor
@@ -2693,6 +2716,13 @@ enum ContinuumApp {
         let appMenuItem = NSMenuItem(title: appName, action: nil, keyEquivalent: "")
         let appMenu = NSMenu(title: appName)
         appMenu.addItem(NSMenuItem(title: "About \(appName)", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: ""))
+        appMenu.addItem(NSMenuItem.separator())
+        // Target is the updater controller when updates are permitted; nil in
+        // QA/bare-binary runs, where no responder implements the selector and
+        // AppKit leaves the item visible but disabled.
+        let checkForUpdatesItem = NSMenuItem(title: "Check for Updates…", action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), keyEquivalent: "")
+        checkForUpdatesItem.target = updaterController
+        appMenu.addItem(checkForUpdatesItem)
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(NSMenuItem(title: "Settings…", action: #selector(AppDelegate.openSettingsFromMenu(_:)), keyEquivalent: ","))
         appMenu.addItem(NSMenuItem.separator())
@@ -2771,6 +2801,16 @@ enum ContinuumApp {
               let appMenu = mainMenu.items.first?.submenu,
               appMenu.title == "Array" else { throw SelfCheckError("missing Array app menu") }
         try expectMenuItem(appMenu, title: "About Array", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        // The contract runs in QA mode (`--menu-contract-check`), where the
+        // updater gate keeps `updaterController` nil: the item must exist with
+        // Sparkle's selector but stay inert (nil target, so AppKit disables it).
+        guard let updatesItem = appMenu.item(withTitle: "Check for Updates…") else { throw SelfCheckError("missing menu item Check for Updates…") }
+        guard updatesItem.action == #selector(SPUStandardUpdaterController.checkForUpdates(_:)) else {
+            throw SelfCheckError("menu item Check for Updates… has action \(String(describing: updatesItem.action))")
+        }
+        guard updatesItem.target === updaterController else {
+            throw SelfCheckError("menu item Check for Updates… target should be the updater controller (nil when gated)")
+        }
         guard appMenu.item(withTitle: "Services")?.submenu === NSApp.servicesMenu else { throw SelfCheckError("missing Services menu") }
         try expectMenuItem(appMenu, title: "Hide Array", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         try expectMenuItem(appMenu, title: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h", modifiers: [.command, .option])
