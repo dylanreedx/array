@@ -17,7 +17,9 @@ public struct TerminalSpawnAdmission: Equatable {
 
     public static let defaultMaxLive = 32
     public static let debounceWindow: TimeInterval = 0.300
-    public static let bundledDefaultsDomain = "dev.arrayapp.macos"
+    // Channel-scoped (AppChannel): dev builds read the DEV bundle's domain,
+    // never prod preferences.
+    public static var bundledDefaultsDomain: String { AppChannel.liveBundledDefaultsDomain }
     public static let legacyDefaultsDomain = "continuum.revived"
     public static let defaultsKey = "continuum.terminalLiveBudget"
 

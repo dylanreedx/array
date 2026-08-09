@@ -90,8 +90,8 @@ if [[ "$SKIP_NOTARIZE" == 0 && -z "$NOTARY_PROFILE" ]]; then
   exit 2
 fi
 
-log "==> build + assemble bundle ($CONFIGURATION)"
-"$ROOT_DIR/scripts/make-app-bundle.sh" --configuration "$CONFIGURATION" --output "$APP" >>"$LOG" 2>&1
+log "==> build + assemble bundle ($CONFIGURATION, prod channel)"
+"$ROOT_DIR/scripts/make-app-bundle.sh" --configuration "$CONFIGURATION" --channel prod --output "$APP" >>"$LOG" 2>&1
 
 PLIST="$APP/Contents/Info.plist"
 if [[ -n "$SET_VERSION" ]]; then

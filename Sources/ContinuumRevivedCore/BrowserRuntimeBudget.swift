@@ -10,7 +10,9 @@ public struct BrowserRuntimeBudget: Equatable {
     }
 
     public static let defaultMaxLive = 6
-    public static let bundledDefaultsDomain = "dev.arrayapp.macos"
+    // Channel-scoped (AppChannel): dev builds read the DEV bundle's domain,
+    // never prod preferences.
+    public static var bundledDefaultsDomain: String { AppChannel.liveBundledDefaultsDomain }
     public static let legacyDefaultsDomain = "continuum.revived"
     public static let defaultsKey = "continuum.browserLiveBudget"
 

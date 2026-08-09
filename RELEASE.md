@@ -73,6 +73,11 @@ The one-page runbook for shipping a release. Program history and rationale live 
 
 ## Notes
 
+- **Channels:** only `release-app.sh` produces a prod-identified bundle
+  (`dev.arrayapp.macos`). Plain `make-app-bundle.sh` output is the DEV channel
+  ("Array Dev", own state, updater inert) — safe to run next to the prod copy.
+  Verify a release bundle with `check-app-bundle.sh --channel prod`.
+
 - 0.2.0 shipped without Sparkle: those installs cannot auto-update and make one
   final manual download. Every install from 0.2.1 on updates in-app.
 - Sparkle asks the user for permission to check automatically on second launch

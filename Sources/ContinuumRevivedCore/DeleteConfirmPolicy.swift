@@ -18,7 +18,9 @@ public enum DeleteConfirmPolicy: String, Sendable {
     case always
 
     public static let userDefaultsKey = "continuum.deleteConfirmPolicy"
-    public static let bundledDefaultsDomain = "dev.arrayapp.macos"
+    // Channel-scoped (AppChannel): dev builds read the DEV bundle's domain,
+    // never prod preferences.
+    public static var bundledDefaultsDomain: String { AppChannel.liveBundledDefaultsDomain }
     public static let legacyDefaultsDomain = "continuum-revived"
 
     public static var current: DeleteConfirmPolicy {

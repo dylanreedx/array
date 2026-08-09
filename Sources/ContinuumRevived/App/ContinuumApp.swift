@@ -844,6 +844,38 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--app-support-channel-check") {
+            do {
+                // Wiring proof: the resolved default dir follows THIS bundle's
+                // channel (prod bundle → "Array", dev bundle / bare → "Array Dev").
+                let expected = AppChannel.liveApplicationSupportDirectoryName
+                let resolved = RegistryStore.defaultApplicationSupportDirectory().lastPathComponent
+                guard resolved == expected else {
+                    throw SelfCheckError("default app-support dir \(resolved) != channel dir \(expected) for bundle id \(Bundle.main.bundleIdentifier ?? "nil")")
+                }
+                // QA isolation unchanged: an explicit override still wins.
+                let override = AgentStore.resolveApplicationSupportDirectory(
+                    smokeTest: false,
+                    environment: ["CONTINUUM_APP_SUPPORT": "/tmp/qa-override"]
+                )
+                guard override?.path == "/tmp/qa-override" else {
+                    throw SelfCheckError("CONTINUUM_APP_SUPPORT override lost")
+                }
+                // Defaults-domain fallbacks are channel-scoped: a dev build
+                // must never read or write prod preferences.
+                guard DeleteConfirmPolicy.bundledDefaultsDomain == AppChannel.liveBundledDefaultsDomain,
+                      TerminalSpawnAdmission.bundledDefaultsDomain == AppChannel.liveBundledDefaultsDomain,
+                      BrowserRuntimeBudget.bundledDefaultsDomain == AppChannel.liveBundledDefaultsDomain else {
+                    throw SelfCheckError("bundledDefaultsDomain not channel-scoped")
+                }
+                print("ContinuumRevivedAppSupportChannelChecks passed: \(resolved)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--tool-path-bootstrap-check") {
             do {
                 ToolEnvironment.shared.bootstrap()

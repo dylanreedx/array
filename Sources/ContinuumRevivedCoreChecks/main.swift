@@ -4187,12 +4187,30 @@ do {
     let legacyProject = try JSONDecoder().decode(ProjectEntry.self, from: legacyProjectJSON)
     expect(legacyProject.missing == false, "ProjectEntry decodes legacy entries without missing as present")
 
-    // The default Application Support path should at least include the app name.
+    // Channel split: this check binary has no bundle id, so it must resolve
+    // the DEV store — proof that bare/agent runs never touch real state.
     let defaultDir = RegistryStore.defaultApplicationSupportDirectory()
     expect(
-        defaultDir.path.hasSuffix("/Array") || defaultDir.path.contains("Array/"),
-        "Default registry directory ends with /Array, got \(defaultDir.path)"
+        defaultDir.path.hasSuffix("/Array Dev"),
+        "Bare-binary default registry directory is the dev channel, got \(defaultDir.path)"
     )
+}
+
+// MARK: - AppChannel: dev/prod split (pure mapping)
+
+do {
+    expect(AppChannel.applicationSupportDirectoryName(bundleIdentifier: "dev.arrayapp.macos") == "Array",
+           "Prod bundle id resolves the prod support dir")
+    expect(AppChannel.applicationSupportDirectoryName(bundleIdentifier: "dev.arrayapp.macos.dev") == "Array Dev",
+           "Dev bundle id resolves the dev support dir")
+    expect(AppChannel.applicationSupportDirectoryName(bundleIdentifier: nil) == "Array Dev",
+           "No bundle id (bare binary) resolves the dev support dir")
+    expect(AppChannel.applicationSupportDirectoryName(bundleIdentifier: "com.example.other") == "Array Dev",
+           "Any non-prod bundle id resolves the dev support dir")
+    expect(AppChannel.bundledDefaultsDomain(bundleIdentifier: "dev.arrayapp.macos") == "dev.arrayapp.macos",
+           "Prod bundle id resolves the prod defaults domain")
+    expect(AppChannel.bundledDefaultsDomain(bundleIdentifier: nil) == "dev.arrayapp.macos.dev",
+           "Everything non-prod resolves the dev defaults domain")
 }
 
 // MARK: - ProjectRootResolver

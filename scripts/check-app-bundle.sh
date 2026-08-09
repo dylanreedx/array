@@ -5,13 +5,17 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 CONFIGURATION=debug
 OUTPUT_DIR=""
 BUNDLE_PATH=""
+CHANNEL=dev
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/check-app-bundle.sh [--configuration debug|release] [--output-dir <dir>] [--bundle <path>]
+Usage: scripts/check-app-bundle.sh [--configuration debug|release] [--channel dev|prod] [--output-dir <dir>] [--bundle <path>]
 
 Builds (unless --bundle is supplied) and verifies the Array.app bundle.
-Writes manifest.json, file.txt, otool-L.txt, and ghostty-artifacts.txt under the run directory.
+--channel selects the identity to assert (default dev — matching
+make-app-bundle.sh's default); pass --channel prod when verifying a release
+bundle. Writes manifest.json, file.txt, otool-L.txt, and ghostty-artifacts.txt
+under the run directory.
 USAGE
 }
 
@@ -20,6 +24,11 @@ while [[ $# -gt 0 ]]; do
     --configuration)
       [[ $# -ge 2 ]] || { echo "missing value for --configuration" >&2; exit 2; }
       CONFIGURATION="$2"
+      shift 2
+      ;;
+    --channel)
+      [[ $# -ge 2 ]] || { echo "missing value for --channel" >&2; exit 2; }
+      CHANNEL="$2"
       shift 2
       ;;
     --output-dir)
@@ -49,6 +58,18 @@ case "$CONFIGURATION" in
   *) echo "--configuration must be debug or release" >&2; exit 2 ;;
 esac
 
+case "$CHANNEL" in
+  dev)
+    EXPECTED_BUNDLE_ID="dev.arrayapp.macos.dev"
+    EXPECTED_APP_NAME="Array Dev"
+    ;;
+  prod)
+    EXPECTED_BUNDLE_ID="dev.arrayapp.macos"
+    EXPECTED_APP_NAME="Array"
+    ;;
+  *) echo "--channel must be dev or prod" >&2; exit 2 ;;
+esac
+
 cd "$ROOT_DIR"
 if [[ -z "$OUTPUT_DIR" ]]; then
   stamp=$(date -u +%Y%m%dT%H%M%SZ)
@@ -59,7 +80,7 @@ OUTPUT_DIR=$(cd "$OUTPUT_DIR" && pwd)
 
 if [[ -z "$BUNDLE_PATH" ]]; then
   BUNDLE_PATH="$OUTPUT_DIR/Array.app"
-  "$ROOT_DIR/scripts/make-app-bundle.sh" --configuration "$CONFIGURATION" --output "$BUNDLE_PATH"
+  "$ROOT_DIR/scripts/make-app-bundle.sh" --configuration "$CONFIGURATION" --channel "$CHANNEL" --output "$BUNDLE_PATH"
 fi
 
 PLIST="$BUNDLE_PATH/Contents/Info.plist"
@@ -76,6 +97,7 @@ MANIFEST="$OUTPUT_DIR/manifest.json"
 REAL_SUPPORT="$HOME/Library/Application Support"
 REAL_PREFS="$HOME/Library/Preferences"
 NEW_DEFAULTS_PLIST="$REAL_PREFS/dev.arrayapp.macos.plist"
+DEV_DEFAULTS_PLIST="$REAL_PREFS/dev.arrayapp.macos.dev.plist"
 LEGACY_BUNDLED_DEFAULTS_PLIST="$REAL_PREFS/com.continuum.revived.plist"
 OLD_DEFAULTS_PLIST="$REAL_PREFS/continuum-revived.plist"
 
@@ -100,10 +122,10 @@ bundle_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST")
 minimum_system=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$PLIST")
 icon_file=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$PLIST")
 
-assert_eq "dev.arrayapp.macos" "$bundle_id" "CFBundleIdentifier"
+assert_eq "$EXPECTED_BUNDLE_ID" "$bundle_id" "CFBundleIdentifier"
 assert_eq "Array" "$bundle_executable" "CFBundleExecutable"
-assert_eq "Array" "$bundle_name" "CFBundleName"
-assert_eq "Array" "$bundle_display" "CFBundleDisplayName"
+assert_eq "$EXPECTED_APP_NAME" "$bundle_name" "CFBundleName"
+assert_eq "$EXPECTED_APP_NAME" "$bundle_display" "CFBundleDisplayName"
 assert_eq "APPL" "$bundle_package" "CFBundlePackageType"
 assert_eq "14.0" "$minimum_system" "LSMinimumSystemVersion"
 [[ -n "$bundle_short_version" ]] || { echo "FAIL: missing short version" >&2; exit 1; }
@@ -152,7 +174,7 @@ else
   ghostty_runtime_dependency=false
 fi
 
-before_support=$(find "$REAL_SUPPORT" -maxdepth 1 \( -iname '*continuum*' -o -name 'Array' \) -print 2>/dev/null | sort || true)
+before_support=$(find "$REAL_SUPPORT" -maxdepth 1 \( -iname '*continuum*' -o -name 'Array' -o -name 'Array Dev' \) -print 2>/dev/null | sort || true)
 plist_snapshot() {
   local path="$1"
   if [[ ! -e "$path" ]]; then
@@ -170,13 +192,14 @@ cleanup_empty_created_plist() {
 }
 
 before_new_defaults=$(plist_snapshot "$NEW_DEFAULTS_PLIST")
+before_dev_defaults=$(plist_snapshot "$DEV_DEFAULTS_PLIST")
 before_legacy_bundled_defaults=$(plist_snapshot "$LEGACY_BUNDLED_DEFAULTS_PLIST")
 before_old_defaults=$(plist_snapshot "$OLD_DEFAULTS_PLIST")
 project_root=$(mktemp -d "${TMPDIR:-/tmp}/continuum-bundle-project.XXXXXX")
 app_support=$(mktemp -d "${TMPDIR:-/tmp}/continuum-bundle-appsupport.XXXXXX")
 isolated_home=$(mktemp -d "${TMPDIR:-/tmp}/continuum-bundle-home.XXXXXX")
 : > "$SELF_CHECK_LOG"
-self_checks=(--palette-duplicate-root-check --file-tree-boot-persistence-check --menu-contract-check --delete-confirm-policy-defaults-check --tool-path-bootstrap-check)
+self_checks=(--palette-duplicate-root-check --file-tree-boot-persistence-check --menu-contract-check --delete-confirm-policy-defaults-check --tool-path-bootstrap-check --app-support-channel-check)
 if [[ -n "${CONTINUUM_BUNDLE_CHECK_FORCE_FAIL:-}" ]]; then
   self_checks+=("$CONTINUUM_BUNDLE_CHECK_FORCE_FAIL")
 fi
@@ -239,18 +262,20 @@ if [[ "$sentinel_status" != "0" ]]; then
   launch_status=$sentinel_status
 fi
 rm -rf "$project_root" "$app_support" "$isolated_home" "$launch_project_root" "$launch_app_support" "$launch_home"
-after_support=$(find "$REAL_SUPPORT" -maxdepth 1 \( -iname '*continuum*' -o -name 'Array' \) -print 2>/dev/null | sort || true)
+after_support=$(find "$REAL_SUPPORT" -maxdepth 1 \( -iname '*continuum*' -o -name 'Array' -o -name 'Array Dev' \) -print 2>/dev/null | sort || true)
 cleanup_empty_created_plist "$before_new_defaults" "$NEW_DEFAULTS_PLIST"
+cleanup_empty_created_plist "$before_dev_defaults" "$DEV_DEFAULTS_PLIST"
 cleanup_empty_created_plist "$before_legacy_bundled_defaults" "$LEGACY_BUNDLED_DEFAULTS_PLIST"
 cleanup_empty_created_plist "$before_old_defaults" "$OLD_DEFAULTS_PLIST"
 after_new_defaults=$(plist_snapshot "$NEW_DEFAULTS_PLIST")
+after_dev_defaults=$(plist_snapshot "$DEV_DEFAULTS_PLIST")
 after_legacy_bundled_defaults=$(plist_snapshot "$LEGACY_BUNDLED_DEFAULTS_PLIST")
 after_old_defaults=$(plist_snapshot "$OLD_DEFAULTS_PLIST")
 if [[ "$before_support" != "$after_support" ]]; then
   echo "FAIL: real Application Support Array/continuum entries changed" >&2
   exit 1
 fi
-if [[ "$before_new_defaults" != "$after_new_defaults" || "$before_legacy_bundled_defaults" != "$after_legacy_bundled_defaults" || "$before_old_defaults" != "$after_old_defaults" ]]; then
+if [[ "$before_new_defaults" != "$after_new_defaults" || "$before_dev_defaults" != "$after_dev_defaults" || "$before_legacy_bundled_defaults" != "$after_legacy_bundled_defaults" || "$before_old_defaults" != "$after_old_defaults" ]]; then
   echo "FAIL: real Array/Continuum defaults plists changed" >&2
   exit 1
 fi
@@ -269,7 +294,7 @@ done
 BUNDLE_PATH="$BUNDLE_PATH" PLIST="$PLIST" EXE="$EXE" OUTPUT_DIR="$OUTPUT_DIR" \
 FILE_LOG="$FILE_LOG" OTOOL_LOG="$OTOOL_LOG" GHOSTTY_LOG="$GHOSTTY_LOG" SELF_CHECK_LOG="$SELF_CHECK_LOG" \
 CODESIGN_LOG="$CODESIGN_LOG" LAUNCH_LOG="$LAUNCH_LOG" LAUNCH_SENTINEL="$LAUNCH_SENTINEL" \
-bundle_id="$bundle_id" bundle_executable="$bundle_executable" bundle_name="$bundle_name" \
+bundle_id="$bundle_id" bundle_executable="$bundle_executable" bundle_name="$bundle_name" channel="$CHANNEL" \
 bundle_package="$bundle_package" icon_file="$icon_file" minimum_system="$minimum_system" \
 forbidden_slices_absent="$forbidden_slices_absent" ghostty_runtime_dependency="$ghostty_runtime_dependency" \
 su_feed_url="$su_feed_url" su_public_ed_key="$su_public_ed_key" \
@@ -290,6 +315,7 @@ manifest = {
     "bundlePath": os.environ["BUNDLE_PATH"],
     "infoPlist": os.environ["PLIST"],
     "executable": os.environ["EXE"],
+    "channel": os.environ["channel"],
     "bundleIdentifier": os.environ["bundle_id"],
     "bundleExecutable": os.environ["bundle_executable"],
     "bundleName": os.environ["bundle_name"],

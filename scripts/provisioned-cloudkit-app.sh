@@ -171,7 +171,7 @@ EOF
   if [[ "$mode" == "build" ]]; then
     cat <<EOF
 planned commands:
-  scripts/make-app-bundle.sh --configuration $CONFIGURATION --output "$app_path"
+  scripts/make-app-bundle.sh --configuration $CONFIGURATION --channel prod --output "$app_path"
   security cms -D -i "<profile>" > "$ARTIFACT_DIR/profile.plist"
   cp "<profile>" "$app_path/Contents/embedded.provisionprofile"
   codesign --force --timestamp=none --sign "<identity>" --entitlements "$ARTIFACT_DIR/profile-entitlements.plist" "$app_path"
@@ -423,7 +423,7 @@ if [[ "$mode" == "build" ]]; then
   verify_profile_for_continuum "$PROFILE_PLIST"
 
   mkdir -p "$(dirname "$OUTPUT")"
-  scripts/make-app-bundle.sh --configuration "$CONFIGURATION" --output "$OUTPUT"
+  scripts/make-app-bundle.sh --configuration "$CONFIGURATION" --channel prod --output "$OUTPUT"
   verify_app_shape "$OUTPUT"
   cp "$PROFILE" "$OUTPUT/Contents/embedded.provisionprofile"
 

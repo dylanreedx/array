@@ -4,14 +4,18 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 CONFIGURATION=release
 OUTPUT=""
+CHANNEL=dev
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/make-app-bundle.sh [--configuration debug|release] --output <path>
+Usage: scripts/make-app-bundle.sh [--configuration debug|release] [--channel dev|prod] --output <path>
 
 Builds the SwiftPM Array executable and assembles a macOS .app bundle.
-This bundle is unsigned/unprovisioned CloudKit-wise; use
-scripts/provisioned-cloudkit-app.sh for real iCloud/CloudKit proof.
+Channel split: the DEFAULT is the dev channel (bundle id dev.arrayapp.macos.dev,
+name "Array Dev", own Application Support dir and defaults domain, updater
+inert) — only the release pipeline passes --channel prod. This bundle is
+unsigned/unprovisioned CloudKit-wise; use scripts/provisioned-cloudkit-app.sh
+for real iCloud/CloudKit proof.
 USAGE
 }
 
@@ -20,6 +24,11 @@ while [[ $# -gt 0 ]]; do
     --configuration)
       [[ $# -ge 2 ]] || { echo "missing value for --configuration" >&2; exit 2; }
       CONFIGURATION="$2"
+      shift 2
+      ;;
+    --channel)
+      [[ $# -ge 2 ]] || { echo "missing value for --channel" >&2; exit 2; }
+      CHANNEL="$2"
       shift 2
       ;;
     --output)
@@ -42,6 +51,11 @@ done
 case "$CONFIGURATION" in
   debug|release) ;;
   *) echo "--configuration must be debug or release" >&2; exit 2 ;;
+esac
+
+case "$CHANNEL" in
+  dev|prod) ;;
+  *) echo "--channel must be dev or prod" >&2; exit 2 ;;
 esac
 
 [[ -n "$OUTPUT" ]] || { echo "--output <path> is required" >&2; usage >&2; exit 2; }
@@ -69,6 +83,15 @@ chmod 0755 "$OUTPUT/Contents/MacOS/Array"
 cp "$PLIST_SOURCE" "$OUTPUT/Contents/Info.plist"
 cp "$ICON_SOURCE" "$OUTPUT/Contents/Resources/AppIcon.icns"
 
+# Channel stamping: Packaging/Info.plist carries the PROD identity; the dev
+# channel re-stamps so macOS keys everything (prefs, LaunchServices, the
+# in-app channel checks) off a distinct identity. Executable name stays Array.
+if [[ "$CHANNEL" == "dev" ]]; then
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier dev.arrayapp.macos.dev' "$OUTPUT/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleName "Array Dev"' "$OUTPUT/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName "Array Dev"' "$OUTPUT/Contents/Info.plist"
+fi
+
 # Sparkle: SwiftPM links the executable against @rpath/Sparkle.framework/… but
 # only stamps rpaths for the bare-binary layout (@loader_path). Embed the
 # framework where a bundle expects it and add the matching rpath.
@@ -83,5 +106,5 @@ codesign --force --sign - "$OUTPUT/Contents/MacOS/Array"
 # xcframework unless a future otool -L check shows a runtime Ghostty dependency.
 plutil -lint "$OUTPUT/Contents/Info.plist" >/dev/null
 
-printf 'Assembled %s\n' "$OUTPUT"
+printf 'Assembled %s (channel: %s)\n' "$OUTPUT" "$CHANNEL"
 printf 'CloudKit proof: no (unsigned/unprovisioned). Use scripts/provisioned-cloudkit-app.sh with a matching identity/profile.\n'

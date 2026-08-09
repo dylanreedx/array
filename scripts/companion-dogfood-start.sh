@@ -129,7 +129,7 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   if [[ -z "$DESKTOP_APP" ]]; then
     if [[ "$ALLOW_UNENTITLED" -eq 1 ]]; then
       DESKTOP_APP="$unentitled_default_app"
-      scripts/make-app-bundle.sh --configuration release --output "$DESKTOP_APP"
+      scripts/make-app-bundle.sh --configuration release --channel prod --output "$DESKTOP_APP"
       echo "WARNING: built unentitled diagnostics app at $DESKTOP_APP; this is not CloudKit proof because --allow-unentitled was supplied." >&2
     else
       DESKTOP_APP="$provisioned_default_app"

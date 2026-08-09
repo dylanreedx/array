@@ -387,6 +387,34 @@ Priority order — the first item is a bug fix that gates everything else:
 - [ ] CI (GitHub Actions + certs in secrets) is explicitly deferred until manual releases
       hurt.
 
+## Dev/prod channel split — DONE (2026-08-09, post-0.2.1)
+
+The prod copy in /Applications must never share state with dev builds or
+agent-driven runs. macOS keys prefs and identity off the bundle id, so the
+channel IS the bundle id (`AppChannel` in Core, mappings pinned in CoreChecks):
+
+- **Prod** = exactly `dev.arrayapp.macos` → "Array" app-support dir, prod
+  defaults domain, updater eligible. ONLY `release-app.sh` (and the two
+  CloudKit dogfood scripts, whose container is bundle-id-tied) produce
+  prod-identified bundles.
+- **Dev** = everything else — `make-app-bundle.sh` default output (stamped
+  `dev.arrayapp.macos.dev`, named "Array Dev") AND the bare `swift build`
+  binary (nil bundle id) → "Array Dev" app-support dir, `.dev` defaults
+  domain, updater inert (its gate requires the exact prod id).
+- The `bundledDefaultsDomain` fallbacks (DeleteConfirmPolicy,
+  TerminalSpawnAdmission, BrowserRuntimeBudget) are channel-scoped — a dev
+  build can no longer read or leak into prod preferences.
+- QA env overrides (`CONTINUUM_APP_SUPPORT` etc.) still win over everything.
+- Witness: `--app-support-channel-check` (bare-binary leg in run-matrix.sh;
+  per-channel leg in check-app-bundle.sh, which now takes `--channel` and
+  asserts identity accordingly and pollution-guards BOTH channels' real dirs).
+- Accepted sharing (documented, revisit if it bites): Keychain items
+  (password vault, companion session), `~/.continuum` hook/breadcrumb paths,
+  the per-user tmux server (separate registries mean each channel only
+  reconciles its own sessions; names are UUID-suffixed).
+- To seed a dev build with a copy of real state (deliberate act, never
+  automatic): `cp -R ~/Library/Application\ Support/Array ~/Library/Application\ Support/Array\ Dev`.
+
 ## Open decisions
 
 1. Dylan's machine: migrate state or clean cut? (Phase 0; recommendation: clean cut.)

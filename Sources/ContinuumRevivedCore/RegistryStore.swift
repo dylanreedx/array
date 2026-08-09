@@ -28,7 +28,10 @@ public struct RegistryStore: Sendable {
             .first
             ?? URL(fileURLWithPath: NSHomeDirectory())
                 .appendingPathComponent("Library/Application Support", isDirectory: true)
-        return appSupport.appendingPathComponent("Array", isDirectory: true)
+        // Channel split: "Array" only inside the prod-identified bundle;
+        // dev bundles and bare binaries get "Array Dev" so dev/agent runs
+        // can never touch the user's real state (see AppChannel).
+        return appSupport.appendingPathComponent(AppChannel.liveApplicationSupportDirectoryName, isDirectory: true)
     }
 
     public func save(_ registry: Registry) throws {
