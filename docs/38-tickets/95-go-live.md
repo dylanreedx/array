@@ -369,11 +369,15 @@ Priority order — the first item is a bug fix that gates everything else:
 
 ## Phase 5 — Release runbook + QA gate
 
-- [ ] Write `RELEASE.md`: bump versions → `scripts/run-matrix.sh` gate →
-      `release-app.sh` (build/sign/notarize/staple/DMG) → `generate_appcast` → upload
-      release + publish appcast → **update-from-previous-version test on the clean
-      machine** → announce to friends.
-- [ ] First release through the full pipeline is v0.2.0 build 2.
+- [x] `RELEASE.md` written (2026-08-09): version bump → release-app.sh →
+      archive DMG to `releases/` → gh release (both assets) → generate-appcast.sh →
+      commit appcast + push main → spot-checks. (v0.2.0 build 2 already went through
+      the pre-appcast pipeline.)
+- [ ] **Clean-machine pass (release-blocking, needs a second machine/account):**
+      fresh install of version N via the site download, then publish N+1 to the real
+      feed and confirm the in-app update PROMPT appears, installs, and relaunches
+      (the local Phase 2 proof ran the silent-auto path). Also witnesses first-run
+      onboarding on a genuinely fresh profile.
 - [ ] CI (GitHub Actions + certs in secrets) is explicitly deferred until manual releases
       hurt.
 
