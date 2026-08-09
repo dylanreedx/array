@@ -11,6 +11,7 @@
 		40A5F44EE38B61E9A6B3436E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = D151728376C3F6ABAC382B04 /* Assets.xcassets */; };
 		8E66DACCE58B3338B44AF55B /* DesignTokens+SwiftUI.swift in Sources */ = {isa = PBXBuildFile; fileRef = C455CFC218A49F0B4851F5D3 /* DesignTokens+SwiftUI.swift */; };
 		B8F41E74F6210DDA33B5453C /* ContinuumRevivedAgentUI in Frameworks */ = {isa = PBXBuildFile; productRef = 39D7F461DCC18697C1F6311A /* ContinuumRevivedAgentUI */; };
+		BAAA599598815D94FBFFB1E0 /* DualPlaneGyroIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47F4CA1B0E1E73F4939BBE7C /* DualPlaneGyroIndicator.swift */; };
 		DDA99CDC2BE1065699F09C7A /* StatusChipView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E7C049C56FC6DF9E1EE68BE /* StatusChipView.swift */; };
 		F74BFE16A57249D36643B577 /* ContinuumApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BA0CBC85274F77D8B8949CD /* ContinuumApp.swift */; };
 		FE1AA906A27AD9F986780217 /* ContinuumRevivedSync in Frameworks */ = {isa = PBXBuildFile; productRef = 1ECE6B8BCA1DEFB06577A3DC /* ContinuumRevivedSync */; };
@@ -18,6 +19,7 @@
 
 /* Begin PBXFileReference section */
 		3E7C049C56FC6DF9E1EE68BE /* StatusChipView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusChipView.swift; sourceTree = "<group>"; };
+		47F4CA1B0E1E73F4939BBE7C /* DualPlaneGyroIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DualPlaneGyroIndicator.swift; sourceTree = "<group>"; };
 		67D592583A969FD95A8FA194 /* continuum-overnight */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "continuum-overnight"; path = ..; sourceTree = SOURCE_ROOT; };
 		7BA0CBC85274F77D8B8949CD /* ContinuumApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContinuumApp.swift; sourceTree = "<group>"; };
 		C455CFC218A49F0B4851F5D3 /* DesignTokens+SwiftUI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DesignTokens+SwiftUI.swift"; sourceTree = "<group>"; };
@@ -53,6 +55,7 @@
 				D151728376C3F6ABAC382B04 /* Assets.xcassets */,
 				7BA0CBC85274F77D8B8949CD /* ContinuumApp.swift */,
 				C455CFC218A49F0B4851F5D3 /* DesignTokens+SwiftUI.swift */,
+				47F4CA1B0E1E73F4939BBE7C /* DualPlaneGyroIndicator.swift */,
 				3E7C049C56FC6DF9E1EE68BE /* StatusChipView.swift */,
 			);
 			path = Sources;
@@ -163,6 +166,7 @@
 			files = (
 				F74BFE16A57249D36643B577 /* ContinuumApp.swift in Sources */,
 				8E66DACCE58B3338B44AF55B /* DesignTokens+SwiftUI.swift in Sources */,
+				BAAA599598815D94FBFFB1E0 /* DualPlaneGyroIndicator.swift in Sources */,
 				DDA99CDC2BE1065699F09C7A /* StatusChipView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -1,23 +1,53 @@
 import Darwin
 import Foundation
 
-public enum AtomicWriterError: Error, Equatable {
+public enum AtomicWriterError: Error, Equatable, CustomStringConvertible {
     case noValidBackup(path: String)
+
+    /// The associated path is retained for local recovery code only. Never let
+    /// the filesystem location cross a warning/UI/diagnostic boundary.
+    public var description: String {
+        switch self {
+        case .noValidBackup:
+            return "no valid backup"
+        }
+    }
+}
+
+public struct AtomicWriterDescriptorOperations: Sendable {
+    public var open: @Sendable (_ path: String, _ flags: Int32) -> Int32
+    public var fsync: @Sendable (_ fd: Int32) -> Int32
+    public var close: @Sendable (_ fd: Int32) -> Int32
+
+    public init(
+        open: @escaping @Sendable (_ path: String, _ flags: Int32) -> Int32 = { Darwin.open($0, $1) },
+        fsync: @escaping @Sendable (_ fd: Int32) -> Int32 = { Darwin.fsync($0) },
+        close: @escaping @Sendable (_ fd: Int32) -> Int32 = { Darwin.close($0) }
+    ) {
+        self.open = open
+        self.fsync = fsync
+        self.close = close
+    }
+
+    public static let live = AtomicWriterDescriptorOperations()
 }
 
 public struct AtomicWriter: Sendable {
     public let backupsDirectory: URL?
     public let retainedBackups: Int
     public let prettyPrint: Bool
+    public let descriptorOperations: AtomicWriterDescriptorOperations
 
     public init(
         backupsDirectory: URL? = nil,
         retainedBackups: Int = 3,
-        prettyPrint: Bool = true
+        prettyPrint: Bool = true,
+        descriptorOperations: AtomicWriterDescriptorOperations = .live
     ) {
         self.backupsDirectory = backupsDirectory
         self.retainedBackups = max(0, retainedBackups)
         self.prettyPrint = prettyPrint
+        self.descriptorOperations = descriptorOperations
     }
 
     /// Write `value` as JSON to `url`. The previous file (if any) is copied to
@@ -84,8 +114,23 @@ public struct AtomicWriter: Sendable {
         // Write bytes to the temp (not atomic — it's throwaway; atomicity comes from rename).
         try data.write(to: tmp)
         // fsync the temp's data to stable storage before rename.
-        let fd = open(tmp.path, O_RDONLY)
-        if fd >= 0 { fsync(fd); close(fd) }
+        let fd = descriptorOperations.open(tmp.path, O_RDONLY)
+        guard fd >= 0 else {
+            let err = errno
+            try? FileManager.default.removeItem(at: tmp)
+            throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
+        }
+        if descriptorOperations.fsync(fd) != 0 {
+            let err = errno
+            _ = descriptorOperations.close(fd)
+            try? FileManager.default.removeItem(at: tmp)
+            throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
+        }
+        if descriptorOperations.close(fd) != 0 {
+            let err = errno
+            try? FileManager.default.removeItem(at: tmp)
+            throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
+        }
         // Atomic, same-volume rename. On failure, clean up the temp and rethrow.
         if rename(tmp.path, url.path) != 0 {
             let err = errno
@@ -93,8 +138,18 @@ public struct AtomicWriter: Sendable {
             throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
         }
         // fsync the parent directory so the directory entry (rename) is durable.
-        let dfd = open(dir.path, O_RDONLY)
-        if dfd >= 0 { fsync(dfd); close(dfd) }
+        let dfd = descriptorOperations.open(dir.path, O_RDONLY)
+        guard dfd >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        if descriptorOperations.fsync(dfd) != 0 {
+            let err = errno
+            _ = descriptorOperations.close(dfd)
+            throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
+        }
+        if descriptorOperations.close(dfd) != 0 {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
     }
 
     private func backupExistingFile(at url: URL) throws {
@@ -116,7 +171,7 @@ public struct AtomicWriter: Sendable {
     }
 
     private func pruneOldBackups(for url: URL) throws {
-        guard let backupsDirectory else { return }
+        guard backupsDirectory != nil else { return }
         let urls = try backupURLsNewestFirst(for: url)
         guard urls.count > retainedBackups else { return }
         for stale in urls.dropFirst(retainedBackups) {

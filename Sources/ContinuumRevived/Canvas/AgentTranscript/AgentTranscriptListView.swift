@@ -4,6 +4,35 @@ import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
 @MainActor
+private final class AgentTranscriptTailItem: NSCollectionViewItem {
+    private weak var installedIndicator: DualPlaneGyroTiltedThinkingIndicatorView?
+
+    override func loadView() {
+        view = NSView(frame: .zero)
+    }
+
+    func install(indicator: DualPlaneGyroTiltedThinkingIndicatorView) {
+        installedIndicator?.removeFromSuperview()
+        installedIndicator = indicator
+        indicator.removeFromSuperview()
+        indicator.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(indicator)
+        NSLayoutConstraint.activate([
+            indicator.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            indicator.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            indicator.widthAnchor.constraint(equalToConstant: DualPlaneGyroIndicatorModel.side),
+            indicator.heightAnchor.constraint(equalToConstant: DualPlaneGyroIndicatorModel.side),
+        ])
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        installedIndicator?.removeFromSuperview()
+        installedIndicator = nil
+    }
+}
+
+@MainActor
 private final class AgentTranscriptCollectionItem: NSCollectionViewItem {
     private(set) var hostView: AgentBlockHostView?
     private(set) var reasoningDisclosureView: CompletedReasoningDisclosureView?
@@ -124,11 +153,32 @@ final class AgentTranscriptListView: NSView {
 
     private let registry: AgentBlockRendererRegistry
     private let measurementCache: AgentBlockMeasurementCache
+    /// Host-local, non-semantic tool detail composition. The actor store is
+    /// intentionally owned outside the document; this cache contains only the
+    /// already-sanitized records used for the current host view.
+    private let toolDetailStore: AgentToolDetailStore?
+    private let toolDetailProvider: ((AgentToolDetailKey) -> AgentToolDetailRecord?)?
+    private var toolDetailsByID: [AgentToolDetailKey: AgentToolDetailRecord] = [:]
+    private var toolDetailRefreshTask: Task<Void, Never>?
+    private var toolDetailIDByBlockID: [AgentNodeID: AgentToolDetailKey] = [:]
+    /// Immutable host-local bindings are supplied at the composition boundary;
+    /// they are never inferred from the current turn while flattening history.
+    private var toolDetailIdentityByEntryID: [AgentNodeID: AgentToolDetailKey] = [:]
+    private var toolDetailEntryLifecycleByID: [AgentNodeID: AgentEntry] = [:]
+    private var runtimeIdentities: Set<AgentToolDetailKey> = []
+    private var activeRuntimeScope: AgentToolDetailScope?
+    private let toolDetailClock: @Sendable () -> Date
+    private let toolDetailTimeToLive: TimeInterval?
     /// The list owns the view-state binding because the existing tile context
     /// deliberately carries only semantic render actions. Entry IDs remain the
     /// disclosure key; this opaque owner token prevents state crossing lists.
     private let disclosureStateStore = DisclosureStateStore()
     private let disclosureOwnerID: AgentID
+    private var toolDetailAgentID: AgentID?
+    private var pendingRuntimeObservations: [AgentToolDetailKey: AgentRuntimeObservation] = [:]
+    private let tailThinkingIndicator = DualPlaneGyroTiltedThinkingIndicatorView()
+    private let tailThinkingIndicatorID = AgentNodeID(rawValue: "__agent_transcript_tail_thinking_indicator__")!
+    private var tailThinkingIndicatorIsVisible = false
     /// Duration is an optional host-attested presentation input. The current
     /// transcript model has no duration field, so the production default is nil
     /// rather than a locally inferred or fabricated clock.
@@ -173,12 +223,32 @@ final class AgentTranscriptListView: NSView {
         renderContext: AgentRenderContext = AgentRenderContext(
             actions: .disabled, tokens: .transcript, appearance: .dark
         ),
-        authoritativeReasoningDuration: @escaping (AgentEntry) -> TimeInterval? = { _ in nil }
+        authoritativeReasoningDuration: @escaping (AgentEntry) -> TimeInterval? = { _ in nil },
+        toolDetailStore: AgentToolDetailStore? = nil,
+        toolDetailProvider: ((AgentToolDetailKey) -> AgentToolDetailRecord?)? = nil,
+        toolDetailClock: (@Sendable () -> Date)? = nil,
+        toolDetailTimeToLive: TimeInterval? = nil
     ) {
         self.registry = registry
         disclosureOwnerID = AgentID(rawValue: UUID())
         self.renderContext = renderContext
         self.authoritativeReasoningDuration = authoritativeReasoningDuration
+        self.toolDetailStore = toolDetailStore
+        self.toolDetailProvider = toolDetailProvider
+        if let toolDetailClock {
+            self.toolDetailClock = toolDetailClock
+        } else if let toolDetailStore {
+            self.toolDetailClock = toolDetailStore.currentDate
+        } else {
+            self.toolDetailClock = { Date() }
+        }
+        if let toolDetailTimeToLive {
+            self.toolDetailTimeToLive = max(0, toolDetailTimeToLive)
+        } else if let toolDetailStore {
+            self.toolDetailTimeToLive = toolDetailStore.timeToLive
+        } else {
+            self.toolDetailTimeToLive = nil
+        }
         measurementCache = AgentBlockMeasurementCache()
         super.init(frame: .zero)
         self.renderContext = contextWithDisclosureState(renderContext)
@@ -192,6 +262,10 @@ final class AgentTranscriptListView: NSView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    deinit {
+        toolDetailRefreshTask?.cancel()
+    }
 
     private func configureCollectionView() {
         scrollView.translatesAutoresizingMaskIntoConstraints = false
@@ -211,7 +285,13 @@ final class AgentTranscriptListView: NSView {
             AgentTranscriptCollectionItem.self,
             forItemWithIdentifier: NSUserInterfaceItemIdentifier("AgentTranscriptCollectionItem")
         )
+        collectionView.register(
+            AgentTranscriptTailItem.self,
+            forItemWithIdentifier: NSUserInterfaceItemIdentifier("AgentTranscriptTailItem")
+        )
         scrollView.documentView = collectionView
+        tailThinkingIndicator.isHidden = true
+        tailThinkingIndicator.identifier = NSUserInterfaceItemIdentifier("agentTranscript.tailThinkingIndicator")
         addSubview(scrollView)
         addSubview(jumpToLatestButton)
         NSLayoutConstraint.activate([
@@ -223,19 +303,27 @@ final class AgentTranscriptListView: NSView {
             jumpToLatestButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
         ])
 
-        transcriptLayout.itemCount = { [weak self] in self?.rows.count ?? 0 }
+        transcriptLayout.itemCount = { [weak self] in
+            guard let self else { return 0 }
+            return rows.count + (tailThinkingIndicatorIsVisible ? 1 : 0)
+        }
         transcriptLayout.measuredHeight = { [weak self] index, width in
-            guard let self, rows.indices.contains(index) else { return 1 }
+            guard let self else { return 1 }
+            if index == rows.count, tailThinkingIndicatorIsVisible {
+                return DualPlaneGyroIndicatorModel.side
+            }
+            guard rows.indices.contains(index) else { return 1 }
             let row = rows[index]
             do {
                 switch row.content {
                 case let .block(block):
+                    let presented = presentedToolBlock(block)
                     return try measurementCache.height(
-                        for: block,
+                        for: presented,
                         width: width,
                         context: renderContext,
                         entryRole: row.role,
-                        renderer: registry.renderer(for: block.kind, entryRole: row.role)
+                        renderer: registry.renderer(for: presented.kind, entryRole: row.role)
                     )
                 case let .completedReasoning(entry):
                     return CompletedReasoningDisclosureView.measuredHeight(
@@ -254,7 +342,15 @@ final class AgentTranscriptListView: NSView {
 
         dataSource = NSCollectionViewDiffableDataSource<Int, AgentNodeID>(collectionView: collectionView) {
             [weak self] collectionView, indexPath, id in
-            guard let self, let row = rowsByID[id] else { return nil }
+            guard let self else { return nil }
+            if id == tailThinkingIndicatorID {
+                let identifier = NSUserInterfaceItemIdentifier("AgentTranscriptTailItem")
+                guard let item = collectionView.makeItem(withIdentifier: identifier, for: indexPath)
+                    as? AgentTranscriptTailItem else { return nil }
+                item.install(indicator: tailThinkingIndicator)
+                return item
+            }
+            guard let row = rowsByID[id] else { return nil }
             let identifier = NSUserInterfaceItemIdentifier("AgentTranscriptCollectionItem")
             guard let item = collectionView.makeItem(withIdentifier: identifier, for: indexPath)
                 as? AgentTranscriptCollectionItem else { return nil }
@@ -263,7 +359,7 @@ final class AgentTranscriptListView: NSView {
                 case let .block(block):
                     let host = item.installHost(registry: registry, cache: measurementCache)
                     track(host)
-                    try host.apply(block: block, entryRole: row.role, context: renderContext)
+                    try host.apply(block: presentedToolBlock(block), entryRole: row.role, context: renderContext)
                 case let .completedReasoning(entry):
                     let disclosure = item.installCompletedReasoningDisclosure()
                     disclosure.apply(
@@ -328,6 +424,10 @@ final class AgentTranscriptListView: NSView {
             return nil
         }
         var children: [Any] = orderedChildren.sorted { $0.0 < $1.0 }.map { $0.1 }
+        if tailThinkingIndicatorIsVisible,
+           let item = collectionView.item(at: IndexPath(item: rows.count, section: 0)) as? AgentTranscriptTailItem {
+            children.append(item)
+        }
         if !jumpToLatestButton.isHidden { children.append(jumpToLatestButton) }
         return children
     }
@@ -352,7 +452,12 @@ final class AgentTranscriptListView: NSView {
     }
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
-        if newWindow == nil { updateScheduler.flush() }
+        if newWindow == nil {
+            updateScheduler.flush()
+            tailThinkingIndicator.stopAnimating()
+        } else if tailThinkingIndicatorIsVisible {
+            tailThinkingIndicator.startAnimating()
+        }
         super.viewWillMove(toWindow: newWindow)
     }
 
@@ -377,6 +482,11 @@ final class AgentTranscriptListView: NSView {
     }
 
     private func transcriptY(for id: AgentNodeID) -> CGFloat? {
+        if id == tailThinkingIndicatorID, tailThinkingIndicatorIsVisible {
+            return collectionView.layoutAttributesForItem(
+                at: IndexPath(item: rows.count, section: 0)
+            )?.frame.minY
+        }
         guard let index = rows.firstIndex(where: { $0.id == id }) else { return nil }
         return collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0))?.frame.minY
     }
@@ -410,7 +520,8 @@ final class AgentTranscriptListView: NSView {
     /// unchanged IDs; reconfiguration is limited to rows touched by the patch.
     /// There is intentionally no reloadData path after (or before) initial load.
     private func applyCoalesced(document: AgentDocument) throws {
-        let flattened = try Self.flatten(document)
+        prepareToolDetailLifecycle(for: document)
+        let flattened = try flatten(document)
         let oldIndexes = Dictionary(uniqueKeysWithValues: rows.enumerated().map { ($0.element.id, $0.offset) })
         let changedNodeIDs = Set(flattened.rows.compactMap { row -> AgentNodeID? in
             guard let old = rowsByID[row.id] else { return nil }
@@ -430,7 +541,8 @@ final class AgentTranscriptListView: NSView {
         if let appliedVersion, patch.fromVersion != appliedVersion {
             throw UpdateError.versionMismatch(expected: appliedVersion, actual: patch.fromVersion)
         }
-        let flattened = try Self.flatten(document)
+        prepareToolDetailLifecycle(for: document)
+        let flattened = try flatten(document)
         try applyWithScroll(
             document: document,
             flattened: flattened,
@@ -441,7 +553,7 @@ final class AgentTranscriptListView: NSView {
 
     private func applyWithScroll(
         document: AgentDocument,
-        flattened: (rows: [Row], topLevelIDsByNodeID: [AgentNodeID: Set<AgentNodeID>]),
+        flattened: (rows: [Row], topLevelIDsByNodeID: [AgentNodeID: Set<AgentNodeID>], toolDetailIDByBlockID: [AgentNodeID: AgentToolDetailKey]),
         changedNodeIDs: Set<AgentNodeID>
     ) throws {
         try scrollController.apply(
@@ -463,7 +575,7 @@ final class AgentTranscriptListView: NSView {
 
     private func applyUnscrolled(
         document: AgentDocument,
-        flattened: (rows: [Row], topLevelIDsByNodeID: [AgentNodeID: Set<AgentNodeID>]),
+        flattened: (rows: [Row], topLevelIDsByNodeID: [AgentNodeID: Set<AgentNodeID>], toolDetailIDByBlockID: [AgentNodeID: AgentToolDetailKey]),
         changedNodeIDs: Set<AgentNodeID>
     ) throws {
         let oldIDs = rows.map(\.id)
@@ -500,7 +612,9 @@ final class AgentTranscriptListView: NSView {
         rows = flattened.rows
         rowsByID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
         topLevelIDsByNodeID = flattened.topLevelIDsByNodeID
+        toolDetailIDByBlockID = flattened.toolDetailIDByBlockID
         renderingError = nil
+        scheduleToolDetailRefresh()
 
         // Fault injection used only by the deterministic negative witness. It
         // recreates the forbidden permanent-stack architecture directly: one
@@ -517,6 +631,7 @@ final class AgentTranscriptListView: NSView {
         var snapshot = NSDiffableDataSourceSnapshot<Int, AgentNodeID>()
         snapshot.appendSections([0])
         snapshot.appendItems(newIDs, toSection: 0)
+        if tailThinkingIndicatorIsVisible { snapshot.appendItems([tailThinkingIndicatorID], toSection: 0) }
 
         var changedTopLevelIDs = Set(changedNodeIDs.flatMap { topLevelIDsByNodeID[$0] ?? [] })
         // Entry revisions also advance when one child changes. Do not fan that
@@ -569,6 +684,69 @@ final class AgentTranscriptListView: NSView {
         try updateVisibleHosts(ids: Set(rowsByID.keys))
     }
 
+    /// Binds host-local tool detail to the managed agent identity. This is
+    /// deliberately separate from semantic entries so the agent ID never enters
+    /// Codable transcript state.
+    func bindToolDetailAgent(_ agentID: AgentID?) {
+        toolDetailAgentID = agentID
+        activeRuntimeScope = nil
+        runtimeIdentities.removeAll()
+        pendingRuntimeObservations.removeAll()
+    }
+
+    /// The selected production thinking indicator is transcript-owned, not part
+    /// of the compact status row. It is a tail decoration so the status/composer
+    /// region retains its measured height and accessibility children.
+    func setThinkingIndicatorVisible(_ visible: Bool) {
+        guard tailThinkingIndicatorIsVisible != visible else { return }
+        tailThinkingIndicatorIsVisible = visible
+        tailThinkingIndicator.isHidden = !visible
+        if visible {
+            tailThinkingIndicator.startAnimating()
+        } else {
+            tailThinkingIndicator.stopAnimating()
+        }
+        applyTailVisibilityWithScrollPreservation()
+    }
+
+    private func applyTailVisibilityWithScrollPreservation() {
+        guard dataSource != nil else { return }
+        scrollController.apply(
+            in: scrollView,
+            idAtY: { [weak self] y in self?.transcriptID(at: y) },
+            yForID: { [weak self] id in self?.transcriptY(for: id) },
+            isSelecting: { [weak self] in self?.hasActiveTextSelection() ?? false },
+            update: { [weak self] in
+                guard let self else { return }
+                var snapshot = NSDiffableDataSourceSnapshot<Int, AgentNodeID>()
+                snapshot.appendSections([0])
+                snapshot.appendItems(rows.map(\.id), toSection: 0)
+                if tailThinkingIndicatorIsVisible {
+                    snapshot.appendItems([tailThinkingIndicatorID], toSection: 0)
+                }
+                dataSource.apply(snapshot, animatingDifferences: false)
+                transcriptLayout.invalidateForStructureChange()
+                layoutSubtreeIfNeeded()
+            }
+        )
+        jumpToLatestButton.isHidden = !scrollController.showsJumpToLatest
+    }
+
+    var qaThinkingIndicatorVisible: Bool { tailThinkingIndicatorIsVisible && !tailThinkingIndicator.isHidden }
+    var qaTailIsVirtualDocumentRow: Bool {
+        tailThinkingIndicatorIsVisible &&
+            collectionView.item(at: IndexPath(item: rows.count, section: 0)) is AgentTranscriptTailItem
+    }
+    var qaTranscriptDocumentHeight: CGFloat {
+        layoutSubtreeIfNeeded()
+        return transcriptLayout.collectionViewContentSize.height
+    }
+    var qaPendingRuntimeObservationCount: Int { pendingRuntimeObservations.count }
+    var qaThinkingIndicatorFrame: NSRect {
+        guard tailThinkingIndicator.superview != nil else { return .zero }
+        return tailThinkingIndicator.convert(tailThinkingIndicator.bounds, to: self)
+    }
+
     private func contextWithDisclosureState(_ context: AgentRenderContext) -> AgentRenderContext {
         var context = context
         context.actions = disclosureStateStore.renderActions(
@@ -585,9 +763,10 @@ final class AgentTranscriptListView: NSView {
         switch row.content {
         case let .block(block):
             do {
-                let renderer = try registry.renderer(for: block.kind, entryRole: row.role)
+                let presented = presentedToolBlock(block)
+                let renderer = try registry.renderer(for: presented.kind, entryRole: row.role)
                 return measurementCache.height(
-                    for: block,
+                    for: presented,
                     width: width,
                     context: renderContext,
                     entryRole: row.role,
@@ -615,7 +794,7 @@ final class AgentTranscriptListView: NSView {
                 switch row.content {
                 case let .block(block):
                     let host = item.installHost(registry: registry, cache: measurementCache)
-                    try host.apply(block: block, entryRole: row.role, context: renderContext)
+                    try host.apply(block: presentedToolBlock(block), entryRole: row.role, context: renderContext)
                 case let .completedReasoning(entry):
                     let disclosure = item.installCompletedReasoningDisclosure()
                     disclosure.apply(
@@ -696,18 +875,166 @@ final class AgentTranscriptListView: NSView {
         }
     }
 
-    private static func flatten(
+    /// Binds a transcript entry to its immutable host-local provider identity.
+    /// A conflicting lifecycle rebind is rejected; preserving the original
+    /// binding keeps already-rendered and cached identity from being rewritten.
+    @discardableResult
+    func bindToolDetailIdentity(_ identity: AgentToolDetailKey, to entryID: AgentNodeID) -> Bool {
+        if let toolDetailAgentID,
+           identity.scope.agentID != toolDetailAgentID.rawValue.uuidString {
+            return false
+        }
+        guard let existing = toolDetailIdentityByEntryID[entryID] else {
+            toolDetailIdentityByEntryID[entryID] = identity
+            return true
+        }
+        return existing == identity
+    }
+
+    private func prepareToolDetailLifecycle(for document: AgentDocument) {
+        let incoming = Dictionary(uniqueKeysWithValues: document.entries.map { ($0.id, $0) })
+        var invalidatedEntryIDs = Set(toolDetailEntryLifecycleByID.keys).subtracting(incoming.keys)
+        var removedBlockIDsByEntry: [AgentNodeID: Set<AgentNodeID>] = [:]
+        for (id, oldEntry) in toolDetailEntryLifecycleByID {
+            guard let newEntry = incoming[id] else { continue }
+            guard oldEntry.role == newEntry.role,
+                  oldEntry.provenance == newEntry.provenance else {
+                invalidatedEntryIDs.insert(id)
+                continue
+            }
+            let oldBlockIDs = toolDetailBlockIDs(in: oldEntry)
+            let newBlockIDs = toolDetailBlockIDs(in: newEntry)
+            let removedBlockIDs = oldBlockIDs.subtracting(newBlockIDs)
+            guard !removedBlockIDs.isEmpty else { continue }
+            // A removed/replaced tool block invalidates the owning entry even
+            // when a paragraph or another sibling survives. The provider
+            // identity is entry-scoped, so a selective child purge would let
+            // that identity/cache/runtime binding reach the replacement tool.
+            let removedToolBlockIDs = toolBlockIDs(in: oldEntry).subtracting(toolBlockIDs(in: newEntry))
+            if !removedToolBlockIDs.isEmpty || oldBlockIDs.isDisjoint(with: newBlockIDs) {
+                invalidatedEntryIDs.insert(id)
+            } else {
+                // Non-tool sibling removal has no provider identity of its own;
+                // retain the entry binding while clearing its local disclosure.
+                removedBlockIDsByEntry[id] = removedBlockIDs
+            }
+        }
+        if !invalidatedEntryIDs.isEmpty {
+            purgeToolDetailState(for: invalidatedEntryIDs)
+        }
+        for (entryID, blockIDs) in removedBlockIDsByEntry where !invalidatedEntryIDs.contains(entryID) {
+            purgeToolDetailBlockState(for: blockIDs)
+        }
+        if incoming.isEmpty {
+            runtimeIdentities.removeAll()
+            pendingRuntimeObservations.removeAll()
+            activeRuntimeScope = nil
+        }
+        toolDetailEntryLifecycleByID = incoming
+    }
+
+    private func toolDetailBlockIDs(in entry: AgentEntry) -> Set<AgentNodeID> {
+        var ids = Set<AgentNodeID>()
+        var pendingBlocks = entry.blocks
+        while let block = pendingBlocks.popLast() {
+            ids.insert(block.id)
+            pendingBlocks.append(contentsOf: block.children)
+        }
+        return ids
+    }
+
+    private func toolBlockIDs(in entry: AgentEntry) -> Set<AgentNodeID> {
+        var ids = Set<AgentNodeID>()
+        var pendingBlocks = entry.blocks
+        while let block = pendingBlocks.popLast() {
+            if case .toolCall = block.payload { ids.insert(block.id) }
+            pendingBlocks.append(contentsOf: block.children)
+        }
+        return ids
+    }
+
+    private func purgeToolDetailState(for entryIDs: Set<AgentNodeID>) {
+        guard !entryIDs.isEmpty else { return }
+        var identities = Set<AgentToolDetailKey>()
+        var blockIDs = Set<AgentNodeID>()
+        for entryID in entryIDs {
+            if let identity = toolDetailIdentityByEntryID.removeValue(forKey: entryID) {
+                identities.insert(identity)
+            }
+            guard let entry = toolDetailEntryLifecycleByID[entryID] else { continue }
+            var pendingBlocks = entry.blocks
+            var entryBlockIDs = Set<AgentNodeID>()
+            while let block = pendingBlocks.popLast() {
+                entryBlockIDs.insert(block.id)
+                pendingBlocks.append(contentsOf: block.children)
+                if let identity = toolDetailIDByBlockID[block.id] {
+                    identities.insert(identity)
+                }
+            }
+            blockIDs.formUnion(entryBlockIDs)
+            // This method is reached only for removal or an identity-changing
+            // replacement. Content updates with the same entry/block IDs never
+            // arrive here, so purge the complete old disclosure subtree for all
+            // roles, including reasoning, before any ID can be reused.
+            disclosureStateStore.removeSubtree(
+                for: disclosureOwnerID,
+                rootID: entryID,
+                descendantIDs: entryBlockIDs
+            )
+        }
+        for blockID in blockIDs {
+            toolDetailIDByBlockID.removeValue(forKey: blockID)
+        }
+        removeToolDetailIdentities(identities)
+    }
+
+    private func purgeToolDetailBlockState(for blockIDs: Set<AgentNodeID>) {
+        guard !blockIDs.isEmpty else { return }
+        for blockID in blockIDs {
+            disclosureStateStore.removeState(for: ToolDisclosureKey(
+                agentID: disclosureOwnerID,
+                blockID: blockID
+            ))
+            // The owning entry identity still survives this selective diff, so
+            // retain its provider record/cache for any surviving sibling block.
+            toolDetailIDByBlockID.removeValue(forKey: blockID)
+        }
+    }
+
+    private func removeToolDetailIdentities(_ identities: Set<AgentToolDetailKey>) {
+        for identity in identities {
+            toolDetailsByID.removeValue(forKey: identity)
+            runtimeIdentities.remove(identity)
+        }
+    }
+
+    private func flatten(
         _ document: AgentDocument
-    ) throws -> (rows: [Row], topLevelIDsByNodeID: [AgentNodeID: Set<AgentNodeID>]) {
+    ) throws -> (
+        rows: [Row],
+        topLevelIDsByNodeID: [AgentNodeID: Set<AgentNodeID>],
+        toolDetailIDByBlockID: [AgentNodeID: AgentToolDetailKey]
+    ) {
         var rows: [Row] = []
         var owners: [AgentNodeID: Set<AgentNodeID>] = [:]
+        var toolDetailIDs: [AgentNodeID: AgentToolDetailKey] = [:]
         var topLevelIDs: Set<AgentNodeID> = []
 
-        func index(_ block: AgentBlock, owner: AgentNodeID) {
+        func index(_ block: AgentBlock, owner: AgentNodeID, detailID: AgentToolDetailKey?) {
             owners[block.id] = [owner]
-            block.children.forEach { index($0, owner: owner) }
+            if let detailID { toolDetailIDs[block.id] = detailID }
+            block.children.forEach { index($0, owner: owner, detailID: detailID) }
         }
         for entry in document.entries {
+            var detailID: AgentToolDetailKey?
+            if case let .providerItem(provider, itemID?) = entry.provenance,
+               let itemID = AgentToolDetailID(itemID),
+               let candidate = toolDetailIdentityByEntryID[entry.id],
+               candidate.providerItemID == itemID,
+               (toolDetailAgentID == nil || candidate.scope.agentID == toolDetailAgentID?.rawValue.uuidString),
+               candidate.scope.provider == provider {
+                detailID = candidate
+            }
             if entry.role == .reasoning {
                 // Open reasoning is represented by the surrounding activity/status
                 // owner, not by a second transcript row. Finished reasoning is one
@@ -722,7 +1049,7 @@ final class AgentTranscriptListView: NSView {
                 rows.append(Row(content: .completedReasoning(entry), role: .reasoning))
                 owners[entry.id] = [entry.id]
                 for block in entry.blocks {
-                    index(block, owner: entry.id)
+                    index(block, owner: entry.id, detailID: detailID)
                 }
                 continue
             }
@@ -732,11 +1059,202 @@ final class AgentTranscriptListView: NSView {
                     throw UpdateError.duplicateTopLevelBlock(block.id)
                 }
                 rows.append(Row(content: .block(block), role: entry.role))
-                index(block, owner: block.id)
+                index(block, owner: block.id, detailID: detailID)
             }
             owners[entry.id] = []
         }
-        return (rows, owners)
+        return (rows, owners, toolDetailIDs)
+    }
+
+    /// Applies only a sanitized compact summary to a terminal tool block. Active
+    /// work deliberately stays on the semantic activity/status path and never
+    /// reads local detail. The document and its Codable payload remain unchanged.
+    private func presentedToolBlock(_ block: AgentBlock) -> AgentBlock {
+        guard case let .toolCall(payload) = block.payload,
+              payload.status != .pending,
+              payload.status != .inProgress,
+              let providerID = toolDetailIDByBlockID[block.id] else { return block }
+        if let cached = toolDetailsByID[providerID],
+           let timeToLive = toolDetailTimeToLive,
+           (timeToLive <= 0 || toolDetailClock().timeIntervalSince(cached.updatedAt) >= timeToLive) {
+            toolDetailsByID.removeValue(forKey: providerID)
+        }
+        guard let candidate = toolDetailProvider?(providerID) ?? toolDetailsByID[providerID],
+              candidate.identity == providerID else { return block }
+        let candidateIsFresh: Bool
+        if let timeToLive = toolDetailTimeToLive {
+            candidateIsFresh = timeToLive > 0 &&
+                toolDetailClock().timeIntervalSince(candidate.updatedAt) < timeToLive
+        } else {
+            candidateIsFresh = true
+        }
+        guard candidateIsFresh,
+              candidate.status != .pending,
+              candidate.status != .inProgress,
+              let detail = AgentToolDetailPresenter.sanitizedProviderRecord(candidate) else { return block }
+        var presented = block
+        var presentedPayload = payload
+        // The compact human summary may include a basename or command query.
+        // The disclosure surface is stricter: expose only the presenter's
+        // value-free accessibility/count summary, never a path or raw value.
+        presentedPayload.summary = AgentToolDetailPresenter.compact(detail).accessibilitySummary
+        presented.payload = .toolCall(presentedPayload)
+        return presented
+    }
+
+    /// Refreshes the host-local actor snapshot without putting tool details into
+    /// semantic rows, runtime events, or sync payloads. Callers that connect the
+    /// provider observer may invoke this after a terminal tool event as well.
+    func refreshToolDetailPresentation() {
+        scheduleToolDetailRefresh()
+    }
+
+    func qaWaitForToolDetailRefresh() async {
+        await toolDetailRefreshTask?.value
+    }
+
+    private func scheduleToolDetailRefresh() {
+        guard let toolDetailStore else {
+            refreshVisibleToolDetails()
+            return
+        }
+        toolDetailRefreshTask?.cancel()
+        toolDetailRefreshTask = Task { [weak self, toolDetailStore] in
+            let details = await toolDetailStore.allDetails()
+            guard !Task.isCancelled, let self else { return }
+            self.toolDetailsByID = Dictionary(uniqueKeysWithValues: details.compactMap { detail in
+                guard let sanitized = AgentToolDetailPresenter.sanitizedProviderRecord(detail) else { return nil }
+                return (sanitized.identity, sanitized)
+            })
+            self.refreshVisibleToolDetails()
+        }
+    }
+
+    private func refreshVisibleToolDetails() {
+        let changed = Set(toolDetailIDByBlockID.keys.compactMap { blockID in
+            topLevelIDsByNodeID[blockID]?.first
+        })
+        guard !changed.isEmpty else { return }
+        for blockID in toolDetailIDByBlockID.keys { measurementCache.invalidate(id: blockID) }
+        do {
+            try scrollController.apply(
+                in: scrollView,
+                idAtY: { [weak self] y in self?.transcriptID(at: y) },
+                yForID: { [weak self] id in self?.transcriptY(for: id) },
+                isSelecting: { [weak self] in self?.hasActiveTextSelection() ?? false },
+                update: { [weak self] in
+                    guard let self else { return }
+                    transcriptLayout.invalidate(changedIDs: changed)
+                    try updateVisibleHosts(ids: changed)
+                }
+            )
+        } catch {
+            renderingError = UpdateError.renderer(error)
+        }
+        jumpToLatestButton.isHidden = !scrollController.showsJumpToLatest
+    }
+
+    /// Runtime capture remains a host-local adapter: only a non-Codable scoped
+    /// key, sanitized tool name, lifecycle status, and approved path observation
+    /// enter the actor. Raw runtime payloads never cross into this view or the
+    /// document. Runtime events already carry thread/turn routing; this adapter
+    /// derives local scope from them instead of widening their Codable shape.
+    @discardableResult
+    func captureRuntimeEvent(_ event: AgentRuntimeEvent) -> AgentToolDetailKey? {
+        guard let toolDetailStore else { return nil }
+        switch event {
+        case let .turnStarted(threadID, turnID):
+            // A new immutable scope invalidates every unmatched observation from
+            // the prior turn. The provider may reuse item IDs, but it may never
+            // reuse a complete scope.
+            let newScope = runtimeScope(threadID: threadID, turnID: turnID)
+            activeRuntimeScope = newScope
+            pendingRuntimeObservations = pendingRuntimeObservations.filter {
+                $0.key.scope == newScope
+            }
+            return nil
+        case let .itemStarted(threadID, itemID, kind, title):
+            guard Self.isToolDetailKind(kind),
+                  let providerID = AgentToolDetailID(itemID),
+                  let activeRuntimeScope,
+                  activeRuntimeScope.threadID == threadID else { return nil }
+            let identity = AgentToolDetailKey(scope: activeRuntimeScope, providerItemID: providerID)
+            runtimeIdentities.insert(identity)
+            let pending = pendingRuntimeObservations.removeValue(forKey: identity)
+            Task { [weak self, toolDetailStore] in
+                _ = await toolDetailStore.recordStart(AgentToolDetailStart(
+                    identity: identity,
+                    toolName: title ?? "Tool"
+                ))
+                if case let .toolActivity(_, activity) = pending {
+                    _ = await toolDetailStore.recordStart(AgentToolDetailStart(
+                        identity: identity,
+                        toolName: activity.operation.rawValue,
+                        affectedFiles: activity.targetPath.map { [$0] } ?? [],
+                        startedAt: activity.startedAt
+                    ))
+                }
+                self?.refreshToolDetailPresentation()
+            }
+            return identity
+        case let .itemCompleted(threadID, itemID, kind, status):
+            guard Self.isToolDetailKind(kind),
+                  let providerID = AgentToolDetailID(itemID),
+                  let scope = activeRuntimeScope,
+                  scope.threadID == threadID else { return nil }
+            let identity = AgentToolDetailKey(scope: scope, providerItemID: providerID)
+            guard runtimeIdentities.contains(identity) else { return nil }
+            let mapped: AgentItemStatus = status == .failed ? .failed : (status == .declined ? .cancelled : .completed)
+            Task { [weak self, toolDetailStore] in
+                _ = await toolDetailStore.recordEnd(AgentToolDetailEnd(identity: identity, status: mapped))
+                self?.refreshToolDetailPresentation()
+            }
+        default:
+            break
+        }
+        return nil
+    }
+
+    func captureRuntimeObservation(_ observation: AgentRuntimeObservation) {
+        guard let toolDetailStore else { return }
+        guard case let .toolActivity(itemID, activity) = observation,
+              let providerID = AgentToolDetailID(itemID),
+              let scope = activeRuntimeScope else { return }
+        let identity = AgentToolDetailKey(scope: scope, providerItemID: providerID)
+        guard runtimeIdentities.contains(identity) else {
+            // Pi may publish its private observation before the normalized item
+            // event. Hold only the sanitized observation under the complete
+            // immutable agent/thread/turn/provider/item scope; a later turn can
+            // never consume this value, even if Pi reuses the item ID.
+            pendingRuntimeObservations[identity] = observation
+            return
+        }
+        Task { [weak self, toolDetailStore] in
+            _ = await toolDetailStore.recordStart(AgentToolDetailStart(
+                identity: identity,
+                toolName: activity.operation.rawValue,
+                affectedFiles: activity.targetPath.map { [$0] } ?? [],
+                startedAt: activity.startedAt
+            ))
+            self?.refreshToolDetailPresentation()
+        }
+    }
+
+    private func runtimeScope(threadID: String, turnID: String) -> AgentToolDetailScope? {
+        guard let toolDetailAgentID else { return nil }
+        return AgentToolDetailScope(
+            agentID: toolDetailAgentID.rawValue.uuidString,
+            threadID: threadID,
+            turnID: turnID,
+            provider: "runtime"
+        )
+    }
+
+    private static func isToolDetailKind(_ kind: ItemKind) -> Bool {
+        switch kind {
+        case .commandExecution, .mcpToolCall, .webSearch: return true
+        case .fileChange, .assistantMessage, .reasoning, .plan, .error: return false
+        }
     }
 
     private func track(_ host: AgentBlockHostView) {
@@ -746,10 +1264,16 @@ final class AgentTranscriptListView: NSView {
 
     // Deterministic fixture observations; no production owner depends on these.
     var qaSemanticRowCount: Int { rows.count }
-    func qaDisclosureState(for entryID: AgentNodeID) -> Bool? {
+    func qaDisclosureState(for blockID: AgentNodeID) -> Bool? {
         disclosureStateStore.explicitState(for: ToolDisclosureKey(
-            agentID: disclosureOwnerID, blockID: entryID
+            agentID: disclosureOwnerID, blockID: blockID
         ))
+    }
+    func qaSetDisclosureState(for blockID: AgentNodeID, expanded: Bool) {
+        disclosureStateStore.setExpanded(
+            expanded,
+            for: ToolDisclosureKey(agentID: disclosureOwnerID, blockID: blockID)
+        )
     }
     func qaDisclosureRevision(for blockID: AgentNodeID) -> UInt64 {
         disclosureStateStore.presentationRevision(for: ToolDisclosureKey(
@@ -760,6 +1284,16 @@ final class AgentTranscriptListView: NSView {
         layoutSubtreeIfNeeded()
         guard let index = rows.firstIndex(where: { $0.id == id }) else { return nil }
         return collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0))?.frame.height
+    }
+
+    /// Production-route probe: returns the exact compact text supplied to the
+    /// renderer, never the actor record or semantic payload. This lets geometry
+    /// and privacy probes prove that terminal detail composes while active work
+    /// remains summary/status-only.
+    func qaPresentedToolSummary(for blockID: AgentNodeID) -> String? {
+        guard let block = rows.compactMap(\.block).first(where: { $0.id == blockID }),
+              case let .toolCall(payload) = presentedToolBlock(block).payload else { return nil }
+        return payload.summary
     }
     var qaLiveHostCount: Int {
         trackedHosts = trackedHosts.filter { $0.value.value != nil }
@@ -800,6 +1334,16 @@ final class AgentTranscriptListView: NSView {
     var qaCachedMeasurementCount: Int { measurementCache.cachedMeasurementCount }
     var qaLayoutPreparePassCount: Int { transcriptLayout.preparePassCount }
     var qaShowsJumpToLatest: Bool { !jumpToLatestButton.isHidden }
+    var qaVisibleAccessibilityText: [String] {
+        collectionView.visibleItems().compactMap { item in
+            guard let item = item as? AgentTranscriptCollectionItem,
+                  let renderer = item.hostView?.rendererView else { return nil }
+            return [renderer.accessibilityLabel(), renderer.accessibilityValue() as? String]
+                .compactMap { $0 }
+                .joined(separator: " ")
+        }
+    }
+
     var qaVisibleAccessibilityOrder: [AgentNodeID] {
         collectionView.visibleItems().compactMap { item -> (Int, AgentNodeID)? in
             guard let item = item as? AgentTranscriptCollectionItem,

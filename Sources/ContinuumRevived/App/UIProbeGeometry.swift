@@ -327,7 +327,9 @@ enum UIProbeGeometry {
         print("UIProbeGeometry: compact bottom status row held \(compactStatusAssertions) geometry, appearance, contrast, state, accessibility, and compression assertions at 320/480/560/wide in both appearances")
         try checkLiveV2AgentTileLayout()
         try checkManagedAgentStreamingTeardown()
+        try checkThinkingTailProductionSeams()
         let transcriptLiveHosts = try checkTranscriptCollectionList()
+        let toolCompositionAssertions = try checkHostLocalToolDisclosureComposition()
         let streamingApplies = try checkIncrementalTranscriptBehavior()
         let proseRows = try checkAssistantProseRenderer()
         let userPromptRows = try checkUserPromptRenderer()
@@ -347,8 +349,8 @@ enum UIProbeGeometry {
             sidebarGate.measured, sidebarGate.truncated
         ))
         print(String(
-            format: "UIProbeGeometry: reusable block host identity/reset and 8-dimensional measurement key gated; composer grows through %d width/draft cases with an eight-visual-line cap and stable constraints; custom choice popover gates %d keyboard, disabled, accessibility-state, appearance, and screen-placement cases; live v2 tile gated at 320/480/560/640/900 in both appearances with footer truncation measured across the required effort values; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, %d image/gallery states preserve opaque local media actions, %d exceptional states preserve request identity and opaque privacy, and %d completed-reasoning disclosure states preserve scoped expansion at 320pt",
-            composerCases, choiceCases, transcriptLiveHosts, streamingApplies, proseRows, userPromptRows, codeRows, operationRows, mediaRows, exceptionalRows, reasoningDisclosureRows
+            format: "UIProbeGeometry: reusable block host identity/reset and 8-dimensional measurement key gated; composer grows through %d width/draft cases with an eight-visual-line cap and stable constraints; custom choice popover gates %d keyboard, disabled, accessibility-state, appearance, and screen-placement cases; live v2 tile gated at 320/480/560/640/900 in both appearances with footer truncation measured across the required effort values; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; host-local tool composition held %d reflow/copy/accessibility/scroll assertions; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, %d image/gallery states preserve opaque local media actions, %d exceptional states preserve request identity and opaque privacy, and %d completed-reasoning disclosure states preserve scoped expansion at 320pt",
+            composerCases, choiceCases, transcriptLiveHosts, toolCompositionAssertions, streamingApplies, proseRows, userPromptRows, codeRows, operationRows, mediaRows, exceptionalRows, reasoningDisclosureRows
         ))
     }
 
@@ -610,8 +612,10 @@ enum UIProbeGeometry {
                     try require(row.qaContextDetail.contains("Freshness"), "compact status row context tooltip missing freshness")
                     try require(row.qaAccessibilityLabel.contains("Home") && row.qaAccessibilityLabel.contains("Where") && row.qaAccessibilityLabel.contains("Activity") && row.qaAccessibilityLabel.contains("Context"),
                                 "compact status row AX label dropped one semantic fact")
-                    try require(row.qaAccessibilityChildrenCount == 0,
-                                "compact status row exposes duplicate accessibility children")
+                    try require(row.qaAccessibilityChildrenCount == 1,
+                                "compact status row must expose exactly its one location-action child")
+                    try require(row.qaLocationActionButtonAccessibilityLabel == "Location actions",
+                                "compact status row lost the single accessible location action route")
                     if presentation.activity.showsThinkingIndicator {
                         try require(row.qaThinkingSlotVisible, "compact status row hid injected thinking indicator while active")
                     }
@@ -5439,6 +5443,10 @@ enum UIProbeGeometry {
                 tile.layoutSubtreeIfNeeded()
                 transcript.layoutSubtreeIfNeeded()
                 guard !tile.qaHasLegacyComposeField, !tile.qaHasPermanentApprovalDock,
+                      tile.qaLegacyLocationStatusIsHidden,
+                      tile.qaCompactStatusAccessibilityLabel.contains("Home")
+                          && (tile.qaCompactStatusAccessibilityLabel.contains("What")
+                              || tile.qaCompactStatusAccessibilityLabel.contains("Activity")),
                       tile.qaV2RenderError == nil,
                       transcript.qaSemanticRowCount >= 4 else {
                     throw fail("\(label): v2 tile retained legacy UI or failed semantic rendering")
@@ -5452,6 +5460,24 @@ enum UIProbeGeometry {
                       tile.qaLocationContentFitsBounds else {
                     throw fail("\(label): integrated Home/Where/What lost its content or fixed external-marker lane")
                 }
+                guard tile.qaStatusRowPlacement == .aboveComposer,
+                      tile.qaCompositionIdentifiers == [
+                          "agentTile.statusRow", "agentTile.composer", "agentTile.providerControls"
+                      ],
+                      !tile.qaStatusThinkingIndicatorVisible else {
+                    throw fail("\(label): default production order or compact-row thinking-indicator boundary regressed (placement=\(tile.qaStatusRowPlacement.rawValue), order=\(tile.qaCompositionIdentifiers), status=\(tile.qaStatusThinkingIndicatorVisible))")
+                }
+                guard !tile.qaThinkingIndicatorVisible else {
+                    throw fail("\(label): unattached/configuring fixture advertised an active transcript-tail Dual-Plane Gyro")
+                }
+                tile.ingest(.contentDelta(
+                    threadId: tile.wiringThreadId, turnId: "gyro-yield",
+                    streamKind: .assistant, delta: "assistant delta"))
+                guard !tile.qaThinkingIndicatorVisible,
+                      !tile.qaStatusThinkingIndicatorVisible else {
+                    throw fail("\(label): transcript-tail gyro did not yield immediately on assistant content")
+                }
+                try checkManagedTileCompactStatusComposition(tile, label: label)
                 try fills(child: transcript, parent: tile, minRatio: 0.95, label: "\(label): semantic transcript")
                 // P5.5 defect 6: a pixel gate cannot see this — the collection
                 // view's default background is `windowBackgroundColor`, which only
@@ -5478,6 +5504,134 @@ enum UIProbeGeometry {
                     try checkProviderFooterEffortSizing(tile, width: width, label: label)
                 }
             }
+        }
+
+        let belowTile = ManagedAgentTileNSView(
+            tile: Tile(
+                id: UUID(), kind: .managedAgent, title: "placement",
+                frame: TileFrame(x: 0, y: 0, width: 520, height: 560),
+                zPosition: .fromLegacyRank(1), runtimeRef: nil,
+                metadata: TileMetadata(launchProfileId: "managed")
+            ),
+            statusRowPlacement: .belowComposer)
+        belowTile.frame = NSRect(x: 0, y: 0, width: 520, height: 560)
+        belowTile.layoutSubtreeIfNeeded()
+        guard belowTile.qaStatusRowPlacement == .belowComposer,
+              belowTile.qaCompositionIdentifiers == [
+                  "agentTile.composer", "agentTile.statusRow",
+                  "agentTile.statusProviderSpacing", "agentTile.providerControls"
+              ] else {
+            throw fail("managedAgent.v2 placement alternate did not preserve composer → status → deliberate spacing → provider controls")
+        }
+    }
+
+    /// Composition-path witness for the approved phase adapter and compact row.
+    /// Each case feeds the installed managed tile row, rather than rendering a
+    /// standalone row or asserting only the adapter result. The missing-fact legs
+    /// specifically forbid a fabricated Thinking/elapsed claim and token-total
+    /// context arithmetic.
+    private static func checkManagedTileCompactStatusComposition(
+        _ tile: ManagedAgentTileNSView,
+        label: String
+    ) throws {
+        let now = Date(timeIntervalSinceReferenceDate: 900_100_000)
+        let root = URL(fileURLWithPath: "/Users/qa/Projects/continuum", isDirectory: true)
+        let home = AgentHome(projectId: nil, projectRoot: root, checkoutRoot: root)
+        let source = root.appendingPathComponent("Sources/ContinuumRevived", isDirectory: true)
+        let target = source.appendingPathComponent("ManagedAgentTileNSView.swift")
+        let location = AgentLocationSnapshot(home: home, whereDirectory: source)
+        let start = now.addingTimeInterval(-12)
+        func activity(_ operation: AgentObservedActivity.Operation) -> AgentObservedActivity {
+            AgentObservedActivity(
+                operation: operation,
+                targetPath: target,
+                startedAt: start,
+                updatedAt: start,
+                evidenceSource: .toolEvent)
+        }
+        let authoritative: [(AgentCompactActivityPhase, AgentCompactStatusPhaseFacts)] = [
+            (.starting, .init(session: .init(state: .starting))),
+            (.thinking, .init(turn: .active(startedAt: start, stream: .reasoning, streamStartedAt: start))),
+            (.responding, .init(turn: .active(startedAt: start, stream: .assistant, streamStartedAt: start))),
+            (.reading, .init(currentActivity: activity(.reading), currentActivityExpiresAt: now.addingTimeInterval(20))),
+            (.searching, .init(currentActivity: activity(.searching), currentActivityExpiresAt: now.addingTimeInterval(20))),
+            (.editing, .init(currentActivity: activity(.editing), currentActivityExpiresAt: now.addingTimeInterval(20))),
+            (.running, .init(turn: .active(startedAt: start, stream: .commandOutput, streamStartedAt: start))),
+            (.waiting, .init(interaction: .pending(startedAt: nil))),
+            (.ready, .init(turn: .completed(outcome: .completed, phaseStartedAt: nil))),
+            (.failed, .init(turn: .completed(outcome: .failed, phaseStartedAt: nil))),
+            (.interrupted, .init(session: .init(state: .stopped))),
+        ]
+        tile.qaResetCompactStatusComposition()
+        guard tile.qaCompactStatusRowIsInstalled else {
+            throw fail("\(label): compact status row was not installed in the managed tile composition")
+        }
+        let context = AgentContextWindowSnapshot(
+            usedTokens: 48_000,
+            maxTokens: 128_000,
+            observedAt: now,
+            source: .providerSessionStats,
+            freshness: .live)
+        for (expected, facts) in authoritative {
+            tile.qaApplyCompactStatusFacts(facts, location: location, contextWindow: context, now: now)
+            let row = tile.qaCompactStatusRow
+            row.layoutSubtreeIfNeeded()
+            guard tile.qaCompactStatusPhase == expected,
+                  row.qaActivityText != "Unknown",
+                  row.qaContextState == .known,
+                  row.qaContextFraction == 48_000.0 / 128_000.0,
+                  tile.qaCompactStatusContentFitsBounds,
+                  row.bounds.height >= AgentCompactStatusRowView.preferredHeight else {
+                throw fail("\(label): installed compact row lost \(expected.rawValue) phase, authoritative context, or geometry")
+            }
+        }
+
+        // No runtime facts means no phase, no elapsed anchor, and no token-total
+        // inference. The row remains visibly conservative through its unknown
+        // activity treatment and context meter.
+        tile.qaApplyCompactStatusFacts(.init(), location: location, now: now)
+        let unknownRow = tile.qaCompactStatusRow
+        unknownRow.layoutSubtreeIfNeeded()
+        guard tile.qaCompactStatusPhase == nil,
+              unknownRow.qaActivityText == "Unknown",
+              unknownRow.qaElapsedText == nil,
+              unknownRow.qaContextState == .unknown,
+              unknownRow.qaContextFraction == nil,
+              tile.qaCompactStatusAccessibilityLabel.contains("Activity unknown"),
+              tile.qaCompactStatusContentFitsBounds else {
+            throw fail("\(label): missing runtime/context facts produced a false phase, elapsed, or percentage in the installed row")
+        }
+
+        // A coarse running session and an active turn without a stream are both
+        // intentionally unresolved. A stale What must not resurrect Reading.
+        let stale = AgentObservedActivity(
+            operation: .inspecting,
+            targetPath: target,
+            startedAt: start,
+            updatedAt: start,
+            evidenceSource: .toolEvent)
+        tile.qaApplyCompactStatusFacts(
+            .init(session: .init(state: .running)), location: location, now: now)
+        guard tile.qaCompactStatusPhase == nil else {
+            throw fail("\(label): coarse running session fabricated a compact phase")
+        }
+        tile.qaApplyCompactStatusFacts(
+            .init(turn: .active(startedAt: start, stream: nil, streamStartedAt: nil)),
+            location: location,
+            now: now)
+        guard tile.qaCompactStatusPhase == nil else {
+            throw fail("\(label): active turn without a stream fabricated a compact phase")
+        }
+        tile.qaApplyCompactStatusFacts(
+            .init(
+                turn: .active(startedAt: start, stream: .reasoning, streamStartedAt: start),
+                currentActivity: stale,
+                currentActivityExpiresAt: now.addingTimeInterval(-1)),
+            location: location,
+            now: now)
+        guard tile.qaCompactStatusPhase == .thinking,
+              tile.qaCompactStatusRow.qaActivityText == "Thinking" else {
+            throw fail("\(label): expired inspecting activity overrode the current reasoning stream")
         }
     }
 
@@ -6013,6 +6167,187 @@ enum UIProbeGeometry {
             throw fail("incremental transcript updates retained \(list.qaLiveHostCount) live hosts")
         }
         return live
+    }
+
+    /// The Gyro must be a virtual collection tail, not a viewport overlay. This
+    /// negative seam also pins the unattached/configuring and detached gates: no
+    /// live agent means no indicator row, regardless of a stale-looking status.
+    private static func checkThinkingTailProductionSeams() throws {
+        func fail(_ message: String) -> GeometryError {
+            GeometryError(message: "thinking-tail: \(message)")
+        }
+        let list = AgentTranscriptListView()
+        list.frame = NSRect(x: 0, y: 0, width: 320, height: 180)
+        let host = NSView(frame: list.frame)
+        host.addSubview(list)
+        list.autoresizingMask = [.width, .height]
+        list.layoutSubtreeIfNeeded()
+        let emptyHeight = list.qaTranscriptDocumentHeight
+        list.setThinkingIndicatorVisible(true)
+        list.layoutSubtreeIfNeeded()
+        guard list.qaThinkingIndicatorVisible,
+              list.qaTailIsVirtualDocumentRow,
+              list.qaTranscriptDocumentHeight > emptyHeight,
+              list.qaThinkingIndicatorFrame.width == DualPlaneGyroIndicatorModel.side,
+              list.qaThinkingIndicatorFrame.height == DualPlaneGyroIndicatorModel.side,
+              list.qaThinkingIndicatorFrame.maxY <= list.bounds.height else {
+            throw fail("visible Gyro did not occupy a bounded collection-document tail row")
+        }
+        list.setThinkingIndicatorVisible(false)
+        list.layoutSubtreeIfNeeded()
+        guard !list.qaThinkingIndicatorVisible,
+              !list.qaTailIsVirtualDocumentRow,
+              list.qaTranscriptDocumentHeight <= emptyHeight + 0.5 else {
+            throw fail("hiding the Gyro did not remove its document extent immediately")
+        }
+
+        let tile = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(uuidString: "00000000-0000-0000-0000-0000000009a1")!,
+            kind: .managedAgent,
+            title: "UNATTACHED_GYRO",
+            frame: TileFrame(x: 0, y: 0, width: 320, height: 240),
+            zPosition: .fromLegacyRank(1),
+            runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")
+        ))
+        guard !tile.qaThinkingIndicatorVisible else {
+            throw fail("fresh unattached/configuring tile advertised an active Gyro")
+        }
+        tile.detach()
+        guard !tile.qaThinkingIndicatorVisible else {
+            throw fail("detached tile retained live Gyro state")
+        }
+    }
+
+    /// Composition gate for the host-local tool-detail adapter. The provider
+    /// record is intentionally supplied through the production resolver seam,
+    /// while the semantic document remains free of local summary/path text.
+    private static func checkHostLocalToolDisclosureComposition() throws -> Int {
+        func id(_ value: String) -> AgentNodeID { AgentNodeID(rawValue: value)! }
+        let captureAgent = AgentID(rawValue: UUID(uuidString: "91000000-0000-4000-8000-000000000091")!)
+        let captureList = AgentTranscriptListView(toolDetailStore: AgentToolDetailStore())
+        captureList.bindToolDetailAgent(captureAgent)
+        captureList.captureRuntimeEvent(.turnStarted(threadId: "capture-thread", turnId: "capture-turn"))
+        let captureActivity = AgentObservedActivity(
+            operation: .reading,
+            targetPath: URL(fileURLWithPath: "/private/capture/secret.swift"),
+            startedAt: Date(timeIntervalSinceReferenceDate: 100),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 100),
+            evidenceSource: .toolEvent)
+        // The observation intentionally arrives before itemStarted, matching the
+        // Pi side-channel order; production must hold it until exact identity exists.
+        captureList.captureRuntimeObservation(.toolActivity(itemId: "capture-item", activity: captureActivity))
+        // Same provider item IDs are legal across turns. A pending observation
+        // from the old scope must be discarded before the new item can start.
+        captureList.captureRuntimeEvent(.turnStarted(threadId: "capture-thread", turnId: "capture-next-turn"))
+        guard captureList.qaPendingRuntimeObservationCount == 0,
+              let nextIdentity = captureList.captureRuntimeEvent(
+                  .itemStarted(threadId: "capture-thread", itemId: "capture-item", kind: .commandExecution, title: "read-next")
+              ),
+              nextIdentity.scope.turnID == "capture-next-turn" else {
+            throw fail("runtime observation crossed a turn boundary for a reused item ID")
+        }
+        let originalScopeList = AgentTranscriptListView(toolDetailStore: AgentToolDetailStore())
+        originalScopeList.bindToolDetailAgent(captureAgent)
+        originalScopeList.captureRuntimeEvent(.turnStarted(threadId: "capture-thread", turnId: "capture-turn"))
+        guard let capturedIdentity = originalScopeList.captureRuntimeEvent(
+            .itemStarted(threadId: "capture-thread", itemId: "capture-item", kind: .commandExecution, title: "read")
+        ),
+        capturedIdentity.scope.agentID == captureAgent.rawValue.uuidString,
+        capturedIdentity.scope.threadID == "capture-thread",
+        capturedIdentity.scope.turnID == "capture-turn",
+        capturedIdentity.scope.provider == "runtime",
+        originalScopeList.bindToolDetailIdentity(capturedIdentity, to: id("capture-entry")) else {
+            throw fail("production tool capture did not fail closed into exact agent/thread/turn/provider identity")
+        }
+        let blockID = id("tool-composition-block")
+        let itemID: AgentToolDetailID = "tool-composition-item"
+        let compositionAgentID = AgentID(rawValue: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!)
+        let scope = AgentToolDetailScope(
+            agentID: compositionAgentID.rawValue.uuidString, threadID: "composition-thread",
+            turnID: "composition-turn", provider: "runtime"
+        )!
+        let identity = AgentToolDetailKey(scope: scope, providerItemID: itemID)
+        let record = AgentToolDetailRecord(
+            identity: identity,
+            toolName: "/Users/private/project/run-tool",
+            arguments: [AgentToolDetailArgument(
+                key: "command",
+                value: AgentToolDetailBoundedText(text: "echo safe")
+            )],
+            status: .completed,
+            updatedAt: Date(timeIntervalSinceReferenceDate: 10)
+        )
+        let block = AgentBlock(
+            id: blockID, revision: 1, kind: .toolCall,
+            payload: .toolCall(AgentToolCallPayload(
+                name: "provider-tool", summary: "Completed", status: .completed
+            ))
+        )
+        let filler = (1..<20).map { index in
+            AgentBlock(
+                id: id("tool-composition-filler-\(index)"), revision: 1,
+                kind: AgentBlockKind(rawValue: "fixture-opaque")!,
+                payload: .opaque(AgentOpaquePayload(debugLabel: "filler-\(index)", value: .null))
+            )
+        }
+        let blocks = [block] + filler
+        let entry = AgentEntry(
+            id: id("tool-composition-entry"), revision: 1, role: .assistant,
+            provenance: .providerItem(provider: "runtime", itemID: itemID.rawValue), blocks: blocks
+        )
+        let document = AgentDocument(version: 1, entries: [entry])
+        let list = AgentTranscriptListView(toolDetailProvider: { key in
+            key == identity ? record : nil
+        })
+        // The semantic row is intentionally paired with the exact same host
+        // owner as the local record; a mismatched tile must fail closed.
+        list.bindToolDetailAgent(compositionAgentID)
+        list.bindToolDetailIdentity(identity, to: entry.id)
+        list.frame = NSRect(x: 0, y: 0, width: 320, height: 120)
+        let host = NSView(frame: list.frame)
+        host.addSubview(list)
+        list.autoresizingMask = [.width, .height]
+        try list.apply(document: document, patch: AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: blocks.map(\.id)))
+        host.layoutSubtreeIfNeeded()
+        list.collectionView.layoutSubtreeIfNeeded()
+
+        var assertions = 0
+        guard list.qaPresentedToolSummary(for: blockID)?.contains("Tool") == true else {
+            throw fail("host-local tool composition did not reflow the sanitized terminal summary")
+        }
+        assertions += 1
+        guard list.qaTranscriptRowHeight(for: blockID).map({ $0 > 0 }) == true else {
+            throw fail("host-local tool composition produced no measured row height")
+        }
+        assertions += 1
+
+        list.collectionView.selectionIndexPaths = [IndexPath(item: 0, section: 0)]
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("ContinuumToolCompositionCopy"))
+        list.copySelectedBlocks(asMarkdown: true, pasteboard: pasteboard)
+        guard let copied = pasteboard.string(forType: NSPasteboard.PasteboardType.string),
+              copied.contains("provider-tool"),
+              !copied.contains("/Users/private") else {
+            throw fail("host-local tool copy crossed the local summary/path boundary")
+        }
+        assertions += 1
+
+        let spoken = list.qaVisibleAccessibilityText.joined(separator: " ")
+        guard spoken.contains("provider-tool") || spoken.contains("Completed"),
+              !spoken.contains("/Users/private") else {
+            throw fail("host-local tool accessibility output exposed a path or lost the semantic label")
+        }
+        assertions += 1
+
+        let beforeY = list.scrollView.contentView.bounds.origin.y
+        list.scrollView.contentView.scroll(to: NSPoint(x: 0, y: 12))
+        list.scrollView.reflectScrolledClipView(list.scrollView.contentView)
+        let afterY = list.scrollView.contentView.bounds.origin.y
+        guard beforeY != afterY || list.scrollView.contentSize.height <= list.scrollView.contentView.bounds.height else {
+            throw fail("host-local tool composition did not preserve the transcript scroll seam")
+        }
+        assertions += 1
+        return assertions
     }
 
     /// Production entry/item acceptance check for the completed-reasoning route.
@@ -7734,7 +8069,352 @@ enum UIProbeGeometry {
         let pasteboardAssertions = try await checkComposerImagePasteboardDecoder()
         let thumbnailAssertions = try await checkComposerImageThumbnailPipeline()
         let railAssertions = try await checkComposerImageAttachmentRail()
-        print("UIProbeGeometry: composer image components gated \(pasteboardAssertions) paste/drop decoding assertions, \(thumbnailAssertions) thumbnail-cache assertions, and \(railAssertions) rail geometry/accessibility/keyboard assertions")
+        let rebindAssertions = try await checkComposerRebindIsolation()
+        let submissionRecoveryAssertions = try await checkComposerSubmissionRebindRecovery()
+        let asyncRefusalAssertions = try await checkAsyncRefusalRebindRecovery()
+        print("UIProbeGeometry: composer image components gated \(pasteboardAssertions) paste/drop decoding assertions, \(thumbnailAssertions) thumbnail-cache assertions, \(railAssertions) rail geometry/accessibility/keyboard assertions, \(rebindAssertions) delayed cross-agent rebind assertions, \(submissionRecoveryAssertions) pre-sink submission rebind recovery assertions, and \(asyncRefusalAssertions) suspended sink-refusal/rebind assertions")
+    }
+
+    /// Delays an old agent's attachment-resolution await while the real AppKit
+    /// composer is rebound to another agent. The stale task must not apply the
+    /// old text or attachment rail after the new binding is installed.
+    private static func checkComposerRebindIsolation() async throws -> Int {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ComposerRebindIsolation-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let agentA = AgentID(rawValue: UUID(uuidString: "C0000000-0000-4000-8000-0000000000A1")!)
+        let agentB = AgentID(rawValue: UUID(uuidString: "C0000000-0000-4000-8000-0000000000B1")!)
+        let store = AgentComposerDraftStore(
+            applicationSupportDirectory: root,
+            debounceInterval: 60,
+            submissionRecoveryDelayNanoseconds: 100_000_000
+        )
+        let draftA = ContinuumRevivedCore.AgentComposerDraft(
+            text: "agent A private draft", selection: 0..<21, updatedAt: Date()
+        )
+        let draftB = ContinuumRevivedCore.AgentComposerDraft(
+            text: "agent B draft", selection: 0..<13, updatedAt: Date().addingTimeInterval(1)
+        )
+        await store.save(draftA, for: agentA)
+        await store.flushAll()
+        _ = try await store.beginSubmission(for: agentA, submittedAt: Date())
+        await store.save(draftB, for: agentB)
+        await store.flushAll()
+
+        // The injected bounded recovery delay makes the old restore task
+        // deterministically cross the rebind boundary rather than relying on
+        // scheduler luck.
+        let composer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 420, height: 120))
+        composer.bindDraftStore(store, agentID: agentA)
+        composer.restorePromptSubmission()
+        try await Task.sleep(nanoseconds: 10_000_000)
+        composer.bindDraftStore(store, agentID: agentB)
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        guard composer.draft.text == draftB.text,
+              !composer.draft.text.contains("agent A private") else {
+            throw fail("delayed cross-agent composer rebind applied the stale agent A draft: \(composer.draft.text)")
+        }
+        return 2
+    }
+
+    /// Deterministically crosses the exact pre-sink window: the store has
+    /// journaled and cleared agent A, then the composer is rebound before the
+    /// sink can be invoked. The next A bind must recover the durable draft.
+    private static func checkComposerSubmissionRebindRecovery() async throws -> Int {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ComposerSubmissionRebindRecovery-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let agentA = AgentID(rawValue: UUID(uuidString: "C0000000-0000-4000-8000-0000000000A2")!)
+        let agentB = AgentID(rawValue: UUID(uuidString: "C0000000-0000-4000-8000-0000000000B2")!)
+        let store = AgentComposerDraftStore(
+            applicationSupportDirectory: root,
+            debounceInterval: 60
+        )
+        let imageID = AgentImageAttachmentID(rawValue: "pre-sink-recovery-image")!
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let imageURL = root.appendingPathComponent("pre-sink-recovery.png")
+        try Data([0, 1, 2]).write(to: imageURL)
+        let image = AgentPromptImageAttachment(
+            metadata: AgentImageAttachmentMetadata(id: imageID, displayName: "pre-sink-recovery.png"),
+            fileURL: imageURL
+        )
+        let draft = ContinuumRevivedCore.AgentComposerDraft(
+            text: "pre-sink recovery draft", selection: 0..<23, updatedAt: Date(),
+            imageAttachments: [AgentComposerDraftImageAttachment(metadata: image.metadata)]
+        )
+        await store.save(draft, for: agentA)
+        await store.flushAll()
+        let snapshot = AgentTileTurnSnapshot(
+            state: .ready,
+            capabilities: AgentTurnCapabilities(canSend: true),
+            turnStartedAt: nil
+        )
+        let sink = ComposerSubmissionProbeSink()
+        let composer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 420, height: 120))
+        composer.bindActionSink(sink, agentID: agentA, snapshot: snapshot)
+        composer.bindDraftStore(store, agentID: agentA)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        composer.apply(AgentComposerDraft(
+            text: draft.text,
+            selection: NSRange(location: (draft.text as NSString).length, length: 0),
+            revision: 1,
+            imageAttachments: [image]
+        ))
+        // Regression witness A: rebind while beginSubmissionLease is at its actor
+        // await, before a lease can be installed on the composer.
+        composer.qaBeforeSubmissionLeaseAcquisition = {
+            composer.bindActionSink(sink, agentID: agentB, snapshot: snapshot)
+            composer.bindDraftStore(store, agentID: agentB)
+        }
+        composer.composerRequestedSend(composer.textView)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        guard await sink.invocationCount == 0 else {
+            throw fail("pre-sink rebind witness invoked the sink before cancellation")
+        }
+
+        composer.bindActionSink(sink, agentID: agentA, snapshot: snapshot)
+        composer.bindDraftStore(store, agentID: agentA)
+        try await Task.sleep(nanoseconds: 180_000_000)
+
+        guard composer.draft.text == draft.text else {
+            throw fail("next agent A bind left its pre-sink journal hidden: \(composer.draft.text)")
+        }
+        guard await sink.invocationCount == 0 else {
+            throw fail("pre-sink recovery duplicated sink delivery")
+        }
+
+        // Regression witness B: two live composers for one agent. The loser is
+        // rejected while the winner owns the journal, then must be able to
+        // submit after the winner completes; a latched actionTask fails the
+        // second send here.
+        let concurrentAgent = AgentID(rawValue: UUID(uuidString: "C0000000-0000-4000-8000-0000000000D2")!)
+        let winnerDraft = ContinuumRevivedCore.AgentComposerDraft(
+            text: "winner prompt", selection: 0..<13, updatedAt: Date(), imageAttachments: draft.imageAttachments
+        )
+        let loserDraft = ContinuumRevivedCore.AgentComposerDraft(
+            text: "loser prompt", selection: 0..<12, updatedAt: Date(), imageAttachments: draft.imageAttachments
+        )
+        await store.save(winnerDraft, for: concurrentAgent)
+        await store.flushAll()
+        let winnerSink = ComposerSubmissionProbeSink(delayNanoseconds: 100_000_000)
+        let loserSink = ComposerSubmissionProbeSink()
+        let winnerComposer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 420, height: 120))
+        let loserComposer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 420, height: 120))
+        winnerComposer.bindActionSink(winnerSink, agentID: concurrentAgent, snapshot: snapshot)
+        winnerComposer.bindDraftStore(store, agentID: concurrentAgent)
+        loserComposer.bindActionSink(loserSink, agentID: concurrentAgent, snapshot: snapshot)
+        loserComposer.bindDraftStore(store, agentID: concurrentAgent)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        winnerComposer.apply(AgentComposerDraft(
+            text: winnerDraft.text, selection: NSRange(location: 13, length: 0), revision: 1, imageAttachments: [image]
+        ))
+        loserComposer.apply(AgentComposerDraft(
+            text: loserDraft.text, selection: NSRange(location: 12, length: 0), revision: 1, imageAttachments: [image]
+        ))
+        winnerComposer.composerRequestedSend(winnerComposer.textView)
+        // Let the winner suspend inside its delayed sink acceptance, then send
+        // from the second live composer while the winner's lease is active.
+        try await Task.sleep(nanoseconds: 20_000_000)
+        loserComposer.composerRequestedSend(loserComposer.textView)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        guard await winnerSink.invocationCount == 1,
+              await loserSink.invocationCount == 0 else {
+            throw fail("two-composer witness did not reject the loser before sink handoff")
+        }
+        winnerComposer.confirmPromptSubmissionCompleted()
+        try await Task.sleep(nanoseconds: 120_000_000)
+        loserComposer.composerRequestedSend(loserComposer.textView)
+        try await Task.sleep(nanoseconds: 120_000_000)
+        guard await loserSink.invocationCount == 1 else {
+            throw fail("rejected second composer remained action-latched after winner completion")
+        }
+
+        // Sink-gone immediately after lease installation must take the same
+        // exact-token restore path, and the next acquire must remain possible.
+        let disappearingAgent = AgentID(rawValue: UUID(uuidString: "C0000000-0000-4000-8000-0000000000E2")!)
+        let disappearingDraft = ContinuumRevivedCore.AgentComposerDraft(
+            text: "sink disappeared", selection: 0..<16, updatedAt: Date(),
+            imageAttachments: draft.imageAttachments
+        )
+        await store.save(disappearingDraft, for: disappearingAgent)
+        await store.flushAll()
+        var disappearingSink: ComposerSubmissionProbeSink? = ComposerSubmissionProbeSink()
+        let disappearingComposer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 420, height: 120))
+        disappearingComposer.bindActionSink(disappearingSink!, agentID: disappearingAgent, snapshot: snapshot)
+        disappearingComposer.bindDraftStore(store, agentID: disappearingAgent)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        disappearingComposer.apply(AgentComposerDraft(
+            text: disappearingDraft.text, selection: NSRange(location: 16, length: 0),
+            revision: 1, imageAttachments: [image]
+        ))
+        disappearingComposer.qaBeforeSubmissionSinkHandoff = {
+            disappearingSink = nil
+        }
+        disappearingComposer.composerRequestedSend(disappearingComposer.textView)
+        try await Task.sleep(nanoseconds: 120_000_000)
+        guard disappearingComposer.draft.text == disappearingDraft.text else {
+            throw fail("sink-gone pre-handoff did not restore the exact leased draft")
+        }
+        let recoveredSink = ComposerSubmissionProbeSink()
+        disappearingComposer.bindActionSink(recoveredSink, agentID: disappearingAgent, snapshot: snapshot)
+        disappearingComposer.qaBeforeSubmissionSinkHandoff = nil
+        disappearingComposer.composerRequestedSend(disappearingComposer.textView)
+        try await Task.sleep(nanoseconds: 120_000_000)
+        guard await recoveredSink.invocationCount == 1 else {
+            throw fail("sink-gone restore left the next acquire blocked")
+        }
+
+        let handoffAgent = AgentID(rawValue: UUID(uuidString: "C0000000-0000-4000-8000-0000000000C2")!)
+        let handoffDraft = ContinuumRevivedCore.AgentComposerDraft(
+            text: "post-handoff stays hidden", selection: 0..<25, updatedAt: Date(),
+            imageAttachments: draft.imageAttachments
+        )
+        await store.save(handoffDraft, for: handoffAgent)
+        await store.flushAll()
+        let delayedSink = ComposerSubmissionProbeSink(delayNanoseconds: 100_000_000)
+        let handoffComposer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 420, height: 120))
+        handoffComposer.bindActionSink(delayedSink, agentID: handoffAgent, snapshot: snapshot)
+        handoffComposer.bindDraftStore(store, agentID: handoffAgent)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        handoffComposer.apply(AgentComposerDraft(
+            text: handoffDraft.text,
+            selection: NSRange(location: (handoffDraft.text as NSString).length, length: 0),
+            revision: 1,
+            imageAttachments: [image]
+        ))
+        handoffComposer.composerRequestedSend(handoffComposer.textView)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        guard await delayedSink.invocationCount == 1 else {
+            throw fail("post-handoff witness did not invoke the sink exactly once")
+        }
+        handoffComposer.bindActionSink(delayedSink, agentID: agentB, snapshot: snapshot)
+        handoffComposer.bindDraftStore(store, agentID: agentB)
+        try await Task.sleep(nanoseconds: 150_000_000)
+        handoffComposer.bindActionSink(delayedSink, agentID: handoffAgent, snapshot: snapshot)
+        handoffComposer.bindDraftStore(store, agentID: handoffAgent)
+        try await Task.sleep(nanoseconds: 180_000_000)
+        guard await delayedSink.invocationCount == 1,
+              handoffComposer.draft.text.isEmpty else {
+            throw fail("post-handoff rebind restored or duplicated an already handed-off prompt")
+        }
+        return 5
+    }
+
+    /// The winner owns a durable draft while its sink is suspended. A rebind crosses
+    /// the old UI generation before the sink refuses; recovery must still settle the
+    /// exact lease, while only applying the restored draft to the current generation.
+    /// A second live composer proves refusal does not strand its latch or journal.
+    private static func checkAsyncRefusalRebindRecovery() async throws -> Int {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ComposerAsyncRefusalRebind-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let agentA = AgentID(rawValue: UUID(uuidString: "C0000000-0000-4000-8000-0000000000F2")!)
+        let agentB = AgentID(rawValue: UUID(uuidString: "C0000000-0000-4000-8000-0000000000F3")!)
+        let attachmentStore = AgentComposerAttachmentStore(applicationSupportDirectory: root)
+        let store = AgentComposerDraftStore(
+            applicationSupportDirectory: root,
+            debounceInterval: 60,
+            attachmentStore: attachmentStore
+        )
+        let imageData = try makeProbeImageData(width: 64, height: 32, type: .png)
+        let storedImage = try await attachmentStore.importValidatedPastedImage(
+            imageData,
+            displayName: "refusal-rebind.png",
+            validation: AgentComposerImageValidation(
+                validatedContentType: "image/png", pixelWidth: 64, pixelHeight: 32,
+                byteCount: UInt64(imageData.count)
+            ),
+            forDraftOf: agentA
+        )
+        let draft = ContinuumRevivedCore.AgentComposerDraft(
+            text: "async refusal recoverable draft",
+            selection: 31..<31,
+            updatedAt: Date(),
+            imageAttachments: [AgentComposerDraftImageAttachment(metadata: storedImage.promptAttachment.metadata)]
+        )
+        await store.save(draft, for: agentA)
+        await store.flushAll()
+        let snapshot = AgentTileTurnSnapshot(
+            state: .ready,
+            capabilities: AgentTurnCapabilities(canSend: true),
+            turnStartedAt: nil
+        )
+        let refusingSink = ComposerSubmissionProbeSink(
+            delayNanoseconds: 180_000_000,
+            acceptance: .refused(.unsupported)
+        )
+        let loserSink = ComposerSubmissionProbeSink()
+        let winner = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 420, height: 120))
+        let loser = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 420, height: 120))
+        for composer in [winner, loser] {
+            composer.bindActionSink(
+                composer === winner ? refusingSink : loserSink,
+                agentID: agentA,
+                snapshot: snapshot
+            )
+            composer.bindAttachmentStore(attachmentStore, agentID: agentA)
+            composer.bindDraftStore(store, agentID: agentA)
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let prompt = AgentPromptImageAttachment(
+            metadata: storedImage.promptAttachment.metadata,
+            fileURL: storedImage.promptAttachment.fileURL
+        )
+        winner.apply(AgentComposerDraft(
+            text: draft.text,
+            selection: NSRange(location: (draft.text as NSString).length, length: 0),
+            revision: 1,
+            imageAttachments: [prompt]
+        ))
+        loser.apply(AgentComposerDraft(
+            text: draft.text,
+            selection: NSRange(location: (draft.text as NSString).length, length: 0),
+            revision: 1,
+            imageAttachments: [prompt]
+        ))
+        winner.composerRequestedSend(winner.textView)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        guard await refusingSink.invocationCount == 1 else {
+            throw fail("suspended refusal witness did not enter the sink await")
+        }
+        // Rebind after the lease marker has been cleared for sink handoff. The
+        // refusing task is still live and must restore despite this old generation.
+        winner.bindActionSink(loserSink, agentID: agentB, snapshot: snapshot)
+        winner.bindDraftStore(store, agentID: agentB)
+        loser.composerRequestedSend(loser.textView)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        guard await loserSink.invocationCount == 0 else {
+            throw fail("loser composer acquired the winner journal during suspended refusal")
+        }
+        try await Task.sleep(nanoseconds: 220_000_000)
+        let restored = await store.load(for: agentA)
+        guard let restored else {
+            throw fail("async sink refusal did not restore a draft")
+        }
+        guard restored.text == draft.text else {
+            throw fail("async sink refusal changed restored text")
+        }
+        guard restored.selection == draft.selection else {
+            throw fail("async sink refusal changed restored selection: \(restored.selection) vs \(draft.selection)")
+        }
+        guard restored.imageAttachments == draft.imageAttachments else {
+            throw fail("async sink refusal changed restored image references")
+        }
+        guard !(await store.hasSubmissionRecovery(for: agentA)) else {
+            throw fail("async sink refusal left the submission journal behind")
+        }
+        guard (try await attachmentStore.storedAttachment(for: storedImage.manifest.id)) != nil else {
+            throw fail("async sink refusal lost the managed image capability")
+        }
+        loser.composerRequestedSend(loser.textView)
+        try await Task.sleep(nanoseconds: 120_000_000)
+        guard await loserSink.invocationCount == 1 else {
+            throw fail("loser composer remained latched after winner refusal/rebind recovery")
+        }
+        loser.confirmPromptSubmissionCompleted()
+        try await Task.sleep(nanoseconds: 120_000_000)
+        return 6
     }
 
     private static func checkComposerImagePasteboardDecoder() async throws -> Int {
@@ -8190,6 +8870,31 @@ enum UIProbeGeometry {
         return data
     }
 
+}
+
+@MainActor
+private final class ComposerSubmissionProbeSink: AgentTileActionSink {
+    private(set) var invocationCount = 0
+    let delayNanoseconds: UInt64
+    let acceptance: IntentAcceptance
+
+    init(delayNanoseconds: UInt64 = 0, acceptance: IntentAcceptance = .accepted) {
+        self.delayNanoseconds = delayNanoseconds
+        self.acceptance = acceptance
+    }
+
+    func accept(_ intent: AgentComposerIntent, for agentID: AgentID) async -> IntentAcceptance {
+        invocationCount += 1
+        if delayNanoseconds > 0 {
+            // Keep the production sink await suspended even when the old
+            // composer task is cancelled by a rebind.
+            let delay = delayNanoseconds
+            _ = await Task.detached {
+                try? await Task.sleep(nanoseconds: delay)
+            }.value
+        }
+        return acceptance
+    }
 }
 
 private actor ComposerImageImportRecorder {

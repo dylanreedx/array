@@ -162,6 +162,15 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
         semanticProjection.appendUserPrompt(text)
     }
 
+    /// Echoes one accepted semantic prompt, including images, through the same
+    /// projection used by provider history. The caller owns idempotence; this
+    /// overload keeps local prompt/image blocks together rather than exposing
+    /// transport paths to the transcript model.
+    public mutating func appendUserPrompt(id: AgentNodeID, prompt: AgentPrompt) {
+        do { _ = try semanticProjection.appendUserPrompt(id: id, prompt: prompt) }
+        catch { /* fail closed; provider events remain authoritative */ }
+    }
+
     public mutating func appendNotice(id: String, title: String, text: String) {
         semanticProjection.appendNotice(id: id, title: title, text: text)
     }

@@ -31,6 +31,25 @@ public enum SecretRedactor {
         return redacted
     }
 
+    /// Pi/local diagnostics may echo host-local file capabilities. Apply this at
+    /// local runtime/log boundaries, not to generic browser/network diagnostics.
+    public static func redactLocalDiagnostics(_ text: String, explicitSecrets: [String] = []) -> String {
+        redactLocalPathReferences(redact(text, explicitSecrets: explicitSecrets))
+    }
+
+    /// Removes local file capabilities from messages that may enter runtime
+    /// events, transcripts, activity sync, or logs. This catches Pi `@/path`
+    /// image argv echoes as well as ordinary absolute/file URLs while preserving
+    /// HTTP(S) URLs and enough structure to understand that a local path was present.
+    public static func redactLocalPathReferences(_ text: String) -> String {
+        rewriteLocalPathReferences(in: text, replacement: "[LOCAL-PATH]")
+    }
+
+    /// Shared safe removal for labels/names where even a placeholder would add noise.
+    public static func removeLocalPathReferences(_ text: String) -> String {
+        rewriteLocalPathReferences(in: text, replacement: " ")
+    }
+
     /// Extracts credential values from provider text for same-event privacy
     /// decisions. Results are bounded and are consumed immediately; callers
     /// must not retain them as detail payload.
@@ -154,5 +173,91 @@ public enum SecretRedactor {
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
         return regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: template)
+    }
+
+    private static func rewriteLocalPathReferences(in text: String, replacement: String) -> String {
+        let scalars = Array(text.unicodeScalars)
+        var result = String.UnicodeScalarView()
+        var index = 0
+        while index < scalars.count {
+            if let end = localPathEnd(in: scalars, startingAt: index) {
+                result.append(contentsOf: replacement.unicodeScalars)
+                index = end
+            } else {
+                result.append(scalars[index])
+                index += 1
+            }
+        }
+        return String(result)
+    }
+
+    private static func localPathEnd(in scalars: [UnicodeScalar], startingAt start: Int) -> Int? {
+        let count = scalars.count
+        func hasPrefix(_ prefix: String, at index: Int) -> Bool {
+            let needle = Array(prefix.unicodeScalars)
+            guard index + needle.count <= count else { return false }
+            return Array(scalars[index..<(index + needle.count)]) == needle
+        }
+        let previous = start > 0 ? scalars[start - 1] : nil
+        let opener = previous.flatMap(pathClosingDelimiter(for:))
+        let begins: Bool
+        if hasPrefix("file:///", at: start) {
+            begins = true
+        } else if hasPrefix("@file:///", at: start) {
+            begins = true
+        } else if hasPrefix("~/", at: start) || hasPrefix("@~/", at: start) || hasPrefix("@/", at: start) {
+            begins = isBoundary(previous)
+        } else if scalars[start] == "/" {
+            // A URL path is not a host-local capability. Scan only the current
+            // token so `https://host/path` survives while `/Users/...` does not.
+            begins = previous != ":" && previous != "/" && !isHTTPURL(scalars, at: start)
+        } else {
+            begins = false
+        }
+        guard begins else { return nil }
+
+        var index = start
+        while index < count {
+            let scalar = scalars[index]
+            if scalar == "\n" || scalar == "\r" { break }
+            if let opener, scalar == opener { break }
+            if opener == nil && isUnquotedPathTerminator(scalar) { break }
+            index += 1
+        }
+        return index > start ? index : nil
+    }
+
+    private static func pathClosingDelimiter(for scalar: UnicodeScalar) -> UnicodeScalar? {
+        switch scalar {
+        case "(": return ")"
+        case "[": return "]"
+        case "{": return "}"
+        case "<": return ">"
+        case "\"": return "\""
+        case "'": return "'"
+        case "`": return "`"
+        default: return nil
+        }
+    }
+
+    private static func isBoundary(_ scalar: UnicodeScalar?) -> Bool {
+        guard let scalar else { return true }
+        if CharacterSet.whitespacesAndNewlines.contains(scalar) { return true }
+        return "\"'`()[]{}<>,;".unicodeScalars.contains(scalar)
+    }
+
+    private static func isUnquotedPathTerminator(_ scalar: UnicodeScalar) -> Bool {
+        CharacterSet.whitespacesAndNewlines.contains(scalar)
+            || "\"'`()[]{}<>,;".unicodeScalars.contains(scalar)
+    }
+
+    private static func isHTTPURL(_ scalars: [UnicodeScalar], at start: Int) -> Bool {
+        var begin = start
+        while begin > 0,
+              !CharacterSet.whitespacesAndNewlines.contains(scalars[begin - 1]) {
+            begin -= 1
+        }
+        let token = String(String.UnicodeScalarView(scalars[begin..<start]))
+        return token.hasPrefix("http://") || token.hasPrefix("https://")
     }
 }

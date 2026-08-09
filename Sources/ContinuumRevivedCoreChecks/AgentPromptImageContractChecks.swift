@@ -45,6 +45,8 @@ func runAgentPromptImageContractChecks() {
            "text-only compatibility must keep the prompt as the trailing positional argument, got \(legacy)")
 
     let imageOnly = AgentPrompt(imageAttachments: [localAttachment(1, path: "/tmp/one image.png")])
+    expect(!imageOnly.isEmpty && AgentPrompt(text: "   ").isEmpty,
+           "AgentPrompt emptiness must treat attachments as sendable while rejecting whitespace-only text")
     let sendTurn = AgentSendTurnInput(threadId: "thread", prompt: imageOnly)
     expect(sendTurn.text.isEmpty && sendTurn.prompt.imageAttachments.count == 1,
            "image-only AgentPrompt must be accepted by the provider-neutral adapter contract")

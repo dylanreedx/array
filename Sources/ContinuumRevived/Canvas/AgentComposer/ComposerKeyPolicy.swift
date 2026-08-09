@@ -18,7 +18,8 @@ struct ComposerKeyPolicy {
         for event: NSEvent,
         hasMarkedText: Bool,
         hasTrimmedContent: Bool,
-        suggestionsVisible: Bool
+        suggestionsVisible: Bool,
+        hasAttachments: Bool = false
     ) -> ComposerKeyAction {
         if event.keyCode == escapeKeyCode, suggestionsVisible {
             return .dismissSuggestions
@@ -39,6 +40,6 @@ struct ComposerKeyPolicy {
         // can select/commit the actual candidate; clearing the mark ourselves would
         // bypass candidate-window semantics for real IMEs.
         if hasMarkedText { return .nativeTextSystem }
-        return hasTrimmedContent ? .send : .nativeTextSystem
+        return hasTrimmedContent || hasAttachments ? .send : .nativeTextSystem
     }
 }

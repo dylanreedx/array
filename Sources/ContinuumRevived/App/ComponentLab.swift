@@ -1170,6 +1170,7 @@ enum LabCatalog {
             managedAgentLocationStatusCard, managedAgentNarrowLocationTileCard,
             transcriptReviewCard, composerReviewCard, composerFullVariantCard,
             composerCompactVariantCard, composerProviderControlsCard, throbberCandidateGalleryCard,
+            orbitVariationsGalleryCard, tiltedVariationsGalleryCard,
 
             // MARK: night3-C cards
             managedAgentApprovalDockCard, newTileCwdPolicyCard,
@@ -2299,9 +2300,47 @@ enum LabCatalog {
         )
     }
 
+    private static var orbitVariationsGalleryCard: LabEntry {
+        LabEntry(
+            id: "managed-agent.orbit-variations",
+            category: "Managed Agent",
+            title: "Orbit Variations — Motion Study",
+            summary: "Original Orbit plus five named variations at true 18×18 scale, shown in Normal and Reduced Motion with compact status-row context. Review only; no production winner is selected.",
+            content: .reviewSurface(preferredSize: OrbitVariationsGalleryView.preferredSize) {
+                LabCatalog.makeOrbitVariationsGalleryView(mode: .live)
+            }
+        )
+    }
+
     static func makeThrobberCandidateGalleryView(mode: ThrobberCandidateGalleryView.Mode) -> ThrobberCandidateGalleryView {
         ThrobberCandidateGalleryView(
             frame: NSRect(origin: .zero, size: ThrobberCandidateGalleryView.preferredSize),
+            mode: mode
+        )
+    }
+
+    static func makeOrbitVariationsGalleryView(mode: OrbitVariationsGalleryView.Mode) -> OrbitVariationsGalleryView {
+        OrbitVariationsGalleryView(
+            frame: NSRect(origin: .zero, size: OrbitVariationsGalleryView.preferredSize),
+            mode: mode
+        )
+    }
+
+    private static var tiltedVariationsGalleryCard: LabEntry {
+        LabEntry(
+            id: "managed-agent.tilted-variations",
+            category: "Managed Agent",
+            title: "Tilted Prism Variations — Motion Study",
+            summary: "Four immediately distinct Gyro directions at true 18×18 scale, shown in live Normal and static Reduced Motion with compact status context. Review only; no production winner is selected.",
+            content: .reviewSurface(preferredSize: TiltedVariationsGalleryView.preferredSize) {
+                LabCatalog.makeTiltedVariationsGalleryView(mode: .live)
+            }
+        )
+    }
+
+    static func makeTiltedVariationsGalleryView(mode: TiltedVariationsGalleryView.Mode) -> TiltedVariationsGalleryView {
+        TiltedVariationsGalleryView(
+            frame: NSRect(origin: .zero, size: TiltedVariationsGalleryView.preferredSize),
             mode: mode
         )
     }
@@ -3677,6 +3716,274 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
     }
 
+    private static func runOrbitVariationsGalleryCheck(fail: (String) -> Error) throws {
+        let appearances: [NSAppearance.Name] = [.aqua, .darkAqua]
+        var contrast = UIProbeContrast.Evaluation()
+        for appearance in appearances {
+            for scale in [CGFloat(1), CGFloat(2)] {
+                let label = "orbit-variations.\(appearance.rawValue).\(Int(scale))x"
+                let probe = try UIProbe.render(
+                    UIProbe.Spec(
+                        id: "managed-agent.orbit-variations.\(appearance.rawValue).\(Int(scale))x",
+                        size: OrbitVariationsGalleryView.preferredSize,
+                        appearance: appearance,
+                        renderScale: scale
+                    ),
+                    make: { LabCatalog.makeOrbitVariationsGalleryView(mode: .snapshot) }
+                )
+                guard let gallery = probe.view as? OrbitVariationsGalleryView else {
+                    throw fail("\(label): probe did not render OrbitVariationsGalleryView")
+                }
+                try UIProbeGeometry.expectNoZeroSizeViews(gallery, label: label)
+                try UIProbeGeometry.expectNoClipping(gallery, label: label)
+                try UIProbeGeometry.expectNoBrokenRequiredSizeConstraints(gallery, label: label)
+                guard gallery.qaCandidateCount == 6, gallery.qaFixtureCount == 12 else {
+                    throw fail("\(label): expected original Orbit plus five variations in Normal and Reduced Motion")
+                }
+                for fixture in gallery.qaIndicatorFixtures {
+                    let indicator = fixture.indicator
+                    guard indicator.bounds.size == NSSize(width: 18, height: 18),
+                          indicator.accessibilityRole() == .progressIndicator,
+                          indicator.accessibilityLabel()?.contains("Agent thinking") == true,
+                          gallery.bounds.contains(indicator.convert(indicator.bounds, to: gallery)),
+                          fixture.nameLabel.stringValue == fixture.candidate.rawValue,
+                          fixture.directionLabel.stringValue == fixture.candidate.direction,
+                          !fixture.statusLabel.stringValue.isEmpty,
+                          fixture.nameLabel.maximumNumberOfLines == 2,
+                          fixture.directionLabel.maximumNumberOfLines == 2 else {
+                        throw fail("\(label): \(fixture.candidate.rawValue) lost 18×18 geometry, AX, direction, or status context")
+                    }
+                    guard fixture.nameLabel.frame.width + 0.5 >= fixture.nameLabel.intrinsicContentSize.width || fixture.nameLabel.maximumNumberOfLines == 2,
+                          fixture.directionLabel.frame.width > 0,
+                          fixture.statusLabel.frame.width > 0 else {
+                        throw fail("\(label): \(fixture.candidate.rawValue) clipped review labels")
+                    }
+                    guard activeAnimationCount(in: indicator) == 0 else {
+                        throw fail("\(label): snapshot route installed animation for \(fixture.candidate.rawValue)")
+                    }
+                }
+                contrast.merge(try UIProbeContrast.evaluate(probe))
+            }
+        }
+        guard contrast.measured > 0, contrast.failures.isEmpty else {
+            throw fail("orbit variations contrast/color-token check failed: \(contrast.failures.joined(separator: "; "))")
+        }
+
+        let liveProbe = try UIProbe.render(
+            UIProbe.Spec(id: "managed-agent.orbit-variations.live.darkAqua", size: OrbitVariationsGalleryView.preferredSize, appearance: .darkAqua),
+            make: { LabCatalog.makeOrbitVariationsGalleryView(mode: .live) }
+        )
+        guard let liveGallery = liveProbe.view as? OrbitVariationsGalleryView else {
+            throw fail("orbit variations live probe did not render gallery")
+        }
+        guard liveGallery.qaIndicatorFixtures.filter({ $0.reducedMotion }).count == 6,
+              liveGallery.qaIndicatorFixtures.filter({ !$0.reducedMotion }).count == 6 else {
+            throw fail("orbit variations live route lost Normal/Reduced Motion coverage")
+        }
+        for fixture in liveGallery.qaIndicatorFixtures {
+            let count = activeAnimationCount(in: fixture.indicator)
+            if fixture.reducedMotion {
+                guard count == 0 else { throw fail("orbit variations Reduced Motion animated \(fixture.candidate.rawValue)") }
+            } else {
+                guard count > 0 else { throw fail("orbit variations Normal Motion did not animate \(fixture.candidate.rawValue)") }
+            }
+        }
+        for candidate in OrbitVariationsGalleryView.Candidate.allCases {
+            let indicator = candidate.makeIndicator(reducedMotion: false)
+            indicator.frame = NSRect(x: 0, y: 0, width: 18, height: 18)
+            indicator.startAnimating()
+            guard activeAnimationCount(in: indicator) == 0 else {
+                throw fail("orbit variations \(candidate.rawValue) animated before entering a window")
+            }
+            let host = NSView(frame: NSRect(x: 0, y: 0, width: 40, height: 40))
+            let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = host
+            host.addSubview(indicator)
+            indicator.frame = NSRect(x: 11, y: 11, width: 18, height: 18)
+            indicator.startAnimating()
+            guard activeAnimationCount(in: indicator) > 0 else { throw fail("orbit variations \(candidate.rawValue) did not animate when visible") }
+            indicator.setReducedMotion(true)
+            guard activeAnimationCount(in: indicator) == 0 else { throw fail("orbit variations \(candidate.rawValue) ignored Reduced Motion") }
+            indicator.setReducedMotion(false)
+            indicator.startAnimating()
+            indicator.isHidden = true
+            guard activeAnimationCount(in: indicator) == 0 else { throw fail("orbit variations \(candidate.rawValue) animated while hidden") }
+            window.contentView = nil
+        }
+    }
+
+    private static func runTiltedVariationsGalleryCheck(fail: (String) -> Error) throws {
+        let appearances: [NSAppearance.Name] = [.aqua, .darkAqua]
+        var contrast = UIProbeContrast.Evaluation()
+        let expectedCandidates = TiltedVariationsGalleryView.Candidate.allCases
+        guard TiltedVariationsGalleryView.preferredSize == NSSize(width: 960, height: 640) else {
+            throw fail("tilted variations preferred size drifted from 960×640")
+        }
+        for appearance in appearances {
+            for scale in [CGFloat(1), CGFloat(2)] {
+                let label = "tilted-variations.\(appearance.rawValue).\(Int(scale))x"
+                let probe = try UIProbe.render(
+                    UIProbe.Spec(
+                        id: "managed-agent.tilted-variations.\(appearance.rawValue).\(Int(scale))x",
+                        size: TiltedVariationsGalleryView.preferredSize,
+                        appearance: appearance,
+                        renderScale: scale
+                    ),
+                    make: { LabCatalog.makeTiltedVariationsGalleryView(mode: .snapshot) }
+                )
+                guard let gallery = probe.view as? TiltedVariationsGalleryView else {
+                    throw fail("\(label): probe did not render TiltedVariationsGalleryView")
+                }
+                try UIProbeGeometry.expectNoZeroSizeViews(gallery, label: label)
+                try UIProbeGeometry.expectNoClipping(gallery, label: label)
+                try UIProbeGeometry.expectNoBrokenRequiredSizeConstraints(gallery, label: label)
+                guard gallery.qaCandidateCount == 4,
+                      gallery.qaFixtureCount == 8,
+                      expectedCandidates == [.dualPlaneGyro, .monochromeGyro, .ribbonNoiseGyro, .latticeGyro],
+                      !expectedCandidates.contains(where: { $0.rawValue.contains("Echo") || $0.rawValue.contains("Signal") || $0.rawValue.contains("Depth") }) else {
+                    throw fail("\(label): Gyro review surface must contain exactly four approved candidates in Normal and Reduced Motion")
+                }
+                for fixture in gallery.qaIndicatorFixtures {
+                    let indicator = fixture.indicator
+                    guard indicator.bounds.size == NSSize(width: 18, height: 18),
+                          indicator.accessibilityRole() == .progressIndicator,
+                          indicator.accessibilityLabel()?.contains("Agent thinking") == true,
+                          gallery.bounds.contains(indicator.convert(indicator.bounds, to: gallery)),
+                          fixture.nameLabel.stringValue == fixture.candidate.rawValue,
+                          expectedCandidates.contains(fixture.candidate),
+                          fixture.directionLabel.stringValue == fixture.candidate.direction,
+                          !fixture.directionLabel.stringValue.isEmpty,
+                          !fixture.statusLabel.stringValue.isEmpty,
+                          fixture.nameLabel.maximumNumberOfLines == 2,
+                          fixture.directionLabel.maximumNumberOfLines == 2,
+                          fixture.nameLabel.frame.width > 0,
+                          fixture.directionLabel.frame.width > 0,
+                          fixture.statusLabel.frame.width > 0 else {
+                        throw fail("\(label): \(fixture.candidate.rawValue) lost 18×18 geometry, exact name/direction, AX, or compact status context")
+                    }
+                    guard activeAnimationCount(in: indicator) == 0 else {
+                        throw fail("\(label): snapshot route installed animation for \(fixture.candidate.rawValue)")
+                    }
+                    if let gyro = indicator as? GyroBrandDerivativeThinkingIndicatorView {
+                        let report = gyro.qaReport
+                        guard report.footprintSide == 18,
+                              report.nodeCount == 3,
+                              report.guideCount == (gyro.variant == .arrayEcho || gyro.variant == .lattice ? 3 : 2),
+                              report.sampledPathFitsFootprint,
+                              report.minimumCenterClearance > 0,
+                              report.colorHandoffSamples > 0 || gyro.variant != .depthPulse,
+                              gyro.qaNodeStates.allSatisfy({ state in
+                                  AccentToken.allCases.contains(where: { $0.rawValue == state.tokenName })
+                                      && state.opacity >= 0 && state.opacity <= 1
+                              }) else {
+                            throw fail("\(label): \(fixture.candidate.rawValue) lost bounded geometry, open centre, semantic colour, or depth handoff")
+                        }
+                        if gyro.variant == .ribbonNoise {
+                            guard report.usesDeterministicHarmonics,
+                                  report.nodeShape == "capsule-ribbon",
+                                  report.pathTopology == "band-limited-wobble",
+                                  report.nodePathPointCount > 0 else {
+                                throw fail("\(label): Ribbon Noise Gyro lost its deterministic path noise or ribbon silhouette")
+                            }
+                        }
+                        if gyro.variant == .monochromatic {
+                            guard Set(gyro.qaNodeStates.map(\.tokenName)).count == 1,
+                                  gyro.qaNodeStates.allSatisfy({ $0.tokenName == AccentToken.accentWorking.rawValue }) else {
+                                throw fail("\(label): Monochrome Gyro used more than one semantic accent token")
+                            }
+                        }
+                        if gyro.variant == .lattice {
+                            guard report.pathTopology == "rotating-triangle",
+                                  report.nodeShape == "diamond",
+                                  report.guideCount == 3 else {
+                                throw fail("\(label): Lattice Gyro lost its triangular topology and diamond nodes")
+                            }
+                        }
+                    }
+                }
+                let normalFixtures = gallery.qaIndicatorFixtures.filter { !$0.reducedMotion }
+                let dual = normalFixtures.first(where: { $0.candidate == .dualPlaneGyro })?.indicator as? DualPlaneGyroTiltedThinkingIndicatorView
+                let ribbon = normalFixtures.first(where: { $0.candidate == .ribbonNoiseGyro })?.indicator as? GyroBrandDerivativeThinkingIndicatorView
+                let lattice = normalFixtures.first(where: { $0.candidate == .latticeGyro })?.indicator as? GyroBrandDerivativeThinkingIndicatorView
+                guard let dual, let ribbon, let lattice,
+                      dual.qaPlaneReport.primaryTiltDegrees != dual.qaPlaneReport.secondaryTiltDegrees,
+                      ribbon.qaPathTopology != "dual-tilted-ellipse",
+                      lattice.qaPathTopology == "rotating-triangle",
+                      ribbon.qaNodeStates.map(\.diameter) != dual.qaPlaneReport.reducedMotionNodeStates.map(\.diameter),
+                      ribbon.qaNodeShape != lattice.qaNodeShape else {
+                    throw fail("\(label): Gyro candidates lost measurable path, topology, or diameter distinctions")
+                }
+                contrast.merge(try UIProbeContrast.evaluate(probe))
+            }
+        }
+        guard contrast.measured > 0, contrast.failures.isEmpty else {
+            throw fail("tilted variations contrast/color-hygiene check failed: \(contrast.failures.joined(separator: "; "))")
+        }
+
+        let liveProbe = try UIProbe.render(
+            UIProbe.Spec(
+                id: "managed-agent.tilted-variations.live.darkAqua",
+                size: TiltedVariationsGalleryView.preferredSize,
+                appearance: .darkAqua
+            ),
+            make: { LabCatalog.makeTiltedVariationsGalleryView(mode: .live) }
+        )
+        guard let liveGallery = liveProbe.view as? TiltedVariationsGalleryView else {
+            throw fail("tilted variations live probe did not render gallery")
+        }
+        let liveFixtures = liveGallery.qaIndicatorFixtures
+        guard liveFixtures.filter({ $0.reducedMotion }).count == expectedCandidates.count,
+              liveFixtures.filter({ !$0.reducedMotion }).count == expectedCandidates.count else {
+            throw fail("tilted variations live route lost Normal/Reduced Motion coverage")
+        }
+        for fixture in liveFixtures {
+            let count = activeAnimationCount(in: fixture.indicator)
+            if fixture.reducedMotion {
+                guard count == 0 else { throw fail("tilted variations Reduced Motion animated \(fixture.candidate.rawValue)") }
+            } else {
+                guard count > 0 else { throw fail("tilted variations Normal Motion did not animate \(fixture.candidate.rawValue)") }
+            }
+            if let gyro = fixture.indicator as? GyroBrandDerivativeThinkingIndicatorView {
+                guard gyro.qaIntrinsicSide == 18,
+                      gyro.qaNodeStates.count == 3,
+                      gyro.qaNodeStates.allSatisfy({ $0.clearanceFromCenter > 0 }),
+                      gyro.qaReport.sampledPathFitsFootprint else {
+                    throw fail("tilted variations live geometry gate failed for \(fixture.candidate.rawValue)")
+                }
+            }
+        }
+
+        // Exercise the real window/appearance seam: each candidate must repaint
+        // from semantic dynamic tokens and restart its requested live animation
+        // after the effective appearance changes in both directions.
+        let host = NSView(frame: NSRect(origin: .zero, size: TiltedVariationsGalleryView.preferredSize))
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.appearance = NSAppearance(named: .aqua)
+        window.contentView = host
+        host.addSubview(liveGallery)
+        liveGallery.frame = host.bounds
+        host.layoutSubtreeIfNeeded()
+        for appearance in [NSAppearance.Name.darkAqua, .aqua] {
+            let generationsBeforeFlip = liveGallery.qaIndicatorFixtures.map { ($0.indicator as? GyroBrandDerivativeThinkingIndicatorView)?.qaColorResolutionGeneration ?? -1 }
+            window.appearance = NSAppearance(named: appearance)
+            host.layoutSubtreeIfNeeded()
+            for (index, fixture) in liveGallery.qaIndicatorFixtures.enumerated() {
+                let count = activeAnimationCount(in: fixture.indicator)
+                if fixture.reducedMotion {
+                    guard count == 0 else { throw fail("tilted variations appearance redraw animated Reduced Motion \(fixture.candidate.rawValue)") }
+                } else {
+                    guard count > 0 else { throw fail("tilted variations appearance redraw failed to restart \(fixture.candidate.rawValue) in \(appearance.rawValue)") }
+                }
+                if let gyro = fixture.indicator as? GyroBrandDerivativeThinkingIndicatorView {
+                    guard gyro.qaColorResolutionGeneration > generationsBeforeFlip[index] else {
+                        throw fail("tilted variations appearance flip did not re-resolve semantic colours for \(fixture.candidate.rawValue)")
+                    }
+                }
+            }
+        }
+        window.contentView = nil
+    }
+
     private static func activeAnimationCount(in indicator: NSView & AgentThinkingIndicatorAnimating) -> Int {
         switch indicator {
         case let view as OrbitingTriadThinkingIndicatorView:
@@ -3686,6 +3993,28 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         case let view as BreathingSparkIndicatorView:
             return view.qaActiveAnimationCount
         case let view as DrawingLoopIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as ChromaticRelayOrbitThinkingIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as TiltedPrismOrbitThinkingIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as CounterCurrentOrbitThinkingIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as SolarHandoffOrbitThinkingIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as AngularSlingshotOrbitThinkingIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as ChromaticDepthRelayTiltedThinkingIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as GyroBrandDerivativeThinkingIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as DualPlaneGyroTiltedThinkingIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as AuroraRibbonTiltedThinkingIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as PrecessingPrismTiltedThinkingIndicatorView:
+            return view.qaActiveAnimationCount
+        case let view as PrismaticCometTiltedThinkingIndicatorView:
             return view.qaActiveAnimationCount
         default:
             return 0
@@ -3812,6 +4141,8 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         try runPlanAndDiffRendererCheck(fail: fail)
         try runTranscriptReviewCheck(fail: fail)
         try runThrobberCandidateGalleryCheck(fail: fail)
+        try runOrbitVariationsGalleryCheck(fail: fail)
+        try runTiltedVariationsGalleryCheck(fail: fail)
 
         let panel = ComponentLabPanel(env: LabEnvironment(ghostty: nil, browserEngine: nil))
         panel.show(near: nil)
@@ -3831,6 +4162,18 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard let throbberEntry = entries.first(where: { $0.id == "managed-agent.throbber-candidates" }),
               case .reviewSurface = throbberEntry.content else {
             throw fail("missing throbber candidate review surface")
+        }
+        guard let orbitVariationsEntry = entries.first(where: { $0.id == "managed-agent.orbit-variations" }),
+              orbitVariationsEntry.title == "Orbit Variations — Motion Study",
+              case .reviewSurface = orbitVariationsEntry.content else {
+            throw fail("missing Orbit Variations motion study review surface")
+        }
+        guard let tiltedVariationsEntry = entries.first(where: { $0.id == "managed-agent.tilted-variations" }),
+              tiltedVariationsEntry.title == "Tilted Prism Variations — Motion Study",
+              case let .reviewSurface(size, makeView) = tiltedVariationsEntry.content,
+              size == NSSize(width: 960, height: 640),
+              makeView() is TiltedVariationsGalleryView else {
+            throw fail("missing Tilted Prism Variations motion study review surface")
         }
         guard let composerEntry = entries.first(where: { $0.id == "agent.composer.review" }),
               case let .reviewSurface(composerSize, makeComposerView) = composerEntry.content,

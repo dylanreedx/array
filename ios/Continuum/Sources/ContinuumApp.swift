@@ -18,7 +18,6 @@ struct ContinuumApp: App {
         WindowGroup {
             ContinuumRootView()
                 .environmentObject(model)
-                .preferredColorScheme(.dark)
                 .task {
                     pushDelegate.model = model
                     await model.start()
@@ -900,7 +899,11 @@ private struct AgentRowView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            StatusGlyphView(status: row.status)
+            if DualPlaneGyroIndicatorModel.isActive(status: row.status) {
+                DualPlaneGyroIndicator(isActive: true)
+            } else {
+                StatusGlyphView(status: row.status)
+            }
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
                     StatusChipView(status: row.status)
@@ -962,7 +965,10 @@ private struct AgentDetailView: View {
                         .tint(.orange)
                     }
 
-                    TimelineView(events: AgentsBoardProjection.timelineEvents(for: activity))
+                    TimelineView(
+                        events: AgentsBoardProjection.timelineEvents(for: activity),
+                        showsActiveIndicator: DualPlaneGyroIndicatorModel.isActive(status: row.status)
+                    )
                 } else {
                     Text("Agent activity is no longer available.")
                         .foregroundStyle(.secondary)
@@ -1140,6 +1146,7 @@ private struct PendingAttentionCard: View {
 
 private struct TimelineView: View {
     let events: [AgentActivityEvent]
+    let showsActiveIndicator: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1157,6 +1164,14 @@ private struct TimelineView: View {
                 ForEach(events, id: \.compositeId) { event in
                     TimelineEventRow(event: event)
                 }
+            }
+            if showsActiveIndicator {
+                HStack {
+                    DualPlaneGyroIndicator(isActive: true)
+                    Spacer(minLength: 0)
+                }
+                .frame(height: DualPlaneGyroIndicatorModel.side)
+                .accessibilityElement(children: .contain)
             }
         }
     }

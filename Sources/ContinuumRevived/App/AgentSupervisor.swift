@@ -46,7 +46,7 @@ import Foundation
 protocol AgentRunning: AnyObject, Sendable {
     /// Blocking: runs one prompt to completion, streaming events to `onEvent` as
     /// they arrive. Called off the main thread by `send`.
-    func run(prompt: String, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws
+    func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws
     func stop()
     /// P2D.2 — the local-only `spawn_agent` side channel. Separate from `onEvent`
     /// because a `SpawnRequest` carries the call's ARGUMENTS, which may never enter
@@ -56,6 +56,13 @@ protocol AgentRunning: AnyObject, Sendable {
     /// Codable runtime and companion activity streams.
     func observeRuntimeObservations(
         _ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void)
+}
+
+extension AgentRunning {
+    /// Text-only compatibility wrapper for older supervisor checks/callers.
+    func run(prompt: String, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+        try run(prompt: AgentPrompt(prompt), onEvent: onEvent)
+    }
 }
 
 extension PiAgentRunner: AgentRunning {}
@@ -856,6 +863,12 @@ final class AgentSupervisor {
     /// process-free cache snapshot; it never invokes a shell from this actor.
     private let nameGenerationCapabilityProvider: (@Sendable () -> AgentNameGenerationCapability?)?
     private let nameGenerationTimeout: TimeInterval
+    private let attachmentStore: AgentComposerAttachmentStore
+    private var runtimeObservationObservers: [AgentID: [UUID: (AgentRuntimeObservation) -> Void]] = [:]
+    /// App-lifetime recovery owner. This is deliberately independent of tile
+    /// subscriptions so launch failures and provider rejection restore drafts
+    /// even when no tile remains bound.
+    private let submissionRecoveryStore: AgentComposerDraftStore?
 
     /// The records this supervisor owns, in memory. `AgentStore` is the durable
     /// copy; this is the live one.
@@ -880,11 +893,24 @@ final class AgentSupervisor {
     private var activeNameGenerations = 0
     private var nameGenerationTasks: [AgentID: Task<Void, Never>] = [:]
     private var nameGenerationRequestIDs: [AgentID: UUID] = [:]
+    /// Recovery operations are serialized per agent. Completion and teardown
+    /// events can arrive back-to-back; ordering them prevents a late restore from
+    /// racing a successful confirmation and makes replay/rebind idempotent.
+    private var submissionRecoveryTasks: [AgentID: Task<Void, Never>] = [:]
 
     /// Provider facts used by the v2 tile. Deliberately separate from `runners`:
     /// a provider process may remain alive while its turn is ready, and that must
     /// never paint Working. `runners` is consulted only when deciding whether the
     /// current send/stop transport can accept an action.
+    /// A prompt reaches the runner only after the attachment store has validated
+    /// every reference for this exact agent. The unchecked AgentPrompt remains a
+    /// public model for transcripts/providers, but it is never the internal send
+    /// capability for an image-bearing transport.
+    private struct PreparedAgentPrompt {
+        let prompt: AgentPrompt
+        let expectedAgentID: AgentID
+    }
+
     private struct TurnFacts {
         var execution: AgentTurnExecutionState = .ready
         var failureMessage: String?
@@ -906,7 +932,9 @@ final class AgentSupervisor {
         warn: @escaping (String) -> Void = { fputs($0 + "\n", stderr) },
         upsertRecord: ((AgentRecord) throws -> Void)? = nil,
         nameGenerationCapabilityProvider: (@Sendable () -> AgentNameGenerationCapability?)? = nil,
-        nameGenerationTimeout: TimeInterval = AgentNameOneShot.timeout
+        nameGenerationTimeout: TimeInterval = AgentNameOneShot.timeout,
+        attachmentStore: AgentComposerAttachmentStore? = nil,
+        submissionRecoveryStore: AgentComposerDraftStore? = nil
     ) {
         self.store = store
         self.makeRunner = makeRunner
@@ -914,6 +942,10 @@ final class AgentSupervisor {
         self.upsertRecord = upsertRecord ?? { record in try store.upsert(record) }
         self.nameGenerationCapabilityProvider = nameGenerationCapabilityProvider
         self.nameGenerationTimeout = nameGenerationTimeout
+        self.attachmentStore = attachmentStore ?? AgentComposerAttachmentStore(
+            applicationSupportDirectory: store.layout.applicationSupportDirectory
+        )
+        self.submissionRecoveryStore = submissionRecoveryStore
     }
 
     /// The explicit action's cached capability gate. This is a snapshot only:
@@ -1012,6 +1044,23 @@ final class AgentSupervisor {
             whereDirectory: checkout)
     }
 
+    @discardableResult
+    func addRuntimeObservationObserver(
+        for id: AgentID,
+        _ observer: @escaping (AgentRuntimeObservation) -> Void
+    ) -> UUID {
+        let token = UUID()
+        runtimeObservationObservers[id, default: [:]][token] = observer
+        return token
+    }
+
+    func removeRuntimeObservationObserver(_ token: UUID, for id: AgentID) {
+        runtimeObservationObservers[id]?[token] = nil
+        if runtimeObservationObservers[id]?.isEmpty == true {
+            runtimeObservationObservers[id] = nil
+        }
+    }
+
     private func ingestRuntimeObservation(
         _ observation: AgentRuntimeObservation,
         for id: AgentID
@@ -1019,6 +1068,10 @@ final class AgentSupervisor {
         guard let record = records[id] else { return }
         ensureLocationProjector(for: record)
         locationProjectors[id]?.ingest(observation)
+        // The projector and the transcript list consume the same sanitized,
+        // non-Codable side channel. Observers are host-local and scoped by the
+        // immutable agent ID; no raw runtime payload or path enters the event log.
+        runtimeObservationObservers[id]?.values.forEach { $0(observation) }
     }
 
     /// True once there is user/session work that makes Home retargeting unsafe.
@@ -1577,10 +1630,32 @@ final class AgentSupervisor {
     /// Runs `prompt` on the agent's own runner, off the main thread (`run` blocks).
     /// Events hop back via `DispatchQueue.main.async` — FIFO, which is what keeps
     /// the fan-out ordered; a `Task { @MainActor }` per event would not be.
-    func send(_ prompt: String, to id: AgentID) {
+    /// Public compatibility seam for text-only callers. Image-bearing prompts
+    /// must use `accept(.sendPrompt:)`, which creates a prepared capability after
+    /// all-or-nothing ownership/path validation. Rejecting here closes the direct
+    /// `send(AgentPrompt,to:)` bypass instead of trusting caller-supplied URLs.
+    @discardableResult
+    func send(_ prompt: AgentPrompt, to id: AgentID) -> Bool {
+        guard prompt.imageAttachments.isEmpty else {
+            warn("AgentSupervisor.send: unmanaged image attachment transport refused")
+            return false
+        }
+        return sendPrepared(
+            PreparedAgentPrompt(prompt: prompt, expectedAgentID: id),
+            to: id
+        )
+    }
+
+    @discardableResult
+    private func sendPrepared(_ prepared: PreparedAgentPrompt, to id: AgentID) -> Bool {
+        guard prepared.expectedAgentID == id else {
+            warn("AgentSupervisor.send: prepared prompt agent mismatch")
+            return false
+        }
+        let prompt = prepared.prompt
         guard var record = records[id] else {
             warn("AgentSupervisor.send: no agent \(id.rawValue.uuidString)")
-            return
+            return false
         }
         // ONE RUNNER PER AGENT, refused rather than replaced (from the
         // cross-review). Assigning over `runners[id]` would leave the first process
@@ -1592,13 +1667,15 @@ final class AgentSupervisor {
         // is `P5.7-steer-follow-up`'s, and inventing it here would be a second
         // answer to supersede.
         if let inFlight = runners[id] {
-            warn("AgentSupervisor.send: agent \(id.rawValue.uuidString) already has a prompt in flight (\(type(of: inFlight))); dropping \(prompt.count) chars")
-            return
+            warn("AgentSupervisor.send: agent \(id.rawValue.uuidString) already has a prompt in flight (\(type(of: inFlight))); dropping \(prompt.text.count) visible chars and \(prompt.imageAttachments.count) image attachment(s)")
+            return false
         }
-        // Keep only the first local prompt for the explicit naming action. This
-        // dictionary is memory-only; AgentRecord/AgentInventory never receive it.
-        if firstPromptByAgent[id] == nil {
-            firstPromptByAgent[id] = String(prompt.prefix(AgentNameOneShot.maximumPromptLength))
+        let firstPromptText = Self.visibleNamingText(from: prompt)
+        // Keep only the first local prompt's visible text for the explicit naming
+        // action. Local image paths/@path argv capabilities are never copied into
+        // this memory-only naming context.
+        if firstPromptByAgent[id] == nil, let firstPromptText {
+            firstPromptByAgent[id] = firstPromptText
         }
         // This is the ONE automatic naming funnel. The shared resolver applies
         // prompt, source-item, then parent-relative ordinal precedence; a later
@@ -1609,7 +1686,7 @@ final class AgentSupervisor {
            record.displayName == AgentRecord.defaultAgentName,
            record.displayNameSource == .sentinel,
            let proposal = AgentRecord.resolveDerivedDisplayName(
-               firstPrompt: prompt,
+               firstPrompt: firstPromptText,
                sourceItemId: record.sourceItemId,
                parentName: parentDisplayName(for: record),
                parentRelativeOrdinal: record.parentRelativeOrdinal,
@@ -1659,7 +1736,7 @@ final class AgentSupervisor {
                     DispatchQueue.main.async { self?.deliver(bound, to: id) }
                 }
             } catch {
-                let message = String(describing: error)
+                let message = SecretRedactor.redactLocalDiagnostics(String(describing: error))
                 fputs("AgentSupervisor: runner failed for agent \(id.rawValue.uuidString): \(message)\n", stderr)
                 DispatchQueue.main.async {
                     self?.deliver(.runtimeError(threadId: threadId, message: message), to: id)
@@ -1667,6 +1744,18 @@ final class AgentSupervisor {
             }
             DispatchQueue.main.async { self?.clearRunner(runner, for: id) }
         }
+        return true
+    }
+
+    /// Text-only compatibility wrapper for existing callers and checks.
+    func send(_ prompt: String, to id: AgentID) {
+        _ = send(AgentPrompt(prompt), to: id)
+    }
+
+    private nonisolated static func visibleNamingText(from prompt: AgentPrompt) -> String? {
+        let bounded = String(prompt.text.prefix(AgentNameOneShot.maximumPromptLength))
+        let visible = SecretRedactor.removeLocalPathReferences(bounded)
+        return AgentName.normalizedLabel(visible)
     }
 
     /// Terminates the in-flight runner and records the stop on the agent's stream.
@@ -2733,7 +2822,34 @@ final class AgentSupervisor {
             let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !prompt.isEmpty else { return .refused(.emptyDraft) }
             guard snapshot.capabilities.canSend else { return .refused(.turnNotReady) }
-            send(prompt, to: agentID)
+            guard sendPrepared(
+                PreparedAgentPrompt(prompt: AgentPrompt(prompt), expectedAgentID: agentID),
+                to: agentID
+            ) else { return .refused(.invalidAttachment) }
+            return .accepted
+        case .sendPrompt(let draft):
+            var prompt = draft
+            prompt.text = prompt.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !prompt.isEmpty else { return .refused(.emptyDraft) }
+            guard snapshot.capabilities.canSend else { return .refused(.turnNotReady) }
+            do {
+                let prepared = try await attachmentStore.preparePromptAttachments(
+                    for: agentID,
+                    draftAttachments: prompt.imageAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) }
+                )
+                guard sendPrepared(
+                    PreparedAgentPrompt(
+                        prompt: AgentPrompt(text: prompt.text, imageAttachments: prepared),
+                        expectedAgentID: agentID
+                    ),
+                    to: agentID
+                ) else {
+                    return .refused(.invalidAttachment)
+                }
+            } catch {
+                warn("AgentSupervisor.accept: attachment preparation refused for agent \(agentID.rawValue.uuidString): invalid managed attachment")
+                return .refused(.invalidAttachment)
+            }
             return .accepted
         case .stop:
             guard snapshot.capabilities.canStop, runners[agentID] != nil else {
@@ -3108,7 +3224,54 @@ final class AgentSupervisor {
         if subscribers[id]?.isEmpty == true { subscribers.removeValue(forKey: id) }
     }
 
+    private enum SubmissionRecoveryAction {
+        case confirmSuccess(Date)
+        case restore
+    }
+
+    /// Serialize recovery against the event order. The journal is deliberately
+    /// not consumed at `.turnStarted`: only a completed turn is authoritative.
+    /// Replayed completion/error events are harmless because the draft store's
+    /// remove/restore operations are idempotent once the journal is gone.
+    private func enqueueSubmissionRecovery(_ action: SubmissionRecoveryAction, for id: AgentID) {
+        guard submissionRecoveryStore != nil else { return }
+        let previous = submissionRecoveryTasks[id]
+        let task = Task { @MainActor [weak self] in
+            if let previous { await previous.value }
+            guard let self, let store = self.submissionRecoveryStore else { return }
+            do {
+                switch action {
+                case let .confirmSuccess(sentAt):
+                    do {
+                        _ = try await store.confirmSubmissionAfterAuthoritativeHandoff(for: id, sentAt: sentAt)
+                    } catch {
+                        // A successful provider turn cannot silently discard a
+                        // draft when local acceptance persistence failed.
+                        _ = try? await store.recoverSubmissionAfterAuthoritativeFailure(for: id)
+                    }
+                case .restore:
+                    _ = try await store.recoverSubmissionAfterAuthoritativeFailure(for: id)
+                }
+            } catch {
+                self.warn("AgentSupervisor: composer recovery remained pending for agent \(id.rawValue.uuidString)")
+            }
+        }
+        submissionRecoveryTasks[id] = task
+    }
+
     private func deliver(_ event: AgentRuntimeEvent, to id: AgentID, now: Date = Date()) {
+        switch event {
+        case let .turnCompleted(_, _, outcome, _):
+            if outcome == .completed {
+                enqueueSubmissionRecovery(.confirmSuccess(now), for: id)
+            } else {
+                enqueueSubmissionRecovery(.restore, for: id)
+            }
+        case .runtimeError, .sessionStateChanged(.stopped), .sessionStateChanged(.error):
+            enqueueSubmissionRecovery(.restore, for: id)
+        default:
+            break
+        }
         updateTurnFacts(with: event, for: id, now: now)
         if let record = records[id] {
             ensureLocationProjector(for: record)
@@ -3366,12 +3529,14 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
     private let script: [AgentRuntimeEvent]
     private let runtimeObservations: [AgentRuntimeObservation]
     private let holdUntilStopped: Bool
+    private let runError: Error?
     private let released = DispatchSemaphore(value: 0)
     private let lock = NSLock()
     private var stopCountStorage = 0
     private var runCountStorage = 0
     private var completedRunStorage = 0
     private var promptsStorage: [String] = []
+    private var agentPromptsStorage: [AgentPrompt] = []
     private var liveHandler: (@Sendable (AgentRuntimeEvent) -> Void)?
     private var spawnHandler: (@Sendable (SpawnRequest) -> Void)?
     private var runtimeObservationHandler: (@Sendable (AgentRuntimeObservation) -> Void)?
@@ -3379,11 +3544,13 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
     init(
         script: [AgentRuntimeEvent],
         runtimeObservations: [AgentRuntimeObservation] = [],
-        holdUntilStopped: Bool = false
+        holdUntilStopped: Bool = false,
+        runError: Error? = nil
     ) {
         self.script = script
         self.runtimeObservations = runtimeObservations
         self.holdUntilStopped = holdUntilStopped
+        self.runError = runError
     }
 
     var stopCount: Int { lock.withLock { stopCountStorage } }
@@ -3394,13 +3561,16 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
     /// the blocked call. This counter is the only witness that the runner exited.
     var completedRuns: Int { lock.withLock { completedRunStorage } }
     var prompts: [String] { lock.withLock { promptsStorage } }
+    var agentPrompts: [AgentPrompt] { lock.withLock { agentPromptsStorage } }
 
-    func run(prompt: String, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+    func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
         lock.withLock {
             runCountStorage += 1
-            promptsStorage.append(prompt)
+            promptsStorage.append(prompt.text)
+            agentPromptsStorage.append(prompt)
             liveHandler = onEvent
         }
+        if let runError { throw runError }
         if let observer = lock.withLock({ runtimeObservationHandler }) {
             for observation in runtimeObservations { observer(observation) }
         }
@@ -3472,6 +3642,24 @@ private func runComposerKeyContractChecks() throws -> Int {
             keyCode: keyCode
         ) else { throw fail("could not create synthetic key event") }
         return event
+    }
+
+    guard ComposerKeyPolicy.action(
+        for: try event(keyCode: 36, characters: "\r"),
+        hasMarkedText: false,
+        hasTrimmedContent: false,
+        suggestionsVisible: false,
+        hasAttachments: true
+    ) == .send else {
+        throw fail("image-only Return did not select the send route")
+    }
+    guard ComposerKeyPolicy.action(
+        for: try event(keyCode: 36, characters: "\r"),
+        hasMarkedText: false,
+        hasTrimmedContent: false,
+        suggestionsVisible: false
+    ) == .nativeTextSystem else {
+        throw fail("truly empty Return was not rejected")
     }
 
     // Exercise the production composer and its required observer contract, not a
@@ -4023,6 +4211,139 @@ private func runCompletionComposerChecks() async throws -> Int {
     return 25
 }
 
+/// Gated on `--image-supervisor-check`. This is intentionally separate from the
+/// historical naming corpus: image transport ownership and recovery must remain
+/// executable evidence even when that older model-id expectation fails.
+@MainActor
+func runImageSupervisorProductionSeamChecks() async throws {
+    struct CheckError: Error, CustomStringConvertible {
+        let description: String
+    }
+    func fail(_ message: String) -> CheckError { CheckError(description: message) }
+
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-image-supervisor-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let config = AgentModelConfig.resolvedFromDefaults()
+    let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+    let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("agents", isDirectory: true))
+    let attachmentStore = AgentComposerAttachmentStore(
+        applicationSupportDirectory: root.appendingPathComponent("attachments", isDirectory: true))
+    let draftStore = AgentComposerDraftStore(
+        applicationSupportDirectory: root.appendingPathComponent("drafts", isDirectory: true),
+        debounceInterval: 60,
+        attachmentStore: attachmentStore)
+    let runner = ScriptedAgentRunner(
+        script: [
+            .turnStarted(threadId: "image-check", turnId: "image-check#1")
+        ],
+        holdUntilStopped: true)
+    let supervisor = AgentSupervisor(
+        store: store,
+        makeRunner: { _ in runner },
+        attachmentStore: attachmentStore,
+        submissionRecoveryStore: draftStore)
+    let agent = supervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, model: config.model, thinking: config.thinking)
+    let validation = try AgentComposerImageValidation(
+        validatedContentType: "image/png", pixelWidth: 80, pixelHeight: 60, byteCount: 3)
+    let managed = try await attachmentStore.importValidatedPastedImage(
+        Data([1, 2, 3]), displayName: "managed.png", validation: validation, forDraftOf: agent)
+
+    // RED witness for the unchecked transport seam: a caller-provided /tmp URL
+    // has no managed ownership and must never reach the runner.
+    let unmanaged = AgentPrompt(imageAttachments: [
+        AgentPromptImageAttachment(metadata: managed.manifest.metadata,
+                                   fileURL: URL(fileURLWithPath: "/tmp/unmanaged.png"))
+    ])
+    guard !supervisor.send(unmanaged, to: agent), runner.agentPrompts.isEmpty else {
+        throw fail("unmanaged direct AgentPrompt send reached the runner")
+    }
+
+    let draft = ContinuumRevivedCore.AgentComposerDraft(
+        text: "  inspect visible details @/tmp/not-a-capability.png  ",
+        selection: 0..<0,
+        updatedAt: Date(timeIntervalSinceReferenceDate: 807_803_000),
+        imageAttachments: [managed.draftAttachment])
+    await draftStore.save(draft, for: agent)
+    await draftStore.flushAll()
+    guard try await draftStore.beginSubmission(for: agent) else {
+        throw fail("image supervisor recovery fixture did not journal the draft")
+    }
+    guard await supervisor.accept(
+        .sendPrompt(AgentPrompt(text: draft.text, imageAttachments: [managed.promptAttachment])),
+        for: agent) == .accepted else {
+        throw fail("managed image prompt was refused at the supervisor production seam")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        runner.agentPrompts.count == 1
+            && supervisor.turnSnapshot(for: agent)?.state == .working
+    }) else {
+        throw fail("managed image prompt did not reach the runner")
+    }
+    guard runner.agentPrompts[0].imageAttachments.map(\.fileURL.path) == [managed.fileURL.path] else {
+        throw fail("managed image prompt did not preserve its Application Support capability")
+    }
+    guard await draftStore.hasSubmissionRecovery(for: agent) else {
+        throw fail("turnStarted consumed composer recovery before authoritative completion")
+    }
+    supervisor.stop(agent)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        !supervisor.isRunning(agent)
+    }) else {
+        throw fail("runtime/provider stop after turnStarted did not finish")
+    }
+    for _ in 0..<100 {
+        if !(await draftStore.hasSubmissionRecovery(for: agent)) { break }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+    let restoredDraft = await draftStore.load(for: agent)
+    guard restoredDraft == draft else {
+        throw fail("runtime/provider stop after turnStarted did not restore the exact draft")
+    }
+
+    // A successful turn is the only acceptance point that may consume recovery.
+    let successRunner = ScriptedAgentRunner(script: [
+        .turnStarted(threadId: "image-success", turnId: "image-success#1"),
+        .turnCompleted(threadId: "image-success", turnId: "image-success#1", outcome: .completed, errorMessage: nil)
+    ])
+    let successSupervisor = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("success-agents", isDirectory: true)),
+        makeRunner: { _ in successRunner },
+        attachmentStore: attachmentStore,
+        submissionRecoveryStore: draftStore)
+    let successAgent = successSupervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, model: config.model, thinking: config.thinking)
+    let successImage = try await attachmentStore.importValidatedPastedImage(
+        Data([4, 5, 6]), displayName: "success.png", validation: validation, forDraftOf: successAgent)
+    let successDraft = ContinuumRevivedCore.AgentComposerDraft(
+        text: "successful image acceptance",
+        selection: 0..<0,
+        updatedAt: Date(timeIntervalSinceReferenceDate: 807_803_001),
+        imageAttachments: [successImage.draftAttachment])
+    await draftStore.save(successDraft, for: successAgent)
+    await draftStore.flushAll()
+    guard try await draftStore.beginSubmission(for: successAgent),
+          await successSupervisor.accept(
+              .sendPrompt(AgentPrompt(imageAttachments: [successImage.promptAttachment])),
+              for: successAgent) == .accepted else {
+        throw fail("successful image recovery fixture was not accepted")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        successRunner.agentPrompts.count == 1 && !successSupervisor.isRunning(successAgent)
+    }) else {
+        throw fail("successful image turn did not complete")
+    }
+    for _ in 0..<100 {
+        if !(await draftStore.hasSubmissionRecovery(for: successAgent)) { break }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+    guard !(await draftStore.hasSubmissionRecovery(for: successAgent)),
+          await draftStore.load(for: successAgent) == nil else {
+        throw fail("successful turn did not authoritatively consume recovery")
+    }
+}
+
 /// Gated on `--agent-supervisor-check`.
 ///
 /// Deterministic and offline: a `ScriptedAgentRunner` replaces Pi, so what is under
@@ -4050,6 +4371,187 @@ func runAgentSupervisorChecks() async throws {
     // than being masked by the broader historical naming corpus below.
     let generatedNameReport = try await checkGeneratedNameOneShot(config: config, fail: fail)
     let namingReport = try await checkAgentNameContract(config: config, cwd: cwd, fail: fail)
+
+    func managedImageAttachment(
+        _ store: AgentComposerAttachmentStore,
+        displayName: String,
+        for agentID: AgentID
+    ) async throws -> AgentPromptImageAttachment {
+        let validation = try AgentComposerImageValidation(
+            validatedContentType: "image/png", pixelWidth: 80, pixelHeight: 60, byteCount: 123)
+        return try await store.importValidatedPastedImage(
+            Data(repeating: 7, count: 123), displayName: displayName,
+            validation: validation, forDraftOf: agentID
+        ).promptAttachment
+    }
+
+    func replayedEvents(
+        from supervisor: AgentSupervisor,
+        for agentID: AgentID,
+        count: Int
+    ) async -> [AgentRuntimeEvent] {
+        var result: [AgentRuntimeEvent] = []
+        for await event in supervisor.events(for: agentID) {
+            result.append(event)
+            if result.count >= count { break }
+        }
+        return result
+    }
+
+    func containsAny(_ text: String, _ needles: [String]) -> Bool {
+        needles.contains { !$0.isEmpty && text.contains($0) }
+    }
+
+    // Image Wave 2A · Lane D — AgentPrompt reaches the real supervisor/runner
+    // transport seam. This intentionally does not touch the composer UI: a
+    // serialized coordinator that already owns attachments must call
+    // AgentSupervisor.accept(.sendPrompt(prompt), for:); unchecked direct send
+    // rejects image-bearing prompts.
+    let imageTransportStore = AgentStore(
+        applicationSupportDirectory: root.appendingPathComponent("image-transport", isDirectory: true))
+    let imageRunner = ScriptedAgentRunner(
+        script: [
+            .turnStarted(threadId: "provider-image", turnId: "image-turn"),
+            .contentDelta(threadId: "provider-image", turnId: "image-turn", streamKind: .assistant, delta: "received"),
+        ],
+        holdUntilStopped: true)
+    let imageAttachmentStore = AgentComposerAttachmentStore(
+        applicationSupportDirectory: imageTransportStore.layout.applicationSupportDirectory)
+    let imageSupervisor = AgentSupervisor(
+        store: imageTransportStore, makeRunner: { _ in imageRunner }, attachmentStore: imageAttachmentStore)
+    let imageAgent = imageSupervisor.spawn(
+        role: nil,
+        prompt: nil,
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking,
+        projectId: nil)
+    let firstImage = try await managedImageAttachment(
+        imageAttachmentStore, displayName: "first visible image.png", for: imageAgent)
+    let secondImage = try await managedImageAttachment(
+        imageAttachmentStore, displayName: "second visible image.png", for: imageAgent)
+    let imageOnlyPrompt = AgentPrompt(imageAttachments: [firstImage, secondImage])
+    guard await imageSupervisor.accept(.sendPrompt(imageOnlyPrompt), for: imageAgent) == .accepted else {
+        throw fail("image transport: image-only AgentPrompt was refused at the supervisor accept seam")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { imageRunner.agentPrompts.count == 1 }) else {
+        throw fail("image transport: prompt-capable accept did not reach the runner")
+    }
+    guard imageRunner.agentPrompts[0].text.isEmpty,
+          imageRunner.agentPrompts[0].imageAttachments.map(\.fileURL.path) == [firstImage.fileURL.path, secondImage.fileURL.path] else {
+        throw fail("image transport: multiple attachment URLs did not reach the runner intact: \(imageRunner.agentPrompts)")
+    }
+    guard imageSupervisor.records[imageAgent]?.displayName == AgentRecord.defaultAgentName else {
+        throw fail("image transport: image-only first prompt derived a name from a local path or attachment metadata")
+    }
+    let refusalImage = try await managedImageAttachment(
+        imageAttachmentStore, displayName: "refused.png", for: imageAgent)
+    let refusalPrompt = AgentPrompt(
+        text: "do not clear this draft",
+        imageAttachments: [refusalImage])
+    guard await imageSupervisor.accept(.sendPrompt(refusalPrompt), for: imageAgent) == .refused(.turnNotReady),
+          imageRunner.agentPrompts.count == 1 else {
+        throw fail("image transport: in-flight send was accepted or destructively replaced the runner prompt")
+    }
+    imageSupervisor.stop(imageAgent)
+    _ = await waitUntil(timeout: 5, pollInterval: 0.02, { imageRunner.completedRuns == 1 })
+
+    let replayedImageEvents = await replayedEvents(from: imageSupervisor, for: imageAgent, count: 3)
+    let replayedImageJSON = String(decoding: try JSONEncoder().encode(replayedImageEvents), as: UTF8.self)
+    let secretImagePaths = [firstImage.fileURL.path, secondImage.fileURL.path, "@\(firstImage.fileURL.path)", "@\(secondImage.fileURL.path)"]
+    guard !containsAny(replayedImageJSON, secretImagePaths) else {
+        throw fail("image transport: local image paths leaked into supervisor runtime events: \(replayedImageJSON)")
+    }
+
+    let leakyManagedPath = root
+        .appendingPathComponent("agent-composer-attachments/objects/private-image.bin", isDirectory: false)
+        .path
+    let stderrLeakRunner = ScriptedAgentRunner(
+        script: [],
+        runError: PiAgentRunner.RunError.piFailed(
+            exitCode: 42,
+            stderr: "provider echoed argv @\(leakyManagedPath) and \(leakyManagedPath) before start"))
+    let stderrLeakStore = AgentStore(
+        applicationSupportDirectory: root.appendingPathComponent("stderr-leak", isDirectory: true))
+    let stderrLeakAttachmentStore = AgentComposerAttachmentStore(
+        applicationSupportDirectory: stderrLeakStore.layout.applicationSupportDirectory)
+    let stderrLeakSupervisor = AgentSupervisor(
+        store: stderrLeakStore, makeRunner: { _ in stderrLeakRunner },
+        attachmentStore: stderrLeakAttachmentStore)
+    let stderrLeakAgent = stderrLeakSupervisor.spawn(
+        role: nil,
+        prompt: nil,
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking,
+        projectId: nil)
+    let stderrLeakImage = try await managedImageAttachment(
+        stderrLeakAttachmentStore, displayName: "leak.png", for: stderrLeakAgent)
+    guard await stderrLeakSupervisor.accept(.sendPrompt(AgentPrompt(imageAttachments: [stderrLeakImage])), for: stderrLeakAgent) == .accepted else {
+        throw fail("image transport: stderr leak fixture send was refused")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { !stderrLeakSupervisor.isRunning(stderrLeakAgent) }) else {
+        throw fail("image transport: stderr leak fixture did not finish")
+    }
+    let stderrLeakEvents = await replayedEvents(from: stderrLeakSupervisor, for: stderrLeakAgent, count: 1)
+    let stderrLeakJSON = String(decoding: try JSONEncoder().encode(stderrLeakEvents), as: UTF8.self)
+    guard !stderrLeakJSON.contains(leakyManagedPath),
+          !stderrLeakJSON.contains("@\(leakyManagedPath)"),
+          stderrLeakJSON.contains("[LOCAL-PATH]") else {
+        throw fail("image transport: runner stderr path leaked into runtime events/transcript source: \(stderrLeakJSON)")
+    }
+
+    var imageProjection = AgentTranscriptProjection(threadId: "image-transport-thread")
+    try imageProjection.appendUserPrompt(
+        id: AgentNodeID(rawValue: "local:image-only-prompt")!,
+        prompt: imageOnlyPrompt)
+    let imageTranscriptBody = imageProjection.compatibilityRows.map(\.body).joined(separator: "\n")
+    let imageTranscriptJSON = String(decoding: try JSONEncoder().encode(imageProjection.document), as: UTF8.self)
+    guard !containsAny(imageTranscriptBody, secretImagePaths),
+          !containsAny(imageTranscriptJSON, secretImagePaths),
+          imageTranscriptJSON.contains(firstImage.metadata.id.rawValue),
+          imageTranscriptJSON.contains("image-gallery") else {
+        throw fail("image transport: transcript projection did not preserve path-free image metadata only; body=\(imageTranscriptBody), json=\(imageTranscriptJSON)")
+    }
+
+    let mixedRunner = ScriptedAgentRunner(script: [.sessionStateChanged(.ready)])
+    let mixedStore = AgentStore(
+        applicationSupportDirectory: root.appendingPathComponent("image-transport-mixed", isDirectory: true))
+    let mixedAttachmentStore = AgentComposerAttachmentStore(
+        applicationSupportDirectory: mixedStore.layout.applicationSupportDirectory)
+    let mixedSupervisor = AgentSupervisor(
+        store: mixedStore, makeRunner: { _ in mixedRunner }, attachmentStore: mixedAttachmentStore)
+    let mixedAgent = mixedSupervisor.spawn(
+        role: nil,
+        prompt: nil,
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking,
+        projectId: nil)
+    let mixedImage = try await managedImageAttachment(
+        mixedAttachmentStore, displayName: "mixed visible image.png", for: mixedAgent)
+    let mixedPrompt = AgentPrompt(
+        text: "  Compare visible screen details Inspect(/Users/dylan/Private/name-leak.png) '@/tmp/quoted-name-leak.png' @/tmp/name-leak.png  ",
+        imageAttachments: [mixedImage])
+    guard await mixedSupervisor.accept(.sendPrompt(mixedPrompt), for: mixedAgent) == .accepted else {
+        throw fail("image transport: text plus image AgentPrompt was refused at the supervisor accept seam")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { mixedRunner.agentPrompts.count == 1 }) else {
+        throw fail("image transport: mixed AgentPrompt did not reach the runner")
+    }
+    guard mixedRunner.agentPrompts[0].text == "Compare visible screen details Inspect(/Users/dylan/Private/name-leak.png) '@/tmp/quoted-name-leak.png' @/tmp/name-leak.png",
+          mixedRunner.agentPrompts[0].imageAttachments.map(\.fileURL.path) == [mixedImage.fileURL.path] else {
+        throw fail("image transport: mixed prompt text/attachments were not preserved at the runner: \(mixedRunner.agentPrompts)")
+    }
+    let mixedName = mixedSupervisor.records[mixedAgent]?.displayName ?? ""
+    guard mixedName.count <= AgentName.maximumLength,
+          !mixedName.contains("/"),
+          !mixedName.contains("@"),
+          !mixedName.contains("name-leak"),
+          !mixedName.contains("Users"),
+          mixedName.contains("Compare visible screen details") else {
+        throw fail("image transport: first-prompt naming leaked embedded/quoted path/@path text or exceeded the visible-text cap: \(mixedName)")
+    }
 
     // Queue 91 P3.6/P3.7 — Home may be changed only while the agent is still a
     // zero-turn/provisional record. After any session history exists, callers must
@@ -6864,6 +7366,21 @@ private func checkLiveV2TileMigration<Failure: Error>(
     }) else {
         throw fail("live-v2: tail duplicated the stable semantic row (events \(tile.ingestedEvents.count), rows \(tile.qaRenderedCardCount))")
     }
+    // This is the production event path: supervisor delivery -> tile ingest ->
+    // compact phase projection. It deliberately does not call the geometry-only
+    // qaApplyCompactStatusFacts seam.
+    guard tile.qaCompactStatusPhase == .responding,
+          tile.qaCompactStatusActivityText == "Responding" else {
+        throw fail("live-v2: an ingested assistant delta did not drive the installed compact row (phase \(String(describing: tile.qaCompactStatusPhase)), activity \(tile.qaCompactStatusActivityText))")
+    }
+    guard tile.qaCompactStatusRowIsInstalled,
+          tile.qaCompactStatusAccessibilityLabel.contains("Home") else {
+        throw fail("live-v2: attach/replay left the compact status row uninstalled or without its location semantics")
+    }
+    guard tile.qaLocationActionButtonAccessibilityLabel == "Location actions",
+          tile.qaLocationActionButtonEnabled else {
+        throw fail("live-v2: the compact row lost its single accessible location action owner")
+    }
     guard tile.qaUsesV2Tile, tile.qaUsesFullTurnComposer,
           !tile.qaHasLegacyComposeField, !tile.qaHasPermanentApprovalDock,
           tile.qaV2RenderError == nil else {
@@ -6991,6 +7508,24 @@ private func checkLiveV2TileMigration<Failure: Error>(
 
     let subscribersBeforeDetach = supervisor.subscriberCount(for: agentID)
     tile.detach()
+    guard tile.qaCompactStatusPhase == nil,
+          tile.qaCompactStatusActivityText == "Unknown" else {
+        throw fail("live-v2: detach did not conservatively clear the compact lifecycle projection")
+    }
+    tile.attach(agentID: agentID, supervisor: supervisor)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        tile.attachedAgentID == agentID
+            && supervisor.subscriberCount(for: agentID) == subscribersBeforeDetach
+    }) else {
+        throw fail("live-v2: rebind task did not restore the subscription")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        tile.qaCompactStatusPhase == .ready
+            && tile.qaCompactStatusActivityText == "Ready"
+    }) else {
+        throw fail("live-v2: rebind did not replay lifecycle events into the compact row (phase \(String(describing: tile.qaCompactStatusPhase)), activity \(tile.qaCompactStatusActivityText))")
+    }
+    tile.detach()
     guard subscribersBeforeDetach == 1,
           await waitUntil(timeout: 5, pollInterval: 0.02, {
               supervisor.subscriberCount(for: agentID) == 0
@@ -6998,7 +7533,7 @@ private func checkLiveV2TileMigration<Failure: Error>(
           supervisor.records[agentID] != nil else {
         throw fail("live-v2: detach failed to cancel UI subscription or changed supervisor ownership")
     }
-    return "v2 tile replayed then tailed one stable semantic row, sent and history-recorded one AgentID-bound full-turn draft with no legacy field/dock, revealed one reducer-projected fixed-choice request whose choice press dispatched once and resolved NOTHING until the real runtime resolution turned it passive, kept fixedChoice([]) read-only, reattached with an exactly-once replay including resolved request history and a truthful no-chip branch refresh, detached cleanly, with the legacy path structurally unreachable"
+    return "v2 tile replayed then tailed one stable semantic row and drove compact status through real ingest, sent and history-recorded one AgentID-bound full-turn draft with no legacy field/dock, revealed one reducer-projected fixed-choice request whose choice press dispatched once and resolved NOTHING until the real runtime resolution turned it passive, kept fixedChoice([]) read-only, detached and rebound the compact lifecycle projection with an exactly-once replay including resolved request history and a truthful no-chip branch refresh, with the legacy path structurally unreachable"
 }
 
 /// The tile as a pure view over an agent's stream: attach replays the history,
@@ -7760,7 +8295,7 @@ private func checkHeadlessAgents(
     guard headlessBranch.contains("promptForAgentTask("), headlessBranch.contains("prompt: prompt") else {
         throw fail("the headless spawn branch does not collect and pass a first prompt, so it spawns an agent that never runs:\n\(headlessBranch)")
     }
-    let spawnHelper = try paletteAgentSpawnBranch("private func spawnSupervisedAgent(tileId: UUID?, prompt: String? = nil) -> AgentID {")
+    let spawnHelper = try paletteAgentSpawnBranch("private func spawnSupervisedAgent(tileId: UUID?, prompt: String? = nil) -> AgentID? {")
     guard spawnHelper.contains("prompt: prompt") else {
         throw fail("the app's spawn helper drops the prompt, so the headless agent would not run:\n\(spawnHelper)")
     }
@@ -7799,13 +8334,18 @@ final class FixtureStreamRunner: AgentRunning, @unchecked Sendable {
     private var spawnHandler: (@Sendable (SpawnRequest) -> Void)?
     private var runtimeObservationHandler: (@Sendable (AgentRuntimeObservation) -> Void)?
     private var promptsStorage: [String] = []
+    private var agentPromptsStorage: [AgentPrompt] = []
 
     init(lines: [String]) { self.lines = lines }
 
     var prompts: [String] { lock.withLock { promptsStorage } }
+    var agentPrompts: [AgentPrompt] { lock.withLock { agentPromptsStorage } }
 
-    func run(prompt: String, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
-        lock.withLock { promptsStorage.append(prompt) }
+    func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+        lock.withLock {
+            promptsStorage.append(prompt.text)
+            agentPromptsStorage.append(prompt)
+        }
         var translator = PiEventTranslator()
         if let handler = lock.withLock({ spawnHandler }) {
             translator.onSpawnRequest = handler

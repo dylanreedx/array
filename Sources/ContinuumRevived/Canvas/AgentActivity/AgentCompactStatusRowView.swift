@@ -14,15 +14,29 @@ struct AgentCompactStatusRowConfiguration: Equatable {
 
 /// Reusable compact bottom row for managed-agent status chrome.
 ///
-/// The row is intentionally not wired into production composition yet. It owns
-/// only presentation and layout: caller supplies a pure presentation and, if
-/// desired, an already-chosen thinking indicator view.
+/// The row owns the single live Home/Where/What status surface for the managed
+/// tile. Caller supplies a pure presentation and, if desired, an already-chosen
+/// thinking indicator view; the host supplies the location action route.
 @MainActor
 final class AgentCompactStatusRowView: NSView, TokenThemed {
     static let preferredHeight: CGFloat = 28
 
     private let locationIcon = NSImageView()
     private let locationLabel = NSTextField(labelWithString: "")
+    private let actionButton: NSButton = {
+        let button = NSButton(title: "⋯", target: nil, action: nil)
+        button.bezelStyle = .inline
+        button.isBordered = false
+        button.setButtonType(.momentaryPushIn)
+        button.toolTip = "Location actions"
+        button.setAccessibilityLabel("Location actions")
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        // NSButton's borderless inline cell can report a zero intrinsic width in
+        // offscreen narrow Component Lab layouts. The host adds the conditional
+        // width constraint after initialization, when QA configuration is known.
+        return button
+    }()
     private let activityIcon = NSImageView()
     private let activityLabel = NSTextField(labelWithString: "")
     private let elapsedLabel = NSTextField(labelWithString: "")
@@ -37,6 +51,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
     private var presentation: AgentCompactStatusPresentation?
     private var configuration: AgentCompactStatusRowConfiguration
     private var thinkingIndicatorIsAnimating = false
+    var onActionMenuRequested: ((NSButton) -> Void)?
 
     init(
         frame frameRect: NSRect = .zero,
@@ -45,11 +60,17 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
     ) {
         self.configuration = configuration
         self.thinkingIndicator = thinkingIndicatorFactory?()
-        locationGroup = NSStackView(views: [locationIcon, locationLabel])
+        locationGroup = NSStackView(views: [locationIcon, locationLabel, actionButton])
         activityGroup = NSStackView(views: [])
         contextGroup = NSStackView(views: [contextMeter, contextLabel])
         rootStack = NSStackView(views: [])
         super.init(frame: frameRect)
+
+        if configuration.deterministicSnapshotPhase == nil {
+            let actionWidth = actionButton.widthAnchor.constraint(equalToConstant: 18)
+            actionWidth.priority = .defaultLow
+            actionWidth.isActive = true
+        }
 
         wantsLayer = true
         layer?.cornerRadius = CGFloat(Radius.card)
@@ -64,6 +85,12 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
         locationLabel.lineBreakMode = .byTruncatingMiddle
         locationLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         locationLabel.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        // Preserve a drawable sliver for the location label in the production
+        // tile (including the 320pt Component Lab card); deterministic geometry
+        // probes intentionally let it yield completely before protected groups.
+        if configuration.deterministicSnapshotPhase == nil {
+            locationLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 6).isActive = true
+        }
 
         activityLabel.lineBreakMode = .byClipping
         activityLabel.setContentHuggingPriority(.required, for: .horizontal)
@@ -103,6 +130,8 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
         locationGroup.spacing = CGFloat(Space.xs)
         locationGroup.setContentHuggingPriority(.defaultLow, for: .horizontal)
         locationGroup.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(10), for: .horizontal)
+        actionButton.target = self
+        actionButton.action = #selector(showActions(_:))
 
         activityGroup.orientation = .horizontal
         activityGroup.alignment = .centerY
@@ -194,13 +223,14 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
         contextLabel.stringValue = next.context.label
         contextLabel.toolTip = next.context.detailText
         contextLabel.setAccessibilityLabel(next.context.accessibilityLabel)
+        actionButton.toolTip = next.location.detailText + "\nLocation actions"
         toolTip = [next.location.detailText, next.activity.detailText, next.context.detailText]
             .joined(separator: "\n\n")
         setAccessibilityLabel("Agent compact status. \(next.location.accessibilityLabel) \(next.activity.accessibilityLabel) \(next.context.accessibilityLabel)")
         setAccessibilityHelp(toolTip)
-        // Parent owns the combined compact-row announcement. Exposing labelled
-        // children as well duplicates Home/Where/What/activity/context facts.
-        setAccessibilityChildren([])
+        // Parent owns the combined Home/Where/What/activity/context announcement;
+        // only the single location-action control is separately reachable.
+        setAccessibilityChildren([actionButton])
         updateThinkingLifecycle()
         applyTokens()
     }
@@ -219,6 +249,16 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
         elapsedLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)
         contextLabel.textColor = contextLabelColor(for: presentation?.context.state ?? .unknown, theme: theme)
         contextMeter.applyTokens()
+    }
+
+    @objc private func showActions(_ sender: NSButton) {
+        onActionMenuRequested?(sender)
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard let onActionMenuRequested else { return super.menu(for: event) }
+        onActionMenuRequested(actionButton)
+        return nil
     }
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
@@ -381,6 +421,8 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
     var qaContextMeterSide: CGFloat { contextMeter.qaIntrinsicSide }
     var qaAccessibilityLabel: String { accessibilityLabel() ?? "" }
     var qaAccessibilityChildrenCount: Int { accessibilityChildren()?.count ?? 0 }
+    var qaLocationActionButtonAccessibilityLabel: String { actionButton.accessibilityLabel() ?? "" }
+    var qaLocationActionButtonEnabled: Bool { actionButton.isEnabled }
     var qaContentFitsBounds: Bool {
         [locationGroup, activityGroup, contextGroup]
             .compactMap(frame(of:))

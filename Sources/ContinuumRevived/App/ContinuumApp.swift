@@ -962,6 +962,21 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--tool-detail-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    let assertions = try await UIProbeGeometry.runToolDetailChecks()
+                    print("ContinuumRevivedToolDetailChecks passed: \(assertions) immutable-scope/expiry assertions")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--ui-geometry-check") {
             do {
                 _ = NSApplication.shared
@@ -1052,6 +1067,21 @@ enum ContinuumApp {
             // `waitUntil` needs a live main run loop to drain its main-queue hops —
             // that is the property under test. No delegate is installed yet, so this
             // runs the loop without booting a workspace.
+            NSApp.run()
+        }
+
+        if CommandLine.arguments.contains("--image-supervisor-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runImageSupervisorProductionSeamChecks()
+                    print("ContinuumRevivedImageSupervisorChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
             NSApp.run()
         }
 
@@ -2968,11 +2998,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// The app-lifetime owner of every agent (P2A.3). Replaces the per-tile
     /// `managedAgentRunners` dictionary this view used to hold: the supervisor owns
     /// the runner and the record, and a tile is one subscriber to its event stream.
-    private lazy var agentSupervisor = AgentSupervisor(store: AgentStore(smokeTest: smokeTestEnabled))
+    private lazy var agentComposerAttachmentStore = AgentComposerAttachmentStore(
+        applicationSupportDirectory: Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
+    )
+    private lazy var agentSupervisor = AgentSupervisor(
+        store: AgentStore(smokeTest: smokeTestEnabled),
+        attachmentStore: agentComposerAttachmentStore,
+        submissionRecoveryStore: agentComposerDraftStore
+    )
     /// Host-local only: drafts are persisted by AgentID and accepted prompt history
     /// remains memory-only. Neither value enters AgentRecord or companion sync.
     private lazy var agentComposerDraftStore = AgentComposerDraftStore(
-        applicationSupportDirectory: Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
+        applicationSupportDirectory: Self.resolveAppSupportDir(smokeTest: smokeTestEnabled),
+        attachmentStore: agentComposerAttachmentStore
     )
     private let agentPromptHistory = AgentPromptHistory()
     /// P2D.6: the ticket-queue tiles that can fan out, so the agent that finishes
@@ -9671,7 +9709,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         supervisor.attach(agentID: agentId, to: tileId)
         view.bindV2ComposerState(
             draftStore: agentComposerDraftStore,
-            promptHistory: agentPromptHistory
+            promptHistory: agentPromptHistory,
+            attachmentStore: agentComposerAttachmentStore
         )
 
         view.onSubmitPrompt = { [weak view] prompt in
@@ -11151,6 +11190,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             gallery.frame = NSRect(origin: .zero, size: ThrobberCandidateGalleryView.preferredSize)
             content = gallery
             backingSize = ThrobberCandidateGalleryView.preferredSize
+        case "orbit-variations":
+            let gallery = LabCatalog.makeOrbitVariationsGalleryView(mode: .snapshot)
+            gallery.frame = NSRect(origin: .zero, size: OrbitVariationsGalleryView.preferredSize)
+            content = gallery
+            backingSize = OrbitVariationsGalleryView.preferredSize
+        case "tilted-variations":
+            let gallery = LabCatalog.makeTiltedVariationsGalleryView(mode: .snapshot)
+            gallery.frame = NSRect(origin: .zero, size: TiltedVariationsGalleryView.preferredSize)
+            content = gallery
+            backingSize = TiltedVariationsGalleryView.preferredSize
         default:
             FileHandle.standardError.write(Data("unknown component snapshot: \(name)\n".utf8))
             return false
