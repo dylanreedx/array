@@ -11,6 +11,24 @@ release ledger), `docs/38-tickets/95-go-live.md` (program history/rationale).
   never rename them. Legacy fixtures and historical docs keep saying
   Continuum; never a global find-replace.
 
+## Dev vs prod channels (NON-NEGOTIABLE)
+
+The user's prod copy in /Applications must never share state with dev/agent
+work. The channel is the bundle id (`AppChannel` in Core):
+
+- **Prod** = exactly `dev.arrayapp.macos`: "Array" Application Support dir,
+  prod defaults domain, updater eligible. ONLY `scripts/release-app.sh` (and
+  the CloudKit dogfood scripts) may produce prod-identified bundles.
+- **Dev** = everything else: plain `make-app-bundle.sh` output is stamped
+  `dev.arrayapp.macos.dev` / "Array Dev", and the bare `swift build` binary
+  (nil bundle id) also resolves the dev channel — "Array Dev" dir, `.dev`
+  defaults domain, updater inert.
+- Never point a dev build at `~/Library/Application Support/Array` or the
+  prod defaults domain. QA uses `CONTINUUM_APP_SUPPORT` temp-dir isolation on
+  top (that override always wins).
+- Verify a release bundle with `check-app-bundle.sh --channel prod`; the
+  default channel everywhere else is dev.
+
 ## Versioning & releases (NON-NEGOTIABLE)
 
 - Version scheme: marketing version `X.Y.Z` (`CFBundleShortVersionString`) +
