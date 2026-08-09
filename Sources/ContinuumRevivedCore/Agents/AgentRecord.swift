@@ -222,6 +222,11 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// agent. Anything that treats this as the agent's key reintroduces the
     /// three failures documented at the head of this file.
     public var tileId: UUID?
+    /// The last provider-reported context-window telemetry, persisted so a
+    /// resumed session seeds its meter with the real prior occupancy (rendered
+    /// stale) instead of "unknown". Host-bound like everything else here; the
+    /// sync boundary never sees an `AgentRecord`.
+    public var lastContextWindow: AgentContextWindowSnapshot?
 
     // Ticket: docs/38-tickets/90-agent-ux/P4.1-lifecycle-state.md
     //
@@ -447,6 +452,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         runCompletedAt: Date? = nil,
         lastVisitedAt: Date? = nil,
         tileId: UUID? = nil,
+        lastContextWindow: AgentContextWindowSnapshot? = nil,
         settledOverride: SettledOverride = .default,
         settledAt: Date? = nil,
         snoozedUntil: Date? = nil,
@@ -476,6 +482,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         self.runCompletedAt = runCompletedAt
         self.lastVisitedAt = lastVisitedAt
         self.tileId = tileId
+        self.lastContextWindow = lastContextWindow
         self.settledOverride = settledOverride
         self.settledAt = settledAt
         self.snoozedUntil = snoozedUntil
@@ -581,6 +588,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         case failedAtReferenceInterval, runCompletedAtReferenceInterval
         case lastVisitedAtReferenceInterval
         case tileId
+        case lastContextWindow
         // P4.1. The three lifecycle dates take reference intervals for exactly
         // the reason above — a settled-at that drifts on reload reorders
         // history.
@@ -650,6 +658,10 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         runCompletedAt = completedInterval.map(Date.init(timeIntervalSinceReferenceDate:))
         lastVisitedAt = visitedInterval.map(Date.init(timeIntervalSinceReferenceDate:))
         tileId = try container.decodeIfPresent(UUID.self, forKey: .tileId)
+        // Tolerant like the lifecycle dates above: malformed telemetry reads as
+        // absent rather than dropping the whole record.
+        lastContextWindow = (try? container.decodeIfPresent(
+            AgentContextWindowSnapshot.self, forKey: .lastContextWindow)) ?? nil
         // P4.1. Decoded through `SettledOverride(persistedRawValue:)` rather
         // than as the enum directly: a record written by a newer build with a
         // case this one has never heard of must read as `.neutral`, not throw
@@ -699,6 +711,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         try container.encodeIfPresent(lastVisitedAt?.timeIntervalSinceReferenceDate,
                                       forKey: .lastVisitedAtReferenceInterval)
         try container.encodeIfPresent(tileId, forKey: .tileId)
+        try container.encodeIfPresent(lastContextWindow, forKey: .lastContextWindow)
         // P4.1. `.neutral` is written as ABSENCE, the same way a headless
         // record omits `tileId`: the default is "nobody has said anything", and
         // a stored word saying so is noise that also makes every pre-P4.1

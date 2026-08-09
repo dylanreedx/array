@@ -925,6 +925,11 @@ final class AgentSupervisor {
         var turnStartedAt: Date?
     }
     private var turnFacts: [AgentID: TurnFacts] = [:]
+    /// Latest provider-reported context-window telemetry per agent. The replay
+    /// buffer cannot be trusted to still contain the (rare) telemetry event
+    /// after a streaming turn floods it, so a tile that attaches later seeds
+    /// from this instead (`contextWindowSnapshot(for:)`).
+    private var contextWindowSnapshots: [AgentID: AgentContextWindowSnapshot] = [:]
 
     init(
         store: AgentStore,
@@ -2213,6 +2218,7 @@ final class AgentSupervisor {
         history.removeValue(forKey: id)
         locationProjectors.removeValue(forKey: id)
         turnFacts.removeValue(forKey: id)
+        contextWindowSnapshots.removeValue(forKey: id)
         for continuation in (subscribers[id] ?? [:]).values { continuation.finish() }
         subscribers.removeValue(forKey: id)
         restoredIDs.remove(id)
@@ -2777,6 +2783,19 @@ final class AgentSupervisor {
     /// Operational state for one tile. State comes only from explicit lifecycle
     /// and request events. Transport occupancy affects capability acceptance, not
     /// the label: a process that has emitted Ready still presents Ready.
+    /// The latest context-window telemetry the supervisor has seen for this
+    /// agent, or nil when none was ever reported. Attach-time seeding reads
+    /// this seam (like `turnSnapshot`/`providerSettings`/`branchContext`)
+    /// because the capped replay buffer routinely evicts the rare
+    /// `.contextWindowUpdated` event behind a streaming turn's deltas. The
+    /// caller owns demoting freshness for a seeded (non-live) read.
+    func contextWindowSnapshot(for id: AgentID) -> AgentContextWindowSnapshot? {
+        guard let record = records[id] else { return nil }
+        // In-memory first (freshest), then the record's persisted telemetry so
+        // a resumed session seeds real prior occupancy instead of "unknown".
+        return contextWindowSnapshots[id] ?? record.lastContextWindow
+    }
+
     func turnSnapshot(for id: AgentID) -> AgentTileTurnSnapshot? {
         guard records[id] != nil else { return nil }
         let facts = turnFacts[id] ?? TurnFacts()
@@ -3273,6 +3292,9 @@ final class AgentSupervisor {
             break
         }
         updateTurnFacts(with: event, for: id, now: now)
+        if case let .contextWindowUpdated(_, snapshot) = event {
+            contextWindowSnapshots[id] = snapshot
+        }
         if let record = records[id] {
             ensureLocationProjector(for: record)
             locationProjectors[id]?.ingest(event, at: now)
@@ -3287,6 +3309,16 @@ final class AgentSupervisor {
 
         if var record = records[id] {
             record.lastActivityAt = max(record.lastActivityAt, now)
+            // Context telemetry rides the record so a resumed session can seed
+            // its meter after relaunch (rendered stale). Turn-scale cadence, and
+            // only an actual change forces the write, so this adds at most one
+            // AtomicWriter write per turn — never one per token.
+            var contextTelemetryChanged = false
+            if case let .contextWindowUpdated(_, snapshot) = event,
+               record.lastContextWindow != snapshot {
+                record.lastContextWindow = snapshot
+                contextTelemetryChanged = true
+            }
             // A completion watched in the focused agent is a visit at the moment
             // it lands. Keep the watermark monotonic and persist this write even
             // though ordinary focus writes are throttled; otherwise the just-read
@@ -3320,7 +3352,8 @@ final class AgentSupervisor {
             // `.userInputRequested` are not persist-worthy, so without this the
             // agent would read `.neutral` in memory and come back `.settled` on the
             // next launch.
-            if Self.isPersistWorthy(event) || unsettled || watchedCompletion { persist(record) }
+            if Self.isPersistWorthy(event) || unsettled || watchedCompletion
+                || contextTelemetryChanged { persist(record) }
         }
 
         for continuation in (subscribers[id] ?? [:]).values {
@@ -6474,6 +6507,58 @@ private func checkCapabilityDrivenTurnStates<Failure: Error>(
         outcome: .completed,
         errorMessage: nil
     ), to: id)
+
+    // Context-window seam: attach-time seeding reads the supervisor's latest
+    // snapshot because the capped replay buffer evicts the rare telemetry event
+    // behind a streaming turn. RED before the seam: after the delta flood below,
+    // a re-attached tile's replay contained no `.contextWindowUpdated`, so the
+    // meter presented "unknown" until the next live report.
+    guard supervisor.contextWindowSnapshot(for: id) == nil else {
+        throw fail("context-seam: telemetry reported before any was delivered")
+    }
+    let contextSnapshot = AgentContextWindowSnapshot(
+        usedTokens: 42_000,
+        maxTokens: 200_000,
+        observedAt: Date(timeIntervalSinceReferenceDate: 800_000_000),
+        source: .piMessageUsage,
+        freshness: .live)
+    supervisor.qaDeliver(.contextWindowUpdated(
+        threadId: AgentSupervisor.threadId(for: id), snapshot: contextSnapshot), to: id)
+    guard supervisor.contextWindowSnapshot(for: id) == contextSnapshot else {
+        throw fail("context-seam: delivered snapshot is not returned by the seam")
+    }
+    for index in 0..<(AgentSupervisor.replayCap + 8) {
+        supervisor.qaDeliver(.contentDelta(
+            threadId: AgentSupervisor.threadId(for: id),
+            turnId: "turn-flood",
+            streamKind: .assistant,
+            delta: "chunk-\(index)"), to: id)
+    }
+    var floodedReplay: [AgentRuntimeEvent] = []
+    for await event in supervisor.events(for: id) {
+        floodedReplay.append(event)
+        if floodedReplay.count >= AgentSupervisor.replayCap { break }
+    }
+    let replayStillCarriesTelemetry = floodedReplay.contains { event in
+        if case .contextWindowUpdated = event { return true }
+        return false
+    }
+    guard !replayStillCarriesTelemetry else {
+        throw fail("context-seam: flood was expected to evict telemetry from the replay buffer (witness precondition)")
+    }
+    guard supervisor.contextWindowSnapshot(for: id) == contextSnapshot else {
+        throw fail("context-seam: snapshot must survive replay-buffer eviction")
+    }
+    guard supervisor.contextWindowSnapshot(for: AgentID(rawValue: UUID())) == nil else {
+        throw fail("context-seam: unknown agent must report nil telemetry")
+    }
+    // Relaunch path: telemetry rides the persisted record, so a supervisor
+    // restored over the same store must still seed the last-known snapshot.
+    let resumedSupervisor = AgentSupervisor(
+        store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+    guard resumedSupervisor.contextWindowSnapshot(for: id) == contextSnapshot else {
+        throw fail("context-seam: a restored supervisor must seed persisted telemetry from the record")
+    }
 
     supervisor.qaDeliver(.requestOpened(
         threadId: AgentSupervisor.threadId(for: id),

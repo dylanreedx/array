@@ -5602,6 +5602,23 @@ enum UIProbeGeometry {
             throw fail("\(label): missing runtime/context facts produced a false phase, elapsed, or percentage in the installed row")
         }
 
+        // A zero-turn session is empty for ANY window size: the seeded
+        // zero-used/no-max snapshot renders an authoritative 0%, never
+        // "unknown". A real report always carries a max and keeps the
+        // arithmetic path.
+        let emptySession = AgentContextWindowSnapshot(
+            usedTokens: 0, observedAt: now, source: .unknown("fresh-session"), freshness: .live)
+        tile.qaApplyCompactStatusFacts(
+            .init(session: .init(state: .ready)), location: location,
+            contextWindow: emptySession, now: now)
+        let emptyRow = tile.qaCompactStatusRow
+        emptyRow.layoutSubtreeIfNeeded()
+        guard emptyRow.qaContextState == .known,
+              emptyRow.qaContextFraction == 0,
+              tile.qaCompactStatusContentFitsBounds else {
+            throw fail("\(label): a zero-turn empty session must present authoritative 0%, got state \(emptyRow.qaContextState) fraction \(String(describing: emptyRow.qaContextFraction))")
+        }
+
         // A coarse running session and an active turn without a stream are both
         // intentionally unresolved. A stale What must not resurrect Reading.
         let stale = AgentObservedActivity(

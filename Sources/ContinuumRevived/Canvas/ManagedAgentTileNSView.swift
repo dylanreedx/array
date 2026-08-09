@@ -350,6 +350,12 @@ final class ManagedAgentTileNSView: TileNSView {
         locationProjectName = projectName
         applyBranchContext(supervisor.branchContext(for: agentID))
         refreshLocationStatus()
+        // Seed the compact row from the supervisor's current truth instead of
+        // waiting for the replay to happen to contain the right events: the
+        // capped replay buffer evicts rare lifecycle/telemetry events behind a
+        // streaming turn, and a fresh spawn has no events yet at all. Replayed
+        // and live events overwrite these seeds through the normal ingest path.
+        seedCompactStatus(from: supervisor, agentID: agentID)
         // P6.1: and which model and thinking level it runs with. From the RECORD,
         // for the same reason the branch is: the agent has its own values (a role
         // may have chosen them at spawn, or the user may have picked them in a
@@ -837,6 +843,50 @@ final class ManagedAgentTileNSView: TileNSView {
         if settles { cancelStreamingMarkupParseTimer() }
         synchronizeV2Transcript(final: settles)
         if !settles { scheduleStreamingMarkupParseTimerIfNeeded() }
+    }
+
+    /// Seed the compact row's phase facts and context meter from the
+    /// supervisor's current truth at attach time. The turn snapshot is the
+    /// same authority the composer binds to; the context snapshot is demoted
+    /// to `.stale` because a seeded read is not a live provider report — the
+    /// next `.contextWindowUpdated` restores a live reading.
+    private func seedCompactStatus(from supervisor: AgentSupervisor, agentID: AgentID) {
+        if let snapshot = supervisor.turnSnapshot(for: agentID) {
+            switch snapshot.state {
+            case .working:
+                compactStatusSession = .init(state: .running)
+                compactStatusTurn = .active(
+                    startedAt: snapshot.turnStartedAt, stream: nil, streamStartedAt: nil)
+            case .queued:
+                compactStatusSession = .init(state: .starting)
+            case .needsAction:
+                compactStatusSession = .init(state: .running)
+                compactStatusInteraction = .pending(startedAt: nil)
+            case .failed:
+                compactStatusSession = .init(state: .error)
+                compactStatusTurn = .completed(outcome: .failed, phaseStartedAt: nil)
+            case .ready, .restored:
+                compactStatusSession = .init(state: .ready)
+            }
+        }
+        if compactContextWindow == nil,
+           var contextSeed = supervisor.contextWindowSnapshot(for: agentID) {
+            if case .live = contextSeed.freshness { contextSeed.freshness = .stale }
+            compactContextWindow = contextSeed
+        }
+        if compactContextWindow == nil,
+           let record = supervisor.records[agentID],
+           record.latestPromptAt == nil, record.latestTurnAt == nil {
+            // Zero prior turns and no telemetry: the window is empty for any
+            // size — seed an authoritative 0% instead of "unknown". The first
+            // real provider report overwrites this through the event path.
+            compactContextWindow = AgentContextWindowSnapshot(
+                usedTokens: 0,
+                observedAt: record.createdAt,
+                source: .unknown("fresh-session"),
+                freshness: .live)
+        }
+        refreshCompactStatus()
     }
 
     /// Update the compact-row facts from the same managed-agent event stream as

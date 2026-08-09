@@ -357,6 +357,19 @@ enum AgentRadialContextMeterPresenter {
 
         let freshness = freshnessLabel(snapshot.freshness)
         let source = sourceLabel(snapshot.source)
+        // A session with zero prior turns is empty for ANY window size, so 0%
+        // is authoritative even though the max is provider-reported and not yet
+        // known. Only the zero-used/no-max shape takes this path; a real report
+        // always carries a max and flows through the arithmetic below.
+        if snapshot.usedTokens == 0, snapshot.maxTokens == nil {
+            return AgentRadialContextMeterPresentation(
+                state: .known,
+                fraction: 0,
+                label: "0%",
+                accessibilityLabel: "Context window 0 percent used. Freshness: \(freshness).",
+                detailText: "Authoritative context: empty (0 tokens used)\nSource: \(source)\nFreshness: \(freshness)\nNo turns have run in this session.",
+                warningMarker: nil)
+        }
         let arithmetic = authoritativeArithmetic(snapshot)
         let rawPercent = arithmetic.map { Int(($0.fraction * 100).rounded()) }
         let renderFraction = arithmetic?.fraction
