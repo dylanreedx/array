@@ -2811,6 +2811,13 @@ enum ContinuumApp {
         debugMenuItem.submenu = debugMenu
         mainMenu.addItem(debugMenuItem)
 
+        let helpMenuItem = NSMenuItem(title: "Help", action: nil, keyEquivalent: "")
+        let helpMenu = NSMenu(title: "Help")
+        helpMenu.addItem(NSMenuItem(title: "Report a Problem…", action: #selector(AppDelegate.reportProblemFromMenu(_:)), keyEquivalent: ""))
+        helpMenuItem.submenu = helpMenu
+        mainMenu.addItem(helpMenuItem)
+        NSApp.helpMenu = helpMenu
+
         NSApp.mainMenu = mainMenu
     }
 
@@ -2856,6 +2863,10 @@ enum ContinuumApp {
         guard let viewMenu = mainMenu.item(withTitle: "View")?.submenu else { throw SelfCheckError("missing View menu") }
         try expectMenuItem(viewMenu, title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: "S", modifiers: [.command, .shift])
         try expectMenuItem(viewMenu, title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: "")
+
+        guard let helpMenu = mainMenu.item(withTitle: "Help")?.submenu else { throw SelfCheckError("missing Help menu") }
+        guard helpMenu === NSApp.helpMenu else { throw SelfCheckError("Help menu is not NSApp.helpMenu") }
+        try expectMenuItem(helpMenu, title: "Report a Problem…", action: #selector(AppDelegate.reportProblemFromMenu(_:)), keyEquivalent: "")
 
         guard let debugMenu = mainMenu.item(withTitle: "Debug")?.submenu else { throw SelfCheckError("missing Debug menu") }
         guard let authMenu = debugMenu.item(withTitle: "Auth")?.submenu else { throw SelfCheckError("missing Debug > Auth menu") }
@@ -6392,6 +6403,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self?.paletteContextTileId = nil
         }
         return palette
+    }
+
+    // Go-live Phase 4: the friends-alpha feedback channel. The public issues
+    // repo, not the (private) code repo.
+    static let reportProblemURL = URL(string: "https://github.com/dylanreedx/array-releases/issues")!
+
+    @objc func reportProblemFromMenu(_ sender: Any?) {
+        NSWorkspace.shared.open(Self.reportProblemURL)
     }
 
     @objc func openSettingsFromMenu(_ sender: Any?) {
