@@ -1245,6 +1245,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--onboarding-panel-check") {
+            do {
+                _ = NSApplication.shared
+                try OnboardingPanel.runSelfCheck()
+                print("ContinuumRevivedOnboardingPanelChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-url-focus-check") {
             do {
                 _ = NSApplication.shared
@@ -2813,6 +2825,7 @@ enum ContinuumApp {
 
         let helpMenuItem = NSMenuItem(title: "Help", action: nil, keyEquivalent: "")
         let helpMenu = NSMenu(title: "Help")
+        helpMenu.addItem(NSMenuItem(title: "Environment Setup…", action: #selector(AppDelegate.openEnvironmentSetupFromMenu(_:)), keyEquivalent: ""))
         helpMenu.addItem(NSMenuItem(title: "Report a Problem…", action: #selector(AppDelegate.reportProblemFromMenu(_:)), keyEquivalent: ""))
         helpMenuItem.submenu = helpMenu
         mainMenu.addItem(helpMenuItem)
@@ -2866,6 +2879,7 @@ enum ContinuumApp {
 
         guard let helpMenu = mainMenu.item(withTitle: "Help")?.submenu else { throw SelfCheckError("missing Help menu") }
         guard helpMenu === NSApp.helpMenu else { throw SelfCheckError("Help menu is not NSApp.helpMenu") }
+        try expectMenuItem(helpMenu, title: "Environment Setup…", action: #selector(AppDelegate.openEnvironmentSetupFromMenu(_:)), keyEquivalent: "")
         try expectMenuItem(helpMenu, title: "Report a Problem…", action: #selector(AppDelegate.reportProblemFromMenu(_:)), keyEquivalent: "")
 
         guard let debugMenu = mainMenu.item(withTitle: "Debug")?.submenu else { throw SelfCheckError("missing Debug menu") }
@@ -3138,6 +3152,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var profilePalette: LaunchProfilePalette?
     private var paletteContextTileId: UUID?
     private var settingsPanel: SettingsPanel?
+    private var onboardingPanel: OnboardingPanel?
     private var componentLabPanel: ComponentLabPanel?
     private var settingsChangeObserver: NSObjectProtocol?
     private var tmuxDefaults: UserDefaults = .standard
@@ -3203,6 +3218,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return lines.joined(separator: "\n") + "\n"
     }()
     static let topologyMigrationNoteShownKey = "continuum.topology.migrationNoteShown"
+    static let onboardingShownKey = "continuum.onboarding.shown"
     static let topologyMigrationInformativeText = """
     Continuum now groups terminal tiles by project, so your terminals share one tmux session per project. Your terminal tiles will restart once. Any running agents will need to be re-launched - they are still alive in tmux and can be found with `tmux ls` if needed.
     """
@@ -3238,6 +3254,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 instanceDisplayName: Host.current().localizedName ?? "Continuum"
             )
             let registry = try registryStore.loadOrEmpty()
+            // Go-live Phase 4: an empty registry is the "no prior state"
+            // signal the first-run onboarding gate consumes after boot.
+            let registryWasEmpty = registry.projects.isEmpty
             let projectRoot = try Self.resolveProjectRoot(smokeTest: smokeTestEnabled, registry: registry)
             let bootController = try presentLockContentionUXIfNeeded(projectRoot: projectRoot, registry: registry)
             self.registryStore = registryStore
@@ -3566,6 +3585,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 runSmokeTest(window: window, runtime: runtimes.first)
             } else {
                 startDesktopCompanionSyncService()
+                presentOnboardingIfFirstRun(registryWasEmpty: registryWasEmpty)
             }
         } catch {
             presentFatalError(error)
@@ -6411,6 +6431,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     @objc func reportProblemFromMenu(_ sender: Any?) {
         NSWorkspace.shared.open(Self.reportProblemURL)
+    }
+
+    /// Go-live Phase 4: first-run onboarding. Fires once per profile — the
+    /// empty registry at boot is the trigger, the defaults key makes it
+    /// once-only across relaunches (topology-note precedent). QA runs of the
+    /// real UI drive isolated fresh profiles where the panel would sit over
+    /// every capture, hence the env gate; real users never set CONTINUUM_*.
+    private func presentOnboardingIfFirstRun(registryWasEmpty: Bool) {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["CONTINUUM_QA_FLOW"] == nil,
+              environment["CONTINUUM_APP_SUPPORT"] == nil else { return }
+        guard registryWasEmpty, !UserDefaults.standard.bool(forKey: Self.onboardingShownKey) else { return }
+        UserDefaults.standard.set(true, forKey: Self.onboardingShownKey)
+        showOnboardingPanel()
+    }
+
+    @objc func openEnvironmentSetupFromMenu(_ sender: Any?) {
+        showOnboardingPanel()
+    }
+
+    private func showOnboardingPanel() {
+        let panel = onboardingPanel ?? {
+            let created = OnboardingPanel(probes: OnboardingPanel.liveProbes(environment: { ToolEnvironment.shared.environment() }))
+            created.onOpenTile = { [weak self] profileId in
+                self?.spawnTerminalFromProfile(profileId, trigger: "onboarding:\(profileId)")
+            }
+            created.onClose = { [weak self] in self?.onboardingPanel = nil }
+            return created
+        }()
+        onboardingPanel = panel
+        panel.show(near: window)
     }
 
     @objc func openSettingsFromMenu(_ sender: Any?) {
@@ -11040,14 +11091,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         switch kind {
         case .notFound:
             alert.messageText = "\(executable) is not installed"
-            alert.informativeText = "Couldn't find \(executable) on your $PATH. Install the CLI or pick a different profile from Cmd-K."
+            alert.informativeText = "Couldn't find \(executable) on your $PATH. Environment Setup has install guidance, or pick a different profile from Cmd-K."
         case .notConfigured:
             alert.messageText = "Profile '\(profileId)' is not configured"
             alert.informativeText = "Custom profiles aren't editable yet — pick a built-in profile from Cmd-K."
         }
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
-        alert.runModal()
+        if kind == .notFound {
+            alert.addButton(withTitle: "Environment Setup…")
+        }
+        let response = alert.runModal()
+        if kind == .notFound, response == .alertSecondButtonReturn {
+            showOnboardingPanel()
+        }
     }
 
     /// P2A.6: a headless agent has no tile to close, so nothing in the UI can reach

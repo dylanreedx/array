@@ -168,6 +168,7 @@ run_app_check .build/debug/Array --push-payload-dump-check
 run_app_check .build/debug/Array --palette-duplicate-root-check
 run_app_check .build/debug/Array --palette-first-responder-restore-check
 run_app_check .build/debug/Array --settings-panel-check
+run_app_check .build/debug/Array --onboarding-panel-check
 if [[ "${CONTINUUM_SKIP_UI_BASELINES:-0}" == "1" ]]; then
   printf '\n==> SKIPPED (display-dependent, CONTINUUM_SKIP_UI_BASELINES=1): --component-lab-check — baseline comparison deferred to a supervised Retina-Main visual gate.\n'
 else
