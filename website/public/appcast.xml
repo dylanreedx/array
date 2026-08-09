@@ -1,0 +1,16 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>Array</title>
+        <item>
+            <title>0.2.1</title>
+            <pubDate>Sun, 09 Aug 2026 17:13:24 -0400</pubDate>
+            <link>https://arrayapp.dev</link>
+            <sparkle:version>3</sparkle:version>
+            <sparkle:shortVersionString>0.2.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/dylanreedx/array-releases/releases/download/v0.2.1/Array-0.2.1.dmg" length="21890753" type="application/octet-stream" sparkle:edSignature="hNBORsixAVyRQKuBvF9lXECe4oAkdL2EM+51u0EQwPk3zS3GlA1ihS+p/93inP1+6HpdaaeViiCoBnMCLRXpDA==" />
+        <sparkle:releaseNotesLink>https://github.com/dylanreedx/array-releases/releases/tag/v0.2.1</sparkle:releaseNotesLink></item>
+    </channel>
+</rss>
