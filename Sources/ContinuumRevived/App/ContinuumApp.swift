@@ -844,6 +844,27 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--tool-path-bootstrap-check") {
+            do {
+                ToolEnvironment.shared.bootstrap()
+                let exported = getenv("PATH").map { String(cString: $0) } ?? ""
+                let exportedDirs = exported.split(separator: ":").map(String.init)
+                for dir in ToolSearchPath.liveWellKnownDirectories() {
+                    guard exportedDirs.contains(dir) else {
+                        throw SelfCheckError("bootstrap did not export well-known dir \(dir); PATH=\(exported)")
+                    }
+                }
+                guard ToolEnvironment.shared.environment()["PATH"] == exported else {
+                    throw SelfCheckError("environment() PATH disagrees with exported PATH")
+                }
+                print("ContinuumRevivedToolPathBootstrapChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--menu-contract-check") {
             do {
                 _ = NSApplication.shared
@@ -2675,6 +2696,12 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+
+        // PATH augmentation must precede the first ProcessInfo.environment
+        // read (NSProcessInfo caches on first access) — AppDelegate's
+        // initializers already read it. See ToolEnvironment.
+        ToolEnvironment.shared.bootstrap()
+        ToolEnvironment.shared.startLoginShellUpgrade()
 
         let application = NSApplication.shared
         let delegate = AppDelegate()

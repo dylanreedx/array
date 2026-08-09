@@ -261,7 +261,9 @@ private enum AgentNameOneShotError: Error, CustomStringConvertible, Sendable {
 
 /// A provider-independent, print-mode Pi invocation. The source prompt is
 /// written to stdin only; it is never an argv element, a session, or an event.
-private enum AgentNameOneShot {
+// Internal (not private): ToolEnvironment reuses the bounded login-shell
+// PATH probe for the app-wide PATH upgrade (go-live Phase 4).
+enum AgentNameOneShot {
     static let timeout: TimeInterval = 8
     static let processGroupGrace: TimeInterval = 0.15
     static let maximumPromptLength = 8_000

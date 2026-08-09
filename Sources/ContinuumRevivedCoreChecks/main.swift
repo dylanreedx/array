@@ -5511,6 +5511,70 @@ do {
     expect(strict.locate("codex", in: ["/opt/homebrew/bin/"]) == nil, "Detector does not produce double-slash candidates")
 }
 
+// MARK: - ToolSearchPath: GUI PATH augmentation (go-live Phase 4)
+
+do {
+    let dirs = ToolSearchPath.wellKnownDirectories(
+        home: "/Users/qa",
+        directoryExists: { [
+            "/Users/qa/.local/bin",
+            "/opt/homebrew/bin",
+            "/Users/qa/.bun/bin",
+            "/Users/qa/.nvm/versions/node/v20.1.0/bin",
+            "/Users/qa/.nvm/versions/node/v18.4.0/bin"
+        ].contains($0) },
+        nodeVersions: { root in root == "/Users/qa/.nvm/versions/node" ? ["v18.4.0", "v20.1.0"] : [] }
+    )
+    expect(dirs == [
+        "/Users/qa/.local/bin",
+        "/opt/homebrew/bin",
+        "/Users/qa/.bun/bin",
+        "/Users/qa/.nvm/versions/node/v20.1.0/bin",
+        "/Users/qa/.nvm/versions/node/v18.4.0/bin"
+    ], "Well-known dirs keep curated order, drop missing dirs, expand nvm newest-first")
+}
+
+do {
+    expect(
+        ToolSearchPath.appending(extraDirs: ["/opt/homebrew/bin", "/usr/bin", "/x/bin"], to: "/usr/bin:/bin")
+            == "/usr/bin:/bin:/opt/homebrew/bin:/x/bin",
+        "Appending keeps base precedence and skips dirs already on PATH")
+    expect(ToolSearchPath.appending(extraDirs: [], to: "/usr/bin") == "/usr/bin", "No extras is identity")
+    expect(ToolSearchPath.appending(extraDirs: ["/a", "/a", ""], to: "") == "/a", "Empty base yields extras, deduped, empty segment dropped")
+}
+
+do {
+    let merged = ToolSearchPath.merged(
+        loginShellPath: "/Users/qa/.local/bin:/opt/homebrew/bin:/usr/bin",
+        processPath: "/usr/bin:/bin:/qa/sentinel",
+        wellKnown: ["/opt/homebrew/bin", "/Users/qa/.cargo/bin"]
+    )
+    expect(
+        merged == "/Users/qa/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/qa/sentinel:/Users/qa/.cargo/bin",
+        "Login-shell merge: login dirs lead, process dirs survive, well-known appended")
+}
+
+// The fix's consumption shape: a tool that lives only in a well-known dir is
+// .missing under the thin GUI PATH but .found once the caller passes the
+// augmented PATH through resolve's environment — the exact call TileSpawner
+// now makes via its environmentProvider seam.
+do {
+    let registry = LaunchProfileRegistry()
+    let claude = registry.spec(for: "claude")!
+    let detector = ToolDetector { path in path == "/Users/qa/.local/bin/claude" }
+    let thin = registry.resolve(claude, in: "/tmp/proj", environment: ["PATH": "/usr/bin:/bin"], detector: detector)
+    if case .missing = thin {} else {
+        expect(false, "claude should be .missing under the thin GUI PATH, got \(thin)")
+    }
+    let augmented = ToolSearchPath.appending(extraDirs: ["/Users/qa/.local/bin"], to: "/usr/bin:/bin")
+    let resolution = registry.resolve(claude, in: "/tmp/proj", environment: ["PATH": augmented], detector: detector)
+    if case let .found(profile) = resolution {
+        expect(profile.command == "/Users/qa/.local/bin/claude", "Augmented PATH resolves claude from a well-known dir")
+    } else {
+        expect(false, "claude should resolve to .found with the augmented PATH, got \(resolution)")
+    }
+}
+
 // MARK: - LaunchProfileRegistry: resolve shell
 
 do {

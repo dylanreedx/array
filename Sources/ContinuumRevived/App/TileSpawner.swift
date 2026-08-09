@@ -45,6 +45,7 @@ final class TileSpawner {
     private let detector: ToolDetector
     private let defaults: UserDefaults
     private let tmuxPathResolver: (UserDefaults) -> String?
+    private let environmentProvider: () -> [String: String]
     private let tmuxControlFactory: @Sendable (String) -> any TmuxControl
     private var browserProfiles: [BrowserProfile]
 
@@ -97,6 +98,10 @@ final class TileSpawner {
         defaults: UserDefaults = .standard,
         tmuxPathResolver: @escaping (UserDefaults) -> String? = { TmuxLocator.resolve(defaults: $0) },
         tmuxControlFactory: @escaping @Sendable (String) -> any TmuxControl = { ProcessTmuxControl(tmuxPath: $0) },
+        // Go-live Phase 4: .tool resolution consults the augmented PATH
+        // (well-known install dirs + login-shell upgrade), not the thin GUI
+        // process PATH. Injectable so checks can pin resolution behavior.
+        environmentProvider: @escaping () -> [String: String] = { ToolEnvironment.shared.environment() },
         browserProfiles: [BrowserProfile] = [BrowserProfile.builtInDefault()],
         managedSessionStore: ManagedAgentSessionStore? = nil
     ) {
@@ -111,6 +116,7 @@ final class TileSpawner {
         self.defaults = defaults
         self.tmuxPathResolver = tmuxPathResolver
         self.tmuxControlFactory = tmuxControlFactory
+        self.environmentProvider = environmentProvider
         self.browserProfiles = browserProfiles
         canvasView.onFileURLDrop = { [weak self] path, worldPoint in
             _ = self?.spawnFile(path: path, at: worldPoint)
@@ -124,7 +130,7 @@ final class TileSpawner {
                 resolution: registry.resolve(
                     spec,
                     in: project.rootPath,
-                    environment: ProcessInfo.processInfo.environment,
+                    environment: environmentProvider(),
                     detector: detector
                 )
             )
@@ -162,7 +168,7 @@ final class TileSpawner {
         let resolution = registry.resolve(
             spec,
             in: projectRoot,
-            environment: ProcessInfo.processInfo.environment,
+            environment: environmentProvider(),
             detector: detector
         )
         let profile: LaunchProfile
@@ -458,7 +464,7 @@ final class TileSpawner {
         let resolution = registry.resolve(
             spec,
             in: projectRoot,
-            environment: ProcessInfo.processInfo.environment,
+            environment: environmentProvider(),
             detector: detector
         )
         let profile: LaunchProfile
@@ -6299,7 +6305,7 @@ final class TileSpawner {
         let resolution = registry.resolve(
             spec,
             in: project.rootPath,
-            environment: ProcessInfo.processInfo.environment,
+            environment: environmentProvider(),
             detector: detector
         )
         guard case let .found(profile) = resolution else {
