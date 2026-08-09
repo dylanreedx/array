@@ -321,14 +321,29 @@ Traps learned (do not re-derive):
 
 Priority order — the first item is a bug fix that gates everything else:
 
-- [ ] **Fix claude/codex binary resolution.** Resolve via login-shell PATH
-      (`$SHELL -ilc`, pattern already in `AgentSupervisor.swift:351`) plus well-known
-      fallback dirs (pattern in `PiAgentRunner.swift` / `TmuxSession.swift:174`), cache
-      the result, and pass the augmented PATH to spawned tiles in `TileSpawner.swift`.
-      Applies to `LaunchProfileRegistry` `.tool` resolution generally.
-- [ ] **Dependency audit for a fresh Mac:** tmux is the big one — decide bundle vs
-      detect-and-guide (`brew install tmux`). Sweep for other host assumptions (fonts,
-      `git`, node for any sidecar).
+- [x] **Fix claude/codex binary resolution** — DONE (2026-08-09). `ToolSearchPath`
+      (Core, pure, pinned in CoreChecks) + `ToolEnvironment` (app): synchronous
+      bootstrap setenvs well-known install dirs onto PATH before the first
+      `ProcessInfo.environment` read (NSProcessInfo caches on first access — that
+      ordering is load-bearing), so Ghostty ptys/tmux/Process children inherit the
+      fix; a bounded 1s `$SHELL -ilc` probe upgrades to the login-shell PATH after
+      launch. TileSpawner resolves through an injectable `environmentProvider` seam.
+      Witness: `--tool-path-bootstrap-check` (in check-app-bundle.sh).
+- [x] **Dependency audit for a fresh Mac** — DONE (2026-08-09). Hard deps: none
+      beyond stock macOS (zsh ships, GhosttyKit statically linked, no custom fonts,
+      no direct node spawns). Soft deps, all detect-and-guide via the first-run
+      window (no bundling in v0):
+      - tmux → terminal-session persistence only; missing tmux currently degrades
+        SILENTLY (`TileSpawner.tmuxWrappedProfileIfAvailable`) — surface it in the
+        env check. Guidance: `brew install tmux`. (ISC license would allow bundling
+        later if guiding annoys.)
+      - git → file tree status, diff review, agent worktrees. Fresh Macs have the
+        /usr/bin/git CLT shim: first invocation pops the Xcode CLT dialog. Detect
+        with `xcode-select -p` (doesn't trigger the dialog); guide to CLT install.
+      - claude / codex → optional, at least one encouraged; auth runs inside the
+        CLI in a real tile. nvim → optional editor profile.
+      - node → not standalone: npm-installed CLIs reach it via their own dirs
+        (nvm/volta/bun), which the PATH augmentation covers.
 - [ ] **First-run window** (net-new; shown when no prior state exists):
       1. Welcome + one-paragraph "what Array is".
       2. Environment check with live re-check button: claude ✓/✗, codex ✓/✗, tmux ✓/✗ —
