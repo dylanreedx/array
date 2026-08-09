@@ -993,7 +993,7 @@ final class AgentSupervisor {
     /// the agent, not the tile (it was `continuum-<tileId>`): the conversation
     /// belongs to the agent, and a tile is one view of it.
     nonisolated static func sessionId(for id: AgentID) -> String {
-        "continuum-agent-\(id.rawValue.uuidString)"
+        "array-agent-\(id.rawValue.uuidString)"
     }
 
     /// THE production runner, and the only `PiAgentRunner(` construction in the app.
@@ -7001,7 +7001,7 @@ func runAgentRestoreChecks() async throws {
     // The conversation is continuable because the Pi session id is derived from the
     // agent id, which is what survived. Asserted, since "history is not lost"
     // depends on it entirely.
-    guard AgentSupervisor.sessionId(for: tiled.id) == "continuum-agent-\(tiled.id.rawValue.uuidString)" else {
+    guard AgentSupervisor.sessionId(for: tiled.id) == "array-agent-\(tiled.id.rawValue.uuidString)" else {
         throw fail("the restored agent's Pi session id is not derived from its id: \(AgentSupervisor.sessionId(for: tiled.id))")
     }
     // THE REASON THE BOOT WALK NEEDS THIS: the tile finds its own agent instead of

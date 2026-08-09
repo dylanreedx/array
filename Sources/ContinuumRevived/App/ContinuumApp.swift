@@ -13840,7 +13840,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 tileId: tileId,
                 launchProfileId: "shell",
                 command: "/bin/zsh",
-                args: ["new-session", "-A", "-s", "continuum-\(tileId.uuidString)", "-c", "/tmp/project"],
+                args: ["new-session", "-A", "-s", "array-\(tileId.uuidString)", "-c", "/tmp/project"],
                 cwd: "/tmp/project",
                 env: [:],
                 title: "Shell",

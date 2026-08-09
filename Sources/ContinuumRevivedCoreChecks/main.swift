@@ -698,7 +698,7 @@ do {
     )
 
     let name = TmuxSession.sessionName(tileId: tileId)
-    expect(name == "continuum-\(tileId.uuidString)", "tmux session name should be continuum-prefixed tile UUID")
+    expect(name == "array-\(tileId.uuidString)", "tmux session name should be array-prefixed tile UUID")
     expect(TmuxSession.sessionName(tileId: tileId) == name, "tmux session name should be stable for a tile id")
     expect(TmuxSession.sessionName(tileId: otherTileId) != name, "tmux session name should be unique across tile ids")
 
@@ -720,7 +720,7 @@ do {
     expect(kill.arguments == ["kill-session", "-t", name], "tmux kill command argv should target stable session name")
 
     let viewName = TmuxSession.viewSessionName(tileId: tileId)
-    expect(viewName == "continuum-view-\(tileId.uuidString)", "tmux view session name should be continuum-view-prefixed tile UUID")
+    expect(viewName == "array-view-\(tileId.uuidString)", "tmux view session name should be array-view-prefixed tile UUID")
     expect(viewName != name, "tmux view session name must not collide with legacy per-tile session name")
     let viewKill = TmuxSession.killViewSessionCommand(tileId: tileId, tmuxPath: tmuxPath)
     expect(viewKill.command == tmuxPath, "tmux view-session kill command should use resolved tmux path")
@@ -732,7 +732,7 @@ do {
     expect(killWindow.arguments != kill.arguments, "kill-window and kill-session argv must not be interchangeable")
 
     let projectSessionName = TmuxSession.projectSessionName(projectId: UUID(uuidString: "A0000000-0000-4000-8000-000000000036")!)
-    expect(projectSessionName == "continuum-proj-A0000000-0000-4000-8000-000000000036", "project tmux session name should be continuum-proj-prefixed project UUID")
+    expect(projectSessionName == "array-proj-A0000000-0000-4000-8000-000000000036", "project tmux session name should be array-proj-prefixed project UUID")
     let newWindowArgs = TmuxSession.newWindowArguments(
         projectSessionName: projectSessionName,
         cwd: "/tmp/Continuum Project",
@@ -3554,12 +3554,12 @@ do {
     let legacyProject = descriptor(
         UUID(uuidString: "26000000-0000-4000-8000-000000000020")!,
         tileId: projectTileId,
-        args: ["new-session", "-A", "-s", "continuum-\(projectTileId.uuidString)", "-c", "/tmp/project"]
+        args: ["new-session", "-A", "-s", "array-\(projectTileId.uuidString)", "-c", "/tmp/project"]
     )
     let legacyAmbient = descriptor(
         UUID(uuidString: "26000000-0000-4000-8000-000000000021")!,
         tileId: ambientTileId,
-        args: ["new-session", "-A", "-s", "continuum-\(ambientTileId.uuidString)", "-c", "/tmp/project"]
+        args: ["new-session", "-A", "-s", "array-\(ambientTileId.uuidString)", "-c", "/tmp/project"]
     )
     let newShape = descriptor(
         UUID(uuidString: "26000000-0000-4000-8000-000000000022")!,
@@ -3569,19 +3569,19 @@ do {
     let missingTile = descriptor(
         UUID(uuidString: "26000000-0000-4000-8000-000000000023")!,
         tileId: missingTileId,
-        args: ["new-session", "-A", "-s", "continuum-\(missingTileId.uuidString)", "-c", "/tmp/project"]
+        args: ["new-session", "-A", "-s", "array-\(missingTileId.uuidString)", "-c", "/tmp/project"]
     )
     let newPrefix = descriptor(
         UUID(uuidString: "26000000-0000-4000-8000-000000000024")!,
         tileId: projectTileId,
-        args: ["new-session", "-A", "-s", "continuum-proj-\(projectId.uuidString)", "-c", "/tmp/project"]
+        args: ["new-session", "-A", "-s", "array-proj-\(projectId.uuidString)", "-c", "/tmp/project"]
     )
 
     expect(migration.detectTopologyMigration(descriptors: [legacyProject], canvas: canvas, workspace: workspace) == .needed(legacyDescriptorIds: [legacyProject.id]), "ticket26: legacy project-zone descriptor should require migration")
     expect(migration.detectTopologyMigration(descriptors: [legacyAmbient], canvas: canvas, workspace: workspace) == .notNeeded, "ticket26: identical ambient legacy descriptor must not migrate")
     expect(migration.detectTopologyMigration(descriptors: [newShape], canvas: canvas, workspace: workspace) == .notNeeded, "ticket26: new attach-to-pane descriptor should not migrate")
     expect(migration.detectTopologyMigration(descriptors: [missingTile], canvas: canvas, workspace: workspace) == .notNeeded, "ticket26: descriptor for missing tile should not migrate")
-    expect(migration.detectTopologyMigration(descriptors: [newPrefix], canvas: canvas, workspace: workspace) == .notNeeded, "ticket26: continuum-proj prefix should not be treated as legacy")
+    expect(migration.detectTopologyMigration(descriptors: [newPrefix], canvas: canvas, workspace: workspace) == .notNeeded, "ticket26: array-proj prefix should not be treated as legacy")
 
     if case let .needed(ids) = migration.detectTopologyMigration(descriptors: [legacyProject, legacyAmbient, newShape], canvas: canvas, workspace: workspace) {
         expect(ids == [legacyProject.id], "ticket26: mixed list should migrate only project-zone legacy descriptor")
@@ -3591,7 +3591,7 @@ do {
     expect(migration.detectTopologyMigration(descriptors: [newShape, newPrefix], canvas: canvas, workspace: workspace) == .notNeeded, "ticket26: all-new list should not migrate")
 
     let v2JSON = """
-    {"schemaVersion":2,"id":"26000000-0000-4000-8000-000000000025","tileId":"\(projectTileId.uuidString)","launchProfileId":"shell","command":"/bin/zsh","args":["new-session","-A","-s","continuum-\(projectTileId.uuidString)","-c","/tmp/project"],"cwd":"/tmp/project","env":{},"title":"Shell","createdAt":1,"lastStartedAt":1,"lastExit":null}
+    {"schemaVersion":2,"id":"26000000-0000-4000-8000-000000000025","tileId":"\(projectTileId.uuidString)","launchProfileId":"shell","command":"/bin/zsh","args":["new-session","-A","-s","array-\(projectTileId.uuidString)","-c","/tmp/project"],"cwd":"/tmp/project","env":{},"title":"Shell","createdAt":1,"lastStartedAt":1,"lastExit":null}
     """.data(using: .utf8)!
     let decodedLegacy = try JSONDecoder().decode(TerminalSessionDescriptor.self, from: v2JSON)
     expect(migration.detectTopologyMigration(descriptors: [decodedLegacy], canvas: canvas, workspace: workspace) == .needed(legacyDescriptorIds: [decodedLegacy.id]), "ticket26: pre-upgrade descriptor JSON without target state should decode and migrate")
@@ -10167,7 +10167,7 @@ do {
     var projectNameMeasurements: [String: JSONValue] = [:]
     for (index, id) in fixtureIds.enumerated() {
         let actual = TmuxSession.projectSessionName(projectId: id)
-        let expected = "continuum-proj-\(id.uuidString)"
+        let expected = "array-proj-\(id.uuidString)"
         expect(actual == expected, "projectSessionName(\(id)): expected \(expected) got \(actual)")
         projectNameMeasurements["projectSessionName_\(index)_actual"] = .string(actual)
         projectNameMeasurements["projectSessionName_\(index)_expected"] = .string(expected)
@@ -10183,21 +10183,21 @@ do {
     let sharedId = fixtureIds[0]
     let projectName = TmuxSession.projectSessionName(projectId: sharedId)
     let ambientName = TmuxSession.ambientSessionName(workspaceId: sharedId)
-    let expectedAmbient = "continuum-ws-\(sharedId.uuidString)"
+    let expectedAmbient = "array-ws-\(sharedId.uuidString)"
     expect(ambientName == expectedAmbient, "ambientSessionName: expected \(expectedAmbient) got \(ambientName)")
     expect(ambientName != projectName, "ambientSessionName and projectSessionName must differ for the same UUID (both were \(ambientName))")
 
     // Check 4: killProjectSessionCommand(projectId:tmuxPath:).arguments exact array.
     let tmuxPath = "/usr/bin/tmux"
     let killArgs = TmuxSession.killProjectSessionCommand(projectId: sharedId, tmuxPath: tmuxPath)
-    let expectedKillArgs = ["kill-session", "-t", "continuum-proj-\(sharedId.uuidString)"]
+    let expectedKillArgs = ["kill-session", "-t", "array-proj-\(sharedId.uuidString)"]
     expect(killArgs.command == tmuxPath, "killProjectSessionCommand: expected command \(tmuxPath) got \(killArgs.command)")
     expect(killArgs.arguments == expectedKillArgs, "killProjectSessionCommand: expected \(expectedKillArgs) got \(killArgs.arguments)")
 
     // Check 5: sessionName(tileId:) unbroken by this ticket's additions.
     let tileId = fixtureIds[0]
     let tileName = TmuxSession.sessionName(tileId: tileId)
-    let expectedTileName = "continuum-\(tileId.uuidString)"
+    let expectedTileName = "array-\(tileId.uuidString)"
     expect(tileName == expectedTileName, "sessionName(tileId:): expected \(expectedTileName) got \(tileName) (per-tile path must remain unbroken)")
 
     // Every actual-vs-expected string pair asserted above, recorded verbatim (not
