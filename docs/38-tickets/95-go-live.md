@@ -26,8 +26,15 @@ Status as of 2026-08-09 (end of day):
   `--agent-supervisor-check` NAMING section (timing flake, three distinct failure
   messages across runs; the context-seam assertions behind it run once naming is
   fixed — the standalone CoreChecks suite covers the rest).
-- Remaining: Phase 2 (Sparkle), Phase 4 (PATH fix + onboarding — the gate before
-  actually sending friends the link), Phase 5 (runbook + clean-machine test).
+- **Phase 2 (Sparkle) DONE (2026-08-09, evening)** — implemented and proven end-to-end
+  locally: a 0.2.0(2) test install fetched a localhost appcast, EdDSA-validated,
+  downloaded the 0.2.1(3) DMG, and swapped the bundle on quit (signature intact after
+  swap). Auto-update goes LIVE with the first real 0.2.1 release: publish the DMG,
+  run `scripts/generate-appcast.sh`, ship `website/public/appcast.xml`. 0.2.0 users
+  make one final manual download; from 0.2.1 on, updates arrive in-app.
+- Remaining: 0.2.1 release (first appcast-backed release), Phase 4 (PATH fix +
+  onboarding — the gate before actually sending friends the link), Phase 5 (runbook +
+  clean-machine test, which re-verifies the update prompt UX against the real feed).
 
 ## Goal
 
@@ -212,63 +219,87 @@ Verify (still open): clean macOS VM or a fresh user account — download the DMG
 HTTP, open, drag, launch. Zero warnings beyond the standard "downloaded from the
 internet — Open?" prompt. (Best done with the Phase 3 download URL.)
 
-## Phase 2 — Sparkle 2 auto-update
+## Phase 2 — Sparkle 2 auto-update — DONE (2026-08-09, commit 8e3e890)
 
-Ordered plan (planned in detail 2026-08-09). The two repo-specific constraints that
-shape it: the bundle is hand-assembled by `make-app-bundle.sh` (no Xcode embed phase),
-and the QA matrix runs the **bare** binary, where an updater must stay inert.
+The two repo-specific constraints that shaped it: the bundle is hand-assembled by
+`make-app-bundle.sh` (no Xcode embed phase), and the QA matrix runs the **bare**
+binary, where an updater must stay inert.
 
-1. [ ] **Keys (once, Dylan's machine).** Run Sparkle's `generate_keys` (shipped inside
-   the SPM artifact bundle under `.build/artifacts/`). Private EdDSA key → login
-   Keychain only ("Private key for signing Sparkle updates"). Public key → Info.plist.
-   **Never in the repo.** Back the private key up (Keychain export or
-   `generate_keys -x`) — losing it strands every installed copy on its version.
-2. [ ] **Dependency.** `Package.swift`: add `sparkle-project/Sparkle` (from: "2.8.0")
-   as a dependency of the app target only (`ContinuumRevived`). It ships as a binary
-   XCFramework target via SPM.
-3. [ ] **Info.plist.** `SUFeedURL` = `https://arrayapp.dev/appcast.xml`,
-   `SUPublicEDKey` = <public key from step 1>. Leave `SUEnableAutomaticChecks` unset —
-   Sparkle then asks the user for permission on second launch (polite default, and no
-   silent network calls on first run).
-4. [ ] **Code wiring.** In app startup: create one
-   `SPUStandardUpdaterController(startingUpdater:updaterDelegate:userDriverDelegate:)`,
-   **gated**: only start when `Bundle.main.bundleIdentifier == "dev.arrayapp.macos"`
-   and not in any self-check/QA mode (bare-binary matrix legs and isolated-HOME QA runs
-   must never touch the network or spawn Sparkle prompts). Add "Check for Updates…"
-   to the app menu in `installMainMenu` (target: updater controller,
-   `checkForUpdates(_:)`) — and extend `runMenuContractSelfCheck` to assert it, noting
-   the menu contract runs in QA mode where the item exists but the updater is inert.
-5. [ ] **Bundle embedding (the fiddly step).** `make-app-bundle.sh`: locate
-   `Sparkle.framework` in the macOS slice of the SPM artifact (`.build/artifacts/…`),
-   `ditto` it into `Contents/Frameworks/`, and fix rpaths: SwiftPM links the bare
-   binary against the absolute artifacts path, so add
-   `install_name_tool -add_rpath @executable_path/../Frameworks` (and verify with
-   `otool -l`). `check-app-bundle.sh`: assert the framework (and its XPC services) is
-   present, and that the launch smoke still passes — that proves the rpath is right.
-   `release-app.sh` needs no change: its nested-signing loop already signs
-   `*.xpc`/`*.framework` deepest-first under Contents/Frameworks.
-6. [ ] **Appcast in the release flow.** Keep every shipped DMG in a local flat
-   `releases/` archive dir (source of truth). After staple, run `generate_appcast
-   <releases-dir> --download-url-prefix
-   https://github.com/dylanreedx/array-releases/releases/download/v<version>/` →
-   signs each item with the Keychain key → write `appcast.xml` to `website/public/`
-   (deploys with the site on Vercel). Release notes: `sparkle:releaseNotesLink` per
-   item, pointing at the releases page (Phase 3).
-7. [ ] **End-to-end update test (local).** Build 0.2.0 (build 2) with SUFeedURL
-   overridden to `http://localhost:8000/appcast.xml` in the test bundle's plist,
-   install to /Applications on the test account, then publish 0.2.1 (build 3) to a
-   local `python3 -m http.server` appcast. Confirm: prompt appears, update installs,
-   app relaunches as 0.2.1. Sparkle compares `CFBundleVersion` — the monotonic build
-   number is the load-bearing field.
+1. [x] **Keys.** Generated via the artifact's `generate_keys`. Private EdDSA key lives
+   ONLY in the login Keychain ("Private key for signing Sparkle updates"). Public key
+   `o3eIWuneUYLaNxzh0Z1A8NSAPBnTINnpqprZQLennHE=` is in Info.plist. **Never in the
+   repo.** BACKUP still owed by Dylan (Keychain export or `generate_keys -x`) —
+   losing it strands every installed copy on its version.
+2. [x] **Dependency.** Sparkle 2.9.5 via SPM, app target only. Artifact layout
+   (pinned in scripts): `.build/artifacts/sparkle/Sparkle/bin/` (generate_keys,
+   generate_appcast, sign_update) + `…/Sparkle.xcframework/macos-arm64_x86_64/`.
+   No build quirks; SwiftPM copies the framework next to the bare binary and
+   `@loader_path` resolves it, so the QA matrix runs unchanged.
+3. [x] **Info.plist.** `SUFeedURL` = `https://arrayapp.dev/appcast.xml` +
+   `SUPublicEDKey`. `SUEnableAutomaticChecks` stays UNSET (Sparkle asks on second
+   launch) — check-app-bundle.sh FAILS if it ever appears in the plist.
+4. [x] **Code wiring.** One gated `SPUStandardUpdaterController` in
+   `ContinuumApp.main()` + `updaterPermitted()`: bundle id must be
+   `dev.arrayapp.macos`, no `--` argument (covers every self-check flag and the
+   launch probe), no `CONTINUUM_APP_SUPPORT`/`CONTINUUM_SMOKE_TEST`/
+   `CONTINUUM_QA_FLOW`/`CONTINUUM_COMPONENT_SNAPSHOT` env. "Check for Updates…" in
+   the app menu (target: controller; nil target in QA runs = item visible but
+   disabled); `runMenuContractSelfCheck` asserts item + selector + inert target.
+5. [x] **Bundle embedding.** `make-app-bundle.sh` dittos the framework into
+   `Contents/Frameworks/`, adds the `@executable_path/../Frameworks` rpath, then
+   re-signs ad hoc (install_name_tool invalidates the linker signature; arm64 won't
+   launch otherwise). `check-app-bundle.sh` asserts framework binary, both XPC
+   services, Updater.app, Autoupdate, the rpath, and the SUFeedURL/SUPublicEDKey
+   keys; the launch smoke proves the rpath behaviorally. `release-app.sh` DID need
+   changes: `Autoupdate` is a bare executable the `find` pattern missed, and the
+   XPC services need `--preserve-metadata=entitlements` to keep their sandbox
+   entitlements across re-signing.
+6. [x] **Appcast in the release flow.** `scripts/generate-appcast.sh`: local flat
+   `releases/` archive dir (gitignored — starts at the first Sparkle-capable
+   version; back it up) → `generate_appcast` (signs with the Keychain key;
+   headless Keychain access confirmed working) → canonical `releases/appcast.xml`
+   → rewrite step gives each enclosure its per-version URL
+   `…/releases/download/v<ver>/Array-<ver>.dmg` + `sparkle:releaseNotesLink` to the
+   GitHub release tag → `website/public/appcast.xml` (deploys with the site).
+   Per-item rewrite exists because `--download-url-prefix` is global while GitHub
+   URLs embed the tag.
+7. [x] **End-to-end update test (local, 2026-08-09).** 0.2.0(2) test install
+   (SUFeedURL → `http://localhost:8000/appcast.xml`, isolated HOME, real Developer
+   ID signature, unnotarized) against a `python3 -m http.server` feed advertising
+   0.2.1(3): appcast fetched, EdDSA validated, DMG downloaded, install staged,
+   bundle swapped to 0.2.1(3) on quit with signature intact and the real feed URL
+   in place. Sparkle compares `CFBundleVersion` — the monotonic build number is
+   the load-bearing field.
 
-Verify (release-blocking): install version N on the clean machine, publish N+1 to the
-real feed, confirm the in-app prompt appears and the update installs and relaunches.
+Verify (release-blocking, still owed — belongs to Phase 5's clean-machine pass):
+install version N on the clean machine, publish N+1 to the real feed, confirm the
+in-app PROMPT appears (the local proof ran the silent-auto path) and the update
+installs and relaunches.
 
-Open implementation questions to resolve while building (not blockers):
-- Exact artifact path/layout of Sparkle's SPM binary + bundled tools on this SwiftPM
-  version — discover at step 2 and pin in the scripts.
-- Whether `swift build` needs `--disable-sandbox` quirks for the binary target (no
-  indication it will; check on first build).
+Traps learned (do not re-derive):
+- **cfprefsd ignores HOME/CFFIXED_USER_HOME for the standard defaults domain**:
+  a test instance launched with an isolated HOME still reads/writes the REAL
+  `dev.arrayapp.macos` preferences (Caches/app-support do follow HOME). So Sparkle
+  state (SULastCheckTime, SUHasLaunchedBefore, permission answers) is shared
+  per-user regardless of HOME isolation, and `defaults write <abs path>` writes to
+  the real domain too. The updater gate's env/arg checks are the load-bearing QA
+  isolation — never rely on HOME for prefs.
+- `generate_appcast` re-uses an existing appcast.xml in the archives dir and only
+  appends new items; the site copy is always regenerated from the canonical one.
+
+## Release runbook (v2, appcast era) — supersedes the Phase 1 command alone
+
+1. `scripts/release-app.sh --identity "Developer ID Application: Dylan Reed
+   (46TTB6J9DZ)" --notary-profile array-notary --set-version <X.Y.Z> --set-build <N>`
+   (build number MUST increase every release — Sparkle compares CFBundleVersion).
+2. Copy the stapled `Array-<X.Y.Z>.dmg` into `releases/`.
+3. `gh release create v<X.Y.Z>` on `dylanreedx/array-releases` with release notes and
+   BOTH assets: `Array.dmg` (constant name — the site's latest-URL depends on it) and
+   `Array-<X.Y.Z>.dmg` (appcast permalink).
+4. `scripts/generate-appcast.sh` → commit `website/public/appcast.xml` → push `main`
+   (Vercel deploys the feed).
+5. Spot-check: `curl https://arrayapp.dev/appcast.xml` shows the new item; installed
+   previous version sees the update.
 
 ## Phase 3 — Website download — DONE (2026-08-09) except appcast
 
@@ -281,8 +312,10 @@ Open implementation questions to resolve while building (not blockers):
 - [x] Requirements line under the hero button (macOS 14+ · Apple Silicon · free while
       in alpha). tmux bundling/guidance still owned by Phase 4's audit.
 - [x] "Report a problem" → array-releases issues (code repo stays private).
-- [ ] `website/public/appcast.xml` + a minimal `/releases` (or changelog) page fed from
-      the same release notes, so "what's new" has a URL. (Belongs to Phase 2 step 6.)
+- [~] `website/public/appcast.xml`: machinery done (Phase 2 step 6,
+      `scripts/generate-appcast.sh`); the file itself ships with the first
+      appcast-backed release (0.2.1). "What's new" URLs point at the GitHub release
+      tags via `sparkle:releaseNotesLink`, so a site `/releases` page is optional.
 
 ## Phase 4 — Onboarding + CLI connect/verify
 
