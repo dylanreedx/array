@@ -14,7 +14,9 @@ private final class FooterAlphaSamples: @unchecked Sendable {
 final class AgentComposerFooterView: NSView, TokenThemed {
     typealias SettingsWriter = (_ model: String?, _ thinking: String?) -> Bool
 
-    let modelButton = ChoiceButton(title: "Model")
+    // The model trigger presents the provider>model picker (t3code-style two
+    // pane surface); items/selection/QA seams are plain ChoiceButton.
+    let modelButton: ChoiceButton = ProviderModelButton(title: "Model")
     let effortButton = ChoiceButton(title: "Effort")
     private var settings = AgentModelConfig.resolvedFromDefaults()
     private var usesCompactLabels = false

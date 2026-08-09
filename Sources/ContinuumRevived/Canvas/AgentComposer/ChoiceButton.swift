@@ -3,8 +3,12 @@ import ContinuumRevivedAgentUI
 
 /// Borderless trigger for `ChoicePopoverController`. The button paints every
 /// visible state; AppKit is retained only for control, focus, and accessibility.
+/// Subclassable at exactly one seam — the presented surface
+/// (`presentPopover` / `presentedPopoverIsVisible` / `dismissPresentedPopover`)
+/// — so `ProviderModelButton` can swap the flat list for the provider>model
+/// picker while trigger paint, items, selection, and QA seams stay shared.
 @MainActor
-final class ChoiceButton: NSControl, TokenThemed {
+class ChoiceButton: NSControl, TokenThemed {
     private let titleLabel = NSTextField(labelWithString: "")
     private let chevronView = NSImageView(frame: .zero)
     private let popoverController = ChoicePopoverController()
@@ -141,10 +145,15 @@ final class ChoiceButton: NSControl, TokenThemed {
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
         case 36, 49, 125: togglePopover()
-        case 53 where popoverController.isPresented: popoverController.dismiss()
+        case 53 where presentedPopoverIsVisible: dismissPresentedPopover()
         default: super.keyDown(with: event)
         }
     }
+
+    /// The presentation seam a subclass overrides together with
+    /// `presentPopover()` so toggle/escape/token accents track ITS surface.
+    var presentedPopoverIsVisible: Bool { popoverController.isPresented }
+    func dismissPresentedPopover() { popoverController.dismiss() }
 
     override func accessibilityPerformPress() -> Bool {
         guard isEnabled, items.contains(where: \.enabled) else { return false }
@@ -154,7 +163,7 @@ final class ChoiceButton: NSControl, TokenThemed {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window == nil { popoverController.dismiss() }
+        if window == nil { dismissPresentedPopover() }
         applyTokens()
     }
 
@@ -178,8 +187,8 @@ final class ChoiceButton: NSControl, TokenThemed {
     func applyTokens() {
         let theme = effectiveTokenTheme
         let focused = window?.firstResponder === self
-        let accented = focused || popoverController.isPresented
-        let background: TokenColor = (isHovered || popoverController.isPresented)
+        let accented = focused || presentedPopoverIsVisible
+        let background: TokenColor = (isHovered || presentedPopoverIsVisible)
             ? AgentSurfaceRole.rowHover.color
             : AgentSurfaceRole.composer.color
         layer?.backgroundColor = background.cgColor(for: theme)
@@ -197,8 +206,8 @@ final class ChoiceButton: NSControl, TokenThemed {
 
     private func togglePopover() {
         guard isEnabled, items.contains(where: \.enabled) else { return }
-        if popoverController.isPresented {
-            popoverController.dismiss()
+        if presentedPopoverIsVisible {
+            dismissPresentedPopover()
             applyTokens()
             return
         }
@@ -224,7 +233,7 @@ final class ChoiceButton: NSControl, TokenThemed {
 
     /// One presentation seam for mouse, keyboard, VoiceOver, and deterministic
     /// selection. Client-specific width is applied here, never in a QA-only branch.
-    private func presentPopover() {
+    func presentPopover() {
         popoverController.present(
             items: items, selectedID: selectedID, anchor: bounds, relativeTo: self
         ) { [weak self] item in
@@ -247,7 +256,7 @@ final class ChoiceButton: NSControl, TokenThemed {
         list.layoutSubtreeIfNeeded()
     }
 
-    private func handleSelection(_ item: ChoiceItem) {
+    func handleSelection(_ item: ChoiceItem) {
         if keepsSelectionForItem?(item) != true {
             selectedID = item.id
         }

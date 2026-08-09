@@ -1277,6 +1277,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--provider-model-picker-check") {
+            do {
+                _ = NSApplication.shared
+                try ProviderModelButton.runSelfCheck()
+                print("ContinuumRevivedProviderModelPickerChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--onboarding-panel-check") {
             do {
                 _ = NSApplication.shared

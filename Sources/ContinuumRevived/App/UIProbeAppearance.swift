@@ -393,6 +393,23 @@ enum UIProbeAppearance {
                 root.addSubview(button)
                 root.addSubview(list)
                 return root
+            }),
+            // Provider>model picker (t3 port): render the two-pane surface so
+            // the container and its private rail buttons can never keep a
+            // stale token CGColor unobserved.
+            ("appearance.providerModelPicker", NSSize(width: 320, height: 200), {
+                let root = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 200))
+                let picker = ProviderModelPickerView(
+                    items: [
+                        ChoiceItem(id: "openai-codex/gpt-a", title: "openai-codex/gpt-a"),
+                        ChoiceItem(id: "openai-codex/gpt-b", title: "openai-codex/gpt-b"),
+                        ChoiceItem(id: "anthropic/claude-x", title: "anthropic/claude-x"),
+                    ],
+                    selectedID: "anthropic/claude-x")
+                let size = picker.intrinsicContentSize
+                picker.frame = NSRect(x: 0, y: max(0, 200 - size.height), width: size.width, height: size.height)
+                root.addSubview(picker)
+                return root
             })
         ]
         // Read out of the source, not typed here: every declared conformer must show
@@ -728,6 +745,21 @@ enum UIProbeAppearance {
         // managed-agent tile, so its fill and interactive boundary now also enter
         // the adopted-surface value/role gate.
         "ChoiceButton",
+        // Provider>model picker (t3 port): the composer's model trigger is a
+        // ChoiceButton subclass painting the identical composer/hover family;
+        // the two-pane surface paints the composer fill with hairline divider
+        // and focus-ring indicator bars; rail buttons paint the row
+        // hover/selected ladder. All named tokens, gated by
+        // `--provider-model-picker-check`'s render pass.
+        "ProviderModelButton",
+        "ProviderModelPickerView",
+        "ProviderRailButton",
+        // The picker embeds the P4.7 choice list as its model pane, which puts
+        // the list (SurfaceToken.overlay fill) and its rows (the same
+        // hover/selected ladder as the rail) under this census for the first
+        // time — they always painted these tokens; only the gate's reach grew.
+        "ChoiceListView",
+        "ChoiceRowView",
         // P2C.4's branch chip, born on tokens: `SurfaceToken.overlay` fill with a
         // `LineToken.border` outline that becomes `AccentToken.accentApproval` when
         // the agent is off the branch it was given.
@@ -831,8 +863,23 @@ enum UIProbeAppearance {
         var values = legalValues(for: kind, theme: theme)
         guard kind == .background || kind == .fill else { return values }
         switch owner {
-        case "ChoiceButton":
+        case "ChoiceButton", "ProviderModelButton":
+            // The picker trigger is a ChoiceButton subclass painting the same
+            // composer/hover family through the inherited applyTokens.
             for role in [AgentSurfaceRole.composer, .rowHover] {
+                values.insert(hex(role.color.cgColor(for: theme)))
+            }
+        case "ProviderModelPickerView":
+            // The two-pane surface: composer fill; its selected-provider
+            // indicator bar and rail divider are FILLS of line roles by
+            // design (a 2.5pt bar and a 1pt divider are drawn as views).
+            values.insert(hex(AgentSurfaceRole.composer.color.cgColor(for: theme)))
+            values.insert(hex(AgentLineRole.focusRing.color.cgColor(for: theme)))
+            values.insert(hex(AgentLineRole.decorativeHairline.color.cgColor(for: theme)))
+        case "ProviderRailButton", "ChoiceRowView":
+            // The rail's interaction ladder mirrors choice rows; the rows are
+            // the original owners of it (P4.7). Resting state paints nothing.
+            for role in [AgentSurfaceRole.rowHover, .rowSelected] {
                 values.insert(hex(role.color.cgColor(for: theme)))
             }
         case "AgentComposerView":
@@ -1283,6 +1330,18 @@ enum UIProbeAppearance {
                     recoverableErrorMessage: "root is not readable")
                 view.applySnapshotForQA(cannedFileTree())
                 return view
+            }),
+            // Provider>model picker (t3 port): the two-pane surface with a
+            // selected provider, so the container (composer fill + hairline
+            // divider + focus-ring indicator) and a rail button's rowSelected
+            // fill all actually paint under this gate.
+            AdoptedSurface(id: "providerModelPicker", size: NSSize(width: 320, height: 200), make: {
+                ProviderModelPickerView(
+                    items: [
+                        ChoiceItem(id: "openai-codex/gpt-a", title: "gpt-a"),
+                        ChoiceItem(id: "anthropic/claude-x", title: "claude-x"),
+                    ],
+                    selectedID: "anthropic/claude-x")
             }),
             AdoptedSurface(id: "canvas", size: NSSize(width: 700, height: 480), make: {
                 CanvasNSView(canvasState: CanvasState(

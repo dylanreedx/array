@@ -327,7 +327,10 @@ private final class ChoiceRowView: NSControl, TokenThemed {
         } else if focused {
             layer?.backgroundColor = AgentSurfaceRole.rowHover.color.cgColor(for: theme)
         } else {
-            layer?.backgroundColor = NSColor.clear.cgColor
+            // A resting row owns NO colour slot (inbox-card precedent): a
+            // painted transparent is an unregistered literal under the
+            // adopted-owner value gate the provider picker now puts rows under.
+            layer?.backgroundColor = nil
         }
         layer?.borderWidth = 0
         checkView.isHidden = !selected
