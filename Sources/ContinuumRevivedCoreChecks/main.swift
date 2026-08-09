@@ -10333,6 +10333,7 @@ runAgentPromptImageContractChecks()
 
 // Ticket: docs/38-tickets/90-agent-ux/P0.10-explicit-model-id.md
 runAgentModelConfigChecks()
+runAgentModelCatalogChecks()
 runAgentRuntimeEventRemapChecks()
 runManagedAgentActivityBridgeChecks()
 

@@ -105,3 +105,59 @@ func runAgentModelConfigChecks() {
 
     print("AgentModelConfig checks passed: default is an exact catalogue id, no ambiguous prefix offered, thinking levels valid, unrecognized values fall back, Settings binds both keys, Config defaults from the resolver and both values reach Pi's argv")
 }
+
+// Live catalogue (AgentModelCatalog): the frozen list above became the
+// FALLBACK; a bounded `pi --list-models` probe replaces it in the running app
+// so newly-authed providers (pi's own /login CLI flow) surface in the picker.
+// QA never probes — these checks drive parse/apply with fixtures.
+func runAgentModelCatalogChecks() {
+    // 1. Parser: real table shape (header + aligned columns), provider/model
+    //    fully qualified, pi's order preserved, ANSI styling stripped.
+    let fixture = """
+    provider      model                context  max-out  thinking  images
+    openai-codex  gpt-5.6-sol          272K     128K     yes       yes
+    anthropic     claude-fable-5       500K     128K     yes       yes
+    \u{1B}[1manthropic\u{1B}[0m     claude-opus-5        500K     128K     yes       yes
+
+    """
+    let parsed = AgentModelCatalog.parse(listModelsOutput: fixture)
+    expect(parsed == [
+        "openai-codex/gpt-5.6-sol",
+        "anthropic/claude-fable-5",
+        "anthropic/claude-opus-5",
+    ], "parse yields fully-qualified ids in pi's order, skipping the header and ANSI styling, got \(parsed)")
+    expect(AgentModelCatalog.parse(listModelsOutput: "") == [], "empty output parses to no ids")
+    expect(AgentModelCatalog.parse(listModelsOutput: "provider      model    context\n") == [],
+           "header alone parses to no ids")
+
+    // 2. Cache semantics: fallback until a NON-EMPTY apply; empty/garbage
+    //    applies never blank the picker.
+    let catalog = AgentModelCatalog()
+    expect(catalog.options(fallback: ["f/one"]) == ["f/one"], "catalog serves the fallback before any apply")
+    catalog.apply(listModelsOutput: "")
+    expect(catalog.options(fallback: ["f/one"]) == ["f/one"], "an empty probe result must not blank the options")
+    catalog.apply(listModelsOutput: fixture)
+    expect(catalog.options(fallback: ["f/one"]) == parsed, "a successful probe replaces the fallback")
+
+    // 3. modelOptions is the shared catalogue view, and resolution falls back
+    //    to the first USABLE model when the default's provider isn't authed
+    //    (handing pi an unusable default fails every spawn).
+    AgentModelCatalog.shared.resetForQA(options: ["anthropic/claude-fable-5", "anthropic/claude-opus-5"])
+    defer { AgentModelCatalog.shared.resetForQA() }
+    expect(AgentModelConfig.modelOptions == ["anthropic/claude-fable-5", "anthropic/claude-opus-5"],
+           "modelOptions reflects the live catalogue")
+    let suiteName = "AgentModelCatalogChecks-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let resolved = AgentModelConfig.resolvedFromDefaults(defaults: defaults)
+    expect(resolved.model == "anthropic/claude-fable-5",
+           "when the default model is unavailable, resolution falls back to the first usable id, got \(resolved.model)")
+    defaults.set("anthropic/claude-opus-5", forKey: AgentModelConfig.modelKey)
+    expect(AgentModelConfig.resolvedFromDefaults(defaults: defaults).model == "anthropic/claude-opus-5",
+           "a stored live-catalogue id wins")
+    AgentModelCatalog.shared.resetForQA()
+    expect(AgentModelConfig.modelOptions == AgentModelConfig.fallbackModelOptions,
+           "after reset the frozen fallback stands again")
+
+    print("AgentModelCatalog checks passed: table parse (header/ANSI/order), non-empty-replace semantics, live options drive resolution with first-usable fallback")
+}

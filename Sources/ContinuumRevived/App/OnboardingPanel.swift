@@ -12,18 +12,24 @@ import ContinuumRevivedCore
 /// of that ticket is built.
 @MainActor
 final class OnboardingPanel {
-    /// One environment probe: how to find a tool and what to tell the user
-    /// when it's missing. Injected so the self-check is deterministic.
+    /// One environment probe: how to check a tool (or a provider login) and
+    /// what to tell the user when it's missing. Injected so the self-check is
+    /// deterministic.
     struct Probe {
         let id: String
         let title: String
         /// One-line role shown under the title.
         let detail: String
-        /// Copy-paste install command shown when the tool is missing.
-        let installGuidance: String
+        /// Full guidance line shown when the probe fails — a copy-paste
+        /// install command, or the CLI login flow for provider auth. Auth is
+        /// ALWAYS the CLI's own login (OAuth), never a pasted API key.
+        let missingGuidance: String
         /// Launch profile that opens a real tile so the CLI's own login/auth
         /// flow runs inside Array; nil for non-tile tools (tmux, git).
         let connectProfileId: String?
+        /// Returns a short display string when satisfied (a path, or an auth
+        /// status), nil when not. May run a bounded subprocess — refresh is
+        /// synchronous, so keep probes under ~a second each.
         let locate: () -> String?
     }
 
@@ -41,9 +47,11 @@ final class OnboardingPanel {
         self.probes = probes
     }
 
-    /// The real environment: claude/codex through the augmented PATH
+    /// The real environment: claude/codex/pi through the augmented PATH
     /// (ToolEnvironment), tmux through its locator, git through the CLT
-    /// presence check that does NOT trigger the Xcode CLT install dialog.
+    /// presence check that does NOT trigger the Xcode CLT install dialog, and
+    /// pi provider logins through `pi auth check` — auth is always the CLI's
+    /// own `/login` OAuth flow, never a pasted API key.
     static func liveProbes(
         environment: @escaping () -> [String: String],
         defaults: UserDefaults = .standard
@@ -53,12 +61,29 @@ final class OnboardingPanel {
                 ToolDetector.live.locate(name, in: ToolDetector.splitPath(environment()["PATH"] ?? ""))
             }
         }
+        func piAuthStatus(provider: String) -> (() -> String?) {
+            {
+                guard let pi = locateOnPath("pi")() else { return nil }
+                guard let output = boundedOutput(
+                    executable: pi,
+                    arguments: ["auth", "check", "--provider", provider, "--json", "--no-refresh"],
+                    environment: environment(),
+                    timeout: 3.0
+                ) else { return nil }
+                guard output.contains("\"status\":\"ready\"") else { return nil }
+                if let match = output.range(of: "\"authType\":\"([a-z-]+)\"", options: .regularExpression) {
+                    let authType = output[match].split(separator: ":").last.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "\"")) }
+                    return "signed in (\(authType ?? "CLI auth"))"
+                }
+                return "signed in (CLI auth)"
+            }
+        }
         return [
             Probe(
                 id: "claude",
                 title: "Claude Code",
                 detail: "Agent CLI — at least one agent CLI is recommended.",
-                installGuidance: "curl -fsSL https://claude.ai/install.sh | bash",
+                missingGuidance: "Install: curl -fsSL https://claude.ai/install.sh | bash",
                 connectProfileId: "claude",
                 locate: locateOnPath("claude")
             ),
@@ -66,15 +91,39 @@ final class OnboardingPanel {
                 id: "codex",
                 title: "Codex",
                 detail: "Agent CLI — at least one agent CLI is recommended.",
-                installGuidance: "npm install -g @openai/codex",
+                missingGuidance: "Install: npm install -g @openai/codex",
                 connectProfileId: "codex",
                 locate: locateOnPath("codex")
+            ),
+            Probe(
+                id: "pi",
+                title: "pi",
+                detail: "Runs managed agent tiles and supplies the model catalogue.",
+                missingGuidance: "Install: npm install -g @earendil-works/pi-coding-agent",
+                connectProfileId: nil,
+                locate: locateOnPath("pi")
+            ),
+            Probe(
+                id: "pi-auth-anthropic",
+                title: "Claude models (pi ▸ anthropic)",
+                detail: "Lets managed agents run Claude models.",
+                missingGuidance: "Sign in: run pi in a terminal, then /login anthropic (OAuth — no API keys)",
+                connectProfileId: nil,
+                locate: piAuthStatus(provider: "anthropic")
+            ),
+            Probe(
+                id: "pi-auth-openai-codex",
+                title: "GPT models (pi ▸ openai-codex)",
+                detail: "Lets managed agents run GPT models.",
+                missingGuidance: "Sign in: run pi in a terminal, then /login openai-codex (OAuth — no API keys)",
+                connectProfileId: nil,
+                locate: piAuthStatus(provider: "openai-codex")
             ),
             Probe(
                 id: "tmux",
                 title: "tmux",
                 detail: "Keeps terminal sessions alive across app restarts (optional).",
-                installGuidance: "brew install tmux",
+                missingGuidance: "Install: brew install tmux",
                 connectProfileId: nil,
                 locate: { TmuxLocator.resolve(defaults: defaults) }
             ),
@@ -82,7 +131,7 @@ final class OnboardingPanel {
                 id: "git",
                 title: "Git (Command Line Tools)",
                 detail: "File tree status, diff review, and agent worktrees.",
-                installGuidance: "xcode-select --install",
+                missingGuidance: "Install: xcode-select --install",
                 connectProfileId: nil,
                 locate: {
                     for candidate in [
@@ -95,6 +144,33 @@ final class OnboardingPanel {
                 }
             )
         ]
+    }
+
+    /// Small bounded runner for probe subprocesses (`pi auth check`). Returns
+    /// stdout on clean exit within the timeout, nil otherwise.
+    private static func boundedOutput(
+        executable: String,
+        arguments: [String],
+        environment: [String: String],
+        timeout: TimeInterval
+    ) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.environment = environment
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = Pipe()
+        do { try process.run() } catch { return nil }
+        let killer = DispatchWorkItem {
+            if process.isRunning { process.terminate() }
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: killer)
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        killer.cancel()
+        guard process.terminationStatus == 0 else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     func show(near host: NSWindow?) {
@@ -241,7 +317,7 @@ final class OnboardingPanel {
             } else {
                 status.stringValue = "✗"
                 status.textColor = .systemOrange
-                guidance.stringValue = "Install: \(probe.installGuidance)"
+                guidance.stringValue = probe.missingGuidance
                 guidance.textColor = .labelColor
             }
             connectButtons[probe.id]?.isEnabled = located != nil
@@ -289,12 +365,16 @@ final class OnboardingPanel {
         }
         let claudeLocation = MutableLocation("/qa/bin/claude")
         let codexLocation = MutableLocation(nil)
+        let authLocation = MutableLocation(nil)
         let probes = [
-            Probe(id: "claude", title: "Claude Code", detail: "agent", installGuidance: "install-claude",
+            Probe(id: "claude", title: "Claude Code", detail: "agent", missingGuidance: "Install: install-claude",
                   connectProfileId: "claude", locate: { claudeLocation.path }),
-            Probe(id: "codex", title: "Codex", detail: "agent", installGuidance: "install-codex",
+            Probe(id: "codex", title: "Codex", detail: "agent", missingGuidance: "Install: install-codex",
                   connectProfileId: "codex", locate: { codexLocation.path }),
-            Probe(id: "tmux", title: "tmux", detail: "persistence", installGuidance: "brew install tmux",
+            Probe(id: "pi-auth", title: "Claude models (pi ▸ anthropic)", detail: "auth",
+                  missingGuidance: "Sign in: /login anthropic", connectProfileId: nil,
+                  locate: { authLocation.path }),
+            Probe(id: "tmux", title: "tmux", detail: "persistence", missingGuidance: "Install: brew install tmux",
                   connectProfileId: nil, locate: { nil })
         ]
         let panel = OnboardingPanel(probes: probes)
@@ -308,6 +388,9 @@ final class OnboardingPanel {
         guard panel.statusTextForQA("codex") == "✗", panel.guidanceTextForQA("codex") == "Install: install-codex" else {
             throw SelfCheckError.message("codex row should show missing + guidance")
         }
+        guard panel.statusTextForQA("pi-auth") == "✗", panel.guidanceTextForQA("pi-auth") == "Sign in: /login anthropic" else {
+            throw SelfCheckError.message("auth row should show missing + CLI login guidance")
+        }
         guard panel.connectButtonForQA("claude")?.isEnabled == true else {
             throw SelfCheckError.message("claude connect button should be enabled when found")
         }
@@ -318,12 +401,17 @@ final class OnboardingPanel {
             throw SelfCheckError.message("tmux must not offer a connect tile")
         }
 
-        // Live re-check: codex "gets installed", one click updates the row.
+        // Live re-check: codex "gets installed" and the provider "gets signed
+        // in" (CLI auth); one click updates both rows.
         codexLocation.path = "/qa/bin/codex"
+        authLocation.path = "signed in (oauth)"
         panel.recheckForQA()
         guard panel.statusTextForQA("codex") == "✓", panel.guidanceTextForQA("codex") == "/qa/bin/codex",
               panel.connectButtonForQA("codex")?.isEnabled == true else {
             throw SelfCheckError.message("re-check should pick up newly installed codex")
+        }
+        guard panel.statusTextForQA("pi-auth") == "✓", panel.guidanceTextForQA("pi-auth") == "signed in (oauth)" else {
+            throw SelfCheckError.message("re-check should pick up fresh provider auth")
         }
 
         panel.connectButtonForQA("claude")?.performClick(nil)
