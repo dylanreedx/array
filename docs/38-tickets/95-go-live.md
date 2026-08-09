@@ -387,6 +387,26 @@ Priority order — the first item is a bug fix that gates everything else:
 - [ ] CI (GitHub Actions + certs in secrets) is explicitly deferred until manual releases
       hurt.
 
+## Managed-agent providers — live catalogue DONE (2026-08-09); backend abstraction OPEN
+
+Managed agent tiles are 100% pi-backed (`@earendil-works/pi-coding-agent`, npm,
+host-installed — NOT bundled; needs node). Shipped today:
+
+- **Live model catalogue**: `AgentModelCatalog` probes `pi --list-models` at
+  real-app startup (bounded, once per process) and replaces the frozen P0.10
+  snapshot (now the fallback; QA never probes). Newly-authed providers surface
+  in the picker after an app relaunch. Resolution falls back to the first
+  USABLE model when the default's provider isn't authed.
+- **Onboarding rows**: pi (install guidance) + per-provider auth status via
+  `pi auth check --json`. RULE (owner, non-negotiable): auth guidance is
+  ALWAYS the CLI's own `/login` OAuth flow — never pasted API keys.
+
+OPEN (the strategic fork, owner decision pending): friends don't know pi.
+Either bundle pi+node with Array (~100MB+, our update cadence, still needs
+provider auth), or teach managed agents to use the CLIs users already install
+as backends (`claude -p --output-format stream-json`, `codex exec --json`) —
+pi preferred when present, CLI backend otherwise. Current lean: CLI backends.
+
 ## Dev/prod channel split — DONE (2026-08-09, post-0.2.1)
 
 The prod copy in /Applications must never share state with dev builds or
