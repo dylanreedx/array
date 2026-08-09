@@ -32,9 +32,14 @@ Status as of 2026-08-09 (end of day):
   swap). Auto-update goes LIVE with the first real 0.2.1 release: publish the DMG,
   run `scripts/generate-appcast.sh`, ship `website/public/appcast.xml`. 0.2.0 users
   make one final manual download; from 0.2.1 on, updates arrive in-app.
-- Remaining: 0.2.1 release (first appcast-backed release), Phase 4 (PATH fix +
-  onboarding — the gate before actually sending friends the link), Phase 5 (runbook +
-  clean-machine test, which re-verifies the update prompt UX against the real feed).
+- **Phase 4 (PATH fix + onboarding) DONE (2026-08-09, late evening)** — thin-GUI-PATH
+  resolution fixed (ToolSearchPath/ToolEnvironment), dependency audit recorded,
+  first-run onboarding panel + Help menu (Environment Setup…, Report a Problem…)
+  shipped; ticket-42 hook consent deferred (machinery not built yet — correction to
+  the plan, which assumed it existed).
+- Remaining: 0.2.1 release (first appcast-backed release — auto-update goes live),
+  Phase 5 (RELEASE.md runbook + clean-machine test, which re-verifies the update
+  prompt UX against the real feed).
 
 ## Goal
 
@@ -344,21 +349,23 @@ Priority order — the first item is a bug fix that gates everything else:
         CLI in a real tile. nvim → optional editor profile.
       - node → not standalone: npm-installed CLIs reach it via their own dirs
         (nvm/volta/bun), which the PATH augmentation covers.
-- [ ] **First-run window** (net-new; shown when no prior state exists):
-      1. Welcome + one-paragraph "what Array is".
-      2. Environment check with live re-check button: claude ✓/✗, codex ✓/✗, tmux ✓/✗ —
-         each ✗ gets install guidance (copy-paste command), not a dead end. Reuse
-         `ToolDetector` results; both CLIs optional but at least one encouraged.
-      3. Connect/verify: open a real terminal tile per detected CLI so its own
-         login/auth flow runs inside Array (`claude` and `codex` handle their own auth;
-         v0 does not re-implement auth detection — the honest check is "does the CLI
-         start and talk").
-      4. Claude notification-hook consent (ticket 42 machinery already exists — this
-         becomes its natural home).
-      5. Done → drop into a starter workspace.
-- [ ] Replace the bare "claude not found on $PATH" restart-placeholder and disabled
-      palette rows with a pointer into the environment-check UI.
-- [ ] Feedback channel in-app: Help menu → "Report a problem" → public repo issue URL.
+- [x] **First-run window** — DONE (2026-08-09), `OnboardingPanel.swift`. Shown once
+      on a fresh profile (empty registry at boot + `continuum.onboarding.shown`
+      defaults gate), reopenable via Help → Environment Setup…. Welcome paragraph;
+      environment check with live Re-check (claude/codex via augmented PATH, tmux
+      via TmuxLocator, git via a CLT presence probe that avoids the Xcode dialog);
+      per-CLI "Open a tile" buttons spawn real terminal tiles for the CLI's own
+      auth flow. Witness: `--onboarding-panel-check` (matrix-registered; PNG
+      artifact under qa-runs/). QA env gate keeps it out of isolated QA profiles.
+      CORRECTION to the original plan: ticket 42's hook-consent machinery does NOT
+      exist yet (only the status-engine consumer half does) — the consent step is
+      deferred until ticket 42 builds the installer/consent store; it slots into
+      this panel then.
+- [x] Missing-command alert now offers "Environment Setup…" (opens the panel)
+      instead of the bare dead end. The restart-placeholder tile text itself is
+      unchanged (placeholder-level pointer can follow if it matters in practice).
+- [x] Feedback channel in-app — DONE (2026-08-09): Help → Report a Problem… →
+      array-releases issues; menu-contract-pinned along with Environment Setup….
 
 ## Phase 5 — Release runbook + QA gate
 
