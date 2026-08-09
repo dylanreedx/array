@@ -53,9 +53,11 @@ The one-page runbook for shipping a release. Program history and rationale live 
 
    Writes `website/public/appcast.xml` with per-version GitHub enclosure URLs.
 
-6. **Deploy the feed:** commit `website/public/appcast.xml`, push
-   `array/integration`, fast-forward `main` (Vercel deploys arrayapp.dev from
-   `main`).
+6. **Deploy the feed + record the release:** append a row to the release ledger
+   (`docs/VERSIONING.md`, plus the abbreviated table in `CLAUDE.md` — the ledger
+   is how the next release knows its build number), then commit it together with
+   `website/public/appcast.xml`, push `array/integration`, fast-forward `main`
+   (Vercel deploys arrayapp.dev from `main`).
 
 7. **Spot-check:**
    - `curl -s https://arrayapp.dev/appcast.xml` shows the new item.
