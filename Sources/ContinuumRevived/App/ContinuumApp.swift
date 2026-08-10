@@ -10417,6 +10417,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try expect(durableRecord == before,
                        "invalid Home action mutated the durable record for \(invalid.absoluteString)")
         }
+
+        // POSITIVE path — the "selected a new Home did nothing" report. A valid
+        // Home on a zero-turn agent must actually move BOTH the record's cwd and
+        // the live location snapshot the tile renders (the refusal cases above
+        // never proved the accept case worked).
+        let movedHome = root.appendingPathComponent("moved-home", isDirectory: true)
+        try FileManager.default.createDirectory(at: movedHome, withIntermediateDirectories: true)
+        let movedHomePath = movedHome.standardizedFileURL.resolvingSymlinksInPath().path
+        delegate.reassignHome(agentID: agentID, cwd: movedHome, projectId: nil)
+        try expect(delegate.agentSupervisor.records[agentID]?.cwd == movedHomePath,
+                   "valid Change Home did not move the record's cwd (got \(delegate.agentSupervisor.records[agentID]?.cwd ?? "nil"))")
+        try expect(delegate.agentSupervisor.locationSnapshot(for: agentID)?.home.checkoutRoot.path == movedHomePath,
+                   "valid Change Home did not move the live location snapshot Home (got \(delegate.agentSupervisor.locationSnapshot(for: agentID)?.home.checkoutRoot.path ?? "nil"))")
+
+        // FORK path — "New Agent Here" spawns a NEW agent that must land in the
+        // chosen Home, not the active-project default.
+        let forkHome = root.appendingPathComponent("fork-home", isDirectory: true)
+        try FileManager.default.createDirectory(at: forkHome, withIntermediateDirectories: true)
+        let forkHomePath = forkHome.standardizedFileURL.resolvingSymlinksInPath().path
+        let forkAgentID = delegate.agentSupervisor.spawn(
+            role: nil, prompt: nil, cwd: forkHome, model: "test-model", thinking: "off", projectId: nil)
+        try expect(delegate.agentSupervisor.records[forkAgentID]?.cwd == forkHomePath,
+                   "New Agent Here did not spawn the new agent in the chosen Home (got \(delegate.agentSupervisor.records[forkAgentID]?.cwd ?? "nil"))")
+        try expect(delegate.agentSupervisor.locationSnapshot(for: forkAgentID)?.home.checkoutRoot.path == forkHomePath,
+                   "the forked agent's live location snapshot did not use the chosen Home (got \(delegate.agentSupervisor.locationSnapshot(for: forkAgentID)?.home.checkoutRoot.path ?? "nil"))")
+
+        // DISPLAY: re-attaching after a Change Home to a custom FOLDER (projectId
+        // nil → projectName nil) must drop the prior project name from the header,
+        // or the tile shows the old Home though the cwd moved. Drives the real
+        // attach re-entry path (not the ComponentLab presentation injection).
+        let namedHome = root.appendingPathComponent("Alpha-Root", isDirectory: true)
+        try FileManager.default.createDirectory(at: namedHome, withIntermediateDirectories: true)
+        let displayAgent = delegate.agentSupervisor.spawn(
+            role: nil, prompt: nil, cwd: namedHome, model: "test-model", thinking: "off", projectId: nil)
+        let displayTile = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(), kind: .managedAgent, title: "T",
+            frame: TileFrame(x: 0, y: 0, width: 520, height: 320),
+            zPosition: .fromLegacyRank(1), runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")))
+        displayTile.frame = NSRect(x: 0, y: 0, width: 520, height: 320)
+        displayTile.attach(agentID: displayAgent, supervisor: delegate.agentSupervisor, projectName: "Alpha Project")
+        try expect(displayTile.qaLocationText.contains("Alpha Project"),
+                   "attach with a project name should show it, got \(displayTile.qaLocationText)")
+        displayTile.attach(agentID: displayAgent, supervisor: delegate.agentSupervisor, projectName: nil)
+        try expect(!displayTile.qaLocationText.contains("Alpha Project"),
+                   "re-attach to a custom folder (nil project) must drop the stale project name, got \(displayTile.qaLocationText)")
+        try expect(displayTile.qaLocationText.contains("Alpha-Root"),
+                   "re-attach to a custom folder must show the folder name, got \(displayTile.qaLocationText)")
     }
 
     /// Records a managed-agent runtime event onto the per-agent syncable

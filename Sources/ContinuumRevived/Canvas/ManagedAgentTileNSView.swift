@@ -331,7 +331,12 @@ final class ManagedAgentTileNSView: TileNSView {
         projectName: String? = nil
     ) {
         if attachedAgentID == agentID, eventSubscription != nil {
-            if let projectName { locationProjectName = projectName }
+            // Assign unconditionally (including nil), matching the full-attach
+            // path below: re-attaching after a Change Home to a custom FOLDER
+            // passes projectName == nil, and keeping the stale prior project
+            // name here left the header showing the old Home even though the
+            // cwd moved ("selected a new Home did nothing").
+            locationProjectName = projectName
             refreshLocationStatus()
             return
         }
