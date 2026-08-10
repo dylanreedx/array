@@ -43,6 +43,18 @@ Status as of 2026-08-09 (end of day):
   `https://arrayapp.dev/appcast.xml` serving the signed item. Update PROMPT UX
   verified by Dylan on the local feed (prompt → install → relaunch) before shipping.
   0.2.0 installs make one final manual download.
+- **Array 0.2.2 (build 4) SHIPPED (2026-08-09, night) — the colleague-ready
+  release.** On top of 0.2.1: dev/prod channel split; live model catalogue
+  (`AgentModelCatalog`: `pi --list-models` probe at startup + throttled re-probes
+  on picker open / onboarding re-check, QA-inert by construction); provider>model
+  picker (t3code design: provider rail + model pane, one shared component in the
+  tile composer AND Settings) with human display names from pi's synced catalog
+  (`~/.pi/agent/models-store.json`); onboarding pi row + per-provider auth rows
+  (`pi auth check`, CLI `/login` guidance ONLY — never API keys); Settings ▸
+  Agents reworded to defaults-for-new-agents. Repo reorganized t3-style
+  (AGENTS.md orientation with CLAUDE.md symlinked to it, docs/README.md taxonomy,
+  RELEASE.md + docs/VERSIONING.md ledger, .plans/). Public download verified
+  byte-identical; appcast serving both items; ledger current (next build: 5).
 - Remaining: Phase 5 clean-machine pass (fresh install of 0.2.1 from the site on a
   second machine/account — witnesses Gatekeeper, first-run onboarding on a truly
   fresh profile, and the next release's update against the real feed).
