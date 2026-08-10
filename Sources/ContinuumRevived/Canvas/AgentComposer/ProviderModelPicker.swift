@@ -481,6 +481,16 @@ extension ProviderModelButton {
             if !condition { throw SelfCheckError.message(message()) }
         }
 
+        // Hermetic against ambient harness state. The Agent Harness lives in the
+        // standard defaults domain, which is shared across matrix legs and
+        // persists on the machine (cfprefsd ignores per-leg isolation), so a
+        // leftover .codex/.claudeCode from another leg or an earlier run would
+        // filter the catalogue and make the unfiltered-rail assertions below
+        // flaky. Force the pi baseline (unfiltered) here and clear on exit; the
+        // harness-filter sub-test further down sets its own value explicitly.
+        UserDefaults.standard.removeObject(forKey: AgentBackendConfig.key)
+        defer { UserDefaults.standard.removeObject(forKey: AgentBackendConfig.key) }
+
         // 1. Pure grouping: order-preserving, fully-qualified split, slashless
         //    ids grouped under "other", display names title-cased.
         let grouped = ProviderModelGrouping.groups(from: [

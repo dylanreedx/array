@@ -852,11 +852,13 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
                   panel.modelPickerButtonForQA?.items.map(\.id) == ["openai-codex/gpt-x", "anthropic/claude-y"] else {
                 throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: pi harness must show every provider in the live picker, got \(panel.modelPickerButtonForQA?.items.map(\.id) ?? [])")
             }
-            if let priorBackend {
-                UserDefaults.standard.set(priorBackend, forKey: AgentBackendConfig.key)
-            } else {
-                UserDefaults.standard.removeObject(forKey: AgentBackendConfig.key)
-            }
+            // End clean rather than restoring `priorBackend`: the standard
+            // domain is shared across matrix legs and persists on the machine,
+            // so restoring a stale leftover would perpetuate it into other legs
+            // (it flaked the provider-model-picker rail). QA never means to keep
+            // a harness value; clearing returns the pi default.
+            _ = priorBackend
+            UserDefaults.standard.removeObject(forKey: AgentBackendConfig.key)
             AgentModelCatalog.shared.resetForQA()
         }
 
