@@ -159,6 +159,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         var segments: [String] = []
         if !prompt.text.isEmpty { segments.append(prompt.text) }
         segments.append(contentsOf: prompt.imageAttachments.map(\.piPathReference))
+        segments.append(contentsOf: prompt.fileReferences.map(\.piPathReference))
         return segments.joined(separator: "\n")
     }
 

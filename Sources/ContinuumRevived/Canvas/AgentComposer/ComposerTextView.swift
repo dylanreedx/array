@@ -18,6 +18,7 @@ protocol ComposerTextViewObserver: AnyObject {
     ) -> Bool
     func composerRequestedDismissSuggestions(_ textView: ComposerTextView)
     func composerRequestedImageImport(_ textView: ComposerTextView, from pasteboard: NSPasteboard)
+    func composerRequestedFileReferenceImport(_ textView: ComposerTextView, from pasteboard: NSPasteboard)
 }
 
 @MainActor
@@ -135,22 +136,33 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate {
 
     override func paste(_ sender: Any?) {
         let pasteboard = NSPasteboard.general
-        guard ComposerImagePasteboardDecoder.canDecode(pasteboard) else {
+        if ComposerImagePasteboardDecoder.canDecode(pasteboard) {
+            composerObserver?.composerRequestedImageImport(self, from: pasteboard)
+        } else if ComposerFileReferencePasteboardDecoder.canDecode(pasteboard) {
+            composerObserver?.composerRequestedFileReferenceImport(self, from: pasteboard)
+        } else {
             super.paste(sender)
-            return
         }
-        composerObserver?.composerRequestedImageImport(self, from: pasteboard)
     }
 
     override func performDragOperation(_ draggingInfo: NSDraggingInfo) -> Bool {
         let pasteboard = draggingInfo.draggingPasteboard
-        guard ComposerImagePasteboardDecoder.canDecode(pasteboard) else { return false }
-        composerObserver?.composerRequestedImageImport(self, from: pasteboard)
-        return true
+        if ComposerImagePasteboardDecoder.canDecode(pasteboard) {
+            composerObserver?.composerRequestedImageImport(self, from: pasteboard)
+            return true
+        }
+        if ComposerFileReferencePasteboardDecoder.canDecode(pasteboard) {
+            composerObserver?.composerRequestedFileReferenceImport(self, from: pasteboard)
+            return true
+        }
+        return false
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        ComposerImagePasteboardDecoder.canDecode(sender.draggingPasteboard) ? .copy : []
+        let pasteboard = sender.draggingPasteboard
+        let canDecode = ComposerImagePasteboardDecoder.canDecode(pasteboard)
+            || ComposerFileReferencePasteboardDecoder.canDecode(pasteboard)
+        return canDecode ? .copy : []
     }
 
     override func keyDown(with event: NSEvent) {

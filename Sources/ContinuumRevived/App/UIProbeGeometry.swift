@@ -8108,7 +8108,186 @@ enum UIProbeGeometry {
         let rebindAssertions = try await checkComposerRebindIsolation()
         let submissionRecoveryAssertions = try await checkComposerSubmissionRebindRecovery()
         let asyncRefusalAssertions = try await checkAsyncRefusalRebindRecovery()
-        print("UIProbeGeometry: composer image components gated \(pasteboardAssertions) paste/drop decoding assertions, \(thumbnailAssertions) thumbnail-cache assertions, \(railAssertions) rail geometry/accessibility/keyboard assertions, \(rebindAssertions) delayed cross-agent rebind assertions, \(submissionRecoveryAssertions) pre-sink submission rebind recovery assertions, and \(asyncRefusalAssertions) suspended sink-refusal/rebind assertions")
+        let fileReferenceAssertions = try await checkComposerFileReferenceIntake()
+        print("UIProbeGeometry: composer image components gated \(pasteboardAssertions) paste/drop decoding assertions, \(thumbnailAssertions) thumbnail-cache assertions, \(railAssertions) rail geometry/accessibility/keyboard assertions, \(rebindAssertions) delayed cross-agent rebind assertions, \(submissionRecoveryAssertions) pre-sink submission rebind recovery assertions, \(asyncRefusalAssertions) suspended sink-refusal/rebind assertions, and \(fileReferenceAssertions) non-image file-reference intake assertions")
+    }
+
+    /// Plan: .plans/04-drag-drop-files.md — dropping a doc/text file on the
+    /// composer must become a `@/path` REFERENCE (the agent's Read tool fetches
+    /// it), never an embedded byte copy, while images keep the embedding path and
+    /// binaries are refused outright.
+    private static func checkComposerFileReferenceIntake() async throws -> Int {
+        var assertions = 0
+        func require(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String) throws {
+            guard condition() else { throw fail(message()) }
+            assertions += 1
+        }
+
+        let tempDir = try makeProbeTemporaryDirectory(named: "composer-file-references")
+        func write(_ name: String, _ contents: String) throws -> URL {
+            let url = tempDir.appendingPathComponent(name)
+            try Data(contents.utf8).write(to: url, options: .atomic)
+            return url
+        }
+        func pasteboard(_ urls: [URL]) -> NSPasteboard {
+            let board = NSPasteboard(name: NSPasteboard.Name("continuum.composer.filerefs.\(UUID().uuidString)"))
+            board.clearContents()
+            board.writeObjects(urls.map { $0 as NSURL })
+            return board
+        }
+
+        // Dylan's four named types plus a code file, all referenceable.
+        let markdown = try write("notes.md", "# notes\n")
+        let text = try write("log.txt", "plain\n")
+        let xml = try write("data.xml", "<root/>\n")
+        let swift = try write("Thing.swift", "let x = 1\n")
+        let pdf = tempDir.appendingPathComponent("paper.pdf")
+        try makeProbePDFData().write(to: pdf, options: .atomic)
+        let named = [markdown, text, xml, pdf, swift]
+        let decoded = ComposerFileReferencePasteboardDecoder.decodedReferences(from: pasteboard(named))
+        try require(decoded.count == named.count,
+                    "composer file-reference decoder dropped one of md/txt/xml/pdf/swift: got \(decoded.map(\.displayName))")
+        try require(decoded.map(\.displayName) == named.map(\.lastPathComponent),
+                    "composer file-reference decoder lost filename order/identity: \(decoded.map(\.displayName))")
+        try require(decoded.allSatisfy { $0.piPathReference == "@\($0.fileURL.path)" },
+                    "every decoded file must expose an @path reference for the agent's Read tool")
+
+        // An image must NOT decode as a reference — it takes the embedding path
+        // so a vision model receives the bytes.
+        let imageURL = tempDir.appendingPathComponent("shot.png")
+        try makeProbeImageData(width: 8, height: 8, type: .png).write(to: imageURL, options: .atomic)
+        try require(ComposerFileReferencePasteboardDecoder.decodedReferences(from: pasteboard([imageURL])).isEmpty,
+                    "an image must not decode as a file reference; images embed instead")
+        try require(!ComposerImagePasteboardDecoder.decodedItems(from: pasteboard([imageURL])).isEmpty,
+                    "the image decoder must still claim images after the file-reference path landed")
+
+        // A binary/unknown payload is refused by both decoders.
+        let binary = tempDir.appendingPathComponent("blob.bin")
+        try Data([0x00, 0x01, 0x02, 0xFF]).write(to: binary, options: .atomic)
+        try require(ComposerFileReferencePasteboardDecoder.decodedReferences(from: pasteboard([binary])).isEmpty,
+                    "an unrecognized binary must not decode as a file reference")
+
+        // A directory is not a file reference.
+        let subdir = tempDir.appendingPathComponent("folder", isDirectory: true)
+        try FileManager.default.createDirectory(at: subdir, withIntermediateDirectories: true)
+        try require(ComposerFileReferencePasteboardDecoder.decodedReferences(from: pasteboard([subdir])).isEmpty,
+                    "a dropped directory must not decode as a file reference")
+
+        // A path with spaces and shell metacharacters survives as ONE literal.
+        let hostile = try write("weird $(touch NOPE) `x` name.md", "hostile\n")
+        let hostileDecoded = ComposerFileReferencePasteboardDecoder.decodedReferences(from: pasteboard([hostile]))
+        try require(hostileDecoded.count == 1 && hostileDecoded[0].fileURL.path == hostile.path,
+                    "a metacharacter filename must decode to exactly one reference with its literal path")
+
+        // The live composer: a drop lands in the rail, is sendable with no prose,
+        // reaches the prompt as a reference, and removal clears it.
+        let composer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 520, height: 96))
+        let window = NSWindow(contentRect: composer.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = composer
+        let agentID = AgentID(rawValue: UUID())
+        let draftStoreDir = tempDir.appendingPathComponent("draft-store", isDirectory: true)
+        try FileManager.default.createDirectory(at: draftStoreDir, withIntermediateDirectories: true)
+        let draftStore = AgentComposerDraftStore(applicationSupportDirectory: draftStoreDir)
+        composer.bindDraftStore(draftStore, agentID: agentID)
+        composer.bindAttachmentStore(
+            AgentComposerAttachmentStore(applicationSupportDirectory: draftStoreDir),
+            agentID: agentID
+        )
+
+        try require(!composer.qaHasSendableAttachments,
+                    "an empty composer must not report sendable attachments")
+        composer.qaImportFileReferences(from: pasteboard([markdown, xml]))
+        composer.layoutSubtreeIfNeeded()
+        try require(composer.qaFileReferenceCount == 2,
+                    "dropping two documents must produce two composer file references, got \(composer.qaFileReferenceCount)")
+        try require(composer.qaFileReferenceRailNames == ["notes.md", "data.xml"],
+                    "the file rail must render a chip per reference in drop order, got \(composer.qaFileReferenceRailNames)")
+        try require(composer.qaHasSendableAttachments,
+                    "file references alone must make an empty-prose composer sendable")
+        try require(composer.qaFileReferenceRailAccessibilityLabels.allSatisfy { !$0.contains(tempDir.path) },
+                    "a file chip's accessibility label must not leak the local path, got \(composer.qaFileReferenceRailAccessibilityLabels)")
+
+        // Dropping the same file again must not duplicate the chip.
+        composer.qaImportFileReferences(from: pasteboard([markdown]))
+        try require(composer.qaFileReferenceCount == 2,
+                    "re-dropping the same file must not duplicate its reference, got \(composer.qaFileReferenceCount)")
+
+        // Removing a chip drops exactly that reference.
+        composer.qaRemoveFileReference(at: 0)
+        try require(composer.qaFileReferenceCount == 1 && composer.qaFileReferenceRailNames == ["data.xml"],
+                    "removing a chip must drop exactly that reference, got \(composer.qaFileReferenceRailNames)")
+        composer.qaImportFileReferences(from: pasteboard([markdown]))
+        try require(composer.qaFileReferenceRailNames == ["data.xml", "notes.md"],
+                    "re-adding a removed file must append it, got \(composer.qaFileReferenceRailNames)")
+
+        // The REAL send path (not a reconstruction): drive composerRequestedSend
+        // through a recording sink and read the intent production would deliver.
+        // A witness that rebuilt the prompt itself would keep passing if the send
+        // assembly dropped references.
+        let recordingSink = ComposerIntentRecordingProbeSink()
+        composer.bindActionSink(
+            recordingSink,
+            agentID: agentID,
+            snapshot: AgentTileTurnSnapshot(
+                state: .ready,
+                capabilities: AgentTurnCapabilities(canSend: true),
+                turnStartedAt: nil
+            )
+        )
+        composer.apply(AgentComposerDraft(
+            text: "summarize these",
+            selection: NSRange(location: 15, length: 0),
+            revision: 1,
+            fileReferences: composer.qaFileReferences
+        ))
+        composer.composerRequestedSend(composer.textView)
+        for _ in 0..<50 where await recordingSink.promptCount == 0 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard let prompt = await recordingSink.lastPrompt else {
+            throw fail("the composer never delivered a sendPrompt intent for a file-reference draft")
+        }
+        try require(prompt.fileReferences.map(\.fileURL.path) == [xml.path, markdown.path],
+                    "the SENT prompt must carry each dropped file as a reference in order, got \(prompt.fileReferences.map(\.displayName))")
+        try require(prompt.text == "summarize these",
+                    "the sent prompt must keep its prose alongside references, got \(prompt.text)")
+        let piSegments = PiAgentRunner.promptArgumentSegments(prompt)
+        try require(piSegments == ["summarize these", "@\(xml.path)", "@\(markdown.path)"],
+                    "pi argv must be prose plus one @path per reference, got \(piSegments)")
+        try require(!ClaudeAgentRunner.promptArgument(prompt).contains("# notes"),
+                    "reference-not-embed: no file CONTENT may enter the prompt argument")
+
+        // An accepted send clears the rail with the rest of the draft.
+        try require(composer.qaFileReferenceCount == 0,
+                    "an accepted send must clear the file rail, \(composer.qaFileReferenceCount) chip(s) remained")
+
+        // Persistence round-trip: the durable draft keeps references, and a
+        // reference whose file vanished is not restored.
+        let persisted = ContinuumRevivedCore.AgentComposerDraft(
+            text: "restored",
+            selection: 0..<0,
+            // Whole seconds: the store's ISO-8601 codec does not carry sub-second
+            // precision, and this assertion is about the reference list, not clocks.
+            updatedAt: Date(timeIntervalSince1970: 1_786_000_000),
+            fileReferences: [
+                AgentComposerDraftFileReference(displayName: "notes.md", contentType: "net.daringfireball.markdown", path: markdown.path),
+                AgentComposerDraftFileReference(displayName: "gone.md", contentType: "net.daringfireball.markdown", path: tempDir.appendingPathComponent("gone.md").path),
+            ]
+        )
+        let encoded = try JSONCodec.makeEncoder().encode(persisted)
+        let roundTripped = try JSONCodec.makeDecoder().decode(ContinuumRevivedCore.AgentComposerDraft.self, from: encoded)
+        try require(roundTripped == persisted,
+                    "a composer draft carrying file references must round-trip through Codable")
+        let legacy = Data(#"{"text":"old","selection":[0,3],"updatedAt":"2026-08-07T02:40:11Z"}"#.utf8)
+        let legacyDecoded = try JSONCodec.makeDecoder().decode(ContinuumRevivedCore.AgentComposerDraft.self, from: legacy)
+        try require(legacyDecoded.fileReferences.isEmpty,
+                    "a pre-existing persisted draft without fileReferences must still decode")
+        let restored = composer.qaResolveFileReferences(from: persisted.fileReferences)
+        try require(restored.map(\.displayName) == ["notes.md"],
+                    "restoring a draft must keep readable references and drop vanished ones, got \(restored.map(\.displayName))")
+
+        window.contentView = nil
+        return assertions
     }
 
     /// Delays an old agent's attachment-resolution await while the real AppKit
@@ -8875,6 +9054,24 @@ enum UIProbeGeometry {
         return url
     }
 
+    /// A minimal one-page PDF, so the file-reference allowlist is witnessed
+    /// against a REAL pdf whose type UTType resolves from content, not a
+    /// hand-asserted identifier.
+    private static func makeProbePDFData() throws -> Data {
+        let data = NSMutableData()
+        var mediaBox = CGRect(x: 0, y: 0, width: 72, height: 72)
+        guard let consumer = CGDataConsumer(data: data as CFMutableData),
+              let context = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else {
+            throw fail("failed to create probe PDF context")
+        }
+        context.beginPDFPage(nil)
+        context.setFillColor(CGColor(red: 0.2, green: 0.4, blue: 0.8, alpha: 1))
+        context.fill(CGRect(x: 8, y: 8, width: 56, height: 56))
+        context.endPDFPage()
+        context.closePDF()
+        return data as Data
+    }
+
     private static func makeProbeImageData(width: Int, height: Int, type: NSBitmapImageRep.FileType) throws -> Data {
         guard let rep = NSBitmapImageRep(
             bitmapDataPlanes: nil,
@@ -8930,6 +9127,23 @@ private final class ComposerSubmissionProbeSink: AgentTileActionSink {
             }.value
         }
         return acceptance
+    }
+}
+
+/// Captures the exact `AgentComposerIntent` the composer hands its sink, so a
+/// witness reads what production would send rather than rebuilding it.
+@MainActor
+private final class ComposerIntentRecordingProbeSink: AgentTileActionSink {
+    private(set) var prompts: [AgentPrompt] = []
+
+    var promptCount: Int { prompts.count }
+    var lastPrompt: AgentPrompt? { prompts.last }
+
+    nonisolated func accept(_ intent: AgentComposerIntent, for agentID: AgentID) async -> IntentAcceptance {
+        if case .sendPrompt(let prompt) = intent {
+            await MainActor.run { self.prompts.append(prompt) }
+        }
+        return .accepted
     }
 }
 

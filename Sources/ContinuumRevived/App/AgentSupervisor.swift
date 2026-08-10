@@ -2988,7 +2988,11 @@ final class AgentSupervisor {
                 )
                 guard sendPrepared(
                     PreparedAgentPrompt(
-                        prompt: AgentPrompt(text: prompt.text, imageAttachments: prepared),
+                        prompt: AgentPrompt(
+                            text: prompt.text,
+                            imageAttachments: prepared,
+                            fileReferences: prompt.fileReferences
+                        ),
                         expectedAgentID: agentID
                     ),
                     to: agentID

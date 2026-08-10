@@ -15,6 +15,23 @@ public struct AgentComposerDraftImageAttachment: Codable, Equatable, Sendable {
     public var attachmentID: AgentImageAttachmentID { metadata.id }
 }
 
+/// One referenced file retained by an unfinished composer draft. Unlike an
+/// image attachment (an opaque id resolved through the managed store), a
+/// reference carries no bytes and no store identity — its path IS the payload.
+/// Persisting the path here is host-local only: composer drafts live outside
+/// `AgentRecord` and every sync model, so no path ever reaches CloudKit.
+public struct AgentComposerDraftFileReference: Codable, Equatable, Sendable {
+    public var displayName: String
+    public var contentType: String
+    public var path: String
+
+    public init(displayName: String, contentType: String, path: String) {
+        self.displayName = displayName
+        self.contentType = contentType
+        self.path = path
+    }
+}
+
 /// Host-local composer state. Prompt text deliberately lives outside
 /// `AgentRecord` and every sync model.
 public struct AgentComposerDraft: Codable, Equatable, Sendable {
@@ -22,21 +39,24 @@ public struct AgentComposerDraft: Codable, Equatable, Sendable {
     public var selection: Range<Int>
     public var updatedAt: Date
     public var imageAttachments: [AgentComposerDraftImageAttachment]
+    public var fileReferences: [AgentComposerDraftFileReference]
 
     public init(
         text: String,
         selection: Range<Int>,
         updatedAt: Date,
-        imageAttachments: [AgentComposerDraftImageAttachment] = []
+        imageAttachments: [AgentComposerDraftImageAttachment] = [],
+        fileReferences: [AgentComposerDraftFileReference] = []
     ) {
         self.text = text
         self.selection = selection
         self.updatedAt = updatedAt
         self.imageAttachments = imageAttachments
+        self.fileReferences = fileReferences
     }
 
     private enum CodingKeys: String, CodingKey {
-        case text, selection, updatedAt, imageAttachments
+        case text, selection, updatedAt, imageAttachments, fileReferences
     }
 
     public init(from decoder: Decoder) throws {
@@ -45,6 +65,7 @@ public struct AgentComposerDraft: Codable, Equatable, Sendable {
         selection = try values.decode(Range<Int>.self, forKey: .selection)
         updatedAt = try values.decode(Date.self, forKey: .updatedAt)
         imageAttachments = try values.decodeIfPresent([AgentComposerDraftImageAttachment].self, forKey: .imageAttachments) ?? []
+        fileReferences = try values.decodeIfPresent([AgentComposerDraftFileReference].self, forKey: .fileReferences) ?? []
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -54,6 +75,9 @@ public struct AgentComposerDraft: Codable, Equatable, Sendable {
         try values.encode(updatedAt, forKey: .updatedAt)
         if !imageAttachments.isEmpty {
             try values.encode(imageAttachments, forKey: .imageAttachments)
+        }
+        if !fileReferences.isEmpty {
+            try values.encode(fileReferences, forKey: .fileReferences)
         }
     }
 }
