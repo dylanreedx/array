@@ -7,11 +7,14 @@ live on arrayapp.dev 2026-08-10; next release is build 6.** `main` ==
 `array/integration`. Dylan is in a "continuous improvements + tweaks" phase —
 this is the menu; he picks what to run next.
 
-## Next up (Dylan-named)
+## Unreleased on `array/integration` (rides build 6)
 
-- **Drag-drop non-image files** (md/pdf/xml/txt) → `04-drag-drop-files.md`. Key
-  decision: reference, don't embed — hand the agent a `@/path` and let its Read
-  tool fetch it (images stay embedded for vision). First queued improvement.
+- **Drag-drop non-image files SHIPPED 2026-08-10** (`61983d8`, plan `04`):
+  md/pdf/xml/txt/code drop or paste onto a composer as `@/path` references the
+  agent Reads; images still embed. Not yet in a release — Dylan should dogfood
+  it in Array Dev first. Known gaps recorded in the plan: codex's
+  `workspace-write` sandbox may refuse a file dropped from outside the project,
+  and PDF-read parity varies by harness.
 
 ## Recently shipped (0.3.0, 2026-08-10)
 
@@ -77,10 +80,11 @@ this is the menu; he picks what to run next.
 
 ## Bigger designed work
 
-- `04-drag-drop-files.md` — **NEXT** (Dylan-named). Drag-drop md/pdf/xml/txt as
-  `@/path` references the agent's Read tool fetches; images stay embedded. Watch
-  the codex `workspace-write` sandbox for out-of-project drops, and PDF-read
-  parity across harnesses.
+- `04-drag-drop-files.md` — **SHIPPED 2026-08-10** (unreleased, rides build 6).
+  Drag-drop md/pdf/xml/txt as `@/path` references the agent's Read tool fetches;
+  images stay embedded. Remaining questions (codex `workspace-write` sandbox for
+  out-of-project drops, PDF-read parity) are recorded in the plan and were left
+  open deliberately.
 - `03-transcript-rehydration.md` — **SHIPPED 2026-08-10** (MVP: resume shows the
   prior transcript behind a "Previous session" boundary, read from the provider
   session file and replayed as events; display-only, never re-synced). Fast-follows

@@ -1,7 +1,44 @@
 # 04 — Drag-drop non-image files (md / pdf / xml / txt …)
 
-Status: planned, not started. Dylan's ask (2026-08-10) + the load-bearing
-design decision below.
+Status: **SHIPPED 2026-08-10** (commit `61983d8`, unreleased — rides the next
+build). Dylan's ask (2026-08-10) + the load-bearing design decision below.
+
+## What shipped
+
+Reference-not-embed, exactly as decided. Drop or paste a doc on a composer and
+it becomes a chip; the prompt carries `@/path` and the agent's Read tool
+fetches it. Images still embed.
+
+- `AgentPromptFileReference` (Core) — displayName + contentType + local file
+  URL, non-Codable like the image capability. All three runners append its
+  `@path` AFTER the image refs: pi as its own argv segment, claude/codex as
+  their own newline-joined line, so spaces and metacharacters stay literal.
+- `AgentFileReferenceRules` (Core) — the allowlist: text/source/markup + PDF
+  referenceable; images refused (they embed); binaries/unknown refused.
+- `ComposerFileReferencePasteboardDecoder` — validates readable regular file +
+  allowlisted resolved content type, reads no bytes.
+- `ComposerFileReferenceRailView` — chip rail (icon + name + remove), above the
+  image rail. TokenThemed with a `nil` resting background, so the census sweeps
+  it via the composer surface and no literal-owner entry was needed.
+- Draft persistence — refs round-trip through the host-local draft store; a
+  reference whose file vanished is dropped on restore.
+
+Witnesses: `--agent-prompt-file-reference-contract-check` (adapters, allowlist,
+hostile path, path-free transcript) and +24 assertions in
+`--composer-image-components-check`. Both teeth-verified. **Note for future
+witness authors:** the first version of the composer witness rebuilt the prompt
+itself and stayed GREEN when the send assembly dropped references — it now
+drives the real `composerRequestedSend` through a recording sink.
+
+## Not done (deliberate, revisit if Dylan hits them)
+
+- **codex sandbox**: `sandbox_mode=workspace-write` may block codex reading a
+  file dropped from OUTSIDE the project. Nothing restricts drops today — codex
+  will report it cannot read the file. One-line flip to `danger-full-access` in
+  `CodexCLIBackend` if that bites.
+- **PDF read parity**: claude's Read parses PDFs; pi's and codex's may not. The
+  path is attached either way and the agent says if it can't read it.
+- No size cap (nothing is copied) and no in-project restriction.
 
 ## Problem
 
