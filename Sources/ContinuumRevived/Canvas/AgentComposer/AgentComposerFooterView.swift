@@ -33,6 +33,14 @@ final class AgentComposerFooterView: NSView, TokenThemed {
         modelButton.setContentHuggingPriority(.defaultLow, for: .horizontal)
         effortButton.setContentCompressionResistancePriority(.required, for: .horizontal)
         effortButton.setContentHuggingPriority(.required, for: .horizontal)
+        // The footer has no intrinsic width (it sizes to its host row), so when it
+        // shares a row with the Send button it must actively want to FILL the
+        // remainder — otherwise the enclosing stack sizes it to its collapsed
+        // minimum and the model/effort buttons truncate while free space sits
+        // before Send (the recurring effort-picker truncation). A near-zero
+        // hugging priority makes the row hand it all the surplus.
+        setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
         modelButton.setAccessibilityLabel("Model, next turn")
         modelButton.setAccessibilityHelp("Choose the model for this agent's next turn")
         effortButton.setAccessibilityLabel("Reasoning effort, next turn")

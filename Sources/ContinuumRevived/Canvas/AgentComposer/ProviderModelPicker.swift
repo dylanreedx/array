@@ -616,5 +616,41 @@ extension ProviderModelButton {
         } else {
             UserDefaults.standard.removeObject(forKey: AgentBackendConfig.key)
         }
+
+        // 7. Footer FILL in the Send row (the recurring effort-picker truncation):
+        //    the footer has no intrinsic width, so sharing a row with the Send
+        //    button it must absorb the remainder — otherwise it collapses to its
+        //    minimum and model/effort truncate while free space sits before Send.
+        let fillFooter = AgentComposerFooterView(frame: .zero)
+        fillFooter.apply(AgentModelConfig.Resolution(model: "openai-codex/gpt-b", thinking: "medium"))
+        let sendStandIn = NSButton(title: "Send", target: nil, action: nil)
+        sendStandIn.setContentHuggingPriority(.required, for: .horizontal)
+        sendStandIn.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let fillRow = NSStackView(views: [fillFooter, sendStandIn])
+        fillRow.orientation = .horizontal
+        fillRow.spacing = CGFloat(Space.m)
+        fillRow.translatesAutoresizingMaskIntoConstraints = false
+        // Replicate the tile's real container: a VERTICAL stack with `.leading`
+        // alignment (which does NOT stretch its children horizontally) plus the
+        // explicit footerRow width pin. This is the context that made the footer
+        // collapse; a plain host does not reproduce it.
+        let fillColumn = NSStackView(views: [fillRow])
+        fillColumn.orientation = .vertical
+        fillColumn.alignment = .leading
+        fillColumn.translatesAutoresizingMaskIntoConstraints = false
+        let fillHost = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 40))
+        fillHost.addSubview(fillColumn)
+        NSLayoutConstraint.activate([
+            fillColumn.leadingAnchor.constraint(equalTo: fillHost.leadingAnchor),
+            fillColumn.trailingAnchor.constraint(equalTo: fillHost.trailingAnchor),
+            fillColumn.centerYAnchor.constraint(equalTo: fillHost.centerYAnchor),
+            fillRow.widthAnchor.constraint(equalTo: fillColumn.widthAnchor),
+            fillFooter.heightAnchor.constraint(equalToConstant: AgentComposerFooterView.height),
+        ])
+        fillHost.layoutSubtreeIfNeeded()
+        try expect(fillFooter.bounds.width > 200,
+                   "footer collapsed in the Send row (width \(fillFooter.bounds.width)) instead of filling — model/effort truncate")
+        try expect(fillFooter.qaFitsCurrentTitles,
+                   "footer did not fit its model/effort titles in the Send row (width \(fillFooter.bounds.width)) — the effort picker truncates")
     }
 }
