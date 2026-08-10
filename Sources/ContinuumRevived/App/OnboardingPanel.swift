@@ -91,6 +91,23 @@ final class OnboardingPanel {
                 return "signed in (claude.ai)"
             }
         }
+        func codexAuthStatus() -> (() -> String?) {
+            {
+                guard let codex = locateOnPath("codex")() else { return nil }
+                // `codex login status` has no --json (it errors); parse the real
+                // text shape. `boundedOutput` returns stdout only on a clean exit
+                // (exit 0), so a non-nil value already implies exit 0 — the
+                // isLoggedIn text check then confirms the ChatGPT sign-in.
+                guard let output = boundedOutput(
+                    executable: codex,
+                    arguments: ["login", "status"],
+                    environment: environment(),
+                    timeout: 3.0
+                ) else { return nil }
+                guard CodexCLIBackend.isLoggedIn(statusOutput: output, exitCode: 0) else { return nil }
+                return "signed in (ChatGPT)"
+            }
+        }
         return [
             Probe(
                 id: "claude",
@@ -111,10 +128,18 @@ final class OnboardingPanel {
             Probe(
                 id: "codex",
                 title: "Codex",
-                detail: "Agent CLI — at least one agent CLI is recommended.",
+                detail: "Managed agents run OpenAI models through your own Codex sign-in — no API keys.",
                 missingGuidance: "Install: npm install -g @openai/codex",
                 connectProfileId: "codex",
                 locate: locateOnPath("codex")
+            ),
+            Probe(
+                id: "codex-auth",
+                title: "OpenAI models (Codex)",
+                detail: "Managed agents run OpenAI models through your own Codex sign-in — no API keys.",
+                missingGuidance: "Sign in: run codex in a terminal and follow its login (OAuth — no API keys)",
+                connectProfileId: nil,
+                locate: codexAuthStatus()
             ),
             Probe(
                 id: "pi",

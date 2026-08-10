@@ -795,6 +795,33 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
             }
         }
 
+        // 3c. Backend filtering (Plan 02 §4.4): the resolved backend narrows the
+        // SAME `AgentModelConfig.modelOptions` both the settings picker and the
+        // composer read. Fixture a two-provider catalogue and flip the global
+        // backend (in `.standard`, which `resolved()` reads); restore both.
+        do {
+            let priorBackend = UserDefaults.standard.string(forKey: AgentBackendConfig.key)
+            AgentModelCatalog.shared.resetForQA(options: ["openai-codex/gpt-x", "anthropic/claude-y"])
+            AgentBackendConfig.store(.codex)
+            guard AgentModelConfig.modelOptions == ["openai-codex/gpt-x"] else {
+                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: Codex backend must narrow modelOptions to openai-codex/*, got \(AgentModelConfig.modelOptions)")
+            }
+            AgentBackendConfig.store(.claudeCode)
+            guard AgentModelConfig.modelOptions == ["anthropic/claude-y"] else {
+                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: Claude Code backend must narrow modelOptions to anthropic/*, got \(AgentModelConfig.modelOptions)")
+            }
+            AgentBackendConfig.store(.pi)
+            guard AgentModelConfig.modelOptions == ["openai-codex/gpt-x", "anthropic/claude-y"] else {
+                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: pi backend must show every provider, got \(AgentModelConfig.modelOptions)")
+            }
+            if let priorBackend {
+                UserDefaults.standard.set(priorBackend, forKey: AgentBackendConfig.key)
+            } else {
+                UserDefaults.standard.removeObject(forKey: AgentBackendConfig.key)
+            }
+            AgentModelCatalog.shared.resetForQA()
+        }
+
         // 4. Visual gate (docs/26): the rendered content must not be blank/uniform.
         guard let content = panel.contentViewForQA,
               let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) else {

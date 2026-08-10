@@ -34,8 +34,9 @@ enum ProviderModelGrouping {
     }
 
     static func provider(forID id: String) -> String {
-        let parts = id.split(separator: "/", maxSplits: 1)
-        return parts.count == 2 ? String(parts[0]) : "other"
+        // The split rule lives once in Core (`AgentBackendConfig.provider`) so
+        // the backend filter and this grouping pin the same logic in the matrix.
+        AgentBackendConfig.provider(forID: id)
     }
 
     /// First-appearance provider order (pi's own catalogue order). Row titles
@@ -582,6 +583,28 @@ extension ProviderModelButton {
         if let panelWindowNumber,
            NSApp.windows.contains(where: { $0.windowNumber == panelWindowNumber && $0.isVisible }) {
             throw SelfCheckError.message("picker panel window leaked after choose")
+        }
+
+        // 6. Backend filtering (Plan 02 §4.4): the SAME catalogue the composer
+        //    reads (`AgentModelConfig.modelOptions`) narrows to the selected
+        //    backend's providers. The fixture catalogue from step 2 (two codex +
+        //    one anthropic id) is still active via its defer. Pure form first,
+        //    then the resolved form through `.standard` (save/restore).
+        try expect(AgentModelConfig.modelOptions(for: .codex) == ["openai-codex/gpt-a", "openai-codex/gpt-b"],
+                   "Codex backend must narrow to openai-codex/*, got \(AgentModelConfig.modelOptions(for: .codex))")
+        try expect(AgentModelConfig.modelOptions(for: .claudeCode) == ["anthropic/claude-x"],
+                   "Claude Code backend must narrow to anthropic/*, got \(AgentModelConfig.modelOptions(for: .claudeCode))")
+        try expect(AgentModelConfig.modelOptions(for: .pi) == ["openai-codex/gpt-a", "openai-codex/gpt-b", "anthropic/claude-x"],
+                   "pi backend must show every provider, got \(AgentModelConfig.modelOptions(for: .pi))")
+
+        let priorBackend = UserDefaults.standard.string(forKey: AgentBackendConfig.key)
+        AgentBackendConfig.store(.codex)
+        try expect(AgentModelConfig.modelOptions == ["openai-codex/gpt-a", "openai-codex/gpt-b"],
+                   "resolved Codex backend must narrow the live modelOptions, got \(AgentModelConfig.modelOptions)")
+        if let priorBackend {
+            UserDefaults.standard.set(priorBackend, forKey: AgentBackendConfig.key)
+        } else {
+            UserDefaults.standard.removeObject(forKey: AgentBackendConfig.key)
         }
     }
 }

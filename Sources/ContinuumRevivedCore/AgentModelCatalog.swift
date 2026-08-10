@@ -26,6 +26,11 @@ public final class AgentModelCatalog: @unchecked Sendable {
     /// wipe them, and vice versa.
     private var claudeBackendModels: [String] = []
     private var claudeBackendDisplayNames: [String: String] = [:]
+    /// Models the codex CLI backend contributes, kept in their own store for the
+    /// same reason as claude's: a pi probe replacing `liveOptions` must not wipe
+    /// them, and the two native probes must not clobber each other.
+    private var codexBackendModels: [String] = []
+    private var codexBackendDisplayNames: [String: String] = [:]
     /// Live refreshing is opt-in and only the real app opts in (startup).
     /// QA never enables it, so presenting pickers in checks can never spawn
     /// a probe or race fixture options.
@@ -40,9 +45,13 @@ public final class AgentModelCatalog: @unchecked Sendable {
         lock.withLock {
             let base = liveOptions ?? fallback
             // Union, not replace: a machine with pi keeps pi's full catalogue
-            // and gains the claude aliases; a machine with only claude still
-            // gets usable anthropic entries on top of the frozen fallback.
-            return base + claudeBackendModels.filter { !base.contains($0) }
+            // and gains the native aliases; a machine with only claude/codex
+            // still gets usable entries on top of the frozen fallback. Each
+            // native backend appends only ids not already present.
+            var union = base
+            union += claudeBackendModels.filter { !union.contains($0) }
+            union += codexBackendModels.filter { !union.contains($0) }
+            return union
         }
     }
 
@@ -52,11 +61,17 @@ public final class AgentModelCatalog: @unchecked Sendable {
     /// callers fall back to the id, which is also the QA state (no store is
     /// read outside `startRefresh`), so pinned titles never depend on it.
     public func displayName(for id: String) -> String? {
-        lock.withLock { liveDisplayNames[id] ?? claudeBackendDisplayNames[id] }
+        lock.withLock { liveDisplayNames[id] ?? claudeBackendDisplayNames[id] ?? codexBackendDisplayNames[id] }
     }
 
     public func displayNamesSnapshot() -> [String: String] {
-        lock.withLock { claudeBackendDisplayNames.merging(liveDisplayNames) { _, pi in pi } }
+        lock.withLock {
+            // pi's names win over curated ones (they are model-specific); the two
+            // curated sets never share an id (anthropic/* vs openai-codex/*).
+            claudeBackendDisplayNames
+                .merging(codexBackendDisplayNames) { curated, _ in curated }
+                .merging(liveDisplayNames) { _, pi in pi }
+        }
     }
 
     /// Parse the `pi --list-models` table: a header row, then columns
@@ -118,12 +133,24 @@ public final class AgentModelCatalog: @unchecked Sendable {
         }
     }
 
+    /// The codex probe's outcome, mirroring `apply(claudeBackendAvailable:)`.
+    /// `available: false` clears, so uninstalling/logging out of codex drops the
+    /// entries on the next probe. Independent of the claude store.
+    public func apply(codexBackendAvailable available: Bool) {
+        lock.withLock {
+            codexBackendModels = available ? CodexCLIBackend.curatedCatalogModels : []
+            codexBackendDisplayNames = available ? CodexCLIBackend.curatedCatalogDisplayNames : [:]
+        }
+    }
+
     public func resetForQA(options: [String]? = nil, displayNames: [String: String] = [:]) {
         lock.withLock {
             liveOptions = options
             liveDisplayNames = displayNames
             claudeBackendModels = []
             claudeBackendDisplayNames = [:]
+            codexBackendModels = []
+            codexBackendDisplayNames = [:]
             liveRefreshEnabled = false
             lastRefreshStartedAt = nil
             refreshInFlight = false
@@ -184,6 +211,7 @@ public final class AgentModelCatalog: @unchecked Sendable {
             defer { self?.finishRefresh() }
             self?.probePi(timeout: timeout)
             self?.probeClaudeBackend(timeout: timeout)
+            self?.probeCodexBackend(timeout: timeout)
         }
     }
 
@@ -217,6 +245,23 @@ public final class AgentModelCatalog: @unchecked Sendable {
             command: command, arguments: ["auth", "status", "--json"], timeout: timeout)
         let loggedIn = output.map { ClaudeCLIBackend.isLoggedIn(authStatusJSON: Data($0.utf8)) } ?? false
         apply(claudeBackendAvailable: loggedIn)
+    }
+
+    /// The codex CLI backend's catalogue contribution: entries appear when the
+    /// CLI is INSTALLED (an absolute path resolved) and LOGGED IN (`codex login
+    /// status` → exit 0 + "Logged in"). `boundedProbeOutput` returns stdout only
+    /// on a clean exit, so a non-nil output already implies exit 0 — the
+    /// `isLoggedIn` text check then confirms the sign-in. Independent of pi.
+    private func probeCodexBackend(timeout: TimeInterval) {
+        let command = CodexAgentRunner.liveResolvedCommand()
+        guard command.prefixArgs.isEmpty else {
+            apply(codexBackendAvailable: false)
+            return
+        }
+        let output = Self.boundedProbeOutput(
+            command: command, arguments: ["login", "status"], timeout: timeout)
+        let loggedIn = output.map { CodexCLIBackend.isLoggedIn(statusOutput: $0, exitCode: 0) } ?? false
+        apply(codexBackendAvailable: loggedIn)
     }
 
     /// One bounded subprocess: stdout on success, nil on launch failure,

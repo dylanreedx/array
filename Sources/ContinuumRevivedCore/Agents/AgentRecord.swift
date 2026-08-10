@@ -227,6 +227,20 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// stale) instead of "unknown". Host-bound like everything else here; the
     /// sync boundary never sees an `AgentRecord`.
     public var lastContextWindow: AgentContextWindowSnapshot?
+    /// The codex thread id captured from the first turn's `thread.started`,
+    /// persisted so a later turn resumes the SAME thread (`codex exec resume
+    /// <id>`). Codex mints this id itself and gives no flag to set it, so unlike
+    /// claude — whose session UUID is derived from the agent id and never stored
+    /// — codex continuity must be STORED. Host-bound like everything here; the
+    /// sync boundary never sees an `AgentRecord`.
+    ///
+    /// Plan: .plans/02-codex-backend-and-toggle.md §3.4. `currentSchemaVersion`
+    /// deliberately does NOT move for this: it is an OPTIONAL field both older
+    /// and newer builds decode as absent — the same `decodeIfPresent` convention
+    /// `snoozedAt`, `sourceItemId`, and `lastContextWindow` already set. Nothing
+    /// has to branch on it, so the version marker (which is for a change a reader
+    /// MUST branch on) stays put.
+    public var codexThreadId: String?
 
     // Ticket: docs/38-tickets/90-agent-ux/P4.1-lifecycle-state.md
     //
@@ -453,6 +467,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         lastVisitedAt: Date? = nil,
         tileId: UUID? = nil,
         lastContextWindow: AgentContextWindowSnapshot? = nil,
+        codexThreadId: String? = nil,
         settledOverride: SettledOverride = .default,
         settledAt: Date? = nil,
         snoozedUntil: Date? = nil,
@@ -483,6 +498,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         self.lastVisitedAt = lastVisitedAt
         self.tileId = tileId
         self.lastContextWindow = lastContextWindow
+        self.codexThreadId = codexThreadId
         self.settledOverride = settledOverride
         self.settledAt = settledAt
         self.snoozedUntil = snoozedUntil
@@ -589,6 +605,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         case lastVisitedAtReferenceInterval
         case tileId
         case lastContextWindow
+        case codexThreadId
         // P4.1. The three lifecycle dates take reference intervals for exactly
         // the reason above — a settled-at that drifts on reload reorders
         // history.
@@ -662,6 +679,9 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         // absent rather than dropping the whole record.
         lastContextWindow = (try? container.decodeIfPresent(
             AgentContextWindowSnapshot.self, forKey: .lastContextWindow)) ?? nil
+        // Optional, tolerant, no schema bump — the snoozedAt/sourceItemId
+        // precedent. A record from before this plan decodes it as absent.
+        codexThreadId = try container.decodeIfPresent(String.self, forKey: .codexThreadId)
         // P4.1. Decoded through `SettledOverride(persistedRawValue:)` rather
         // than as the enum directly: a record written by a newer build with a
         // case this one has never heard of must read as `.neutral`, not throw
@@ -712,6 +732,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
                                       forKey: .lastVisitedAtReferenceInterval)
         try container.encodeIfPresent(tileId, forKey: .tileId)
         try container.encodeIfPresent(lastContextWindow, forKey: .lastContextWindow)
+        try container.encodeIfPresent(codexThreadId, forKey: .codexThreadId)
         // P4.1. `.neutral` is written as ABSENCE, the same way a headless
         // record omits `tileId`: the default is "nobody has said anything", and
         // a stored word saying so is noise that also makes every pre-P4.1

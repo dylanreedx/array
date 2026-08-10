@@ -39,7 +39,23 @@ public enum AgentModelConfig {
     /// Fully-qualified ids, verbatim from pi's own list — the single source
     /// shared by `SettingsSchema` (the `.choice` options), the tile composer,
     /// and provider-settings validation.
-    public static var modelOptions: [String] { AgentModelCatalog.shared.options() }
+    ///
+    /// The list is narrowed to the resolved backend's providers (Plan 02 §4.4):
+    /// filtering here auto-applies everywhere `modelOptions` is read, with zero
+    /// call-site edits. The DEFAULT backend (`.pi`) filters to nil, so this is
+    /// byte-identical to the pre-plan list — no existing check's model set moves.
+    public static var modelOptions: [String] { modelOptions(for: AgentBackendConfig.resolved()) }
+
+    /// The catalogue narrowed to `backend`'s providers, with the "never blank
+    /// the picker" guard: if narrowing empties the list (e.g. Codex selected
+    /// before the catalog union added `openai-codex/*`), fall back to the
+    /// unfiltered list rather than showing nothing — the same rule
+    /// `AgentModelCatalog.apply` and `resolvedFromDefaults` already follow.
+    public static func modelOptions(for backend: AgentBackend) -> [String] {
+        let all = AgentModelCatalog.shared.options()
+        let filtered = AgentBackendConfig.filter(all, for: backend)
+        return filtered.isEmpty ? all : filtered
+    }
 
     /// The levels `pi --thinking <level>` accepts.
     public static let thinkingOptions = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]

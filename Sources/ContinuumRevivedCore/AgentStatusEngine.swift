@@ -284,6 +284,10 @@ public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
     /// The `usage` block of a claude stream-json `result` event (per-turn
     /// aggregate; cache counters describe the turn, not occupancy).
     case claudeResultUsage
+    /// The `usage` block of a codex `turn.completed` event (per-turn aggregate;
+    /// `input_tokens` is already the total, cache counters are a subset — not
+    /// authoritative occupancy).
+    case codexTurnUsage
     case providerSessionStats
     case unknown(String)
 
@@ -291,7 +295,7 @@ public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
         switch self {
         case .providerSessionStats:
             return true
-        case .piMessageUsage, .claudeResultUsage, .unknown:
+        case .piMessageUsage, .claudeResultUsage, .codexTurnUsage, .unknown:
             return false
         }
     }
@@ -300,6 +304,7 @@ public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
         switch self {
         case .piMessageUsage: return "piMessageUsage"
         case .claudeResultUsage: return "claudeResultUsage"
+        case .codexTurnUsage: return "codexTurnUsage"
         case .providerSessionStats: return "providerSessionStats"
         case .unknown(let raw): return raw
         }
@@ -310,6 +315,7 @@ public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
         switch raw {
         case "piMessageUsage": self = .piMessageUsage
         case "claudeResultUsage": self = .claudeResultUsage
+        case "codexTurnUsage": self = .codexTurnUsage
         case "providerSessionStats": self = .providerSessionStats
         default: self = .unknown(raw)
         }

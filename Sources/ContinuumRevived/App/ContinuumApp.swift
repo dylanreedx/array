@@ -3626,6 +3626,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 runManagedAgentLiveCheck(window: window)
             } else if CommandLine.arguments.contains("--claude-agent-live-check") {
                 runClaudeAgentLiveCheck(window: window)
+            } else if CommandLine.arguments.contains("--codex-agent-live-check") {
+                runCodexAgentLiveCheck(window: window)
             } else if CommandLine.arguments.contains("--palette-captures-keys-over-browser-check") {
                 runPaletteCapturesKeysOverBrowserCheck(window: window)
             } else if CommandLine.arguments.contains("--terminal-scroll-ergonomics-check") {
@@ -4010,6 +4012,92 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
                 report("transcript:\n\(view.qaTranscriptText)")
                 report("PASS: turn 2 recalled '\(codeword)' — claude-backed session continuity works in-app")
+                Foundation.exit(0)
+            }
+        }
+    }
+
+    /// Twin of `runClaudeAgentLiveCheck` for the codex backend. Proves the one
+    /// hard difference: codex continuity is STORED. Turn 1 (a fresh `codex exec`)
+    /// plants a codeword and captures + PERSISTS the minted `thread_id` to
+    /// `record.codexThreadId`; turn 2 (`codex exec resume` in a fresh process)
+    /// recalls it. Supervised only (spends real subscription usage, needs codex
+    /// installed + signed in) — not a default matrix leg, like the claude/pi
+    /// twins. Gated on `--codex-agent-live-check`.
+    private func runCodexAgentLiveCheck(window: NSWindow) {
+        func report(_ line: String) { FileHandle.standardError.write(Data("[codex-agent-live] \(line)\n".utf8)) }
+        let codeword = "PLATYPUS42"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self, let spawner = self.tileSpawner, let canvasView = self.canvasView else {
+                report("FAIL: no spawner/canvas"); Foundation.exit(2)
+            }
+            guard CodexAgentRunner.liveCLIAvailable() else {
+                report("FAIL: no codex CLI on this machine — this leg is supervised and needs one"); Foundation.exit(2)
+            }
+            guard case let .spawned(tileId) = spawner.spawnManagedAgent() else {
+                report("FAIL: spawnManagedAgent did not spawn"); Foundation.exit(2)
+            }
+            self.wireManagedAgentTile(tileId)
+            self.focusSpawnedTile(tileId)
+            guard let view = canvasView.tileView(for: tileId) as? ManagedAgentTileNSView else {
+                report("FAIL: spawned tile is not a ManagedAgentTileNSView"); Foundation.exit(2)
+            }
+            // Move the agent onto an openai-codex model so routing picks codex.
+            // The check run never enables live catalogue refresh, so seed the
+            // codex union the probe would have applied, then go through the real
+            // validated setter. The DEFAULT backend (.pi) already routes
+            // openai-codex/* → codex when codex is available, so no backend
+            // preference is written (never pollute the real defaults domain).
+            AgentModelCatalog.shared.apply(codexBackendAvailable: true)
+            guard let agentId = self.agentSupervisor.agent(forTile: tileId),
+                  self.agentSupervisor.setProviderSettings(agentID: agentId, model: "openai-codex/gpt-5.4-mini", thinking: "low")
+            else {
+                report("FAIL: could not move the spawned agent onto openai-codex/gpt-5.4-mini"); Foundation.exit(2)
+            }
+            guard let record = self.agentSupervisor.records[agentId],
+                  AgentSupervisor.productionRunner(for: record) is CodexAgentRunner
+            else {
+                report("FAIL: openai-codex/gpt-5.4-mini did not route to CodexAgentRunner"); Foundation.exit(2)
+            }
+            report("spawned tile \(tileId), routed to codex (model openai-codex/gpt-5.4-mini)")
+
+            let deadline = Date().addingTimeInterval(240)
+            view.qaSubmitPrompt("Remember this codeword: \(codeword). Reply with just: OK")
+            let cardsAfterTurn1Submit = view.transcriptCardCount
+            report("turn 1 submitted (plant codeword, fresh codex exec); baseCards=\(cardsAfterTurn1Submit)…")
+
+            Task { @MainActor in
+                @MainActor func timedOut(_ stage: String) -> Never {
+                    report("transcript:\n\(view.qaTranscriptText)")
+                    report("FAIL: timed out (\(stage))")
+                    Foundation.exit(1)
+                }
+
+                guard await waitUntil(timeout: deadline.timeIntervalSinceNow, {
+                    view.transcriptCardCount > cardsAfterTurn1Submit
+                        && view.qaV2CanSend
+                        && view.qaV2ActionTitle == "Send"
+                        && view.currentAgentStatus != .working
+                }) else { timedOut("waiting for turn 1 reply") }
+
+                // The STORED-continuity witness: turn 1's thread.started must
+                // have been captured off the observation side channel and
+                // persisted to the record before turn 2 can resume it.
+                guard let persisted = self.agentSupervisor.records[agentId]?.codexThreadId, !persisted.isEmpty else {
+                    report("transcript:\n\(view.qaTranscriptText)")
+                    report("FAIL: turn 1 did not persist record.codexThreadId (stored continuity broke)")
+                    Foundation.exit(1)
+                }
+                report("turn 1 done; persisted codexThreadId=\(persisted); submitting turn 2 (recall) via codex exec resume in a fresh process")
+                view.qaSubmitPrompt("What was the codeword? Reply with only the codeword.")
+
+                guard await waitUntil(timeout: deadline.timeIntervalSinceNow, {
+                    view.qaLastAssistantCardBody?.contains(codeword) == true
+                        && view.currentAgentStatus != .working
+                }) else { timedOut("waiting for turn 2 recall") }
+
+                report("transcript:\n\(view.qaTranscriptText)")
+                report("PASS: turn 2 recalled '\(codeword)' and record.codexThreadId persisted (\(persisted)) — codex STORED continuity works in-app")
                 Foundation.exit(0)
             }
         }

@@ -12,6 +12,15 @@ import Foundation
 public enum AgentRuntimeObservation: Equatable, Sendable {
     case workingDirectory(URL, observedAt: Date)
     case toolActivity(itemId: String, activity: AgentObservedActivity)
+    /// A provider-minted session/thread id captured from the live stream (codex
+    /// mints its own `thread_id` on `thread.started` with no flag to set it).
+    /// It rides this host-local side channel rather than an `AgentRuntimeEvent`
+    /// because the supervisor rebinds every event's threadId to the agent's own
+    /// derived id before delivery — so the captured id could not survive on an
+    /// event. The supervisor persists it to `AgentRecord.codexThreadId` to
+    /// resume the same thread later. Not a location fact: the projector ignores
+    /// it.
+    case threadId(String)
 }
 
 /// Deterministically folds private provider observations and normalized runtime
@@ -57,6 +66,12 @@ public struct AgentLocationProjector: Sendable {
         case .toolActivity(let itemId, let activity):
             locallyObservedItemIds.insert(itemId)
             setActivity(activity, useful: true)
+
+        case .threadId:
+            // A provider session id is host-local persistence state, not a Home
+            // / Where / What fact. The supervisor persists it; the projector has
+            // nothing to fold in.
+            break
         }
     }
 

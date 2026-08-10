@@ -67,6 +67,7 @@ extension AgentRunning {
 
 extension PiAgentRunner: AgentRunning {}
 extension ClaudeAgentRunner: AgentRunning {}
+extension CodexAgentRunner: AgentRunning {}
 
 // MARK: - P4.5 generated-name one-shot
 
@@ -1008,18 +1009,23 @@ final class AgentSupervisor {
     }
 
     /// THE production runner factory: routes each prompt to the runtime the
-    /// machine actually has. Anthropic models prefer the user's own claude
-    /// CLI when it is installed — subscription-correct and pi-free (see the
-    /// ClaudeAgentRunner header for the compliance posture) — and everything
-    /// else stays on pi. Routing policy is pure and pinned in the matrix
-    /// (`ClaudeCLIBackend.routesToClaude`); only the availability read is live.
+    /// machine actually has, under the user's chosen backend. Anthropic models
+    /// prefer the user's own claude CLI and openai-codex models prefer codex when
+    /// installed — subscription-correct and pi-free (see the runner headers for
+    /// the compliance posture) — and everything else stays on pi. Routing policy
+    /// is pure and pinned in the matrix (`AgentBackendConfig.route`); only the
+    /// backend preference and the availability reads are live. The DEFAULT
+    /// backend (`.pi`) preserves the shipped native-preferring behaviour exactly.
     nonisolated static func productionRunner(for record: AgentRecord) -> AgentRunning {
-        if ClaudeCLIBackend.routesToClaude(
+        switch AgentBackendConfig.route(
             model: record.model,
-            claudeCLIAvailable: ClaudeAgentRunner.liveCLIAvailable()) {
-            return claudeRunner(for: record)
+            backend: AgentBackendConfig.resolved(),
+            claudeAvailable: ClaudeAgentRunner.liveCLIAvailable(),
+            codexAvailable: CodexAgentRunner.liveCLIAvailable()) {
+        case .claude: return claudeRunner(for: record)
+        case .codex: return codexRunner(for: record)
+        case .pi: return piRunner(for: record)
         }
-        return piRunner(for: record)
     }
 
     /// The only `PiAgentRunner(` construction in the app.
@@ -1044,6 +1050,26 @@ final class AgentSupervisor {
             effort: ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
             cwd: URL(fileURLWithPath: record.cwd, isDirectory: true),
             sessionId: claudeSessionId(for: record.id)
+        )
+    }
+
+    /// The only `CodexAgentRunner(` construction in the app, mirroring
+    /// `claudeRunner(for:)` so the same ownership scan holds for all three.
+    nonisolated static func codexRunner(for record: AgentRecord) -> AgentRunning {
+        CodexAgentRunner(config: codexRunnerConfig(for: record))
+    }
+
+    /// What a codex-backed runner is built with. The catalogue prefix is
+    /// stripped (codex takes bare slugs), pi thinking levels map to
+    /// `model_reasoning_effort` only on exact match, and — the one difference
+    /// from claude — continuity is STORED: `record.codexThreadId` (nil ⇒ fresh)
+    /// is read back so a later turn resumes the same codex thread.
+    nonisolated static func codexRunnerConfig(for record: AgentRecord) -> CodexAgentRunner.Config {
+        CodexAgentRunner.Config(
+            model: CodexCLIBackend.modelArgument(forCatalogId: record.model),
+            effort: CodexCLIBackend.effortArgument(forThinking: record.thinking),
+            cwd: URL(fileURLWithPath: record.cwd, isDirectory: true),
+            threadId: record.codexThreadId
         )
     }
 
@@ -1117,6 +1143,18 @@ final class AgentSupervisor {
         for id: AgentID
     ) {
         guard let record = records[id] else { return }
+        // A captured codex thread id is host-local persistence state, not a Home
+        // / Where / What fact: persist it and stop. The guard on inequality
+        // makes this a no-op when `thread.started` re-fires the same id on
+        // resume (so a turn does not needlessly rewrite the store).
+        if case let .threadId(value) = observation {
+            guard record.codexThreadId != value else { return }
+            var updated = record
+            updated.codexThreadId = value
+            records[id] = updated
+            persist(updated)
+            return
+        }
         ensureLocationProjector(for: record)
         locationProjectors[id]?.ingest(observation)
         // The projector and the transcript list consume the same sanitized,
@@ -5082,10 +5120,13 @@ func runAgentSupervisorChecks() async throws {
     guard AgentSupervisor.claudeRunner(for: record) is ClaudeAgentRunner else {
         throw fail("the claude runner factory does not produce a ClaudeAgentRunner")
     }
-    // Routing policy itself (anthropic + claude-present → claude, else pi) is
-    // pure and pinned machine-independently in runClaudeAgentBackendChecks;
-    // asserting `productionRunner` live here would make the matrix depend on
-    // whether THIS machine has claude installed.
+    guard AgentSupervisor.codexRunner(for: record) is CodexAgentRunner else {
+        throw fail("the codex runner factory does not produce a CodexAgentRunner")
+    }
+    // Routing policy itself (backend + provider prefix + availability → runner)
+    // is pure and pinned machine-independently in runClaudeAgentBackendChecks /
+    // runCodexAgentBackendChecks; asserting `productionRunner` live here would
+    // make the matrix depend on whether THIS machine has claude/codex installed.
 
     // MARK: …6 · and no VIEW constructs one
 
@@ -5099,6 +5140,10 @@ func runAgentSupervisorChecks() async throws {
     let (claudeConstructionSites, _) = try runnerConstructionSites(typeName: "ClaudeAgentRunner")
     guard claudeConstructionSites == ["App/AgentSupervisor.swift"] else {
         throw fail("ClaudeAgentRunner is constructed outside AgentSupervisor.swift: \(claudeConstructionSites.sorted()) (same single-owner rule as PiAgentRunner)")
+    }
+    let (codexConstructionSites, _) = try runnerConstructionSites(typeName: "CodexAgentRunner")
+    guard codexConstructionSites == ["App/AgentSupervisor.swift"] else {
+        throw fail("CodexAgentRunner is constructed outside AgentSupervisor.swift: \(codexConstructionSites.sorted()) (same single-owner rule as PiAgentRunner)")
     }
 
     // MARK: 7 · a TILE is a subscriber (P2A.4), and detaching it leaves the agent running
