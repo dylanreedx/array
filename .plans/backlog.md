@@ -2,20 +2,20 @@
 
 Small, self-contained improvements — each is one focused session or less.
 Bigger designed work gets a numbered plan file (see `01-provider-cli-backends.md`).
-Program history: `docs/38-tickets/95-go-live.md`. **Shipped state: 0.3.0 (build 5),
-live on arrayapp.dev 2026-08-10; next release is build 6.** `main` ==
+Program history: `docs/38-tickets/95-go-live.md`. **Shipped state: 0.4.0 (build 6),
+live on arrayapp.dev 2026-08-10; next release is build 7.** `main` ==
 `array/integration`, tree clean. Dylan is **daily-driving Array Dev and
 reporting what he notices** — "we are so close to using it as a daily driver".
-Work is unreleased and accumulating for build 6.
 
-**Start here:** the NEXT UP section below (agent close/delete + history tab) is
-his most recent report and is not started.
+**Start here:** nothing is named. Ask him what he has hit since 0.4.0, or pick
+from Verification debt below — the `--agent-supervisor-check` naming flake is
+the highest-leverage item there, because it gates ~110 matrix legs.
 
-## Unreleased on `array/integration` (all of this rides build 6)
+## Shipped in 0.4.0 (build 6, 2026-08-10)
 
-Dylan is dogfooding these in Array Dev (`~/Desktop/Array Dev.app`, rebuilt and
-relaunched after each change) and reporting what he notices. None of it is in a
-release yet.
+All of the below went out in 0.4.0. Dylan dogfooded each one in Array Dev
+(`~/Desktop/Array Dev.app`, rebuilt and relaunched after each change) before it
+shipped. Nothing is unreleased right now.
 
 - **Drag-drop non-image files** (`61983d8`, plan `04`): md/pdf/xml/txt/code drop
   or paste onto a composer as `@/path` references the agent Reads; images still
@@ -40,7 +40,7 @@ release yet.
   pi abstains). Stale readings show their number, not the word "stale".
   **Limitation:** last-turn accurate, does not climb mid-turn — no harness
   reports usage until turn end.
-- **Closing a tile parks the agent in History** (plan `05`): Dylan's report was
+- **Closing a tile parks the agent in History** (`ddb4533`, plan `05`): Dylan's report was
   *"close/deleting agents seem weird, they go to unconfirmed… there could be a
   recovery tab"*. Closing an IDLE tile now stamps `archivedAt` and the agent
   leaves the live list for a collapsed `History (N)` section; a WORKING agent
