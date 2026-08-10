@@ -217,6 +217,12 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     private func choiceRow(for field: SettingsField, options: [String]) -> NSView {
+        // The default-model field uses the same provider>model picker as the
+        // tile composer: one component, one data source (the live catalogue),
+        // instead of a flat popup repeating provider/model per row.
+        if field.key == AgentModelConfig.modelKey {
+            return modelPickerRow(for: field, options: options)
+        }
         let labelView = label(field.label, size: 12, weight: .regular, color: .secondaryLabelColor)
         let popup = NSPopUpButton(frame: .zero, pullsDown: false)
         popup.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
@@ -228,6 +234,22 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         }
         bindings[ObjectIdentifier(popup)] = field
         return vGroup([labelView, popup])
+    }
+
+    private func modelPickerRow(for field: SettingsField, options: [String]) -> NSView {
+        let labelView = label(field.label, size: 12, weight: .regular, color: .secondaryLabelColor)
+        let button = ProviderModelButton(title: field.label)
+        button.items = options.map { ChoiceItem(id: $0, title: $0) }
+        if case .string(let value) = field.currentValue(in: defaults), options.contains(value) {
+            button.selectedID = value
+        }
+        button.onSelection = { [weak self] item in
+            guard let self else { return }
+            field.setValue(.string(item.id), in: self.defaults)
+            self.notifySettingsChanged()
+        }
+        modelPickerButtonForQA = button
+        return vGroup([labelView, button])
     }
 
     private func infoRow(for field: SettingsField) -> NSView {
@@ -502,6 +524,9 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     private var bindings: [ObjectIdentifier: SettingsField] = [:]
+    /// The default-model picker trigger, kept for the self-check: it must be
+    /// the SAME component the tile composer uses, fed by the same catalogue.
+    private(set) var modelPickerButtonForQA: ProviderModelButton?
 
     // MARK: - Helpers
 
@@ -631,7 +656,10 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
             case .text:
                 if firstDescendant(of: row, ofType: NSTextField.self, where: { $0.isEditable }) == nil { return false }
             case .choice:
-                if firstDescendant(of: row, ofType: NSPopUpButton.self) == nil { return false }
+                // The default-model field renders the provider>model picker
+                // trigger; every other choice stays a stock popup.
+                if firstDescendant(of: row, ofType: NSPopUpButton.self) == nil,
+                   firstDescendant(of: row, ofType: ChoiceButton.self) == nil { return false }
             case .info:
                 if firstDescendant(of: row, ofType: NSTextField.self, where: { !$0.stringValue.isEmpty && !$0.isEditable }) == nil { return false }
             case .shortcuts:
@@ -743,6 +771,26 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         let storedAfter = defaults.object(forKey: key) != nil ? defaults.bool(forKey: key) : nil
         guard case .bool(let reflected) = toggleField.currentValue(in: defaults), reflected == target, storedAfter == target else {
             throw SettingsPanelSelfCheckError.toggleDidNotRoundTrip(stored: storedAfter, expected: target)
+        }
+
+        // 3b. Consolidation witness: the agents section's default-model field
+        // renders the SAME provider>model picker the tile composer uses, its
+        // items are the live catalogue (one data source), and a pick writes
+        // the exact key the spawn resolver reads.
+        if let agentsIndex = sections.firstIndex(where: { $0.id == "agents" }) {
+            panel.selectSectionForQA(agentsIndex)
+            guard let picker = panel.modelPickerButtonForQA else {
+                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: default-model picker missing")
+            }
+            guard picker.items.map(\.id) == AgentModelConfig.modelOptions else {
+                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: picker items diverge from the catalogue")
+            }
+            if let target = AgentModelConfig.modelOptions.last {
+                _ = picker.chooseForQA(id: target)
+                guard defaults.string(forKey: AgentModelConfig.modelKey) == target else {
+                    throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: picker choice did not write \(AgentModelConfig.modelKey)")
+                }
+            }
         }
 
         // 4. Visual gate (docs/26): the rendered content must not be blank/uniform.

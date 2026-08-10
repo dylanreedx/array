@@ -208,15 +208,20 @@ public enum SettingsSchema {
                 title: "Agents",
                 iconSystemName: "bell.badge",
                 fields: [
+                    // Owner correction: these are the DEFAULTS a newly created
+                    // agent starts with — each agent tile overrides its own
+                    // next turn in the composer. The old "Agent Model" label
+                    // read as if it drove every agent.
+                    .info(label: "Defaults for newly created agents. Each agent tile picks its own model and effort for the next turn in its composer."),
                     .choice(
                         key: AgentModelConfig.modelKey,
-                        label: "Agent Model",
+                        label: "Default Model",
                         options: AgentModelConfig.modelOptions,
                         default: AgentModelConfig.defaultModel
                     ),
                     .choice(
                         key: AgentModelConfig.thinkingKey,
-                        label: "Agent Reasoning Effort",
+                        label: "Default Reasoning Effort",
                         options: AgentModelConfig.thinkingOptions,
                         default: AgentModelConfig.defaultThinking
                     ),
