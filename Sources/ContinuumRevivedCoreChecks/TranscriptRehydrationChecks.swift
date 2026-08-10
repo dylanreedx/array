@@ -76,10 +76,12 @@ private func runClaudeSessionTranscriptParseChecks() {
         .event(.turnStarted(threadId: threadId, turnId: "rehydrated-t1")),
         .event(.contentDelta(threadId: threadId, turnId: "rehydrated-t1", streamKind: .reasoning, delta: "REASON_ALPHA")),
         .event(.contentDelta(threadId: threadId, turnId: "rehydrated-t1", streamKind: .assistant, delta: "ANSWER_ALPHA")),
-        .event(.itemStarted(threadId: threadId, itemId: "toolu_A", kind: .commandExecution, title: "Bash")),
+        // The command rides the title so a rehydrated card reads "Bash · ls"
+        // instead of an opaque "Bash" (display-only; rehydration never re-syncs).
+        .event(.itemStarted(threadId: threadId, itemId: "toolu_A", kind: .commandExecution, title: "Bash · ls")),
         .event(.itemCompleted(threadId: threadId, itemId: "toolu_A", kind: .commandExecution, status: .completed)),
         .event(.contentDelta(threadId: threadId, turnId: "rehydrated-t1", streamKind: .assistant, delta: "ANSWER_BETA")),
-        .event(.itemStarted(threadId: threadId, itemId: "toolu_B", kind: .fileChange, title: "Edit")),
+        .event(.itemStarted(threadId: threadId, itemId: "toolu_B", kind: .fileChange, title: "Edit · /x")),
         .event(.itemCompleted(threadId: threadId, itemId: "toolu_B", kind: .fileChange, status: .failed)),
         .event(.turnCompleted(threadId: threadId, turnId: "rehydrated-t1", outcome: .completed, errorMessage: nil)),
         .userPrompt("HELLO_PROMPT_TWO"),

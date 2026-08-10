@@ -104,7 +104,13 @@ public enum ClaudeSessionTranscriptReader {
                 if let value = block["text"] as? String { text += value }
             case "tool_use":
                 if let id = block["id"] as? String, let name = block["name"] as? String {
-                    toolCalls.append(.init(id: id, name: name))
+                    // Rehydration is display-only local content (the user's own
+                    // on-disk session, never re-synced — see ManagedTranscriptRehydrator's
+                    // header), so unlike the live translator it MAY surface the
+                    // command for context instead of a bare "Bash" card.
+                    toolCalls.append(.init(
+                        id: id, name: name,
+                        detail: Self.toolDetail(from: block["input"] as? [String: Any])))
                 }
             default:
                 continue
@@ -113,6 +119,23 @@ public enum ClaudeSessionTranscriptReader {
         guard !reasoning.isEmpty || !text.isEmpty || !toolCalls.isEmpty else { return }
         out.append(NormalizedTranscriptMessage(
             role: .assistant, text: text, reasoning: reasoning, toolCalls: toolCalls))
+    }
+
+    /// A short, safe one-line detail for a tool card title: the command for
+    /// Bash, else a description or a file/path/pattern. Control characters are
+    /// stripped and the result is bounded so a card title never carries a wall
+    /// of text or breaks layout.
+    private static func toolDetail(from input: [String: Any]?) -> String? {
+        guard let input else { return nil }
+        let candidate = ["command", "description", "file_path", "path", "pattern", "query"]
+            .lazy.compactMap { input[$0] as? String }.first
+        guard let candidate else { return nil }
+        let oneLine = candidate
+            .replacingOccurrences(of: "\n", with: " ")
+            .filter { !$0.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) } }
+            .trimmingCharacters(in: .whitespaces)
+        guard !oneLine.isEmpty else { return nil }
+        return oneLine.count > 140 ? String(oneLine.prefix(139)) + "…" : oneLine
     }
 }
 

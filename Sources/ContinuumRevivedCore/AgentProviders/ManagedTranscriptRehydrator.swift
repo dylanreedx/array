@@ -84,7 +84,7 @@ public struct RehydrationLimits: Equatable, Sendable {
 /// turn-boundary/cap assembly has exactly one definition.
 struct NormalizedTranscriptMessage: Equatable {
     enum Role: Equatable { case userPrompt, assistant, toolResult }
-    struct ToolCall: Equatable { var id: String; var name: String }
+    struct ToolCall: Equatable { var id: String; var name: String; var detail: String? = nil }
 
     var role: Role
     /// User prompt text, or the assistant's visible text.
@@ -183,8 +183,13 @@ public enum ManagedTranscriptRehydrator {
                 for call in message.toolCalls {
                     let kind = itemKind(forTool: call.name)
                     itemKinds[call.id] = kind
+                    // Surface the command in the title so a rehydrated card reads
+                    // "Bash · ls && cat …" instead of an opaque, contextless
+                    // "Bash". Display-only (rehydration never re-syncs); the live
+                    // translator keeps name-only for the I5 sync boundary.
+                    let title = call.detail.map { "\(call.name) · \($0)" } ?? call.name
                     steps.append(.event(.itemStarted(
-                        threadId: threadId, itemId: call.id, kind: kind, title: call.name)))
+                        threadId: threadId, itemId: call.id, kind: kind, title: title)))
                 }
                 messageCount += 1
             case .toolResult:
