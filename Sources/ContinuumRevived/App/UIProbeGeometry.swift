@@ -453,8 +453,13 @@ enum UIProbeGeometry {
                     "compact status warning marker/label/state disagree")
         try require(statePresentations.first { $0.0 == .critical }?.1.label == "! 94%",
                     "compact status critical label/state disagree")
-        try require(statePresentations.first { $0.0 == .stale }?.1.label == "stale 50%",
-                    "compact status stale context lacks exact stale state")
+        // Stale keeps the measurement in the row; the state and tooltip carry the
+        // qualifier. (Warning/critical DO prefix their markers — those are calls
+        // to action about a live reading, not doubts about its freshness.)
+        try require(statePresentations.first { $0.0 == .stale }?.1.label == "50%",
+                    "a stale context reading must still show its number, got \(String(describing: statePresentations.first { $0.0 == .stale }?.1.label))")
+        try require(statePresentations.first { $0.0 == .stale }?.1.detailText.contains("Freshness: stale") == true,
+                    "a stale context reading must disclose staleness in its tooltip")
 
         // Per-turn usage (claude/codex) reports token counts but no context
         // window max, so occupancy % is unknowable — but the count IS known and
@@ -5693,6 +5698,33 @@ enum UIProbeGeometry {
               tile.qaTailStatusText.isEmpty,
               !tile.qaCompactStatusTickScheduled else {
             throw fail("\(label): an idle tile must be silent in BOTH surfaces and tear the tick down, silent \(tile.qaCompactStatusRow.qaActivityIsSilent) tail \"\(tile.qaTailStatusText)\" scheduled \(tile.qaCompactStatusTickScheduled)")
+        }
+
+        // The radial meter fills from a real percentage once a snapshot carries
+        // occupancy. Before this, NO production source ever set used/max, so the
+        // ring could not fill at all and the row fell back to a cumulative token
+        // count that is not occupancy.
+        let occupied = AgentContextOccupancy.withDerivedOccupancy(
+            AgentContextWindowSnapshot(
+                inputTokens: 1_200,
+                outputTokens: 900,
+                cacheReadTokens: 40_000,
+                cacheWriteTokens: 800,
+                totalProcessedTokens: 42_900,
+                observedAt: now,
+                source: .claudeResultUsage,
+                freshness: .live),
+            contextWindow: 200_000)
+        tile.qaApplyCompactStatusFacts(
+            .init(session: .init(state: .ready)), location: location,
+            contextWindow: occupied, now: now)
+        let meterRow = tile.qaCompactStatusRow
+        meterRow.layoutSubtreeIfNeeded()
+        guard meterRow.qaContextFraction == 42_000.0 / 200_000.0,
+              meterRow.qaContextState == .known,
+              meterRow.qaContextText == "21%",
+              meterRow.qaContextDetail.contains("prompt tokens sent on the last completed turn") else {
+            throw fail("\(label): a derived-occupancy snapshot must fill the radial meter with a real percentage and disclose the derivation, fraction \(String(describing: meterRow.qaContextFraction)) text \(meterRow.qaContextText)")
         }
 
         // A zero-turn session is empty for ANY window size: the seeded

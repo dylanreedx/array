@@ -129,6 +129,11 @@ if CommandLine.arguments.contains("--agent-prompt-file-reference-contract-check"
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--agent-context-occupancy-check") {
+    runAgentContextOccupancyChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--local-transcript-node-check") {
     runLocalTranscriptNodeChecks()
     Foundation.exit(0)
@@ -10336,6 +10341,7 @@ runPiExecutableResolutionChecks()
 runPiSessionArgsChecks()
 runAgentPromptImageContractChecks()
 runAgentPromptFileReferenceContractChecks()
+runAgentContextOccupancyChecks()
 
 // Plan: .plans/01-provider-cli-backends.md (claude CLI backend)
 runClaudeAgentBackendChecks()

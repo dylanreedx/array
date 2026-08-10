@@ -288,8 +288,14 @@ extension UIProbeGeometry {
             source: .providerSessionStats,
             freshness: .stale)
         let context = AgentRadialContextMeterPresenter.present(staleContext)
-        try require(context.state == .stale && context.fraction == 0.5 && context.label == "stale 50%",
-                    "stale context arithmetic must pass through unchanged")
+        // A restored reading keeps its arithmetic AND its number. Staleness is a
+        // qualifier carried by the meter state and the tooltip, not a word that
+        // replaces the measurement — leading the row with "stale" made a good
+        // last-known value read as a failure.
+        try require(context.state == .stale && context.fraction == 0.5 && context.label == "50%",
+                    "stale context arithmetic must pass through unchanged and still read as a number, got \(context.label)")
+        try require(context.detailText.contains("Freshness: stale"),
+                    "staleness must still be disclosed in the meter tooltip, got \(context.detailText)")
         try require(AgentRadialContextMeterPresenter.present(
             AgentContextWindowSnapshot(
                 usedTokens: 90,

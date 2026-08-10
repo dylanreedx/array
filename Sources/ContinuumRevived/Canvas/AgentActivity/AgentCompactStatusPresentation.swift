@@ -417,7 +417,7 @@ enum AgentRadialContextMeterPresenter {
                 detailText: "Authoritative context: empty (0 tokens used)\nSource: \(source)\nFreshness: \(freshness)\nNo turns have run in this session.",
                 warningMarker: nil)
         }
-        let arithmetic = authoritativeArithmetic(snapshot)
+        let arithmetic = occupancyArithmetic(snapshot)
         let rawPercent = arithmetic.map { Int(($0.fraction * 100).rounded()) }
         let renderFraction = arithmetic?.fraction
         // Non-authoritative sources (claude/codex per-turn usage) carry token
@@ -450,16 +450,20 @@ enum AgentRadialContextMeterPresenter {
         }
 
         let visualLabel: String
-        if let countLabel, arithmetic == nil, snapshot.freshness != .stale {
+        // A restored reading shows its NUMBER, not the word "stale". Staleness is
+        // a qualifier on a real measurement, so it belongs in the tooltip and the
+        // meter's subdued state — leading the row with it made a perfectly good
+        // last-known value read as a failure.
+        if let countLabel, arithmetic == nil {
             visualLabel = countLabel
         } else {
             switch (state, rawPercent) {
             case (.unknown, _):
                 visualLabel = "unknown"
             case (.stale, let value?):
-                visualLabel = "stale \(value)%"
+                visualLabel = "\(value)%"
             case (.stale, nil):
-                visualLabel = "stale"
+                visualLabel = "unknown"
             case (.warning, let value?):
                 visualLabel = "⚠︎ \(value)%"
             case (.critical, let value?):
@@ -517,10 +521,13 @@ enum AgentRadialContextMeterPresenter {
         if let arithmetic {
             let percent = Int((arithmetic.fraction * 100).rounded())
             lines.append("Authoritative context: \(arithmetic.used) / \(arithmetic.max) tokens (\(percent)%)")
+            if !snapshot.source.isAuthoritativeForContextOccupancy {
+                lines.append("Occupancy note: prompt tokens sent on the last completed turn, over the model's published context window. Accurate as of that turn; it does not move mid-turn.")
+            }
         } else {
             lines.append("Authoritative context: unknown")
             if !snapshot.source.isAuthoritativeForContextOccupancy {
-                lines.append("Occupancy note: source is not authoritative for used/max context window.")
+                lines.append("Occupancy note: no published context-window size for this model, so no percentage is shown.")
             } else if let used = snapshot.usedTokens, used < 0 {
                 lines.append("Occupancy note: invalid negative used token count was rejected.")
             } else if let max = snapshot.maxTokens, max <= 0 {
@@ -573,9 +580,15 @@ enum AgentRadialContextMeterPresenter {
         return "\(total)"
     }
 
-    private static func authoritativeArithmetic(_ snapshot: AgentContextWindowSnapshot) -> (used: Int, max: Int, fraction: Double)? {
-        guard snapshot.source.isAuthoritativeForContextOccupancy,
-              let used = snapshot.usedTokens,
+    /// A real occupancy reading: both numbers present and sane. The source is no
+    /// longer gated here. It used to be, and since NO provider we drive reports
+    /// `.providerSessionStats`, the gate meant the ring could never fill at all.
+    /// A snapshot only carries used/max once `AgentContextOccupancy` has filled
+    /// them from the provider's own per-turn prompt tokens and the model's
+    /// published window, so reaching this point already means the numbers are
+    /// measured rather than assumed; `detailText` states which kind they are.
+    private static func occupancyArithmetic(_ snapshot: AgentContextWindowSnapshot) -> (used: Int, max: Int, fraction: Double)? {
+        guard let used = snapshot.usedTokens,
               let max = snapshot.maxTokens,
               used >= 0,
               max > 0

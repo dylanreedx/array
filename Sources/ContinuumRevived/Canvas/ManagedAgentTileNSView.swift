@@ -938,7 +938,7 @@ final class ManagedAgentTileNSView: TileNSView {
         if compactContextWindow == nil,
            var contextSeed = supervisor.contextWindowSnapshot(for: agentID) {
             if case .live = contextSeed.freshness { contextSeed.freshness = .stale }
-            compactContextWindow = contextSeed
+            compactContextWindow = withDerivedOccupancy(contextSeed)
         }
         if compactContextWindow == nil,
            let record = supervisor.records[agentID],
@@ -997,7 +997,7 @@ final class ManagedAgentTileNSView: TileNSView {
         case .itemStarted, .itemCompleted, .tokenUsageUpdated:
             break
         case let .contextWindowUpdated(_, snapshot):
-            compactContextWindow = snapshot
+            compactContextWindow = withDerivedOccupancy(snapshot)
         }
     }
 
@@ -1251,6 +1251,23 @@ final class ManagedAgentTileNSView: TileNSView {
 
     /// The words currently riding the gyro, for witnesses.
     var qaTailStatusText: String { transcriptCollectionFixture?.qaTailStatusText ?? "" }
+
+    /// Fills a per-turn usage snapshot with an occupancy reading so the radial
+    /// meter can show a real percentage: the prompt tokens the provider reported
+    /// for the turn, over THIS agent's model's published context window. No
+    /// window on file (pi's models-store absent, or a model it does not list)
+    /// leaves the snapshot untouched and the ring empty.
+    private func withDerivedOccupancy(
+        _ snapshot: AgentContextWindowSnapshot
+    ) -> AgentContextWindowSnapshot {
+        AgentContextOccupancy.withDerivedOccupancy(
+            snapshot,
+            contextWindow: contextWindowForCurrentModel())
+    }
+
+    private func contextWindowForCurrentModel() -> Int? {
+        AgentModelCatalog.shared.contextWindow(for: providerSettings.model)
+    }
 
     /// Whether the live elapsed tick is currently scheduled. A live phase must
     /// have one (or its reading freezes); idle/silent must not (or an idle canvas

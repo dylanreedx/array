@@ -20,6 +20,10 @@ public final class AgentModelCatalog: @unchecked Sendable {
     private let lock = NSLock()
     private var liveOptions: [String]?
     private var liveDisplayNames: [String: String] = [:]
+    /// Published context-window sizes from pi's models-store, keyed by
+    /// fully-qualified id. Empty when the store is absent — the meter then
+    /// shows no percentage rather than a guessed one.
+    private var liveContextWindows: [String: Int] = [:]
     /// Models the claude CLI backend contributes (curated aliases, applied
     /// only when a live probe saw the CLI installed AND logged in). Kept
     /// separate from `liveOptions` so a pi probe replacing the list cannot
@@ -109,6 +113,37 @@ public final class AgentModelCatalog: @unchecked Sendable {
             }
         }
         return names
+    }
+
+    /// Parse pi's models-store into a fully-qualified-id → context-window-size
+    /// map. This is the provider's own published window (`contextWindow`), not
+    /// an assumption of ours — the same file the display names come from, and
+    /// the only local source of a real window size. `maxTokens` in that file is
+    /// the max OUTPUT per response and is deliberately not read here. Pure.
+    public static func parse(modelsStoreContextWindows data: Data) -> [String: Int] {
+        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return [:] }
+        var windows: [String: Int] = [:]
+        for (provider, value) in root {
+            guard let entry = value as? [String: Any],
+                  let models = entry["models"] as? [[String: Any]] else { continue }
+            for model in models {
+                guard let id = model["id"] as? String, !id.isEmpty,
+                      let window = model["contextWindow"] as? Int, window > 0 else { continue }
+                windows["\(provider)/\(id)"] = window
+            }
+        }
+        return windows
+    }
+
+    /// The model's published context window, or nil when the store has no entry
+    /// (pi not installed, or a model it does not list). Callers must degrade to
+    /// "no percentage" rather than inventing a size.
+    public func contextWindow(for id: String) -> Int? {
+        lock.withLock { liveContextWindows[id] }
+    }
+
+    public func apply(contextWindows: [String: Int]) {
+        lock.withLock { liveContextWindows = contextWindows }
     }
 
     /// A non-empty parse replaces the current options; an empty or failed
@@ -227,6 +262,7 @@ public final class AgentModelCatalog: @unchecked Sendable {
             .appendingPathComponent(".pi/agent/models-store.json")
         if let storeData = try? Data(contentsOf: storeURL) {
             apply(displayNames: Self.parse(modelsStoreJSON: storeData))
+            apply(contextWindows: Self.parse(modelsStoreContextWindows: storeData))
         }
     }
 
