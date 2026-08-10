@@ -2,8 +2,28 @@
 
 Small, self-contained improvements — each is one focused session or less.
 Bigger designed work gets a numbered plan file (see `01-provider-cli-backends.md`).
-Program history: `docs/38-tickets/95-go-live.md`. Shipped state: 0.2.2 (build 4);
-next release is build 5.
+Program history: `docs/38-tickets/95-go-live.md`. **Shipped state: 0.3.0 (build 5),
+live on arrayapp.dev 2026-08-10; next release is build 6.** `main` ==
+`array/integration`. Dylan is in a "continuous improvements + tweaks" phase —
+this is the menu; he picks what to run next.
+
+## Next up (Dylan-named)
+
+- **Drag-drop non-image files** (md/pdf/xml/txt) → `04-drag-drop-files.md`. Key
+  decision: reference, don't embed — hand the agent a `@/path` and let its Read
+  tool fetch it (images stay embedded for vision). First queued improvement.
+
+## Recently shipped (0.3.0, 2026-08-10)
+
+- Agent-harness picker (Claude Code / Codex / pi) + codex & claude CLI backends
+  (`01`, `02`); transcript resume (`03`).
+- Fixes: markdown tables render (was "Unsupported content: unknown"); context
+  meter shows token counts for claude/codex (was "unknown"); rehydrated tool
+  cards show the command (was opaque "Bash"); custom-folder Home updates the
+  header.
+- **Effort-picker truncation (#4): HARDENING ONLY, unconfirmed.** Could not
+  reproduce in a headless test; footer now declares fill intent in the Send row.
+  If it still truncates in 0.3.0, get the tile WIDTH from Dylan and reproduce.
 
 ## Verification debt
 
@@ -57,10 +77,16 @@ next release is build 5.
 
 ## Bigger designed work
 
+- `04-drag-drop-files.md` — **NEXT** (Dylan-named). Drag-drop md/pdf/xml/txt as
+  `@/path` references the agent's Read tool fetches; images stay embedded. Watch
+  the codex `workspace-write` sandbox for out-of-project drops, and PDF-read
+  parity across harnesses.
 - `03-transcript-rehydration.md` — **SHIPPED 2026-08-10** (MVP: resume shows the
   prior transcript behind a "Previous session" boundary, read from the provider
-  session file and replayed as events; display-only, never re-synced). Fast-follow
-  not built: the collapse/disclosure "summary that expands" grouping.
+  session file and replayed as events; display-only, never re-synced). Fast-follows
+  NOT built: the collapse/disclosure "summary that expands" grouping, and
+  expand-to-see tool OUTPUT (the reader has the on-disk result; only the command
+  is surfaced today).
 - `02-codex-backend-and-toggle.md` — **SHIPPED 2026-08-10** (codex CLI backend so
   pi isn't required + a three-way Agent Harness toggle in Settings that live-filters
   the model dropdown: pi/Claude Code/Codex, codex↔openai, claude↔anthropic).
