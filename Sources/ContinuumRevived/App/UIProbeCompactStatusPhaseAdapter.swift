@@ -51,13 +51,23 @@ extension UIProbeGeometry {
             .init(session: .init(state: .running)), now: t1)
         try require(coarseRunning.phase == nil && coarseRunning.phaseStartedAt == nil,
                     "session running without turn/tool facts must remain unknown")
+        // An active turn is the agent working even before (or without) any
+        // content stream: codex never streams, and pi/claude have a pre-stream
+        // gap. It must present as the generic Working (Thinking) phase anchored
+        // at the turn start — NOT a degraded unknown that renders as a stuck
+        // "Waiting" (the codex "Waiting 0s / unknown" regression).
         var activeWithoutStreamAdapter = AgentCompactStatusPhaseAdapter()
         let activeWithoutStream = activeWithoutStreamAdapter.update(
             .init(turn: .active(startedAt: t0, stream: nil, streamStartedAt: nil)), now: t1)
-        try require(activeWithoutStream.phase == nil && activeWithoutStream.phaseStartedAt == nil,
-                    "active turn without an explicit stream must remain unknown")
-        try require(activeWithoutStream.activityInput == nil,
-                    "active turn without an explicit stream must not create activity input")
+        try require(activeWithoutStream.phase == .thinking && activeWithoutStream.phaseStartedAt == t0,
+                    "active turn without a stream must present as Working (Thinking) anchored at the turn start, not unknown")
+        try require(activeWithoutStream.activityInput != nil,
+                    "active turn without a stream must produce a Working activity input, not nil")
+        // A later precise stream still overrides the coarse Working phase.
+        let streamOverrides = activeWithoutStreamAdapter.update(
+            .init(turn: .active(startedAt: t0, stream: .assistant, streamStartedAt: t1)), now: t1)
+        try require(streamOverrides.phase == .responding,
+                    "an arriving assistant stream must override the coarse active-turn Working phase")
 
         // Same-state updates never reset an authoritative phase anchor.
         let starting = adapter.update(

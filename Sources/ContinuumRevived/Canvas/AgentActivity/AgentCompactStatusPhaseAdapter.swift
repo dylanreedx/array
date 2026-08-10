@@ -201,10 +201,15 @@ struct AgentCompactStatusPhaseAdapter {
             case .commandOutput:
                 return result(.running, startedAt: streamStartedAt ?? startedAt, evidence: "Command output stream is active.")
             case nil:
-                // An active turn without an explicit stream does not identify
-                // thinking, responding, or tool work. Keep it explicitly
-                // unknown rather than fabricating a Thinking phase.
-                return .unknown
+                // An active turn IS the agent working, even before any content
+                // stream arrives — and some harnesses (codex) never stream,
+                // delivering the whole reply at turn end. Present the generic
+                // Working (Thinking) phase anchored at the turn start rather
+                // than a degraded unknown that renders as a stuck "Waiting". A
+                // more precise stream or tool fact above overrides this the
+                // instant it arrives (this is the same coarse-working mapping
+                // `activityInput(status:)` already uses for `.working`).
+                return result(.thinking, startedAt: startedAt, evidence: "Turn is active; the harness has not (yet) streamed content.")
             }
         }
 

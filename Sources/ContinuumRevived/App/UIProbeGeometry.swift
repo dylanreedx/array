@@ -5619,8 +5619,11 @@ enum UIProbeGeometry {
             throw fail("\(label): a zero-turn empty session must present authoritative 0%, got state \(emptyRow.qaContextState) fraction \(String(describing: emptyRow.qaContextFraction))")
         }
 
-        // A coarse running session and an active turn without a stream are both
-        // intentionally unresolved. A stale What must not resurrect Reading.
+        // A coarse running session (no active turn) stays intentionally
+        // unresolved. But an active turn without a stream IS the agent working
+        // (codex never streams; pi/claude have a pre-stream gap) and must present
+        // the coarse Working (Thinking) phase, not a stuck "Waiting". A stale
+        // What must not resurrect Reading.
         let stale = AgentObservedActivity(
             operation: .inspecting,
             targetPath: target,
@@ -5636,8 +5639,8 @@ enum UIProbeGeometry {
             .init(turn: .active(startedAt: start, stream: nil, streamStartedAt: nil)),
             location: location,
             now: now)
-        guard tile.qaCompactStatusPhase == nil else {
-            throw fail("\(label): active turn without a stream fabricated a compact phase")
+        guard tile.qaCompactStatusPhase == .thinking else {
+            throw fail("\(label): active turn without a stream must present Working (Thinking), got \(String(describing: tile.qaCompactStatusPhase))")
         }
         tile.qaApplyCompactStatusFacts(
             .init(
