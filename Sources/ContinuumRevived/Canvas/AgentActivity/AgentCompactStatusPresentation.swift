@@ -373,6 +373,10 @@ enum AgentRadialContextMeterPresenter {
         let arithmetic = authoritativeArithmetic(snapshot)
         let rawPercent = arithmetic.map { Int(($0.fraction * 100).rounded()) }
         let renderFraction = arithmetic?.fraction
+        // Non-authoritative sources (claude/codex per-turn usage) carry token
+        // counts but no context-window max, so occupancy % is unknowable. Show
+        // the token count we DO have ("24.4k") rather than a bare "unknown".
+        let countLabel = arithmetic == nil ? processedTokenLabel(snapshot) : nil
         let state: AgentRadialContextMeterState
         let marker: String?
         if case .stale = snapshot.freshness {
@@ -389,27 +393,35 @@ enum AgentRadialContextMeterPresenter {
                 state = .known
                 marker = nil
             }
+        } else if countLabel != nil {
+            // A real measurement (token count), just not an occupancy fraction.
+            state = .known
+            marker = nil
         } else {
             state = .unknown
             marker = nil
         }
 
         let visualLabel: String
-        switch (state, rawPercent) {
-        case (.unknown, _):
-            visualLabel = "unknown"
-        case (.stale, let value?):
-            visualLabel = "stale \(value)%"
-        case (.stale, nil):
-            visualLabel = "stale"
-        case (.warning, let value?):
-            visualLabel = "⚠︎ \(value)%"
-        case (.critical, let value?):
-            visualLabel = "! \(value)%"
-        case (_, let value?):
-            visualLabel = "\(value)%"
-        case (_, nil):
-            visualLabel = "unknown"
+        if let countLabel, arithmetic == nil, snapshot.freshness != .stale {
+            visualLabel = countLabel
+        } else {
+            switch (state, rawPercent) {
+            case (.unknown, _):
+                visualLabel = "unknown"
+            case (.stale, let value?):
+                visualLabel = "stale \(value)%"
+            case (.stale, nil):
+                visualLabel = "stale"
+            case (.warning, let value?):
+                visualLabel = "⚠︎ \(value)%"
+            case (.critical, let value?):
+                visualLabel = "! \(value)%"
+            case (_, let value?):
+                visualLabel = "\(value)%"
+            case (_, nil):
+                visualLabel = "unknown"
+            }
         }
 
         return AgentRadialContextMeterPresentation(
@@ -492,6 +504,26 @@ enum AgentRadialContextMeterPresenter {
             lines.append("Automatic compaction: \(automaticCompaction ? "enabled" : "disabled")")
         }
         return lines.joined(separator: "\n")
+    }
+
+    /// A compact token-count label for sources that report usage but no
+    /// context-window max (claude/codex per-turn usage): the total processed
+    /// tokens, else input+output. Nil when there is nothing to show.
+    private static func processedTokenLabel(_ snapshot: AgentContextWindowSnapshot) -> String? {
+        let total: Int
+        if let processed = snapshot.totalProcessedTokens, processed > 0 {
+            total = processed
+        } else {
+            let sum = [snapshot.inputTokens, snapshot.outputTokens].compactMap { $0 }.reduce(0, +)
+            guard sum > 0 else { return nil }
+            total = sum
+        }
+        if total >= 1_000_000 {
+            return String(format: "%.1fM", Double(total) / 1_000_000)
+        } else if total >= 1_000 {
+            return String(format: "%.1fk", Double(total) / 1_000)
+        }
+        return "\(total)"
     }
 
     private static func authoritativeArithmetic(_ snapshot: AgentContextWindowSnapshot) -> (used: Int, max: Int, fraction: Double)? {

@@ -412,8 +412,10 @@ enum UIProbeGeometry {
         let negativeUsed = AgentContextWindowSnapshot(
             usedTokens: -1, maxTokens: 128_000,
             observedAt: now, source: .providerSessionStats, freshness: .live)
+        // A true unknown carries NO token counts (only cost): occupancy is
+        // unknowable AND there's nothing to show as a count. A per-message/turn
+        // source that DOES carry counts now shows the count (see perTurnCount).
         let unknown = AgentContextWindowSnapshot(
-            inputTokens: 400, outputTokens: 50, cacheReadTokens: 900,
             totalCostUsd: 0.0100, observedAt: now,
             source: .piMessageUsage, freshness: .live)
         let stale = AgentContextWindowSnapshot(
@@ -453,6 +455,20 @@ enum UIProbeGeometry {
                     "compact status critical label/state disagree")
         try require(statePresentations.first { $0.0 == .stale }?.1.label == "stale 50%",
                     "compact status stale context lacks exact stale state")
+
+        // Per-turn usage (claude/codex) reports token counts but no context
+        // window max, so occupancy % is unknowable — but the count IS known and
+        // must show instead of a bare "unknown" (the "status reverted to
+        // unknown after the response" report).
+        let perTurnCount = AgentContextWindowSnapshot(
+            inputTokens: 10, outputTokens: 40, cacheReadTokens: 17_900, cacheWriteTokens: 6_496,
+            totalProcessedTokens: 24_446, totalCostUsd: 0.015, observedAt: now,
+            source: .claudeResultUsage, freshness: .live)
+        let count = AgentRadialContextMeterPresenter.present(perTurnCount, policy: policy)
+        try require(count.state == .known && count.fraction == nil,
+                    "per-turn usage without a max must present a known token count, not an occupancy fraction (state \(count.state.rawValue), fraction \(String(describing: count.fraction)))")
+        try require(count.label == "24.4k",
+                    "per-turn usage must show the token count, not 'unknown', got \(count.label)")
 
         let over = AgentRadialContextMeterPresenter.present(overCapacity, policy: policy)
         let overPercent = expectedRawPercent(used: 180_000, max: 128_000)
