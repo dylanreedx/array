@@ -12,14 +12,26 @@
 # is per-project-root, not per-channel — so keep the dev app on a project the
 # prod app never opens.
 #
+# THE PROJECT IS PINNED, and that is the point. `CONTINUUM_PROJECT_ROOT` is the
+# first rung of `ProjectRootResolver.resolve()`, ahead of the registry's
+# last-active project — so the preview app opens the scratch root and cannot
+# wander into a real one even if its registry still remembers it. Wiping the dev
+# store is NOT enough on its own: the app re-adopts the last root it knows.
+#
+# Why that matters: a project's canvas, tiles, notes and managed sessions live in
+# `<root>/.array/`, which is NOT channel-split. Two apps on one root share those
+# files and the last writer wins.
+#
 # Usage:
-#   scripts/dev-app.sh              # rebuild + relaunch
+#   scripts/dev-app.sh              # rebuild + relaunch on the scratch project
 #   scripts/dev-app.sh --no-launch  # rebuild only
+#   DEV_PROJECT_ROOT=/path scripts/dev-app.sh
 #   DEV_APP_PATH=... scripts/dev-app.sh
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_PATH="${DEV_APP_PATH:-$HOME/Desktop/Array Dev.app}"
+PROJECT_ROOT="${DEV_PROJECT_ROOT:-$HOME/array-scratch}"
 LAUNCH=1
 [[ "${1:-}" == "--no-launch" ]] && LAUNCH=0
 
@@ -43,8 +55,15 @@ echo "==> building (debug, incremental)"
 "$ROOT_DIR/scripts/make-app-bundle.sh" --configuration debug --output "$APP_PATH"
 
 if [[ $LAUNCH -eq 1 ]]; then
-  echo "==> launching $APP_PATH"
-  open "$APP_PATH"
+  mkdir -p "$PROJECT_ROOT"
+  echo "==> launching $APP_PATH on $PROJECT_ROOT"
+  # The executable directly, not `open`: it is the only way to hand the process
+  # an environment, and a binary inside a .app still resolves `Bundle.main` from
+  # its enclosing bundle — so this is still the DEV-channel identity.
+  # nohup + disown so quitting this shell does not take the app with it.
+  CONTINUUM_PROJECT_ROOT="$PROJECT_ROOT" \
+    nohup "$APP_PATH/Contents/MacOS/Array" >/dev/null 2>&1 &
+  disown 2>/dev/null || true
 fi
 
 echo "==> done in $(( $(date +%s) - started ))s"
