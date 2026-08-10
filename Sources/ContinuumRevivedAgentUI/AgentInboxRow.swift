@@ -248,6 +248,11 @@ public enum AgentStatusVocabulary {
     /// surface.
     public static let failed = "Failed"
     public static let unconfirmed = "Unconfirmed"
+    /// What a row in History says (.plans/05-close-to-history.md). A closed agent
+    /// has no tile by definition, so the word is about the TILE, not the agent's
+    /// health — it is neither failed nor unconfirmed, and reopening the row brings
+    /// it back exactly as it was left.
+    public static let closed = "Closed"
 }
 
 /// What the agent is doing. FIVE STATES, and only three MEANINGS get colour:
@@ -382,17 +387,24 @@ public enum InboxLifecycle: Equatable, Sendable {
     /// is why `InboxSort` needs no fallback for one. Same shape as
     /// `snoozed(until:)`.
     case settled(at: Date)
-    case archived
+    /// When the agent left the list. Carries its date for the same reason
+    /// `settled(at:)` does: History is ordered by when each agent was closed, and
+    /// the row says "Closed 20m ago" — neither is derivable from a bare case.
+    case archived(at: Date)
 
-    /// The moment the work ended, for the one lifecycle that has one.
+    /// The moment the work ended, for the two lifecycles that have one.
     ///
     /// `snoozed` deliberately does not answer: its date is in the FUTURE (when the
     /// row comes back), and treating it as an end time would sort a snoozed row
-    /// into history ahead of everything that really finished.
+    /// into history ahead of everything that really finished. `archived` answers
+    /// with its close time, which is what orders the History section — the two
+    /// dates never compete, because settled and archived rows are sorted in
+    /// separate blocks.
     public var endedAt: Date? {
         switch self {
         case .settled(let at): return at
-        case .active, .snoozed, .archived: return nil
+        case .archived(let at): return at
+        case .active, .snoozed: return nil
         }
     }
 }
@@ -408,9 +420,14 @@ public enum RowVariant: String, CaseIterable, Equatable, Sendable {
     /// `failed` are full cards no matter how quiet the list gets.
     public static func forLifecycle(_ lifecycle: InboxLifecycle) -> RowVariant {
         switch lifecycle {
-        case .snoozed, .settled:
+        case .snoozed, .settled, .archived:
+            // Archived joins the collapsing set now that it is a section a person
+            // scrolls (.plans/05-close-to-history.md — closing a tile parks the
+            // agent in History) rather than a state nothing ever drew. A closed
+            // agent is the most parked thing in the list; giving it a full card
+            // would make History the tallest block.
             return .slim
-        case .active, .archived:
+        case .active:
             return .card
         }
     }
@@ -937,7 +954,16 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         // priority here so InboxAttention.woke remains visible on a resting row;
         // `InboxState.label` now supplies the shared state words for working,
         // needs-attention, and failed rows.
-        isUnconfirmed ? AgentStatusVocabulary.unconfirmed : label
+        //
+        // A CLOSED ROW IS NEVER "UNCONFIRMED" (.plans/05-close-to-history.md).
+        // "Unconfirmed" means the app has no observer and therefore cannot say
+        // what the agent is doing. For a closed agent it CAN: nothing, because
+        // closing refused to park it while anything was in flight. Saying
+        // "Unconfirmed" over the whole of History would turn an honest admission
+        // of ignorance into wallpaper — which is exactly what it had become when
+        // every closed tile left one of these rows behind.
+        if case .archived = lifecycle { return AgentStatusVocabulary.closed }
+        return isUnconfirmed ? AgentStatusVocabulary.unconfirmed : label
     }
 
     /// The row's ONE label, resolved down the packet's priority:

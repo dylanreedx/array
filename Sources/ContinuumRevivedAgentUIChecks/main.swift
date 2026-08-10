@@ -464,7 +464,7 @@ func runSidebarDefectCorpusChecks() {
         "titleIsModelId", "nilRoleNilBranch", "elapsedThreeDigitHour",
         "unobservedNoSnapshot", "fanOutFortyChildren", "depthChainToCap",
         "projectNameWiderThanRow", "combiningMarksRTLName",
-        "snoozedOnShelf", "settledSlimTail", "archivedCard",
+        "snoozedOnShelf", "settledSlimTail", "archivedSlim",
     ]
     for name in required.subtracting(declared).sorted() {
         expect(false, "SidebarDefectCorpus: required defect shape .\(name) is no longer declared")

@@ -165,10 +165,11 @@ private func runRowVariantCheck() {
         (.active, .card),
         (.snoozed(until: until), .slim),
         (.settled(at: until), .slim),
-        // Archived leaves the list entirely (P4.1: archived != settled), so it has
-        // no density of its own to argue about; a card is the honest default for
-        // anything that is still being drawn.
-        (.archived, .card),
+        // Archived is drawn now (.plans/05-close-to-history.md: closing a tile
+        // parks the agent in History instead of deleting it), and it is the most
+        // parked thing in the list — so it collapses, like the other two parked
+        // lifecycles. P4.1 left it a card only because nothing ever rendered one.
+        (.archived(at: until), .slim),
     ]
     for (lifecycle, want) in expected {
         let got = RowVariant.forLifecycle(lifecycle)

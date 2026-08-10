@@ -131,9 +131,14 @@ public enum InboxSort {
     ///      and an end time stops changing the moment the row settles, so this
     ///      block is just as still as the other two.
     ///
-    /// `.archived` stays in the live block, because an archived row has left the
-    /// list entirely by the time anything draws it (P4.1) — the same call
-    /// `RowVariant.forLifecycle` already makes by leaving it a card.
+    ///   4. **CLOSED** — archived rows, most recently CLOSED first (.plans/05-close-to-history.md).
+    ///      P4.1 put `.archived` in the live block because archiving deleted the
+    ///      record, so no archived row could ever reach a sort. Closing a tile now
+    ///      parks the agent instead of deleting it, so archived rows are real and
+    ///      need a block of their own — below history, because a closed agent is
+    ///      further from your attention than a finished one, and ordered by close
+    ///      time for the same reason history is ordered by end time: it is the
+    ///      question you are asking when you open the section.
     ///
     /// Within each block, a CHILD is placed immediately after its parent (P2D.4),
     /// depth-first, with siblings ordered by the same comparator as roots, and every
@@ -150,16 +155,19 @@ public enum InboxSort {
         var live: [AgentInboxRow] = []
         var shelf: [AgentInboxRow] = []
         var history: [AgentInboxRow] = []
+        var closed: [AgentInboxRow] = []
         for row in rows {
             switch row.lifecycle {
-            case .active, .archived: live.append(row)
+            case .active: live.append(row)
             case .snoozed: shelf.append(row)
             case .settled: history.append(row)
+            case .archived: closed.append(row)
             }
         }
         return nest(live, by: newestSpawnedFirst)
             + nest(shelf, by: newestSpawnedFirst)
             + nest(history, by: mostRecentlyEndedFirst)
+            + nest(closed, by: mostRecentlyEndedFirst)
     }
 
     /// Bound direct children without changing the global frozen root order. A
@@ -515,6 +523,10 @@ public enum InboxSort {
         case snoozed
         /// The tail: work that is over.
         case settled
+        /// Closed agents, behind a counted header of their own — the tile is gone
+        /// but the record, the transcript and the worktree are not, so opening one
+        /// brings the agent back (.plans/05-close-to-history.md).
+        case history
     }
 
     /// The section this lifecycle draws in at `now`.
@@ -530,14 +542,16 @@ public enum InboxSort {
     /// here as `.snoozed` at all: `snoozeHonoured` withholds the date, `resolve`
     /// answers `.active`, and the row arrives in this function already active.
     ///
-    /// `.archived` is active for the same reason `sortForInbox` leaves it in the live
-    /// block: an archived row has left the list before anything draws it (P4.1), so
-    /// the honest answer is the one that does not invent a section for it.
+    /// `.archived` has its own section now (.plans/05-close-to-history.md). P4.1
+    /// answered `.active` because archiving deleted the record, so no archived row
+    /// could reach this function; closing a tile parks the agent instead, so the
+    /// honest answer is the section it is actually drawn in.
     public static func section(for lifecycle: InboxLifecycle, now: Date) -> InboxSection {
         switch lifecycle {
         case .snoozed(let until): return until > now ? .snoozed : .active
         case .settled: return .settled
-        case .active, .archived: return .active
+        case .archived: return .history
+        case .active: return .active
         }
     }
 
@@ -565,6 +579,7 @@ public enum InboxSort {
             case .active: parts.active.append(row)
             case .snoozed: parts.snoozed.append(row)
             case .settled: parts.settled.append(row)
+            case .history: parts.history.append(row)
             }
         }
         return parts
@@ -648,30 +663,41 @@ public struct InboxPartition: Equatable, Sendable {
     public var active: [AgentInboxRow]
     public var snoozed: [AgentInboxRow]
     public var settled: [AgentInboxRow]
+    /// Closed agents (.plans/05-close-to-history.md), behind their own counted
+    /// header. Last, because it is the only section you go looking for.
+    public var history: [AgentInboxRow]
 
     public init(
         active: [AgentInboxRow] = [],
         snoozed: [AgentInboxRow] = [],
-        settled: [AgentInboxRow] = []
+        settled: [AgentInboxRow] = [],
+        history: [AgentInboxRow] = []
     ) {
         self.active = active
         self.snoozed = snoozed
         self.settled = settled
+        self.history = history
     }
 
-    /// Everything, in the order the list draws it with the shelf OPEN. The header
-    /// itself is the view's, not this type's — a count is a fact about the shelf, a
-    /// header is a row on a screen.
-    public var all: [AgentInboxRow] { active + snoozed + settled }
+    /// Everything, in the order the list draws it with both counted sections OPEN.
+    /// The headers themselves are the view's, not this type's — a count is a fact
+    /// about a section, a header is a row on a screen.
+    public var all: [AgentInboxRow] { active + snoozed + settled + history }
 
-    /// The rows on screen with the shelf in this state — the one place "collapsed
-    /// hides the shelf and nothing else" is written down.
-    public func visible(shelfExpanded: Bool) -> [AgentInboxRow] {
-        shelfExpanded ? all : active + settled
+    /// The rows on screen with each counted section in the given state — the one
+    /// place "collapsed hides that section and nothing else" is written down.
+    public func visible(shelfExpanded: Bool, historyExpanded: Bool = false) -> [AgentInboxRow] {
+        (shelfExpanded ? active + snoozed : active)
+            + settled
+            + (historyExpanded ? history : [])
     }
 
     /// What the header says it is holding. The count is of the SHELF, never of what
     /// is on screen, which is the whole point of a collapsed section: "deferred work
     /// is visible as a count without occupying the list".
     public var shelfCount: Int { snoozed.count }
+
+    /// The same fact for the History header. Separate property rather than a
+    /// parameterised one so a call site cannot ask the shelf for history's count.
+    public var historyCount: Int { history.count }
 }

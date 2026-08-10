@@ -210,15 +210,16 @@ private func runEffectiveLifecycleTableCheck() {
                       lastActivityAt: aWeekAgo, autoSettleAfter: threeDays,
                       expected: .settled(at: anHourAgo)),
 
-        // Rung 0 — archived leaves the list; it is not a stronger settle.
+        // Rung 0 — archived leaves the live list for History; it is not a stronger
+        // settle, and it carries the moment it was closed.
         LifecycleCase(what: "an archived agent is archived, never settled",
-                      override: .neutral, archivedAt: anHourAgo, expected: .archived),
+                      override: .neutral, archivedAt: anHourAgo, expected: .archived(at: anHourAgo)),
         LifecycleCase(what: "an archived agent is out of the list even with a blocker",
                       override: .settled, blockers: .pendingApproval, settledAt: anHourAgo,
-                      archivedAt: anHourAgo, expected: .archived),
+                      archivedAt: anHourAgo, expected: .archived(at: anHourAgo)),
         LifecycleCase(what: "an archived agent is not shelved by a live snooze",
                       override: .neutral, snoozedUntil: inHalfAnHour, archivedAt: anHourAgo,
-                      expected: .archived),
+                      expected: .archived(at: anHourAgo)),
     ]
 
     for testCase in cases {
@@ -230,10 +231,9 @@ private func runEffectiveLifecycleTableCheck() {
     // and it must really exercise all four lifecycles.
     expect(cases.count >= 31,
            "the precedence table covers every rung — got \(cases.count) cases")
-    for lifecycle in [InboxLifecycle.active, .archived] {
-        expect(cases.contains { $0.expected == lifecycle },
-               "the table expects \(lifecycle) somewhere")
-    }
+    expect(cases.contains { $0.expected == .active }, "the table expects an active row somewhere")
+    expect(cases.contains { if case .archived = $0.expected { return true } else { return false } },
+           "the table expects an archived row somewhere")
     expect(cases.contains { if case .settled = $0.expected { return true } else { return false } },
            "the table expects a settled row somewhere")
     expect(cases.contains { if case .snoozed = $0.expected { return true } else { return false } },
@@ -278,7 +278,7 @@ private func runEffectiveLifecyclePropertyCheck() {
         archivedAt: Date?,
         lastActivityAt: Date?
     ) -> InboxLifecycle {
-        if archivedAt != nil { return .archived }
+        if let archivedAt { return .archived(at: archivedAt) }
         if !blockers.isEmpty { return .active }
         if let snoozedUntil, snoozedUntil > now { return .snoozed(until: snoozedUntil) }
         if override == .settled { return .settled(at: settledAt ?? lastActivityAt ?? now) }
@@ -341,8 +341,14 @@ private func runEffectiveLifecyclePropertyCheck() {
 
                             // …plus the invariants, which the oracle could not
                             // state about itself.
-                            expect((lifecycle == .archived) == (archivedAt != nil),
+                            let isArchived: Bool = {
+                                if case .archived = lifecycle { return true }
+                                return false
+                            }()
+                            expect(isArchived == (archivedAt != nil),
                                    "archivedAt is the only thing that produces .archived — \(inputs) resolved \(lifecycle)")
+                            expect(!isArchived || lifecycle == .archived(at: archivedAt!),
+                                   "an archived row carries the exact stamp it was closed with — \(inputs) resolved \(lifecycle)")
                             if archivedAt == nil, blockers.isBlocking {
                                 // THE RULE, over every combination rather than the
                                 // table's named few.

@@ -469,7 +469,7 @@ enum LabFixtures {
         /// rows before the list ever sees them (P4.1), but the compiled view
         /// keeps one in the live block as a card — the corpus carries it so the
         /// probe witnesses today's compiled behaviour rather than assuming it.
-        case archivedCard
+        case archivedSlim
     }
 
     /// How many depth-1 children the fan-out fixture spawns. Named so the checks
@@ -494,7 +494,11 @@ enum LabFixtures {
                 id: rowId(0x01), title: "openai-codex/gpt-5.6-sol", projectName: "continuum",
                 workspaceName: "Overnight", state: .approval, attention: .unread,
                 model: "gpt-5.6-sol", role: "reviewer", branch: "agent/model-id-name",
-                isIsolated: true, createdAt: at(1_010))]
+                // The corpus's explicit CARD row. Stated rather than defaulted so
+                // the coverage gate can see it: an active row is a card, and after
+                // .plans/05-close-to-history.md the archived shape is slim, which
+                // left the matrix with no card literal to find.
+                isIsolated: true, variant: .card, createdAt: at(1_010))]
         case .nilRoleNilBranch:
             return [AgentInboxRow(
                 id: rowId(0x02), title: "claude · dead space", projectName: "continuum",
@@ -571,12 +575,15 @@ enum LabFixtures {
                 workspaceName: "Overnight", state: .ready,
                 lifecycle: .settled(at: at(63)), model: "claude-opus-5",
                 role: "builder", branch: "main", variant: .slim, createdAt: at(697))]
-        case .archivedCard:
+        case .archivedSlim:
             return [AgentInboxRow(
-                id: rowId(0x35), title: "claude · archived record", projectName: "continuum",
-                workspaceName: "Overnight", state: .ready, lifecycle: .archived,
+                // A row in History (.plans/05-close-to-history.md): slim, like the
+                // other two parked lifecycles, and drawn now that closing a tile
+                // parks an agent here instead of deleting its record.
+                id: rowId(0x35), title: "claude · closed", projectName: "continuum",
+                workspaceName: "Overnight", state: .ready, lifecycle: .archived(at: at(64)),
                 model: "claude-opus-5", role: "builder", branch: "main",
-                variant: .card, createdAt: at(696))]
+                variant: .slim, createdAt: at(696))]
         }
     }
 

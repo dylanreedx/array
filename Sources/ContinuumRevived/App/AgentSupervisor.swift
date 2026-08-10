@@ -2303,9 +2303,10 @@ final class AgentSupervisor {
     /// The agent leaves: its runner stops, its worktree goes away, and its record is
     /// deleted from memory and from the store.
     ///
-    /// This is NOT what closing a tile does — that is `detachView` (P2A.5), and the
-    /// locked decision is that closing a tile never ends the work. Only a deliberate
-    /// archive/delete reaches here.
+    /// This is NOT what closing a tile does — that is `detachView` + `close`
+    /// (P2A.5, .plans/05-close-to-history.md): closing a tile never ends the work,
+    /// it parks the agent in History with everything it owns intact. Only a
+    /// deliberate Delete reaches here, and it is the one verb that destroys.
     ///
     /// The branch is deleted ONLY when `WorktreeManager.isMerged` says the repository
     /// already has everything on it. Otherwise the branch is kept and NAMED in the
@@ -3291,6 +3292,55 @@ final class AgentSupervisor {
         guard record.snoozedUntil != nil || record.snoozedAt != nil else { return false }
         record.snoozedUntil = nil
         record.snoozedAt = nil
+        records[id] = record
+        persist(record)
+        return true
+    }
+
+    // Ticket: .plans/05-close-to-history.md
+
+    /// Park an agent in History. The row leaves the live list; the record, the
+    /// transcript, the provider session and the worktree all stay, so reopening the
+    /// row brings the agent back with its context (`revealAgentFromInbox`).
+    ///
+    /// THIS IS NOT `archive`, which is the destructive verb below and deletes
+    /// everything. The two used to be the same thing because closing a tile left
+    /// the agent in the list forever; the plan splits them.
+    ///
+    /// REFUSES A BLOCKED AGENT, through the predicate the settle action already
+    /// uses (`AgentLifecycleFacts.blocksSettlement`) rather than a second opinion
+    /// about what "busy" means: a turn in flight, a pending human request, an
+    /// unadopted prompt, or a descendant holding its parent open all keep the agent
+    /// where you can see it. Closing the tile of a WORKING agent is the case this
+    /// protects — P2A.5's decision is that the work continues, and the row is then
+    /// the only thing left saying so.
+    @discardableResult
+    func close(agentID id: AgentID, now: Date = Date()) -> Bool {
+        guard var record = records[id] else {
+            warn("AgentSupervisor.close: no agent \(id.rawValue.uuidString)")
+            return false
+        }
+        guard record.archivedAt == nil else { return false }
+        guard !currentLifecycleFacts(for: id, now: now).blocksSettlement(now: now) else {
+            return false
+        }
+        record.archivedAt = now
+        records[id] = record
+        persist(record)
+        return true
+    }
+
+    /// The way out of History. Reopening a closed agent is asking for it back, so
+    /// the stamp is cleared — otherwise the row it was revealed from would still be
+    /// in History while its tile sits on the canvas.
+    @discardableResult
+    func reopen(agentID id: AgentID) -> Bool {
+        guard var record = records[id] else {
+            warn("AgentSupervisor.reopen: no agent \(id.rawValue.uuidString)")
+            return false
+        }
+        guard record.archivedAt != nil else { return false }
+        record.archivedAt = nil
         records[id] = record
         persist(record)
         return true
@@ -6708,6 +6758,12 @@ private func checkCapabilityDrivenTurnStates<Failure: Error>(
     // restored over the same store must still seed the last-known snapshot.
     let resumedSupervisor = AgentSupervisor(
         store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+    // …and RESTORED, which is what a relaunch does. Without this the resumed
+    // supervisor holds no records at all, `contextWindowSnapshot` short-circuits
+    // on the missing record, and the leg has been asserting nil == a snapshot
+    // since `24b1b00` gave the seam its record lookup — unnoticed, because this
+    // leg halts earlier at the KNOWN-RED naming section.
+    resumedSupervisor.restore()
     guard resumedSupervisor.contextWindowSnapshot(for: id) == contextSnapshot else {
         throw fail("context-seam: a restored supervisor must seed persisted telemetry from the record")
     }
@@ -6907,7 +6963,14 @@ private func checkAgentBlockRendererRegistry<Failure: Error>(
     guard registry.isFrozen else {
         throw fail("production block renderer registry is not frozen after bootstrap")
     }
-    guard Set(AgentBlockRendererRegistry.builtInKinds).count == 16 else {
+    // 18, not 16: `ddbf83d` (Render semantic transcript images) added `.image`
+    // and `.imageGallery` to the fixture and did not move the number with them,
+    // and this leg halts earlier at the KNOWN-RED naming section so nothing said
+    // so. Both halves are pinned — the exact roster size, and that no kind is
+    // listed twice, which a bare count cannot tell apart from a missing one.
+    guard AgentBlockRendererRegistry.builtInKinds.count == 18,
+          Set(AgentBlockRendererRegistry.builtInKinds).count
+            == AgentBlockRendererRegistry.builtInKinds.count else {
         throw fail("block renderer built-in fixture is incomplete or duplicated: \(AgentBlockRendererRegistry.builtInKinds.map(\.rawValue))")
     }
 
@@ -7761,9 +7824,20 @@ private func checkLiveV2TileMigration<Failure: Error>(
     // This is the production event path: supervisor delivery -> tile ingest ->
     // compact phase projection. It deliberately does not call the geometry-only
     // qaApplyCompactStatusFacts seam.
+    // WHERE THE LIVE WORD IS NOW. Commit 204b2ac moved live status onto the prism
+    // gyro at the transcript tail and left the footer only the states that want
+    // your attention, so a `.responding` turn deliberately says nothing in the
+    // footer. This assertion still read the footer, and it went red the moment
+    // that shipped — invisible, because this leg halts earlier at the KNOWN-RED
+    // naming section. Both halves are asserted now: the word appears where it
+    // moved to, and the surface it moved off stays quiet. Prefix and not equality:
+    // the gyro's line carries the 1s elapsed tick after the word ("Responding · 0s"),
+    // and pinning a running clock in a string comparison is how a leg becomes a
+    // flake. The tick has its own witness (`qaCompactStatusTickScheduled`).
     guard tile.qaCompactStatusPhase == .responding,
-          tile.qaCompactStatusActivityText == "Responding" else {
-        throw fail("live-v2: an ingested assistant delta did not drive the installed compact row (phase \(String(describing: tile.qaCompactStatusPhase)), activity \(tile.qaCompactStatusActivityText))")
+          tile.qaTailStatusText.hasPrefix("Responding"),
+          tile.qaCompactStatusActivityText.isEmpty else {
+        throw fail("live-v2: an ingested assistant delta did not drive the installed compact row (phase \(String(describing: tile.qaCompactStatusPhase)), gyro status '\(tile.qaTailStatusText)', footer activity '\(tile.qaCompactStatusActivityText)')")
     }
     guard tile.qaCompactStatusRowIsInstalled,
           tile.qaCompactStatusAccessibilityLabel.contains("Home") else {
@@ -7900,9 +7974,16 @@ private func checkLiveV2TileMigration<Failure: Error>(
 
     let subscribersBeforeDetach = supervisor.subscriberCount(for: agentID)
     tile.detach()
+    // A detached tile has no phase and says nothing. It used to say "Unknown"
+    // out loud; 204b2ac's rule is that the row is silent whenever it has no
+    // authoritative fact, and a permanent "Unknown" chip on a tile nobody is
+    // driving is exactly the wallpaper that rule exists to remove. The
+    // conservative CLEAR is still the assertion — phase back to nil, and the
+    // gyro's live word gone with it.
     guard tile.qaCompactStatusPhase == nil,
-          tile.qaCompactStatusActivityText == "Unknown" else {
-        throw fail("live-v2: detach did not conservatively clear the compact lifecycle projection")
+          tile.qaCompactStatusActivityText.isEmpty,
+          tile.qaTailStatusText.isEmpty else {
+        throw fail("live-v2: detach did not conservatively clear the compact lifecycle projection (phase \(String(describing: tile.qaCompactStatusPhase)), footer '\(tile.qaCompactStatusActivityText)', gyro '\(tile.qaTailStatusText)')")
     }
     tile.attach(agentID: agentID, supervisor: supervisor)
     guard await waitUntil(timeout: 5, pollInterval: 0.02, {
@@ -7911,11 +7992,16 @@ private func checkLiveV2TileMigration<Failure: Error>(
     }) else {
         throw fail("live-v2: rebind task did not restore the subscription")
     }
+    // The replay is the assertion; the WORD is not, because an idle agent is
+    // deliberately silent now (92c07da: "go silent when idle"). A permanent
+    // "Ready" chip was the thing that made the status line unreadable — it was
+    // on screen whether or not anything had happened. So: the phase must come
+    // back, and the row must say nothing about it.
     guard await waitUntil(timeout: 5, pollInterval: 0.02, {
         tile.qaCompactStatusPhase == .ready
-            && tile.qaCompactStatusActivityText == "Ready"
+            && tile.qaCompactStatusRow.qaActivityIsSilent
     }) else {
-        throw fail("live-v2: rebind did not replay lifecycle events into the compact row (phase \(String(describing: tile.qaCompactStatusPhase)), activity \(tile.qaCompactStatusActivityText))")
+        throw fail("live-v2: rebind did not replay lifecycle events into the compact row (phase \(String(describing: tile.qaCompactStatusPhase)), activity \'\(tile.qaCompactStatusActivityText)\', silent \(tile.qaCompactStatusRow.qaActivityIsSilent))")
     }
     tile.detach()
     guard subscribersBeforeDetach == 1,
@@ -8281,12 +8367,24 @@ private func checkDetachOutlivesItsTile(
         throw fail("the blocking turn did not start; runCount \(blocking.runCount), probe last \(String(describing: probe.events.last))")
     }
 
-    // THE CLOSE PATH, exactly as `deleteTile`'s `.managedAgent` branch runs it.
+    // THE CLOSE PATH, exactly as `deleteTile`'s `.managedAgent` branch runs it —
+    // the park first, then the detach, in that order.
+    let parked = supervisor.close(agentID: agentId)
     supervisor.detachView(agentID: agentId)
     tile.detach()
 
+    // THE PARK MUST REFUSE HERE (.plans/05-close-to-history.md). This agent is
+    // mid-turn, and burying working work in History is the one thing closing a
+    // tile may never do: the row is all that is left saying the work exists.
+    guard !parked else {
+        throw fail("closing the tile of a WORKING agent parked it in History; the turn is still in flight and its row is the only surface left reporting it")
+    }
+
     guard let afterClose = try store.load(id: agentId) else {
         throw fail("closing the tile removed the agent's record from the store — the agent is the entity, the tile is one view of it")
+    }
+    guard afterClose.archivedAt == nil else {
+        throw fail("closing the tile of a working agent stamped archivedAt \(String(describing: afterClose.archivedAt)) — it would draw in History while its turn runs")
     }
     guard afterClose.tileId == nil else {
         throw fail("closing the tile left the persisted record claiming tile \(String(describing: afterClose.tileId))")
@@ -8444,6 +8542,12 @@ private func checkDetachOutlivesItsTile(
     }
     guard branch.contains(".detach()") else {
         throw fail("deleteTile's .managedAgent branch does not detach the tile's own subscription:\n\(branch)")
+    }
+    // …and it parks. Without this line the branch reverts to what filled the
+    // sidebar with unobservable rows: a record with no tile, no runner and no way
+    // out of the live list (.plans/05-close-to-history.md).
+    guard branch.contains("close(agentID:") else {
+        throw fail("deleteTile's .managedAgent branch never parks the agent: a closed tile would leave its record in the live list forever, with no tile to observe it and no section to hold it:\n\(branch)")
     }
     let stopPattern = try NSRegularExpression(pattern: "\\.stop\\s*\\(")
     guard stopPattern.firstMatch(in: branch, range: NSRange(branch.startIndex..., in: branch)) == nil else {

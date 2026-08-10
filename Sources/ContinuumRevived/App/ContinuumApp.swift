@@ -3061,6 +3061,15 @@ struct UnconfirmedElapsedFreeze {
 
     mutating func apply(rows: [AgentInboxRow], unobserved: Set<UUID>) -> [AgentInboxRow] {
         rows.map { row in
+            // A CLOSED ROW IS NOT AN UNOBSERVED ONE (.plans/05-close-to-history.md).
+            // Every row in History is unobserved — that is what closing a tile
+            // means — so freezing them all would mark the whole section with a
+            // confidence caveat that says nothing, and would strand each one's
+            // last elapsed reading as a permanent number beside it.
+            if case .archived = row.lifecycle {
+                lastKnown.removeValue(forKey: row.id)
+                return row
+            }
             guard unobserved.contains(row.id) else {
                 lastKnown.removeValue(forKey: row.id)
                 return row
@@ -4701,18 +4710,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             break
         case .managedAgent:
             // CLOSING A TILE IS CLOSING A WINDOW, NOT ENDING THE WORK (P2A.5, locked
-            // decision). Three things happen here and a fourth deliberately does not:
+            // decision). Four things happen here and a fifth deliberately does not:
             // the tile-keyed `ManagedAgentSessionRecord` goes (view state, the same
             // class as canvas persistence dropping the tile — its `tileId` is a
             // `let`, so it cannot outlive the tile it is keyed on); the agent's VIEW
             // BINDING is cleared, so it is listed as running-and-unattached rather
-            // than claiming a tile that no longer exists; the tile cancels its own
-            // subscription (P2A.4). What is NOT called is `agentSupervisor.stop` —
-            // the runner keeps running and `AgentRecord` stays in `AgentStore`.
+            // than claiming a tile that no longer exists; the agent is PARKED IN
+            // HISTORY unless it is busy; the tile cancels its own subscription
+            // (P2A.4). What is NOT called is `agentSupervisor.stop` — the runner
+            // keeps running and `AgentRecord` stays in `AgentStore`.
             // Stopping is a separate deliberate action (Phase 3's row context menu).
             // `--agent-supervisor-check` scans this branch to hold that.
+            //
+            // THE PARK IS WHY THE SIDEBAR STOPS FILLING UP (.plans/05-close-to-history.md).
+            // Before it, a closed tile left its record in the live list with no tile
+            // and no runner — unobservable, so the row froze at "Unconfirmed" and
+            // stayed there forever. `close` refuses a busy agent, so a tile closed
+            // mid-turn still leaves its row where you can see the work finish.
             try? workspaceRuntime?.activeController?.managedSessionStore.delete(tileId: id)
             if let agentId = agentSupervisor.agent(forTile: id) {
+                agentSupervisor.close(agentID: agentId)
                 agentSupervisor.detachView(agentID: agentId)
             }
             (canvasView.tileView(for: id) as? ManagedAgentTileNSView)?.detach()
@@ -7706,8 +7723,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // A tile the agent already has is the tile it is revealed in — spawning a
         // second one for an agent that has one is the packet's other trap, and
         // `attach` would silently unbind the first.
-        guard let tileId = record.tileId ?? attachTileToAgentFromInbox(agentId) else { return false }
+        //
+        // A RECORD CAN OUTLIVE ITS TILE, though, and then the recorded id names a
+        // tile no canvas holds: `revealTileFromInbox` resolves nothing and returns
+        // false, so clicking the row did NOTHING and the agent looked unreachable.
+        // Measured on the owner's dev store — eight records, every one of them
+        // still naming a tile the canvas had lost. A binding nothing can find is
+        // not a binding, so it is cleared and the agent gets a fresh tile, which
+        // is the same answer a headless agent already gets one line down
+        // (.plans/05-close-to-history.md).
+        let boundTileId = record.tileId.flatMap { tileIsReachable($0) ? $0 : nil }
+        if record.tileId != nil, boundTileId == nil {
+            fputs("Reveal from inbox: \(agentId.rawValue.uuidString) names tile \(record.tileId!.uuidString), which no canvas holds; giving it a new one\n", stderr)
+            agentSupervisor.detachView(agentID: agentId)
+        }
+        guard let tileId = boundTileId ?? attachTileToAgentFromInbox(agentId) else { return false }
         guard revealTileFromInbox(tileId) else { return false }
+        // Out of History: reopening a closed agent is asking for it back, and its
+        // row must not stay in a section whose promise is "no tile"
+        // (.plans/05-close-to-history.md). After the reveal landed, for the same
+        // reason the focus arm below is.
+        agentSupervisor.reopen(agentID: agentId)
         // P3.3: opening a row clears the mark AND arms the focus, so a turn that
         // completes while you are sitting on the agent is not unread. Only after the
         // reveal landed — arming focus on an agent you failed to reach would suppress
@@ -7775,8 +7811,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return wakeAgentsFromInbox(rowIds)
         case .markUnread:
             return markUnreadAgentsFromInbox(rowIds)
-        case .archive, .delete:
-            return archiveAgentsFromInbox(rowIds, verb: action == .delete ? "Delete" : "Archive")
+        case .archive:
+            return parkAgentsFromInbox(rowIds)
+        case .delete:
+            return archiveAgentsFromInbox(rowIds, verb: "Delete")
         case .generateName:
             // R2: this is the compile-forced callback callsite only. The
             // supervisor owns filtering, cap admission, CAS, and completion.
@@ -7806,8 +7844,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return snoozeAgentsFromInbox(rowIds)
         case .markUnread:
             return markUnreadAgentsFromInbox(rowIds)
-        case .archive, .delete:
-            return archiveAgentsFromInbox(rowIds, verb: action == .delete ? "Delete" : "Archive")
+        case .archive:
+            return parkAgentsFromInbox(rowIds)
+        case .delete:
+            return archiveAgentsFromInbox(rowIds, verb: "Delete")
         }
     }
 
@@ -7895,10 +7935,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return true
     }
 
-    /// THE ONE DELETION PATH, for both verbs. `AgentSupervisor.archive` does the whole
-    /// job in an order its own comments call load-bearing (stop, then the durable
-    /// delete, then the worktree, keeping anything unmerged); Delete and Archive differ
-    /// in what the person is told, not in what the app does.
+    // Ticket: .plans/05-close-to-history.md
+
+    /// Archive, the REVERSIBLE verb: the selected agents move to History and
+    /// nothing is destroyed. Same park closing a tile performs, from the list
+    /// instead of the canvas.
+    ///
+    /// NO CONFIRMATION SHEET, and that is the point of the split: an action you can
+    /// undo by opening History and clicking the row does not get to interrupt you.
+    /// The sheet belongs to Delete, which is the one that cannot be taken back.
+    ///
+    /// A BUSY AGENT IS REFUSED rather than silently skipped — `close` will not park
+    /// one, and a message that said "Archived 3 agents" while one of them kept
+    /// working is the over-claim `ArchiveReport` exists to stop.
+    @discardableResult
+    private func parkAgentsFromInbox(_ rowIds: [UUID]) -> Bool {
+        let targets = managedAgents(for: rowIds)
+        let ignored = rowIds.count - targets.count
+        guard !targets.isEmpty else {
+            setWorkspaceManagementMessage("Archive ignored: no managed agent was selected.")
+            return false
+        }
+        // ARCHIVE TAKES THE TILE WITH IT. History's promise is "the tile is gone,
+        // the agent is not", and archiving from the list while its tile sat on the
+        // canvas would put the same agent in both places at once — a row saying
+        // Closed above a tile you can type into.
+        //
+        // The park comes FIRST and the tile only follows a park that succeeded:
+        // `deleteTile` closes a tile whether or not its agent can be parked, so
+        // doing it the other way round would take the tile away from a busy agent
+        // this action just refused to archive. The nested `close` inside
+        // `deleteTile` then no-ops on the stamp already written.
+        var parked: [AgentRecord] = []
+        for record in targets where agentSupervisor.close(agentID: record.id) {
+            parked.append(record)
+            if let tileId = record.tileId { deleteTile(id: tileId) }
+        }
+        let refused = targets.filter { record in !parked.contains { $0.id == record.id } }
+        var sentence: String
+        if parked.isEmpty {
+            sentence = "Archived nothing: \(countedAgents(refused.count)) still busy."
+        } else {
+            sentence = "Archived \(countedAgents(parked.count)) to History: \(agentNameList(parked))."
+            if !refused.isEmpty {
+                sentence += " Kept \(countedAgents(refused.count)) still busy: \(agentNameList(refused))."
+            }
+        }
+        if ignored > 0 { sentence += " \(ignored) selected row(s) had no agent to archive." }
+        setWorkspaceManagementMessage(sentence)
+        refreshAgentSurfaces(notify: false)
+        return !parked.isEmpty
+    }
+
+    /// THE DELETION PATH. `AgentSupervisor.archive` does the whole job in an order
+    /// its own comments call load-bearing (stop, then the durable delete, then the
+    /// worktree, keeping anything unmerged).
+    ///
+    /// ONE VERB REACHES HERE NOW. Delete and Archive used to be the same call and
+    /// differed only in what the person was told; .plans/05-close-to-history.md
+    /// makes Archive reversible (`parkAgentsFromInbox` above), so this is the only
+    /// path that destroys anything. The `verb` parameter stays because the
+    /// confirmation sheet and the report sentence are worded from it.
     @discardableResult
     private func archiveAgentsFromInbox(_ rowIds: [UUID], verb: String) -> Bool {
         let targets = managedAgents(for: rowIds)
@@ -8022,6 +8119,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if let workspaceId = workspaceContainingTile(tileId),
            !switchWorkspaceFromSidebarIfNeeded(workspaceId) { return false }
         return focusTileFromSidebar(tileId)
+    }
+
+    /// Whether anything can still show this tile — the same two places
+    /// `revealTileFromInbox` looks, in the same order: the live canvas first (a
+    /// tile just spawned is there before the tree is re-read), then the workspace
+    /// tree. False means the id names a tile that no longer exists anywhere, which
+    /// is a stale binding rather than a tile in another workspace.
+    private func tileIsReachable(_ tileId: UUID) -> Bool {
+        if canvasView?.navigationTileSnapshot(for: tileId) != nil { return true }
+        return workspaceContainingTile(tileId) != nil
     }
 
     /// Which workspace holds this tile, from the same fold the sidebar draws
@@ -24230,6 +24337,102 @@ extension AppDelegate {
     try expect(revealApp.currentWorkspaceIdForSidebar() == hereWorkspace,
                "…and attaching a view is not a workspace switch")
 
+    // 3c · CLOSING THE TILE PARKS THE AGENT IN HISTORY (.plans/05-close-to-history.md).
+    //
+    //      DRIVEN THROUGH THE REAL `deleteTile`, never a reconstruction of its
+    //      `.managedAgent` branch. That branch is where the defect lived — a closed
+    //      tile left its record in the live list with no tile and no runner, so the
+    //      row froze at "Unconfirmed" and stayed there for good — and a witness that
+    //      re-performed the branch's steps itself would stay green while production
+    //      dropped the park. (`--agent-supervisor-check` source-scans the same branch
+    //      for the call; this drives it and reads the result off the shipped list.)
+    try expect(!DeleteConfirmPolicy.current.requiresConfirmation(for: .managedAgent),
+               "setup: this machine's delete-confirm policy is \(DeleteConfirmPolicy.current.rawValue), which would put a modal alert in front of deleteTile and hang the run")
+    try expect(!revealInbox.isHistoryExpandedForQA,
+               "History opens COLLAPSED — it is the one section you go looking for")
+    try expect(revealInbox.historyHeaderTitleForQA == nil,
+               "nothing is closed yet, so no heading is drawn — got \(String(describing: revealInbox.historyHeaderTitleForQA))")
+    try expect(revealInbox.rowIdsForQA.contains(elsewhereAgent.rawValue),
+               "setup: the agent about to be closed must be a visible row first")
+    try expect(revealSupervisor.records[elsewhereAgent]?.archivedAt == nil,
+               "setup: it must not already be in History")
+
+    revealApp.deleteTile(id: elsewhereTile)
+    revealInbox.layoutForQA()
+
+    guard let closedAt = revealSupervisor.records[elsewhereAgent]?.archivedAt else {
+        throw CheckError.failed("closing an idle agent's tile left it in the live list: archivedAt is still nil, which is the row that used to sit there saying Unconfirmed forever")
+    }
+    let durableClose = try revealAgentStore.load(id: elsewhereAgent)?.archivedAt
+    try expect(durableClose == closedAt,
+               "the park is DURABLE, or the next launch puts the agent back at the top of the list — on disk: \(String(describing: durableClose))")
+    try expect(revealSupervisor.records[elsewhereAgent] != nil,
+               "closing a tile must not delete the agent — History is where it went, not a grave")
+    try expect(!revealCanvas.canvasState.tiles.contains { $0.id == elsewhereTile },
+               "the tile itself is gone from the canvas")
+    try expect(!revealInbox.rowIdsForQA.contains(elsewhereAgent.rawValue),
+               "a closed agent LEAVES the live list — got \(revealInbox.titlesForQA)")
+    try expect(revealInbox.historyHeaderTitleForQA == "History (1)",
+               "…and is counted by a heading instead — got \(String(describing: revealInbox.historyHeaderTitleForQA))")
+
+    // It is REACHABLE: open History and the row is there, saying what it is.
+    try expect(revealInbox.clickHistoryDisclosureForQA(),
+               "the History heading's own triangle must be wired, not just `toggleHistory`")
+    revealInbox.layoutForQA()
+    try expect(revealInbox.isHistoryExpandedForQA, "…and open the section")
+    guard let closedRow = revealInbox.rows.first(where: { $0.id == elsewhereAgent.rawValue }) else {
+        throw CheckError.failed("opening History must show the closed agent — got \(revealInbox.titlesForQA)")
+    }
+    try expect(closedRow.presentationLabel == AgentStatusVocabulary.closed,
+               "a closed row says '\(AgentStatusVocabulary.closed)' — the app knows it is not running, so '\(AgentStatusVocabulary.unconfirmed)' would be a caveat about nothing — got \(String(describing: closedRow.presentationLabel))")
+    try expect(closedRow.variant == .slim,
+               "History collapses: a closed agent is the most parked row there is, not a card")
+
+    // And clicking it brings the agent back — same agent, new tile, out of History.
+    let tilesBeforeReopen = revealCanvas.canvasState.tiles.count
+    let recordsBeforeReopen = revealSupervisor.records.count
+    try expect(revealInbox.clickRowForQA(id: elsewhereAgent.rawValue), "a History row must be clickable")
+    revealInbox.layoutForQA()
+    guard let reopenedTile = revealSupervisor.records[elsewhereAgent]?.tileId else {
+        throw CheckError.failed("reopening a closed agent must give it a tile again")
+    }
+    let durableReopen = try revealAgentStore.load(id: elsewhereAgent)?.archivedAt
+    try expect(revealSupervisor.records[elsewhereAgent]?.archivedAt == nil && durableReopen == nil,
+               "…and take it back out of History, on disk too — stored archivedAt \(String(describing: durableReopen))")
+    try expect(revealSupervisor.records.count == recordsBeforeReopen,
+               "reopening must not mint a second agent — \(revealSupervisor.records.count) records, was \(recordsBeforeReopen)")
+    try expect(revealCanvas.canvasState.tiles.count == tilesBeforeReopen + 1,
+               "…and exactly one tile came back — \(revealCanvas.canvasState.tiles.count) tiles, was \(tilesBeforeReopen)")
+    try expect(revealApp.focusBroker.activeSurface == .tile(reopenedTile),
+               "…and the click landed on it — focus is \(String(describing: revealApp.focusBroker.activeSurface))")
+    try expect(revealInbox.historyHeaderTitleForQA == nil,
+               "History is empty again, so its heading is gone — got \(String(describing: revealInbox.historyHeaderTitleForQA))")
+
+    // …and ARCHIVE does the same thing from the other side. Its whole difference
+    // from closing a tile is where you start; if it left the tile behind, the same
+    // agent would be a "Closed" row above a tile you can still type into.
+    let tilesBeforeArchive = revealCanvas.canvasState.tiles.count
+    try expect(revealApp.performInboxRowAction(.archive, on: [elsewhereAgent.rawValue]),
+               "Archive must be performable on an idle agent")
+    revealInbox.layoutForQA()
+    try expect(revealSupervisor.records[elsewhereAgent]?.archivedAt != nil,
+               "Archive parks the agent, exactly as closing its tile does")
+    try expect(revealCanvas.canvasState.tiles.count == tilesBeforeArchive - 1,
+               "…and takes its tile with it — \(revealCanvas.canvasState.tiles.count) tiles, was \(tilesBeforeArchive)")
+    try expect(revealSupervisor.records[elsewhereAgent]?.tileId == nil,
+               "…leaving no binding to a tile that is gone — got \(String(describing: revealSupervisor.records[elsewhereAgent]?.tileId))")
+    let archivedRecordOnDisk = try revealAgentStore.load(id: elsewhereAgent)
+    try expect(archivedRecordOnDisk != nil,
+               "Archive is the REVERSIBLE verb: the record must still be on disk (Delete is the one that removes it)")
+
+    // Put the agent back, so the sections below inherit the state section C left
+    // them rather than a hole this one dug.
+    try expect(revealInbox.clickRowForQA(id: elsewhereAgent.rawValue),
+               "the archived row must be clickable again")
+    revealInbox.layoutForQA()
+    try expect(revealSupervisor.records[elsewhereAgent]?.archivedAt == nil,
+               "teardown: the agent must come back out of History for the sections below")
+
     // 4 · CROSS-WORKSPACE: the click switches workspace first, then lands.
     try expect(revealApp.currentWorkspaceIdForSidebar() == hereWorkspace,
                "setup: the there-agent must be in a workspace we are NOT in, or the switch is untested")
@@ -24692,7 +24895,7 @@ extension AppDelegate {
     let settledRow = lifecycled(quietRow, .settled(at: LabFixtures.inboxNow.addingTimeInterval(-300)))
     try expect(!InboxBulkAction.available(for: [failedRow, settledRow]).contains(.settle),
                "an already-settled member has nothing to settle — got \(InboxBulkAction.available(for: [failedRow, settledRow]).map(\.title))")
-    let archivedRow = lifecycled(quietRow, .archived)
+    let archivedRow = lifecycled(quietRow, .archived(at: LabFixtures.inboxNow.addingTimeInterval(-600)))
     try expect(InboxBulkAction.available(for: [archivedRow]) == [.delete],
                "an archived row is out of the lifecycle: only Delete is left — got \(InboxBulkAction.available(for: [archivedRow]).map(\.title))")
     // Vacuity, and it is not pedantic: `allSatisfy` over an empty selection is TRUE, so

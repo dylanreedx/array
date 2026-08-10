@@ -1200,6 +1200,12 @@ enum UIProbeGeometry {
         return IndependentFanoutExpectation(
             visibleIDs: sorted
                 .filter { !childIDs.contains($0.id) || selectedIDs.contains($0.id) }
+                // .plans/05-close-to-history.md: History is COLLAPSED by default,
+                // so a closed row is counted by a heading and not drawn. Read off
+                // the row's own lifecycle rather than calling `InboxSort.partition`
+                // — this oracle exists to disagree with the renderer's own model,
+                // and borrowing that model is how it would stop being able to.
+                .filter { if case .archived = $0.lifecycle { return false } else { return true } }
                 .map(\.id),
             remainders: [remainder])
     }
@@ -1254,7 +1260,15 @@ enum UIProbeGeometry {
         let expectedAgentCells = expectedAgentIDs.count
         let expectedShelfRows = parts.shelfCount > 0 ? 1 : 0
         let expectedPagingRows = page.hasMore ? 1 : 0
-        let expectedNonAgentRows = expectedShelfRows + expectedPagingRows
+        // .plans/05-close-to-history.md: a closed agent costs one heading row and
+        // no cell, which is the whole point of the section. Counted off `rows`
+        // and not off `parts`, because the closed rows were deliberately taken
+        // out of the visible set above — the heading is drawn for rows that are
+        // NOT on screen.
+        let expectedHistoryRows = rows.contains {
+            if case .archived = $0.lifecycle { return true } else { return false }
+        } ? 1 : 0
+        let expectedNonAgentRows = expectedShelfRows + expectedPagingRows + expectedHistoryRows
         let actualRemainders = probe.inbox.fanoutRemainderRowsForQA
         let expectedRemainderIDs = Set(expected.remainders.map(\.parentID))
         let actualRemainderIDs = Set(actualRemainders.map(\.parentId))
@@ -1456,8 +1470,19 @@ enum UIProbeGeometry {
               let defaultRemainder = probe.inbox.fanoutRemaindersByParentForQA[fanoutParent] else {
             throw fail("\(label): the capped parent did not render an explicit remainder")
         }
+        // EVERY ROW IS ACCOUNTED FOR: drawn, held behind a fan-out remainder, or —
+        // since .plans/05-close-to-history.md — counted by the collapsed History
+        // heading. The third bucket is named here rather than folded into
+        // `visibleIDs`, so "closed rows are off screen" stays a claim this line
+        // makes instead of an absence it cannot see.
+        let closedIDs = Set(rows.compactMap { row -> UUID? in
+            if case .archived = row.lifecycle { return row.id } else { return nil }
+        })
         guard Set(defaultRemainder.hiddenDescendantIDs).intersection(Set(expectedDefault.visibleIDs)).isEmpty,
-              Set(defaultRemainder.hiddenDescendantIDs).union(Set(expectedDefault.visibleIDs)) == Set(rows.map(\.id)) else {
+              closedIDs.intersection(Set(expectedDefault.visibleIDs)).isEmpty,
+              Set(defaultRemainder.hiddenDescendantIDs)
+                .union(Set(expectedDefault.visibleIDs))
+                .union(closedIDs) == Set(rows.map(\.id)) else {
             throw fail("\(label): the remainder did not account for every hidden child without losing a visible id")
         }
 
@@ -1513,6 +1538,19 @@ enum UIProbeGeometry {
         probe.inbox.layoutForQA()
         probe.host.layoutSubtreeIfNeeded()
         probe.inbox.layoutForQA()
+        // .plans/05-close-to-history.md: the corpus carries a CLOSED row, and it
+        // sits behind the collapsed History heading. Open it through the heading's
+        // own control so "every corpus id materializes" stays a claim about the
+        // whole corpus — and so the live AppKit table, not just the model, is
+        // witnessed producing the row.
+        if closedIDs.isEmpty == false {
+            guard probe.inbox.clickHistoryDisclosureForQA(), probe.inbox.isHistoryExpandedForQA else {
+                throw fail("\(label): the History heading did not open, so its rows could not be materialized")
+            }
+            probe.inbox.layoutForQA()
+            probe.host.layoutSubtreeIfNeeded()
+            probe.inbox.layoutForQA()
+        }
         let expandedIDs = probe.inbox.rowIdsForQA
         guard expandedIDs == sortedRows.map(\.id),
               probe.inbox.qaMaterializedRowCellCount == rows.count,
@@ -2725,18 +2763,28 @@ enum UIProbeGeometry {
             asserted += 8
         }
 
-        // The same content with a different resting mark/lifecycle must not move
-        // the card. This is the non-vacuous guard against height branching on
-        // attention or importance rather than on what the cell draws.
+        // The same content with a different RESTING MARK must not move the card.
+        // This is the non-vacuous guard against height branching on attention or
+        // importance rather than on what the cell draws.
+        //
+        // Attention only, and no longer attention-or-lifecycle: since
+        // .plans/05-close-to-history.md an archived row draws the word "Closed"
+        // where an active one may draw nothing, so a lifecycle flip is a CONTENT
+        // change and asserting it moves no height would be asserting the height is
+        // ignoring content — the opposite of this leg's rule. Attention is still
+        // the pure mark it always was.
         let base = rows[1]
         let equivalent = AgentInboxRow(
             id: base.id, title: base.title, projectName: base.projectName,
-            state: base.state, attention: .unread, lifecycle: .archived,
+            state: base.state, attention: .unread, lifecycle: base.lifecycle,
             model: base.model, role: base.role, branch: base.branch,
             isIsolated: base.isIsolated, elapsed: base.elapsed, depth: base.depth,
             variant: .card, createdAt: base.createdAt, parentId: base.parentId)
+        guard base.attention != .unread else {
+            throw fail("sidebar-ux-check.content-height: the equivalence fixture must actually change the attention mark, or the guard is vacuous")
+        }
         guard AgentInboxView.height(for: base) == AgentInboxView.height(for: equivalent) else {
-            throw fail("sidebar-ux-check.content-height: identical drawn content changed height with attention/lifecycle")
+            throw fail("sidebar-ux-check.content-height: identical drawn content changed height with the attention mark")
         }
 
         // A content arrival changes only the row's height; the selected identity
@@ -5279,6 +5327,20 @@ enum UIProbeGeometry {
                 probe.inbox.layoutForQA()
                 probe.host.layoutSubtreeIfNeeded()
                 probe.inbox.layoutForQA()
+                // .plans/05-close-to-history.md: the corpus's closed row is behind
+                // the collapsed History heading, so "every row materializes" means
+                // opening that section too — through its own control, as with the
+                // fan-out remainder above.
+                if rows.contains(where: {
+                    if case .archived = $0.lifecycle { return true } else { return false }
+                }) {
+                    guard probe.inbox.clickHistoryDisclosureForQA() else {
+                        throw fail("ui-geometry-check: sidebar gate could not open History at \(gate.name)")
+                    }
+                    probe.inbox.layoutForQA()
+                    probe.host.layoutSubtreeIfNeeded()
+                    probe.inbox.layoutForQA()
+                }
                 let geometries = probe.inbox.qaRowGeometriesForQA
                 guard geometries.count == rows.count,
                       probe.inbox.rowIdsForQA == InboxSort.sortForInbox(rows: rows).map(\.id),

@@ -361,13 +361,19 @@ private func runInboxLifecycleMovesRowCheck() {
     expect(afterSnooze == [rowThree, rowFour, rowFive, rowTwo, rowOne],
            "snoozing shelves the row between the live rows and history, got \(afterSnooze)")
 
-    // Archived is NOT parked: it has left the list by the time anything draws it,
-    // so it keeps its place rather than being demoted to a block of its own.
-    var archivedList = base
+    // Archiving is the strongest park there is (.plans/05-close-to-history.md), so
+    // it demotes the row PAST history — below even a settled one. Before that plan
+    // this asserted the opposite ("archiving does not reorder"), which was only
+    // true because archiving deleted the record and no archived row could reach a
+    // sort.
+    var archivedList = settledList
     let middle = archivedList.firstIndex { $0.id == rowThree }!
-    archivedList[middle] = withLifecycle(archivedList[middle], .archived)
-    expect(InboxSort.sortForInbox(rows: archivedList).map(\.id) == baseline,
-           "archiving does not reorder, got \(InboxSort.sortForInbox(rows: archivedList).map(\.id))")
+    archivedList[middle] = withLifecycle(archivedList[middle], .archived(at: sortEpoch.addingTimeInterval(9_000)))
+    let afterArchive = InboxSort.sortForInbox(rows: archivedList).map(\.id)
+    expect(afterArchive == [rowTwo, rowFour, rowFive, rowOne, rowThree],
+           "archiving moves the row below history, at the very end of the list, got \(afterArchive)")
+    expect(afterArchive.last == rowThree && afterArchive.dropLast().contains(rowOne),
+           "the settled row stays ABOVE the closed one — History is further away than the tail")
 }
 
 // MARK: - 4 · history is ordered by when work ENDED
@@ -391,8 +397,22 @@ private func runInboxHistoryOrderCheck() {
            "a wake-up time is not an end time")
     expect(InboxLifecycle.settled(at: sortEpoch).endedAt == sortEpoch,
            "a settled row's end time is the one it was settled with")
-    expect(InboxLifecycle.active.endedAt == nil && InboxLifecycle.archived.endedAt == nil,
-           "only a settled row has ended")
+    expect(InboxLifecycle.active.endedAt == nil,
+           "an active row has not ended")
+    expect(InboxLifecycle.archived(at: sortEpoch).endedAt == sortEpoch,
+           "a closed row's end time is when it was closed — that is what orders History")
+
+    // The closed block is ordered by close time, and it is a SEPARATE block: three
+    // rows closed in the opposite order to their spawn come out most-recently-closed
+    // first, the same rule history uses.
+    let closedRows = [
+        sortRow(rowOne, spawnedAfter: 400, lifecycle: .archived(at: sortEpoch.addingTimeInterval(1_000))),
+        sortRow(rowTwo, spawnedAfter: 300, lifecycle: .archived(at: sortEpoch.addingTimeInterval(2_000))),
+        sortRow(rowThree, spawnedAfter: 200, lifecycle: .archived(at: sortEpoch.addingTimeInterval(3_000))),
+    ]
+    let closedSorted = InboxSort.sortForInbox(rows: closedRows).map(\.id)
+    expect(closedSorted == [rowThree, rowTwo, rowOne],
+           "History is most-recently-closed first, got \(closedSorted)")
 }
 
 // MARK: - 5 · ties and permutation
@@ -811,12 +831,27 @@ private func runInboxPartitionCheck() {
 
     // TOTAL over the vocabulary: every lifecycle answers exactly one section, so a
     // fifth case cannot fall through the view's `switch` into the wrong block.
-    expect(InboxSort.section(for: .archived, now: now) == .active,
-           "an archived row is not a section of its own — it has left the list")
+    expect(InboxSort.section(for: .archived(at: now), now: now) == .history,
+           "a closed row draws in History, the section it was closed into")
     expect(InboxSort.section(for: .snoozed(until: now), now: now) == .active,
            "the shelf boundary is `>`, the same one `resolve` uses")
     expect(InboxSort.partition(rows: [], now: now) == InboxPartition(),
            "no rows, no sections")
+
+    // History is collapsed by DEFAULT, and the shelf's state does not speak for it:
+    // expanding the shelf must not reveal closed agents (.plans/05-close-to-history.md).
+    let closedRow = sortRow(rowOne, spawnedAfter: 10, lifecycle: .archived(at: now))
+    let activeRow = sortRow(rowTwo, spawnedAfter: 20, lifecycle: .active)
+    let mixed = InboxSort.partition(rows: [closedRow, activeRow], now: now)
+    expect(mixed.history.map(\.id) == [rowOne] && mixed.active.map(\.id) == [rowTwo],
+           "the closed row goes to History and nowhere else, got \(mixed)")
+    expect(mixed.historyCount == 1 && mixed.shelfCount == 0,
+           "the History header counts closed rows; the shelf header does not")
+    expect(mixed.visible(shelfExpanded: true).map(\.id) == [rowTwo],
+           "opening the shelf reveals the shelf, not History")
+    expect(mixed.visible(shelfExpanded: false, historyExpanded: true).map(\.id) == [rowTwo, rowOne],
+           "opening History puts the closed row last, after everything still live")
+    expect(mixed.all.count == 2, "every row is in exactly one section")
 }
 
 // Ticket: docs/38-tickets/90-agent-ux/P4.8-settled-tail-paging.md

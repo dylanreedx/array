@@ -550,6 +550,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// now is not a fact about an agent, and a persisted one would restore a fold
     /// over work that woke up while the app was closed.
     private var shelfExpanded = false
+    // Ticket: .plans/05-close-to-history.md
+    /// Whether History is open. VIEW-LOCAL and COLLAPSED BY DEFAULT for the same
+    /// reasons as the shelf, and one more: History is the only section you go
+    /// LOOKING for. Closed agents are the ones you have already decided you are
+    /// done watching, so restoring an open History would hand every launch a list
+    /// of everything you ever closed, above nothing you asked for.
+    private var historyExpanded = false
     // Ticket: docs/38-tickets/90-agent-ux/P4.8-settled-tail-paging.md
     /// How many settled rows the tail is showing. VIEW-LOCAL and back at the first
     /// page on every launch, for the reason `shelfExpanded` is: how far you have
@@ -684,6 +691,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// shift every one of those arrays out of step with `rows`. At most one exists,
     /// so it is a field and not a map.
     private var shelfHeaderCell: AgentInboxShelfHeaderView?
+    /// The History heading's cell (.plans/05-close-to-history.md). Cached
+    /// separately from the shelf's: both headings can be on screen at once.
+    private var historyHeaderCell: AgentInboxShelfHeaderView?
     // Ticket: docs/38-tickets/90-agent-ux/P4.8-settled-tail-paging.md
     /// The settled tail's footer, kept out of `cellsByRow` for the same reason the
     /// heading is. At most one exists — the tail is one section.
@@ -1400,6 +1410,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         setItems(visible)
         cellsByRow.removeAll()
         shelfHeaderCell = nil
+        historyHeaderCell = nil
         settledMoreCell = nil
         fanoutRemainderCellsByParent.removeAll()
         tableView.reloadData()
@@ -1616,6 +1627,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         if page.hasMore {
             built.append(.settledMore(hidden: page.hidden))
         }
+        // .plans/05-close-to-history.md. LAST, and behind its own collapsed
+        // heading: closed agents are the only rows you go looking for, so they may
+        // never displace one you did not. No empty heading, for the reason the
+        // shelf has none. Unpaged on purpose — collapsed-by-default already keeps
+        // History off the screen you did not ask for it on, and paging a section
+        // that is shut costs a second limit, a second footer and a second thing
+        // that can disagree with its own count.
+        if parts.historyCount > 0 {
+            built.append(.historyHeader(count: parts.historyCount, isExpanded: historyExpanded))
+            if historyExpanded {
+                built.append(contentsOf: agentItems(for: parts.history))
+            }
+        }
         return built
     }
 
@@ -1677,6 +1701,20 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         render(display(from: allRows))
     }
 
+    // MARK: - History (.plans/05-close-to-history.md)
+
+    /// Open or close History. A full re-render with selection and hover dropped,
+    /// for the reason `toggleShelf` records: rows appear, so every index the old
+    /// list handed out now names a different agent.
+    func toggleHistory() {
+        historyExpanded.toggle()
+        tableView.deselectAll(nil)
+        selectedRowsForEmphasis = IndexSet()
+        hoveredAgentId = nil
+        keyboardFocusIntent = nil
+        render(display(from: allRows))
+    }
+
     // MARK: - The two index spaces (P4.7)
 
     /// Take a new drawn model, and build the two index maps WITH it — one
@@ -1716,6 +1754,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// and no shelf would otherwise report the footer's row as the heading's.
     private var shelfHeaderTableRow: Int? {
         items.firstIndex { if case .shelfHeader = $0 { return true } else { return false } }
+    }
+
+    /// The History heading's table row, or nil when nothing has been closed.
+    private var historyHeaderTableRow: Int? {
+        items.firstIndex { if case .historyHeader = $0 { return true } else { return false } }
     }
 
     /// The settled tail's footer row, or nil when nothing is being held back.
@@ -1937,7 +1980,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         guard let model = item.agentRow else {
             switch item {
             case .fanoutRemainder: return AgentInboxView.slimRowHeight
-            case .shelfHeader, .settledMore: return AgentInboxView.shelfHeaderHeight
+            case .shelfHeader, .historyHeader, .settledMore:
+                return AgentInboxView.shelfHeaderHeight
             case .agent: return AgentInboxView.shelfHeaderHeight
             }
         }
@@ -1977,8 +2021,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             case .shelfHeader(let count, let isExpanded):
                 let header = shelfHeaderCell ?? AgentInboxShelfHeaderView()
                 header.onToggle = { [weak self] in self?.toggleShelf() }
-                header.apply(count: count, isExpanded: isExpanded)
+                header.apply(section: .snoozed, count: count, isExpanded: isExpanded)
                 shelfHeaderCell = header
+                return header
+            // .plans/05-close-to-history.md. Its own cached cell: the two headings
+            // are on screen at the same time, so sharing one instance would have
+            // the second draw overwrite the first.
+            case .historyHeader(let count, let isExpanded):
+                let header = historyHeaderCell ?? AgentInboxShelfHeaderView()
+                header.onToggle = { [weak self] in self?.toggleHistory() }
+                header.apply(section: .history, count: count, isExpanded: isExpanded)
+                historyHeaderCell = header
                 return header
             // P4.8
             case .settledMore(let hidden):
@@ -3519,6 +3572,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     func clickShelfDisclosureForQA() -> Bool {
         shelfHeaderCell?.clickDisclosureForQA() ?? false
     }
+    // Ticket: .plans/05-close-to-history.md
+    /// The History heading as RENDERED, where it sits, and whether it is open —
+    /// nil when nothing has been closed and no heading is drawn.
+    var historyHeaderTitleForQA: String? { historyHeaderCell?.qaTitle }
+    var historyHeaderDisclosureForQA: String? { historyHeaderCell?.qaDisclosureGlyph }
+    var isHistoryExpandedForQA: Bool { historyExpanded }
+    var historyHeaderTableRowForQA: Int? { historyHeaderTableRow }
+    /// Open or close History the way the user does — through the heading's own
+    /// button, so the check exercises the wiring and not just `toggleHistory`.
+    @discardableResult
+    func clickHistoryDisclosureForQA() -> Bool {
+        historyHeaderCell?.clickDisclosureForQA() ?? false
+    }
     // Ticket: docs/38-tickets/90-agent-ux/P4.8-settled-tail-paging.md
     /// The footer as RENDERED, where it sits, and how far the tail has been paged —
     /// nil when history fits and no footer is drawn.
@@ -4383,6 +4449,12 @@ enum InboxListItem {
     case agent(AgentInboxRow)
     case fanoutRemainder(FanoutRemainder)
     case shelfHeader(count: Int, isExpanded: Bool)
+    // Ticket: .plans/05-close-to-history.md
+    /// The `History (N)` heading. A separate case from `shelfHeader` even though
+    /// one view draws both, because the two sections collapse independently and
+    /// `identity` has to be able to tell their headings apart — otherwise a push
+    /// that changed only the History count would be diffed against the shelf's.
+    case historyHeader(count: Int, isExpanded: Bool)
     // Ticket: docs/38-tickets/90-agent-ux/P4.8-settled-tail-paging.md
     /// The footer under a paged settled tail. A third KIND of row rather than a
     /// second use of the heading, for the reason the heading is not an agent: it
@@ -4409,6 +4481,7 @@ enum InboxListItem {
         case .agent(let row): return "agent:\(row.id.uuidString)"
         case .fanoutRemainder(let remainder): return "fanout:\(remainder.identity)"
         case .shelfHeader(let count, let isExpanded): return "shelf:\(count):\(isExpanded)"
+        case .historyHeader(let count, let isExpanded): return "history:\(count):\(isExpanded)"
         // P4.8: the hidden count is part of the footer's identity for the same
         // reason the shelf's is part of the heading's — an agent settling while the
         // tail is paged changes that number and nothing else, and the incremental
@@ -4440,12 +4513,49 @@ final class AgentInboxShelfHeaderView: NSTableCellView, TokenThemed {
     private let label = NSTextField(labelWithString: "")
     private let hitButton = NSButton(frame: .zero)
     private var count = 0
+    private var section: CountedSection = .snoozed
     var onToggle: (() -> Void)?
+
+    /// The two counted, collapsible sections this one heading draws. Kept as a
+    /// parameter rather than a second `TokenThemed` subclass: the widget is
+    /// identical — triangle, word, count, full-width hit target — and a new themed
+    /// view owes the appearance census a sweep surface, an adopted surface and an
+    /// owner entry for nothing (`UIProbeAppearance.swift`).
+    enum CountedSection {
+        /// P4.7's shelf: parked work that is coming back.
+        case snoozed
+        /// .plans/05-close-to-history.md: agents whose tile you closed.
+        case history
+
+        var word: String {
+            switch self {
+            case .snoozed: return "Snoozed"
+            case .history: return "History"
+            }
+        }
+
+        /// What VoiceOver reads for the count, in the same words the section uses.
+        var spokenNoun: String {
+            switch self {
+            case .snoozed: return "snoozed"
+            case .history: return "closed"
+            }
+        }
+
+        var accessibilityHelp: String {
+            switch self {
+            case .snoozed: return "Shows or hides snoozed agents"
+            case .history: return "Shows or hides closed agents"
+            }
+        }
+    }
 
     /// What the heading says. `(N)` and not "N snoozed": the word is the section and
     /// the number is what it is holding, which is the order a scanning eye wants them
     /// in — and it stays one short line at sidebar width however large N gets.
-    static func title(count: Int) -> String { "Snoozed (\(count))" }
+    static func title(section: CountedSection = .snoozed, count: Int) -> String {
+        "\(section.word) (\(count))"
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -4496,13 +4606,15 @@ final class AgentInboxShelfHeaderView: NSTableCellView, TokenThemed {
 
     required init?(coder: NSCoder) { return nil }
 
-    func apply(count: Int, isExpanded: Bool) {
+    func apply(section: CountedSection = .snoozed, count: Int, isExpanded: Bool) {
         self.count = count
-        label.stringValue = AgentInboxShelfHeaderView.title(count: count)
+        self.section = section
+        label.stringValue = AgentInboxShelfHeaderView.title(section: section, count: count)
+        hitButton.setAccessibilityHelp(section.accessibilityHelp)
         disclosureButton.show(isExpanded ? .expanded : .collapsed)
         let action = isExpanded ? "Collapse" : "Expand"
         hitButton.setAccessibilityLabel("\(action) \(label.stringValue)")
-        hitButton.setAccessibilityValue("\(count) snoozed, \(isExpanded ? "expanded" : "collapsed")")
+        hitButton.setAccessibilityValue("\(count) \(section.spokenNoun), \(isExpanded ? "expanded" : "collapsed")")
         hitButton.setAccessibilityExpanded(isExpanded)
         hitButton.setAccessibilityEnabled(true)
         setAccessibilityChildren([hitButton])

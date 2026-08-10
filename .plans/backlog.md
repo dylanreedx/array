@@ -40,37 +40,21 @@ release yet.
   pi abstains). Stale readings show their number, not the word "stale".
   **Limitation:** last-turn accurate, does not climb mid-turn — no harness
   reports usage until turn end.
+- **Closing a tile parks the agent in History** (plan `05`): Dylan's report was
+  *"close/deleting agents seem weird, they go to unconfirmed… there could be a
+  recovery tab"*. Closing an IDLE tile now stamps `archivedAt` and the agent
+  leaves the live list for a collapsed `History (N)` section; a WORKING agent
+  stays visible (refused by the same `blocksSettlement` predicate Settle uses).
+  Archive and Delete stopped being the same call — Archive is reversible and
+  takes the tile with it, Delete is the only verb that destroys. Clicking a
+  History row reopens and resumes. Also fixed: a record whose `tileId` named a
+  tile no canvas held made its row silently unclickable, and closed rows said
+  "Unconfirmed" (they now say "Closed").
+  **Not done:** no boot migration for agents orphaned by the OLD close path —
+  they have `tileId == nil`, indistinguishable from a legitimately headless
+  agent, and guessing wrong hides running work.
 
-## NEXT UP — Dylan-named, 2026-08-10, not started
-
-**Closing/deleting an agent behaves weirdly; the sidebar fills with agents that
-have no tile.** In his words: *"close/deleting agents seem weird, they go to
-unconfirmed... they should be deleted for the most part, there could be a
-recovery tab, history tab, to see closed previous sessions and to open and
-resume the tile, but i see so many agents in my sidebar but i dont have that
-many tiles opened"*.
-
-Two things to separate before designing:
-1. **Closing a tile ≠ deleting an agent.** Today closing appears to leave the
-   agent record alive and merely UNOBSERVED, which the inbox renders as
-   "Unconfirmed" (an unobserved agent is unconfirmed, never working — that rule
-   is deliberate, see `ContinuumApp.swift` ~21887 and P3.4's frozen clock at
-   ~22018). So the sidebar accumulates rows for agents whose tiles are gone.
-   Dylan's expectation: closing should mostly DELETE.
-2. **He wants the recoverable ones somewhere else** — a history/recovery tab
-   listing closed sessions, from which a tile can be reopened and resumed.
-   Transcript resume already exists (plan `03`), so reopening has a foundation.
-
-Starting anchors: `AgentStatusVocabulary.unconfirmed`
-(`Sources/ContinuumRevivedAgentUI/AgentInboxRow.swift:250`, applied at :940),
-`unconfirmedFreeze` (`ContinuumApp.swift:3190`, used ~7530), the inbox row
-builder, and whatever the tile-close path does to the agent record (find it
-before assuming — the delete/close seam was NOT located in this pass).
-
-Design questions for Dylan when it starts: does closing delete immediately or
-soft-delete into history; what happens to the provider session file and the
-composer draft; is history per-project or global; does reopening resume the same
-session id or fork a new one.
+## NEXT UP — nothing named. Waiting on Dylan's next dogfood report.
 
 ### Follow-ups these opened
 
@@ -108,6 +92,19 @@ session id or fork a new one.
   It is NOT always the "different message each run" flake — on 2026-08-10 it
   failed identically on repeat runs with `a prompt equal to a model id produced
   an identifier-shaped display name`. Fixing it un-gates everything behind it.
+  **2026-08-10 (later): the naming section is now the ONLY thing holding this
+  leg red.** Plan `05` reached §7–§20 by temporarily stubbing the naming legs and
+  found three stale assertions behind it, all fixed: `live-v2` still read the
+  footer for a word `204b2ac` moved to the gyro (plus a detached tile asserted to
+  say "Unknown" and a rebound one "Ready", both removed on purpose by `92c07da`);
+  the block-renderer roster was pinned at 16 when `ddbf83d` made it 18; and the
+  context-telemetry seam built a supervisor without calling `restore()`, so it
+  had been asserting `nil == snapshot` since `24b1b00`. Fix the naming flake and
+  the whole leg — and the ~110 matrix legs behind it — come back.
+  **Technique, reusable:** stub the failing report line
+  (`let namingReport = "TEMP"`), rebuild, run, then restore. Always attribute
+  first by `git stash`-ing your work and re-running at HEAD — two of the three
+  above looked like regressions from the current session and were not.
 - **A THIRD red leg hides behind the supervisor one** (found 2026-08-10): the
   matrix halts at `--agent-supervisor-check` (line 230 of ~402), so ~110 legs
   never run in a normal invocation. On one run where the supervisor leg happened

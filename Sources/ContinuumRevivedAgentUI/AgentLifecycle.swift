@@ -338,12 +338,17 @@ extension InboxLifecycle {
     /// PRECEDENCE, in the order it is evaluated, and why each rung sits where it
     /// does:
     ///
-    ///   0. **`archivedAt` → `.archived`.** Archiving is not a stronger settle, it
-    ///      is leaving the list (`_RUNBOOK.md`: archived ≠ settled), and by the
-    ///      time it is set `AgentSupervisor.archive` has already stopped the runner
-    ///      and deleted the record — so there is no live blocker left for step 1 to
-    ///      find, and answering `.active` for an agent that is gone would resurrect
-    ///      a row pointing at nothing. This is the one rung above blockers.
+    ///   0. **`archivedAt` → `.archived(at:)`.** Archiving is not a stronger settle,
+    ///      it is leaving the live list (`_RUNBOOK.md`: archived ≠ settled) for the
+    ///      History section. It sits above blockers because the two writers that set
+    ///      it — closing a tile, and the Archive action — both REFUSE a blocked
+    ///      agent (`AgentSupervisor.close`, and P3.11's rule for the menu), so a
+    ///      record carrying `archivedAt` had no live blocker when it was stamped.
+    ///      A blocker that arrives afterwards belongs to an agent nobody is running:
+    ///      History is where you go to find it, and answering `.active` would put a
+    ///      tile-less row back at the top of a list it was deliberately closed out
+    ///      of. (Before .plans/05-close-to-history.md this rung was unreachable in
+    ///      production — the archive verb deleted the record outright.)
     ///   1. **Any blocker → `.active`.** This beats EVERYTHING below it, including
     ///      an explicit `settledOverride == .settled`. It is the packet's whole
     ///      point and both named witnesses live here.
@@ -390,8 +395,8 @@ extension InboxLifecycle {
         autoSettleAfter: TimeInterval? = nil,
         now: Date
     ) -> InboxLifecycle {
-        // 0 · Out of the list entirely.
-        if archivedAt != nil { return .archived }
+        // 0 · Out of the live list, into History.
+        if let archivedAt { return .archived(at: archivedAt) }
 
         // 1 · A blocker outranks user intent. THE rule.
         if blockers.isBlocking { return .active }
