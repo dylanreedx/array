@@ -93,11 +93,22 @@ final class AgentComposerFooterView: NSView, TokenThemed {
         }
     }
 
+    /// One resolution for what a model id is CALLED on this row: compact mode
+    /// keeps the short id tail (it exists to fit), full mode prefers the human
+    /// name from pi's synced catalog ("Claude Fable 5") and falls back to the
+    /// id. QA has no display names unless a check injects them, so pinned
+    /// titles are unchanged there.
+    static func displayTitle(forModel model: String, compact: Bool) -> String {
+        compact
+            ? abbreviatedModel(model)
+            : (AgentModelCatalog.shared.displayName(for: model) ?? model)
+    }
+
     /// The row's fitting width for the CURRENT selection's titles: the same
     /// per-button expression `ChoiceButton` measures itself with, so this cannot
     /// drift from what the buttons actually need.
     private func requiredWidth(usingCompactLabels compact: Bool) -> CGFloat {
-        let modelTitle = compact ? Self.abbreviatedModel(settings.model) : settings.model
+        let modelTitle = Self.displayTitle(forModel: settings.model, compact: compact)
         let effortTitle = compact ? Self.abbreviatedEffort(settings.thinking) : settings.thinking.capitalized
         return ChoiceButton.fittingWidth(forTitle: modelTitle)
             + CGFloat(Space.m) + ChoiceButton.fittingWidth(forTitle: effortTitle)
@@ -154,7 +165,7 @@ final class AgentComposerFooterView: NSView, TokenThemed {
         var models = AgentModelConfig.modelOptions
         if !models.contains(settings.model) { models.append(settings.model) }
         modelButton.items = models.map {
-            ChoiceItem(id: $0, title: usesCompactLabels ? Self.abbreviatedModel($0) : $0)
+            ChoiceItem(id: $0, title: Self.displayTitle(forModel: $0, compact: usesCompactLabels))
         }
         var efforts = AgentModelConfig.thinkingOptions
         if !efforts.contains(settings.thinking) { efforts.append(settings.thinking) }

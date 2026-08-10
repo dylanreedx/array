@@ -239,7 +239,9 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     private func modelPickerRow(for field: SettingsField, options: [String]) -> NSView {
         let labelView = label(field.label, size: 12, weight: .regular, color: .secondaryLabelColor)
         let button = ProviderModelButton(title: field.label)
-        button.items = options.map { ChoiceItem(id: $0, title: $0) }
+        button.items = options.map {
+            ChoiceItem(id: $0, title: AgentModelCatalog.shared.displayName(for: $0) ?? $0)
+        }
         if case .string(let value) = field.currentValue(in: defaults), options.contains(value) {
             button.selectedID = value
         }

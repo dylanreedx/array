@@ -39,20 +39,26 @@ enum ProviderModelGrouping {
     }
 
     /// First-appearance provider order (pi's own catalogue order). Row titles
-    /// are reduced to the model name — the rail already names the provider,
-    /// and `provider/model` twice over is exactly the noise the grouped
-    /// picker exists to remove. Slashless ids (off-catalog record values)
-    /// keep their full title.
-    static func groups(from items: [ChoiceItem]) -> [Group] {
+    /// prefer the human name from pi's synced catalog ("Claude Fable 5"),
+    /// with the raw id-tail demoted to the caption line; without a name the
+    /// tail IS the title — the rail already names the provider, and
+    /// `provider/model` twice over is exactly the noise the grouped picker
+    /// exists to remove. Slashless ids (off-catalog record values) keep their
+    /// full title. QA sees no display names unless a check injects them.
+    static func groups(
+        from items: [ChoiceItem],
+        displayNames: [String: String] = [:]
+    ) -> [Group] {
         var order: [String] = []
         var byProvider: [String: [ChoiceItem]] = [:]
         for item in items {
             let provider = provider(forID: item.id)
-            let rowTitle = item.id.contains("/")
+            let tail = item.id.contains("/")
                 ? item.id.split(separator: "/", maxSplits: 1).last.map(String.init) ?? item.title
                 : item.title
+            let nice = displayNames[item.id]
             let row = ChoiceItem(
-                id: item.id, title: rowTitle, detail: item.detail,
+                id: item.id, title: nice ?? tail, detail: nice != nil ? tail : item.detail,
                 enabled: item.enabled, destructive: item.destructive)
             if byProvider[provider] == nil { order.append(provider) }
             byProvider[provider, default: []].append(row)
@@ -162,7 +168,9 @@ final class ProviderModelPickerView: NSView, TokenThemed {
     var onDismiss: (() -> Void)?
 
     init(items: [ChoiceItem], selectedID: String?) {
-        let groups = ProviderModelGrouping.groups(from: items)
+        let groups = ProviderModelGrouping.groups(
+            from: items,
+            displayNames: AgentModelCatalog.shared.displayNamesSnapshot())
         self.groups = groups
         self.selectedModelID = selectedID
         self.selectedGroupID = selectedID.map(ProviderModelGrouping.provider(forID:)) ?? groups.first?.id ?? "other"
@@ -296,6 +304,8 @@ final class ProviderModelPickerView: NSView, TokenThemed {
     var qaProviderTitles: [String] { groups.map(\.title) }
     var qaSelectedProviderID: String { selectedGroupID }
     var qaVisibleModelIDs: [String] { listView?.qaItems.map(\.id) ?? [] }
+    var qaVisibleModelTitles: [String] { listView?.qaItems.map(\.title) ?? [] }
+    var qaVisibleModelDetails: [String?] { listView?.qaItems.map(\.detail) ?? [] }
     func selectProviderForQA(_ id: String) { selectGroup(id: id) }
     func chooseModelForQA(_ id: String) { listView?.choose(id: id) }
 }
@@ -482,10 +492,24 @@ extension ProviderModelButton {
         try expect(grouped[0].title == "OpenAI Codex" && grouped[1].title == "Anthropic",
                    "known providers get display names, got \(grouped.map(\.title))")
 
-        // 2. Live surface over a fixture catalogue.
-        AgentModelCatalog.shared.resetForQA(options: [
-            "openai-codex/gpt-a", "openai-codex/gpt-b", "anthropic/claude-x",
-        ])
+        // 1b. Display names ride the same grouping: name becomes the title,
+        //     the id tail demotes to the caption; unnamed ids keep the tail.
+        let named = ProviderModelGrouping.groups(
+            from: [
+                ChoiceItem(id: "anthropic/claude-x", title: "claude-x"),
+                ChoiceItem(id: "anthropic/claude-y", title: "claude-y"),
+            ],
+            displayNames: ["anthropic/claude-x": "Claude X"])
+        try expect(named[0].models.map(\.title) == ["Claude X", "claude-y"],
+                   "display names become row titles, unnamed ids keep the tail, got \(named[0].models.map(\.title))")
+        try expect(named[0].models.map(\.detail) == ["claude-x", nil],
+                   "named rows demote the id tail to the caption, got \(named[0].models.map(\.detail))")
+
+        // 2. Live surface over a fixture catalogue (with one display name, so
+        //    the surface path is proven too).
+        AgentModelCatalog.shared.resetForQA(
+            options: ["openai-codex/gpt-a", "openai-codex/gpt-b", "anthropic/claude-x"],
+            displayNames: ["anthropic/claude-x": "Claude X"])
         defer { AgentModelCatalog.shared.resetForQA() }
 
         let window = NSWindow(
@@ -526,6 +550,8 @@ extension ProviderModelButton {
         picker.selectProviderForQA("anthropic")
         try expect(picker.qaVisibleModelIDs == ["anthropic/claude-x"],
                    "switching the rail swaps the model pane, got \(picker.qaVisibleModelIDs)")
+        try expect(picker.qaVisibleModelTitles == ["Claude X"] && picker.qaVisibleModelDetails == ["claude-x"],
+                   "the live surface renders the display name with the id caption, got \(picker.qaVisibleModelTitles)/\(picker.qaVisibleModelDetails)")
         try expect(button.qaPickerView.flatMap { $0.window?.frame.width } == widthBefore,
                    "provider switch must not resize the panel")
 

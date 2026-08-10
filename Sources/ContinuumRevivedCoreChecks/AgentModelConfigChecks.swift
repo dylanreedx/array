@@ -159,5 +159,34 @@ func runAgentModelCatalogChecks() {
     expect(AgentModelConfig.modelOptions == AgentModelConfig.fallbackModelOptions,
            "after reset the frozen fallback stands again")
 
-    print("AgentModelCatalog checks passed: table parse (header/ANSI/order), non-empty-replace semantics, live options drive resolution with first-usable fallback")
+    // 4. Display names from pi's synced models-store: fully-qualified keys,
+    //    missing/empty names skipped, unknown ids nil (callers fall back to
+    //    the id — the QA state, so no pinned title depends on the store).
+    let storeFixture = """
+    {
+      "openai-codex": {"models": [
+        {"id": "gpt-5.3-codex-spark", "name": "GPT-5.3 Codex Spark"},
+        {"id": "nameless", "cost": {}}
+      ]},
+      "anthropic": {"models": [{"id": "claude-fable-5", "name": "Claude Fable 5"}]},
+      "broken": "not an object"
+    }
+    """.data(using: .utf8)!
+    let names = AgentModelCatalog.parse(modelsStoreJSON: storeFixture)
+    expect(names == [
+        "openai-codex/gpt-5.3-codex-spark": "GPT-5.3 Codex Spark",
+        "anthropic/claude-fable-5": "Claude Fable 5",
+    ], "models-store parse maps provider/id to name, skipping nameless and malformed entries, got \(names)")
+    expect(AgentModelCatalog.parse(modelsStoreJSON: Data("garbage".utf8)) == [:],
+           "malformed store parses to no names")
+    let namedCatalog = AgentModelCatalog()
+    expect(namedCatalog.displayName(for: "anthropic/claude-fable-5") == nil,
+           "no display names before apply")
+    namedCatalog.apply(displayNames: names)
+    expect(namedCatalog.displayName(for: "anthropic/claude-fable-5") == "Claude Fable 5",
+           "applied display names resolve by fully-qualified id")
+    expect(namedCatalog.displayName(for: "anthropic/unknown") == nil,
+           "unknown ids resolve to nil so callers fall back to the id")
+
+    print("AgentModelCatalog checks passed: table parse (header/ANSI/order), non-empty-replace semantics, live options drive resolution with first-usable fallback, models-store display names")
 }

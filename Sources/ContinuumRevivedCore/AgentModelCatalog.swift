@@ -19,6 +19,7 @@ public final class AgentModelCatalog: @unchecked Sendable {
 
     private let lock = NSLock()
     private var liveOptions: [String]?
+    private var liveDisplayNames: [String: String] = [:]
     private var refreshStarted = false
 
     /// Public so checks can exercise instances without touching `shared`.
@@ -26,6 +27,19 @@ public final class AgentModelCatalog: @unchecked Sendable {
 
     public func options(fallback: [String] = AgentModelConfig.fallbackModelOptions) -> [String] {
         lock.withLock { liveOptions } ?? fallback
+    }
+
+    /// Human display name for a fully-qualified id ("GPT-5.3 Codex Spark" for
+    /// `openai-codex/gpt-5.3-codex-spark`), grabbed from pi's synced catalog
+    /// (`~/.pi/agent/models-store.json`). Nil when the store has no entry —
+    /// callers fall back to the id, which is also the QA state (no store is
+    /// read outside `startRefresh`), so pinned titles never depend on it.
+    public func displayName(for id: String) -> String? {
+        lock.withLock { liveDisplayNames[id] }
+    }
+
+    public func displayNamesSnapshot() -> [String: String] {
+        lock.withLock { liveDisplayNames }
     }
 
     /// Parse the `pi --list-models` table: a header row, then columns
@@ -48,6 +62,23 @@ public final class AgentModelCatalog: @unchecked Sendable {
         return ids
     }
 
+    /// Parse pi's models-store (`{provider: {models: [{id, name, …}]}}`) into
+    /// a fully-qualified-id → display-name map. Pure — pinned in the matrix.
+    public static func parse(modelsStoreJSON data: Data) -> [String: String] {
+        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return [:] }
+        var names: [String: String] = [:]
+        for (provider, value) in root {
+            guard let entry = value as? [String: Any],
+                  let models = entry["models"] as? [[String: Any]] else { continue }
+            for model in models {
+                guard let id = model["id"] as? String, !id.isEmpty,
+                      let name = model["name"] as? String, !name.isEmpty else { continue }
+                names["\(provider)/\(id)"] = name
+            }
+        }
+        return names
+    }
+
     /// A non-empty parse replaces the current options; an empty or failed
     /// probe changes nothing (the picker must never go blank).
     public func apply(listModelsOutput: String) {
@@ -56,9 +87,14 @@ public final class AgentModelCatalog: @unchecked Sendable {
         lock.withLock { liveOptions = parsed }
     }
 
-    public func resetForQA(options: [String]? = nil) {
+    public func apply(displayNames: [String: String]) {
+        lock.withLock { liveDisplayNames = displayNames }
+    }
+
+    public func resetForQA(options: [String]? = nil, displayNames: [String: String] = [:]) {
         lock.withLock {
             liveOptions = options
+            liveDisplayNames = displayNames
             refreshStarted = false
         }
     }
@@ -95,6 +131,14 @@ public final class AgentModelCatalog: @unchecked Sendable {
             killer.cancel()
             guard process.terminationStatus == 0, let output = String(data: data, encoding: .utf8) else { return }
             self?.apply(listModelsOutput: output)
+            // Best-effort display names from pi's synced catalog; usable-model
+            // membership stays owned by --list-models above (the store also
+            // holds models whose provider isn't authed).
+            let storeURL = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".pi/agent/models-store.json")
+            if let storeData = try? Data(contentsOf: storeURL) {
+                self?.apply(displayNames: Self.parse(modelsStoreJSON: storeData))
+            }
         }
     }
 }
