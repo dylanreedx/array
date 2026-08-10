@@ -20,6 +20,12 @@ public final class AgentModelCatalog: @unchecked Sendable {
     private let lock = NSLock()
     private var liveOptions: [String]?
     private var liveDisplayNames: [String: String] = [:]
+    /// Models the claude CLI backend contributes (curated aliases, applied
+    /// only when a live probe saw the CLI installed AND logged in). Kept
+    /// separate from `liveOptions` so a pi probe replacing the list cannot
+    /// wipe them, and vice versa.
+    private var claudeBackendModels: [String] = []
+    private var claudeBackendDisplayNames: [String: String] = [:]
     /// Live refreshing is opt-in and only the real app opts in (startup).
     /// QA never enables it, so presenting pickers in checks can never spawn
     /// a probe or race fixture options.
@@ -31,7 +37,13 @@ public final class AgentModelCatalog: @unchecked Sendable {
     public init() {}
 
     public func options(fallback: [String] = AgentModelConfig.fallbackModelOptions) -> [String] {
-        lock.withLock { liveOptions } ?? fallback
+        lock.withLock {
+            let base = liveOptions ?? fallback
+            // Union, not replace: a machine with pi keeps pi's full catalogue
+            // and gains the claude aliases; a machine with only claude still
+            // gets usable anthropic entries on top of the frozen fallback.
+            return base + claudeBackendModels.filter { !base.contains($0) }
+        }
     }
 
     /// Human display name for a fully-qualified id ("GPT-5.3 Codex Spark" for
@@ -40,11 +52,11 @@ public final class AgentModelCatalog: @unchecked Sendable {
     /// callers fall back to the id, which is also the QA state (no store is
     /// read outside `startRefresh`), so pinned titles never depend on it.
     public func displayName(for id: String) -> String? {
-        lock.withLock { liveDisplayNames[id] }
+        lock.withLock { liveDisplayNames[id] ?? claudeBackendDisplayNames[id] }
     }
 
     public func displayNamesSnapshot() -> [String: String] {
-        lock.withLock { liveDisplayNames }
+        lock.withLock { claudeBackendDisplayNames.merging(liveDisplayNames) { _, pi in pi } }
     }
 
     /// Parse the `pi --list-models` table: a header row, then columns
@@ -96,10 +108,22 @@ public final class AgentModelCatalog: @unchecked Sendable {
         lock.withLock { liveDisplayNames = displayNames }
     }
 
+    /// The claude probe's outcome. Applied only from `startProbe` (real app)
+    /// and QA fixtures — `available: false` clears, so a user who uninstalls
+    /// claude loses the entries on the next probe.
+    public func apply(claudeBackendAvailable available: Bool) {
+        lock.withLock {
+            claudeBackendModels = available ? ClaudeCLIBackend.curatedCatalogModels : []
+            claudeBackendDisplayNames = available ? ClaudeCLIBackend.curatedCatalogDisplayNames : [:]
+        }
+    }
+
     public func resetForQA(options: [String]? = nil, displayNames: [String: String] = [:]) {
         lock.withLock {
             liveOptions = options
             liveDisplayNames = displayNames
+            claudeBackendModels = []
+            claudeBackendDisplayNames = [:]
             liveRefreshEnabled = false
             lastRefreshStartedAt = nil
             refreshInFlight = false
@@ -148,38 +172,83 @@ public final class AgentModelCatalog: @unchecked Sendable {
         lock.withLock { refreshInFlight = false }
     }
 
+    // Probing spawns provider CLIs, which needs `Process` — macOS-only, like
+    // the runners it borrows resolution from. iOS never opts into live refresh
+    // (`enableLiveRefresh()` is called only from the macOS app's startup), so
+    // `requestRefresh` short-circuits there and this is never reached; the stub
+    // exists only so the symbol resolves. The pure parse/options/displayName
+    // surface above stays cross-platform for the shared Core and the matrix.
+    #if os(macOS)
     private func startProbe(timeout: TimeInterval = 5.0) {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             defer { self?.finishRefresh() }
-            let command = PiAgentRunner.liveResolvedCommand()
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: command.executable)
-            process.arguments = command.prefixArgs + ["--list-models"]
-            var environment = ProcessInfo.processInfo.environment
-            environment["PATH"] = PiAgentRunner.augmentedPath(
-                basePath: environment["PATH"] ?? "", extraDirs: PiAgentRunner.liveExtraDirs())
-            process.environment = environment
-            let stdout = Pipe()
-            process.standardOutput = stdout
-            process.standardError = Pipe()
-            do { try process.run() } catch { return }
-            let killer = DispatchWorkItem {
-                if process.isRunning { process.terminate() }
-            }
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: killer)
-            let data = stdout.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            killer.cancel()
-            guard process.terminationStatus == 0, let output = String(data: data, encoding: .utf8) else { return }
-            self?.apply(listModelsOutput: output)
-            // Best-effort display names from pi's synced catalog; usable-model
-            // membership stays owned by --list-models above (the store also
-            // holds models whose provider isn't authed).
-            let storeURL = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".pi/agent/models-store.json")
-            if let storeData = try? Data(contentsOf: storeURL) {
-                self?.apply(displayNames: Self.parse(modelsStoreJSON: storeData))
-            }
+            self?.probePi(timeout: timeout)
+            self?.probeClaudeBackend(timeout: timeout)
         }
     }
+
+    private func probePi(timeout: TimeInterval) {
+        let command = PiAgentRunner.liveResolvedCommand()
+        guard let output = Self.boundedProbeOutput(
+            command: command, arguments: ["--list-models"], timeout: timeout) else { return }
+        apply(listModelsOutput: output)
+        // Best-effort display names from pi's synced catalog; usable-model
+        // membership stays owned by --list-models above (the store also
+        // holds models whose provider isn't authed).
+        let storeURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".pi/agent/models-store.json")
+        if let storeData = try? Data(contentsOf: storeURL) {
+            apply(displayNames: Self.parse(modelsStoreJSON: storeData))
+        }
+    }
+
+    /// The claude CLI backend's catalogue contribution: entries appear when
+    /// the CLI is INSTALLED (an absolute path resolved — the env fallback
+    /// proves nothing) and LOGGED IN (`claude auth status --json`). Runs
+    /// independently of the pi probe so a pi-less machine still gets its
+    /// anthropic models.
+    private func probeClaudeBackend(timeout: TimeInterval) {
+        let command = ClaudeAgentRunner.liveResolvedCommand()
+        guard command.prefixArgs.isEmpty else {
+            apply(claudeBackendAvailable: false)
+            return
+        }
+        let output = Self.boundedProbeOutput(
+            command: command, arguments: ["auth", "status", "--json"], timeout: timeout)
+        let loggedIn = output.map { ClaudeCLIBackend.isLoggedIn(authStatusJSON: Data($0.utf8)) } ?? false
+        apply(claudeBackendAvailable: loggedIn)
+    }
+
+    /// One bounded subprocess: stdout on success, nil on launch failure,
+    /// nonzero exit, or timeout. Silent on every failure — the fallback (or
+    /// the previous probe's result) still stands.
+    private static func boundedProbeOutput(
+        command: PiAgentRunner.ResolvedCommand,
+        arguments: [String],
+        timeout: TimeInterval
+    ) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: command.executable)
+        process.arguments = command.prefixArgs + arguments
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = PiAgentRunner.augmentedPath(
+            basePath: environment["PATH"] ?? "", extraDirs: PiAgentRunner.liveExtraDirs())
+        process.environment = environment
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = Pipe()
+        do { try process.run() } catch { return nil }
+        let killer = DispatchWorkItem {
+            if process.isRunning { process.terminate() }
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: killer)
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        killer.cancel()
+        guard process.terminationStatus == 0 else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+    #else
+    private func startProbe(timeout: TimeInterval = 5.0) { finishRefresh() }
+    #endif
 }

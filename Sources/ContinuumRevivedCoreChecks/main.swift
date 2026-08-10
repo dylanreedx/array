@@ -10331,6 +10331,9 @@ runPiExecutableResolutionChecks()
 runPiSessionArgsChecks()
 runAgentPromptImageContractChecks()
 
+// Plan: .plans/01-provider-cli-backends.md (claude CLI backend)
+runClaudeAgentBackendChecks()
+
 // Ticket: docs/38-tickets/90-agent-ux/P0.10-explicit-model-id.md
 runAgentModelConfigChecks()
 runAgentModelCatalogChecks()

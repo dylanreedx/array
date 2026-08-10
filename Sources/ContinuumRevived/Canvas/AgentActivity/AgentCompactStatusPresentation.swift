@@ -508,6 +508,7 @@ enum AgentRadialContextMeterPresenter {
         switch source {
         case .providerSessionStats: return "provider session stats"
         case .piMessageUsage: return "per-message usage"
+        case .claudeResultUsage: return "per-turn usage"
         case .unknown(let raw): return "unknown (\(raw))"
         }
     }

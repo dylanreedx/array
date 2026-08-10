@@ -78,14 +78,35 @@ final class OnboardingPanel {
                 return "signed in (CLI auth)"
             }
         }
+        func claudeAuthStatus() -> (() -> String?) {
+            {
+                guard let claude = locateOnPath("claude")() else { return nil }
+                guard let output = boundedOutput(
+                    executable: claude,
+                    arguments: ["auth", "status", "--json"],
+                    environment: environment(),
+                    timeout: 3.0
+                ) else { return nil }
+                guard ClaudeCLIBackend.isLoggedIn(authStatusJSON: Data(output.utf8)) else { return nil }
+                return "signed in (claude.ai)"
+            }
+        }
         return [
             Probe(
                 id: "claude",
                 title: "Claude Code",
-                detail: "Agent CLI — at least one agent CLI is recommended.",
+                detail: "Claude terminal tiles, and managed agents on Claude models.",
                 missingGuidance: "Install: curl -fsSL https://claude.ai/install.sh | bash",
                 connectProfileId: "claude",
                 locate: locateOnPath("claude")
+            ),
+            Probe(
+                id: "claude-auth",
+                title: "Claude models (Claude Code)",
+                detail: "Managed agents run Claude models through your own Claude Code sign-in — no API keys.",
+                missingGuidance: "Sign in: run claude in a terminal and follow its login (OAuth — no API keys)",
+                connectProfileId: nil,
+                locate: claudeAuthStatus()
             ),
             Probe(
                 id: "codex",
@@ -98,7 +119,7 @@ final class OnboardingPanel {
             Probe(
                 id: "pi",
                 title: "pi",
-                detail: "Unlocks managed agent tiles (optional) — claude/codex tiles work without it.",
+                detail: "Managed agents on GPT and other providers (optional) — Claude models run through Claude Code itself.",
                 missingGuidance: "Install: npm install -g @earendil-works/pi-coding-agent (needs Node — no npm? brew install node first)",
                 connectProfileId: nil,
                 locate: locateOnPath("pi")
@@ -106,7 +127,7 @@ final class OnboardingPanel {
             Probe(
                 id: "pi-auth-anthropic",
                 title: "Claude models (pi ▸ anthropic)",
-                detail: "Lets managed agents run Claude models.",
+                detail: "Fallback for Claude models only when Claude Code isn't installed (metered separately from a Claude subscription).",
                 missingGuidance: "Sign in: run pi in a terminal, then /login anthropic (OAuth — no API keys)",
                 connectProfileId: nil,
                 locate: piAuthStatus(provider: "anthropic")

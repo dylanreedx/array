@@ -61,10 +61,15 @@ frozen fallback in QA).
 - **Workspace / project** — a project is a filesystem root; the registry
   (`registry.json` in the app-support dir) records projects, workspaces, and
   the last-active pointers.
-- **Managed agent** — an agent tile Array runs headlessly through **pi**
-  (`@earendil-works/pi-coding-agent`, host-installed npm CLI). Driven by
-  `AgentSupervisor` → `PiAgentRunner`. Distinct from a *claude/codex tile*,
-  which is a plain terminal running that CLI interactively.
+- **Managed agent** — an agent tile Array runs headlessly through a provider
+  CLI. Driven by `AgentSupervisor` → a runner behind the `AgentRunning` seam.
+  Two backends today, chosen by `AgentSupervisor.productionRunner(for:)`:
+  **claude CLI** (`ClaudeAgentRunner`, for `anthropic/*` models when `claude`
+  is installed — runs on the user's own Claude subscription, no extra usage)
+  and **pi** (`@earendil-works/pi-coding-agent`, `PiAgentRunner`, for
+  everything else — the wide multi-provider catalogue). Distinct from a
+  *claude/codex tile*, which is a plain terminal running that CLI
+  interactively. See [.plans/01-provider-cli-backends.md](.plans/01-provider-cli-backends.md).
 - **Launch profile** — palette entry describing what a terminal tile runs
   (`shell`, `claude`, `codex`, `nvim`, `custom`) — `LaunchProfileRegistry`.
 - **Channel** — prod vs dev identity (see non-negotiable #1).

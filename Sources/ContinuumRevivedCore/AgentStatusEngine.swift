@@ -281,6 +281,9 @@ public struct TokenUsageSnapshot: Codable, Equatable, Sendable {
 
 public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
     case piMessageUsage
+    /// The `usage` block of a claude stream-json `result` event (per-turn
+    /// aggregate; cache counters describe the turn, not occupancy).
+    case claudeResultUsage
     case providerSessionStats
     case unknown(String)
 
@@ -288,7 +291,7 @@ public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
         switch self {
         case .providerSessionStats:
             return true
-        case .piMessageUsage, .unknown:
+        case .piMessageUsage, .claudeResultUsage, .unknown:
             return false
         }
     }
@@ -296,6 +299,7 @@ public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
     private var encodedValue: String {
         switch self {
         case .piMessageUsage: return "piMessageUsage"
+        case .claudeResultUsage: return "claudeResultUsage"
         case .providerSessionStats: return "providerSessionStats"
         case .unknown(let raw): return raw
         }
@@ -305,6 +309,7 @@ public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
         let raw = try decoder.singleValueContainer().decode(String.self)
         switch raw {
         case "piMessageUsage": self = .piMessageUsage
+        case "claudeResultUsage": self = .claudeResultUsage
         case "providerSessionStats": self = .providerSessionStats
         default: self = .unknown(raw)
         }

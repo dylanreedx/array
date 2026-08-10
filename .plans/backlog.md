@@ -17,6 +17,16 @@ next release is build 5.
 - **agent-supervisor-check naming flake** (KNOWN-RED): timing flake, different
   message each run, pre-existing at `566e615`. Fixing it un-gates the context-seam
   assertions behind it.
+- **matrix-inventory drift → Array rename** (RESOLVED 2026-08-09): the committed
+  `docs/38-tickets/90-agent-ux/matrix-inventory.txt` still listed
+  `.build/debug/continuum-revived` legs while run-matrix.sh had moved to
+  `.build/debug/Array` — the matrix's FIRST leg had been red since the identity
+  cut (undocumented, not one of the two KNOWN-REDs). Re-blessed with
+  `CONTINUUM_UPDATE_MATRIX_INVENTORY=1`. If it recurs, that means a binary rename
+  landed without a re-bless again.
+- **iOS shared-Core break** (RESOLVED 2026-08-09): `AgentModelCatalog`'s probe
+  spawned `Process` ungated, reding the iOS matrix leg since the catalog landed.
+  Now `#if os(macOS)`. Watch for the same trap in any new Core file that shells out.
 
 ## Picker / composer polish
 
@@ -47,5 +57,9 @@ next release is build 5.
 
 ## Bigger designed work
 
-- `01-provider-cli-backends.md` — managed agents on claude/codex CLIs when pi
-  is absent (pi preferred). The "colleagues never learn what pi is" endgame.
+- `01-provider-cli-backends.md` — **claude backend SHIPPED 2026-08-09**
+  (anthropic models run on the user's own Claude Code login, no pi, no extra
+  usage; routing + translator + runner + catalogue union + onboarding +
+  witnesses). REMAINING: codex CLI backend (low priority — no teammate uses
+  codex), the formal `ManagedAgentBackend` protocol extraction, and a
+  tool-approval dock for both backends. Compliance research recorded in-plan.

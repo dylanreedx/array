@@ -66,6 +66,7 @@ extension AgentRunning {
 }
 
 extension PiAgentRunner: AgentRunning {}
+extension ClaudeAgentRunner: AgentRunning {}
 
 // MARK: - P4.5 generated-name one-shot
 
@@ -935,7 +936,7 @@ final class AgentSupervisor {
 
     init(
         store: AgentStore,
-        makeRunner: @escaping (AgentRecord) -> AgentRunning = AgentSupervisor.piRunner,
+        makeRunner: @escaping (AgentRecord) -> AgentRunning = AgentSupervisor.productionRunner,
         warn: @escaping (String) -> Void = { fputs($0 + "\n", stderr) },
         upsertRecord: ((AgentRecord) throws -> Void)? = nil,
         nameGenerationCapabilityProvider: (@Sendable () -> AgentNameGenerationCapability?)? = nil,
@@ -998,9 +999,52 @@ final class AgentSupervisor {
         "array-agent-\(id.rawValue.uuidString)"
     }
 
-    /// THE production runner, and the only `PiAgentRunner(` construction in the app.
+    /// Claude's analogue of `sessionId(for:)`: claude validates UUID format,
+    /// so the agent id itself IS the conversation id. Derived, never stored —
+    /// restore keeps working for claude-backed agents for the same reason it
+    /// does for pi-backed ones.
+    nonisolated static func claudeSessionId(for id: AgentID) -> String {
+        id.rawValue.uuidString.lowercased()
+    }
+
+    /// THE production runner factory: routes each prompt to the runtime the
+    /// machine actually has. Anthropic models prefer the user's own claude
+    /// CLI when it is installed — subscription-correct and pi-free (see the
+    /// ClaudeAgentRunner header for the compliance posture) — and everything
+    /// else stays on pi. Routing policy is pure and pinned in the matrix
+    /// (`ClaudeCLIBackend.routesToClaude`); only the availability read is live.
+    nonisolated static func productionRunner(for record: AgentRecord) -> AgentRunning {
+        if ClaudeCLIBackend.routesToClaude(
+            model: record.model,
+            claudeCLIAvailable: ClaudeAgentRunner.liveCLIAvailable()) {
+            return claudeRunner(for: record)
+        }
+        return piRunner(for: record)
+    }
+
+    /// The only `PiAgentRunner(` construction in the app.
     nonisolated static func piRunner(for record: AgentRecord) -> AgentRunning {
         PiAgentRunner(config: runnerConfig(for: record))
+    }
+
+    /// The only `ClaudeAgentRunner(` construction in the app, mirroring
+    /// `piRunner(for:)` so the same ownership scan can hold for both.
+    nonisolated static func claudeRunner(for record: AgentRecord) -> AgentRunning {
+        ClaudeAgentRunner(config: claudeRunnerConfig(for: record))
+    }
+
+    /// What a claude-backed runner is built with. The catalogue's provider
+    /// prefix is stripped (claude takes bare model names), pi thinking levels
+    /// pass through as `--effort` only on exact match, and the role's
+    /// pi-specific `--tools` args are deliberately not forwarded — claude
+    /// runs its own toolset.
+    nonisolated static func claudeRunnerConfig(for record: AgentRecord) -> ClaudeAgentRunner.Config {
+        ClaudeAgentRunner.Config(
+            model: ClaudeCLIBackend.modelArgument(forCatalogId: record.model),
+            effort: ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
+            cwd: URL(fileURLWithPath: record.cwd, isDirectory: true),
+            sessionId: claudeSessionId(for: record.id)
+        )
     }
 
     /// What the production runner is built with. Split out of `piRunner(for:)` so the
@@ -5035,15 +5079,26 @@ func runAgentSupervisorChecks() async throws {
     guard AgentSupervisor.piRunner(for: record) is PiAgentRunner else {
         throw fail("the default runner factory does not produce a PiAgentRunner")
     }
+    guard AgentSupervisor.claudeRunner(for: record) is ClaudeAgentRunner else {
+        throw fail("the claude runner factory does not produce a ClaudeAgentRunner")
+    }
+    // Routing policy itself (anthropic + claude-present → claude, else pi) is
+    // pure and pinned machine-independently in runClaudeAgentBackendChecks;
+    // asserting `productionRunner` live here would make the matrix depend on
+    // whether THIS machine has claude installed.
 
     // MARK: …6 · and no VIEW constructs one
 
-    let (constructionSites, scannedFiles) = try piRunnerConstructionSites()
+    let (constructionSites, scannedFiles) = try runnerConstructionSites(typeName: "PiAgentRunner")
     guard scannedFiles > 0 else {
         throw fail("the source scan found no Swift files — it is looking in the wrong place")
     }
     guard constructionSites == ["App/AgentSupervisor.swift"] else {
         throw fail("PiAgentRunner is constructed outside AgentSupervisor.swift: \(constructionSites.sorted()) (the supervisor owns the runner; a view that makes its own is a second owner and will double-spawn)")
+    }
+    let (claudeConstructionSites, _) = try runnerConstructionSites(typeName: "ClaudeAgentRunner")
+    guard claudeConstructionSites == ["App/AgentSupervisor.swift"] else {
+        throw fail("ClaudeAgentRunner is constructed outside AgentSupervisor.swift: \(claudeConstructionSites.sorted()) (same single-owner rule as PiAgentRunner)")
     }
 
     // MARK: 7 · a TILE is a subscriber (P2A.4), and detaching it leaves the agent running
@@ -10945,13 +11000,14 @@ private func eventLabel(_ event: AgentRuntimeEvent) -> String {
     }
 }
 
-/// Every file under `Sources/ContinuumRevived` that constructs a `PiAgentRunner`,
-/// as paths relative to that root. Source-scanned for the same reason
-/// `UIProbeAppearance.declaredConformers()` is: Swift cannot enumerate this at
-/// runtime, the matrix runs from the repo root, and a missing directory is a loud
-/// failure rather than a silent pass. The done-criterion "no `PiAgentRunner` is
-/// constructed by a view" is otherwise only assertable by reading the diff.
-private func piRunnerConstructionSites() throws -> (sites: Set<String>, scannedFiles: Int) {
+/// Every file under `Sources/ContinuumRevived` that constructs the named
+/// runner type, as paths relative to that root. Source-scanned for the same
+/// reason `UIProbeAppearance.declaredConformers()` is: Swift cannot enumerate
+/// this at runtime, the matrix runs from the repo root, and a missing
+/// directory is a loud failure rather than a silent pass. The done-criterion
+/// "no runner is constructed by a view" is otherwise only assertable by
+/// reading the diff.
+private func runnerConstructionSites(typeName: String) throws -> (sites: Set<String>, scannedFiles: Int) {
     struct ScanError: Error, CustomStringConvertible { let description: String }
     let scanRoot = "Sources/ContinuumRevived"
     let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
@@ -10963,9 +11019,9 @@ private func piRunnerConstructionSites() throws -> (sites: Set<String>, scannedF
     guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else {
         throw ScanError(description: "could not enumerate \(root.path)")
     }
-    // `PiAgentRunner(config:` and `PiAgentRunner.init(` — construction, not the
-    // type being named in a signature, a comment or an `is` test.
-    let pattern = try NSRegularExpression(pattern: "PiAgentRunner\\s*(\\.init)?\\s*\\(")
+    // `<Type>(config:` and `<Type>.init(` — construction, not the type being
+    // named in a signature, a comment or an `is` test.
+    let pattern = try NSRegularExpression(pattern: "\(typeName)\\s*(\\.init)?\\s*\\(")
     var sites: Set<String> = []
     var scanned = 0
     for case let url as URL in walker where url.pathExtension == "swift" {

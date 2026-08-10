@@ -3624,6 +3624,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 runAgentLocationLiveCheck(window: window)
             } else if CommandLine.arguments.contains("--managed-agent-live-check") {
                 runManagedAgentLiveCheck(window: window)
+            } else if CommandLine.arguments.contains("--claude-agent-live-check") {
+                runClaudeAgentLiveCheck(window: window)
             } else if CommandLine.arguments.contains("--palette-captures-keys-over-browser-check") {
                 runPaletteCapturesKeysOverBrowserCheck(window: window)
             } else if CommandLine.arguments.contains("--terminal-scroll-ergonomics-check") {
@@ -3930,6 +3932,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 let kinds = agentKey.flatMap { self.managedAgentActivityByAgent[$0]?.map(\.kind) } ?? []
                 report("sync activity timeline recorded (88.4c): \(kinds)")
                 report("PASS: turn 2 recalled '\(codeword)' — session continuity works in-app")
+                Foundation.exit(0)
+            }
+        }
+    }
+
+    /// The claude-backend twin of `runManagedAgentLiveCheck`: same two-turn
+    /// codeword continuity proof through the real tile, but on an anthropic
+    /// model so `productionRunner` routes to `ClaudeAgentRunner`. Proves the
+    /// full path live: routing, the resume-first/--session-id-retry dance
+    /// (turn 1 IS the retry; turn 2 resumes), stream-json translation into
+    /// the tile, and cross-process session memory on the user's own claude
+    /// login. Supervised only (spends real subscription usage, needs claude
+    /// installed + signed in) — not a default matrix leg, like the pi twin.
+    /// Gated on `--claude-agent-live-check`.
+    private func runClaudeAgentLiveCheck(window: NSWindow) {
+        func report(_ line: String) { FileHandle.standardError.write(Data("[claude-agent-live] \(line)\n".utf8)) }
+        let codeword = "CANTALOUPE41"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self, let spawner = self.tileSpawner, let canvasView = self.canvasView else {
+                report("FAIL: no spawner/canvas"); Foundation.exit(2)
+            }
+            guard ClaudeAgentRunner.liveCLIAvailable() else {
+                report("FAIL: no claude CLI on this machine — this leg is supervised and needs one"); Foundation.exit(2)
+            }
+            guard case let .spawned(tileId) = spawner.spawnManagedAgent() else {
+                report("FAIL: spawnManagedAgent did not spawn"); Foundation.exit(2)
+            }
+            self.wireManagedAgentTile(tileId)
+            self.focusSpawnedTile(tileId)
+            guard let view = canvasView.tileView(for: tileId) as? ManagedAgentTileNSView else {
+                report("FAIL: spawned tile is not a ManagedAgentTileNSView"); Foundation.exit(2)
+            }
+            // Move the agent onto an anthropic model so routing picks claude.
+            // The check run never enables live catalogue refresh, so seed the
+            // claude union the probe would have applied, then go through the
+            // real validated setter.
+            AgentModelCatalog.shared.apply(claudeBackendAvailable: true)
+            guard let agentId = self.agentSupervisor.agent(forTile: tileId),
+                  self.agentSupervisor.setProviderSettings(agentID: agentId, model: "anthropic/haiku", thinking: "low")
+            else {
+                report("FAIL: could not move the spawned agent onto anthropic/haiku"); Foundation.exit(2)
+            }
+            guard let record = self.agentSupervisor.records[agentId],
+                  AgentSupervisor.productionRunner(for: record) is ClaudeAgentRunner
+            else {
+                report("FAIL: anthropic/haiku did not route to ClaudeAgentRunner"); Foundation.exit(2)
+            }
+            report("spawned tile \(tileId), routed to claude (model anthropic/haiku)")
+
+            let deadline = Date().addingTimeInterval(180)
+            view.qaSubmitPrompt("Remember this codeword: \(codeword). Reply with just: OK")
+            let cardsAfterTurn1Submit = view.transcriptCardCount
+            report("turn 1 submitted (plant codeword, --session-id retry path); baseCards=\(cardsAfterTurn1Submit)…")
+
+            Task { @MainActor in
+                @MainActor func timedOut(_ stage: String) -> Never {
+                    report("transcript:\n\(view.qaTranscriptText)")
+                    report("FAIL: timed out (\(stage))")
+                    Foundation.exit(1)
+                }
+
+                guard await waitUntil(timeout: deadline.timeIntervalSinceNow, {
+                    view.transcriptCardCount > cardsAfterTurn1Submit
+                        && view.qaV2CanSend
+                        && view.qaV2ActionTitle == "Send"
+                        && view.currentAgentStatus != .working
+                }) else { timedOut("waiting for turn 1 reply") }
+
+                report("turn 1 done; submitting turn 2 (recall) in a fresh claude process, same session via --resume")
+                view.qaSubmitPrompt("What was the codeword? Reply with only the codeword.")
+
+                guard await waitUntil(timeout: deadline.timeIntervalSinceNow, {
+                    view.qaLastAssistantCardBody?.contains(codeword) == true
+                        && view.currentAgentStatus != .working
+                }) else { timedOut("waiting for turn 2 recall") }
+
+                report("transcript:\n\(view.qaTranscriptText)")
+                report("PASS: turn 2 recalled '\(codeword)' — claude-backed session continuity works in-app")
                 Foundation.exit(0)
             }
         }
