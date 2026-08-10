@@ -117,6 +117,15 @@ frozen fallback in QA).
 6. **Un-gated UI at boot** — anything that can present at startup must stay
    inert in QA (`--*-check` runs, `CONTINUUM_*` env) — the updater and the
    onboarding panel show the pattern.
+7. **Guessing a `--*-check` flag** — an unknown flag falls through the whole
+   check cascade and boots the FULL app (which then hangs your shell).
+   Enumerate real flags from the source:
+   `grep -oE '\-\-[a-z0-9-]+-check' Sources/ContinuumRevived/App/ContinuumApp.swift`.
+8. **A new `TokenThemed` view** — the ui-probe census will hunt it: it must
+   render in an appearance-sweep surface AND an adopted surface, its owner
+   name goes in `tokenAdoptedOwners` with owner-scoped legal values
+   (`UIProbeAppearance.swift`), and resting states paint `nil`, never
+   `.clear` (a painted transparent is an unregistered literal).
 
 ## Verifying
 
