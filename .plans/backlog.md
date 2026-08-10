@@ -57,13 +57,17 @@ next release is build 5.
 
 ## Bigger designed work
 
-- `03-transcript-rehydration.md` — **planned + fully mapped, ready to build**.
-  Resume shows the full prior transcript (read from the provider session file,
-  replayed as events) as an expandable summary, replacing the empty notice.
-  Dylan's stated want 2026-08-09. Display-only I5 constraint is the sharp risk.
-- `02-codex-backend-and-toggle.md` — codex CLI backend (so pi isn't required)
-  + an explicit backend toggle in Settings that filters the model dropdown
-  (codex↔openai, claude↔anthropic). Being planned by an agent; implement after.
+- `03-transcript-rehydration.md` — **SHIPPED 2026-08-10** (MVP: resume shows the
+  prior transcript behind a "Previous session" boundary, read from the provider
+  session file and replayed as events; display-only, never re-synced). Fast-follow
+  not built: the collapse/disclosure "summary that expands" grouping.
+- `02-codex-backend-and-toggle.md` — **SHIPPED 2026-08-10** (codex CLI backend so
+  pi isn't required + a three-way Agent Harness toggle in Settings that live-filters
+  the model dropdown: pi/Claude Code/Codex, codex↔openai, claude↔anthropic).
+  Sandbox = `workspace-write` (one-line flip to `danger-full-access` if Dylan wants
+  claude parity). Remaining: codex has no token streaming (reply lands whole);
+  formal `ManagedAgentBackend` protocol extraction; a tool-approval dock for all
+  harnesses.
 - `01-provider-cli-backends.md` — **claude backend SHIPPED 2026-08-09**
   (anthropic models run on the user's own Claude Code login, no pi, no extra
   usage; routing + translator + runner + catalogue union + onboarding +
