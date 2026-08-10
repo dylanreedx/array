@@ -20,7 +20,12 @@ public final class AgentModelCatalog: @unchecked Sendable {
     private let lock = NSLock()
     private var liveOptions: [String]?
     private var liveDisplayNames: [String: String] = [:]
-    private var refreshStarted = false
+    /// Live refreshing is opt-in and only the real app opts in (startup).
+    /// QA never enables it, so presenting pickers in checks can never spawn
+    /// a probe or race fixture options.
+    private var liveRefreshEnabled = false
+    private var lastRefreshStartedAt: Date?
+    private var refreshInFlight = false
 
     /// Public so checks can exercise instances without touching `shared`.
     public init() {}
@@ -95,21 +100,57 @@ public final class AgentModelCatalog: @unchecked Sendable {
         lock.withLock {
             liveOptions = options
             liveDisplayNames = displayNames
-            refreshStarted = false
+            liveRefreshEnabled = false
+            lastRefreshStartedAt = nil
+            refreshInFlight = false
         }
     }
 
-    /// Bounded live probe, once per process: resolve pi the same way the
-    /// runner does, run `--list-models`, apply on success. Silent on every
-    /// failure — no pi, no auth, timeout — because the fallback still stands.
-    public func startRefresh(timeout: TimeInterval = 5.0) {
-        let shouldStart = lock.withLock {
-            if refreshStarted { return false }
-            refreshStarted = true
+    /// Pure throttle decision, pinned in the matrix: a refresh is due when
+    /// none ran yet or the last one started at least `minimumInterval` ago.
+    public static func refreshDue(lastStartedAt: Date?, minimumInterval: TimeInterval, now: Date) -> Bool {
+        guard let lastStartedAt else { return true }
+        return now.timeIntervalSince(lastStartedAt) >= minimumInterval
+    }
+
+    /// Opt in to live probing and kick the first one. Called exactly once,
+    /// from the real app's startup path — never from QA.
+    public func enableLiveRefresh() {
+        lock.withLock { liveRefreshEnabled = true }
+        requestRefresh(minimumInterval: 0)
+    }
+
+    /// Throttled re-probe for interaction points (picker open, onboarding
+    /// re-check): a colleague who logs into a provider while the app runs
+    /// gets the wider catalogue without relaunching. No-op unless the real
+    /// app enabled live refreshing, and never overlaps an in-flight probe.
+    @discardableResult
+    public func requestRefresh(minimumInterval: TimeInterval = 15, now: Date = Date()) -> Bool {
+        let shouldStart: Bool = lock.withLock {
+            guard liveRefreshEnabled, !refreshInFlight,
+                  Self.refreshDue(lastStartedAt: lastRefreshStartedAt, minimumInterval: minimumInterval, now: now) else {
+                return false
+            }
+            lastRefreshStartedAt = now
+            refreshInFlight = true
             return true
         }
-        guard shouldStart else { return }
+        guard shouldStart else { return false }
+        startProbe()
+        return true
+    }
+
+    /// Bounded live probe: resolve pi the same way the runner does, run
+    /// `--list-models`, apply on success, then read display names from pi's
+    /// synced catalog. Silent on every failure — no pi, no auth, timeout —
+    /// because the fallback still stands.
+    private func finishRefresh() {
+        lock.withLock { refreshInFlight = false }
+    }
+
+    private func startProbe(timeout: TimeInterval = 5.0) {
         DispatchQueue.global(qos: .utility).async { [weak self] in
+            defer { self?.finishRefresh() }
             let command = PiAgentRunner.liveResolvedCommand()
             let process = Process()
             process.executableURL = URL(fileURLWithPath: command.executable)

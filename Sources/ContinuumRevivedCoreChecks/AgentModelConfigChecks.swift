@@ -188,5 +188,19 @@ func runAgentModelCatalogChecks() {
     expect(namedCatalog.displayName(for: "anthropic/unknown") == nil,
            "unknown ids resolve to nil so callers fall back to the id")
 
-    print("AgentModelCatalog checks passed: table parse (header/ANSI/order), non-empty-replace semantics, live options drive resolution with first-usable fallback, models-store display names")
+    // 5. Live-refresh gating: QA-inert by construction (requestRefresh no-ops
+    //    unless the real app enabled it), and the throttle decision is pure.
+    let gated = AgentModelCatalog()
+    expect(gated.requestRefresh(minimumInterval: 0) == false,
+           "requestRefresh must no-op before enableLiveRefresh — QA can never spawn a probe")
+    expect(AgentModelCatalog.refreshDue(lastStartedAt: nil, minimumInterval: 15, now: Date(timeIntervalSince1970: 100)),
+           "a refresh is due when none ran yet")
+    expect(!AgentModelCatalog.refreshDue(
+        lastStartedAt: Date(timeIntervalSince1970: 90), minimumInterval: 15, now: Date(timeIntervalSince1970: 100)),
+        "a refresh inside the minimum interval is throttled")
+    expect(AgentModelCatalog.refreshDue(
+        lastStartedAt: Date(timeIntervalSince1970: 80), minimumInterval: 15, now: Date(timeIntervalSince1970: 100)),
+        "a refresh past the minimum interval is due again")
+
+    print("AgentModelCatalog checks passed: table parse (header/ANSI/order), non-empty-replace semantics, live options drive resolution with first-usable fallback, models-store display names, QA-inert throttled refresh")
 }

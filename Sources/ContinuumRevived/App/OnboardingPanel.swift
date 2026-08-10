@@ -98,8 +98,8 @@ final class OnboardingPanel {
             Probe(
                 id: "pi",
                 title: "pi",
-                detail: "Runs managed agent tiles and supplies the model catalogue.",
-                missingGuidance: "Install: npm install -g @earendil-works/pi-coding-agent",
+                detail: "Unlocks managed agent tiles (optional) — claude/codex tiles work without it.",
+                missingGuidance: "Install: npm install -g @earendil-works/pi-coding-agent (needs Node — no npm? brew install node first)",
                 connectProfileId: nil,
                 locate: locateOnPath("pi")
             ),
@@ -306,6 +306,9 @@ final class OnboardingPanel {
     }
 
     private func refreshStatuses() {
+        // The Re-check moment is exactly when a provider login just happened
+        // — re-probe the model catalogue too (throttled; inert in QA).
+        AgentModelCatalog.shared.requestRefresh()
         for probe in probes {
             let located = probe.locate()
             guard let status = statusLabels[probe.id], let guidance = guidanceLabels[probe.id] else { continue }

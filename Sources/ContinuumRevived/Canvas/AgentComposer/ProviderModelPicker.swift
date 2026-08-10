@@ -434,6 +434,9 @@ final class ProviderModelButton: ChoiceButton {
     override func dismissPresentedPopover() { providerPopover.dismiss() }
 
     override func presentPopover() {
+        // A provider authed while the app runs reaches the NEXT open without
+        // a relaunch (throttled; inert in QA, which never enables refresh).
+        AgentModelCatalog.shared.requestRefresh()
         providerPopover.present(
             items: items, selectedID: selectedID, anchor: bounds, relativeTo: self
         ) { [weak self] item in

@@ -2758,10 +2758,11 @@ enum ContinuumApp {
         // initializers already read it. See ToolEnvironment.
         ToolEnvironment.shared.bootstrap()
         ToolEnvironment.shared.startLoginShellUpgrade()
-        // Live model catalogue: one bounded `pi --list-models` probe so the
-        // picker offers whatever providers the user has authed in pi (QA
-        // never refreshes and keeps the frozen fallback).
-        AgentModelCatalog.shared.startRefresh()
+        // Live model catalogue: opt in to bounded `pi --list-models` probes
+        // (startup + throttled re-probes on picker open / onboarding
+        // re-check) so the picker offers whatever providers the user has
+        // authed in pi. QA never enables this and keeps the frozen fallback.
+        AgentModelCatalog.shared.enableLiveRefresh()
 
         let application = NSApplication.shared
         let delegate = AppDelegate()
