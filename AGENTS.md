@@ -20,7 +20,13 @@ The prod copy in /Applications owns `~/Library/Application Support/Array` and
 the `dev.arrayapp.macos` defaults domain. Dev builds and bare binaries are the
 DEV channel (`AppChannel` in Core): "Array Dev" store, `.dev` defaults domain,
 updater inert. Never point a dev build at prod state; QA additionally isolates
-with `CONTINUUM_APP_SUPPORT` temp dirs. See the channel section in
+with `CONTINUUM_APP_SUPPORT` temp dirs.
+
+**The split stops at the app's own state.** A PROJECT's state — canvas, tiles,
+notes, managed sessions, lock — lives in `<project root>/.array/` and is keyed
+by path, not by channel. Two installs pointed at one root will overwrite each
+other's work no matter which channels they are (hazard 9). See the channel
+section in
 [docs/38-tickets/95-go-live.md](docs/38-tickets/95-go-live.md).
 
 ### 2. Witnessed behavior, not plausible behavior
@@ -72,7 +78,11 @@ frozen fallback in QA).
   interactively. See [.plans/01-provider-cli-backends.md](.plans/01-provider-cli-backends.md).
 - **Launch profile** — palette entry describing what a terminal tile runs
   (`shell`, `claude`, `codex`, `nvim`, `custom`) — `LaunchProfileRegistry`.
-- **Channel** — prod vs dev identity (see non-negotiable #1).
+- **Channel** — prod vs dev identity (see non-negotiable #1). Covers the app's
+  own state only; a project's `.array/` is shared across channels.
+- **The preview app** — `~/Desktop/Array Dev.app` on `~/array-scratch`, rebuilt
+  by `scripts/dev-app.sh`. Distinct from Dylan's workspace, the prod copy in
+  /Applications, which agents leave alone.
 - **The matrix** — `scripts/run-matrix.sh`, the full offline verification
   suite: build, iOS build, checks executables, app self-check legs, bundle
   probe.
@@ -131,6 +141,53 @@ frozen fallback in QA).
    name goes in `tokenAdoptedOwners` with owner-scoped legal values
    (`UIProbeAppearance.swift`), and resting states paint `nil`, never
    `.clear` (a painted transparent is an unregistered literal).
+9. **Two installs on ONE project root.** The channel split covers Application
+   Support and the defaults domain. It does NOT cover a project: the canvas,
+   tiles, notes, managed sessions and lock live in `<root>/.array/`, keyed by
+   the filesystem path and nothing else. Two apps on one root share those files
+   and the last writer wins — this really happened, and it took a canvas from
+   nine tiles to one. `.array/lock` is an exclusive `flock`, so they cannot even
+   be open at once; and because agent TILES live in the shared canvas while
+   agent RECORDS are channel-split, the second app mints a duplicate agent for
+   every tile it finds no record for. Give each install its own root.
+
+## Running the app while Dylan is using it
+
+Two installs, split by ROLE. Never by project — see hazard 9.
+
+- **`/Applications/Array.app` is Dylan's workspace.** Prod channel, owns
+  `~/Documents/personal`. He works in it all day. **Never rebuild it, never
+  quit it, never point anything else at its project root.** It changes only
+  when a real release ships (RELEASE.md) and he takes the update.
+- **`~/Desktop/Array Dev.app` is the preview window.** Dev channel, pinned to
+  `~/array-scratch`. Rebuild and relaunch it as often as you like; nothing in
+  it is meant to survive.
+
+```sh
+scripts/dev-app.sh              # quit, rebuild, relaunch — ~16s
+scripts/dev-app.sh --no-launch  # rebuild only
+```
+
+**Use that script; do not hand-roll the loop.** Four things it gets right that
+cost a session to learn:
+
+1. **Debug, never `--configuration release`.** Release is whole-module
+   optimization — every edit recompiles the world, ~6 minutes, to look at a UI
+   change. Debug is incremental: ~15s. Release configuration is for shipping.
+2. **`CONTINUUM_PROJECT_ROOT` pins the project**, and it is the first rung of
+   `ProjectRootResolver.resolve()` — ahead of the registry's last-active
+   project. Wiping the dev store is NOT enough on its own; the app re-adopts
+   the last root it knew.
+3. **`open --env …`, never `App.app/Contents/MacOS/Array` directly.** The
+   direct executable makes the app a child of the calling shell, so it dies
+   when that shell's process group is torn down — which is exactly what happens
+   when an agent runs a script. `nohup`/`disown` does not save it. Verify a
+   launch AFTER your tool call returns, not while your shell is still alive.
+4. **The scratch root is outside `~/Documents`.** `Documents`, `Desktop` and
+   `Downloads` need an explicit folder grant
+   (`requiresExplicitProjectFolderGrant`), and the dev bundle's ad-hoc
+   signature changes on every rebuild, so that modal returns every launch — the
+   app just sits there, apparently booting to nothing.
 
 ## Verifying
 

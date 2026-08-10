@@ -11,6 +11,12 @@ reporting what he notices** — "we are so close to using it as a daily driver".
 from Verification debt below — the `--agent-supervisor-check` naming flake is
 the highest-leverage item there, because it gates ~110 matrix legs.
 
+**Dogfood setup (2026-08-10, settled):** prod `/Applications/Array.app` is
+Dylan's workspace on `~/Documents/personal` — never rebuild or quit it. The
+preview app is `~/Desktop/Array Dev.app` on `~/array-scratch` via
+`scripts/dev-app.sh` (~16s). Full rules in AGENTS.md ("Running the app while
+Dylan is using it" + hazard 9).
+
 ## Shipped in 0.4.0 (build 6, 2026-08-10)
 
 All of the below went out in 0.4.0. Dylan dogfooded each one in Array Dev
