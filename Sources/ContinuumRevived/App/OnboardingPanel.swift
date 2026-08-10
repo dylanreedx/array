@@ -108,7 +108,25 @@ final class OnboardingPanel {
                 return "signed in (ChatGPT)"
             }
         }
+        // At least one agent CLI must be installed for managed agents to run;
+        // any one satisfies it, and all three can coexist and be chosen per
+        // agent via the Settings ▸ Agents backend toggle. Ready as soon as any
+        // of claude/codex/pi resolves on PATH.
+        func anyAgentBackendPresent() -> String? {
+            for name in ["claude", "codex", "pi"] where locateOnPath(name)() != nil {
+                return "ready"
+            }
+            return nil
+        }
         return [
+            Probe(
+                id: "agent-backend",
+                title: "Agent backend (at least one required)",
+                detail: "Managed agents need one coding CLI — Claude Code, Codex, or pi. Install any one, or all three and switch per agent in Settings ▸ Agents.",
+                missingGuidance: "Install at least one of Claude Code, Codex, or pi (options below) to run managed agents.",
+                connectProfileId: nil,
+                locate: anyAgentBackendPresent
+            ),
             Probe(
                 id: "claude",
                 title: "Claude Code",
@@ -143,8 +161,8 @@ final class OnboardingPanel {
             ),
             Probe(
                 id: "pi",
-                title: "pi",
-                detail: "Managed agents on GPT and other providers (optional) — Claude models run through Claude Code itself.",
+                title: "pi (interchangeable models — the luxury)",
+                detail: "One backend that runs Claude, GPT, and other providers' models interchangeably. Optional, but install pi for the luxury of switching models freely without picking a single-provider CLI.",
                 missingGuidance: "Install: npm install -g @earendil-works/pi-coding-agent (needs Node — no npm? brew install node first)",
                 connectProfileId: nil,
                 locate: locateOnPath("pi")
@@ -489,6 +507,31 @@ final class OnboardingPanel {
         panel.close()
         if let windowNumber, NSApp.windows.contains(where: { $0.windowNumber == windowNumber && $0.isVisible }) {
             throw SelfCheckError.message("onboarding panel window leaked after close")
+        }
+
+        // The real fresh-setup rows: the three agent backends (claude/codex/pi)
+        // are present, the "at least one required" summary leads them, and pi is
+        // framed as the interchangeable-models luxury. Constructed (locate
+        // closures are not invoked) so this stays deterministic and independent
+        // of what is installed on the QA host.
+        let live = OnboardingPanel.liveProbes(environment: { [:] })
+        let ids = live.map(\.id)
+        for required in ["agent-backend", "claude", "codex", "pi"] where !ids.contains(required) {
+            throw SelfCheckError.message("liveProbes is missing the \(required) row — the three backends + the required-one summary must all appear in fresh setup")
+        }
+        guard let backendIdx = ids.firstIndex(of: "agent-backend"),
+              let claudeIdx = ids.firstIndex(of: "claude"),
+              let codexIdx = ids.firstIndex(of: "codex"),
+              let piIdx = ids.firstIndex(of: "pi"),
+              backendIdx < claudeIdx, backendIdx < codexIdx, backendIdx < piIdx else {
+            throw SelfCheckError.message("the 'at least one required' summary must lead the claude/codex/pi options")
+        }
+        guard live[backendIdx].title.lowercased().contains("required") else {
+            throw SelfCheckError.message("the agent-backend row must state that one backend is required, got \(live[backendIdx].title)")
+        }
+        let piDetail = live[piIdx].detail.lowercased()
+        guard piDetail.contains("interchange"), piDetail.contains("luxury") else {
+            throw SelfCheckError.message("the pi row must frame it as the interchangeable-models luxury, got \(live[piIdx].detail)")
         }
     }
 }
