@@ -219,7 +219,7 @@ public enum SettingsSchema {
                     // sign-in. The model list below filters to the choice.
                     .choice(
                         key: AgentBackendConfig.key,
-                        label: "Agent Backend",
+                        label: "Agent Harness",
                         options: AgentBackendConfig.options,
                         default: AgentBackendConfig.defaultBackend.rawValue
                     ),

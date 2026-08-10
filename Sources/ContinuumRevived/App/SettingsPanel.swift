@@ -251,7 +251,27 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
             self.notifySettingsChanged()
         }
         modelPickerButtonForQA = button
+        modelPickerField = field
         return vGroup([labelView, button])
+    }
+
+    /// The agent harness re-filters which models are runnable. The model picker
+    /// lives in the same panel as the harness toggle, so it must rebuild the
+    /// instant the harness changes — not on next open. If the stored default
+    /// model isn't runnable by the new harness, fall back to the first one it
+    /// can run and persist that so no unrunnable model is left selected.
+    private func refreshModelPickerForHarnessChange() {
+        guard let button = modelPickerButtonForQA else { return }
+        let options = AgentModelConfig.modelOptions  // already filtered by the just-written harness
+        button.items = options.map {
+            ChoiceItem(id: $0, title: AgentModelCatalog.shared.displayName(for: $0) ?? $0)
+        }
+        if case .string(let current)? = modelPickerField?.currentValue(in: defaults), options.contains(current) {
+            button.selectedID = current
+        } else if let first = options.first {
+            button.selectedID = first
+            modelPickerField?.setValue(.string(first), in: defaults)
+        }
     }
 
     private func infoRow(for field: SettingsField) -> NSView {
@@ -504,6 +524,11 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     @objc private func choiceChanged(_ sender: NSPopUpButton) {
         guard let field = bindings[ObjectIdentifier(sender)], let title = sender.titleOfSelectedItem else { return }
         field.setValue(.string(title), in: defaults)
+        // Changing the agent harness re-filters the runnable models, so rebuild
+        // the model picker live rather than leaving a stale (or unrunnable) list.
+        if field.key == AgentBackendConfig.key {
+            refreshModelPickerForHarnessChange()
+        }
         notifySettingsChanged()
     }
 
@@ -529,6 +554,9 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     /// The default-model picker trigger, kept for the self-check: it must be
     /// the SAME component the tile composer uses, fed by the same catalogue.
     private(set) var modelPickerButtonForQA: ProviderModelButton?
+    /// The model field, so the harness toggle can rebuild + re-validate the
+    /// picker live in the same panel.
+    private var modelPickerField: SettingsField?
 
     // MARK: - Helpers
 
@@ -802,17 +830,27 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         do {
             let priorBackend = UserDefaults.standard.string(forKey: AgentBackendConfig.key)
             AgentModelCatalog.shared.resetForQA(options: ["openai-codex/gpt-x", "anthropic/claude-y"])
+            // Each flip asserts BOTH the data narrowing AND that the rendered
+            // picker rebuilds LIVE in the same panel (the harness change bug):
+            // `refreshModelPickerForHarnessChange` is what `choiceChanged` calls,
+            // so the button's items must track the filtered catalogue immediately.
             AgentBackendConfig.store(.codex)
-            guard AgentModelConfig.modelOptions == ["openai-codex/gpt-x"] else {
-                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: Codex backend must narrow modelOptions to openai-codex/*, got \(AgentModelConfig.modelOptions)")
+            panel.refreshModelPickerForHarnessChange()
+            guard AgentModelConfig.modelOptions == ["openai-codex/gpt-x"],
+                  panel.modelPickerButtonForQA?.items.map(\.id) == ["openai-codex/gpt-x"] else {
+                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: Codex harness must narrow the live picker to openai-codex/*, got \(panel.modelPickerButtonForQA?.items.map(\.id) ?? [])")
             }
             AgentBackendConfig.store(.claudeCode)
-            guard AgentModelConfig.modelOptions == ["anthropic/claude-y"] else {
-                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: Claude Code backend must narrow modelOptions to anthropic/*, got \(AgentModelConfig.modelOptions)")
+            panel.refreshModelPickerForHarnessChange()
+            guard AgentModelConfig.modelOptions == ["anthropic/claude-y"],
+                  panel.modelPickerButtonForQA?.items.map(\.id) == ["anthropic/claude-y"] else {
+                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: Claude Code harness must narrow the live picker to anthropic/*, got \(panel.modelPickerButtonForQA?.items.map(\.id) ?? [])")
             }
             AgentBackendConfig.store(.pi)
-            guard AgentModelConfig.modelOptions == ["openai-codex/gpt-x", "anthropic/claude-y"] else {
-                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: pi backend must show every provider, got \(AgentModelConfig.modelOptions)")
+            panel.refreshModelPickerForHarnessChange()
+            guard AgentModelConfig.modelOptions == ["openai-codex/gpt-x", "anthropic/claude-y"],
+                  panel.modelPickerButtonForQA?.items.map(\.id) == ["openai-codex/gpt-x", "anthropic/claude-y"] else {
+                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: pi harness must show every provider in the live picker, got \(panel.modelPickerButtonForQA?.items.map(\.id) ?? [])")
             }
             if let priorBackend {
                 UserDefaults.standard.set(priorBackend, forKey: AgentBackendConfig.key)
