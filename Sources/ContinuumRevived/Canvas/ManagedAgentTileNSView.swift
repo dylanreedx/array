@@ -155,6 +155,10 @@ final class ManagedAgentTileNSView: TileNSView {
     private var descriptor: AgentDescriptor
     private var startedAt: Date?
     private var promptInFlight = false
+    /// Guards `renderRehydratedPreviousSession` so a re-wire cannot stack the
+    /// restored history. Reset by `resetProjection` (which clears the model), so
+    /// a re-attach after a detach re-renders the seeded transcript.
+    private var hasRenderedRehydratedSession = false
     private let threadId: String
     /// P2A.4: the agent this tile is a VIEW OF, and the subscription that feeds it.
     /// The tile owns neither the agent nor its runner — `AgentSupervisor` does — so
@@ -400,6 +404,13 @@ final class ManagedAgentTileNSView: TileNSView {
                 self.ingest(bound, originalEvent: event)
                 self.onIngestedEvent?(bound)
             }
+        }
+        // A restored agent may have a prior transcript the supervisor already
+        // read from its session file. Render it directly (display-only, see
+        // renderRehydratedPreviousSession) so any tile attaching to the agent —
+        // including a re-attach after a detach — shows the restored history.
+        if let rehydrated = supervisor.rehydratedTranscript(for: agentID) {
+            renderRehydratedPreviousSession(rehydrated)
         }
         refreshTranscriptThinkingIndicator()
     }
@@ -718,6 +729,7 @@ final class ManagedAgentTileNSView: TileNSView {
         // A reset restarts the reducer's version numbering, so the forwarded
         // version can no longer be compared against it.
         lastForwardedDocumentVersion = nil
+        hasRenderedRehydratedSession = false
         synchronizeV2Transcript(final: true)
     }
 
@@ -746,6 +758,48 @@ final class ManagedAgentTileNSView: TileNSView {
         // provider produced onto the tile's stream and from there onto the syncable
         // activity timeline. The first real event re-derives the status from the
         // model as usual.
+        descriptor.status = .idle
+        descriptor.statusUpdatedAt = Date()
+        agentStatus = .idle
+        applyHeader(status: .idle)
+        refreshTranscriptThinkingIndicator()
+        synchronizeV2Transcript(final: true)
+    }
+
+    /// Rebuilds the prior conversation from a session file the supervisor read
+    /// (`.plans/03-transcript-rehydration.md`), leading with a clear "Previous
+    /// session" boundary card so the restored history is legible and separated
+    /// from the live turns that append below it.
+    ///
+    /// DISPLAY-ONLY (I5): the steps are ingested straight into THIS tile's model,
+    /// never through the supervisor's event stream, so `onIngestedEvent` — which
+    /// mirrors every ingested event onto the syncable activity timeline (88.4c) —
+    /// does not fire for them. Same reason `showPreviousSessionNotice` appends a
+    /// notice rather than ingesting a synthetic event: restored bodies must not
+    /// re-cross the companion sync boundary. Idempotent so a re-wire cannot stack
+    /// the history.
+    func renderRehydratedPreviousSession(_ transcript: RehydratedTranscript) {
+        guard !hasRenderedRehydratedSession else { return }
+        hasRenderedRehydratedSession = true
+        cancelStreamingMarkupParseTimer()
+        model.appendNotice(
+            id: "notice-previous-session",
+            title: "previous session",
+            text: transcript.boundaryNoticeText)
+        for step in transcript.steps {
+            switch step {
+            case .userPrompt(let text):
+                model.appendUserPrompt(text)
+            case .event(let event):
+                // The model filters on this tile's thread id; rebind exactly as
+                // the live subscription does, but ingest DIRECTLY (never via the
+                // event stream) so activity mirroring stays untriggered.
+                model.ingest(event.withThreadId(threadId))
+            }
+        }
+        // A restored agent is idle until prompted — set directly, the way
+        // showPreviousSessionNotice does, not by ingesting a synthetic session
+        // event (which would reach the syncable activity timeline).
         descriptor.status = .idle
         descriptor.statusUpdatedAt = Date()
         agentStatus = .idle

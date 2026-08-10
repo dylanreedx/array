@@ -10337,6 +10337,9 @@ runClaudeAgentBackendChecks()
 // Plan: .plans/02-codex-backend-and-toggle.md (codex CLI backend + toggle)
 runCodexAgentBackendChecks()
 
+// Plan: .plans/03-transcript-rehydration.md (transcript rehydration on resume)
+runTranscriptRehydrationChecks()
+
 // Ticket: docs/38-tickets/90-agent-ux/P0.10-explicit-model-id.md
 runAgentModelConfigChecks()
 runAgentModelCatalogChecks()
