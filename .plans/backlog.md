@@ -57,6 +57,13 @@ next release is build 5.
 
 ## Bigger designed work
 
+- `03-transcript-rehydration.md` — **planned + fully mapped, ready to build**.
+  Resume shows the full prior transcript (read from the provider session file,
+  replayed as events) as an expandable summary, replacing the empty notice.
+  Dylan's stated want 2026-08-09. Display-only I5 constraint is the sharp risk.
+- `02-codex-backend-and-toggle.md` — codex CLI backend (so pi isn't required)
+  + an explicit backend toggle in Settings that filters the model dropdown
+  (codex↔openai, claude↔anthropic). Being planned by an agent; implement after.
 - `01-provider-cli-backends.md` — **claude backend SHIPPED 2026-08-09**
   (anthropic models run on the user's own Claude Code login, no pi, no extra
   usage; routing + translator + runner + catalogue union + onboarding +
