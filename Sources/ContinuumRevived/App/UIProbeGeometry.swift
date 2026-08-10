@@ -733,7 +733,11 @@ enum UIProbeGeometry {
                 row.apply(AgentCompactStatusPresentation.present(
                     location: longInside,
                     projectName: "continuum",
-                    activity: AgentCompactActivityInput(phase: .responding, phaseStartedAt: now.addingTimeInterval(-88)),
+                    // A footer-retained phase. Live phases such as `.responding`
+                    // now render on the transcript gyro and are silent here, so
+                    // competing them for row width would exercise a layout the
+                    // product cannot produce.
+                    activity: AgentCompactActivityInput(phase: .waiting, phaseStartedAt: now.addingTimeInterval(-88)),
                     now: now,
                     contextWindow: critical,
                     contextPolicy: policy))
@@ -755,7 +759,7 @@ enum UIProbeGeometry {
             }
             try expectNoClipping(stack, label: "compactStatusRow.providerCompetition.\(appearanceName.rawValue)")
             try require(row.qaActivityAndContextVisible && row.qaProtectedDrawableWidths,
-                        "compact status row did not preserve activity/context in provider/action width competition")
+                        "compact status row did not preserve activity/context in provider/action width competition: row \(row.bounds.width) loc \(String(describing: row.qaLocationLabelFrame?.width)) actLabel \(String(describing: row.qaActivityLabelFrame?.width)) actIcon \(String(describing: row.qaActivityIconFrame?.width)) meter \(String(describing: row.qaContextMeterFrame?.width)) ctxLabel \(String(describing: row.qaContextLabelFrame?.width))")
             try require(row.qaLocationCompressionPriority < row.qaActivityCompressionPriority,
                         "compact status row location was not the lowest compression sink under provider/action competition")
         }
@@ -5651,27 +5655,44 @@ enum UIProbeGeometry {
             location: location, contextWindow: context, now: now)
         let liveRow = tile.qaCompactStatusRow
         liveRow.layoutSubtreeIfNeeded()
-        // Read the value out NOW: `liveRow` is the same view object the repaint
-        // below mutates, so a deferred read would compare the new value to itself.
-        let earlyElapsed = liveRow.qaElapsedText
-        guard earlyElapsed != nil, tile.qaCompactStatusTickScheduled else {
-            throw fail("\(label): a live elapsed-bearing phase must schedule the status tick, elapsed \(String(describing: earlyElapsed)) scheduled \(tile.qaCompactStatusTickScheduled)")
+        // Live work rides the GYRO, not the footer: the row stays silent while the
+        // tail label carries the phase and its elapsed reading. Read the tail text
+        // out now — the repaint below mutates the same views.
+        let earlyTail = tile.qaTailStatusText
+        guard liveRow.qaActivityIsSilent else {
+            throw fail("\(label): live work must not print in the footer; row said \"\(liveRow.qaActivityText)\"")
         }
-        // The same row, repainted one minute later with NO new event, must show a
-        // different elapsed reading — that is what the tick delivers.
+        guard earlyTail.contains("Thinking"), earlyTail.contains("5s"), tile.qaCompactStatusTickScheduled else {
+            throw fail("\(label): a live phase must put its label and elapsed on the gyro and schedule the tick, tail \"\(earlyTail)\" scheduled \(tile.qaCompactStatusTickScheduled)")
+        }
+        // Repainted one minute later with NO new event, the gyro's reading must
+        // advance — that is what the tick delivers.
         tile.qaApplyCompactStatusFacts(
             .init(turn: .active(startedAt: now.addingTimeInterval(-5), stream: .reasoning, streamStartedAt: now.addingTimeInterval(-5))),
             location: location, contextWindow: context, now: now.addingTimeInterval(60))
         tile.qaCompactStatusRow.layoutSubtreeIfNeeded()
-        let laterElapsed = tile.qaCompactStatusRow.qaElapsedText
-        guard let laterElapsed, laterElapsed != earlyElapsed else {
-            throw fail("\(label): repainting a live phase at a later instant must advance its elapsed reading, stayed \(String(describing: earlyElapsed)) → \(String(describing: laterElapsed))")
+        let laterTail = tile.qaTailStatusText
+        guard laterTail != earlyTail, laterTail.contains("1m") else {
+            throw fail("\(label): repainting a live phase at a later instant must advance the gyro's elapsed reading, stayed \"\(earlyTail)\" → \"\(laterTail)\"")
         }
+        // An attention state is the footer's job precisely because the gyro is
+        // gone by then: a pending approval must print in the row and NOT on the
+        // gyro, or a blocked agent would look idle.
+        tile.qaApplyCompactStatusFacts(
+            .init(interaction: .pending(startedAt: now.addingTimeInterval(-5))),
+            location: location, contextWindow: context, now: now)
+        tile.qaCompactStatusRow.layoutSubtreeIfNeeded()
+        guard tile.qaCompactStatusRow.qaActivityText == "Waiting", tile.qaTailStatusText.isEmpty else {
+            throw fail("\(label): a pending approval must show in the footer and not on the gyro, row \"\(tile.qaCompactStatusRow.qaActivityText)\" tail \"\(tile.qaTailStatusText)\"")
+        }
+        // Idle: both surfaces quiet, tick torn down.
         tile.qaApplyCompactStatusFacts(
             .init(session: .init(state: .ready)), location: location, contextWindow: context, now: now)
         tile.qaCompactStatusRow.layoutSubtreeIfNeeded()
-        guard tile.qaCompactStatusRow.qaActivityIsSilent, !tile.qaCompactStatusTickScheduled else {
-            throw fail("\(label): an idle row must be silent and must tear the status tick down, silent \(tile.qaCompactStatusRow.qaActivityIsSilent) scheduled \(tile.qaCompactStatusTickScheduled)")
+        guard tile.qaCompactStatusRow.qaActivityIsSilent,
+              tile.qaTailStatusText.isEmpty,
+              !tile.qaCompactStatusTickScheduled else {
+            throw fail("\(label): an idle tile must be silent in BOTH surfaces and tear the tick down, silent \(tile.qaCompactStatusRow.qaActivityIsSilent) tail \"\(tile.qaTailStatusText)\" scheduled \(tile.qaCompactStatusTickScheduled)")
         }
 
         // A zero-turn session is empty for ANY window size: the seeded
@@ -5721,9 +5742,10 @@ enum UIProbeGeometry {
                 currentActivityExpiresAt: now.addingTimeInterval(-1)),
             location: location,
             now: now)
+        // Live work now reads on the gyro, not in the footer row.
         guard tile.qaCompactStatusPhase == .thinking,
-              tile.qaCompactStatusRow.qaActivityText == "Thinking" else {
-            throw fail("\(label): expired inspecting activity overrode the current reasoning stream")
+              tile.qaTailStatusText.contains("Thinking") else {
+            throw fail("\(label): expired inspecting activity overrode the current reasoning stream; phase \(String(describing: tile.qaCompactStatusPhase)) tail \"\(tile.qaTailStatusText)\"")
         }
     }
 

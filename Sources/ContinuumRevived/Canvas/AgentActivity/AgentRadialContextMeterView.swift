@@ -8,7 +8,9 @@ import ContinuumRevivedAgentUI
 /// as well as colour so the state does not depend on hue alone.
 @MainActor
 final class AgentRadialContextMeterView: NSView, TokenThemed {
-    private static let side: CGFloat = 20
+    /// The meter's fixed drawn size. Not private: the compact row pins the view
+    /// to it so priority arbitration can never collapse the glyph.
+    static let side: CGFloat = 20
     private static let lineWidth: CGFloat = 2.2
 
     private var presentation = AgentRadialContextMeterPresenter.present(nil)

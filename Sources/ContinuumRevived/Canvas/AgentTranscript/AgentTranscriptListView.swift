@@ -6,22 +6,35 @@ import ContinuumRevivedCore
 @MainActor
 private final class AgentTranscriptTailItem: NSCollectionViewItem {
     private weak var installedIndicator: DualPlaneGyroTiltedThinkingIndicatorView?
+    private weak var installedStatusLabel: NSTextField?
 
     override func loadView() {
         view = NSView(frame: .zero)
     }
 
-    func install(indicator: DualPlaneGyroTiltedThinkingIndicatorView) {
+    /// The live status rides the gyro: the spinning element and the words that
+    /// describe it are one object, at the end of the transcript where the next
+    /// output will appear. The label is owned by the list (so its text can be
+    /// re-driven without rebuilding the item) and merely hosted here.
+    func install(indicator: DualPlaneGyroTiltedThinkingIndicatorView, statusLabel: NSTextField) {
         installedIndicator?.removeFromSuperview()
+        installedStatusLabel?.removeFromSuperview()
         installedIndicator = indicator
+        installedStatusLabel = statusLabel
         indicator.removeFromSuperview()
+        statusLabel.removeFromSuperview()
         indicator.translatesAutoresizingMaskIntoConstraints = false
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(indicator)
+        view.addSubview(statusLabel)
         NSLayoutConstraint.activate([
             indicator.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             indicator.centerYAnchor.constraint(equalTo: view.centerYAnchor),
             indicator.widthAnchor.constraint(equalToConstant: DualPlaneGyroIndicatorModel.side),
             indicator.heightAnchor.constraint(equalToConstant: DualPlaneGyroIndicatorModel.side),
+            statusLabel.leadingAnchor.constraint(equalTo: indicator.trailingAnchor, constant: CGFloat(Space.s)),
+            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor),
+            statusLabel.centerYAnchor.constraint(equalTo: indicator.centerYAnchor),
         ])
     }
 
@@ -29,6 +42,8 @@ private final class AgentTranscriptTailItem: NSCollectionViewItem {
         super.prepareForReuse()
         installedIndicator?.removeFromSuperview()
         installedIndicator = nil
+        installedStatusLabel?.removeFromSuperview()
+        installedStatusLabel = nil
     }
 }
 
@@ -177,6 +192,9 @@ final class AgentTranscriptListView: NSView {
     private var toolDetailAgentID: AgentID?
     private var pendingRuntimeObservations: [AgentToolDetailKey: AgentRuntimeObservation] = [:]
     private let tailThinkingIndicator = DualPlaneGyroTiltedThinkingIndicatorView()
+    /// The live phase text that rides the gyro (e.g. "Reading Agent.swift · 12s").
+    /// Owned here so a tick can re-drive the words without rebuilding the item.
+    private let tailStatusLabel = NSTextField(labelWithString: "")
     private let tailThinkingIndicatorID = AgentNodeID(rawValue: "__agent_transcript_tail_thinking_indicator__")!
     private var tailThinkingIndicatorIsVisible = false
     /// Duration is an optional host-attested presentation input. The current
@@ -292,6 +310,11 @@ final class AgentTranscriptListView: NSView {
         scrollView.documentView = collectionView
         tailThinkingIndicator.isHidden = true
         tailThinkingIndicator.identifier = NSUserInterfaceItemIdentifier("agentTranscript.tailThinkingIndicator")
+        tailStatusLabel.isHidden = true
+        tailStatusLabel.identifier = NSUserInterfaceItemIdentifier("agentTranscript.tailStatusLabel")
+        tailStatusLabel.lineBreakMode = .byTruncatingTail
+        tailStatusLabel.setAccessibilityElement(false)
+        applyTailStatusTokens()
         addSubview(scrollView)
         addSubview(jumpToLatestButton)
         NSLayoutConstraint.activate([
@@ -347,7 +370,7 @@ final class AgentTranscriptListView: NSView {
                 let identifier = NSUserInterfaceItemIdentifier("AgentTranscriptTailItem")
                 guard let item = collectionView.makeItem(withIdentifier: identifier, for: indexPath)
                     as? AgentTranscriptTailItem else { return nil }
-                item.install(indicator: tailThinkingIndicator)
+                item.install(indicator: tailThinkingIndicator, statusLabel: tailStatusLabel)
                 return item
             }
             guard let row = rowsByID[id] else { return nil }
@@ -701,13 +724,41 @@ final class AgentTranscriptListView: NSView {
         guard tailThinkingIndicatorIsVisible != visible else { return }
         tailThinkingIndicatorIsVisible = visible
         tailThinkingIndicator.isHidden = !visible
+        tailStatusLabel.isHidden = !visible
         if visible {
             tailThinkingIndicator.startAnimating()
         } else {
             tailThinkingIndicator.stopAnimating()
+            tailStatusLabel.stringValue = ""
         }
         applyTailVisibilityWithScrollPreservation()
     }
+
+    /// Re-drives the words beside the gyro without touching the snapshot: the
+    /// elapsed tick calls this once a second, and rebuilding the collection item
+    /// at that rate would fight scrolling and text selection.
+    func setThinkingStatusText(_ text: String?) {
+        let resolved = text ?? ""
+        guard tailStatusLabel.stringValue != resolved else { return }
+        tailStatusLabel.stringValue = resolved
+        tailStatusLabel.toolTip = resolved.isEmpty ? nil : resolved
+    }
+
+    /// Text colour only — the label paints no layer, so this view stays off the
+    /// TokenThemed census while still following the appearance.
+    func applyTailStatusTokens() {
+        tailStatusLabel.font = .token(.caption)
+        tailStatusLabel.textColor = TextToken.textSecondary.color.nsColor(for: effectiveTokenTheme)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTailStatusTokens()
+    }
+
+    // QA seams for the tail status.
+    var qaTailStatusText: String { tailStatusLabel.stringValue }
+    var qaTailStatusIsVisible: Bool { !tailStatusLabel.isHidden }
 
     private func applyTailVisibilityWithScrollPreservation() {
         guard dataSource != nil else { return }

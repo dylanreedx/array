@@ -92,9 +92,14 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
             locationLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 6).isActive = true
         }
 
-        activityLabel.lineBreakMode = .byClipping
+        // The phase label is the only variable-length text left in the row, so it
+        // is the one that must give. With `.byClipping` + `.required` it could do
+        // neither, and a narrow row crushed the context reading beside it to a
+        // few points — glyph-free. Truncating and yielding below the context
+        // label's required resistance puts the loss where it reads correctly.
+        activityLabel.lineBreakMode = .byTruncatingTail
         activityLabel.setContentHuggingPriority(.required, for: .horizontal)
-        activityLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        activityLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         elapsedLabel.lineBreakMode = .byClipping
         elapsedLabel.setContentHuggingPriority(.required, for: .horizontal)
         elapsedLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -102,6 +107,18 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
         contextLabel.lineBreakMode = .byClipping
         contextLabel.setContentHuggingPriority(.required, for: .horizontal)
         contextLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        // The meter is a fixed-size glyph, so pin it rather than leaving its
+        // width to intrinsic size and priority arbitration. Once the activity
+        // group can be hidden, a long location label claims the freed width and
+        // squeezed the meter to 0pt in a narrow tile.
+        contextMeter.translatesAutoresizingMaskIntoConstraints = false
+        contextMeter.setContentHuggingPriority(.required, for: .horizontal)
+        contextMeter.setContentCompressionResistancePriority(.required, for: .horizontal)
+        NSLayoutConstraint.activate([
+            contextMeter.widthAnchor.constraint(equalToConstant: AgentRadialContextMeterView.side),
+            contextMeter.heightAnchor.constraint(equalToConstant: AgentRadialContextMeterView.side),
+        ])
 
         thinkingSlot.translatesAutoresizingMaskIntoConstraints = false
         thinkingSlot.setContentHuggingPriority(.required, for: .horizontal)
@@ -207,7 +224,17 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
         locationLabel.stringValue = next.location.text
         locationLabel.toolTip = next.location.detailText
         locationLabel.setAccessibilityLabel(next.location.accessibilityLabel)
-        activityGroup.isHidden = next.activity.isSilent
+        // Toggling an arranged subview's visibility changes what the stack has to
+        // distribute, but AppKit does not re-lay the row out on its own. Without
+        // this the frames computed for the previous configuration survive — in a
+        // narrow tile the context label stayed 4pt wide and rendered no glyphs.
+        if activityGroup.isHidden != next.activity.isSilent {
+            activityGroup.isHidden = next.activity.isSilent
+            invalidateIntrinsicContentSize()
+            rootStack.needsLayout = true
+            needsLayout = true
+            needsDisplay = true
+        }
         applySymbol(next.activity.symbolName, to: activityIcon, description: next.activity.accessibilityLabel)
         activityLabel.stringValue = next.activity.text
         activityLabel.toolTip = next.activity.detailText

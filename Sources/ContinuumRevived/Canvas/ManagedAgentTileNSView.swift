@@ -1028,6 +1028,7 @@ final class ManagedAgentTileNSView: TileNSView {
                 now: now,
                 contextWindow: compactContextWindow)
             compactStatusRow.apply(presentationWithoutThinkingIndicator(presented))
+            transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: presented.activity))
             syncCompactStatusTick(for: presented.activity)
             return
         }
@@ -1036,6 +1037,7 @@ final class ManagedAgentTileNSView: TileNSView {
             location: compactLocationPresentation(snapshot, detail: locationPresentation),
             activity: activity,
             context: AgentRadialContextMeterPresenter.present(compactContextWindow))))
+        transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: activity))
         syncCompactStatusTick(for: activity)
     }
 
@@ -1109,10 +1111,24 @@ final class ManagedAgentTileNSView: TileNSView {
             context: AgentRadialContextMeterPresenter.present(nil))))
     }
 
+    /// Splits the activity by KIND between the tile's two status surfaces.
+    ///
+    /// Live work (thinking/reading/running/…) belongs on the gyro at the
+    /// transcript tail: the spinning element and the words describing it are one
+    /// object, sitting where the next output will appear. The footer keeps only
+    /// what must not be missed while the gyro is absent — failure, interruption,
+    /// and a pending approval — and is silent otherwise. The thinking indicator
+    /// never renders in the row; the gyro is the single animated element.
     private func presentationWithoutThinkingIndicator(
         _ presentation: AgentCompactStatusPresentation
     ) -> AgentCompactStatusPresentation {
         let activity = presentation.activity
+        guard !activity.isSilent, Self.footerRetainsPhase(activity.phase) else {
+            return AgentCompactStatusPresentation(
+                location: presentation.location,
+                activity: .silent(detailText: activity.detailText),
+                context: presentation.context)
+        }
         return AgentCompactStatusPresentation(
             location: presentation.location,
             activity: .init(
@@ -1124,6 +1140,29 @@ final class ManagedAgentTileNSView: TileNSView {
                 detailText: activity.detailText,
                 showsThinkingIndicator: false),
             context: presentation.context)
+    }
+
+    /// Attention states only. These occur precisely when the gyro is NOT shown
+    /// (the agent is not running), so without them a failure would be invisible.
+    private static func footerRetainsPhase(_ phase: AgentCompactActivityPhase) -> Bool {
+        switch phase {
+        case .failed, .interrupted, .waiting:
+            return true
+        case .starting, .thinking, .responding, .reading, .searching, .editing, .running, .ready:
+            return false
+        }
+    }
+
+    /// The words that ride the gyro: the live phase and its elapsed reading.
+    /// Attention and idle states return nil — those are the footer's, or nobody's.
+    private static func tailStatusText(
+        for activity: AgentCompactStatusPresentation.Activity
+    ) -> String? {
+        guard !activity.isSilent, !footerRetainsPhase(activity.phase), !activity.text.isEmpty else {
+            return nil
+        }
+        guard let elapsed = activity.elapsedText, !elapsed.isEmpty else { return activity.text }
+        return "\(activity.text) · \(elapsed)"
     }
 
     /// No authoritative fact means the row says nothing. A visible "Unknown" chip
@@ -1190,7 +1229,10 @@ final class ManagedAgentTileNSView: TileNSView {
                 activity: input,
                 now: now,
                 contextWindow: contextWindow)
-            compactStatusRow.apply(presented)
+            // Same split as production: footer filter, then the gyro's words.
+            // A probe that skipped either would witness a surface no user sees.
+            compactStatusRow.apply(presentationWithoutThinkingIndicator(presented))
+            transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: presented.activity))
             syncCompactStatusTick(for: presented.activity)
         } else {
             let detail = AgentLocationStatusPresenter.present(
@@ -1198,13 +1240,17 @@ final class ManagedAgentTileNSView: TileNSView {
                 projectName: locationProjectName ?? branchContext?.projectName)
             lastLocationPresentation = detail
             let activity = unknownCompactActivity()
-            compactStatusRow.apply(AgentCompactStatusPresentation(
+            compactStatusRow.apply(presentationWithoutThinkingIndicator(AgentCompactStatusPresentation(
                 location: compactLocationPresentation(location, detail: detail),
                 activity: activity,
-                context: AgentRadialContextMeterPresenter.present(contextWindow)))
+                context: AgentRadialContextMeterPresenter.present(contextWindow))))
+            transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: activity))
             syncCompactStatusTick(for: activity)
         }
     }
+
+    /// The words currently riding the gyro, for witnesses.
+    var qaTailStatusText: String { transcriptCollectionFixture?.qaTailStatusText ?? "" }
 
     /// Whether the live elapsed tick is currently scheduled. A live phase must
     /// have one (or its reading freezes); idle/silent must not (or an idle canvas

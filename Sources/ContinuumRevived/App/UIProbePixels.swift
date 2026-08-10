@@ -317,7 +317,10 @@ enum UIProbePixels {
     /// than its clip view — it is only partly rendered by design, while the cards
     /// inside it are fully rendered and are the things worth measuring.
     private static func isPartlyRendered(_ view: NSView) -> Bool {
-        !view.isHidden && view.alphaValue > 0.01 && Double(view.layer?.opacity ?? 1) > 0.01
+        // `isHiddenOrHasHiddenAncestor`, not `isHidden`: a label inside a hidden
+        // container is still `isHidden == false` and keeps its frame, so the
+        // bare check sampled glyph-free pixels and reported them as flat text.
+        !view.isHiddenOrHasHiddenAncestor && view.alphaValue > 0.01 && Double(view.layer?.opacity ?? 1) > 0.01
             && view.bounds.width > 0 && view.bounds.height > 0
             && !visiblePortion(of: view).isEmpty
     }
@@ -362,7 +365,10 @@ enum UIProbePixels {
     static func sweep(_ probe: UIProbe.Probed, label: String) throws -> Sweep {
         var result = Sweep()
         try walk(probe.view) { view in
-            let key = "\(label) \(describe(view))"
+            // Name the drawn string in the key: "NSTextField" alone does not say
+            // which label went flat in a tile with several.
+            let key = drawnText(of: view).map { "\(label) \(describe(view)) \"\($0.prefix(40))\"" }
+                ?? "\(label) \(describe(view))"
             if drawnText(of: view) != nil {
                 if renderedFraction(of: view) >= minimumVisibleTextFraction {
                     let spread = try expectLegibleText(in: view, probe: probe, label: key)
