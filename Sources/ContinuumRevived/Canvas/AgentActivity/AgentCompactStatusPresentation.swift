@@ -24,6 +24,44 @@ struct AgentCompactStatusPresentation: Equatable {
         let accessibilityLabel: String
         let detailText: String
         let showsThinkingIndicator: Bool
+        /// An idle or unknown agent says nothing at all: the row hides the whole
+        /// activity group rather than asserting a phase. Silence is the honest
+        /// rendering for "no live work" — a persistent "Ready"/"Unknown" chip
+        /// reads as a claim and, once it stops updating, as a stale one.
+        let isSilent: Bool
+
+        init(
+            phase: AgentCompactActivityPhase,
+            symbolName: String,
+            text: String,
+            elapsedText: String?,
+            accessibilityLabel: String,
+            detailText: String,
+            showsThinkingIndicator: Bool,
+            isSilent: Bool = false
+        ) {
+            self.phase = phase
+            self.symbolName = symbolName
+            self.text = text
+            self.elapsedText = elapsedText
+            self.accessibilityLabel = accessibilityLabel
+            self.detailText = detailText
+            self.showsThinkingIndicator = showsThinkingIndicator
+            self.isSilent = isSilent
+        }
+
+        /// The idle rendering: no icon, no label, no elapsed, no indicator.
+        static func silent(detailText: String) -> Activity {
+            Activity(
+                phase: .ready,
+                symbolName: "",
+                text: "",
+                elapsedText: nil,
+                accessibilityLabel: "",
+                detailText: detailText,
+                showsThinkingIndicator: false,
+                isSilent: true)
+        }
     }
 
     let location: Location
@@ -145,6 +183,15 @@ struct AgentCompactStatusPresentation: Equatable {
         now: Date
     ) -> Activity {
         let phase = input.phase
+        // Idle is silence, not a "Ready" chip. Everything below describes live
+        // work; there is nothing live to describe.
+        if phase == .ready {
+            var details = ["Activity phase: idle."]
+            if let evidenceNote = input.evidenceNote, !evidenceNote.isEmpty {
+                details.append("Evidence note: \(evidenceNote)")
+            }
+            return .silent(detailText: details.joined(separator: "\n"))
+        }
         let label = input.visibleLabel
         let elapsedSeconds = input.phaseStartedAt.map { max(0, now.timeIntervalSince($0)) }
         let elapsed = phase.displaysElapsed ? elapsedSeconds.map(AgentElapsedFormatter.elapsedLabel) : nil

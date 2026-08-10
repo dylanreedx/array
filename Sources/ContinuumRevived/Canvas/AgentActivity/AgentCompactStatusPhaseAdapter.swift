@@ -181,6 +181,16 @@ struct AgentCompactStatusPhaseAdapter {
             return result(.waiting, startedAt: startedAt, evidence: "An approval or user-input interaction is pending.")
         }
 
+        // A ready session with no active turn IS idle, and idle is authoritative
+        // over every lower-confidence observation. Without this, a `what` that
+        // has not yet expired outranks the finished turn below and the row keeps
+        // asserting "Reading"/"Waiting" after the agent has stopped — the stale
+        // status Dylan reported. Terminal/error/interaction facts are all
+        // resolved above, so nothing truthful is suppressed here.
+        if let session = facts.session, session.state == .ready, facts.turn == nil {
+            return result(.ready, startedAt: nil, evidence: "Session is ready with no active turn; the agent is idle.")
+        }
+
         // Specific tool/message observations outrank a generic active-turn
         // fact. Generic lifecycle thinking/waiting observations do not: they
         // must not hide a more precise assistant or reasoning stream. Session

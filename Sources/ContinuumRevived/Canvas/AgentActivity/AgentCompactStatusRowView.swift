@@ -207,6 +207,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
         locationLabel.stringValue = next.location.text
         locationLabel.toolTip = next.location.detailText
         locationLabel.setAccessibilityLabel(next.location.accessibilityLabel)
+        activityGroup.isHidden = next.activity.isSilent
         applySymbol(next.activity.symbolName, to: activityIcon, description: next.activity.accessibilityLabel)
         activityLabel.stringValue = next.activity.text
         activityLabel.toolTip = next.activity.detailText
@@ -226,7 +227,10 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
         actionButton.toolTip = next.location.detailText + "\nLocation actions"
         toolTip = [next.location.detailText, next.activity.detailText, next.context.detailText]
             .joined(separator: "\n\n")
-        setAccessibilityLabel("Agent compact status. \(next.location.accessibilityLabel) \(next.activity.accessibilityLabel) \(next.context.accessibilityLabel)")
+        // A silent activity contributes nothing to speech either — VoiceOver must
+        // not announce a phase the row is deliberately not showing.
+        let spokenActivity = next.activity.isSilent ? "" : " \(next.activity.accessibilityLabel)"
+        setAccessibilityLabel("Agent compact status. \(next.location.accessibilityLabel)\(spokenActivity) \(next.context.accessibilityLabel)")
         setAccessibilityHelp(toolTip)
         // Parent owns the combined Home/Where/What/activity/context announcement;
         // only the single location-action control is separately reachable.
@@ -428,6 +432,17 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
             .compactMap(frame(of:))
             .allSatisfy { bounds.insetBy(dx: -0.5, dy: -0.5).contains($0) }
     }
+    /// True when the row is deliberately saying nothing about activity (idle or
+    /// no authoritative fact). Distinct from "an activity exists but is clipped".
+    var qaActivityIsSilent: Bool {
+        (presentation?.activity.isSilent ?? false) && activityGroup.isHidden
+    }
+    /// Silence must cost the activity chunk and nothing else — the context meter
+    /// is ambient and stays put.
+    var qaContextVisibleWhileActivitySilent: Bool {
+        guard let context = qaContextFrame else { return false }
+        return context.width > 0 && bounds.contains(context) && !contextLabel.stringValue.isEmpty
+    }
     var qaActivityAndContextVisible: Bool {
         guard let activity = qaActivityFrame, let context = qaContextFrame else { return false }
         return activity.width > 0 && context.width > 0 && bounds.contains(activity) && bounds.contains(context)
@@ -437,14 +452,18 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
         let minimumTextWidth: CGFloat = 6
         let minimumIconWidth: CGFloat = 8
         guard let locationIcon = qaLocationIconFrame,
-              let activityIcon = qaActivityIconFrame,
-              let activityLabel = qaActivityLabelFrame,
               let contextMeter = qaContextMeterFrame,
               let contextLabel = qaContextLabelFrame else { return false }
-        return locationIcon.width >= minimumIconWidth
-            && activityIcon.width >= minimumIconWidth
-            && activityLabel.width >= minimumTextWidth
+        let locationAndContext = locationIcon.width >= minimumIconWidth
             && contextMeter.width >= 18
             && contextLabel.width >= minimumTextWidth
+        // A silent row has no activity glyph or label to protect; the rule holds
+        // for everything it is still drawing.
+        if qaActivityIsSilent { return locationAndContext }
+        guard let activityIcon = qaActivityIconFrame,
+              let activityLabel = qaActivityLabelFrame else { return false }
+        return locationAndContext
+            && activityIcon.width >= minimumIconWidth
+            && activityLabel.width >= minimumTextWidth
     }
 }

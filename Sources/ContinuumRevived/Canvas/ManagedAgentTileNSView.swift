@@ -94,6 +94,12 @@ final class ManagedAgentTileNSView: TileNSView {
     private var branchContext: AgentRowContext?
     private var locationProjectName: String?
     private var locationStaleTimer: Timer?
+    /// Advances the compact row's elapsed reading while a phase is live.
+    /// `AgentRuntimeEvent`s are the only other thing that repaints the row, so
+    /// without this the reading freezes at whatever the last event produced and
+    /// then jumps — the "delayed and wrong" status. Runs ONLY while a live phase
+    /// is on screen; idle/silent states tear it down.
+    private var compactStatusTickTimer: Timer?
     private var streamingMarkupParseTimer: Timer?
     private var streamingMarkupParseTimerScheduledDelay: TimeInterval?
     private var streamingMarkupParseTimerGeneration: UInt64 = 0
@@ -270,6 +276,7 @@ final class ManagedAgentTileNSView: TileNSView {
     isolated deinit {
         prepareStreamingMarkupForTeardown(final: true)
         locationStaleTimer?.invalidate()
+        compactStatusTickTimer?.invalidate()
     }
 
     /// The thread this tile's transcript filters on. The app rebinds incoming
@@ -1021,6 +1028,7 @@ final class ManagedAgentTileNSView: TileNSView {
                 now: now,
                 contextWindow: compactContextWindow)
             compactStatusRow.apply(presentationWithoutThinkingIndicator(presented))
+            syncCompactStatusTick(for: presented.activity)
             return
         }
         activity = unknownCompactActivity()
@@ -1028,9 +1036,44 @@ final class ManagedAgentTileNSView: TileNSView {
             location: compactLocationPresentation(snapshot, detail: locationPresentation),
             activity: activity,
             context: AgentRadialContextMeterPresenter.present(compactContextWindow))))
+        syncCompactStatusTick(for: activity)
+    }
+
+    /// Runs the elapsed tick exactly while the row is showing a live, elapsed-
+    /// bearing phase. Silence, a missing anchor, and a detached/offscreen tile
+    /// all stop it, so an idle canvas schedules nothing.
+    private func syncCompactStatusTick(for activity: AgentCompactStatusPresentation.Activity) {
+        let wantsTick = !activity.isSilent
+            && activity.elapsedText != nil
+            && window != nil
+        guard wantsTick else {
+            cancelCompactStatusTick()
+            return
+        }
+        guard compactStatusTickTimer == nil else { return }
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.window != nil else {
+                    // The tile went away or left the window between ticks; a
+                    // repeating timer that outlives its view is a leak.
+                    self?.cancelCompactStatusTick()
+                    return
+                }
+                self.refreshCompactStatus()
+            }
+        }
+        timer.tolerance = 0.25
+        RunLoop.main.add(timer, forMode: .common)
+        compactStatusTickTimer = timer
+    }
+
+    private func cancelCompactStatusTick() {
+        compactStatusTickTimer?.invalidate()
+        compactStatusTickTimer = nil
     }
 
     private func resetCompactStatusProjection(at now: Date = Date()) {
+        cancelCompactStatusTick()
         compactStatusPhaseAdapter.reset()
         compactStatusResolution = .unknown
         compactStatusSession = nil
@@ -1083,15 +1126,12 @@ final class ManagedAgentTileNSView: TileNSView {
             context: presentation.context)
     }
 
+    /// No authoritative fact means the row says nothing. A visible "Unknown" chip
+    /// is the boot-time stale claim: before the first event of a session there is
+    /// no live phase, and the previous session's residue must not read as one.
     private func unknownCompactActivity() -> AgentCompactStatusPresentation.Activity {
-        .init(
-            phase: .ready,
-            symbolName: "questionmark.circle",
-            text: "Unknown",
-            elapsedText: nil,
-            accessibilityLabel: "Activity unknown; no authoritative phase fact.",
-            detailText: "Activity phase: unknown. No authoritative session, turn, interaction, or current-tool phase fact.",
-            showsThinkingIndicator: false)
+        .silent(
+            detailText: "Activity phase: unknown. No authoritative session, turn, interaction, or current-tool phase fact.")
     }
 
     private func compactLocationPresentation(
@@ -1144,23 +1184,32 @@ final class ManagedAgentTileNSView: TileNSView {
             lastLocationPresentation = AgentLocationStatusPresenter.present(
                 location,
                 projectName: locationProjectName ?? branchContext?.projectName)
-            compactStatusRow.apply(AgentCompactStatusPresentation.present(
+            let presented = AgentCompactStatusPresentation.present(
                 location: location,
                 projectName: locationProjectName ?? branchContext?.projectName,
                 activity: input,
                 now: now,
-                contextWindow: contextWindow))
+                contextWindow: contextWindow)
+            compactStatusRow.apply(presented)
+            syncCompactStatusTick(for: presented.activity)
         } else {
             let detail = AgentLocationStatusPresenter.present(
                 location,
                 projectName: locationProjectName ?? branchContext?.projectName)
             lastLocationPresentation = detail
+            let activity = unknownCompactActivity()
             compactStatusRow.apply(AgentCompactStatusPresentation(
                 location: compactLocationPresentation(location, detail: detail),
-                activity: unknownCompactActivity(),
+                activity: activity,
                 context: AgentRadialContextMeterPresenter.present(contextWindow)))
+            syncCompactStatusTick(for: activity)
         }
     }
+
+    /// Whether the live elapsed tick is currently scheduled. A live phase must
+    /// have one (or its reading freezes); idle/silent must not (or an idle canvas
+    /// wakes the run loop forever).
+    var qaCompactStatusTickScheduled: Bool { compactStatusTickTimer?.isValid == true }
 
     func qaResetCompactStatusComposition() {
         resetCompactStatusProjection()

@@ -607,7 +607,17 @@ enum UIProbeGeometry {
                     try expectNoClipping(row, label: "compactStatusRow@\(Int(width)).\(name).\(appearanceName.rawValue)")
                     try expectNoBrokenRequiredSizeConstraints(row, label: "compactStatusRow@\(Int(width)).\(name).\(appearanceName.rawValue)")
                     try require(row.qaContentFitsBounds, "compact status row content escapes bounds at \(width)/\(name)/\(appearanceName.rawValue)")
-                    try require(row.qaActivityAndContextVisible, "compact status row compressed activity/context before location at \(width)/\(name)/\(appearanceName.rawValue)")
+                    // An idle row says nothing about activity by design, so the
+                    // "never squeeze the activity out" rule applies only when an
+                    // activity is actually being claimed. Silence still has to
+                    // keep the context meter, and must really be hidden rather
+                    // than an empty label occupying the row.
+                    if row.qaActivityIsSilent {
+                        try require(row.qaContextVisibleWhileActivitySilent,
+                                    "silent compact status row lost its context meter at \(width)/\(name)/\(appearanceName.rawValue)")
+                    } else {
+                        try require(row.qaActivityAndContextVisible, "compact status row compressed activity/context before location at \(width)/\(name)/\(appearanceName.rawValue)")
+                    }
                     try require(row.qaLocationCompressionPriority < row.qaActivityCompressionPriority,
                                 "compact status row location is not first compression sacrifice")
                     try require(row.qaLocationCompressionPriority < row.qaContextCompressionPriority,
@@ -617,7 +627,7 @@ enum UIProbeGeometry {
                     try require(row.qaContextCompressionPriority >= NSLayoutConstraint.Priority.required.rawValue,
                                 "compact status row context priority is not protected")
                     try require(!row.qaHasVisiblePrefixes, "compact status row leaked Home/Where/What visual prefixes at \(name)")
-                    try require(row.qaLocationIconHasImage && row.qaActivityIconHasImage,
+                    try require(row.qaLocationIconHasImage && (row.qaActivityIsSilent || row.qaActivityIconHasImage),
                                 "compact status row did not resolve SF Symbol images at \(name)")
                     try require(row.qaProtectedDrawableWidths,
                                 "compact status row protected icon/label/meter lacks drawable width at \(width)/\(name)")
@@ -626,8 +636,19 @@ enum UIProbeGeometry {
                     try require(row.qaContextDetail.contains("Authoritative context"), "compact status row context tooltip missing authoritative context")
                     try require(row.qaContextDetail.contains("Per-message/cache/cost fields"), "compact status row context tooltip missing per-message/cache/cost fields")
                     try require(row.qaContextDetail.contains("Freshness"), "compact status row context tooltip missing freshness")
-                    try require(row.qaAccessibilityLabel.contains("Home") && row.qaAccessibilityLabel.contains("Where") && row.qaAccessibilityLabel.contains("Activity") && row.qaAccessibilityLabel.contains("Context"),
-                                "compact status row AX label dropped one semantic fact")
+                    // Silence is silent in speech too: an idle row announces
+                    // Home/Where/Context and deliberately omits Activity rather
+                    // than speaking a phase it is not showing.
+                    // "Activity:" with the colon is the spoken activity prefix; a
+                    // bare "Activity" also matches fixture paths such as
+                    // …/Canvas/AgentActivity/… and would make this vacuous.
+                    if row.qaActivityIsSilent {
+                        try require(row.qaAccessibilityLabel.contains("Home") && row.qaAccessibilityLabel.contains("Where") && row.qaAccessibilityLabel.contains("Context") && !row.qaAccessibilityLabel.contains("Activity:"),
+                                    "silent compact status row must announce Home/Where/Context and no Activity phase at \(name); label was \"\(row.qaAccessibilityLabel)\"")
+                    } else {
+                        try require(row.qaAccessibilityLabel.contains("Home") && row.qaAccessibilityLabel.contains("Where") && row.qaAccessibilityLabel.contains("Activity:") && row.qaAccessibilityLabel.contains("Context"),
+                                    "compact status row AX label dropped one semantic fact at \(name); label was \"\(row.qaAccessibilityLabel)\"")
+                    }
                     try require(row.qaAccessibilityChildrenCount == 1,
                                 "compact status row must expose exactly its one location-action child")
                     try require(row.qaLocationActionButtonAccessibilityLabel == "Location actions",
@@ -5603,19 +5624,54 @@ enum UIProbeGeometry {
         }
 
         // No runtime facts means no phase, no elapsed anchor, and no token-total
-        // inference. The row remains visibly conservative through its unknown
-        // activity treatment and context meter.
+        // inference. The row says NOTHING about activity rather than showing an
+        // "Unknown" chip: before the first event of a session there is no live
+        // phase, and a persistent chip there reads as a stale claim (it is the
+        // boot-time staleness this pass removed).
         tile.qaApplyCompactStatusFacts(.init(), location: location, now: now)
         let unknownRow = tile.qaCompactStatusRow
         unknownRow.layoutSubtreeIfNeeded()
         guard tile.qaCompactStatusPhase == nil,
-              unknownRow.qaActivityText == "Unknown",
+              unknownRow.qaActivityIsSilent,
+              unknownRow.qaActivityText.isEmpty,
               unknownRow.qaElapsedText == nil,
               unknownRow.qaContextState == .unknown,
               unknownRow.qaContextFraction == nil,
-              tile.qaCompactStatusAccessibilityLabel.contains("Activity unknown"),
+              !tile.qaCompactStatusAccessibilityLabel.contains("Activity:"),
               tile.qaCompactStatusContentFitsBounds else {
-            throw fail("\(label): missing runtime/context facts produced a false phase, elapsed, or percentage in the installed row")
+            throw fail("\(label): missing runtime/context facts must render a silent activity, not a false phase/elapsed/percentage in the installed row")
+        }
+
+        // The live elapsed tick: a phase that shows elapsed MUST have a running
+        // timer, or its reading freezes at the last event and then jumps (the
+        // "Waiting 0s" that never moved). Idle must NOT have one, or an idle
+        // canvas wakes the run loop once a second per tile forever.
+        tile.qaApplyCompactStatusFacts(
+            .init(turn: .active(startedAt: now.addingTimeInterval(-5), stream: .reasoning, streamStartedAt: now.addingTimeInterval(-5))),
+            location: location, contextWindow: context, now: now)
+        let liveRow = tile.qaCompactStatusRow
+        liveRow.layoutSubtreeIfNeeded()
+        // Read the value out NOW: `liveRow` is the same view object the repaint
+        // below mutates, so a deferred read would compare the new value to itself.
+        let earlyElapsed = liveRow.qaElapsedText
+        guard earlyElapsed != nil, tile.qaCompactStatusTickScheduled else {
+            throw fail("\(label): a live elapsed-bearing phase must schedule the status tick, elapsed \(String(describing: earlyElapsed)) scheduled \(tile.qaCompactStatusTickScheduled)")
+        }
+        // The same row, repainted one minute later with NO new event, must show a
+        // different elapsed reading — that is what the tick delivers.
+        tile.qaApplyCompactStatusFacts(
+            .init(turn: .active(startedAt: now.addingTimeInterval(-5), stream: .reasoning, streamStartedAt: now.addingTimeInterval(-5))),
+            location: location, contextWindow: context, now: now.addingTimeInterval(60))
+        tile.qaCompactStatusRow.layoutSubtreeIfNeeded()
+        let laterElapsed = tile.qaCompactStatusRow.qaElapsedText
+        guard let laterElapsed, laterElapsed != earlyElapsed else {
+            throw fail("\(label): repainting a live phase at a later instant must advance its elapsed reading, stayed \(String(describing: earlyElapsed)) → \(String(describing: laterElapsed))")
+        }
+        tile.qaApplyCompactStatusFacts(
+            .init(session: .init(state: .ready)), location: location, contextWindow: context, now: now)
+        tile.qaCompactStatusRow.layoutSubtreeIfNeeded()
+        guard tile.qaCompactStatusRow.qaActivityIsSilent, !tile.qaCompactStatusTickScheduled else {
+            throw fail("\(label): an idle row must be silent and must tear the status tick down, silent \(tile.qaCompactStatusRow.qaActivityIsSilent) scheduled \(tile.qaCompactStatusTickScheduled)")
         }
 
         // A zero-turn session is empty for ANY window size: the seeded

@@ -299,6 +299,76 @@ extension UIProbeGeometry {
                 freshness: .live)).state == .known,
                     "production warning thresholds remain disabled by default")
 
+        // A ready session with no active turn is IDLE, and idle outranks a tool
+        // observation that has not yet expired. This is the stale-status defect:
+        // after a turn finished, an unexpired `what` used to win here and the row
+        // kept asserting Running/Reading/Waiting for a stopped agent.
+        var idleAdapter = AgentCompactStatusPhaseAdapter()
+        let unexpiredTool = AgentObservedActivity(
+            operation: .running,
+            targetPath: location,
+            startedAt: t0,
+            updatedAt: t0,
+            evidenceSource: .toolEvent)
+        let idleOverStaleTool = idleAdapter.update(
+            .init(
+                session: .init(state: .ready, startedAt: t0),
+                turn: nil,
+                currentActivity: unexpiredTool,
+                currentActivityExpiresAt: t3),
+            now: t1)
+        try require(idleOverStaleTool.phase == .ready && idleOverStaleTool.phaseStartedAt == nil,
+                    "a ready session with no active turn must resolve idle even while a tool observation is unexpired, got \(String(describing: idleOverStaleTool.phase))")
+
+        // The same unexpired observation still wins while the session is running,
+        // so idle authority did not blind the live case.
+        var runningAdapter = AgentCompactStatusPhaseAdapter()
+        let liveTool = runningAdapter.update(
+            .init(
+                session: .init(state: .running, startedAt: t0),
+                turn: .active(startedAt: t0, stream: nil, streamStartedAt: nil),
+                currentActivity: unexpiredTool,
+                currentActivityExpiresAt: t3),
+            now: t1)
+        try require(liveTool.phase == .running,
+                    "a live turn must still surface its current tool observation, got \(String(describing: liveTool.phase))")
+
+        let fixtureRoot = URL(fileURLWithPath: "/tmp/continuum-status-phase", isDirectory: true)
+        let idleLocationFixture = AgentLocationSnapshot(
+            home: AgentHome(projectId: nil, projectRoot: fixtureRoot, checkoutRoot: fixtureRoot),
+            whereDirectory: fixtureRoot)
+
+        // Idle renders as SILENCE, not a "Ready" chip: no label, no elapsed, no
+        // icon, nothing spoken.
+        let idleActivity = AgentCompactStatusPresentation.present(
+            location: idleLocationFixture,
+            activity: AgentCompactActivityInput(phase: .ready, phaseStartedAt: nil),
+            now: t1,
+            contextWindow: nil).activity
+        try require(idleActivity.isSilent
+                    && idleActivity.text.isEmpty
+                    && idleActivity.elapsedText == nil
+                    && idleActivity.symbolName.isEmpty
+                    && idleActivity.accessibilityLabel.isEmpty
+                    && !idleActivity.showsThinkingIndicator,
+                    "an idle phase must render silent, got text \"\(idleActivity.text)\" symbol \"\(idleActivity.symbolName)\"")
+
+        // A live phase is the opposite: it speaks, and its elapsed reading is a
+        // function of `now`, so a repaint at a later instant advances it. This is
+        // what the tile's tick exists to drive.
+        let liveInput = AgentCompactActivityInput(phase: .thinking, phaseStartedAt: t0)
+        func liveElapsed(at instant: Date) -> String? {
+            AgentCompactStatusPresentation.present(
+                location: idleLocationFixture,
+                activity: liveInput,
+                now: instant,
+                contextWindow: nil).activity.elapsedText
+        }
+        let earlyElapsed = liveElapsed(at: t1)
+        let laterElapsed = liveElapsed(at: t3)
+        try require(earlyElapsed != nil && laterElapsed != nil && earlyElapsed != laterElapsed,
+                    "a live phase's elapsed reading must advance with the clock, got \(String(describing: earlyElapsed)) then \(String(describing: laterElapsed))")
+
         return assertions
     }
 }
