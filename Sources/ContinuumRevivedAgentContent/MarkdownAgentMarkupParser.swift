@@ -156,6 +156,11 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
         case is BlockQuote: return .quote
         case is ThematicBreak: return .thematicBreak
         case is CodeBlock: return .fencedCode
+        // GFM tables have no dedicated block kind/renderer; render their literal
+        // pipe source as monospace (see the matching case in convertBlock) so the
+        // alignment reads, instead of the "Unsupported content: unknown" opaque
+        // fallback. Assistant replies use tables constantly — the common case.
+        case is Table: return .fencedCode
         default: return .unknown
         }
     }
@@ -281,6 +286,20 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
                     language: conversion.language,
                     code: conversion.code,
                     isComplete: conversion.isComplete
+                ))
+            )
+        case let table as Table:
+            // Faithful monospace fallback: the raw table markdown preserves the
+            // column pipes so the structure stays legible without a table
+            // renderer. See `blockKind`.
+            return AgentBlock(
+                id: id,
+                kind: .fencedCode,
+                payload: .fencedCode(.init(
+                    language: nil,
+                    code: literalSource(for: table, in: source)?
+                        .trimmingCharacters(in: .newlines) ?? "",
+                    isComplete: true
                 ))
             )
         default:

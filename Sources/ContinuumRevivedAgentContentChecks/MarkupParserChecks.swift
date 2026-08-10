@@ -204,11 +204,26 @@ func runMarkupParserChecks() {
         debugLabel: "markdown.unsupported-structure", value: .string(unsupportedSource)
     )), "unsupported Markdown fallback must preserve the exact source losslessly")
 
+    // GFM tables must render (as monospace code), NOT fall through to the
+    // "Unsupported content: unknown" opaque block — assistant replies use tables
+    // constantly, so the opaque fallback broke the common case.
+    let tableSource = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+    let table = parser.parse(tableSource, entryID: entryID, previous: [])
+    expect(table.blocks.count == 1 && table.blocks.first?.kind == .fencedCode,
+           "a GFM table must parse to a fencedCode block, got \(table.blocks.map(\.kind))")
+    guard case let .fencedCode(tablePayload)? = table.blocks.first?.payload else {
+        fail("table fallback must carry a fencedCode payload")
+    }
+    expect(tablePayload.code.contains("| A | B |") && tablePayload.code.contains("| 1 | 2 |"),
+           "the table fallback must preserve the literal pipe source, got \(tablePayload.code)")
+    expect(!table.blocks.contains { $0.kind == .unknown },
+           "a table must not produce an Unsupported content: unknown block")
+
     // Required negative witness observed red against this final check: changing
     // the Heading conversion to `.paragraph` made the exact `[.heading, .paragraph,
     // .paragraph]` assertion fail with exit 1. Restoring semantic heading blocks
     // returned the leg to green.
-    print("Markup parser checks passed: paragraphs, ATX/setext headings, stable IDs, round-trip, plain-text copy, and diagnosed fallback")
+    print("Markup parser checks passed: paragraphs, ATX/setext headings, tables-as-code, stable IDs, round-trip, plain-text copy, and diagnosed fallback")
 }
 
 private func allBlocks(_ roots: [AgentBlock]) -> [AgentBlock] {
