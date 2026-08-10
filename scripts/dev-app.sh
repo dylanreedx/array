@@ -57,13 +57,13 @@ echo "==> building (debug, incremental)"
 if [[ $LAUNCH -eq 1 ]]; then
   mkdir -p "$PROJECT_ROOT"
   echo "==> launching $APP_PATH on $PROJECT_ROOT"
-  # The executable directly, not `open`: it is the only way to hand the process
-  # an environment, and a binary inside a .app still resolves `Bundle.main` from
-  # its enclosing bundle — so this is still the DEV-channel identity.
-  # nohup + disown so quitting this shell does not take the app with it.
-  CONTINUUM_PROJECT_ROOT="$PROJECT_ROOT" \
-    nohup "$APP_PATH/Contents/MacOS/Array" >/dev/null 2>&1 &
-  disown 2>/dev/null || true
+  # `open --env`, NOT the executable directly. Running
+  # `Array.app/Contents/MacOS/Array` from a script makes the app a child of that
+  # shell: it dies with the shell, and `nohup`/`disown` is not enough when the
+  # caller's whole process group is torn down (which is what happens when an
+  # agent runs this). `open` hands the launch to LaunchServices, which detaches
+  # it properly, and `--env` still gets the pin through.
+  open --env "CONTINUUM_PROJECT_ROOT=$PROJECT_ROOT" "$APP_PATH"
 fi
 
 echo "==> done in $(( $(date +%s) - started ))s"
