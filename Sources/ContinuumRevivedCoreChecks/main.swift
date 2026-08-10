@@ -10334,6 +10334,9 @@ runAgentPromptImageContractChecks()
 // Plan: .plans/01-provider-cli-backends.md (claude CLI backend)
 runClaudeAgentBackendChecks()
 
+// Plan: .plans/03-transcript-rehydration.md (transcript rehydration on resume)
+runTranscriptRehydrationChecks()
+
 // Ticket: docs/38-tickets/90-agent-ux/P0.10-explicit-model-id.md
 runAgentModelConfigChecks()
 runAgentModelCatalogChecks()

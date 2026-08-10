@@ -10025,7 +10025,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // that HAS been prompted replays a real transcript, and the placeholder would
         // land underneath it.
         if supervisor.needsPreviousSessionNotice(agentId) {
+            rehydratePreviousSessionOrNotice(agentId: agentId, into: view)
+        }
+    }
+
+    /// A restored agent's tile: rehydrate its prior transcript from the provider
+    /// session file if one exists, else fall back to the plain notice
+    /// (`.plans/03-transcript-rehydration.md`). The session file can run to
+    /// hundreds of messages, so the read happens OFF the main thread; the seed
+    /// and the render hop back onto it. Seeding flips
+    /// `needsPreviousSessionNotice` false, so a re-wire during the read is a
+    /// no-op and the placeholder never double-renders.
+    private func rehydratePreviousSessionOrNotice(agentId: AgentID, into view: ManagedAgentTileNSView) {
+        guard let inputs = agentSupervisor.rehydrationInputs(for: agentId) else {
             view.showPreviousSessionNotice()
+            return
+        }
+        Task.detached(priority: .userInitiated) { [weak self, weak view] in
+            let transcript = ManagedTranscriptRehydrator.rehydrate(inputs)
+            await MainActor.run {
+                guard let self, let view else { return }
+                // A live prompt during the read makes rehydration moot: the real
+                // transcript now replays, and the placeholder/rehydration would
+                // land underneath it.
+                guard self.agentSupervisor.needsPreviousSessionNotice(agentId) else { return }
+                if let transcript {
+                    self.agentSupervisor.seedRehydratedTranscript(transcript, for: agentId)
+                    view.renderRehydratedPreviousSession(transcript)
+                } else {
+                    view.showPreviousSessionNotice()
+                }
+            }
         }
     }
 

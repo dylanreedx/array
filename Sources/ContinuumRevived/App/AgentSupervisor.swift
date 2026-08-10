@@ -1187,6 +1187,16 @@ final class AgentSupervisor {
     /// so the Phase 3 inbox can surface them rather than have them silently missing.
     private(set) var staleIDs: Set<AgentID> = []
 
+    /// Prior transcripts rehydrated from a provider session file, for DISPLAY
+    /// ONLY. Deliberately a SEPARATE buffer from `history[id]`: history is
+    /// replayed through `events(for:)`, and a managed-agent tile mirrors every
+    /// event it ingests off that stream onto the syncable activity timeline
+    /// (`ContinuumApp.recordManagedActivity`, 88.4c). Rehydration restores
+    /// message BODIES the sync translators intentionally drop, so replaying them
+    /// through that path would re-cross the companion boundary (I5). Instead the
+    /// tile reads this buffer directly. See `seedRehydratedTranscript`.
+    private var rehydratedTranscripts: [AgentID: RehydratedTranscript] = [:]
+
     /// Adopts every record `AgentStore` holds into `records`.
     ///
     /// NO PROVIDER PROCESS IS STARTED, which is the whole shape of this method: a
@@ -1253,7 +1263,42 @@ final class AgentSupervisor {
     /// re-wired to it — P2A.5's re-attach, Phase 3's "open in tile" — would otherwise
     /// print the placeholder underneath it.
     func needsPreviousSessionNotice(_ id: AgentID) -> Bool {
-        restoredIDs.contains(id) && (history[id]?.isEmpty ?? true)
+        restoredIDs.contains(id) && (history[id]?.isEmpty ?? true) && rehydratedTranscripts[id] == nil
+    }
+
+    // MARK: - Transcript rehydration (.plans/03-transcript-rehydration.md)
+
+    /// Seeds a restored agent's prior transcript for DISPLAY ONLY. Stored in a
+    /// buffer the tile reads directly (`rehydratedTranscript(for:)`); it is
+    /// deliberately NOT appended to `history[id]` and NOT run through
+    /// `deliver`, so it is never replayed via `events(for:)` and therefore never
+    /// re-published to the syncable activity timeline. This is the I5
+    /// display-only guard: rehydration restores message bodies locally without
+    /// re-crossing the companion sync boundary. Seeding it flips
+    /// `needsPreviousSessionNotice` false, so the plain placeholder is not also
+    /// shown, and lets any tile that later attaches rehydrate the same content.
+    func seedRehydratedTranscript(_ transcript: RehydratedTranscript, for id: AgentID) {
+        rehydratedTranscripts[id] = transcript
+    }
+
+    /// The prior transcript seeded for `id`, if any. A tile pulls this on attach
+    /// and ingests it straight into its local projection (never through the
+    /// event stream), so the bodies render locally and never re-sync.
+    func rehydratedTranscript(for id: AgentID) -> RehydratedTranscript? {
+        rehydratedTranscripts[id]
+    }
+
+    /// The inputs a rehydrate needs, resolved from the live record on the main
+    /// thread so the caller can then read the (potentially large) session file
+    /// OFF it. `nil` for an agent this supervisor does not know.
+    func rehydrationInputs(for id: AgentID) -> ManagedTranscriptRehydrator.Inputs? {
+        guard let record = records[id] else { return nil }
+        return ManagedTranscriptRehydrator.Inputs(
+            agentUUID: id.rawValue,
+            cwd: record.cwd,
+            model: record.model,
+            claudeCLIAvailable: ClaudeAgentRunner.liveCLIAvailable(),
+            homeURL: URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true))
     }
 
     // MARK: - Lifecycle
@@ -2262,6 +2307,7 @@ final class AgentSupervisor {
 
         records.removeValue(forKey: id)
         history.removeValue(forKey: id)
+        rehydratedTranscripts.removeValue(forKey: id)
         locationProjectors.removeValue(forKey: id)
         turnFacts.removeValue(forKey: id)
         contextWindowSnapshots.removeValue(forKey: id)
@@ -7141,6 +7187,151 @@ func runAgentRestoreChecks() async throws {
         throw fail("an agent spawned in this session reports as restored")
     }
 
+    // MARK: 4b · a restored agent with a provider session file rehydrates its
+    // prior transcript — DISPLAY-ONLY, never re-published to the sync timeline.
+    //
+    // Isolated supervisor/store so the restore accounting in sections 5–8 stays
+    // undisturbed. The claude and pi session files are written into a temp $HOME
+    // the readers are pointed at; the agents' cwd is the live dir so restore()
+    // adopts them (its only filesystem precondition).
+    do {
+        let rehydrateHome = root.appendingPathComponent("rehydrate-home", isDirectory: true)
+        let rehydrateStore = AgentStore(
+            applicationSupportDirectory: root.appendingPathComponent("rehydrate-store", isDirectory: true))
+        let rehydrateSupervisor = AgentSupervisor(
+            store: rehydrateStore, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+
+        let claudeAgent = AgentID(rawValue: UUID())
+        let piAgent = AgentID(rawValue: UUID())
+        for id in [claudeAgent, piAgent] {
+            try rehydrateStore.upsert(AgentRecord(
+                id: id, displayName: "restored", model: config.model, thinking: config.thinking,
+                cwd: liveCwd, createdAt: createdAt, lastActivityAt: createdAt, tileId: UUID()))
+        }
+        _ = rehydrateSupervisor.restore()
+
+        // The derived session ids the readers locate by MUST equal the
+        // supervisor's own derivation, or a real relaunch would look in the
+        // wrong file. Asserted so the two definitions cannot drift.
+        guard ManagedTranscriptRehydrator.claudeSessionId(forAgentUUID: claudeAgent.rawValue)
+                == AgentSupervisor.claudeSessionId(for: claudeAgent),
+              ManagedTranscriptRehydrator.piSessionId(forAgentUUID: piAgent.rawValue)
+                == AgentSupervisor.sessionId(for: piAgent) else {
+            throw fail("the rehydrator's session-id derivation drifted from AgentSupervisor's")
+        }
+
+        // A tile wired to record whatever it would mirror onto the syncable
+        // activity timeline — exactly ContinuumApp.recordManagedActivity's fold.
+        // Rehydration must leave it EMPTY: that is the display-only I5 guard.
+        func attachRecordingTile(_ agentID: AgentID) -> (tile: ManagedAgentTileNSView, drafts: () -> [AgentActivityEventDraft]) {
+            final class DraftBox { var drafts: [AgentActivityEventDraft] = [] }
+            let box = DraftBox()
+            let tile = ManagedAgentTileNSView(tile: Tile(
+                id: UUID(), kind: .managedAgent, title: "agent",
+                frame: TileFrame(x: 0, y: 0, width: 520, height: 320),
+                zPosition: .fromLegacyRank(1), runtimeRef: nil,
+                metadata: TileMetadata(launchProfileId: "managed")))
+            tile.frame = NSRect(x: 0, y: 0, width: 520, height: 320)
+            tile.onIngestedEvent = { event in
+                if let draft = ManagedAgentActivityBridge.draft(
+                    for: event, agentId: agentID.rawValue, tileId: nil, status: .idle, now: createdAt) {
+                    box.drafts.append(draft)
+                }
+            }
+            tile.attach(agentID: agentID, supervisor: rehydrateSupervisor)
+            return (tile, { box.drafts })
+        }
+
+        func assertDisplayOnly(_ transcript: RehydratedTranscript, drafts: [AgentActivityEventDraft], _ label: String) throws {
+            // Vacuity guard: these very events WOULD have produced activity
+            // drafts had they flowed through the mirror, so "zero drafts" is a
+            // measurement of the bypass, not of an empty bridge.
+            let wouldDraft = transcript.events.filter {
+                ManagedAgentActivityBridge.draft(
+                    for: $0, agentId: UUID(), tileId: nil, status: .idle, now: createdAt) != nil
+            }.count
+            guard wouldDraft > 0 else {
+                throw fail("\(label): rehydrated transcript has no activity-bridge-visible events, so the I5 assertion is vacuous")
+            }
+            guard drafts.isEmpty else {
+                throw fail("\(label): rehydration published \(drafts.count) draft(s) to the syncable activity timeline — the display-only I5 guard is violated")
+            }
+        }
+
+        // -- claude path --
+        let claudeURL = ClaudeSessionTranscriptReader.sessionFileURL(
+            homeURL: rehydrateHome, cwd: liveCwd,
+            sessionId: AgentSupervisor.claudeSessionId(for: claudeAgent))
+        try FileManager.default.createDirectory(
+            at: claudeURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try [
+            #"{"type":"user","isSidechain":false,"message":{"role":"user","content":"CLAUDE_PLANTED_PROMPT"}}"#,
+            #"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"CLAUDE_PLANTED_REPLY"},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}]}}"#,
+            #"{"type":"user","isSidechain":false,"message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","is_error":false,"content":"out"}]}}"#,
+        ].joined(separator: "\n").write(to: claudeURL, atomically: true, encoding: .utf8)
+
+        let claudeInputs = ManagedTranscriptRehydrator.Inputs(
+            agentUUID: claudeAgent.rawValue, cwd: liveCwd, model: "anthropic/opus",
+            claudeCLIAvailable: true, homeURL: rehydrateHome)
+        guard let claudeTranscript = ManagedTranscriptRehydrator.rehydrate(claudeInputs) else {
+            throw fail("a restored claude agent with a session file did not rehydrate")
+        }
+        guard rehydrateSupervisor.needsPreviousSessionNotice(claudeAgent) else {
+            throw fail("a restored agent should want the previous-session notice before rehydration seeds it")
+        }
+        rehydrateSupervisor.seedRehydratedTranscript(claudeTranscript, for: claudeAgent)
+        guard rehydrateSupervisor.needsPreviousSessionNotice(claudeAgent) == false else {
+            throw fail("seeding a rehydrated transcript did not retire the previous-session notice")
+        }
+        let (claudeTile, claudeDrafts) = attachRecordingTile(claudeAgent)
+        guard claudeTile.qaTranscriptText.contains("CLAUDE_PLANTED_PROMPT"),
+              claudeTile.qaTranscriptText.contains("CLAUDE_PLANTED_REPLY") else {
+            throw fail("rehydrated claude transcript did not reach the tile cards: \(claudeTile.qaTranscriptText)")
+        }
+        guard claudeTile.qaTranscriptText.contains("Previous session") else {
+            throw fail("rehydrated claude transcript is not led by the previous-session boundary card")
+        }
+        guard claudeTile.transcriptCardCount > 1 else {
+            throw fail("rehydration produced \(claudeTile.transcriptCardCount) card(s); the restored history is missing")
+        }
+        guard claudeTile.currentAgentStatus == .idle else {
+            throw fail("a rehydrated agent's tile shows \(claudeTile.currentAgentStatus) — a relaunched agent is idle until prompted")
+        }
+        try assertDisplayOnly(claudeTranscript, drafts: claudeDrafts(), "claude")
+        claudeTile.detach()
+
+        // -- pi path -- (no claude file for this agent, non-anthropic model)
+        let piDir = rehydrateHome
+            .appendingPathComponent(".pi/agent/sessions", isDirectory: true)
+            .appendingPathComponent(PiSessionTranscriptReader.slug(forCwd: liveCwd), isDirectory: true)
+        try FileManager.default.createDirectory(at: piDir, withIntermediateDirectories: true)
+        let piURL = piDir.appendingPathComponent("2026-08-07T01-20-08-718Z_\(AgentSupervisor.sessionId(for: piAgent)).jsonl")
+        try [
+            #"{"type":"session","version":3,"id":"s","cwd":"x"}"#,
+            #"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"PI_PLANTED_PROMPT"}]}}"#,
+            #"{"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"PI_PLANTED_REASON"},{"type":"text","text":"PI_PLANTED_REPLY"},{"type":"toolCall","id":"call_9","name":"read","arguments":{}}]}}"#,
+            #"{"type":"message","message":{"role":"toolResult","toolCallId":"call_9","toolName":"read","isError":false,"content":[{"type":"text","text":"body"}]}}"#,
+        ].joined(separator: "\n").write(to: piURL, atomically: true, encoding: .utf8)
+
+        let piInputs = ManagedTranscriptRehydrator.Inputs(
+            agentUUID: piAgent.rawValue, cwd: liveCwd, model: "openai-codex/gpt-5.6",
+            claudeCLIAvailable: false, homeURL: rehydrateHome)
+        guard let piTranscript = ManagedTranscriptRehydrator.rehydrate(piInputs) else {
+            throw fail("a restored pi agent with a session file did not rehydrate")
+        }
+        rehydrateSupervisor.seedRehydratedTranscript(piTranscript, for: piAgent)
+        guard rehydrateSupervisor.needsPreviousSessionNotice(piAgent) == false else {
+            throw fail("seeding a rehydrated pi transcript did not retire the previous-session notice")
+        }
+        let (piTile, piDrafts) = attachRecordingTile(piAgent)
+        guard piTile.qaTranscriptText.contains("PI_PLANTED_PROMPT"),
+              piTile.qaTranscriptText.contains("PI_PLANTED_REPLY") else {
+            throw fail("rehydrated pi transcript did not reach the tile cards: \(piTile.qaTranscriptText)")
+        }
+        try assertDisplayOnly(piTranscript, drafts: piDrafts(), "pi")
+        piTile.detach()
+    }
+
     // MARK: 5 · a prompt starts it, and the conversation continues from there
 
     let inbox = EventInbox()
@@ -7268,8 +7459,18 @@ func runAgentRestoreChecks() async throws {
     // agent that already exists into a fresh tile. Still an EXACT match, so a rename
     // still turns this scan red rather than blind.
     let wiring = try paletteAgentSpawnBranch("private func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil) {")
-    guard wiring.contains("needsPreviousSessionNotice("), wiring.contains("showPreviousSessionNotice()") else {
-        throw fail("wireManagedAgentTile does not place the previous-session notice, so a restored agent renders as a blank tile:\n\(wiring)")
+    guard wiring.contains("needsPreviousSessionNotice("), wiring.contains("rehydratePreviousSessionOrNotice(") else {
+        throw fail("wireManagedAgentTile does not route a restored agent through rehydration/notice, so a restored agent renders as a blank tile:\n\(wiring)")
+    }
+    // …and that route reads the session file, seeds the display-only transcript,
+    // renders it, and falls back to the plain notice when there is no file.
+    let rehydrationBranch = try paletteAgentSpawnBranch(
+        "private func rehydratePreviousSessionOrNotice(agentId: AgentID, into view: ManagedAgentTileNSView) {")
+    guard rehydrationBranch.contains("ManagedTranscriptRehydrator.rehydrate("),
+          rehydrationBranch.contains("seedRehydratedTranscript("),
+          rehydrationBranch.contains("renderRehydratedPreviousSession("),
+          rehydrationBranch.contains("showPreviousSessionNotice()") else {
+        throw fail("rehydratePreviousSessionOrNotice must read the session file, seed + render the transcript, and fall back to the notice:\n\(rehydrationBranch)")
     }
 
     print("AgentRestore: 2 of 3 stored agents adopted with no runner (1 marked stale for a missing project root, adopted once that root came back), the tiled one re-resolved from its tileId and took a view showing idle plus a previous-session notice, a prompt then started it with --session-id and retired its placeholder, and restoring four times neither duplicated, clobbered, nor pulled from ManagedAgentSessionStore")
