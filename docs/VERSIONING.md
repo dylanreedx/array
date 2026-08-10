@@ -18,7 +18,7 @@ Two numbers, two audiences:
   auto-update for every installed copy already in the field.
 
 The two move together: every shipped `X.Y.Z` gets the next build number
-(0.2.0 was build 2, 0.2.1 was build 3, the next release is build 4).
+(0.2.2 was build 4, 0.3.0 was build 5; the next release is build 6).
 
 ## Rules
 
@@ -63,3 +63,4 @@ One row per shipped release. Appending here is part of every release.
 | 0.2.0   | 2     | 2026-08-09 | `v0.2.0` | First public release: notarized Developer ID DMG, arrayapp.dev download button. Pre-Sparkle — these installs cannot self-update and make one final manual download. |
 | 0.2.1   | 3     | 2026-08-09 | `v0.2.1` | First appcast-backed release: Sparkle auto-update live (`arrayapp.dev/appcast.xml`), thin-GUI-PATH fix for claude/codex resolution, first-run Environment Setup panel, Help menu (Environment Setup…, Report a Problem…). |
 | 0.2.2   | 4     | 2026-08-09 | `v0.2.2` | Provider>model picker (two-pane, t3-ported) in tiles + Settings with display names from pi's catalog; live model catalogue with throttled re-probes; onboarding pi + per-provider auth rows (CLI login only); dev/prod channel split; Settings ▸ Agents default wording. First release colleagues are pointed at. |
+| 0.3.0   | 5     | 2026-08-10 | `v0.3.0` | Agent-harness picker (Settings ▸ Agents): managed agents run on Claude Code, Codex, or pi — model list filters to the choice, all on the CLI's own login (never API keys). Codex + Claude Code CLI backends (own-subscription, pi-free); transcript resume rehydrates a tile's prior conversation on relaunch; onboarding "at least one harness" fresh-setup. Fixes: markdown tables render (no more "Unsupported content"), context meter shows token counts for claude/codex, rehydrated tool cards show the command, custom-folder Home updates the header. |
