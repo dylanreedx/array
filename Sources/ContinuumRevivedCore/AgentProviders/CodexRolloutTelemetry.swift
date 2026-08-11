@@ -1,7 +1,15 @@
 import Foundation
 
+#if os(macOS)
+
 /// Reads Codex's host-local rollout log and projects only the normalized numeric
 /// context facts Array needs. Raw rollout content never leaves this adapter.
+///
+/// macOS only, like `CodexAgentRunner`: this reads a codex CLI installation's
+/// rollout tree under the user's home, and `homeDirectoryForCurrentUser` does not
+/// exist on iOS. Core is shared with the iOS target, so an unguarded reference
+/// here fails the iOS build — which is exactly how this was found. Every caller
+/// (the runner, the supervisor, the codex backend checks) is already macOS-only.
 public enum CodexRolloutTelemetry {
     public static let maximumReadBytes: UInt64 = 8 * 1024 * 1024
 
@@ -187,3 +195,5 @@ public enum CodexRolloutTelemetry {
         return formatter.date(from: raw) ?? ISO8601DateFormatter().date(from: raw)
     }
 }
+
+#endif  // os(macOS)

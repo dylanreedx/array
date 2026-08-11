@@ -158,7 +158,17 @@ public actor AgentFileIndex {
         }
     }
 
+    /// `git ls-files` when it is available, nil otherwise — the caller then walks
+    /// the directory tree itself (`fallbackPaths`), the same path a checkout with
+    /// no `.git` already takes.
+    ///
+    /// Subprocess-free on iOS: `Process` does not exist there, and this file lives
+    /// in Core, which is shared with the iOS target. Returning nil is not a
+    /// degradation of correctness — it selects the FileManager walk, which honours
+    /// the same exclusions — so the only loss is git's ignore rules on a platform
+    /// that cannot spawn git in the first place.
     private func gitPaths(root: URL) -> [String]? {
+#if os(macOS)
         guard FileManager.default.fileExists(atPath: root.appendingPathComponent(".git").path) else { return nil }
         let process = Process()
         let output = Pipe()
@@ -171,6 +181,9 @@ public actor AgentFileIndex {
         process.waitUntilExit()
         guard process.terminationStatus == 0 else { return nil }
         return String(decoding: data, as: UTF8.self).split(separator: "\0").map(String.init)
+#else
+        return nil
+#endif
     }
 
     private func fallbackPaths(root: URL) -> [String] {
