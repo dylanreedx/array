@@ -299,7 +299,7 @@ class TileNSView: NSView, TokenThemed {
             titleBar?.frame = barFrame
             // Bar height changed (zoom crossed the floor) → redraw the title +
             // dots at the new chrome scale.
-            titleBar?.needsDisplay = true
+            titleBar?.invalidateChrome()
         }
         titleBar?.applyCloseButtonSizing(buttonSize: closeButtonWorldSize, glyphPointSize: closeGlyphWorldPointSize)
         if let titleBar, titleBar.superview === self {
@@ -645,6 +645,8 @@ class TileNSView: NSView, TokenThemed {
     /// QA: laid-out title-bar frame (world units). On-screen height is
     /// `height * zoom`. Drives `--tile-chrome-scale-check`.
     var qaTitleBarFrame: CGRect { titleBar?.frame ?? .zero }
+    /// Redraws the title bar has asked for. A camera move must not raise this.
+    var qaTitleBarRedrawCount: Int { titleBar?.qaRedrawInvalidationCount ?? 0 }
 
     /// QA: the title's world point size (scales with the bar). On-screen size is
     /// `* zoom`. Drives `--tile-chrome-scale-check`.
@@ -726,9 +728,25 @@ class TileNSView: NSView, TokenThemed {
 /// ordering and `super.hitTest` walking semantics.
 @MainActor
 private final class TitleBarView: NSView, TokenThemed {
-    var tile: Tile { didSet { needsDisplay = true } }
-    var agentStatus: AgentStatus? { didSet { needsDisplay = true } }
+    // Redraw only when the drawn VALUE moved. `CanvasNSView.layoutTile` re-assigns
+    // `tile` on every camera event to keep the view's copy current, so an
+    // unconditional `needsDisplay` here re-rasterized the title text of every tile
+    // on every frame of a trackpad pan — defeating the `invalidateTileDisplay:
+    // false` contract `setViewport` states one call up. Zoom is unaffected: the
+    // chrome scale is a function of the bar's height, and `layoutChrome`
+    // invalidates explicitly when that height changes.
+    var tile: Tile { didSet { if tile != oldValue { invalidateChrome() } } }
+    var agentStatus: AgentStatus? { didSet { if agentStatus != oldValue { invalidateChrome() } } }
     var agentStatusErrorMessage: String? { didSet { toolTip = agentStatusErrorMessage } }
+
+    /// Counts the redraws the bar actually asks for, so a check can witness that a
+    /// camera move costs none. Every `needsDisplay` for this bar routes here.
+    private(set) var qaRedrawInvalidationCount = 0
+
+    func invalidateChrome() {
+        qaRedrawInvalidationCount += 1
+        needsDisplay = true
+    }
     var onCloseRequested: (() -> Void)?
     var onStopRunRequested: (() -> Void)?
     var additionalMenuItemsProvider: (() -> [NSMenuItem])?
