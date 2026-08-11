@@ -110,6 +110,36 @@ dispatch identity, which is already correct for all four cases.
 Do NOT delete the sidebar until a witness proves a headless working agent, a
 snoozed agent and a settled agent are all reachable from ⌘K.
 
+## Settled: the Pi backend is NOT broken (verified 2026-08-11)
+
+Reported twice as "only Anthropic models in the dropdown", in ⌘K and then in
+Settings ▸ Agents. Driving the real catalogue probe (`enableLiveRefresh()` +
+`requestRefresh()`, then reading `AgentModelConfig.modelOptions`) gives:
+
+```
+resolved backend: pi (all providers)
+allowedProviders: nil                 ← no filter applied, correct
+modelOptions count: 23   byProvider: ["anthropic": 16, "openai-codex": 7]
+first 3: anthropic/claude-fable-5, anthropic/claude-haiku-4-5, …
+last 3:  anthropic/opus, anthropic/sonnet, anthropic/haiku
+```
+
+All 7 codex models are present and unfiltered. `pi --list-models` returns both
+providers in 0.46s / 1617 bytes (no truncation), the table parser is correct,
+and `SettingsSchema` was untouched by 0.4.3 apart from two Appearance fields —
+so this is not a regression.
+
+The real defect is ORDERING, not filtering. The list is
+`[13 anthropic from pi][7 openai-codex from pi][3 anthropic aliases from the
+claude CLI union]`, so 16 Anthropic rows precede the codex ones, and the
+provider-grouped Settings picker opens on Anthropic. Both reported screenshots
+crop exactly at that boundary.
+
+**Fix at the PICKER, not in `modelOptions`:** order the provider groups so the
+provider of the user's currently-selected default model comes first (and
+preselect that model). Do NOT reorder `AgentModelConfig.modelOptions` itself —
+its order is pinned by existing checks ("no existing check's model set moves").
+
 ## Order matters
 
 Step 3 must not land before 1 and 2 are green, or the intermediate build
