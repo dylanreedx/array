@@ -2,8 +2,8 @@
 
 Small, self-contained improvements — each is one focused session or less.
 Bigger designed work gets a numbered plan file (see `01-provider-cli-backends.md`).
-Program history: `docs/38-tickets/95-go-live.md`. **Shipped state: 0.4.0 (build 6),
-live on arrayapp.dev 2026-08-10; next release is build 7.** `main` ==
+Program history: `docs/38-tickets/95-go-live.md`. **Shipped state: 0.4.1 (build 7),
+live on arrayapp.dev 2026-08-10; next release is build 8.** `main` ==
 `array/integration`, tree clean. Dylan is **daily-driving Array Dev and
 reporting what he notices** — "we are so close to using it as a daily driver".
 
@@ -17,7 +17,7 @@ preview app is `~/Desktop/Array Dev.app` on `~/array-scratch` via
 `scripts/dev-app.sh` (~16s). Full rules in AGENTS.md ("Running the app while
 Dylan is using it" + hazard 9).
 
-## Shipped in 0.4.0 (build 6, 2026-08-10)
+## Shipped in 0.4.0 / 0.4.1 (builds 6 and 7, 2026-08-10)
 
 All of the below went out in 0.4.0. Dylan dogfooded each one in Array Dev
 (`~/Desktop/Array Dev.app`, rebuilt and relaunched after each change) before it
