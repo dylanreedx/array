@@ -205,9 +205,11 @@ now print widths and the drawn string — keep that habit.
   images stay embedded. Remaining questions (codex `workspace-write` sandbox for
   out-of-project drops, PDF-read parity) are recorded in the plan and were left
   open deliberately.
-- `03-transcript-rehydration.md` — **SHIPPED 2026-08-10** (MVP: resume shows the
-  prior transcript behind a "Previous session" boundary, read from the provider
-  session file and replayed as events; display-only, never re-synced). Fast-follows
+- `03-transcript-rehydration.md` — **SHIPPED 2026-08-10 for Claude/Pi; Codex
+  source implementation complete under plan 09, pending the intentionally
+  skipped installed-app smoke** (MVP: resume shows the prior transcript behind
+  a "Previous session" boundary, read from the provider session file and
+  replayed as events; display-only, never re-synced). Fast-follows
   NOT built: the collapse/disclosure "summary that expands" grouping, and
   expand-to-see tool OUTPUT (the reader has the on-disk result; only the command
   is surfaced today).

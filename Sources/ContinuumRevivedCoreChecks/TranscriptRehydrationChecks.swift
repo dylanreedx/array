@@ -17,11 +17,12 @@ func runTranscriptRehydrationChecks() {
     runTranscriptRehydrationSessionIdChecks()
     runClaudeSessionTranscriptParseChecks()
     runPiSessionTranscriptParseChecks()
+    runCodexSessionTranscriptParseChecks()
     runTranscriptRehydrationBoundChecks()
     #if os(macOS)
     runTranscriptRehydrationDispatchChecks()
     #endif
-    print("TranscriptRehydration checks passed: claude+pi session .jsonl parse to replayable steps, sub-agent frames skipped, caps surfaced, backend dispatched by file existence with the claude/pi tiebreak")
+    print("TranscriptRehydration checks passed: claude+codex+pi session .jsonl parse to replayable display-only steps, caps surfaced, exact Codex thread identity located, preferred backend dispatched")
 }
 
 private func stepsDescription(_ transcript: RehydratedTranscript) -> String {
@@ -145,6 +146,47 @@ private func runPiSessionTranscriptParseChecks() {
            "PiSessionTranscriptReader: a compaction summary leaked into the transcript")
 }
 
+private func runCodexSessionTranscriptParseChecks() {
+    let threadId = "019c0dex-1111-2222-3333-444444444444"
+    let lines = [
+        #"{"type":"session_meta","payload":{"id":"019c0dex-1111-2222-3333-444444444444","cwd":"/x","timestamp":"2026-08-10T12:00:00.000Z"}}"#,
+        #"{"type":"event_msg","payload":{"type":"user_message","message":"CODEX_PROMPT"}}"#,
+        #"{"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"CODEX_REASON"}],"encrypted_content":"IGNORE_ENCRYPTED"}}"#,
+        #"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"CODEX_PROMPT"}]}}"#,
+        #"{"type":"response_item","payload":{"type":"function_call","name":"shell_command","arguments":"{\"cmd\":\"do not restore arguments\"}","call_id":"call_ok"}}"#,
+        #"{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_ok","output":"RAW_TOOL_OUTPUT"}}"#,
+        #"{"type":"response_item","payload":{"type":"function_call","name":"apply_patch","arguments":"{}","call_id":"call_bad"}}"#,
+        #"{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_bad","status":"failed","output":"RAW_FAILURE"}}"#,
+        #"{"type":"event_msg","payload":{"type":"agent_message","message":"CODEX_REPLY"}}"#,
+        #"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"CODEX_REPLY"}]}}"#,
+        #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{}}}}"#,
+        "malformed",
+    ]
+    let transcript = CodexSessionTranscriptReader.parse(lines: lines, threadId: threadId)
+    let expected: [RehydratedTranscriptStep] = [
+        .userPrompt("CODEX_PROMPT"),
+        .event(.turnStarted(threadId: threadId, turnId: "rehydrated-t1")),
+        .event(.contentDelta(threadId: threadId, turnId: "rehydrated-t1", streamKind: .reasoning, delta: "CODEX_REASON")),
+        .event(.itemStarted(threadId: threadId, itemId: "call_ok", kind: .commandExecution, title: "shell_command")),
+        .event(.itemCompleted(threadId: threadId, itemId: "call_ok", kind: .commandExecution, status: .completed)),
+        .event(.itemStarted(threadId: threadId, itemId: "call_bad", kind: .commandExecution, title: "apply_patch")),
+        .event(.itemCompleted(threadId: threadId, itemId: "call_bad", kind: .commandExecution, status: .failed)),
+        .event(.contentDelta(threadId: threadId, turnId: "rehydrated-t1", streamKind: .assistant, delta: "CODEX_REPLY")),
+        .event(.turnCompleted(threadId: threadId, turnId: "rehydrated-t1", outcome: .completed, errorMessage: nil)),
+    ]
+    expect(transcript.steps == expected, "Codex transcript steps drifted.\n got: \(transcript.steps)\n want: \(expected)")
+    expect(transcript.restoredMessageCount == 2,
+           "Codex mirrored/reasoning/tool rows must not inflate the 2-message count, got \(transcript.restoredMessageCount)")
+    let serialized = stepsDescription(transcript)
+    expect(serialized.components(separatedBy: "CODEX_PROMPT").count == 2,
+           "Codex mirrored user message rendered more than once")
+    expect(serialized.components(separatedBy: "CODEX_REPLY").count == 2,
+           "Codex mirrored assistant message rendered more than once")
+    expect(!serialized.contains("RAW_TOOL_OUTPUT") && !serialized.contains("RAW_FAILURE")
+            && !serialized.contains("IGNORE_ENCRYPTED") && !serialized.contains("do not restore arguments"),
+           "Codex raw tool/encrypted/argument bodies crossed the display parser boundary")
+}
+
 private func runTranscriptRehydrationBoundChecks() {
     let threadId = "t-bound"
     // Five user prompts, cap at two: only the last two survive and the drop is
@@ -211,6 +253,23 @@ private func runTranscriptRehydrationDispatchChecks() {
         let url = dir.appendingPathComponent("2026-08-07T01-20-08-718Z_\(sessionId).jsonl")
         try! piLines(marker).joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
     }
+    @discardableResult
+    func writeCodex(
+        home: URL, threadId: String, marker: String, archived: Bool = false,
+        filename: String = "rollout-fixture.jsonl"
+    ) -> URL {
+        let rootName = archived ? "archived_sessions" : "sessions/2026/08/10"
+        let dir = home.appendingPathComponent(".codex/\(rootName)", isDirectory: true)
+        try! fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent(filename)
+        let lines = [
+            #"{"type":"session_meta","payload":{"id":"\#(threadId)","cwd":"\#(cwd)","timestamp":"2026-08-10T12:00:00.000Z"}}"#,
+            #"{"type":"event_msg","payload":{"type":"user_message","message":"\#(marker)"}}"#,
+            #"{"type":"event_msg","payload":{"type":"agent_message","message":"reply"}}"#,
+        ]
+        try! lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
     func inputs(home: URL, agentUUID: UUID, model: String, claudeCLIAvailable: Bool) -> ManagedTranscriptRehydrator.Inputs {
         ManagedTranscriptRehydrator.Inputs(
             agentUUID: agentUUID, cwd: cwd, model: model,
@@ -267,6 +326,37 @@ private func runTranscriptRehydrationDispatchChecks() {
         writePi(home: home, agentUUID: id, marker: "PI_FALLBACK", slug: "--some-other-project--")
         let t = ManagedTranscriptRehydrator.rehydrate(inputs(home: home, agentUUID: id, model: "openai-codex/gpt-5.6", claudeCLIAvailable: false))
         expect(firstUserPrompt(t) == "PI_FALLBACK", "dispatch: a pi session file under a different slug must still be found by the unique-id scan, got \(String(describing: firstUserPrompt(t)))")
+    }
+
+    // 6 · Codex selects the exact stored id, never a newer rollout from the
+    // same cwd, and the preferred native route beats an older Pi transcript.
+    do {
+        let home = base.appendingPathComponent("codex-exact", isDirectory: true)
+        let id = UUID()
+        let wanted = "019c0dex-wanted"
+        _ = writeCodex(home: home, threadId: "019c0dex-wrong", marker: "WRONG_NEWEST", filename: "rollout-z-newest.jsonl")
+        _ = writeCodex(home: home, threadId: wanted, marker: "CODEX_EXACT", filename: "rollout-a-wanted.jsonl")
+        writePi(home: home, agentUUID: id, marker: "OLD_PI")
+        let value = ManagedTranscriptRehydrator.rehydrate(.init(
+            agentUUID: id, cwd: cwd, model: "openai-codex/gpt-5.6",
+            claudeCLIAvailable: false, homeURL: home,
+            codexThreadId: wanted,
+            preferredRoute: .codex))
+        expect(firstUserPrompt(value) == "CODEX_EXACT",
+               "dispatch: Codex must select exact stored thread id and preferred route, got \(String(describing: firstUserPrompt(value)))")
+    }
+
+    // 7 · archived fallback works; ambiguity within one tier fails closed.
+    do {
+        let home = base.appendingPathComponent("codex-archive", isDirectory: true)
+        let codexHome = home.appendingPathComponent(".codex", isDirectory: true)
+        let archived = writeCodex(home: home, threadId: "archived-id", marker: "ARCHIVED", archived: true)
+        expect(CodexSessionTranscriptReader.locateRollout(codexHomeURL: codexHome, threadId: "archived-id")?.path == archived.path,
+               "Codex locator must find an exact archived rollout when no active copy exists")
+        _ = writeCodex(home: home, threadId: "duplicate-id", marker: "ONE", filename: "rollout-one.jsonl")
+        _ = writeCodex(home: home, threadId: "duplicate-id", marker: "TWO", filename: "rollout-two.jsonl")
+        expect(CodexSessionTranscriptReader.locateRollout(codexHomeURL: codexHome, threadId: "duplicate-id") == nil,
+               "Codex locator must fail closed for duplicate active matches")
     }
 }
 #endif

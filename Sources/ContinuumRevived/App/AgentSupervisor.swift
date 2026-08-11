@@ -1374,12 +1374,25 @@ final class AgentSupervisor {
     /// OFF it. `nil` for an agent this supervisor does not know.
     func rehydrationInputs(for id: AgentID) -> ManagedTranscriptRehydrator.Inputs? {
         guard let record = records[id] else { return nil }
+        let homeURL = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        let codexHomeURL = ProcessInfo.processInfo.environment["CODEX_HOME"]
+            .flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? homeURL.appendingPathComponent(".codex", isDirectory: true)
+        let claudeAvailable = ClaudeAgentRunner.liveCLIAvailable()
+        let codexAvailable = CodexAgentRunner.liveCLIAvailable()
         return ManagedTranscriptRehydrator.Inputs(
             agentUUID: id.rawValue,
             cwd: record.cwd,
             model: record.model,
-            claudeCLIAvailable: ClaudeAgentRunner.liveCLIAvailable(),
-            homeURL: URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true))
+            claudeCLIAvailable: claudeAvailable,
+            homeURL: homeURL,
+            codexThreadId: record.codexThreadId,
+            codexHomeURL: codexHomeURL,
+            preferredRoute: AgentBackendConfig.route(
+                model: record.model,
+                backend: AgentBackendConfig.resolved(),
+                claudeAvailable: claudeAvailable,
+                codexAvailable: codexAvailable))
     }
 
     // MARK: - Lifecycle
@@ -7428,11 +7441,17 @@ func runAgentRestoreChecks() async throws {
 
         let claudeAgent = AgentID(rawValue: UUID())
         let piAgent = AgentID(rawValue: UUID())
+        let codexAgent = AgentID(rawValue: UUID())
+        let codexThreadId = "019c0dex-restore-check"
         for id in [claudeAgent, piAgent] {
             try rehydrateStore.upsert(AgentRecord(
                 id: id, displayName: "restored", model: config.model, thinking: config.thinking,
                 cwd: liveCwd, createdAt: createdAt, lastActivityAt: createdAt, tileId: UUID()))
         }
+        try rehydrateStore.upsert(AgentRecord(
+            id: codexAgent, displayName: "restored codex", model: "openai-codex/gpt-5.6-sol",
+            thinking: config.thinking, cwd: liveCwd, createdAt: createdAt,
+            lastActivityAt: createdAt, tileId: UUID(), codexThreadId: codexThreadId))
         _ = rehydrateSupervisor.restore()
 
         // The derived session ids the readers locate by MUST equal the
@@ -7555,6 +7574,69 @@ func runAgentRestoreChecks() async throws {
         }
         try assertDisplayOnly(piTranscript, drafts: piDrafts(), "pi")
         piTile.detach()
+
+        // -- codex path -- exact persisted thread id, not newest/same-cwd.
+        let codexDir = rehydrateHome
+            .appendingPathComponent(".codex/sessions/2026/08/10", isDirectory: true)
+        try FileManager.default.createDirectory(at: codexDir, withIntermediateDirectories: true)
+        func writeCodexRollout(_ filename: String, threadId: String, prompt: String) throws {
+            let url = codexDir.appendingPathComponent(filename)
+            try [
+                #"{"type":"session_meta","payload":{"id":"\#(threadId)","cwd":"\#(liveCwd)","timestamp":"2026-08-10T12:00:00.000Z"}}"#,
+                #"{"type":"event_msg","payload":{"type":"user_message","message":"\#(prompt)"}}"#,
+                #"{"type":"event_msg","payload":{"type":"agent_message","message":"CODEX_PLANTED_REPLY"}}"#,
+            ].joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
+        }
+        try writeCodexRollout("rollout-z-wrong.jsonl", threadId: "wrong-thread", prompt: "WRONG_CODEX_PROMPT")
+        try writeCodexRollout("rollout-a-exact.jsonl", threadId: codexThreadId, prompt: "CODEX_PLANTED_PROMPT")
+
+        let codexInputs = ManagedTranscriptRehydrator.Inputs(
+            agentUUID: codexAgent.rawValue, cwd: liveCwd, model: "openai-codex/gpt-5.6-sol",
+            claudeCLIAvailable: false, homeURL: rehydrateHome,
+            codexThreadId: codexThreadId,
+            codexHomeURL: rehydrateHome.appendingPathComponent(".codex", isDirectory: true),
+            preferredRoute: .codex)
+        guard let codexTranscript = ManagedTranscriptRehydrator.rehydrate(codexInputs) else {
+            throw fail("a restored Codex agent with an exact-id rollout did not rehydrate")
+        }
+        rehydrateSupervisor.seedRehydratedTranscript(codexTranscript, for: codexAgent)
+        guard rehydrateSupervisor.needsPreviousSessionNotice(codexAgent) == false else {
+            throw fail("seeding a rehydrated Codex transcript did not retire the previous-session notice")
+        }
+        let (codexTile, codexDrafts) = attachRecordingTile(codexAgent)
+        guard codexTile.qaTranscriptText.contains("CODEX_PLANTED_PROMPT"),
+              codexTile.qaTranscriptText.contains("CODEX_PLANTED_REPLY"),
+              !codexTile.qaTranscriptText.contains("WRONG_CODEX_PROMPT") else {
+            throw fail("rehydrated Codex transcript did not use the exact stored thread: \(codexTile.qaTranscriptText)")
+        }
+        guard codexTile.qaTranscriptText.contains("Previous session"),
+              codexTile.currentAgentStatus == .idle else {
+            throw fail("rehydrated Codex tile must lead with the boundary and remain idle")
+        }
+        try assertDisplayOnly(codexTranscript, drafts: codexDrafts(), "codex")
+        codexTile.detach()
+
+        // Display restoration and continuation are separate contracts: the
+        // restored record must still construct the next runner with this exact
+        // id, which CodexCLIBackend maps to `exec resume <id>`.
+        guard let restoredCodexRecord = rehydrateSupervisor.records[codexAgent] else {
+            throw fail("restored Codex record disappeared")
+        }
+        let resumedConfig = AgentSupervisor.codexRunnerConfig(for: restoredCodexRecord)
+        guard resumedConfig.threadId == codexThreadId else {
+            throw fail("restored Codex runner config lost the persisted thread id")
+        }
+        let resumeArgv = CodexCLIBackend.processArguments(
+            model: resumedConfig.model,
+            effort: resumedConfig.effort,
+            sessionMode: .resume,
+            threadId: resumedConfig.threadId,
+            cwdPath: resumedConfig.cwd.path,
+            extraArgs: [],
+            prompt: AgentPrompt("continue"))
+        guard Array(resumeArgv.prefix(3)) == ["exec", "resume", codexThreadId] else {
+            throw fail("first post-restore Codex prompt is not routed through exec resume: \(resumeArgv)")
+        }
     }
 
     // MARK: 5 · a prompt starts it, and the conversation continues from there
