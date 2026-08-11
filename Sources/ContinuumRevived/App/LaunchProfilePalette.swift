@@ -213,16 +213,16 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             throw PaletteSelfCheckError.failed("palette root is not the glass command-center surface")
         }
         guard palette.displayEntries.contains(where: {
-            if case .section(.create) = $0 { return true }
+            if case CommandCenterDisplayEntry.section(CommandCenterCategory.create.rawValue) = $0 { return true }
             return false
         }), palette.displayEntries.contains(where: {
-            if case .section(.actions) = $0 { return true }
+            if case CommandCenterDisplayEntry.section(CommandCenterCategory.actions.rawValue) = $0 { return true }
             return false
         }) else {
             throw PaletteSelfCheckError.failed("default command center did not render categorized sections")
         }
         if let actionsHeader = palette.displayEntries.firstIndex(where: {
-            if case .section(.actions) = $0 { return true }
+            if case CommandCenterDisplayEntry.section(CommandCenterCategory.actions.rawValue) = $0 { return true }
             return false
         }),
            let previousItem = palette.displayEntries[..<actionsHeader].lastIndex(where: {
@@ -313,6 +313,35 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         }
         palette.onSelectProfile = nil
 
+        // MIXED PROVIDERS: pi's catalogue lists every anthropic model before the
+        // first codex one, so under a single "Choose Model" header a codex user saw a
+        // screenful of Claude and no evidence anything followed — reported twice as
+        // "only Anthropic models" when nothing was filtered at all. Each provider's
+        // block must now be headed, in catalogue order.
+        let mixedProviderModels = [
+            AgentModelPaletteRow(id: "anthropic/claude-opus-5", displayName: "Claude Opus 5", providerName: "Anthropic · anthropic/claude-opus-5"),
+            AgentModelPaletteRow(id: "anthropic/claude-sonnet-5", displayName: "Claude Sonnet 5", providerName: "Anthropic · anthropic/claude-sonnet-5"),
+            AgentModelPaletteRow(id: "openai-codex/gpt-5.6-luna", displayName: "GPT-5.6 Luna", providerName: "OpenAI Codex · openai-codex/gpt-5.6-luna"),
+        ]
+        palette.show(near: host, profiles: [], initialQuery: "Agent", agentModels: mixedProviderModels)
+        palette.commitSelection()
+        let mixedHeaders = palette.displayEntries.compactMap { entry -> String? in
+            if case let .section(title) = entry { return title }
+            return nil
+        }
+        guard mixedHeaders == ["Anthropic", "OpenAI Codex"] else {
+            throw PaletteSelfCheckError.failed("the model step must head each provider's block, got \(mixedHeaders)")
+        }
+        guard palette.displayEntries.contains(where: { entry in
+            if case let .item(item) = entry { return item.row.agentModelID == "openai-codex/gpt-5.6-luna" }
+            return false
+        }) else {
+            throw PaletteSelfCheckError.failed("a codex model must be reachable in the mixed-provider model step")
+        }
+        if let modelSearch = palette.searchField {
+            _ = palette.control(modelSearch, textView: NSTextView(), doCommandBy: #selector(NSResponder.cancelOperation(_:)))
+        }
+
         let agentModels = [
             AgentModelPaletteRow(id: "openai-codex/gpt-5.6-sol", displayName: "GPT-5.6 Sol", providerName: "OpenAI Codex · openai-codex/gpt-5.6-sol"),
             AgentModelPaletteRow(id: "openai-codex/gpt-5.6-luna", displayName: "GPT-5.6 Luna", providerName: "OpenAI Codex · openai-codex/gpt-5.6-luna"),
@@ -333,6 +362,16 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         palette.applyFilter(query: "luna")
         guard palette.selectedDisplayNameForQA == "GPT-5.6 Luna" else {
             throw PaletteSelfCheckError.failed("model-step search did not select the matching exact model")
+        }
+        // A single-provider list keeps the plain header — a lone "OPENAI CODEX" over
+        // every row it owns is noise, not information.
+        palette.applyFilter(query: "")
+        let singleHeaders = palette.displayEntries.compactMap { entry -> String? in
+            if case let .section(title) = entry { return title }
+            return nil
+        }
+        guard singleHeaders == [CommandCenterCategory.models.rawValue] else {
+            throw PaletteSelfCheckError.failed("a single-provider model step keeps the plain header, got \(singleHeaders)")
         }
         _ = palette.control(searchField, textView: NSTextView(), doCommandBy: #selector(NSResponder.cancelOperation(_:)))
         guard palette.isVisible, !palette.isChoosingAgentModelForQA,
@@ -737,8 +776,8 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard let entry = entry(at: row) else { return nil }
         switch entry {
-        case let .section(category):
-            return CommandCenterSectionCell(category: category)
+        case let .section(title):
+            return CommandCenterSectionCell(title: title)
         case let .item(item):
             return CommandCenterItemCell(item: item)
         }
@@ -776,8 +815,32 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             defaults.set(recentIDs, forKey: Self.recentDefaultsKey)
         }
         let sections = LaunchPaletteModel.makeSections(rows: rows, query: query, recentIDs: recentIDs)
-        displayEntries = sections.flatMap { section in
-            [.section(section.category)] + section.items.map(CommandCenterDisplayEntry.item)
+        displayEntries = sections.flatMap { section -> [CommandCenterDisplayEntry] in
+            // Models get ONE HEADER PER PROVIDER instead of a single "Choose Model".
+            // pi's catalogue lists 13 anthropic models before the first codex one, so
+            // under one header a codex user sees a screen of Claude and no evidence
+            // there is anything below — reported twice as "only Anthropic models"
+            // when nothing was filtered at all. Provider blocks stay in catalogue
+            // order; only the headers are added.
+            if section.category == .models {
+                var order: [String] = []
+                var byProvider: [String: [CommandCenterItem]] = [:]
+                for item in section.items {
+                    let provider = ProviderModelGrouping.provider(forID: item.row.agentModelID ?? "")
+                    if byProvider[provider] == nil { order.append(provider) }
+                    byProvider[provider, default: []].append(item)
+                }
+                // A single provider keeps the plain header — a lone "ANTHROPIC" over
+                // every row it owns is noise, not information.
+                if order.count <= 1 {
+                    return [.section(section.category.rawValue)] + section.items.map(CommandCenterDisplayEntry.item)
+                }
+                return order.flatMap { provider in
+                    [.section(ProviderModelGrouping.displayName(forProvider: provider))]
+                        + (byProvider[provider] ?? []).map(CommandCenterDisplayEntry.item)
+                }
+            }
+            return [.section(section.category.rawValue)] + section.items.map(CommandCenterDisplayEntry.item)
         }
         filtered = sections.flatMap(\.items).map(\.row)
         tableView?.reloadData()
@@ -933,7 +996,10 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
 }
 
 private enum CommandCenterDisplayEntry {
-    case section(CommandCenterCategory)
+    /// A header's TITLE, not its category: the model step splits one `.models`
+    /// section into one header per provider, so the text cannot be derived from
+    /// the fixed category enum (.plans/10-command-center-absorbs-sidebar.md).
+    case section(String)
     case item(CommandCenterItem)
 
     var isSection: Bool {
@@ -1029,9 +1095,9 @@ private final class CommandCenterSurfaceView: NSView {
 }
 
 private final class CommandCenterSectionCell: NSTableCellView {
-    init(category: CommandCenterCategory) {
+    init(title: String) {
         super.init(frame: .zero)
-        let label = NSTextField(labelWithString: category.rawValue.uppercased())
+        let label = NSTextField(labelWithString: title.uppercased())
         label.font = .systemFont(ofSize: 10.5, weight: .semibold)
         label.textColor = .secondaryLabelColor
         label.translatesAutoresizingMaskIntoConstraints = false

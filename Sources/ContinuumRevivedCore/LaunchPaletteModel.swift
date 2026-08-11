@@ -307,6 +307,14 @@ public enum LaunchPaletteRow: Equatable, Sendable {
         }
     }
 
+    /// The fully-qualified `provider/model` id when this row IS a model choice.
+    /// Lets the surface group model rows by provider without reaching into the
+    /// associated value at the call site.
+    public var agentModelID: String? {
+        if case let .agentModel(model) = self { return model.id }
+        return nil
+    }
+
     public var isSelectable: Bool {
         switch self {
         case let .profile(profile): return profile.isSelectable

@@ -7427,7 +7427,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         splitView.addSubview(contentPane)
         workspaceTopBarView = topBar
         workspaceSplitView = splitView
-        return splitView
+
+        // Return a PLAIN container, not the split view itself.
+        //
+        // The window's contentView is what every overlay adds itself to
+        // (`LaunchProfilePalette.show` does `host.contentView.addSubview(...)`).
+        // While that was the NSSplitView, the split view adopted ⌘K as a PANE and
+        // overwrote its frame on the next layout pass — so the command center's
+        // carefully computed centred 660×520 float was discarded and it rendered
+        // full-height against the window edge, i.e. as a sidebar. That is the
+        // "⌘K still opens a sidebar" report, and it survived deleting the real
+        // sidebar because the offender was the HOST, not the sidebar.
+        //
+        // A plain NSView does not lay out its children, so an overlay keeps the
+        // frame it asked for.
+        let container = NSView(frame: frame)
+        container.autoresizingMask = [.width, .height]
+        splitView.frame = container.bounds
+        container.addSubview(splitView)
+        return container
     }
 
     private func configureWorkspaceSidebar(_ sidebar: WorkspaceSidebarView) {
@@ -7501,9 +7519,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         topBar.onDeleteWorkspace = { [weak self] workspaceId in
             self?.deleteWorkspaceAndRelaunch(workspaceId: workspaceId)
         }
-        topBar.onToggleSidebar = { [weak self] in
-            self?.toggleWorkspaceSidebar()
-        }
+        // No sidebar toggle: the top bar's ☰ button is gone with the sidebar
+        // (.plans/10-command-center-absorbs-sidebar.md). It was the last visible
+        // control still pointing at an unmounted surface — removing the View menu
+        // item and the palette action but leaving a button in the chrome is a
+        // half-removal the user sees.
     }
 
     private func currentWorkspaceIdForSidebar() -> UUID? {
@@ -8645,6 +8665,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                    "the workspace mount must not create a sidebar any more — ⌘K is the navigation surface")
         try expect(splitView.subviews.count == 1,
                    "the split view must hold only the content pane, got \(splitView.subviews.count) subviews")
+        // The content view an overlay attaches to must NOT be a layout container.
+        // While it was the NSSplitView, ⌘K became a split PANE and its centred
+        // float was overwritten on layout — it rendered full-height against the
+        // window edge, which is what "⌘K still opens a sidebar" was.
+        try expect(!(content is NSSplitView),
+                   "the window content view must not be an NSSplitView — it would lay out ⌘K as a pane and discard its floating frame")
+        try expect(content.subviews.contains(where: { $0 === splitView }),
+                   "the plain content container must host the split view")
         let contentWidthAfterMount = Double(splitView.subviews.first?.frame.width ?? 0)
         try expect(contentWidthAfterMount > 1_000,
                    "the content pane must span the window without a sidebar taking width, got \(contentWidthAfterMount)")
