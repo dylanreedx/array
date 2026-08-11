@@ -25,9 +25,10 @@ final class CompletionPopoverController {
         text: String,
         selection: NSRange,
         source: any AgentCompletionSuggestionSource,
+        context: AgentCompletionContext?,
         anchor: NSRect,
         relativeTo textView: ComposerTextView,
-        onInsert: ((AgentCompletion) -> Void)? = nil
+        onAccept: @escaping (AgentCompletion, NSRange) -> Void
     ) {
         requestTask?.cancel()
         generation &+= 1
@@ -42,13 +43,19 @@ final class CompletionPopoverController {
             return
         }
 
-        guard let query = AgentCompletionQueryDetector.activeQuery(
+        guard let detectedQuery = AgentCompletionQueryDetector.activeQuery(
             in: text,
             selection: selection
         ) else {
             dismissSurface()
             return
         }
+        let query = AgentCompletionQuery(
+            trigger: detectedQuery.trigger,
+            text: detectedQuery.text,
+            replacementRange: detectedQuery.replacementRange,
+            context: context
+        )
 
         // Hide old-query rows immediately instead of leaving actionable stale
         // content visible while a slower replacement provider runs.
@@ -93,12 +100,12 @@ final class CompletionPopoverController {
                       let completion = byKey[item.id] else { return }
                 textView.suggestionsAreVisible = false
                 self.insertionInProgress = true
-                textView.insertCompletion(
-                    completion.insertionText,
-                    replacementRange: query.replacementRange
-                )
+                if case let .insertText(text) = completion.payload {
+                    textView.insertCompletion(text, replacementRange: query.replacementRange)
+                } else {
+                    onAccept(completion, query.replacementRange)
+                }
                 self.insertionInProgress = false
-                onInsert?(completion)
             }
             textView.suggestionsAreVisible = self.popover.isPresented
         }

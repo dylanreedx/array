@@ -4256,13 +4256,20 @@ private final class CompletionProbeState: @unchecked Sendable {
     private var started = 0
     private var returned = 0
     private var queries: [String] = []
+    private var contexts: [AgentCompletionContext?] = []
 
-    func record(_ query: String) { lock.withLock { queries.append(query) } }
+    func record(_ query: AgentCompletionQuery) {
+        lock.withLock {
+            queries.append(query.text)
+            contexts.append(query.context)
+        }
+    }
     func markStarted() { lock.withLock { started += 1 } }
     func markReturned() { lock.withLock { returned += 1 } }
     var startedCount: Int { lock.withLock { started } }
     var returnedCount: Int { lock.withLock { returned } }
     var observedQueries: [String] { lock.withLock { queries } }
+    var observedContexts: [AgentCompletionContext?] { lock.withLock { contexts } }
 }
 
 /// The stale branch deliberately ignores task cancellation and completes after a
@@ -4272,7 +4279,7 @@ private struct CompletionProbeSource: AgentCompletionSuggestionSource {
     let state: CompletionProbeState
 
     func suggestions(for query: AgentCompletionQuery) async -> [AgentCompletion] {
-        state.record(query.text)
+        state.record(query)
         if query.text == "s" {
             state.markStarted()
             let values = await withCheckedContinuation { continuation in
@@ -4284,6 +4291,29 @@ private struct CompletionProbeSource: AgentCompletionSuggestionSource {
             }
             state.markReturned()
             return values
+        }
+        if query.text == "/compact" {
+            return [AgentCompletion(
+                id: "compact",
+                title: "compact",
+                insertionText: "/RAW-COMPACT-MUST-NOT-BE-INSERTED",
+                payload: .runtimeCommand(ResolvedRuntimeCommand(
+                    name: "compact",
+                    providerHandle: "probe.compact"
+                ))
+            )]
+        }
+        if query.text == "read" {
+            return [AgentCompletion(
+                id: "readme-file",
+                title: "README.md",
+                insertionText: "@RAW-FILE-MUST-NOT-BE-INSERTED",
+                payload: .file(AgentPromptFileReference(
+                    displayName: "README.md",
+                    contentType: "text/markdown",
+                    fileURL: URL(fileURLWithPath: "/tmp/array-completion-probe/README.md")
+                ))
+            )]
         }
         guard query.text.hasPrefix("he") else { return [] }
         return [
@@ -4473,6 +4503,121 @@ private func runCompletionComposerChecks() async throws -> Int {
     }
 
     return 25
+}
+
+/// Focused witness for typed completion acceptance. Kept separate from the
+/// historical supervisor corpus so an unrelated AppKit undo failure cannot mask
+/// semantic dispatch, structured file references, or context rebinding.
+@MainActor
+func runAgentCompletionSemanticChecks() async throws {
+    struct CheckError: Error, CustomStringConvertible { let description: String }
+    func fail(_ message: String) -> CheckError {
+        CheckError(description: "semantic completion contract: \(message)")
+    }
+    func event(keyCode: UInt16, characters: String, windowNumber: Int) throws -> NSEvent {
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: windowNumber,
+            context: nil,
+            characters: characters,
+            charactersIgnoringModifiers: characters,
+            isARepeat: false,
+            keyCode: keyCode
+        ) else { throw fail("could not make a synthetic key event") }
+        return event
+    }
+
+    let composer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 480, height: 96))
+    let textView = composer.textView
+    let state = CompletionProbeState()
+    let contextA = AgentCompletionContext(
+        agentID: AgentID(rawValue: UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!),
+        backend: .claudeCode,
+        checkoutRoot: URL(fileURLWithPath: "/tmp/array-context-a", isDirectory: true),
+        gitRoot: URL(fileURLWithPath: "/tmp/array-context-a", isDirectory: true),
+        arrayProjectRoot: URL(fileURLWithPath: "/tmp/array-project", isDirectory: true),
+        trustState: .trusted
+    )
+    let contextB = AgentCompletionContext(
+        agentID: AgentID(rawValue: UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!),
+        backend: .codex,
+        checkoutRoot: URL(fileURLWithPath: "/tmp/array-context-b", isDirectory: true),
+        gitRoot: URL(fileURLWithPath: "/tmp/array-context-b", isDirectory: true),
+        arrayProjectRoot: URL(fileURLWithPath: "/tmp/array-project", isDirectory: true),
+        trustState: .untrusted
+    )
+    composer.qaBindCompletionContext(contextA)
+    composer.qaBindCompletionSource(CompletionProbeSource(state: state))
+    let window = NSWindow(
+        contentRect: NSRect(x: 500, y: 500, width: 480, height: 96),
+        styleMask: .borderless,
+        backing: .buffered,
+        defer: false
+    )
+    window.contentView = composer
+    window.makeKey()
+    guard window.makeFirstResponder(textView) else {
+        throw fail("could not focus the native text view")
+    }
+    defer {
+        composer.removeFromSuperview()
+        window.orderOut(nil)
+        window.close()
+    }
+
+    func replaceText(_ value: String) {
+        textView.insertText(
+            value,
+            replacementRange: NSRange(location: 0, length: (textView.string as NSString).length)
+        )
+        textView.setSelectedRange(NSRange(location: (value as NSString).length, length: 0))
+        textView.textDidChange(Notification(name: NSText.didChangeNotification, object: textView))
+        textView.textViewDidChangeSelection(
+            Notification(name: NSTextView.didChangeSelectionNotification, object: textView)
+        )
+    }
+
+    var acceptedPayload: AgentCompletionPayload?
+    composer.onCompletionAction = { payload in
+        acceptedPayload = payload
+        return false
+    }
+    replaceText("//compact")
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, {
+        composer.qaCompletionTitles == ["compact"]
+    }) else { throw fail("runtime command did not present") }
+    window.sendEvent(try event(keyCode: 36, characters: "\r", windowNumber: window.windowNumber))
+    guard textView.string == "//compact",
+          acceptedPayload == .runtimeCommand(ResolvedRuntimeCommand(
+              name: "compact", providerHandle: "probe.compact"
+          )) else {
+        throw fail("runtime command degraded into literal text or lost its typed payload")
+    }
+
+    replaceText("@read")
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, {
+        composer.qaCompletionTitles == ["README.md"]
+    }) else { throw fail("file result did not present") }
+    window.sendEvent(try event(keyCode: 36, characters: "\r", windowNumber: window.windowNumber))
+    guard textView.string.isEmpty,
+          composer.qaFileReferenceCount == 1,
+          composer.qaFileReferenceRailNames == ["README.md"] else {
+        throw fail("file result did not become one structured draft reference")
+    }
+
+    replaceText("/he")
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, {
+        state.observedContexts.last == contextA
+            && composer.qaCompletionTitles == ["help", "hello"]
+    }) else { throw fail("query did not carry its initial agent context") }
+    composer.qaBindCompletionContext(contextB)
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, {
+        state.observedContexts.last == contextB
+            && composer.qaCompletionTitles == ["help", "hello"]
+    }) else { throw fail("rebind did not atomically replace backend/cwd context") }
 }
 
 /// Gated on `--image-supervisor-check`. This is intentionally separate from the

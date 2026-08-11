@@ -352,7 +352,7 @@ Each adapter owns catalog translation, invocation, capability availability, and 
 
 ### Phase 1 — Semantic completion foundation
 
-Replace string-only selection with typed payloads and agent-scoped context. Keep fixture providers, but make them exercise file, skill, directory, and runtime-command paths.
+Replace string-only selection with typed payloads and agent-scoped context. Keep the user-facing fallback fixtures source-compatible; exercise file, skill, directory, and runtime-command paths with dedicated deterministic providers so placeholders cannot create fake capabilities.
 
 Witnesses:
 
@@ -448,7 +448,7 @@ Manual product path:
 <Checklist
   id="managed-capability-acceptance"
   items={[
-    {"id":"semantic","label":"Completion acceptance uses typed payloads rather than universal text insertion","checked":false},
+    {"id":"semantic","label":"Completion acceptance uses typed payloads rather than universal text insertion","checked":true},
     {"id":"context","label":"Every query is scoped to one agent backend and checkout root","checked":false},
     {"id":"files","label":"@ selection and drag/drop produce the same structured file reference","checked":false},
     {"id":"navigation","label":"Directory navigation is fuzzy, bounded, cancellable, and cannot escape allowed roots","checked":false},

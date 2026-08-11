@@ -80,12 +80,83 @@ func runAgentCompletionChecks() async throws {
         Set(fixtureProviders.map(\.providerID)).count == fixtureProviders.count,
         "AgentCompletion: fixture provider IDs are not replaceable without collision"
     )
+    let semanticPayloads: [AgentCompletionPayload] = [
+        .insertText("literal"),
+        .file(AgentPromptFileReference(
+            displayName: "README.md",
+            contentType: "text/markdown",
+            fileURL: URL(fileURLWithPath: "/tmp/array-completion-check/README.md")
+        )),
+        .skill(ResolvedSkillInvocation(name: "review", providerHandle: "skill.review")),
+        .promptTemplate(ResolvedPromptTemplate(name: "handoff", prompt: "Prepare a handoff")),
+        .runtimeCommand(ResolvedRuntimeCommand(name: "compact", providerHandle: "runtime.compact")),
+        .directory(DirectoryNavigationTarget(
+            directoryURL: URL(fileURLWithPath: "/tmp/array-completion-check/Sources", isDirectory: true)
+        )),
+    ]
+    let semanticPayloadKinds = Set(semanticPayloads.map { payload in
+        switch payload {
+        case .insertText: return "text"
+        case .file: return "file"
+        case .skill: return "skill"
+        case .promptTemplate: return "template"
+        case .runtimeCommand: return "runtime"
+        case .directory: return "directory"
+        }
+    })
+    expect(
+        semanticPayloadKinds == ["text", "file", "skill", "template", "runtime", "directory"],
+        "AgentCompletion: typed contract does not exercise every semantic acceptance path"
+    )
+
+    let checkoutRoot = URL(fileURLWithPath: "/tmp/array-completion-checkout", isDirectory: true)
+    let context = AgentCompletionContext(
+        agentID: AgentID(rawValue: UUID(uuidString: "12345678-1234-1234-1234-1234567890AB")!),
+        backend: .codex,
+        checkoutRoot: checkoutRoot,
+        gitRoot: checkoutRoot,
+        arrayProjectRoot: URL(fileURLWithPath: "/tmp/array-project", isDirectory: true),
+        trustState: .trusted
+    )
+    let contextualQuery = AgentCompletionQuery(
+        trigger: "@",
+        text: "Source",
+        replacementRange: NSRange(location: 0, length: 7),
+        context: context
+    )
+    expect(
+        contextualQuery.context == context
+            && contextualQuery.context?.backend == .codex
+            && contextualQuery.context?.checkoutRoot == checkoutRoot,
+        "AgentCompletion: one query did not retain its immutable agent/backend/checkout context"
+    )
+
+    let legacyText = AgentCompletion(id: "legacy", title: "legacy", insertionText: "/legacy")
+    expect(
+        legacyText.payload == .insertText("/legacy"),
+        "AgentCompletion: source-compatible text results lost explicit insertion semantics"
+    )
+
+    let preferredProvenance = AgentCompletionProvenance(
+        backend: .claudeCode,
+        scope: .personal,
+        sourceIdentifier: "~/.claude/commands/help.md",
+        invocationName: "help"
+    )
 
     let slashA = StaticAgentCompletionProvider(
         providerID: "commands-a",
         trigger: "/",
         completions: [
-            AgentCompletion(id: "help-a", title: "help", detail: "Primary help", insertionText: "/help", score: 20),
+            AgentCompletion(
+                id: "help-a",
+                title: "help",
+                detail: "Primary help",
+                insertionText: "/help",
+                score: 20,
+                payload: .promptTemplate(ResolvedPromptTemplate(name: "help", prompt: "Explain available help")),
+                provenance: preferredProvenance
+            ),
             AgentCompletion(id: "history", title: "history", insertionText: "/history", score: 5),
         ]
     )
@@ -110,6 +181,11 @@ func runAgentCompletionChecks() async throws {
     expect(merged.map(\.insertionText) == ["/help"], "AgentCompletion: trigger filtering/static filtering/dedupe was not exact")
     expect(merged[0].id == "help-a" && merged[0].score == 20, "AgentCompletion: deterministic merge did not retain the preferred result")
     expect(merged[0].providerIDs == ["commands-a", "commands-b"], "AgentCompletion: dedupe dropped provider provenance")
+    expect(
+        merged[0].payload == .promptTemplate(ResolvedPromptTemplate(name: "help", prompt: "Explain available help"))
+            && merged[0].provenance == preferredProvenance,
+        "AgentCompletion: deterministic merge detached semantic payload/provenance from the preferred row"
+    )
     expect(!merged.contains(where: { $0.id == "file" }), "AgentCompletion: a provider for another trigger leaked into results")
 
     await registry.register(StaticAgentCompletionProvider(
@@ -168,5 +244,5 @@ func runAgentCompletionChecks() async throws {
     expect(output.contains(expected), "AgentCompletion: negative witness missed the named compiled assertion")
 
     print("Agent completion negative witness observed red (exit \(witness.terminationStatus)): \(expected)")
-    print("Agent completion checks passed: quote/escape/middle-caret detection, replacement registry, deterministic dedupe/rank/provenance, trigger isolation, and stale cancellation")
+    print("Agent completion checks passed: semantic payloads/context, quote/escape/middle-caret detection, replacement registry, deterministic dedupe/rank/provenance, trigger isolation, and stale cancellation")
 }

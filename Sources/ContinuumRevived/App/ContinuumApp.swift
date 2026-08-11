@@ -1157,6 +1157,21 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--agent-completion-semantic-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runAgentCompletionSemanticChecks()
+                    print("ContinuumRevivedAgentCompletionSemanticChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--agent-display-name-check") {
             _ = NSApplication.shared
             Task { @MainActor in

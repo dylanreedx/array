@@ -84,11 +84,16 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     /// An acceptance-aware seam for owners that can synchronously accept/reject
     /// send intent. Only `true` clears the per-agent draft.
     var onSubmitIntent: ((String) -> Bool)?
+    /// Semantic completion actions that belong to a provider adapter. Returning
+    /// true means the action was accepted; a rejected action leaves the query
+    /// text intact and never degrades into literal prompt text.
+    var onCompletionAction: ((AgentCompletionPayload) -> Bool)?
     var onDismissSuggestions: (() -> Void)?
     private(set) var draft: AgentComposerDraft = .empty
     private let completionController = CompletionPopoverController()
     private var completionSource: any AgentCompletionSuggestionSource =
         AgentCompletionProviderRegistry(providers: AgentCompletionFixtures.providers())
+    private var completionContext: AgentCompletionContext?
     private var draftStore: AgentComposerDraftStore?
     private var draftAgentID: AgentID?
     private weak var actionSink: (any AgentTileActionSink)?
@@ -538,14 +543,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         guard !decoded.isEmpty else { return }
         // Reference-only: no bytes are read or copied. Dedup by path so the same
         // file dropped twice is one chip.
-        var existingPaths = Set(importedFileReferences.map(\.fileURL.path))
-        for reference in decoded where !existingPaths.contains(reference.fileURL.path) {
-            existingPaths.insert(reference.fileURL.path)
-            importedFileReferences.append(reference)
-        }
-        updateFileReferenceRail()
-        publishDraftChange()
-        editorContentsChanged()
+        addFileReferences(decoded)
     }
 
     func composerFocusDidChange(_ textView: ComposerTextView, focused: Bool) {
@@ -629,9 +627,27 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
                 base: completionSource,
                 triggers: variant.completionTriggers
             ),
+            context: completionContext,
             anchor: completionAnchor(),
             relativeTo: textView
-        )
+        ) { [weak self] completion, replacementRange in
+            self?.acceptCompletion(completion, replacementRange: replacementRange)
+        }
+    }
+
+    private func acceptCompletion(_ completion: AgentCompletion, replacementRange: NSRange) {
+        switch completion.payload {
+        case .insertText:
+            assertionFailure("Text completions are applied by CompletionPopoverController")
+        case let .file(reference):
+            textView.insertCompletion("", replacementRange: replacementRange)
+            addFileReferences([reference])
+        case .directory:
+            _ = onCompletionAction?(completion.payload)
+        case .skill, .promptTemplate, .runtimeCommand:
+            guard onCompletionAction?(completion.payload) == true else { return }
+            textView.insertCompletion("", replacementRange: replacementRange)
+        }
     }
 
     private func completionAnchor() -> NSRect {
@@ -981,6 +997,17 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         needsLayout = true
     }
 
+    private func addFileReferences(_ references: [AgentPromptFileReference]) {
+        var existingPaths = Set(importedFileReferences.map(\.fileURL.path))
+        for reference in references where !existingPaths.contains(reference.fileURL.path) {
+            existingPaths.insert(reference.fileURL.path)
+            importedFileReferences.append(reference)
+        }
+        updateFileReferenceRail()
+        publishDraftChange()
+        editorContentsChanged()
+    }
+
     private func removeFileReference(_ reference: AgentPromptFileReference) {
         importedFileReferences.removeAll { $0.fileURL.path == reference.fileURL.path }
         updateFileReferenceRail()
@@ -1056,9 +1083,19 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         bindCompletionSource(source)
     }
 
+    func qaBindCompletionContext(_ context: AgentCompletionContext?) {
+        bindCompletionContext(context)
+    }
+
     private func bindCompletionSource(_ source: any AgentCompletionSuggestionSource) {
         completionController.dismiss()
         completionSource = source
+        refreshCompletionSuggestions()
+    }
+
+    func bindCompletionContext(_ context: AgentCompletionContext?) {
+        completionController.dismiss()
+        completionContext = context
         refreshCompletionSuggestions()
     }
 }
