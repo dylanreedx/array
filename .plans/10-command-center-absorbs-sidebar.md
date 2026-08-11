@@ -76,6 +76,40 @@ than the 0.4.0 bug where a tile-less agent had an unclickable sidebar row.
    - Verify: full matrix, and `--ui-probe-check` (removing a `TokenThemed`
      owner changes the census as surely as adding one).
 
+## BLOCKER found while starting step 3 (2026-08-11)
+
+Step 1 shipped History (`.archived`) — but `.archived` is not the only
+tile-less lifecycle, so step 3 is NOT yet safe.
+
+`AgentInventory` unions "`AgentRecord`-backed agents, tiled or headless", and
+`AgentInboxRowBuilder.title(for:)` states the locked decision outright:
+"`displayName` belongs to the `AgentRecord` and survives the tile being closed
+(the agent is the entity), so a headless agent still has a name."
+
+So an agent can have NO TILE without being closed:
+
+| lifecycle | has a tile? | reachable in ⌘K today |
+|---|---|---|
+| `.archived` (History) | no | ✅ shipped in step 1 |
+| `.active`, headless | no | ❌ not in `jumpTiles`, not in History |
+| `.snoozed` (shelf) | may be headless | ❌ |
+| `.settled` | may be headless | ❌ |
+
+`jumpTiles: canvas.navigationTileSnapshots()` covers only agents WITH a canvas
+tile, so removing the inbox view strands the other three lifecycles exactly the
+way it would have stranded closed agents.
+
+**Before step 3:** generalize the step-1 source from "closed agents" to "every
+agent with no canvas tile", categorized by section — `.archived` → History,
+attention-needing → Needs You, otherwise → Agents & Tiles. The membership
+question stays `InboxSort.section(for:now:)`; only the filter widens from
+`== .history` to "has no tile". Rename the row type accordingly
+(`HistoryAgentPaletteRow` → a tile-less-agent row) and keep the agent-id
+dispatch identity, which is already correct for all four cases.
+
+Do NOT delete the sidebar until a witness proves a headless working agent, a
+snoozed agent and a settled agent are all reachable from ⌘K.
+
 ## Order matters
 
 Step 3 must not land before 1 and 2 are green, or the intermediate build
