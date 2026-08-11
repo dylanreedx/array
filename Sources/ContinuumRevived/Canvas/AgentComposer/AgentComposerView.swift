@@ -76,6 +76,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     private var attachmentStore: AgentComposerAttachmentStore?
     private var importedAttachments: [AgentPromptImageAttachment] = []
     private var importedFileReferences: [AgentPromptFileReference] = []
+    private var imageImportFailureCount = 0
+    private var imageImportFailureCategories: [String] = []
 
     var onDraftChange: ((AgentComposerDraft) -> Void)?
     /// Existing fire-and-forget seam retained until live-tile migration. It does
@@ -496,13 +498,24 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         refreshCompletionSuggestions()
     }
 
-    func composerRequestedImageImport(_ textView: ComposerTextView, from pasteboard: NSPasteboard) {
-        guard let attachmentStore, let agentID = draftAgentID else { return }
-        let generation = bindingGeneration
-        let decoded = ComposerImagePasteboardDecoder.decodedItems(from: pasteboard)
+    func composerRequestedAttachmentImport(
+        _ textView: ComposerTextView,
+        intake: ComposerPasteboardIntake
+    ) {
+        importFileReferences(intake.fileReferences)
+        importImages(intake.images)
+    }
+
+    private func importImages(_ decoded: [ComposerDecodedImagePasteboardItem]) {
         guard !decoded.isEmpty else { return }
+        guard let attachmentStore, let agentID = draftAgentID else {
+            recordImageImportFailures(decoded.count, category: "attachment-store-unavailable")
+            return
+        }
+        let generation = bindingGeneration
         Task { @MainActor [weak self] in
             guard let self, self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
+            var failures = 0
             for item in decoded {
                 guard self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
                 do {
@@ -528,10 +541,13 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
                     guard self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
                     self.importedAttachments.append(stored.promptAttachment)
                 } catch {
-                    // Import failures are intentionally local and bounded. The
-                    // rail retains successful items and the draft remains valid.
-                    continue
+                    // Keep successful siblings, but do not let a rejected item
+                    // turn the whole user interaction into an unexplained no-op.
+                    failures += 1
                 }
+            }
+            if failures > 0 {
+                self.recordImageImportFailures(failures, category: "attachment-store-rejected")
             }
             self.updateAttachmentRail()
             self.publishDraftChange()
@@ -539,13 +555,21 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         }
     }
 
-    func composerRequestedFileReferenceImport(_ textView: ComposerTextView, from pasteboard: NSPasteboard) {
+    private func importFileReferences(_ decoded: [AgentPromptFileReference]) {
         guard draftAgentID != nil else { return }
-        let decoded = ComposerFileReferencePasteboardDecoder.decodedReferences(from: pasteboard)
         guard !decoded.isEmpty else { return }
         // Reference-only: no bytes are read or copied. Dedup by path so the same
         // file dropped twice is one chip.
         addFileReferences(decoded)
+    }
+
+    private func recordImageImportFailures(_ count: Int, category: String) {
+        guard count > 0 else { return }
+        imageImportFailureCount += count
+        imageImportFailureCategories.append(contentsOf: repeatElement(category, count: count))
+        // Deliberately omit filenames, paths, bytes, prompt text, and the raw
+        // Error description: attachment-store errors can carry local context.
+        NSLog("AgentComposerView: %ld image attachment import(s) failed [%@]", count, category)
     }
 
     func composerFocusDidChange(_ textView: ComposerTextView, focused: Bool) {
@@ -1076,14 +1100,22 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     var qaFileReferenceRailNames: [String] { fileReferenceRail.qaDisplayNames }
     var qaFileReferenceRailAccessibilityLabels: [String] { fileReferenceRail.qaAccessibilityLabels }
     var qaHasSendableAttachments: Bool { composerHasSendableAttachments(textView) }
+    var qaImageAttachmentCount: Int { importedAttachments.count }
+    var qaImageImportFailureCount: Int { imageImportFailureCount }
+    var qaImageImportFailureCategories: [String] { imageImportFailureCategories }
 
     func qaImportFileReferences(from pasteboard: NSPasteboard) {
-        composerRequestedFileReferenceImport(textView, from: pasteboard)
+        importFileReferences(ComposerFileReferencePasteboardDecoder.decodedReferences(from: pasteboard))
     }
 
     func qaRemoveFileReference(at index: Int) {
         guard importedFileReferences.indices.contains(index) else { return }
         removeFileReference(importedFileReferences[index])
+    }
+
+    func qaRemoveImageAttachment(at index: Int) {
+        guard importedAttachments.indices.contains(index) else { return }
+        removeAttachment(importedAttachments[index])
     }
 
     var qaFileReferences: [AgentPromptFileReference] { importedFileReferences }

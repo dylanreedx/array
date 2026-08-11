@@ -8368,6 +8368,13 @@ enum UIProbeGeometry {
 
         try require(!composer.qaHasSendableAttachments,
                     "an empty composer must not report sendable attachments")
+
+        let plainTextBoard = NSPasteboard(name: NSPasteboard.Name("continuum.composer.plaintext.\(UUID().uuidString)"))
+        plainTextBoard.clearContents()
+        plainTextBoard.setString("native text", forType: .string)
+        try require(!composer.textView.qaHandleAttachmentIntake(from: plainTextBoard),
+                    "plain text must fall through to NSTextView's native paste path")
+
         composer.qaImportFileReferences(from: pasteboard([markdown, xml]))
         composer.layoutSubtreeIfNeeded()
         try require(composer.qaFileReferenceCount == 2,
@@ -8391,6 +8398,44 @@ enum UIProbeGeometry {
         composer.qaImportFileReferences(from: pasteboard([markdown]))
         try require(composer.qaFileReferenceRailNames == ["data.xml", "notes.md"],
                     "re-adding a removed file must append it, got \(composer.qaFileReferenceRailNames)")
+
+        // Drive the handler shared by the real paste and drag overrides. A mixed
+        // batch must retain both kinds instead of the image-first branch dropping
+        // the document, and the image must pass through the real managed store.
+        let mixedBoard = pasteboard([imageURL, text])
+        try require(composer.textView.qaHandleAttachmentIntake(from: mixedBoard),
+                    "the shared paste/drop handler did not claim a mixed image/document batch")
+        for _ in 0..<100 where composer.qaImageAttachmentCount == 0 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try require(composer.qaImageAttachmentCount == 1,
+                    "the shared paste/drop route did not land its image in the managed attachment rail")
+        try require(composer.qaFileReferenceRailNames == ["data.xml", "notes.md", "log.txt"],
+                    "the mixed paste/drop route lost its document reference: \(composer.qaFileReferenceRailNames)")
+        try require(composer.qaImageImportFailureCount == 0,
+                    "a valid image import recorded a failure")
+        composer.qaRemoveImageAttachment(at: 0)
+        composer.qaRemoveFileReference(at: 2)
+        try require(composer.qaImageAttachmentCount == 0
+                    && composer.qaFileReferenceRailNames == ["data.xml", "notes.md"],
+                    "mixed intake cleanup did not restore the file-reference send fixture")
+
+        // A claimed image with no bound managed attachment store must not
+        // disappear silently. This exercises the bounded diagnostic seam while
+        // keeping filenames, paths, bytes, and prompt text out of the report.
+        let unboundComposer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 520, height: 96))
+        unboundComposer.bindDraftStore(draftStore, agentID: AgentID(rawValue: UUID()))
+        let rawImageBoard = NSPasteboard(name: NSPasteboard.Name("continuum.composer.image.failure.\(UUID().uuidString)"))
+        rawImageBoard.clearContents()
+        let rawImageItem = NSPasteboardItem()
+        rawImageItem.setData(try makeProbeImageData(width: 8, height: 8, type: .png), forType: .png)
+        rawImageBoard.writeObjects([rawImageItem])
+        try require(unboundComposer.textView.qaHandleAttachmentIntake(from: rawImageBoard),
+                    "the shared paste/drop route did not claim a valid raw image")
+        try require(unboundComposer.qaImageImportFailureCount == 1,
+                    "a missing managed attachment store did not produce a bounded image-import failure")
+        try require(unboundComposer.qaImageImportFailureCategories == ["attachment-store-unavailable"],
+                    "the image-import failure did not preserve its bounded category")
 
         // The REAL send path (not a reconstruction): drive composerRequestedSend
         // through a recording sink and read the intent production would deliver.

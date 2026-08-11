@@ -17,8 +17,10 @@ protocol ComposerTextViewObserver: AnyObject {
         command: ChoiceListCommand
     ) -> Bool
     func composerRequestedDismissSuggestions(_ textView: ComposerTextView)
-    func composerRequestedImageImport(_ textView: ComposerTextView, from pasteboard: NSPasteboard)
-    func composerRequestedFileReferenceImport(_ textView: ComposerTextView, from pasteboard: NSPasteboard)
+    func composerRequestedAttachmentImport(
+        _ textView: ComposerTextView,
+        intake: ComposerPasteboardIntake
+    )
 }
 
 @MainActor
@@ -136,33 +138,31 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate {
 
     override func paste(_ sender: Any?) {
         let pasteboard = NSPasteboard.general
-        if ComposerImagePasteboardDecoder.canDecode(pasteboard) {
-            composerObserver?.composerRequestedImageImport(self, from: pasteboard)
-        } else if ComposerFileReferencePasteboardDecoder.canDecode(pasteboard) {
-            composerObserver?.composerRequestedFileReferenceImport(self, from: pasteboard)
-        } else {
+        if !handleAttachmentIntake(from: pasteboard) {
             super.paste(sender)
         }
     }
 
     override func performDragOperation(_ draggingInfo: NSDraggingInfo) -> Bool {
-        let pasteboard = draggingInfo.draggingPasteboard
-        if ComposerImagePasteboardDecoder.canDecode(pasteboard) {
-            composerObserver?.composerRequestedImageImport(self, from: pasteboard)
-            return true
-        }
-        if ComposerFileReferencePasteboardDecoder.canDecode(pasteboard) {
-            composerObserver?.composerRequestedFileReferenceImport(self, from: pasteboard)
-            return true
-        }
-        return false
+        handleAttachmentIntake(from: draggingInfo.draggingPasteboard)
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        let pasteboard = sender.draggingPasteboard
-        let canDecode = ComposerImagePasteboardDecoder.canDecode(pasteboard)
-            || ComposerFileReferencePasteboardDecoder.canDecode(pasteboard)
-        return canDecode ? .copy : []
+        ComposerPasteboardIntake(from: sender.draggingPasteboard).isEmpty ? [] : .copy
+    }
+
+    @discardableResult
+    private func handleAttachmentIntake(from pasteboard: NSPasteboard) -> Bool {
+        let intake = ComposerPasteboardIntake(from: pasteboard)
+        guard !intake.isEmpty else { return false }
+        composerObserver?.composerRequestedAttachmentImport(self, intake: intake)
+        return true
+    }
+
+    // Drives the exact handler shared by paste and drop without mutating the
+    // process-global general pasteboard in deterministic component checks.
+    func qaHandleAttachmentIntake(from pasteboard: NSPasteboard) -> Bool {
+        handleAttachmentIntake(from: pasteboard)
     }
 
     override func keyDown(with event: NSEvent) {
