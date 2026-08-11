@@ -4115,6 +4115,131 @@ final class CanvasNSView: NSView, TokenThemed {
         return artifact
     }
 
+    /// Camera moves must not re-rasterize tile chrome. `setViewport` says so in a
+    /// comment and passes `invalidateTileDisplay: false`, but `layoutTile` also
+    /// re-assigns `view.tile` on every event to keep the view's copy current — and
+    /// that assignment used to mark the title bar dirty unconditionally, so every
+    /// tile redrew its title text on every frame of a trackpad pan. With six agent
+    /// tiles open at 120Hz that is ~700 text rasterizations a second for a picture
+    /// that did not change.
+    ///
+    /// Both directions have teeth: a pan must cost ZERO redraws, and a real content
+    /// change or a zoom that moves the chrome scale must still cost one — the fix
+    /// must suppress redundant work, not correct work.
+    static func runCameraChromeRedrawSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(m): return m } }
+        }
+        func expect(_ c: @autoclosure () -> Bool, _ m: String) throws { if !c() { throw CheckError.failed(m) } }
+
+        let canvasH: CGFloat = 700
+        func drag(_ x: CGFloat, _ y: CGFloat, window: NSWindow) throws -> NSEvent {
+            guard let e = NSEvent.mouseEvent(with: .leftMouseDragged, location: NSPoint(x: x, y: canvasH - y),
+                                             modifierFlags: [.command],
+                                             timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber, context: nil,
+                                             eventNumber: 0, clickCount: 1, pressure: 1)
+            else { throw CheckError.failed("could not synthesize a drag event") }
+            return e
+        }
+
+        // Three tiles, because the cost being witnessed is per-tile.
+        let tiles: [Tile] = (0..<3).map { i in
+            Tile(
+                id: UUID(uuidString: "00000000-0000-0000-0000-00000000CA0\(i)")!,
+                kind: .note,
+                title: "CAMERA_REDRAW_PROBE_\(i)",
+                frame: TileFrame(x: 60 + Double(i) * 340, y: 80, width: 300, height: 220),
+                zPosition: .fromLegacyRank(i + 1),
+                runtimeRef: nil,
+                metadata: TileMetadata()
+            )
+        }
+        let canvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: tiles, groups: [], lastActiveTileId: nil
+        ))
+        canvas.frame = NSRect(x: 0, y: 0, width: 1200, height: canvasH)
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+
+        var views: [UUID: TileNSView] = [:]
+        for tile in tiles {
+            let view = TileNSView(tile: tile)
+            view.setContentView(NSView(frame: .zero))
+            canvas.install(tileView: view, for: tile)
+            views[tile.id] = view
+        }
+        canvas.layoutSubtreeIfNeeded()
+
+        func counts() -> [UUID: Int] { views.mapValues { $0.qaTitleBarRedrawCount } }
+        func delta(_ before: [UUID: Int]) -> Int {
+            let now = counts()
+            return before.keys.reduce(0) { $0 + ((now[$1] ?? 0) - (before[$1] ?? 0)) }
+        }
+
+        // 1. A pure translation sweep through the shared camera funnel. Both the
+        //    trackpad `scrollWheel` branch and `continuePointerPan` end here.
+        let beforeScroll = counts()
+        for step in 0..<60 {
+            canvas.setViewport(CanvasViewport(x: Double(step) * 7, y: Double(step) * 3, zoom: 1))
+            canvas.layoutSubtreeIfNeeded()
+        }
+        let scrollDelta = delta(beforeScroll)
+        try expect(scrollDelta == 0, "a 60-step camera pan redrew tile chrome \(scrollDelta) times; it must cost none")
+
+        // 2. The same thing through the REAL pointer-pan gesture, so the witness
+        //    covers the event path a user actually drives and not just the funnel.
+        let beforePan = counts()
+        canvas.beginPointerPan(with: try drag(400, 300, window: window))
+        for step in 0..<30 {
+            canvas.continuePointerPan(with: try drag(400 + CGFloat(step) * 4, 300 + CGFloat(step) * 2, window: window))
+            canvas.layoutSubtreeIfNeeded()
+        }
+        canvas.endPointerPan()
+        let panDelta = delta(beforePan)
+        try expect(panDelta == 0, "a 30-step Cmd-drag pan redrew tile chrome \(panDelta) times; it must cost none")
+
+        // 3. TEETH: a real title change must still repaint that tile's bar.
+        let beforeRename = counts()
+        var renamed = tiles[1]
+        renamed.title = "CAMERA_REDRAW_PROBE_RENAMED"
+        canvas.updateTile(renamed)
+        canvas.layoutSubtreeIfNeeded()
+        let renameDelta = delta(beforeRename)
+        try expect(renameDelta >= 1, "renaming a tile must repaint its chrome; got \(renameDelta) redraws")
+
+        // 4. TEETH: zooming out past the chrome floor changes the bar's world
+        //    height, so the title + dots must re-render at the new chrome scale.
+        let beforeZoom = counts()
+        canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 0.25))
+        canvas.layoutSubtreeIfNeeded()
+        let zoomDelta = delta(beforeZoom)
+        try expect(zoomDelta >= 1, "zoom crossing the chrome floor must repaint the bar; got \(zoomDelta) redraws")
+
+        let manifest: [String: Any] = [
+            "check": "camera-chrome-redraw",
+            "tileCount": tiles.count,
+            "scrollSweepSteps": 60,
+            "scrollSweepRedraws": scrollDelta,
+            "pointerPanSteps": 30,
+            "pointerPanRedraws": panDelta,
+            "renameRedraws": renameDelta,
+            "zoomFloorRedraws": zoomDelta
+        ]
+        let fm = FileManager.default
+        let directory = URL(fileURLWithPath: fm.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent("camera-chrome-redraw-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+            .write(to: artifact, options: .atomic)
+        return artifact
+    }
+
     /// P2 (resize HUD): drives a REAL tile resize drag through
     /// `TileNSView.mouseDown/Dragged/Up` and asserts the live "W × H" overlay
     /// appears with the dragged dimensions mid-drag and is hidden on release.
