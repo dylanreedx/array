@@ -164,19 +164,28 @@ public final class CodexAgentRunner: @unchecked Sendable {
         public var threadId: String?
         /// Extra args before the prompt.
         public var extraArgs: [String]
+        /// `turn.completed.usage.input_tokens` as of the previous turn of THIS
+        /// thread. codex reports that figure cumulatively for the session, so the
+        /// context occupancy is the delta against this baseline
+        /// (`CodexEventTranslator.usageEvents`). 0 for a fresh thread; nil for a
+        /// resumed thread with no stored reading, which publishes no occupancy
+        /// rather than the unbounded cumulative number.
+        public var priorCumulativeInputTokens: Int?
 
         public init(
             model: String,
             effort: String? = nil,
             cwd: URL,
             threadId: String? = nil,
-            extraArgs: [String] = []
+            extraArgs: [String] = [],
+            priorCumulativeInputTokens: Int? = 0
         ) {
             self.model = model
             self.effort = effort
             self.cwd = cwd
             self.threadId = threadId
             self.extraArgs = extraArgs
+            self.priorCumulativeInputTokens = priorCumulativeInputTokens
         }
     }
 
@@ -238,7 +247,9 @@ public final class CodexAgentRunner: @unchecked Sendable {
 
     public init(config: Config) {
         self.config = config
-        self.translator = CodexEventTranslator(workingDirectory: config.cwd)
+        self.translator = CodexEventTranslator(
+            workingDirectory: config.cwd,
+            priorCumulativeInputTokens: config.priorCumulativeInputTokens)
     }
 
     /// Runs codex with `prompt`, streaming events to `onEvent` until it exits.

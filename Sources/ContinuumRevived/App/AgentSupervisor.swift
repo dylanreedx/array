@@ -1069,7 +1069,22 @@ final class AgentSupervisor {
             model: CodexCLIBackend.modelArgument(forCatalogId: record.model),
             effort: CodexCLIBackend.effortArgument(forThinking: record.thinking),
             cwd: URL(fileURLWithPath: record.cwd, isDirectory: true),
-            threadId: record.codexThreadId
+            threadId: record.codexThreadId,
+            // THE OCCUPANCY BASELINE. codex reports `input_tokens` cumulatively
+            // for the session, so the context reading is this turn's total minus
+            // the last one's; the record is where the last one survives a process
+            // that only lives for one turn.
+            //
+            // A FRESH thread (no stored codex id) baselines at 0, which is exact:
+            // its first prompt is the whole cumulative. A RESUMED thread with no
+            // stored reading baselines at nil, which publishes no occupancy —
+            // the honest answer, and the alternative is the unbounded number that
+            // read 237%.
+            priorCumulativeInputTokens: record.codexThreadId == nil
+                ? 0
+                : record.lastContextWindow.flatMap { snapshot in
+                    snapshot.source == .codexTurnUsage ? snapshot.inputTokens : nil
+                }
         )
     }
 

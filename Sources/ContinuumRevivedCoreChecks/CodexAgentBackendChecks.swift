@@ -14,6 +14,7 @@ import Foundation
 // predicate, the backend routing/policy, and the catalogue union.
 func runCodexAgentBackendChecks() {
     runCodexTranslatorMappingChecks()
+    runCodexCumulativeUsageChecks()
     runCodexTranslatorGateChecks()
     runCodexRunnerArgvChecks()
     runCodexBackendPolicyChecks()
@@ -21,6 +22,73 @@ func runCodexAgentBackendChecks() {
 }
 
 private let codexTID = "019fe980-21f0-7df1-b2a0-49d7839c7937"
+
+/// codex reports `turn.completed.usage.input_tokens` CUMULATIVELY for the
+/// session. Measured against the real CLI on 2026-08-11 — two turns of one
+/// thread, the same trivial exchange each time:
+///
+///     turn 1  input_tokens 15005
+///     turn 2  input_tokens 30026
+///
+/// So the context occupancy is the delta, and dividing the cumulative figure by
+/// a context window is what put 237% on the meter and left it climbing.
+///
+/// Also pinned here: the `codex exec --json` vocabulary is `thread.started`,
+/// `turn.started`, `item.completed`, `turn.completed` and NOTHING else. codex's
+/// own rollout log carries a live per-request `token_count`; that file is not
+/// this stream, and a handler for it here fires never — which is exactly the
+/// mistake this check exists to stop being made a second time.
+private func runCodexCumulativeUsageChecks() {
+    let observedAt = Date(timeIntervalSinceReferenceDate: 456)
+    func occupancy(_ events: [AgentRuntimeEvent]) -> Int? {
+        for case let .contextWindowUpdated(_, snapshot) in events { return snapshot.usedTokens }
+        return nil
+    }
+    func turn(_ input: Int) -> String {
+        #"{"type":"turn.completed","usage":{"input_tokens":\#(input),"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}}"#
+    }
+    let opening = [#"{"type":"thread.started","thread_id":"t"}"#, #"{"type":"turn.started"}"#]
+
+    // A FRESH thread baselines at 0: the first prompt is the whole cumulative.
+    var fresh = CodexEventTranslator(runToken: "c1", priorCumulativeInputTokens: 0, now: { observedAt })
+    _ = fresh.translate(stream: opening)
+    expect(occupancy(fresh.translate(line: turn(15_005))) == 15_005,
+           "a fresh thread's first turn occupies its whole cumulative")
+    // …and the SECOND turn is the delta, not the running total. 30,026 - 15,005.
+    _ = fresh.translate(line: #"{"type":"turn.started"}"#)
+    expect(occupancy(fresh.translate(line: turn(30_026))) == 15_021,
+           "the second turn's occupancy is the delta (30026-15005), not the cumulative 30026")
+
+    // A RESUME seeded from the stored previous reading subtracts it.
+    var resumed = CodexEventTranslator(runToken: "c2", priorCumulativeInputTokens: 15_005, now: { observedAt })
+    _ = resumed.translate(stream: opening)
+    expect(occupancy(resumed.translate(line: turn(30_026))) == 15_021,
+           "a resumed turn subtracts the baseline the record carried")
+
+    // A RESUME with NO baseline publishes NO occupancy. This is the 237% case:
+    // the only other answer available is the unbounded cumulative figure.
+    var blind = CodexEventTranslator(runToken: "c3", priorCumulativeInputTokens: nil, now: { observedAt })
+    _ = blind.translate(stream: opening)
+    let blindEvents = blind.translate(line: turn(643_673))
+    expect(occupancy(blindEvents) == nil,
+           "with no baseline there is no occupancy — never the cumulative total, got \(String(describing: occupancy(blindEvents)))")
+    // …but the token COUNT still publishes, so the row shows "643.7k" rather
+    // than falling back to the word "unknown".
+    var sawUsage = false
+    for case let .tokenUsageUpdated(_, snapshot) in blindEvents where snapshot.inputTokens == 643_673 { sawUsage = true }
+    expect(sawUsage, "cost accounting still wants the cumulative figure even when occupancy is unknowable")
+
+    // The stream's whole vocabulary. A `token_count` line — the shape codex
+    // writes to its ROLLOUT log — must translate to nothing here.
+    var rollout = CodexEventTranslator(runToken: "c4", now: { observedAt })
+    _ = rollout.translate(stream: opening)
+    let rolloutLine = #"{"type":"token_count","info":{"last_token_usage":{"input_tokens":73176,"total_tokens":74379},"model_context_window":258400}}"#
+    expect(rollout.translate(line: rolloutLine).isEmpty,
+           "a rollout-log token_count is not part of `codex exec --json` and must translate to nothing")
+
+    print("Codex cumulative usage checks: fresh baseline, per-turn delta (15005 -> 30026 = 15021), seeded resume, "
+        + "no-baseline abstention with the count still published, and the rollout-only token_count ignored")
+}
 
 private func runCodexTranslatorMappingChecks() {
     // Real captured schema: thread.started (mints the id) → turn.started → a
@@ -37,13 +105,6 @@ private func runCodexTranslatorMappingChecks() {
         #"{"type":"item.started","item":{"id":"item_3","type":"command_execution","command":"/bin/zsh -lc 'SECRET-FAILING-COMMAND'","aggregated_output":"","exit_code":null,"status":"in_progress"}}"#,
         #"{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"/bin/zsh -lc 'SECRET-FAILING-COMMAND'","aggregated_output":"SECRET-FAILURE-OUTPUT\n","exit_code":2,"status":"failed"}}"#,
         #"{"type":"item.completed","item":{"id":"item_4","type":"agent_message","text":"Done."}}"#,
-        // `token_count` arrives DURING the turn and is the only per-request
-        // reading codex gives. Shape copied from a real rollout in
-        // ~/.codex/sessions: `last_token_usage` is this request,
-        // `total_token_usage` is the whole session, and the provider states its
-        // own window. Deriving occupancy from the cumulative block is what put
-        // 237% on the meter.
-        #"{"type":"token_count","info":{"total_token_usage":{"input_tokens":643673,"cached_input_tokens":557824,"cache_write_input_tokens":0,"output_tokens":3938,"reasoning_output_tokens":1700,"total_tokens":647611},"last_token_usage":{"input_tokens":73176,"cached_input_tokens":70400,"cache_write_input_tokens":0,"output_tokens":1203,"reasoning_output_tokens":516,"total_tokens":74379},"model_context_window":258400}}"#,
         #"{"type":"turn.completed","usage":{"input_tokens":46162,"cached_input_tokens":41216,"cache_write_input_tokens":0,"output_tokens":231,"reasoning_output_tokens":0}}"#,
     ]
 
@@ -64,31 +125,15 @@ private func runCodexTranslatorMappingChecks() {
         .itemStarted(threadId: codexTID, itemId: "run1-item_3", kind: .commandExecution, title: "Shell"),
         .itemCompleted(threadId: codexTID, itemId: "run1-item_3", kind: .commandExecution, status: .failed),
         .contentDelta(threadId: codexTID, turnId: turnId, streamKind: .assistant, delta: "Done."),
-        // token_count, mid-turn: usage accounting takes the SESSION total…
-        .tokenUsageUpdated(threadId: codexTID, snapshot: TokenUsageSnapshot(
-            inputTokens: 643673, outputTokens: 3938, totalCostUsd: nil)),
-        // …while occupancy takes the PER-REQUEST block, with the provider's own
-        // window. 74,379 of 258,400 is 29%; the cumulative 643,673 against a
-        // catalogue 272,000 was the 237% the meter used to paint.
-        .contextWindowUpdated(threadId: codexTID, snapshot: AgentContextWindowSnapshot(
-            usedTokens: 74379,
-            maxTokens: 258400,
-            inputTokens: 73176,
-            outputTokens: 1203,
-            cacheReadTokens: 70400,
-            cacheWriteTokens: 0,
-            totalProcessedTokens: 74379,
-            totalCostUsd: nil,
-            automaticCompaction: nil,
-            observedAt: observedAt,
-            source: .codexTurnUsage,
-            freshness: .live)),
         .tokenUsageUpdated(threadId: codexTID, snapshot: TokenUsageSnapshot(
             // input_tokens is ALREADY the total — NOT summed with cached (the
             // opposite of the claude backend). 46162, not 46162+41216.
             inputTokens: 46162, outputTokens: 231, totalCostUsd: nil)),
         .contextWindowUpdated(threadId: codexTID, snapshot: AgentContextWindowSnapshot(
-            usedTokens: nil,
+            // A fresh thread baselines at 0, so the first turn's delta IS its
+            // cumulative: 46,162. The second turn below is what proves the
+            // subtraction happens at all.
+            usedTokens: 46162,
             maxTokens: nil,
             inputTokens: 46162,
             outputTokens: 231,

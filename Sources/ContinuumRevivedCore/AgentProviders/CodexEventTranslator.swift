@@ -39,6 +39,9 @@ public struct CodexEventTranslator {
     private var turnCounter: Int = 0
     private var currentTurnId: String
     private var workingDirectory: URL?
+    /// `input_tokens` as of the previous turn, for the delta above. nil means
+    /// "no baseline" and suppresses the occupancy reading entirely.
+    private var priorCumulativeInputTokens: Int?
     private let now: @Sendable () -> Date
 
     /// Same host-local side channel as the pi/claude translators': an explicit
@@ -50,10 +53,15 @@ public struct CodexEventTranslator {
     public init(
         workingDirectory: URL? = nil,
         runToken: String = UUID().uuidString.lowercased().prefix(8).description,
+        priorCumulativeInputTokens: Int? = 0,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.workingDirectory = workingDirectory?.standardizedFileURL
         self.runToken = runToken
+        // Defaults to 0, the FRESH-thread baseline: the first prompt of a thread
+        // is the whole cumulative, so the delta against zero is exactly right.
+        // A resume with no stored reading must pass nil explicitly.
+        self.priorCumulativeInputTokens = priorCumulativeInputTokens
         self.now = now
         self.currentTurnId = "codex-unknown#\(runToken)-t0"
     }
@@ -100,9 +108,6 @@ public struct CodexEventTranslator {
 
         case "turn.failed":
             return translateTurnFailed(object)
-
-        case "token_count":
-            return tokenCountEvents(object)
 
         default:
             // item.updated, and any event the normalized timeline does not need.
@@ -199,7 +204,7 @@ public struct CodexEventTranslator {
 
     // MARK: - turn completion
 
-    private func translateTurnCompleted(_ object: [String: Any]) -> [AgentRuntimeEvent] {
+    private mutating func translateTurnCompleted(_ object: [String: Any]) -> [AgentRuntimeEvent] {
         // A turn.completed before any turn.started is the shape a failed resume
         // would leave; emitting a completion for a turn that never began would
         // paint a spurious card. Mirror the claude gate.
@@ -211,7 +216,7 @@ public struct CodexEventTranslator {
         return events
     }
 
-    private func translateTurnFailed(_ object: [String: Any]) -> [AgentRuntimeEvent] {
+    private mutating func translateTurnFailed(_ object: [String: Any]) -> [AgentRuntimeEvent] {
         guard turnCounter > 0 else { return [] }
         // errorMessage is a short code/subtype only, NEVER the error body — the
         // body can quote tool output or model text (I5). Launch/auth failures
@@ -227,79 +232,32 @@ public struct CodexEventTranslator {
         return events
     }
 
-    /// codex `token_count`, which arrives **DURING** a turn, repeatedly, and is
-    /// the only honest source for "how full is the context right now".
+    /// codex `turn.completed.usage` — the ONLY usage the `codex exec --json`
+    /// stream carries. (Its whole event vocabulary is `thread.started`,
+    /// `turn.started`, `item.completed`, `turn.completed`; captured from the real
+    /// CLI. codex's own rollout log under `~/.codex/sessions` additionally has a
+    /// live `token_count` with per-request figures and `model_context_window`,
+    /// but that file is not this stream, and a handler for it here fires never.)
     ///
-    /// THREE THINGS THIS GETS RIGHT THAT `turn.completed.usage` CANNOT
-    /// (measured against a real rollout in `~/.codex/sessions`, after the meter
-    /// was observed reading 237%):
+    /// **Token semantics differ from claude:** `input_tokens` is already the
+    /// TOTAL prompt tokens and `cached_input_tokens` is a SUBSET of it (OpenAI
+    /// convention) — do NOT sum, or you double-count. No cost field
+    /// (subscription, not metered) → `totalCostUsd = nil`. A zero-token block
+    /// publishes nothing (don't clobber real telemetry).
     ///
-    ///   1. `last_token_usage` is THIS request; `total_token_usage` is the whole
-    ///      session added up. The context holds the former. Reading the latter
-    ///      makes the meter climb past 100% and never come down — 643,673
-    ///      cumulative input against a 272,000 window is where 237% came from.
-    ///   2. `model_context_window` is the provider's own number (258,400 for
-    ///      gpt-5.6-sol) and it disagrees with pi's catalogue (272,000). The
-    ///      provider running the turn is the authority on its own window.
-    ///   3. It is emitted mid-turn, so the ring fills while the agent works
-    ///      instead of jumping once the turn ends.
+    /// **AND IT IS CUMULATIVE FOR THE SESSION.** Measured, two turns of a real
+    /// thread: 15,005 then 30,026 for the same trivial exchange. So the context
+    /// occupancy is the DELTA — `input_tokens` now minus `input_tokens` as of the
+    /// previous turn — because cumulative(n) is the sum of every prompt and
+    /// prompt(n) is what the model actually held. Using the cumulative figure
+    /// directly is what made the meter read 237% and climb forever.
     ///
-    /// `usedTokens` is `last.total_tokens` (prompt + completion): the next
-    /// request carries this turn's output back in as input, so it is the closest
-    /// thing to "what the model is about to be handed".
-    private func tokenCountEvents(_ object: [String: Any]) -> [AgentRuntimeEvent] {
-        guard let info = object["info"] as? [String: Any] else { return [] }
-        let last = info["last_token_usage"] as? [String: Any]
-        let total = info["total_token_usage"] as? [String: Any]
-        // Prefer the per-request block; a `token_count` without one is not worth
-        // guessing at, because the only other number available is cumulative.
-        guard let last else { return [] }
-        let used = Self.intValue(last["total_tokens"])
-        let input = Self.intValue(last["input_tokens"])
-        let output = Self.intValue(last["output_tokens"])
-        let window = Self.intValue(info["model_context_window"])
-        guard (used ?? 0) > 0 else { return [] }
-        var events: [AgentRuntimeEvent] = []
-        // Cost/usage accounting still wants the SESSION total — that is a
-        // different question from occupancy and the cumulative number is the
-        // right answer to it.
-        if let total, let totalInput = Self.intValue(total["input_tokens"]) {
-            events.append(.tokenUsageUpdated(
-                threadId: threadId,
-                snapshot: TokenUsageSnapshot(
-                    inputTokens: totalInput,
-                    outputTokens: Self.intValue(total["output_tokens"]) ?? 0,
-                    totalCostUsd: nil)))
-        }
-        events.append(.contextWindowUpdated(
-            threadId: threadId,
-            snapshot: AgentContextWindowSnapshot(
-                usedTokens: used,
-                maxTokens: window,
-                inputTokens: input,
-                outputTokens: output,
-                cacheReadTokens: Self.intValue(last["cached_input_tokens"]),
-                cacheWriteTokens: Self.intValue(last["cache_write_input_tokens"]),
-                totalProcessedTokens: used,
-                totalCostUsd: nil,
-                automaticCompaction: nil,
-                observedAt: now(),
-                source: .codexTurnUsage,
-                freshness: .live)))
-        return events
-    }
-
-    /// codex `turn.completed.usage`. **Token semantics differ from claude:**
-    /// `input_tokens` is already the TOTAL prompt tokens and `cached_input_tokens`
-    /// is a SUBSET of it (OpenAI convention) — do NOT sum, or you double-count.
-    /// No cost field (subscription, not metered) → `totalCostUsd = nil`. A
-    /// zero-token block publishes nothing (don't clobber real telemetry).
-    ///
-    /// THIS BLOCK IS CUMULATIVE and therefore never sets `usedTokens`: it is the
-    /// session's running total, not what is in the context. `token_count` above
-    /// is what fills the meter; this stays for the turn-end cost/usage summary
-    /// and for a codex build that emits no `token_count` at all.
-    private func usageEvents(_ raw: Any?) -> [AgentRuntimeEvent] {
+    /// `priorCumulativeInputTokens` supplies the subtrahend: 0 for a fresh
+    /// thread (the first prompt IS the cumulative), the stored previous reading
+    /// on a resume, and nil when a resumed thread has no stored reading to
+    /// subtract — in which case NO occupancy is published, because the only
+    /// alternative is the unbounded number this exists to avoid.
+    private mutating func usageEvents(_ raw: Any?) -> [AgentRuntimeEvent] {
         guard let usage = raw as? [String: Any] else { return [] }
         let input = Self.intValue(usage["input_tokens"])
         let output = Self.intValue(usage["output_tokens"])
@@ -307,6 +265,15 @@ public struct CodexEventTranslator {
         let cacheWrite = Self.intValue(usage["cache_write_input_tokens"])
         let total = (input ?? 0) + (output ?? 0)
         guard total > 0 else { return [] }
+        // The per-request prompt, when a baseline exists to measure against.
+        // `max(0, …)` because a compaction can lower the running total, and a
+        // negative occupancy is worse than none.
+        let used: Int? = {
+            guard let input, let prior = priorCumulativeInputTokens else { return nil }
+            let delta = input - prior
+            return delta > 0 ? delta : nil
+        }()
+        if let input { priorCumulativeInputTokens = input }
         return [
             .tokenUsageUpdated(
                 threadId: threadId,
@@ -317,7 +284,7 @@ public struct CodexEventTranslator {
             .contextWindowUpdated(
                 threadId: threadId,
                 snapshot: AgentContextWindowSnapshot(
-                    usedTokens: nil,
+                    usedTokens: used,
                     maxTokens: nil,
                     inputTokens: input,
                     outputTokens: output,

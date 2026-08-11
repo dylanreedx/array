@@ -6,24 +6,26 @@ import Foundation
 /// size, so the radial meter had nothing to fill. Both numbers exist, though,
 /// and neither is invented here:
 ///
-/// - **Window size** comes from the PROVIDER first when it says (codex reports
-///   `model_context_window`, 258,400 for gpt-5.6-sol), and otherwise from pi's
-///   published models-store (`contextWindow`, which says 272,000 for the same
-///   model). The provider running the turn is the authority on its own window.
-///   Absent both, absent reading.
+/// - **Window size** comes from the provider when a stream states one, and
+///   otherwise from pi's published models-store (`contextWindow`). Neither
+///   `codex exec --json` nor claude states one today, so in practice it is the
+///   catalogue. Absent both, absent reading — never a fabricated denominator.
 /// - **Occupancy** is the prompt on the LAST REQUEST — everything the model had
-///   in context at that moment. Per provider, from each translator's documented
+///   in context at that moment. Per provider, from each translator's measured
 ///   shape, NOT assumed: claude's `input_tokens` excludes cache, so the cache
-///   counters must be added; codex publishes a per-request block of its own.
+///   counters must be added; codex reports cumulatively, so its translator
+///   subtracts the previous turn and publishes the delta as `usedTokens`.
 ///
-/// THE TRAP, paid for once: a cumulative number is not an occupancy. Codex's
-/// `turn.completed.usage` totals the whole SESSION, and using it drove the meter
-/// to 237% — a percentage that only ever climbs. Occupancy must come from a
-/// per-request reading, and anything cumulative belongs to cost accounting.
+/// THE TRAP, paid for twice: a cumulative number is not an occupancy. Codex's
+/// `turn.completed.usage` totals the whole SESSION — measured at 15,005 then
+/// 30,026 across two turns of one thread — and using it drove the meter to 237%,
+/// a percentage that could only climb. Occupancy must come from a per-request
+/// figure; anything cumulative belongs to cost accounting.
 ///
-/// Liveness differs by provider: codex emits `token_count` repeatedly DURING a
-/// turn, so its reading moves as the agent works. claude reports at turn end,
-/// so its reading is last-turn. Callers present what they have.
+/// This is a last-turn reading for every provider we drive. None of them reports
+/// usage mid-turn on the streams we consume (codex's live `token_count` exists
+/// only in its own rollout log, not in `codex exec --json`), so the meter moves
+/// when a turn ends. Callers present it as such.
 public enum AgentContextOccupancy {
     /// The prompt-token total for the observed turn, or nil when the snapshot's
     /// source has no documented occupancy shape (pi's per-message usage does not
