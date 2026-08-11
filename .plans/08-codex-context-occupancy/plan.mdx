@@ -1,0 +1,504 @@
+---
+title: "Correct Codex context occupancy across tool calls"
+brief: "Use the final per-request Codex snapshot instead of summing every request made during a tool-heavy turn."
+kind: "plan"
+localOnly: true
+---
+
+# Correct Codex context occupancy across tool calls
+
+Status: **design draft — discussion and approval only**.
+
+## Outcome
+
+Array's Codex context ring must represent the context held by the latest model
+request, including turns that invoke tools and therefore contain multiple model
+requests. The numerator comes from Codex's final per-request token snapshot; the
+denominator comes from the context window reported by the running Codex model.
+Cumulative turn/session usage remains available for accounting but never drives
+the ring.
+
+Concrete captured example:
+
+1. A thread's first turn ended at 15,139 cumulative input tokens.
+2. The next user turn made nine internal model requests while using tools.
+3. Cumulative input ended at 238,206, so the current subtraction produces
+   223,067 tokens.
+4. Codex's final request actually reported 37,453 total tokens in a 258,400-token
+   window.
+5. The correct ring is therefore about 15%, not about 82% from
+   `223,067 / 272,000`.
+
+<Callout id="occupancy-decision" tone="decision">
+
+**Decision:** keep `codex exec --json` as Array's turn transport and add a
+narrow, fail-closed adapter for the matching Codex rollout's `token_count`
+records. After the Codex process exits and its rollout is flushed, publish the
+final newly appended `last_token_usage.total_tokens / model_context_window`
+snapshot exactly once, before Array delivers the buffered terminal event. Give
+that snapshot its own authoritative telemetry source; cumulative
+`turn.completed.usage` remains explicitly non-authoritative. This fixes the
+metric without expanding the work into an experimental `codex app-server`
+migration.
+
+</Callout>
+
+Done means a tool-heavy turn uses the final individual model request rather than
+the sum of all requests in the turn, compaction may lower the percentage, the
+provider's window wins over catalogue metadata, and unavailable telemetry yields
+no guessed percentage. Completed, failed, and interrupted runs preserve the last
+request they actually made, while an in-progress request is never persisted as a
+final reading. Existing impossible persisted Codex percentages are repaired from
+their exact rollout or suppressed on first launch of the fixed build.
+
+## Telemetry semantics
+
+<Table
+  id="telemetry-semantics"
+  columns={["Telemetry", "Meaning", "Use in Array"]}
+  rows={[
+    ["turn.completed.usage.input_tokens", "Session-cumulative input across every model request", "Usage/accounting only"],
+    ["Delta between user turns", "Sum of all prompts issued during the later turn", "Never context occupancy"],
+    ["token_count.info.last_token_usage.total_tokens", "Tokens consumed by the latest individual model request", "Context-ring numerator"],
+    ["token_count.info.model_context_window", "Window reported by the running Codex model", "Context-ring denominator"],
+    ["codexRolloutTokenCount", "Authoritative normalized rollout snapshot", "Only Codex source allowed to drive occupancy"],
+    ["codexTurnUsage", "Cumulative exec stdout accounting", "Never authoritative, including restored legacy records"],
+    ["Catalogue contextWindow", "Fallback model metadata", "Only when provider telemetry genuinely lacks a max"]
+  ]}
+  density="normal"
+/>
+
+The distinction is request-scoped versus turn-scoped:
+
+- one **user turn** can contain many model requests separated by tool calls;
+- cumulative input advances after every internal request;
+- subtracting the prior user-turn cumulative total measures all work performed
+  during the turn, not the context held by its final request;
+- the final `last_token_usage` block is the correct last-turn occupancy reading.
+
+### Correct telemetry boundary
+
+<Diagram id="correct-telemetry-boundary" caption="Stdout remains authoritative for activity and cumulative usage; the exact matching rollout supplies occupancy only." frame="show">
+
+```html
+<div class="diagram-panel" data-rough>
+  <div class="diagram-card">
+    <strong>One Codex turn</strong>
+    <div class="diagram-muted">exec --json stdout</div>
+    <div class="diagram-node">items + completion</div>
+    <div class="diagram-node">cumulative usage</div>
+    <div class="diagram-muted">matching rollout JSONL</div>
+    <div class="diagram-node">per-request token_count</div>
+  </div>
+  <div class="diagram-card">
+    <strong>Array runner</strong>
+    <div class="diagram-node">exact thread-id match</div>
+    <div class="diagram-node">per-run byte offset</div>
+    <div class="diagram-node">latest valid new snapshot</div>
+    <div class="diagram-pill">fail closed</div>
+  </div>
+  <div class="diagram-card">
+    <strong>Existing UI path</strong>
+    <div class="diagram-node">contextWindowUpdated</div>
+    <div class="diagram-node">used + max preserved</div>
+    <div class="diagram-node">radial presenter</div>
+    <div class="diagram-pill">about 15%</div>
+  </div>
+</div>
+```
+
+```css
+.diagram-panel { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; padding: 18px; }
+.diagram-card { display: flex; flex-direction: column; gap: 10px; padding: 16px; border: 1.4px solid var(--wf-line); background: var(--wf-card); border-radius: var(--wf-radius); }
+.diagram-node { padding: 10px; border: 1.4px solid var(--wf-line); border-radius: var(--wf-radius); }
+```
+
+</Diagram>
+
+## Scope
+
+Included:
+
+- Codex occupancy semantics for tool-loop turns;
+- exact rollout-to-thread matching;
+- current-run freshness through a byte-offset cursor;
+- process-exit ordering for completed, failed, and interrupted runs;
+- fail-closed parsing and privacy boundaries;
+- provider-reported context-window precedence;
+- repair or suppression of legacy persisted Codex delta readings;
+- final-snapshot persistence and deterministic witnesses.
+
+Explicitly deferred:
+
+- migrating the full Codex backend to `codex app-server`;
+- live mid-turn animation after every internal model request;
+- warning/critical threshold changes;
+- redesigning the context circle or its labels;
+- changing Claude or pi occupancy semantics;
+- release, commit, or push operations.
+
+## Implementation plan
+
+### 1. Add a pure rollout token parser
+
+Add `CodexRolloutTelemetry` beside the existing Codex provider code. It accepts
+one JSONL line and returns a normalized value only when all of these are true:
+
+- the envelope is `event_msg`;
+- `payload.type == "token_count"`;
+- `info.last_token_usage.total_tokens` is a non-negative integer;
+- `info.model_context_window` is a positive integer.
+
+The normalized value carries `usedTokens`, `maxTokens`, input/output/cache
+counters when present, and the envelope's parsed timestamp. A live run may use
+the runner's clock only when the token event has no usable timestamp; legacy
+hydration uses the event timestamp (or a documented file-metadata fallback) so
+the restored reading's age is truthful. Every other rollout payload is dropped.
+Raw lines, prompts, messages, commands, tool results, file paths, and reasoning
+never enter `AgentRuntimeEvent` or logs.
+
+Add `.codexRolloutTokenCount` to `AgentContextWindowTelemetrySource`. It is
+authoritative for context occupancy and round-trips through the source's string
+Codable representation. Keep `.codexTurnUsage` for cumulative stdout accounting,
+but make it permanently non-authoritative; it must never produce a prompt-token
+estimate even when an old persisted record contains `usedTokens`.
+
+Primary file:
+
+- `Sources/ContinuumRevivedCore/AgentProviders/CodexRolloutTelemetry.swift` —
+  pure parsing, per-run cursor data, and exact rollout-resolution seam.
+- `Sources/ContinuumRevivedCore/AgentStatusEngine.swift` — distinct authoritative
+  source case plus Codable and authority semantics.
+
+### 2. Bind the reader to the exact Codex thread
+
+Reuse the thread ID already captured from `thread.started` and persisted in
+`AgentRecord.codexThreadId`.
+
+- Resolve Codex home from the environment used by the child process:
+  `CODEX_HOME` when configured, otherwise Codex's normal user directory.
+- Match the full thread ID in the rollout identity; never select “latest”.
+- Search both active and archived session locations only when resolving an
+  existing thread, then cache `threadId -> rollout URL` for later turns.
+- Treat zero or multiple identity matches as unavailable telemetry unless one
+  candidate can be proven authoritative from its session metadata.
+- Reset the mapping when unknown-session self-healing starts a fresh thread.
+
+Exact identity is mandatory because multiple managed Codex agents can execute
+concurrently under the same Codex home.
+
+### 3. Read only telemetry appended by the current run
+
+For a resumed thread, resolve its rollout and capture the file's byte length
+before spawning `codex exec resume`. For a fresh thread, begin at the newly
+created rollout after `thread.started` supplies the ID.
+
+After the child process exits and both stdout and the rollout writer have been
+drained:
+
+1. read only bytes after the per-run starting offset;
+2. discard a trailing partial JSONL line;
+3. parse complete lines with `CodexRolloutTelemetry`;
+4. select the last valid `token_count` appended during this run;
+5. verify it still belongs to the active full thread ID.
+
+The cursor prevents a failed or usage-free turn from reusing the previous
+turn's snapshot. Resume self-healing must suppress telemetry from the rejected
+resume attempt, clear the old cursor, and publish only the replacement fresh
+thread's result.
+
+Primary file:
+
+- `Sources/ContinuumRevivedCore/AgentProviders/CodexAgentRunner.swift` — own the
+  impure file access, lifecycle cursor, thread identity, and event ordering.
+
+### 4. Buffer terminal delivery until the rollout is final
+
+When stdout yields `turn.completed` or `turn.failed`, the runner retains the
+translated usage and terminal events instead of forwarding them immediately.
+After `waitUntilExit`, the stdout remainder is drained, the rollout file is
+closed/flushed by Codex, and the runner reads the latest valid new snapshot.
+It then emits events in this order:
+
+1. cumulative `.tokenUsageUpdated`, when stdout supplied usage;
+2. exact `.contextWindowUpdated`, when this run appended a valid token snapshot;
+3. the buffered completed/failed terminal event and ready state.
+
+If the process exits because the user interrupted or stopped it and no terminal
+stdout event exists, publish the exact context snapshot once before returning
+from the run. The supervisor's existing interruption/error path remains
+responsible for lifecycle state. An interrupted run with no newly appended
+`token_count` publishes no context update.
+
+The exact snapshot maps:
+
+- `usedTokens = last_token_usage.total_tokens`;
+- `maxTokens = model_context_window`;
+- input/output/cache fields from `last_token_usage`;
+- `source = .codexRolloutTokenCount`;
+- `freshness = .live`.
+
+Publishing once per process run preserves the existing last-request presentation
+and the supervisor's intended bounded persistence cadence. Reading only after
+process exit removes the race between observing stdout completion and Codex
+flushing the final `token_count`. A missing, inaccessible, truncated, mismatched,
+or schema-incompatible rollout produces no `.contextWindowUpdated`; cumulative
+`.tokenUsageUpdated` still publishes from stdout usage for accounting.
+
+### 5. Remove cumulative-delta inference
+
+Remove `priorCumulativeInputTokens` from:
+
+- `CodexAgentRunner.Config`;
+- `CodexEventTranslator` state and initializer;
+- `AgentSupervisor.codexRunnerConfig(for:)`.
+
+`CodexEventTranslator.usageEvents` continues translating cumulative input and
+output into `.tokenUsageUpdated`, but does not populate `usedTokens` or
+`maxTokens`. Delete the claim that one user-turn delta equals one model prompt;
+it is only true for trivial turns containing a single request.
+
+Keep `AgentRecord.lastContextWindow`: after the fix it stores the final exact
+provider snapshot and still restores that reading as stale after relaunch. New
+records persist `.codexRolloutTokenCount`; old `.codexTurnUsage` records are
+legacy cumulative/delta data and are never trusted as occupancy.
+
+Primary files:
+
+- `Sources/ContinuumRevivedCore/AgentProviders/CodexEventTranslator.swift`;
+- `Sources/ContinuumRevivedCore/AgentProviders/CodexAgentRunner.swift`;
+- `Sources/ContinuumRevived/App/AgentSupervisor.swift`.
+
+### 6. Repair persisted legacy readings before presentation
+
+The current production records already contain impossible values, including
+multi-million-token `usedTokens`, and some completed threads contain no stored
+occupancy because their cumulative baseline was unavailable. The fixed build
+must not wait for every agent to finish another turn before correcting them.
+
+For a Codex record with `codexThreadId` whose stored source is not
+`.codexRolloutTokenCount`:
+
+1. only when that agent has no live runner, resolve its exact rollout in the
+   background;
+2. scan backward from the file tail in bounded chunks until the newest valid
+   `token_count` is found, rather than parsing years of rollout history;
+3. publish/persist that exact snapshot as `.codexRolloutTokenCount` with
+   `.stale` freshness;
+4. if no exact snapshot is available, clear/suppress the legacy `usedTokens` and
+   `maxTokens` so the ring cannot display a fabricated percentage; retain
+   cumulative accounting fields only as non-occupancy detail.
+
+Hydration must be idempotent, must not race an active runner, and must write a
+record only when the sanitized or repaired snapshot actually differs. This is a
+read-time repair of optional host-local telemetry, not an `AgentRecord` schema
+version migration.
+
+Primary files:
+
+- `Sources/ContinuumRevived/App/AgentSupervisor.swift` — background hydration,
+  live-run exclusion, and one-time repaired persistence;
+- `Sources/ContinuumRevivedCore/Agents/AgentRecord.swift` — contract comments
+  only unless a small pure sanitizer belongs beside the record type.
+
+### 7. Preserve provider numerator and denominator through the existing UI path
+
+No radial-renderer change is required. A Codex snapshot now arrives with both
+`usedTokens` and `maxTokens`, so
+`AgentContextOccupancy.withDerivedOccupancy(_:contextWindow:)` must return them
+unchanged. Catalogue `contextWindow` remains a fallback only when a snapshot
+genuinely lacks a provider max; it must never replace
+`model_context_window`.
+
+`AgentContextOccupancy.promptTokens(from:)` returns authoritative `usedTokens`
+for `.codexRolloutTokenCount` and returns `nil` for `.codexTurnUsage`. The
+normalization path also strips `usedTokens`/`maxTokens` from legacy
+`.codexTurnUsage` snapshots even if an old record happens to contain both; do
+not add a global source gate that would alter Claude's existing derived meter.
+The presenter labels the new source as Codex per-request/rollout telemetry. No
+circle drawing or threshold arithmetic changes.
+
+Update the source comments and checks so the contract is explicit:
+
+- `Sources/ContinuumRevivedCore/AgentContextOccupancy.swift`;
+- `Sources/ContinuumRevivedCoreChecks/AgentContextOccupancyChecks.swift`;
+- `Sources/ContinuumRevived/Canvas/AgentActivity/AgentCompactStatusPresentation.swift`
+  only if wording still describes the Codex source inaccurately.
+
+## Expected file map
+
+<FileTree
+  id="expected-file-map"
+  title="Expected source changes"
+  entries={[
+    {"path":"Sources/ContinuumRevivedCore/AgentProviders/CodexRolloutTelemetry.swift","change":"added","note":"Pure token_count parser, current-run cursor data, and exact rollout-resolution seam."},
+    {"path":"Sources/ContinuumRevivedCore/AgentProviders/CodexAgentRunner.swift","change":"modified","note":"Capture identity/offset, buffer terminal events until process exit, publish final telemetry for completed/failed/interrupted runs, and remove cumulative-baseline config."},
+    {"path":"Sources/ContinuumRevivedCore/AgentProviders/CodexEventTranslator.swift","change":"modified","note":"Retain cumulative accounting but stop deriving occupancy from a turn delta."},
+    {"path":"Sources/ContinuumRevived/App/AgentSupervisor.swift","change":"modified","note":"Remove prior-cumulative plumbing, repair/suppress legacy persisted readings, exclude live runners, and preserve final exact snapshots."},
+    {"path":"Sources/ContinuumRevivedCore/AgentStatusEngine.swift","change":"modified","note":"Add the authoritative codexRolloutTokenCount source and keep codexTurnUsage non-authoritative."},
+    {"path":"Sources/ContinuumRevivedCore/Agents/AgentRecord.swift","change":"modified","note":"Clarify persisted exact-versus-legacy telemetry semantics; no schema bump."},
+    {"path":"Sources/ContinuumRevivedCore/AgentContextOccupancy.swift","change":"modified","note":"Accept only rollout-token Codex occupancy and preserve provider values."},
+    {"path":"Sources/ContinuumRevived/Canvas/AgentActivity/AgentCompactStatusPresentation.swift","change":"modified","note":"Label the new source accurately without changing circle rendering."},
+    {"path":"Sources/ContinuumRevivedCoreChecks/CodexAgentBackendChecks.swift","change":"modified","note":"Add tool-loop, process-exit ordering, interruption, cursor, concurrency, self-heal, malformed-rollout, and privacy witnesses."},
+    {"path":"Sources/ContinuumRevivedCoreChecks/AgentContextOccupancyChecks.swift","change":"modified","note":"Pin source authority, Codable round-trip, exact used/max preservation, legacy suppression, and catalogue fallback behavior."}
+  ]}
+/>
+
+## Risks and guardrails
+
+<Callout id="rollout-format-risk" tone="risk">
+
+Codex rollout JSONL is provider-owned local state. Keep all knowledge of its
+shape behind one parser, accept additive fields, reject missing or invalid
+required fields, and return no percentage on incompatibility. Never log raw
+rollout lines. Exact thread matching and the current-run byte offset are
+required correctness boundaries, not optimizations.
+
+</Callout>
+
+- **Cross-agent contamination:** never use file recency as identity. Full thread
+  ID matching is required.
+- **Stale reuse:** a resumed run must snapshot its starting offset before the
+  child writes. A turn with no new valid telemetry publishes no occupancy.
+- **Partial writes:** parse complete newline-terminated records only.
+- **Flush race:** never read the final snapshot merely because stdout announced
+  completion; buffer terminal delivery until the process exits and pipes drain.
+- **In-progress turns:** do not persist an arbitrary tail snapshot while a
+  runner is active. Only the runner owns live finalization.
+- **Interrupted/failed runs:** publish the last newly appended request exactly
+  once at process exit, even without `turn.completed`; publish nothing when no
+  model request occurred.
+- **Self-heal identity:** an unknown resumed thread that falls back to fresh must
+  suppress the rejected attempt and reset the rollout URL, offset, buffered
+  events, and parser state.
+- **Schema drift:** malformed or changed token fields fail closed to count-only
+  or unknown UI; never fall back to cumulative delta.
+- **Legacy persistence:** old `.codexTurnUsage` snapshots are untrusted for
+  occupancy. Repair them only while no runner is active; otherwise suppress the
+  percentage until the runner publishes an exact source.
+- **Privacy:** normalized numeric fields only. No raw JSONL, prompts, tool data,
+  output, commands, paths, or reasoning in events or diagnostics.
+- **Persistence churn:** publish one final snapshot per user turn, not one event
+  for every internal request; an interrupted process run is still limited to one
+  final snapshot.
+- **Production safety:** manual QA uses only `~/Desktop/Array Dev.app` on
+  `~/array-scratch`, never `/Applications/Array.app` or Dylan's personal root.
+
+## Deterministic witnesses
+
+Replace the two-trivial-turn delta fixture with captured multi-request shapes
+that prove the actual invariant.
+
+### Pure parser and cursor checks
+
+- Parse a valid `token_count` and assert `37,453 / 258,400` is preserved.
+- Assert the numerator is `total_tokens`, not the nearby `input_tokens` value.
+- Parse the rollout envelope timestamp for stale hydration and pin the fallback
+  behavior when it is missing or malformed.
+- Ignore every non-token rollout payload, including messages and tool events.
+- Ignore malformed, negative, overflowed, and missing required numeric fields.
+- Ignore a final partial line.
+- Starting at a nonzero offset cannot reuse an earlier valid snapshot.
+- Multiple new snapshots select the last valid one.
+
+### Runner and identity checks
+
+- A nine-request tool-loop fixture ends at 238,206 cumulative input but emits
+  37,453 used tokens, not the 223,067 turn delta.
+- Two concurrent thread fixtures cannot read one another's rollout.
+- A resumed turn uses only records appended after its starting offset.
+- Unknown-session self-healing resets identity and cursor before the fresh run.
+- Missing or inaccessible rollout data preserves cumulative usage and emits no
+  occupancy percentage.
+- `turn.completed` received before the final rollout flush is buffered until
+  process exit; the exact context event then precedes `turnCompleted`.
+- A failed run with new token telemetry publishes its final exact snapshot once
+  before the failure reaches the supervisor.
+- An interrupted run with new token telemetry publishes its final exact snapshot
+  once; an interrupted run with none leaves prior occupancy untouched.
+- An active runner prevents background legacy hydration from reading or
+  persisting an intermediate tail snapshot.
+- Every terminal path persists at most one exact snapshot.
+
+### Occupancy checks
+
+- `.codexRolloutTokenCount` round-trips through Codable and is authoritative;
+  `.codexTurnUsage` round-trips but remains non-authoritative.
+- A legacy `.codexTurnUsage` snapshot containing both `usedTokens` and
+  `maxTokens` is sanitized before presentation; the defense does not suppress
+  Claude's existing derived occupancy.
+- A rollout snapshot containing 37,453 used and 258,400 max remains unchanged
+  even when the catalogue says 272,000.
+- A post-compaction snapshot lower than the prior turn is accepted.
+- A snapshot without an exact numerator remains unknown rather than borrowing
+  cumulative usage.
+- A legacy stored 4.16-million-token delta is replaced by the rollout's exact
+  217.8k snapshot and displayed stale.
+- A legacy stored reading with no resolvable rollout is sanitized so it cannot
+  draw a percentage.
+- A completed legacy thread with no stored occupancy is hydrated from its final
+  rollout snapshot.
+- Restored exact occupancy displays as stale until the next live turn; hydration
+  is idempotent and never overwrites an active runner's value.
+
+Teeth-verify the main witness twice:
+
+1. substitute the user-turn delta for `last_token_usage.total_tokens` and
+   observe the tool-loop check fail;
+2. substitute `last_token_usage.input_tokens` for `total_tokens` and observe the
+   numerator-semantics check fail;
+3. substitute the catalogue denominator for `model_context_window` and observe
+   the provider-window check fail;
+4. remove the process-exit buffer and observe the delayed-flush fixture fail;
+5. trust legacy `.codexTurnUsage` as authoritative and observe the persisted
+   4.16-million-token repair fixture fail.
+
+## Verification and handoff
+
+Run in this order after implementation approval:
+
+1. Build `ContinuumRevivedCoreChecks`; never trust an existing check binary.
+2. Run the focused Codex backend and occupancy checks.
+3. Run relevant supervisor persistence/replay and UI geometry checks.
+4. Run `scripts/run-matrix.sh`; report documented KNOWN-RED legs separately and
+   introduce no silent new failures.
+5. Rebuild and relaunch only `~/Desktop/Array Dev.app` with
+   `scripts/dev-app.sh`.
+6. Run a real tool-heavy Codex turn on `~/array-scratch` and compare Array's
+   percentage with the final `last_token_usage.total_tokens /
+   model_context_window` in that thread's rollout.
+7. Run another turn after enough context growth or compaction and confirm the
+   ring follows the new final request rather than cumulative lifetime work.
+8. Seed dev-state records with the captured legacy shapes—multi-million delta,
+   no baseline, completed, interrupted, and compacted—then relaunch Array Dev and
+   confirm exact stale repair or fail-closed suppression before any new prompt.
+
+<Checklist
+  id="codex-context-acceptance"
+  items={[
+    {"id":"tool-loop","label":"A tool-loop turn uses the final request's total tokens, not the sum of all requests","checked":false},
+    {"id":"provider-window","label":"Codex's reported context window overrides catalogue metadata","checked":false},
+    {"id":"total-not-input","label":"The numerator uses last total tokens, including output, rather than input tokens alone","checked":false},
+    {"id":"compaction","label":"A post-compaction reading can lower the percentage","checked":false},
+    {"id":"exit-ordering","label":"Terminal events wait for process exit and final rollout flush","checked":false},
+    {"id":"failed-interrupted","label":"Failed and interrupted runs publish one exact final snapshot only when they made a request","checked":false},
+    {"id":"active-run","label":"Background repair cannot persist an in-progress runner's intermediate snapshot","checked":false},
+    {"id":"resume-offset","label":"A resumed run cannot reuse telemetry that predates that run","checked":false},
+    {"id":"concurrent-threads","label":"Concurrent Codex agents cannot consume one another's rollout telemetry","checked":false},
+    {"id":"self-heal","label":"Unknown-session self-healing resets rollout identity and cursor","checked":false},
+    {"id":"fail-closed","label":"Missing or malformed rollout data produces no guessed percentage","checked":false},
+    {"id":"source-authority","label":"Only codexRolloutTokenCount is authoritative; codexTurnUsage remains accounting-only","checked":false},
+    {"id":"legacy-repair","label":"Existing impossible or missing persisted readings repair from rollout or suppress their percentage","checked":false},
+    {"id":"privacy","label":"Only normalized numeric telemetry enters Array events or diagnostics","checked":false},
+    {"id":"persistence","label":"The final exact snapshot persists once and restores as stale","checked":false},
+    {"id":"matrix","label":"Focused checks and the offline matrix add no unexplained failures","checked":false},
+    {"id":"manual","label":"Array Dev matches Codex's own percentage after a real tool-heavy turn","checked":false}
+  ]}
+/>
+
+## Approval boundary
+
+Approval authorizes only the focused Codex occupancy implementation above. It
+does not authorize a backend migration, mid-turn animation, UI redesign,
+release, commit, or push. Re-read and update this plan if the telemetry source or
+product semantics change before implementation.
