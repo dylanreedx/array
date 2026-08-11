@@ -4,11 +4,11 @@ Do not place credentials, APNs keys/tokens, VPN keys, recovery material, VPS pas
 
 ## Before committing/arming the program
 
-- [ ] Resolve the preserved queue-91 P4.6 dirty candidate at `~/.pi/agent-tile-ux-runs/continuum-overnight/run-20260730T225228/`; accept/repair/commit it or deliberately discard it through that program's recovery procedure. Do not reset/clean it casually.
-- [ ] Let queue 91 reach a clean stop/drain point before starting the relay loop; the two loops must never write this checkout concurrently.
-- [ ] Review `_DESIGN.md`, `_QUEUE.md`, and representative packets for scope/priority.
-- [ ] Review and commit the program preparation separately. Until committed, the relay loop correctly refuses the dirty tree.
-- [ ] Decide whether implementation remains on `overnight/agent-ux` or moves to a dedicated branch. If changed, update the runbook/control default before arming—never branch-switch while another loop owns the checkout.
+- [x] Resolve the preserved queue-91 P4.6 candidate at `~/.pi/agent-tile-ux-runs/continuum-overnight/run-20260730T225228/`. The rejected attempt remains preserved as audit evidence; its repaired intent/presentation/control foundation landed as `0bac831`, runtime capability/action integration landed as `58d3509`, and final v2 acceptance landed as `394b822`. The obsolete worktree is already absent; nothing was discarded during this resolution.
+- [x] Let queue 91 reach a clean stop/drain point before starting the relay loop. Queue 91's ledger records P4.6 and the later integration/acceptance packets done, its program drained, and its STOP marker is present in this checkout.
+- [x] Review `_DESIGN.md`, `_QUEUE.md`, and representative packets for scope/priority. Reconciled against the companion catch-up umbrella and passed the 50-packet structural guard on 2026-08-10.
+- [x] Review and commit the program preparation separately. Authority packet committed locally as `87e7ed0` on 2026-08-10.
+- [x] Run implementation on `array/integration`. The runbook and control scripts pin that branch; never branch-switch while another loop owns the checkout.
 - [x] Explicitly approve the repository decision that supersedes blanket I5 for typed/authenticated Class-B content while preserving Class-C host-only secrets. Approved by starting the companion catch-up plan on 2026-08-10; P0 still owns the repository lock/check implementation.
 
 ## Required by P3.10 transport/security review

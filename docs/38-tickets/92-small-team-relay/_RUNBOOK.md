@@ -20,8 +20,8 @@ Exactly one ticket is implemented per iteration and per local commit.
 
 ## Preconditions before any loop start
 
-- Branch is `overnight/agent-ux` unless Dylan explicitly selects and records another branch before arming.
-- Queue 91 is stopped, its current P4.6 candidate is either accepted/committed or deliberately resolved, and no other implementation/review child is alive.
+- Branch is `array/integration`. The loop never creates or switches branches.
+- Queue 91 is stopped, its preserved P4.6 candidate is recorded as superseded by the landed repair/integration commits in `_ACTION_ITEMS.md`, and no other implementation/review child is alive.
 - The working tree/index are clean except owner-authorized untracked `website/` and root `array-logo*.svg`.
 - This program's preparation files have been reviewed and committed separately before the implementation loop runs.
 - `docs/38-tickets/92-small-team-relay/STOP` is absent.

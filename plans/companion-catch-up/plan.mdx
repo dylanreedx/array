@@ -15,8 +15,9 @@ localOnly: true
 ## Progress
 
 - **2026-08-10 — Phase 0 authority packet started.** This umbrella plan and the prepared ticket-92 relay program are being committed together as the local implementation authority.
-- The relay program's `STOP` remains armed. Its implementation loop must not start until the preserved queue-91 P4.6 candidate is resolved and the checkout satisfies the relay runbook's clean-tree/preflight rules.
+- The relay program's `STOP` remains armed. Its implementation loop must not start until the checkout satisfies the relay runbook's clean-tree/preflight rules and Dylan explicitly removes the stop.
 - Existing desktop command-center, agent-home, context-occupancy, brand, archive, and website work is outside this packet and remains untouched.
+- **2026-08-10 — queue-91 precondition resolved.** The rejected P4.6 attempt is retained as audit evidence and is superseded by landed commits `0bac831`, `58d3509`, and `394b822`. The relay harness now pins `array/integration`. The remaining start gates are a clean checkout, no competing writer, explicit STOP removal, and normal build/matrix preflight.
 
 ## Outcome
 

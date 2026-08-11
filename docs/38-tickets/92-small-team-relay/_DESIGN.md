@@ -1,6 +1,6 @@
 # 92-small-team-relay — durable full-control companion relay
 
-Status: prepared; implementation must not start until queue 91's preserved dirty candidate is resolved and this program is committed on a clean checkout
+Status: authority committed; implementation remains stopped until the checkout is clean, the runbook preflight passes, and Dylan removes the tracked STOP
 Owner direction: one boring trusted relay for Dylan and a small office, private-network first, approximately $5/month or less when a VPS is useful
 Local source plan: `plan.mdx` (context only; this document plus `_DECISIONS.md` are the implementation authority)
 Umbrella program: `../../../plans/companion-catch-up/plan.mdx` governs the provider, companion, migration, verification, and release sequence around this relay-specific program

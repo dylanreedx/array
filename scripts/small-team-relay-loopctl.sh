@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 
 PROGRAM_DIR="${PROGRAM_DIR:-docs/38-tickets/92-small-team-relay}"
 STOP_FILE="$PROGRAM_DIR/STOP"
-EXPECTED_BRANCH="${EXPECTED_BRANCH:-overnight/agent-ux}"
+EXPECTED_BRANCH="${EXPECTED_BRANCH:-array/integration}"
 ROOT_PI_DIR="${ROOT_PI_DIR:-$HOME/.pi}"
 CONTROL_DIR="${CONTROL_DIR:-$ROOT_PI_DIR/small-team-relay-loop-control/$(basename "$(git rev-parse --show-toplevel)")}"
 LOOP_SCRIPT="${LOOP_SCRIPT:-./scripts/small-team-relay-loop.sh}"
