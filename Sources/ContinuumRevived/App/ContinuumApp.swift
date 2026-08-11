@@ -10230,6 +10230,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     @discardableResult
+    /// Name a managed-agent tile after the model it runs. One copy of the rule, so
+    /// the spawner's title and a later explicit choice cannot drift apart.
+    private func renameManagedAgentTileForModel(tileId: UUID, modelID: String) {
+        guard let canvasView,
+              var tile = canvasView.canvasState.tiles.first(where: { $0.id == tileId }),
+              tile.kind == .managedAgent else { return }
+        let name = AgentModelCatalog.shared.displayName(for: modelID)
+            ?? modelID.split(separator: "/").last.map(String.init)
+            ?? modelID
+        guard tile.title != name else { return }
+        tile.title = name
+        canvasView.updateTile(tile)
+    }
+
     private func spawnManagedAgentFromPalette(model: String? = nil) -> Bool {
         guard let spawner = tileSpawner else { return false }
         switch spawner.spawnManagedAgent() {
@@ -10241,6 +10255,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     let thinking = AgentModelConfig.resolvedFromDefaults().thinking
                     agentSupervisor.setProviderSettings(agentID: agentID, model: model, thinking: thinking)
                     modelApplied = agentSupervisor.records[agentID]?.model == model
+                    // The spawner named the tile after the DEFAULT model, because the
+                    // tile exists before this explicit choice is applied. Rename it to
+                    // what the agent will actually run, or the ⌘K drill-down leaves a
+                    // header contradicting the composer.
+                    if modelApplied { renameManagedAgentTileForModel(tileId: tileId, modelID: model) }
                 } else {
                     modelApplied = false
                 }

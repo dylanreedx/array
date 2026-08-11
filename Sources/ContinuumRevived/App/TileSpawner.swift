@@ -1315,10 +1315,20 @@ final class TileSpawner {
             in: canvasView
         )
         let nextZ = CanvasEngine.zPositionAbove(canvasView.canvasState.tiles)
+        // The tile is named after the model it will actually run, not a literal.
+        // "GPT-5.6" was hardcoded here and in the bootstrap line below, so every
+        // managed tile's chrome read "Agent · GPT-5.6" no matter which model the
+        // composer showed — the picker was right and the header contradicted it.
+        // Resolved from defaults, the same source the spawn itself uses, so the
+        // header cannot disagree with the model that gets routed.
+        let spawnModelID = AgentModelConfig.resolvedFromDefaults().model
+        let spawnModelName = AgentModelCatalog.shared.displayName(for: spawnModelID)
+            ?? spawnModelID.split(separator: "/").last.map(String.init)
+            ?? spawnModelID
         let tile = Tile(
             id: tileId,
             kind: .managedAgent,
-            title: "GPT-5.6",
+            title: spawnModelName,
             frame: frame,
             zPosition: nextZ,
             runtimeRef: nil,
@@ -1327,7 +1337,7 @@ final class TileSpawner {
         let descriptor = AgentDescriptor(agentKind: agentKind, worktreePath: nil, status: .configuring, statusUpdatedAt: now)
         let view = ManagedAgentTileNSView(tile: tile, threadId: threadId, descriptor: descriptor)
         view.ingest(.sessionStateChanged(.ready))
-        view.ingest(.contentDelta(threadId: threadId, turnId: "bootstrap", streamKind: .assistant, delta: "Ready. Type a prompt below to run GPT-5.6 in this tile."))
+        view.ingest(.contentDelta(threadId: threadId, turnId: "bootstrap", streamKind: .assistant, delta: "Ready. Type a prompt below to run \(spawnModelName) in this tile."))
         canvasView.install(tileView: view, for: tile)
 
         do {
