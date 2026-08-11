@@ -9,10 +9,14 @@ Last updated: 2026-08-10
 - Base: `825bbe8` (`array/integration`, `Resolve relay program preflight`)
 - Design commit: `ffc53f0` (`docs: plan managed agent capabilities`)
 - Phase 1 implementation commit: `721a1d2` (`feat: add semantic agent completions`)
-- Phase 2 implementation: complete locally in this progress update
+- Phase 2 implementation commit: `5e24e72` (`feat: add fuzzy managed agent file navigation`)
+- Complete change record: [`CHANGES.md`](./CHANGES.md)
 - Remote state: local only; nothing pushed
 
 The primary checkout and production Array app/state were not modified or launched.
+
+For the complete architecture, file-by-file delta, verification evidence, safety
+boundaries, and intentionally deferred work, see [`CHANGES.md`](./CHANGES.md).
 
 ## Completed
 
