@@ -305,6 +305,23 @@ final class ProviderModelPickerView: NSView, TokenThemed {
     var qaProviderTitles: [String] { groups.map(\.title) }
     var qaSelectedProviderID: String { selectedGroupID }
     var qaVisibleModelIDs: [String] { listView?.qaItems.map(\.id) ?? [] }
+
+    /// Every row the pane holds must actually FIT it.
+    ///
+    /// `ChoiceListView` is a plain view sized by `intrinsicContentSize` — it does
+    /// NOT scroll — and the pane is laid out to a fixed height. A list taller than
+    /// its pane therefore draws rows nobody can reach or click: the picker looks
+    /// frozen. That shipped in 0.4.7 (one list of every provider's models under a
+    /// 420pt cap) and was reverted; this is the assertion that would have caught
+    /// it. Any future "show more in one pane" change must add real scrolling
+    /// first, and this check is what will say so.
+    var qaListContentFitsPane: Bool {
+        guard let listView else { return true }
+        // Compared against the pane size the picker COMPUTED, not the live bounds:
+        // bounds are still zero right after `presentPopover()`, so a bounds check
+        // fails on layout timing instead of on the defect.
+        return listView.intrinsicContentSize.height <= listPaneSize.height + 0.5
+    }
     var qaVisibleModelTitles: [String] { listView?.qaItems.map(\.title) ?? [] }
     var qaVisibleModelDetails: [String?] { listView?.qaItems.map(\.detail) ?? [] }
     func selectProviderForQA(_ id: String) { selectGroup(id: id) }
@@ -556,6 +573,10 @@ extension ProviderModelButton {
                    "rail lists the catalogue's providers, got \(picker.qaProviderIDs)")
         try expect(picker.qaSelectedProviderID == "openai-codex",
                    "picker opens on the selected model's provider")
+        // No unreachable rows: the list does not scroll, so anything taller than
+        // the pane is clipped and the picker reads as frozen (the 0.4.7 regression).
+        try expect(picker.qaListContentFitsPane,
+                   "every model row must fit the pane — ChoiceListView does not scroll, so a taller list is unreachable")
         try expect(picker.qaVisibleModelIDs == ["openai-codex/gpt-a", "openai-codex/gpt-b"],
                    "right pane lists the active provider's models, got \(picker.qaVisibleModelIDs)")
 
