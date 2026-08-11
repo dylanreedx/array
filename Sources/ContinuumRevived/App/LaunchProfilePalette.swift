@@ -1,11 +1,15 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
 @MainActor
-final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
-    var onSelectProfile: ((String) -> Void)?
-    var onSelectAction: ((LaunchPaletteAction) -> Void)?
+final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
+    /// Returns true only when the app accepted/completed the selection far
+    /// enough for it to be a truthful recent destination.
+    var onSelectProfile: ((String) -> Bool)?
+    var onSelectAgentModel: ((String) -> Bool)?
+    var onSelectAction: ((LaunchPaletteAction) -> Bool)?
     var onClose: (() -> Void)?
 
     static let rootAccessibilityIdentifier = "ContinuumLaunchProfilePaletteRoot"
@@ -15,13 +19,29 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     private var searchField: NSTextField?
 
     private var rows: [LaunchPaletteRow] = []
+    private var rootRows: [LaunchPaletteRow] = []
+    private var rootQuery = ""
+    private var agentModelRows: [LaunchPaletteRow] = []
     private var filtered: [LaunchPaletteRow] = []
+    private var displayEntries: [CommandCenterDisplayEntry] = []
     private weak var previousFirstResponder: NSResponder?
     private weak var previousFirstResponderWindow: NSWindow?
 
-    func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], contextualActions: [LaunchPaletteAction] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = [], jumpZones: [JumpZoneRow] = [], initialQuery: String = "") {
-        self.rows = LaunchPaletteModel.makeRows(profiles: profiles.map(Self.profileRow(for:)), projects: projects, workspaces: workspaces, contextualActions: contextualActions, harnessRoles: harnessRoles, jumpTiles: jumpTiles, jumpZones: jumpZones)
-        self.filtered = initialQuery.isEmpty ? rows : LaunchPaletteModel.filterRows(rows, query: initialQuery)
+    private enum NavigationLevel {
+        case root
+        case agentModels
+    }
+
+    private var navigationLevel = NavigationLevel.root
+
+    private static let recentDefaultsKey = "continuum.commandCenter.recentIDs"
+
+    func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], contextualActions: [LaunchPaletteAction] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = [], jumpZones: [JumpZoneRow] = [], initialQuery: String = "", agentModels: [AgentModelPaletteRow]? = nil) {
+        rootRows = LaunchPaletteModel.makeRows(profiles: profiles.map(Self.profileRow(for:)), projects: projects, workspaces: workspaces, contextualActions: contextualActions, harnessRoles: harnessRoles, jumpTiles: jumpTiles, jumpZones: jumpZones)
+        rows = rootRows
+        rootQuery = initialQuery
+        navigationLevel = .root
+        agentModelRows = (agentModels ?? Self.availableAgentModels()).map(LaunchPaletteRow.agentModel)
         guard let hostView = host.contentView else { return }
         let wasVisible = isVisible
         let paletteView = ensurePaletteView()
@@ -33,16 +53,23 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             hostView.addSubview(paletteView)
         }
         searchField?.stringValue = initialQuery
-        tableView?.reloadData()
+        searchField?.placeholderString = "Search Array…"
+        applyFilter(query: initialQuery)
 
-        let size = NSSize(width: 480, height: 320)
         let hostBounds = hostView.bounds
-        let x = hostBounds.midX - size.width / 2
-        let y = hostBounds.midY - size.height / 2
-        paletteView.frame = NSRect(origin: NSPoint(x: x, y: y), size: size)
-        if !filtered.isEmpty {
-            tableView?.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        let contentHeight = CGFloat(64) + displayEntries.reduce(CGFloat.zero) { total, entry in
+            total + (entry.isSection ? 24 : 46)
         }
+        let availableWidth = max(0, hostBounds.width - 32)
+        let availableHeight = max(0, hostBounds.height - 32)
+        let size = NSSize(
+            width: min(660, max(320, hostBounds.width - 48), availableWidth),
+            height: min(520, max(220, contentHeight), availableHeight)
+        )
+        let x = hostBounds.midX - size.width / 2
+        let topInset = max(24, min(72, hostBounds.height * 0.10))
+        let y = max(16, hostBounds.maxY - size.height - topInset)
+        paletteView.frame = NSRect(origin: NSPoint(x: x, y: y), size: size)
         host.makeFirstResponder(searchField)
     }
 
@@ -63,7 +90,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             commitSelection()
             return true
         case 53: // Escape.
-            close(restoreFocus: true)
+            navigateBackOrClose()
             return true
         case 125: // Down arrow.
             moveSelection(by: 1)
@@ -111,20 +138,27 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         tableView = nil
         searchField = nil
         rows.removeAll()
+        rootRows.removeAll()
+        agentModelRows.removeAll()
+        rootQuery = ""
+        navigationLevel = .root
         filtered.removeAll()
+        displayEntries.removeAll()
         onClose?()
     }
 
     var isVisible: Bool { paletteView?.superview != nil }
 
     var searchTextForQA: String { searchField?.stringValue ?? "" }
+    var isChoosingAgentModelForQA: Bool { navigationLevel == .agentModels }
     var filteredDisplayNamesForQA: [String] { filtered.map(\.displayName) }
 
     var selectedDisplayNameForQA: String? {
-        guard let tableView, tableView.selectedRow >= 0, tableView.selectedRow < filtered.count else { return nil }
-        switch filtered[tableView.selectedRow] {
+        guard let tableView, case let .item(item) = entry(at: tableView.selectedRow) else { return nil }
+        switch item.row {
         case let .action(action): return action.displayName
         case let .profile(profile): return profile.displayName
+        case let .agentModel(model): return model.displayName
         case let .project(project): return "Switch to \(project.name)"
         case let .workspace(workspace): return "Switch to \(workspace.name) Workspace"
         case let .workspaceAction(action, workspace):
@@ -143,6 +177,22 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     }
 
     static func runDuplicateRootSelfCheck() throws {
+        guard fallbackAgentModelName(for: "openai-codex/gpt-5.6-sol") == "GPT-5.6 Sol" else {
+            throw PaletteSelfCheckError.failed("agent-model fallback leaked its raw model id into the primary title")
+        }
+        let defaults = UserDefaults.standard
+        let previousRecents = defaults.object(forKey: recentDefaultsKey)
+        let previousGlassiness = defaults.object(forKey: CommandCenterAppearanceConfig.glassinessKey)
+        let previousCustomOpacity = defaults.object(forKey: CommandCenterAppearanceConfig.customOpacityKey)
+        defaults.removeObject(forKey: recentDefaultsKey)
+        defer {
+            if let previousRecents { defaults.set(previousRecents, forKey: recentDefaultsKey) }
+            else { defaults.removeObject(forKey: recentDefaultsKey) }
+            if let previousGlassiness { defaults.set(previousGlassiness, forKey: CommandCenterAppearanceConfig.glassinessKey) }
+            else { defaults.removeObject(forKey: CommandCenterAppearanceConfig.glassinessKey) }
+            if let previousCustomOpacity { defaults.set(previousCustomOpacity, forKey: CommandCenterAppearanceConfig.customOpacityKey) }
+            else { defaults.removeObject(forKey: CommandCenterAppearanceConfig.customOpacityKey) }
+        }
         let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600), styleMask: [.borderless], backing: .buffered, defer: false)
         let hostView = NSView(frame: host.contentRect(forFrameRect: host.frame))
         host.contentView = hostView
@@ -154,7 +204,150 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
                 throw PaletteSelfCheckError.unexpectedRootCount(paletteRootCount(in: hostView), expected: 1)
             }
         }
+        guard palette.paletteView is CommandCenterSurfaceView else {
+            throw PaletteSelfCheckError.failed("palette root is not the glass command-center surface")
+        }
+        guard palette.displayEntries.contains(where: {
+            if case .section(.create) = $0 { return true }
+            return false
+        }), palette.displayEntries.contains(where: {
+            if case .section(.actions) = $0 { return true }
+            return false
+        }) else {
+            throw PaletteSelfCheckError.failed("default command center did not render categorized sections")
+        }
+        if let actionsHeader = palette.displayEntries.firstIndex(where: {
+            if case .section(.actions) = $0 { return true }
+            return false
+        }),
+           let previousItem = palette.displayEntries[..<actionsHeader].lastIndex(where: {
+               if case let .item(item) = $0 { return item.row.isSelectable }
+               return false
+           }),
+           let nextItem = palette.displayEntries.indices.first(where: { index in
+               guard index > actionsHeader, case let .item(item) = palette.displayEntries[index] else { return false }
+               return item.row.isSelectable
+           }) {
+            palette.tableView?.selectRowIndexes(IndexSet(integer: previousItem), byExtendingSelection: false)
+            palette.moveSelection(by: 1)
+            guard palette.tableView?.selectedRow == nextItem else {
+                throw PaletteSelfCheckError.failed("keyboard traversal did not skip the Actions section header")
+            }
+        } else {
+            throw PaletteSelfCheckError.failed("could not construct the cross-category traversal witness")
+        }
+        guard let table = palette.tableView,
+              palette.tableView(table, heightOfRow: palette.displayEntries.firstIndex(where: { !$0.isSection }) ?? -1) == 46 else {
+            throw PaletteSelfCheckError.failed("command-center result density drifted from 46 points")
+        }
+        let regularFrame = palette.paletteView?.frame ?? .zero
+        guard regularFrame.width == 660,
+              regularFrame.minX >= hostView.bounds.minX,
+              regularFrame.maxX <= hostView.bounds.maxX,
+              regularFrame.maxY <= hostView.bounds.maxY,
+              hostView.bounds.maxY - regularFrame.maxY <= 72 else {
+            throw PaletteSelfCheckError.failed("command center is not width-capped, host-clamped, and upper-aligned: \(regularFrame)")
+        }
+
+        guard let surface = palette.paletteView as? CommandCenterSurfaceView else {
+            throw PaletteSelfCheckError.failed("missing command-center surface for appearance witness")
+        }
+        defaults.set(CommandCenterGlassiness.solid.rawValue, forKey: CommandCenterAppearanceConfig.glassinessKey)
+        surface.reapplyAppearanceForQA()
+        guard surface.appearanceSnapshotForQA == .init(usesBlur: false, opacity: 1) else {
+            throw PaletteSelfCheckError.failed("Solid did not produce an opaque, blur-free command center")
+        }
+        defaults.set(CommandCenterGlassiness.frosted.rawValue, forKey: CommandCenterAppearanceConfig.glassinessKey)
+        surface.reapplyAppearanceForQA()
+        guard surface.appearanceSnapshotForQA == .init(usesBlur: true, opacity: 0.84) else {
+            throw PaletteSelfCheckError.failed("Frosted did not produce the 84% default command center")
+        }
+        defaults.set(CommandCenterGlassiness.glass.rawValue, forKey: CommandCenterAppearanceConfig.glassinessKey)
+        surface.reapplyAppearanceForQA()
+        guard surface.appearanceSnapshotForQA == .init(usesBlur: true, opacity: 0.72) else {
+            throw PaletteSelfCheckError.failed("Glass did not produce the 72% command center")
+        }
+        host.appearance = NSAppearance(named: .aqua)
+        surface.reapplyAppearanceForQA()
+        let lightFill = surface.backgroundColorForQA
+        host.appearance = NSAppearance(named: .darkAqua)
+        surface.reapplyAppearanceForQA()
+        guard lightFill != surface.backgroundColorForQA else {
+            throw PaletteSelfCheckError.failed("command-center token fill did not change across light/dark appearances")
+        }
+        host.appearance = nil
+        defaults.removeObject(forKey: CommandCenterAppearanceConfig.glassinessKey)
         palette.close()
+
+        host.setContentSize(NSSize(width: 360, height: 260))
+        palette.show(near: host, profiles: profiles)
+        let compactFrame = palette.paletteView?.frame ?? .zero
+        guard compactFrame.minX >= hostView.bounds.minX,
+              compactFrame.maxX <= hostView.bounds.maxX,
+              compactFrame.minY >= hostView.bounds.minY,
+              compactFrame.maxY <= hostView.bounds.maxY else {
+            throw PaletteSelfCheckError.failed("small-window command center escaped its host bounds: \(compactFrame) vs \(hostView.bounds)")
+        }
+        palette.close()
+
+        let selectableProfiles = [TileSpawner.AnnotatedProfile(
+            spec: LaunchProfileSpec(id: "qa", displayName: "QA", kind: .shell, title: "QA"),
+            resolution: .found(LaunchProfile(command: "/bin/zsh", arguments: [], cwd: "/tmp", title: "QA"))
+        )]
+        palette.onSelectProfile = { _ in false }
+        palette.show(near: host, profiles: selectableProfiles, initialQuery: "QA")
+        palette.commitSelection()
+        guard defaults.stringArray(forKey: recentDefaultsKey) == nil else {
+            throw PaletteSelfCheckError.failed("a refused profile dispatch was persisted as a recent")
+        }
+        palette.onSelectProfile = { _ in true }
+        palette.show(near: host, profiles: selectableProfiles, initialQuery: "QA")
+        palette.commitSelection()
+        guard defaults.stringArray(forKey: recentDefaultsKey) == ["profile:qa"] else {
+            throw PaletteSelfCheckError.failed("an accepted profile dispatch was not persisted as a recent")
+        }
+        palette.onSelectProfile = nil
+
+        let agentModels = [
+            AgentModelPaletteRow(id: "openai-codex/gpt-5.6-sol", displayName: "GPT-5.6 Sol", providerName: "OpenAI Codex · openai-codex/gpt-5.6-sol"),
+            AgentModelPaletteRow(id: "openai-codex/gpt-5.6-luna", displayName: "GPT-5.6 Luna", providerName: "OpenAI Codex · openai-codex/gpt-5.6-luna"),
+        ]
+        var selectedModelID: String?
+        palette.onSelectAgentModel = { modelID in
+            selectedModelID = modelID
+            return true
+        }
+        palette.show(near: host, profiles: [], initialQuery: "Agent", agentModels: agentModels)
+        palette.commitSelection()
+        guard palette.isVisible, palette.isChoosingAgentModelForQA,
+              palette.selectedDisplayNameForQA == "GPT-5.6 Sol" else {
+            throw PaletteSelfCheckError.failed("New Agent did not drill forward to the exact model list")
+        }
+        guard let searchField = palette.searchField else { throw PaletteSelfCheckError.missingSearchField }
+        searchField.stringValue = "luna"
+        palette.applyFilter(query: "luna")
+        guard palette.selectedDisplayNameForQA == "GPT-5.6 Luna" else {
+            throw PaletteSelfCheckError.failed("model-step search did not select the matching exact model")
+        }
+        _ = palette.control(searchField, textView: NSTextView(), doCommandBy: #selector(NSResponder.cancelOperation(_:)))
+        guard palette.isVisible, !palette.isChoosingAgentModelForQA,
+              palette.searchTextForQA == "Agent",
+              palette.selectedDisplayNameForQA == LaunchPaletteAction.newManagedAgent.displayName else {
+            throw PaletteSelfCheckError.failed("Escape did not pop the model step and restore its root query")
+        }
+        palette.commitSelection()
+        guard palette.isChoosingAgentModelForQA, let modelSearch = palette.searchField else {
+            throw PaletteSelfCheckError.failed("New Agent could not re-enter its model step after navigating back")
+        }
+        modelSearch.stringValue = "luna"
+        palette.applyFilter(query: "luna")
+        palette.commitSelection()
+        guard !palette.isVisible,
+              selectedModelID == "openai-codex/gpt-5.6-luna",
+              defaults.stringArray(forKey: recentDefaultsKey)?.first == "action:new-agent" else {
+            throw PaletteSelfCheckError.failed("model selection did not dispatch the exact id and record the completed parent action")
+        }
+        palette.onSelectAgentModel = nil
         guard paletteRootCount(in: hostView) == 0 else {
             throw PaletteSelfCheckError.unexpectedRootCount(paletteRootCount(in: hostView), expected: 0)
         }
@@ -216,6 +409,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         hostView.addSubview(selectionFocusTarget)
         palette.onSelectProfile = { _ in
             host.makeFirstResponder(selectionFocusTarget)
+            return true
         }
         try runSelectionDoesNotStealNewFocusScenario(
             host: host,
@@ -358,19 +552,17 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     private func ensurePaletteView() -> NSView {
         if let paletteView { return paletteView }
 
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 320))
+        let content = CommandCenterSurfaceView(frame: NSRect(x: 0, y: 0, width: 660, height: 520))
         content.setAccessibilityIdentifier(Self.rootAccessibilityIdentifier)
-        content.wantsLayer = true
-        content.layer?.backgroundColor = NSColor.windowBackgroundColor.appResolvedCGColor
-        content.layer?.borderColor = NSColor.separatorColor.appResolvedCGColor
-        content.layer?.borderWidth = 1
-        content.layer?.cornerRadius = 8
 
-        let search = NSTextField()
+        let search = NSSearchField()
         search.delegate = self
         search.translatesAutoresizingMaskIntoConstraints = false
-        search.placeholderString = "Search profiles…"
+        search.placeholderString = "Search Array…"
         search.focusRingType = .none
+        search.isBezeled = false
+        search.drawsBackground = false
+        search.font = .systemFont(ofSize: 16, weight: .medium)
 
         let table = NSTableView()
         table.dataSource = self
@@ -379,11 +571,14 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         table.allowsMultipleSelection = false
         table.target = self
         table.doubleAction = #selector(tableDidDoubleClick(_:))
-        table.rowHeight = 30
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("profile"))
-        column.title = "Profile"
-        column.width = 460
-        column.resizingMask = [.autoresizingMask, .userResizingMask]
+        table.rowHeight = 46
+        table.intercellSpacing = NSSize(width: 0, height: 2)
+        table.backgroundColor = .clear
+        table.selectionHighlightStyle = .regular
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("command"))
+        column.title = "Command"
+        column.width = 640
+        column.resizingMask = .autoresizingMask
         table.addTableColumn(column)
 
         let scroll = NSScrollView()
@@ -396,13 +591,14 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         content.addSubview(search)
         content.addSubview(scroll)
         NSLayoutConstraint.activate([
-            search.topAnchor.constraint(equalTo: content.topAnchor, constant: 8),
-            search.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 8),
-            search.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8),
-            scroll.topAnchor.constraint(equalTo: search.bottomAnchor, constant: 8),
+            search.topAnchor.constraint(equalTo: content.topAnchor, constant: 14),
+            search.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
+            search.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
+            search.heightAnchor.constraint(equalToConstant: 28),
+            scroll.topAnchor.constraint(equalTo: search.bottomAnchor, constant: 10),
             scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 8),
             scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8),
-            scroll.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -8)
+            scroll.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10)
         ])
 
         self.paletteView = content
@@ -499,49 +695,63 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         )
     }
 
+    private static func availableAgentModels() -> [AgentModelPaletteRow] {
+        AgentModelConfig.modelOptions.map { id in
+            let provider = id.split(separator: "/", maxSplits: 1).first.map(String.init) ?? "Provider"
+            let providerName: String
+            switch provider {
+            case "openai-codex": providerName = "OpenAI Codex"
+            case "anthropic": providerName = "Anthropic"
+            default: providerName = provider.replacingOccurrences(of: "-", with: " ").capitalized
+            }
+            let fallbackName = fallbackAgentModelName(for: id)
+            return AgentModelPaletteRow(
+                id: id,
+                displayName: AgentModelCatalog.shared.displayName(for: id) ?? fallbackName,
+                providerName: "\(providerName) · \(id)"
+            )
+        }
+    }
+
+    private static func fallbackAgentModelName(for id: String) -> String {
+        let model = id.split(separator: "/", maxSplits: 1).last.map(String.init) ?? id
+        let parts = model.split(separator: "-").map(String.init)
+        guard parts.count >= 2, parts[0].lowercased() == "gpt" else {
+            return parts.map { $0.capitalized }.joined(separator: " ")
+        }
+        let variant = parts.dropFirst(2).map { $0.capitalized }.joined(separator: " ")
+        return "GPT-\(parts[1])" + (variant.isEmpty ? "" : " \(variant)")
+    }
+
     // MARK: - NSTableViewDataSource
 
-    func numberOfRows(in tableView: NSTableView) -> Int { filtered.count }
+    func numberOfRows(in tableView: NSTableView) -> Int { displayEntries.count }
 
     // MARK: - NSTableViewDelegate
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let cell = NSTableCellView()
-        let text = NSTextField(labelWithString: "")
-        text.lineBreakMode = .byTruncatingTail
-        text.translatesAutoresizingMaskIntoConstraints = false
-        cell.addSubview(text)
-        cell.textField = text
-        NSLayoutConstraint.activate([
-            text.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 6),
-            text.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
-            text.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
-        ])
-        let item = filtered[row]
-        switch item {
-        case let .profile(profile):
-            text.stringValue = "\(profile.displayName) — \(profile.detail)"
-            text.textColor = profile.isSelectable ? .labelColor : .secondaryLabelColor
-        case let .action(action):
-            text.stringValue = action.displayName
-            text.textColor = .labelColor
-        case let .project(project):
-            text.stringValue = "Switch to \(project.name) — \(project.rootPath)"
-            text.textColor = project.isSelectable ? .labelColor : .secondaryLabelColor
-        case let .workspace(workspace):
-            text.stringValue = "Switch to \(workspace.name) Workspace — \(workspace.projectIds.count) project(s)"
-            text.textColor = workspace.projectIds.isEmpty ? .secondaryLabelColor : .labelColor
-        case let .workspaceAction(action, workspace):
-            text.stringValue = "\(action.displayName) \(workspace.name)"
-            text.textColor = .labelColor
-        case let .jumpToTile(tile):
-            text.stringValue = "Jump to \(tile.title)"
-            text.textColor = .labelColor
-        case let .jumpToZone(zone):
-            text.stringValue = "Jump to \(zone.title)"
-            text.textColor = .labelColor
+        guard let entry = entry(at: row) else { return nil }
+        switch entry {
+        case let .section(category):
+            return CommandCenterSectionCell(category: category)
+        case let .item(item):
+            return CommandCenterItemCell(item: item)
         }
-        return cell
+    }
+
+    func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
+        if case .section = entry(at: row) { return true }
+        return false
+    }
+
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        if case .section = entry(at: row) { return 24 }
+        return 46
+    }
+
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        guard case let .item(item) = entry(at: row) else { return false }
+        return item.row.isSelectable
     }
 
     // MARK: - NSTextFieldDelegate
@@ -552,10 +762,27 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     }
 
     private func applyFilter(query: String) {
-        filtered = LaunchPaletteModel.filterRows(rows, query: query)
+        let defaults = UserDefaults.standard
+        let storedRecentIDs = defaults.stringArray(forKey: Self.recentDefaultsKey) ?? []
+        let recentIDs = navigationLevel == .root
+            ? LaunchPaletteModel.sanitizeRecentIDs(storedRecentIDs, rows: rows)
+            : []
+        if navigationLevel == .root, recentIDs != storedRecentIDs {
+            defaults.set(recentIDs, forKey: Self.recentDefaultsKey)
+        }
+        let sections = LaunchPaletteModel.makeSections(rows: rows, query: query, recentIDs: recentIDs)
+        displayEntries = sections.flatMap { section in
+            [.section(section.category)] + section.items.map(CommandCenterDisplayEntry.item)
+        }
+        filtered = sections.flatMap(\.items).map(\.row)
         tableView?.reloadData()
-        if !filtered.isEmpty {
-            tableView?.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        if let first = displayEntries.indices.first(where: { index in
+            guard case let .item(item) = displayEntries[index] else { return false }
+            return item.row.isSelectable
+        }) {
+            tableView?.selectRowIndexes(IndexSet(integer: first), byExtendingSelection: false)
+        } else {
+            tableView?.deselectAll(nil)
         }
     }
 
@@ -565,7 +792,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             commitSelection()
             return true
         case #selector(NSResponder.cancelOperation(_:)):
-            close(restoreFocus: true)
+            navigateBackOrClose()
             return true
         case #selector(NSResponder.moveDown(_:)):
             moveSelection(by: 1)
@@ -585,51 +812,266 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     private func commitSelection() {
         guard let table = tableView else { return }
         let row = table.selectedRow
-        guard row >= 0, row < filtered.count else { return }
-        switch filtered[row] {
+        guard case let .item(presented) = entry(at: row) else { return }
+        let selected = presented.row
+        if navigationLevel == .root, selected == .action(.newManagedAgent) {
+            enterAgentModelStep()
+            return
+        }
+        switch selected {
         case let .profile(profile):
             guard profile.isSelectable else {
                 NSSound.beep()
                 return
             }
-            onSelectProfile?(profile.id)
+            let succeeded = onSelectProfile?(profile.id) ?? false
+            recordRecent(selected, succeeded: succeeded)
+            close(restoreFocus: true)
+        case let .agentModel(model):
+            let succeeded = onSelectAgentModel?(model.id) ?? false
+            recordRecent(.action(.newManagedAgent), succeeded: succeeded)
             close(restoreFocus: true)
         case let .action(action):
-            onSelectAction?(action)
+            let succeeded = onSelectAction?(action) ?? false
+            recordRecent(selected, succeeded: succeeded)
             close(restoreFocus: true)
         case let .project(project):
             guard project.isSelectable else {
                 NSSound.beep()
                 return
             }
-            onSelectAction?(.addProjectToCanvas(project.id))
+            let succeeded = onSelectAction?(.addProjectToCanvas(project.id)) ?? false
+            recordRecent(selected, succeeded: succeeded)
             close(restoreFocus: true)
         case let .workspace(workspace):
             guard !workspace.projectIds.isEmpty else {
                 NSSound.beep()
                 return
             }
-            onSelectAction?(.switchWorkspace(workspace.id))
+            let succeeded = onSelectAction?(.switchWorkspace(workspace.id)) ?? false
+            recordRecent(selected, succeeded: succeeded)
             close(restoreFocus: true)
         case let .workspaceAction(action, _):
-            onSelectAction?(action)
+            let succeeded = onSelectAction?(action) ?? false
+            recordRecent(selected, succeeded: succeeded)
             close(restoreFocus: true)
         case let .jumpToTile(tile):
-            onSelectAction?(.jumpToTile(tile.id))
+            let succeeded = onSelectAction?(.jumpToTile(tile.id)) ?? false
+            recordRecent(selected, succeeded: succeeded)
             close(restoreFocus: true)
         case let .jumpToZone(zone):
-            onSelectAction?(.jumpToZone(zone.id))
+            let succeeded = onSelectAction?(.jumpToZone(zone.id)) ?? false
+            recordRecent(selected, succeeded: succeeded)
             close(restoreFocus: true)
         }
     }
 
+    private func enterAgentModelStep() {
+        guard !agentModelRows.isEmpty, let searchField else {
+            NSSound.beep()
+            return
+        }
+        rootQuery = searchField.stringValue
+        navigationLevel = .agentModels
+        rows = agentModelRows
+        searchField.placeholderString = "Choose a model…"
+        searchField.stringValue = ""
+        applyFilter(query: "")
+    }
+
+    private func navigateBackOrClose() {
+        guard navigationLevel == .agentModels, let searchField else {
+            close(restoreFocus: true)
+            return
+        }
+        navigationLevel = .root
+        rows = rootRows
+        searchField.placeholderString = "Search Array…"
+        searchField.stringValue = rootQuery
+        applyFilter(query: rootQuery)
+    }
+
     private func moveSelection(by delta: Int) {
         guard let table = tableView else { return }
-        let row = table.selectedRow
-        let next = max(0, min(filtered.count - 1, row + delta))
-        if next != row {
-            table.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
-            table.scrollRowToVisible(next)
-        }
+        guard !displayEntries.isEmpty else { return }
+        var next = table.selectedRow
+        if next < 0 { next = delta > 0 ? -1 : displayEntries.count }
+        repeat {
+            next += delta
+            guard displayEntries.indices.contains(next) else { return }
+            if case let .item(item) = displayEntries[next], item.row.isSelectable {
+                table.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
+                table.scrollRowToVisible(next)
+                return
+            }
+        } while displayEntries.indices.contains(next)
     }
+
+    private func entry(at index: Int) -> CommandCenterDisplayEntry? {
+        guard displayEntries.indices.contains(index) else { return nil }
+        return displayEntries[index]
+    }
+
+    private func recordRecent(_ row: LaunchPaletteRow, succeeded: Bool) {
+        let defaults = UserDefaults.standard
+        let existing = defaults.stringArray(forKey: Self.recentDefaultsKey) ?? []
+        let updated = LaunchPaletteModel.recordingRecent(row, in: existing, succeeded: succeeded)
+        if updated != existing { defaults.set(updated, forKey: Self.recentDefaultsKey) }
+    }
+}
+
+private enum CommandCenterDisplayEntry {
+    case section(CommandCenterCategory)
+    case item(CommandCenterItem)
+
+    var isSection: Bool {
+        if case .section = self { return true }
+        return false
+    }
+}
+
+private final class CommandCenterSurfaceView: NSView {
+    struct AppearanceSnapshot: Equatable {
+        let usesBlur: Bool
+        let opacity: Double
+    }
+
+    private let effect = NSVisualEffectView()
+    private let tint = NSView()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = 14
+        layer?.borderWidth = 0.5
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOpacity = 0.24
+        layer?.shadowRadius = 24
+        layer?.shadowOffset = NSSize(width: 0, height: -8)
+
+        effect.material = .hudWindow
+        effect.blendingMode = .withinWindow
+        effect.state = .active
+        effect.wantsLayer = true
+        effect.layer?.cornerRadius = 14
+        effect.layer?.masksToBounds = true
+        effect.autoresizingMask = [.width, .height]
+        effect.frame = bounds
+        addSubview(effect)
+
+        tint.wantsLayer = true
+        tint.layer?.cornerRadius = 14
+        tint.layer?.masksToBounds = true
+        tint.autoresizingMask = [.width, .height]
+        tint.frame = bounds
+        addSubview(tint)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(accessibilityDisplayOptionsChanged(_:)),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil
+        )
+        applyAppearance()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyAppearance()
+    }
+
+    deinit {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
+    @objc private func accessibilityDisplayOptionsChanged(_ notification: Notification) {
+        applyAppearance()
+    }
+
+    private func applyAppearance() {
+        let defaults = UserDefaults.standard
+        let resolved = CommandCenterAppearanceConfig.resolve(
+            glassinessRaw: defaults.string(forKey: CommandCenterAppearanceConfig.glassinessKey),
+            customOpacityRaw: defaults.object(forKey: CommandCenterAppearanceConfig.customOpacityKey).map { String(describing: $0) },
+            reduceTransparency: NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency,
+            increaseContrast: NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+        )
+        effect.isHidden = !resolved.usesBlur
+        tint.layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: effectiveTokenTheme).copy(alpha: resolved.backgroundOpacity)
+        layer?.borderColor = LineToken.separator.color.cgColor(for: effectiveTokenTheme)
+    }
+
+    func reapplyAppearanceForQA() { applyAppearance() }
+
+    var appearanceSnapshotForQA: AppearanceSnapshot {
+        let alpha = tint.layer?.backgroundColor?.alpha ?? 0
+        return AppearanceSnapshot(usesBlur: !effect.isHidden, opacity: Double((alpha * 100).rounded() / 100))
+    }
+
+    var backgroundColorForQA: String {
+        guard let color = tint.layer?.backgroundColor,
+              let converted = NSColor(cgColor: color)?.usingColorSpace(.sRGB) else { return "nil" }
+        return String(format: "%.4f,%.4f,%.4f,%.4f", converted.redComponent, converted.greenComponent, converted.blueComponent, converted.alphaComponent)
+    }
+}
+
+private final class CommandCenterSectionCell: NSTableCellView {
+    init(category: CommandCenterCategory) {
+        super.init(frame: .zero)
+        let label = NSTextField(labelWithString: category.rawValue.uppercased())
+        label.font = .systemFont(ofSize: 10.5, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 42),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2)
+        ])
+    }
+
+    required init?(coder: NSCoder) { nil }
+}
+
+private final class CommandCenterItemCell: NSTableCellView {
+    init(item: CommandCenterItem) {
+        super.init(frame: .zero)
+        let image = NSImageView(image: NSImage(systemSymbolName: item.iconSystemName, accessibilityDescription: nil) ?? NSImage())
+        image.contentTintColor = item.row.isSelectable ? .labelColor : .tertiaryLabelColor
+        image.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+        image.translatesAutoresizingMaskIntoConstraints = false
+
+        let title = NSTextField(labelWithString: item.title)
+        title.font = .systemFont(ofSize: 13.5, weight: .medium)
+        title.textColor = item.row.isSelectable ? .labelColor : .tertiaryLabelColor
+        title.lineBreakMode = .byTruncatingTail
+
+        let subtitle = NSTextField(labelWithString: item.subtitle ?? "")
+        subtitle.font = .systemFont(ofSize: 11.5)
+        subtitle.textColor = .secondaryLabelColor
+        subtitle.lineBreakMode = .byTruncatingMiddle
+        subtitle.isHidden = item.subtitle == nil
+
+        let stack = NSStackView(views: [title, subtitle])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 1
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(image)
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            image.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            image.centerYAnchor.constraint(equalTo: centerYAnchor),
+            image.widthAnchor.constraint(equalToConstant: 18),
+            image.heightAnchor.constraint(equalToConstant: 18),
+            stack.leadingAnchor.constraint(equalTo: image.trailingAnchor, constant: 10),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+        setAccessibilityLabel(item.title)
+        if let detail = item.subtitle { setAccessibilityHelp(detail) }
+    }
+
+    required init?(coder: NSCoder) { nil }
 }

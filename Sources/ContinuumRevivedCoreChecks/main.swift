@@ -16,6 +16,12 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+if CommandLine.arguments.contains("--command-center-check") {
+    runCommandCenterChecks()
+    print("CommandCenterChecks passed")
+    Foundation.exit(0)
+}
+
 private final class AtomicWriterOpenFaultState: @unchecked Sendable {
     var failTempOpen = false
     var failDirectoryOpen = false
@@ -6863,6 +6869,11 @@ do {
             field.setValue(.string("not-a-valid-option"), in: defaults)
             expect(field.currentValue(in: defaults) == .string(fallback), "choice rejects an invalid value, falling back to default")
             expect(defaults.string(forKey: key) == fallback, "choice persists the fallback when given an invalid value")
+        case .slider(let key, _, let range, let fallback, _):
+            expect(field.currentValue(in: defaults) == .double(fallback), "slider currentValue on empty defaults is its declared default")
+            field.setValue(.double(range.upperBound + 1), in: defaults)
+            expect(field.currentValue(in: defaults) == .double(range.upperBound), "slider clamps values to its declared range")
+            expect(defaults.double(forKey: key) == range.upperBound, "slider persists its bounded numeric value")
         }
     }
 

@@ -6648,13 +6648,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             focusBroker.openModal(.palette)
         }
         let rows = activeController.paletteRows(registryStore: registryStore)
+        let zoneNames = Dictionary(uniqueKeysWithValues: (canvasView?.navZoneRenderModels ?? []).map {
+            ($0.placement.zoneId, $0.displayName)
+        })
+        let workspaceName = rows.workspaces.first(where: { $0.id == workspaceRuntime?.workspaceId })?.name
+        let projectName = activeController.project.name
         let jumpTiles = (canvasView?.navigationTileSnapshots() ?? []).map { tile in
-            JumpTileRow(id: tile.tileId, title: tile.title.isEmpty ? "Untitled Tile" : tile.title)
+            let agentID = agentSupervisor.agent(forTile: tile.tileId)
+            let record = agentID.flatMap { agentSupervisor.records[$0] }
+            let snapshot = agentID.flatMap { agentSupervisor.turnSnapshot(for: $0) }
+            let state = snapshot.map(commandCenterAgentState)
+            let zoneName = tile.zoneId.flatMap { zoneNames[$0] }?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let context = [workspaceName, zoneName?.isEmpty == false ? zoneName : projectName]
+                .compactMap { $0 }
+                .reduce(into: [String]()) { result, value in
+                    if !result.contains(value) { result.append(value) }
+                }
+                .joined(separator: " · ")
+            let modelID = record?.model
+            let modelDisplayName = modelID.map {
+                AgentModelCatalog.shared.displayName(for: $0)
+                    ?? $0.split(separator: "/").last.map(String.init)
+                    ?? $0
+            }
+            return JumpTileRow(
+                id: tile.tileId,
+                title: record?.displayName ?? (tile.title.isEmpty ? "Untitled Tile" : tile.title),
+                kind: tile.kind,
+                contextTitle: context.isEmpty ? nil : context,
+                modelID: modelID,
+                modelDisplayName: modelDisplayName,
+                statusLabel: state?.label,
+                attentionReason: state?.attention
+            )
         }
         let jumpZones = (canvasView?.navZoneRenderModels ?? []).map { model in
             JumpZoneRow(id: model.placement.zoneId, title: model.displayName)
         }
         palette.show(near: host, profiles: rows.profiles, projects: rows.projects, workspaces: rows.workspaces, contextualActions: contextualActions, harnessRoles: harnessRolesForActiveProject(), jumpTiles: jumpTiles, jumpZones: jumpZones, initialQuery: initialQuery)
+    }
+
+    private func commandCenterAgentState(
+        _ snapshot: AgentTileTurnSnapshot
+    ) -> (label: String, attention: CommandCenterAttentionReason?) {
+        switch snapshot.state {
+        case .ready: return (AgentStatusVocabulary.label(for: .idle), nil)
+        case .working: return (AgentStatusVocabulary.label(for: .working), nil)
+        case .queued: return ("Queued", nil)
+        case let .needsAction(request):
+            let attention: CommandCenterAttentionReason = request.kind == .approval ? .approval : .input
+            return (AgentStatusVocabulary.label(for: .needsAttention), attention)
+        case .failed: return (AgentStatusVocabulary.failed, nil)
+        case .restored: return ("Restored", nil)
+        }
     }
 
     private func focusedTileIdForPaletteContext() -> UUID? {
@@ -6688,10 +6734,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func makeProfilePalette() -> LaunchProfilePalette {
         let palette = LaunchProfilePalette()
         palette.onSelectProfile = { [weak self] profileId in
-            self?.spawnTerminalFromProfile(profileId, trigger: "palette:\(profileId)")
+            self?.spawnTerminalFromProfile(profileId, trigger: "palette:\(profileId)") ?? false
+        }
+        palette.onSelectAgentModel = { [weak self] modelID in
+            self?.spawnManagedAgentFromPalette(model: modelID) ?? false
         }
         palette.onSelectAction = { [weak self] action in
-            self?.performPaletteAction(action)
+            self?.performPaletteAction(action) ?? false
         }
         palette.onClose = { [weak self] in
             self?.focusBroker.closeModal(.palette)
@@ -10066,36 +10115,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }.count
     }
 
-    private func spawnTerminalFromProfile(_ profileId: String, trigger: String? = nil) {
-        guard let spawner = tileSpawner else { return }
+    @discardableResult
+    private func spawnTerminalFromProfile(_ profileId: String, trigger: String? = nil) -> Bool {
+        guard let spawner = tileSpawner else { return false }
         let admissionTrigger = trigger ?? "profile:\(profileId)"
         if let refusal = terminalSpawnAdmission.admit(trigger: admissionTrigger, liveCount: liveTerminalRuntimeCount()) {
             fputs("\(refusal.message)\n", stderr)
-            return
+            return false
         }
         switch spawner.spawnTerminal(profileId: profileId) {
         case let .spawned(runtime):
             installSpawnedTerminal(runtime)
+            return true
         case let .missingCommand(executable):
             presentMissingCommand(executable: executable, profileId: profileId)
+            return false
         case let .notConfigured(id):
             presentMissingCommand(executable: id, profileId: id, kind: .notConfigured)
+            return false
         case let .unknownProfile(id):
             fputs("Unknown profile id: \(id)\n", stderr)
+            return false
         case let .failure(error):
             fputs("TileSpawner.spawnTerminal failed: \(error)\n", stderr)
+            return false
         }
     }
 
-    private func spawnManagedAgentFromPalette() {
-        guard let spawner = tileSpawner else { return }
+    @discardableResult
+    private func spawnManagedAgentFromPalette(model: String? = nil) -> Bool {
+        guard let spawner = tileSpawner else { return false }
         switch spawner.spawnManagedAgent() {
         case let .spawned(tileId):
             wireManagedAgentTile(tileId)
+            var modelApplied = true
+            if let model {
+                if let agentID = agentSupervisor.agent(forTile: tileId) {
+                    let thinking = AgentModelConfig.resolvedFromDefaults().thinking
+                    agentSupervisor.setProviderSettings(agentID: agentID, model: model, thinking: thinking)
+                    modelApplied = agentSupervisor.records[agentID]?.model == model
+                } else {
+                    modelApplied = false
+                }
+            }
             focusSpawnedTile(tileId)
             scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "managed-agent-spawn", debounce: 0.2)
+            return modelApplied
         case let .failure(error):
             fputs("TileSpawner.spawnManagedAgent failed: \(error)\n", stderr)
+            return false
         }
     }
 
@@ -10758,60 +10826,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         spawnTerminalFromProfile("nvim")
     }
 
-    private func performPaletteAction(_ action: LaunchPaletteAction) {
+    @discardableResult
+    private func performPaletteAction(_ action: LaunchPaletteAction) -> Bool {
+        let tileCount = { [weak self] in self?.canvasView?.navigationTileSnapshots().count ?? 0 }
         switch action {
         case .newManagedAgent:
-            spawnManagedAgentFromPalette()
+            return spawnManagedAgentFromPalette()
         case .newHeadlessAgent:
             spawnHeadlessAgentFromPalette()
+            return false // Not a safe recent; its modal/spawn path has no result seam yet.
         case .fanOutQueueSelection:
             fanOutFocusedTicketQueue()
+            return false // Developer action; intentionally never recent.
         case .newNote:
+            let before = tileCount()
             spawnNoteFromPalette()
+            return tileCount() > before
         case .newBrowser:
+            let before = tileCount()
             spawnBrowserDefault()
+            return tileCount() > before
         case let .openURL(url):
+            let before = tileCount()
             spawnBrowserFromPalette(url: url)
+            return tileCount() > before
         case .openFile:
+            let before = tileCount()
             openFileFromPalette()
+            return tileCount() > before
         case .openFileTree:
+            let before = tileCount()
             spawnFileTreeFromPalette()
+            return tileCount() > before
         case .newDiffReview:
+            let before = tileCount()
             spawnDiffReviewFromPalette()
+            return tileCount() > before
         case .fitCanvasToAll:
-            if let viewport = canvasView?.fitAllToViewport() {
-                canvasView?.setViewport(viewport)
-            }
+            guard let canvasView, let viewport = canvasView.fitAllToViewport() else { return false }
+            canvasView.setViewport(viewport)
+            return true
         case .previousView:
-            restorePreviousView()
+            return restorePreviousView()
         case .previousTile:
-            restorePreviousTile()
+            return restorePreviousTile()
         case .previousZone:
-            restorePreviousZone()
+            return restorePreviousZone()
         case .toggleWorkspaceSidebar:
             toggleWorkspaceSidebar()
+            return true
         case let .switchProject(projectId):
             switchProjectAndRelaunch(projectId: projectId)
+            return false // Completion is asynchronous across a relaunch.
         case let .addProjectToCanvas(projectId):
+            let before = canvasView?.navZoneRenderModels.count ?? 0
             addProjectZone(projectId: projectId)
+            return (canvasView?.navZoneRenderModels.count ?? 0) > before
         case .newWorkspace:
+            let before = workspaceRuntime?.workspaceId
             createWorkspaceFromChrome()
+            return workspaceRuntime?.workspaceId != before
         case let .renameWorkspace(workspaceId):
-            renameWorkspace(workspaceId: workspaceId, name: "Renamed Workspace")
+            return renameWorkspace(workspaceId: workspaceId, name: "Renamed Workspace")
         case let .deleteWorkspace(workspaceId):
-            deleteWorkspaceAndRelaunch(workspaceId: workspaceId)
+            return deleteWorkspaceAndRelaunch(workspaceId: workspaceId)
         case let .switchWorkspace(workspaceId):
+            let before = workspaceRuntime?.workspaceId
             switchWorkspaceAndRelaunch(workspaceId: workspaceId)
+            return workspaceRuntime?.workspaceId == workspaceId && workspaceRuntime?.workspaceId != before
         case .openInspectorForFocusedBrowser:
-            _ = openInspectorForFocusedBrowserFromPalette()
+            return openInspectorForFocusedBrowserFromPalette()
         case let .spawnHarnessRole(role):
             spawnHarnessRoleFromPalette(role)
+            return false // Developer action; intentionally never recent.
         case let .jumpToTile(tileId):
-            jumpToTileFromPalette(tileId)
+            return jumpToTileFromPalette(tileId)
         case let .jumpToZone(zoneId):
-            jumpToZoneFromPalette(zoneId)
+            return jumpToZoneFromPalette(zoneId)
         case .createZone:
-            createGroupZoneFromPalette()
+            return createGroupZoneFromPalette()
         }
     }
 
@@ -10837,14 +10930,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// tile scope with `.tileSpawned` so the palette's snapshot restore on close
     /// doesn't bounce focus back to the pre-palette scope (same intent as a
     /// spawn-from-palette: land on the chosen tile).
-    private func jumpToTileFromPalette(_ tileId: UUID) {
-        guard let canvasView, canvasView.navigationTileSnapshot(for: tileId) != nil else { return }
+    @discardableResult
+    private func jumpToTileFromPalette(_ tileId: UUID) -> Bool {
+        guard let canvasView, canvasView.navigationTileSnapshot(for: tileId) != nil else { return false }
         if let targetViewport = canvasView.framedViewportForTileJump(tileId) {
             recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: targetViewport)
             canvasView.setViewport(targetViewport)
         }
         focusHistory.recordTileFocus(tileId, zoneId: zoneContainingTile(tileId), reason: .paletteJump)
         focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
+        return true
     }
 
     /// QA accessor for `navSelectedZoneId` (mirrors `searchTextForQA` precedent).
@@ -10854,10 +10949,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// the viewport, sets navSelectedZoneId, and enters the zone's first member tile
     /// with `.tileSpawned` so the palette snapshot restore on close doesn't bounce
     /// focus back to the pre-palette scope.
-    private func jumpToZoneFromPalette(_ zoneId: UUID) {
+    @discardableResult
+    private func jumpToZoneFromPalette(_ zoneId: UUID) -> Bool {
         guard let canvasView,
               canvasView.navZoneRenderModels.contains(where: { $0.placement.zoneId == zoneId }),
-              let viewport = canvasView.fitZoneToViewport(zoneId: zoneId) else { return }
+              let viewport = canvasView.fitZoneToViewport(zoneId: zoneId) else { return false }
         recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: viewport)
         canvasView.setViewport(viewport)
         navSelectedZoneId = zoneId
@@ -10868,20 +10964,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             focusHistory.recordTileFocus(tileId, zoneId: zoneId, reason: .paletteJump)
             focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
         }
+        return true
     }
 
-    private func restorePreviousView() {
-        guard let snapshot = focusHistory.previousView(), let canvasView else { NSSound.beep(); return }
+    @discardableResult
+    private func restorePreviousView() -> Bool {
+        guard let snapshot = focusHistory.previousView(), let canvasView else { NSSound.beep(); return false }
         canvasView.setViewport(snapshot.viewport)
         navSelectedZoneId = snapshot.focusedZoneId
         if let tileId = snapshot.focusedTileId, canvasView.navigationTileSnapshot(for: tileId) != nil {
             focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
         }
+        return true
     }
 
-    private func restorePreviousTile() {
+    @discardableResult
+    private func restorePreviousTile() -> Bool {
         guard let canvasView,
-              let tileId = focusHistory.previousTile(valid: { [weak self] id in self?.canvasView?.navigationTileSnapshot(for: id) != nil }) else { NSSound.beep(); return }
+              let tileId = focusHistory.previousTile(valid: { [weak self] id in self?.canvasView?.navigationTileSnapshot(for: id) != nil }) else { NSSound.beep(); return false }
         if let targetViewport = canvasView.framedViewportForTileJump(tileId) {
             recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: targetViewport)
             canvasView.setViewport(targetViewport)
@@ -10890,11 +10990,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         navSelectedZoneId = zoneContainingTile(tileId)
         focusHistory.recordTileFocus(tileId, zoneId: navSelectedZoneId, reason: .previousNavigation)
         focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
+        return true
     }
 
-    private func restorePreviousZone() {
+    @discardableResult
+    private func restorePreviousZone() -> Bool {
         guard let canvasView,
-              let zoneId = focusHistory.previousZone(valid: { [weak self] id in self?.canvasView?.navZoneRenderModels.contains(where: { $0.placement.zoneId == id }) == true }) else { NSSound.beep(); return }
+              let zoneId = focusHistory.previousZone(valid: { [weak self] id in self?.canvasView?.navZoneRenderModels.contains(where: { $0.placement.zoneId == id }) == true }) else { NSSound.beep(); return false }
         navSelectedZoneId = zoneId
         if let tileId = focusHistory.lastFocusedTileByZone[zoneId], canvasView.navigationTileSnapshot(for: tileId) != nil {
             if let targetViewport = canvasView.framedViewportForTileJump(tileId) {
@@ -10909,6 +11011,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             canvasView.setViewport(viewport)
         }
         focusHistory.recordZoneFocus(zoneId, reason: .previousNavigation)
+        return true
     }
 
     private func zoneContainingTile(_ tileId: UUID) -> UUID? {
@@ -10943,8 +11046,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// project/registry mutation). Resolves the active workspaceId, loads the document,
     /// appends a group zone with the configured default name, persists, and saves the
     /// registry. Does NOT spin a ZoneRuntimeController (T08's addZone responsibility).
-    private func createGroupZoneFromPalette() {
-        guard let registryStore else { return }
+    @discardableResult
+    private func createGroupZoneFromPalette() -> Bool {
+        guard let registryStore else { return false }
         do {
             var registry = try registryStore.loadOrEmpty()
             let workspaceId: UUID
@@ -10954,7 +11058,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 workspaceId = wId
             } else {
                 fputs("Create Zone failed: no active workspace\n", stderr)
-                return
+                return false
             }
             let appSupport = registryStore.registryFile.deletingLastPathComponent()
             let store = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
@@ -10966,8 +11070,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             workspaceRuntime?.replaceDocument(document, for: workspaceId)
             try registryStore.save(registry)
             reloadWorkspaceSidebar()
+            return true
         } catch {
             fputs("Create Zone failed: \(error)\n", stderr)
+            return false
         }
     }
 

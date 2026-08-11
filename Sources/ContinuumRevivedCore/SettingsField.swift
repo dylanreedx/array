@@ -15,6 +15,10 @@ public enum SettingsField: Equatable, Sendable {
     /// A fixed-options preference (rendered as a popup). `setValue` rejects any
     /// value not in `options`, falling back to `default`.
     case choice(key: String, label: String, options: [String], default: String)
+    /// A bounded numeric preference rendered as a slider. An optional condition
+    /// keeps advanced controls out of the panel until their owning choice is
+    /// selected.
+    case slider(key: String, label: String, range: ClosedRange<Double>, default: Double, visibleWhen: SettingsVisibility? = nil)
     /// Static explanatory copy rendered in a settings section without binding a
     /// UserDefaults key.
     case info(label: String)
@@ -22,12 +26,13 @@ public enum SettingsField: Equatable, Sendable {
     /// binding a single key.
     case shortcuts(label: String)
 
-    /// The UserDefaults key this field reads/writes, or `nil` for `.shortcuts`.
+    /// The UserDefaults key this field reads/writes, or `nil` for static fields.
     public var key: String? {
         switch self {
         case .toggle(let key, _, _): return key
         case .text(let key, _, _): return key
         case .choice(let key, _, _, _): return key
+        case .slider(let key, _, _, _, _): return key
         case .info: return nil
         case .shortcuts: return nil
         }
@@ -39,13 +44,14 @@ public enum SettingsField: Equatable, Sendable {
         case .toggle(_, let label, _): return label
         case .text(_, let label, _): return label
         case .choice(_, let label, _, _): return label
+        case .slider(_, let label, _, _, _): return label
         case .info(let label): return label
         case .shortcuts(let label): return label
         }
     }
 
     /// The current value (typed) for this field, or its declared default when the
-    /// key is absent. `nil` for `.shortcuts`.
+    /// key is absent. `nil` for static fields.
     public func currentValue(in defaults: UserDefaults) -> SettingsValue? {
         switch self {
         case .toggle(let key, _, let fallback):
@@ -57,6 +63,12 @@ public enum SettingsField: Equatable, Sendable {
             let raw = defaults.string(forKey: key)
             if let raw, options.contains(raw) { return .string(raw) }
             return .string(fallback)
+        case .slider(let key, _, let range, let fallback, _):
+            let raw = defaults.object(forKey: key)
+            let decoded = (raw as? NSNumber)?.doubleValue
+                ?? (raw as? String).flatMap(Double.init)
+                ?? fallback
+            return .double(min(range.upperBound, max(range.lowerBound, decoded)))
         case .info:
             return nil
         case .shortcuts:
@@ -66,7 +78,7 @@ public enum SettingsField: Equatable, Sendable {
 
     /// Persists `value` to UserDefaults. A `.choice` value outside `options`, or a
     /// value whose type does not match the field, falls back to the declared
-    /// default. No-op for `.shortcuts`.
+    /// default. No-op for static fields.
     public func setValue(_ value: SettingsValue, in defaults: UserDefaults) {
         switch self {
         case .toggle(let key, _, let fallback):
@@ -81,19 +93,38 @@ public enum SettingsField: Equatable, Sendable {
                 return
             }
             defaults.set(raw, forKey: key)
+        case .slider(let key, _, let range, let fallback, _):
+            guard case .double(let raw) = value else { defaults.set(fallback, forKey: key); return }
+            defaults.set(min(range.upperBound, max(range.lowerBound, raw)), forKey: key)
         case .info:
             break
         case .shortcuts:
             break
         }
     }
+
+    public func isVisible(in defaults: UserDefaults) -> Bool {
+        guard case .slider(_, _, _, _, let condition) = self, let condition else { return true }
+        return defaults.string(forKey: condition.key) == condition.equals
+    }
 }
 
 /// A typed value carried by a `SettingsField` (toggle → bool, text/choice →
-/// string).
+/// string, slider → double).
 public enum SettingsValue: Equatable, Sendable {
     case bool(Bool)
     case string(String)
+    case double(Double)
+}
+
+public struct SettingsVisibility: Equatable, Sendable {
+    public let key: String
+    public let equals: String
+
+    public init(key: String, equals: String) {
+        self.key = key
+        self.equals = equals
+    }
 }
 
 /// An ordered group of fields shown together in the settings surface.
