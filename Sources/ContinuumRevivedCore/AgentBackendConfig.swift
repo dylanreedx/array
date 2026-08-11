@@ -22,7 +22,7 @@ import Foundation
 /// shown by the generic settings `.choice` renderer (which uses the option
 /// string as both title and stored value); the CASE names are what routing and
 /// filtering switch on.
-public enum AgentBackend: String, CaseIterable, Sendable {
+public enum AgentBackend: String, CaseIterable, Equatable, Sendable {
     case pi = "pi (all providers)"
     case claudeCode = "Claude Code"
     case codex = "Codex"

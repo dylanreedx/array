@@ -1,11 +1,100 @@
 import Foundation
 
+public enum AgentCompletionScope: String, Equatable, Sendable {
+    case system
+    case personal
+    case project
+    case plugin
+    case package
+    case temporary
+    case runtime
+    case fixture
+}
+
+/// Provider-native identity retained independently from the row's display text.
+/// Paths and handles are host-local capabilities and intentionally not Codable.
+public struct AgentCompletionProvenance: Equatable, Sendable {
+    public let backend: AgentBackend?
+    public let scope: AgentCompletionScope
+    public let sourceIdentifier: String
+    public let invocationName: String?
+
+    public init(
+        backend: AgentBackend? = nil,
+        scope: AgentCompletionScope,
+        sourceIdentifier: String,
+        invocationName: String? = nil
+    ) {
+        self.backend = backend
+        self.scope = scope
+        self.sourceIdentifier = sourceIdentifier
+        self.invocationName = invocationName
+    }
+
+    public static let fixture = AgentCompletionProvenance(
+        scope: .fixture,
+        sourceIdentifier: "array.fixture"
+    )
+}
+
+public struct ResolvedSkillInvocation: Equatable, Sendable {
+    public let name: String
+    public let providerHandle: String
+
+    public init(name: String, providerHandle: String) {
+        self.name = name
+        self.providerHandle = providerHandle
+    }
+}
+
+public struct ResolvedPromptTemplate: Equatable, Sendable {
+    public let name: String
+    public let prompt: String
+
+    public init(name: String, prompt: String) {
+        self.name = name
+        self.prompt = prompt
+    }
+}
+
+public struct ResolvedRuntimeCommand: Equatable, Sendable {
+    public let name: String
+    public let providerHandle: String
+
+    public init(name: String, providerHandle: String) {
+        self.name = name
+        self.providerHandle = providerHandle
+    }
+}
+
+public struct DirectoryNavigationTarget: Equatable, Sendable {
+    public let directoryURL: URL
+
+    public init(directoryURL: URL) {
+        precondition(directoryURL.isFileURL, "DirectoryNavigationTarget requires a local file URL")
+        self.directoryURL = directoryURL
+    }
+}
+
+public enum AgentCompletionPayload: Equatable, Sendable {
+    case insertText(String)
+    case file(AgentPromptFileReference)
+    case skill(ResolvedSkillInvocation)
+    case promptTemplate(ResolvedPromptTemplate)
+    case runtimeCommand(ResolvedRuntimeCommand)
+    case directory(DirectoryNavigationTarget)
+}
+
 public struct AgentCompletion: Equatable, Sendable, Identifiable {
     public let id: String
     public let title: String
     public let detail: String?
+    /// Search/display text retained for provider-neutral filtering. Acceptance
+    /// is governed exclusively by `payload`.
     public let insertionText: String
     public let score: Int
+    public let payload: AgentCompletionPayload
+    public let provenance: AgentCompletionProvenance
     /// Every provider that returned this deduplicated result, in stable order.
     public let providerIDs: [String]
 
@@ -15,7 +104,9 @@ public struct AgentCompletion: Equatable, Sendable, Identifiable {
         detail: String? = nil,
         insertionText: String,
         score: Int = 0,
-        providerIDs: [String] = []
+        providerIDs: [String] = [],
+        payload: AgentCompletionPayload? = nil,
+        provenance: AgentCompletionProvenance = .fixture
     ) {
         self.id = id
         self.title = title
@@ -23,6 +114,8 @@ public struct AgentCompletion: Equatable, Sendable, Identifiable {
         self.insertionText = insertionText
         self.score = score
         self.providerIDs = providerIDs
+        self.payload = payload ?? .insertText(insertionText)
+        self.provenance = provenance
     }
 }
 
@@ -181,7 +274,9 @@ public actor AgentCompletionProviderRegistry: AgentCompletionSuggestionSource {
                 detail: value.completion.detail,
                 insertionText: value.completion.insertionText,
                 score: value.completion.score,
-                providerIDs: value.providerIDs.sorted()
+                providerIDs: value.providerIDs.sorted(),
+                payload: value.completion.payload,
+                provenance: value.completion.provenance
             )
         }.sorted { lhs, rhs in
             let leftRank = matchRank(lhs, query: query)

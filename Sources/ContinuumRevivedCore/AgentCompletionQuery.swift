@@ -1,5 +1,42 @@
 import Foundation
 
+public enum ProviderTrustState: Equatable, Sendable {
+    case trusted
+    case untrusted
+    case unavailable(reason: String)
+}
+
+/// Immutable, host-local scope captured when a composer binds to one managed
+/// agent. Providers must resolve files and capabilities from this context, never
+/// from Array's globally active project or the process working directory.
+public struct AgentCompletionContext: Equatable, Sendable {
+    public let agentID: AgentID
+    public let backend: AgentBackend
+    public let checkoutRoot: URL
+    public let gitRoot: URL?
+    public let arrayProjectRoot: URL
+    public let trustState: ProviderTrustState
+
+    public init(
+        agentID: AgentID,
+        backend: AgentBackend,
+        checkoutRoot: URL,
+        gitRoot: URL? = nil,
+        arrayProjectRoot: URL,
+        trustState: ProviderTrustState
+    ) {
+        precondition(checkoutRoot.isFileURL, "AgentCompletionContext requires a local checkout root")
+        precondition(gitRoot?.isFileURL != false, "AgentCompletionContext requires a local git root")
+        precondition(arrayProjectRoot.isFileURL, "AgentCompletionContext requires a local Array project root")
+        self.agentID = agentID
+        self.backend = backend
+        self.checkoutRoot = checkoutRoot
+        self.gitRoot = gitRoot
+        self.arrayProjectRoot = arrayProjectRoot
+        self.trustState = trustState
+    }
+}
+
 /// A host-local completion query. `replacementRange` uses UTF-16 offsets so an
 /// AppKit/UIKit editor can apply it directly without converting String indices.
 /// Query text and replacement ranges are deliberately not Codable and must never
@@ -8,11 +45,23 @@ public struct AgentCompletionQuery: Equatable, Sendable {
     public let trigger: Character
     public let text: String
     public let replacementRange: NSRange
+    public let context: AgentCompletionContext?
+    /// Host-local browser scope for `@` completion. This is presentation state,
+    /// not prompt text, and is intentionally absent from every persisted draft.
+    public let navigationPath: String?
 
-    public init(trigger: Character, text: String, replacementRange: NSRange) {
+    public init(
+        trigger: Character,
+        text: String,
+        replacementRange: NSRange,
+        context: AgentCompletionContext? = nil,
+        navigationPath: String? = nil
+    ) {
         self.trigger = trigger
         self.text = text
         self.replacementRange = replacementRange
+        self.context = context
+        self.navigationPath = navigationPath
     }
 }
 

@@ -1,0 +1,470 @@
+---
+title: "Managed-agent skills, commands, and fuzzy file references"
+brief: "Provider-owned customization with an Array-native semantic composer and agent-checkout-scoped fuzzy file navigation."
+kind: "plan"
+localOnly: true
+---
+
+# Managed-agent skills, commands, and fuzzy file references
+
+Status: **design draft — review and approval only**.
+
+## Outcome
+
+Array exposes each managed agent’s real personal and project customization without copying, rewriting, or executing provider-owned skill files. The native composer becomes a capability surface:
+
+- `$` selects skills.
+- `/` selects provider prompt templates and provider-native invocations.
+- `//` selects Array/runtime operations such as compaction and stop.
+- `@` navigates and fuzzily selects files from the exact agent checkout.
+
+A selection is a typed action, not merely inserted text. Claude, Codex, and Pi remain authoritative for discovery, precedence, trust, and execution. Array owns presentation, normalized provenance, keyboard behavior, and dispatch into explicit provider adapters.
+
+<Callout id="architecture-decision" tone="decision">
+
+**Decision:** Array does not create a fourth skill system. It presents provider-owned capabilities through one native composer, then routes a typed selection back to the provider that resolved it. Runtime commands are intercepted only when Array has an explicit capability implementation.
+
+</Callout>
+
+Done means:
+
+1. A managed agent in a nested repo or worktree sees the same eligible user/project skills it would see in the provider’s native client.
+2. Skill and command rows show backend, scope, source, trust, and conflicts.
+3. Selecting a file creates the same validated `AgentPromptFileReference` used by drag/drop.
+4. Runtime commands call explicit capabilities and never reach the model as prompt prose.
+5. Catalog queries and local paths remain host-local and out of sync metadata.
+6. Each substantive phase has an offline deterministic witness and a supervised end-to-end provider smoke.
+
+## Concrete acceptance case: Falcon
+
+Falcon is the acceptance fixture because it contains the real ambiguity this architecture must preserve:
+
+<Table
+  id="falcon-acceptance-layout"
+  columns={["Location", "Meaning", "Expected provider visibility"]}
+  rows={[
+    ["`falcon/.agents/skills/mcp-test*`", "Portable shared project skills", "Codex and Pi"],
+    ["`falcon/.claude/skills/mcp-test*`", "Claude-specific copies", "Claude"],
+    ["`falcon/.claude/skills/frontend-design-director`", "Claude project skill", "Claude"],
+    ["`falcon/.codex/agents/mcp-tester.toml`", "Codex project agent definition", "Codex"],
+    ["`falcon/.pi/agents/implementer.md`", "Pi project agent definition", "Pi"],
+    ["User dotfiles", "Personal skills, prompts, and extensions", "Owning provider"]
+  ]}
+/>
+
+The actual git root is `/Users/dylan/Documents/work/falcon-platform/falcon`; the outer `falcon-platform` folder is not the repository. Completion context must therefore come from the managed agent record and checkout, not from the outer Array project registration.
+
+Some Falcon skills are exact duplicates. Others share a name while differing by provider-specific instructions. Exact duplicates may be visually grouped, but same-name variants remain separate, source-addressed rows.
+
+## Current architecture and the gap
+
+Array already has most of the presentation foundation:
+
+- `AgentCompletionQueryDetector` recognizes `/`, `@`, and `$`, handles quotes/escapes, and calculates a full-token replacement range.
+- `AgentCompletionProviderRegistry` asynchronously merges providers by trigger and guards deterministic ordering.
+- `CompletionPopoverController` owns passive presentation, stale-request cancellation, keyboard navigation, and undo-safe insertion.
+- `AgentComposerView` already binds a replaceable completion registry.
+- Drag/drop creates validated, persisted `AgentPromptFileReference` values and renders them in `ComposerFileReferenceRailView`.
+
+Production still defaults to fixture completions. More importantly, `AgentCompletion` carries only `insertionText`; accepting a row can only mutate text. That cannot safely represent a file capability, a structured Codex skill input, a Pi RPC prompt template, or an Array runtime command.
+
+The runners expose the other half of the mismatch:
+
+<Table
+  id="runner-command-boundary"
+  columns={["Backend", "Current managed boundary", "Why generic slash forwarding fails"]}
+  rows={[
+    ["Pi", "`pi -p --mode json`", "Interactive built-ins are not a generic prompt protocol; RPC owns real operations and `get_commands`."],
+    ["Claude", "print/stream JSON", "Skill loading remains native, but client-only commands need explicit managed capabilities."],
+    ["Codex", "`codex exec`", "The exec surface accepts prompt text, not the interactive slash-command host."],
+    ["Array", "plain `AgentPrompt`", "Literal control text can be interpreted as prose instead of changing runtime state."]
+  ]}
+/>
+
+Array’s existing P5.6 captures the concrete failure: literal `/compact` reached the model, which replied that context had been compacted even though no compaction happened. The new architecture makes that impossible by construction.
+
+## Target architecture
+
+<Diagram id="capability-ownership" caption="Array owns native interaction and typed routing; providers remain authoritative for capability resolution and execution." frame="hide">
+
+```html
+<div class="diagram-panel" style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr) minmax(0,1fr);gap:16px;align-items:stretch">
+  <div class="diagram-card" style="display:flex;flex-direction:column;gap:10px">
+    <div class="diagram-pill">Provider-owned inputs</div>
+    <div class="diagram-node">User dotfiles</div>
+    <div class="diagram-node">Project customization</div>
+    <div class="diagram-node">Trust and precedence</div>
+    <div class="diagram-muted">Claude · Codex · Pi each resolve their own effective catalog.</div>
+  </div>
+  <div class="diagram-card" data-rough style="display:flex;flex-direction:column;gap:10px">
+    <div class="diagram-pill">Array-native core</div>
+    <div class="diagram-node">AgentCompletionContext</div>
+    <div class="diagram-node">Semantic suggestion registry</div>
+    <div class="diagram-node">Completion popover and action sink</div>
+    <div class="diagram-node">File index and directory navigation</div>
+    <div class="diagram-muted">Normalizes presentation without inventing universal provider semantics.</div>
+  </div>
+  <div class="diagram-card" style="display:flex;flex-direction:column;gap:10px">
+    <div class="diagram-pill">Typed dispatch</div>
+    <div class="diagram-node">Provider skill invocation</div>
+    <div class="diagram-node">Prompt template invocation</div>
+    <div class="diagram-node">Runtime RPC operation</div>
+    <div class="diagram-node">Structured file reference</div>
+    <div class="diagram-muted">Unknown text remains ordinary prompt prose.</div>
+  </div>
+</div>
+```
+
+</Diagram>
+
+### Semantic suggestion contract
+
+Replace string-only completion results with a provider-neutral typed result:
+
+```swift
+public struct AgentComposerSuggestion: Sendable, Identifiable {
+    public let id: SuggestionID
+    public let trigger: Character
+    public let title: String
+    public let detail: String?
+    public let provenance: SuggestionProvenance
+    public let score: Int
+    public let payload: Payload
+
+    public enum Payload: Sendable {
+        case insertText(String)
+        case file(ResolvedFileReference)
+        case skill(ResolvedSkillInvocation)
+        case promptTemplate(ResolvedPromptTemplate)
+        case runtimeCommand(ResolvedRuntimeCommand)
+        case directory(DirectoryNavigationTarget)
+    }
+}
+```
+
+`CompletionPopoverController` remains presentation-only. Accepting a row calls an action sink with the selected semantic payload. Native TextKit insertion and undo remain one payload case, not the universal behavior.
+
+Every query also receives immutable agent context:
+
+```swift
+public struct AgentCompletionContext: Sendable {
+    public let agentID: AgentID
+    public let backend: AgentBackend
+    public let checkoutRoot: URL
+    public let gitRoot: URL?
+    public let arrayProjectRoot: URL
+    public let trustState: ProviderTrustState
+}
+```
+
+This context is captured atomically when the composer binds or the backend/Home changes. No completion provider reads the globally active Array workspace.
+
+### Stable identity and provenance
+
+Canonical identity is:
+
+```text
+backend + capability kind + scope + provider-resolved source/path/handle
+```
+
+Names are labels, not identities. Every row carries:
+
+- backend;
+- kind: skill, template, extension command, runtime command;
+- scope: system, personal, project, plugin/package, or temporary;
+- provider-native invocation name;
+- resolved source path or opaque provider handle;
+- enabled and trust state;
+- content fingerprint when it can be computed without violating provider trust.
+
+Array groups only exact duplicate fingerprints in presentation. Same-name, different-source entries stay distinct and receive a conflict badge. Array displays provider-resolved precedence; it does not guess a universal ordering.
+
+### Capability seams
+
+Add narrow provider-neutral protocols:
+
+- `AgentCapabilityCatalogProvider` returns resolved skills, templates, and invocable provider commands.
+- `AgentCapabilityInvoker` converts a semantic selection into provider-specific structured input or RPC.
+- `AgentRuntimeCommandRegistry` owns Array/runtime commands and their live availability.
+- `AgentFileIndexProvider` returns normalized file and directory candidates for an exact checkout.
+- `AgentComposerSuggestionRegistry` merges candidates for the active trigger without erasing source identity.
+
+No provider-specific branches enter `ComposerTextView`, `CompletionPopoverController`, or `ChoiceListView`.
+
+## Provider adapters
+
+### Pi
+
+Move managed Pi sessions onto the planned RPC client.
+
+- Use `get_commands` as the canonical catalog for skills, prompt templates, and extension commands.
+- Preserve the exact returned invocation name, including deterministic collision suffixes.
+- Invoke skill/template selections through Pi RPC prompt semantics.
+- Map built-in operations such as compact to explicit RPC methods.
+- Implement the semantic extension UI request/response subset separately from the catalog.
+
+Pi extensions remain arbitrary provider-owned code. Array must not read or execute extension code merely to populate the menu. Terminal-only headers, custom editors, themes, and renderers remain outside native-tile parity.
+
+### Codex
+
+Move managed Codex sessions from `codex exec` to app-server.
+
+- Use `skills/list` and `skills/changed` for resolved discovery.
+- Invoke with both visible `$skill-name` text and the structured `{type: "skill", name, path}` input returned by the catalog.
+- Use app-server fuzzy-file-search sessions behind `AgentFileIndexProvider` when available.
+- Map compact, review, model, status, and related client actions to explicit app-server operations.
+
+App-server has no generic slash-command catalog. Array advertises only commands backed by an explicit adapter.
+
+### Claude
+
+Preserve Claude’s real `HOME`, cwd, trust, enterprise configuration, and plugin environment so native discovery and implicit activation continue to work.
+
+- Build a read-only provenance catalog from Claude-supported personal, project, enterprise, and plugin metadata.
+- Respect Claude’s precedence, project trust, added-directory, and plugin namespace semantics.
+- Use Claude-supported explicit skill invocation for selected skills.
+- Advertise a client-only built-in command only when a real managed capability exists.
+
+`.agents/skills` is not a Claude discovery source. A project that wants one portable skill across all providers remains responsible for a provider-supported copy or symlink.
+
+## Composer namespace
+
+<Table
+  id="composer-namespace"
+  columns={["Trigger", "Meaning", "Acceptance behavior"]}
+  rows={[
+    ["`$`", "Skills available to the active backend", "Invoke the exact provider-resolved skill."],
+    ["`/`", "Provider templates and invocable provider commands", "Use the provider-native template/command contract."],
+    ["`//`", "Array/runtime commands", "Call an explicit RPC or supervisor capability."],
+    ["`@`", "Files and directory navigation", "Navigate directories or create a structured file reference."],
+    ["Unknown text", "Ordinary prose", "Leave untouched and send as a normal prompt."]
+  ]}
+/>
+
+The catalog defaults to the active backend. Cross-provider availability may appear as secondary provenance, never as an executable row for the wrong backend.
+
+## Fuzzy `@` navigation
+
+The `@` picker behaves like `cd` combined with global fuzzy search:
+
+1. Opening `@` starts at `checkoutRoot`.
+2. An empty query shows immediate children with directories first.
+3. Typing searches basename and relative path across the bounded checkout index.
+4. Enter, Right, or Tab on a directory descends and clears the local query.
+5. Left, `..`, or Backspace on an empty query ascends without escaping an allowed root.
+6. Enter on a file creates `Payload.file` and the existing file-reference chip.
+7. Escape dismisses without mutating the draft.
+8. Breadcrumbs show the current scope; chips show checkout-relative paths.
+
+Ranking is deterministic:
+
+1. exact basename;
+2. basename prefix;
+3. contiguous fuzzy basename;
+4. path-segment prefix;
+5. fuzzy relative path;
+6. small recency and currently-open-file tiebreakers.
+
+The index respects `.gitignore`, provider deny rules, and project trust; excludes `.git` and known dependency/build caches; and uses a bounded fallback walker for non-git folders. Codex may delegate matching to app-server, but every adapter normalizes into the same result model.
+
+<Callout id="file-reference-decision" tone="decision">
+
+**Decision:** accepting a file creates the same validated `AgentPromptFileReference` used by drag/drop. The picker does not merely insert a relative `@path` string. This preserves spaces, stale-file handling, worktree identity, draft recovery, transport safety, and path-redaction rules.
+
+</Callout>
+
+Directories navigate only in the first release. Attaching an entire directory is deferred until provider semantics, indexing cost, and privacy behavior are explicitly designed.
+
+## Trust, privacy, and persistence
+
+- Provider trust is authoritative. Array does not bypass unresolved project trust by independently executing project resources.
+- Catalog metadata, queries, absolute paths, and provider handles remain host-local and never sync to the phone.
+- Personal customization stays in user dotfiles. Array never copies it into Application Support or project `.array/` state.
+- Drafts persist semantic file references through the existing draft store.
+- Skill draft tokens persist only enough visible identity to restore the composer; provider handles are refreshed before invocation.
+- Extension scripts and bundled code are never pre-executed during discovery.
+- Backend or cwd changes cancel in-flight queries and atomically replace the completion context.
+
+<Callout id="trust-risk" tone="risk">
+
+**Highest trust risk:** a filesystem crawler that reads project skill metadata before the provider has accepted project trust can accidentally bypass the provider’s security model. Prefer provider-native catalogs; any Claude filesystem fallback must share the same trust gate and remain read-only.
+
+</Callout>
+
+## Implementation map
+
+### Core semantic contracts
+
+Modify:
+
+- `Sources/ContinuumRevivedCore/AgentCompletionProvider.swift`
+- `Sources/ContinuumRevivedCore/AgentCompletionQuery.swift`
+- `Sources/ContinuumRevivedCore/AgentPrompt.swift`
+- `Sources/ContinuumRevivedCore/AgentComposerDraftStore.swift`
+
+Add suggestion payloads, per-agent completion context, provenance, stable identities, and draft restoration rules. Reuse the existing asynchronous registry, locale-independent normalization, and sync-locality boundary.
+
+### Composer presentation and actions
+
+Modify:
+
+- `Sources/ContinuumRevived/Canvas/AgentComposer/CompletionPopoverController.swift`
+- `Sources/ContinuumRevived/Canvas/AgentComposer/AgentComposerView.swift`
+- `Sources/ContinuumRevived/Canvas/AgentComposer/ComposerTextView.swift`
+- `Sources/ContinuumRevived/Canvas/AgentComposer/ChoiceListView.swift`
+- `Sources/ContinuumRevived/Canvas/AgentComposer/ComposerFileReferenceRailView.swift`
+
+Reuse the passive popover, stale-generation guard, native undo behavior, draft binding, file validation, and chips. Add semantic acceptance, breadcrumbs, directory navigation, provenance rows, trust/disabled presentation, and exact action dispatch.
+
+### File index
+
+Evolve or add beside:
+
+- `Sources/ContinuumRevived/Canvas/FileTreeScanner.swift`
+- `Sources/ContinuumRevived/Canvas/FileTreeOutlineModel.swift`
+- `Sources/ContinuumRevivedCore/AgentFileReferenceRules.swift`
+
+Keep tree presentation separate from indexing and ranking. The current file-tree filter is substring-only. A shared lower-level index can later improve the standalone file-tree tile without forcing the composer to depend on `NSOutlineView` state.
+
+### Runtime wiring
+
+Modify:
+
+- `Sources/ContinuumRevived/Canvas/ManagedAgentTileNSView.swift`
+- `Sources/ContinuumRevived/App/AgentSupervisor.swift`
+- `Sources/ContinuumRevived/App/ContinuumApp.swift`
+
+Bind one registry and immutable context per agent tile. Refresh on backend, Home/worktree, provider trust, or provider catalog change events.
+
+### Provider adapters
+
+Build on:
+
+- `Sources/ContinuumRevivedCore/AgentProviders/PiAgentRunner.swift`
+- planned `Sources/ContinuumRevivedCore/AgentProviders/PiRpcClient.swift`
+- `Sources/ContinuumRevivedCore/AgentProviders/CodexAgentRunner.swift`
+- a focused Codex app-server client
+- `Sources/ContinuumRevivedCore/AgentProviders/ClaudeAgentRunner.swift`
+
+Each adapter owns catalog translation, invocation, capability availability, and provider error mapping.
+
+## Delivery phases
+
+Implementation status and the exact local handoff are tracked in [`PROGRESS.md`](./PROGRESS.md).
+
+### Phase 1 — Semantic completion foundation
+
+Replace string-only selection with typed payloads and agent-scoped context. Keep the user-facing fallback fixtures source-compatible; exercise file, skill, directory, and runtime-command paths with dedicated deterministic providers so placeholders cannot create fake capabilities.
+
+Witnesses:
+
+- a semantic selection cannot silently degrade into text;
+- stale suggestions cannot execute;
+- rebind swaps cwd/backend atomically;
+- paths, queries, and provider handles do not enter sync metadata.
+
+### Phase 2 — Real `@` navigation
+
+Add the bounded fuzzy file index, directory navigation, breadcrumbs, and structured file acceptance.
+
+Witnesses:
+
+- a nested Falcon fixture resolves from `falcon-platform/falcon`, not the outer folder;
+- spaces, quotes, ignored files, deletion, symlinks, and worktree paths;
+- selecting a file produces the same `AgentPrompt` shape as drag/drop;
+- navigation cannot escape an allowed root;
+- deterministic ranking and rapid-query cancellation.
+
+### Phase 3 — Pi catalog and runtime commands
+
+Land Pi RPC discovery/invocation and map real `//compact`.
+
+Witnesses:
+
+- fake `get_commands` catalog with user/project collisions;
+- exact returned invocation names survive selection;
+- compact sends an RPC operation, never prompt text;
+- unresolved trust does not cause Array to load project resources.
+
+### Phase 4 — Codex app-server
+
+Land `skills/list`, structured skill invocation, change events, and the fuzzy-search adapter.
+
+Witnesses:
+
+- `turn/start` includes the exact path returned by `skills/list`;
+- duplicate names remain independently invocable;
+- removed or disabled skills disappear after a change event;
+- no capability requiring app-server silently falls back to `codex exec`.
+
+### Phase 5 — Claude catalog parity
+
+Add provenance-aware metadata discovery and supported explicit skill invocation while retaining Claude-native loading.
+
+Witnesses:
+
+- personal, project, enterprise, and plugin precedence corpus;
+- nested cwd and added-directory behavior;
+- exact duplicates group only in presentation;
+- unsupported client-only commands are not advertised as executable.
+
+### Phase 6 — Product polish and shared indexing
+
+Add conflict badges, local visibility preferences, recency, keyboard/accessibility coverage, and reuse the index beneath the standalone file-tree tile.
+
+## Non-goals
+
+- A new Array-authored skill format.
+- Copying personal dotfiles into Array state.
+- A universal cross-provider precedence algorithm.
+- Executing extension code during discovery.
+- Perfect reproduction of terminal-only Pi extension UI.
+- Attaching whole directories in the first release.
+- Eagerly embedding file contents when a path reference is sufficient.
+- Advertising a slash command that lacks a real managed capability.
+- Renaming or moving historical `docs/38-tickets/` files.
+
+## Verification gate
+
+Each substantive phase gets a deterministic witness that is observed RED before the implementation and GREEN after it.
+
+Run:
+
+1. Focused Core checks for semantic suggestions, identity, provenance, ranking, trust, and sync locality.
+2. Composer AppKit checks for keyboard navigation, native undo, stale cancellation, rebind, chips, disabled states, and accessibility.
+3. Fake Pi RPC and Codex app-server protocol fixtures.
+4. Claude discovery and precedence fixtures.
+5. `scripts/run-matrix.sh`, tolerating only the documented KNOWN-RED legs.
+6. A supervised smoke in an isolated scratch project, never Dylan’s production project root.
+
+Manual product path:
+
+1. Open an agent in the nested Falcon-shaped fixture.
+2. Type `$` and verify personal/project provenance and conflicts.
+3. Select a skill and confirm the provider receives the resolved structured invocation.
+4. Type `@`, descend through two directories, fuzzy-select a file with spaces, and verify a chip appears.
+5. Send and confirm the agent reads the exact worktree file.
+6. Run `//compact` and verify a real compaction event plus measurable context reduction.
+7. Relaunch `~/Desktop/Array Dev.app` through `scripts/dev-app.sh` against its isolated scratch root and verify draft/catalog recovery.
+
+<Checklist
+  id="managed-capability-acceptance"
+  items={[
+    {"id":"semantic","label":"Completion acceptance uses typed payloads rather than universal text insertion","checked":true},
+    {"id":"context","label":"Every query is scoped to one agent backend and checkout root","checked":true},
+    {"id":"files","label":"@ selection and drag/drop produce the same structured file reference","checked":true},
+    {"id":"navigation","label":"Directory navigation is fuzzy, bounded, cancellable, and cannot escape allowed roots","checked":true},
+    {"id":"provenance","label":"Catalog rows preserve backend, scope, source, trust, and conflicts","checked":false},
+    {"id":"pi","label":"Pi uses get_commands and explicit RPC operations","checked":false},
+    {"id":"codex","label":"Codex uses skills/list and structured skill inputs through app-server","checked":false},
+    {"id":"claude","label":"Claude keeps native loading while Array exposes only supported managed capabilities","checked":false},
+    {"id":"compact","label":"//compact cannot reach a model as literal prompt prose","checked":false},
+    {"id":"privacy","label":"Paths, queries, and provider handles stay host-local and out of sync metadata","checked":true},
+    {"id":"matrix","label":"Focused witnesses and the full matrix add no unexplained failures","checked":false},
+    {"id":"manual","label":"The complete flow is witnessed in Array Dev without touching production state","checked":false}
+  ]}
+/>
+
+## Approval boundary
+
+Approval authorizes the phased design above, beginning with semantic completion and the real `@` navigator. It does not authorize provider migration, implementation, release, commit, or push until the relevant phase is separately started. Re-read this plan before implementation and update these files if the architecture or namespace decisions change.

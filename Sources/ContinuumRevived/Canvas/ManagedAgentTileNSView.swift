@@ -113,6 +113,7 @@ final class ManagedAgentTileNSView: TileNSView {
     private var v2AttachmentStore: AgentComposerAttachmentStore?
     private var v2PromptHistory: AgentPromptHistory?
     private var v2CompletionRegistry: AgentCompletionProviderRegistry?
+    private let v2DefaultCompletionRegistry: AgentCompletionProviderRegistry
     private var v2TurnSnapshot: AgentTileTurnSnapshot?
     // The compact row consumes only facts observed on this tile's managed-agent
     // stream. In particular, no receipt-time Date is promoted to a phase anchor;
@@ -217,6 +218,11 @@ final class ManagedAgentTileNSView: TileNSView {
         statusRowPlacement: AgentStatusRowPlacement = .aboveComposer,
         monotonicNow: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     ) {
+        let fileIndex = AgentFileIndex()
+        self.v2DefaultCompletionRegistry = AgentCompletionProviderRegistry(
+            providers: AgentCompletionFixtures.providers().filter { $0.providerID != "fixture.files" }
+                + [AgentFileCompletionProvider(index: fileIndex)]
+        )
         self.threadId = threadId
         self.statusRowPlacement = statusRowPlacement
         self.projectionMonotonicNow = monotonicNow
@@ -283,6 +289,7 @@ final class ManagedAgentTileNSView: TileNSView {
     /// The thread this tile's transcript filters on. The app rebinds incoming
     /// provider events to this before ingest (ticket 88.4b).
     var wiringThreadId: String { threadId }
+    var qaCompletionContext: AgentCompletionContext? { v2Composer?.qaCompletionContext }
     var transcriptCardCount: Int { model.cards.count }
     var activeToolCount: Int { model.activeToolCount }
     var currentAgentStatus: AgentStatus { descriptor.status }
@@ -310,13 +317,13 @@ final class ManagedAgentTileNSView: TileNSView {
         v2DraftStore = draftStore
         v2AttachmentStore = attachmentStore
         v2PromptHistory = promptHistory
-        v2CompletionRegistry = completionRegistry
+        v2CompletionRegistry = completionRegistry ?? v2DefaultCompletionRegistry
         if let agentID = attachedAgentID {
             if let attachmentStore { v2Composer?.bindAttachmentStore(attachmentStore, agentID: agentID) }
             v2Composer?.bindDraftStore(draftStore, agentID: agentID)
             v2Composer?.bindPromptHistory(promptHistory, agentID: agentID)
         }
-        if let completionRegistry { v2Composer?.bindCompletionRegistry(completionRegistry) }
+        if let v2CompletionRegistry { v2Composer?.bindCompletionRegistry(v2CompletionRegistry) }
         hydrateManagedImagesFromDocument()
         try? transcriptCollectionFixture?.updateRenderContext(v2RenderContext)
     }
@@ -345,6 +352,7 @@ final class ManagedAgentTileNSView: TileNSView {
             // name here left the header showing the old Home even though the
             // cwd moved ("selected a new Home did nothing").
             locationProjectName = projectName
+            v2Composer?.bindCompletionContext(supervisor.completionContext(for: agentID))
             refreshLocationStatus()
             return
         }
@@ -363,6 +371,7 @@ final class ManagedAgentTileNSView: TileNSView {
         // tile can learn which checkout this agent works in — before its first
         // event, and without the tile ever reading a repository itself.
         agentSource = supervisor
+        v2Composer?.bindCompletionContext(supervisor.completionContext(for: agentID))
         headerAgentName = supervisor.records[agentID]?.displayName
         displayNameObserverToken = supervisor.addDisplayNameObserver(for: agentID) { [weak self] name in
             guard let self, self.headerAgentName != name else { return }
@@ -469,6 +478,7 @@ final class ManagedAgentTileNSView: TileNSView {
             Task { await v2DraftStore.flush(agentID: agentID) }
         }
         v2Composer?.unbindActionSink()
+        v2Composer?.bindCompletionContext(nil)
         managedImageBindingGeneration &+= 1
         // Keep transcript-owned image metadata/capabilities alive while the
         // transcript remains on screen; resetProjection owns their purge.

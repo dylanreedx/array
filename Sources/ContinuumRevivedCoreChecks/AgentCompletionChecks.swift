@@ -80,12 +80,244 @@ func runAgentCompletionChecks() async throws {
         Set(fixtureProviders.map(\.providerID)).count == fixtureProviders.count,
         "AgentCompletion: fixture provider IDs are not replaceable without collision"
     )
+    let semanticPayloads: [AgentCompletionPayload] = [
+        .insertText("literal"),
+        .file(AgentPromptFileReference(
+            displayName: "README.md",
+            contentType: "text/markdown",
+            fileURL: URL(fileURLWithPath: "/tmp/array-completion-check/README.md")
+        )),
+        .skill(ResolvedSkillInvocation(name: "review", providerHandle: "skill.review")),
+        .promptTemplate(ResolvedPromptTemplate(name: "handoff", prompt: "Prepare a handoff")),
+        .runtimeCommand(ResolvedRuntimeCommand(name: "compact", providerHandle: "runtime.compact")),
+        .directory(DirectoryNavigationTarget(
+            directoryURL: URL(fileURLWithPath: "/tmp/array-completion-check/Sources", isDirectory: true)
+        )),
+    ]
+    let semanticPayloadKinds = Set(semanticPayloads.map { payload in
+        switch payload {
+        case .insertText: return "text"
+        case .file: return "file"
+        case .skill: return "skill"
+        case .promptTemplate: return "template"
+        case .runtimeCommand: return "runtime"
+        case .directory: return "directory"
+        }
+    })
+    expect(
+        semanticPayloadKinds == ["text", "file", "skill", "template", "runtime", "directory"],
+        "AgentCompletion: typed contract does not exercise every semantic acceptance path"
+    )
+
+    let checkoutRoot = URL(fileURLWithPath: "/tmp/array-completion-checkout", isDirectory: true)
+    let context = AgentCompletionContext(
+        agentID: AgentID(rawValue: UUID(uuidString: "12345678-1234-1234-1234-1234567890AB")!),
+        backend: .codex,
+        checkoutRoot: checkoutRoot,
+        gitRoot: checkoutRoot,
+        arrayProjectRoot: URL(fileURLWithPath: "/tmp/array-project", isDirectory: true),
+        trustState: .trusted
+    )
+    let contextualQuery = AgentCompletionQuery(
+        trigger: "@",
+        text: "Source",
+        replacementRange: NSRange(location: 0, length: 7),
+        context: context
+    )
+    expect(
+        contextualQuery.context == context
+            && contextualQuery.context?.backend == .codex
+            && contextualQuery.context?.checkoutRoot == checkoutRoot,
+        "AgentCompletion: one query did not retain its immutable agent/backend/checkout context"
+    )
+
+    let fileManager = FileManager.default
+    let fileIndexRoot = fileManager.temporaryDirectory
+        .appendingPathComponent("array-agent-file-index-\(UUID().uuidString)", isDirectory: true)
+    let falconOuter = fileIndexRoot.appendingPathComponent("falcon-platform", isDirectory: true)
+    let falconRoot = falconOuter.appendingPathComponent("falcon", isDirectory: true)
+    try fileManager.createDirectory(at: falconRoot.appendingPathComponent("Sources/Nested", isDirectory: true), withIntermediateDirectories: true)
+    defer { try? fileManager.removeItem(at: fileIndexRoot) }
+
+    func write(_ relativePath: String, _ contents: String = "fixture") throws {
+        let url = falconRoot.appendingPathComponent(relativePath)
+        try fileManager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(contents.utf8).write(to: url)
+    }
+    func git(_ arguments: [String]) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["git", "-C", falconRoot.path] + arguments
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+        process.waitUntilExit()
+        expect(process.terminationStatus == 0, "AgentCompletion: git fixture command failed: \(arguments.joined(separator: " "))")
+    }
+
+    try write("README.md", "falcon")
+    try write("Sources/FalconClient.swift")
+    try write("Sources/Nested/My Quoted 'File'.swift")
+    try write("Sources/Nested/deleted.swift")
+    try write("ignored.swift")
+    try write(".gitignore", "ignored.swift\n")
+    try Data("outer decoy".utf8).write(to: falconOuter.appendingPathComponent("OUTER.md"))
+    try git(["init", "-q"])
+    try git(["add", ".gitignore", "README.md", "Sources"])
+    try git(["config", "user.name", "Array Check"])
+    try git(["config", "user.email", "array-check@invalid.example"])
+    try git(["commit", "-q", "-m", "fixture"])
+    let worktreeRoot = fileIndexRoot.appendingPathComponent("falcon-worktree", isDirectory: true)
+    try git(["worktree", "add", "-q", "-b", "array-file-index-check", worktreeRoot.path])
+    let worktreeContext = AgentCompletionContext(
+        agentID: AgentID(rawValue: UUID(uuidString: "ABCDEF98-1234-1234-1234-1234567890AB")!),
+        backend: .codex,
+        checkoutRoot: worktreeRoot,
+        gitRoot: worktreeRoot,
+        arrayProjectRoot: falconOuter,
+        trustState: .trusted
+    )
+    let worktreeResults = await AgentFileIndex().suggestions(for: AgentCompletionQuery(
+        trigger: "@", text: "readme", replacementRange: NSRange(location: 0, length: 7), context: worktreeContext
+    ))
+    guard case let .file(worktreeReference) = worktreeResults.first?.payload else {
+        expect(false, "AgentCompletion: a real Git worktree root did not index tracked files")
+        return
+    }
+    expect(
+        worktreeReference.fileURL == worktreeRoot.appendingPathComponent("README.md"),
+        "AgentCompletion: worktree indexing escaped to its primary repository"
+    )
+    let outside = fileIndexRoot.appendingPathComponent("outside", isDirectory: true)
+    try fileManager.createDirectory(at: outside, withIntermediateDirectories: true)
+    try write("Sources/linked-target.swift")
+    try fileManager.createSymbolicLink(
+        at: falconRoot.appendingPathComponent("Sources/outside-link", isDirectory: true),
+        withDestinationURL: outside
+    )
+
+    let falconContext = AgentCompletionContext(
+        agentID: AgentID(rawValue: UUID(uuidString: "FEDCBA98-1234-1234-1234-1234567890AB")!),
+        backend: .codex,
+        checkoutRoot: falconRoot,
+        gitRoot: falconRoot,
+        arrayProjectRoot: falconOuter,
+        trustState: .trusted
+    )
+    let fileIndex = AgentFileIndex(entryLimit: 100, resultLimit: 3)
+    let rootFiles = await fileIndex.suggestions(for: AgentCompletionQuery(
+        trigger: "@", text: "", replacementRange: NSRange(location: 0, length: 1), context: falconContext
+    ))
+    expect(
+        rootFiles.map(\.title) == ["Sources/", "README.md"],
+        "AgentCompletion: empty @ results were not immediate directories-first children: \(rootFiles.map(\.title))"
+    )
+    expect(
+        !rootFiles.contains(where: { $0.detail == "OUTER.md" || $0.detail == "ignored.swift" }),
+        "AgentCompletion: Falcon escaped its nested checkout root or included an ignored file"
+    )
+    guard case let .directory(sourcesTarget) = rootFiles[0].payload else {
+        expect(false, "AgentCompletion: directory row did not carry a navigation payload")
+        return
+    }
+    expect(
+        sourcesTarget.directoryURL == falconRoot.appendingPathComponent("Sources", isDirectory: true),
+        "AgentCompletion: directory payload did not resolve inside Falcon's exact checkout"
+    )
+    let boundedChildren = await fileIndex.suggestions(for: AgentCompletionQuery(
+        trigger: "@", text: "", replacementRange: NSRange(location: 0, length: 1),
+        context: falconContext, navigationPath: "Sources"
+    ))
+    expect(
+        boundedChildren.count == 3 && boundedChildren.first?.title == "Nested/",
+        "AgentCompletion: result ceiling or directory-first scoped order was not enforced"
+    )
+
+    let fuzzyFiles = await fileIndex.suggestions(for: AgentCompletionQuery(
+        trigger: "@", text: "fc", replacementRange: NSRange(location: 0, length: 3),
+        context: falconContext, navigationPath: "Sources"
+    ))
+    expect(
+        fuzzyFiles.first?.detail == "Sources/FalconClient.swift",
+        "AgentCompletion: deterministic basename fuzzy ranking did not prefer FalconClient.swift"
+    )
+    let quotedFiles = await fileIndex.suggestions(for: AgentCompletionQuery(
+        trigger: "@", text: "quoted file", replacementRange: NSRange(location: 0, length: 12),
+        context: falconContext, navigationPath: "Sources/Nested"
+    ))
+    guard case let .file(indexedReference) = quotedFiles.first?.payload else {
+        expect(false, "AgentCompletion: spaced/quoted file did not produce a semantic file payload")
+        return
+    }
+    let dragDropShape = AgentPromptFileReference(
+        displayName: "My Quoted 'File'.swift",
+        contentType: indexedReference.contentType,
+        fileURL: falconRoot.appendingPathComponent("Sources/Nested/My Quoted 'File'.swift")
+    )
+    expect(
+        indexedReference == dragDropShape,
+        "AgentCompletion: @ acceptance did not produce the drag/drop AgentPromptFileReference shape"
+    )
+
+    try fileManager.removeItem(at: falconRoot.appendingPathComponent("Sources/Nested/deleted.swift"))
+    let deleted = await fileIndex.suggestions(for: AgentCompletionQuery(
+        trigger: "@", text: "deleted", replacementRange: NSRange(location: 0, length: 8),
+        context: falconContext
+    ))
+    expect(deleted.isEmpty, "AgentCompletion: a deleted cached path remained actionable")
+    let symlink = await fileIndex.suggestions(for: AgentCompletionQuery(
+        trigger: "@", text: "outside-link", replacementRange: NSRange(location: 0, length: 13),
+        context: falconContext
+    ))
+    expect(symlink.isEmpty, "AgentCompletion: a symlink could navigate outside the checkout")
+    let cancelled = Task {
+        await fileIndex.suggestions(for: AgentCompletionQuery(
+            trigger: "@", text: "Falcon", replacementRange: NSRange(location: 0, length: 7), context: falconContext
+        ))
+    }
+    cancelled.cancel()
+    let cancelledResults = await cancelled.value
+    expect(cancelledResults.isEmpty, "AgentCompletion: cancelled file-index query returned actionable rows")
+
+    let untrusted = AgentCompletionContext(
+        agentID: falconContext.agentID,
+        backend: falconContext.backend,
+        checkoutRoot: falconContext.checkoutRoot,
+        gitRoot: falconContext.gitRoot,
+        arrayProjectRoot: falconContext.arrayProjectRoot,
+        trustState: .untrusted
+    )
+    let untrustedResults = await fileIndex.suggestions(for: AgentCompletionQuery(
+        trigger: "@", text: "", replacementRange: NSRange(location: 0, length: 1), context: untrusted
+    ))
+    expect(untrustedResults.isEmpty, "AgentCompletion: untrusted checkout exposed file capabilities")
+
+    let legacyText = AgentCompletion(id: "legacy", title: "legacy", insertionText: "/legacy")
+    expect(
+        legacyText.payload == .insertText("/legacy"),
+        "AgentCompletion: source-compatible text results lost explicit insertion semantics"
+    )
+
+    let preferredProvenance = AgentCompletionProvenance(
+        backend: .claudeCode,
+        scope: .personal,
+        sourceIdentifier: "~/.claude/commands/help.md",
+        invocationName: "help"
+    )
 
     let slashA = StaticAgentCompletionProvider(
         providerID: "commands-a",
         trigger: "/",
         completions: [
-            AgentCompletion(id: "help-a", title: "help", detail: "Primary help", insertionText: "/help", score: 20),
+            AgentCompletion(
+                id: "help-a",
+                title: "help",
+                detail: "Primary help",
+                insertionText: "/help",
+                score: 20,
+                payload: .promptTemplate(ResolvedPromptTemplate(name: "help", prompt: "Explain available help")),
+                provenance: preferredProvenance
+            ),
             AgentCompletion(id: "history", title: "history", insertionText: "/history", score: 5),
         ]
     )
@@ -110,6 +342,11 @@ func runAgentCompletionChecks() async throws {
     expect(merged.map(\.insertionText) == ["/help"], "AgentCompletion: trigger filtering/static filtering/dedupe was not exact")
     expect(merged[0].id == "help-a" && merged[0].score == 20, "AgentCompletion: deterministic merge did not retain the preferred result")
     expect(merged[0].providerIDs == ["commands-a", "commands-b"], "AgentCompletion: dedupe dropped provider provenance")
+    expect(
+        merged[0].payload == .promptTemplate(ResolvedPromptTemplate(name: "help", prompt: "Explain available help"))
+            && merged[0].provenance == preferredProvenance,
+        "AgentCompletion: deterministic merge detached semantic payload/provenance from the preferred row"
+    )
     expect(!merged.contains(where: { $0.id == "file" }), "AgentCompletion: a provider for another trigger leaked into results")
 
     await registry.register(StaticAgentCompletionProvider(
@@ -168,5 +405,5 @@ func runAgentCompletionChecks() async throws {
     expect(output.contains(expected), "AgentCompletion: negative witness missed the named compiled assertion")
 
     print("Agent completion negative witness observed red (exit \(witness.terminationStatus)): \(expected)")
-    print("Agent completion checks passed: quote/escape/middle-caret detection, replacement registry, deterministic dedupe/rank/provenance, trigger isolation, and stale cancellation")
+    print("Agent completion checks passed: semantic payloads/context, bounded checkout file index/root/ignore/symlink/deletion/fuzzy/navigation/acceptance behavior, quote/escape/middle-caret detection, replacement registry, deterministic dedupe/rank/provenance, trigger isolation, and stale cancellation")
 }

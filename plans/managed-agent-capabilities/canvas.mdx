@@ -1,0 +1,111 @@
+<DesignBoard title="Managed-agent composer capabilities" version={2}>
+  <Section
+    id="composer-states"
+    title="One composer, four typed capability surfaces"
+    subtitle="The active backend and exact agent checkout determine what Array can offer."
+  >
+    <Artboard
+      id="agent-tile-context"
+      label="Managed agent tile with skill picker"
+      surface="desktop"
+      x={0}
+      y={0}
+      order={1}
+    >
+      <Screen
+        surface="desktop"
+        caption="The picker stays anchored to the native composer inside the existing managed-agent tile."
+        html={"<div style=\"display:flex;gap:14px;padding:16px;box-sizing:border-box;height:100%;background:var(--wf-paper)\"><aside class=\"wf-box\" style=\"width:180px;display:flex;flex-direction:column;gap:10px;padding:12px\"><strong>Array</strong><span class=\"wf-muted\">Agents</span><div class=\"wf-card\" style=\"padding:9px\"><strong>Falcon review</strong><br/><small>Working · 03:18</small></div><div style=\"flex:1\"></div><small>falcon-platform/falcon</small></aside><main style=\"flex:1;min-width:0;display:flex;align-items:center;justify-content:center\"><section class=\"wf-card\" style=\"width:min(560px,90%);height:88%;display:flex;flex-direction:column;padding:0;overflow:hidden\"><header style=\"display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1.4px solid var(--wf-line)\"><strong>Falcon review</strong><span class=\"wf-pill\">Codex</span><div style=\"flex:1\"></div><small>develop</small></header><div style=\"flex:1;padding:16px;display:flex;flex-direction:column;gap:12px\"><p>I found the credentials route and its shared form primitives.</p><div class=\"wf-card\" style=\"padding:10px\"><small>Read</small><br/><strong>ui/src/routes/admin/credentials/+page.svelte</strong></div></div><div style=\"padding:12px;border-top:1.4px solid var(--wf-line);position:relative\"><div class=\"wf-card\" style=\"position:absolute;left:12px;right:12px;bottom:74px;padding:8px;display:flex;flex-direction:column;gap:4px;background:var(--wf-card)\"><div style=\"display:flex;gap:8px;align-items:center;padding:8px;background:var(--wf-accent-soft)\"><strong>mcp-test</strong><span class=\"wf-pill accent\">Project</span><span class=\"wf-pill\">shared</span></div><div style=\"display:flex;gap:8px;align-items:center;padding:8px\"><strong>mcp-test-suite</strong><span class=\"wf-pill\">Project</span><span class=\"wf-pill\">Codex / Pi</span></div><div style=\"display:flex;gap:8px;align-items:center;padding:8px\"><strong>visual-plan</strong><span class=\"wf-pill\">Personal</span></div></div><div class=\"wf-box\" style=\"display:flex;align-items:center;gap:8px;padding:11px 12px\"><span>$mcp</span><div style=\"flex:1\"></div><button aria-label=\"Send\"><span data-icon=\"send\"></span></button></div><div style=\"display:flex;gap:8px;margin-top:8px\"><span class=\"wf-pill\">Codex</span><span class=\"wf-pill\">gpt-5.6</span><span class=\"wf-pill\">xhigh</span></div></div></section></main></div>"}
+      />
+    </Artboard>
+
+    <Artboard
+      id="skill-picker"
+      label="Skills — $"
+      surface="popover"
+      x={1500}
+      y={0}
+      order={2}
+    >
+      <Screen
+        surface="popover"
+        caption="Provider-resolved skills keep scope and provenance visible."
+        html={"<div style=\"display:flex;flex-direction:column;gap:8px;padding:16px;box-sizing:border-box;height:100%\"><div style=\"display:flex;align-items:center;gap:8px\"><strong>Skills</strong><div style=\"flex:1\"></div><span class=\"wf-pill\">Codex</span></div><input value=\"mcp\" aria-label=\"Find a skill\"/><div class=\"wf-card\" style=\"display:flex;flex-direction:column;padding:0\"><div style=\"padding:10px;background:var(--wf-accent-soft)\"><strong>mcp-test</strong><br/><small>Run a single blind MCP scenario</small><div style=\"display:flex;gap:5px;margin-top:6px\"><span class=\"wf-pill accent\">Project</span><span class=\"wf-pill\">shared</span></div></div><div style=\"padding:10px;border-top:1.4px solid var(--wf-line)\"><strong>mcp-test-suite</strong><br/><small>Run the progressive MCP suite</small><div style=\"display:flex;gap:5px;margin-top:6px\"><span class=\"wf-pill\">Project</span><span class=\"wf-pill\">Codex / Pi</span></div></div><div style=\"padding:10px;border-top:1.4px solid var(--wf-line)\"><strong>mcp-test-suite</strong> <span class=\"wf-pill\">Conflict</span><br/><small>Claude-specific same-name variant</small></div></div><small>Return select · ↑↓ navigate · Esc close</small></div>"}
+      />
+    </Artboard>
+
+    <Artboard
+      id="runtime-picker"
+      label="Commands — / and //"
+      surface="popover"
+      x={2200}
+      y={0}
+      order={3}
+    >
+      <Screen
+        surface="popover"
+        caption="Runtime operations are visually and semantically distinct from prompt templates."
+        html={"<div style=\"display:flex;flex-direction:column;gap:10px;padding:16px;box-sizing:border-box;height:100%\"><div style=\"display:flex;align-items:center\"><strong>Commands</strong><div style=\"flex:1\"></div><span class=\"wf-pill\">Pi</span></div><div class=\"wf-box\" style=\"padding:9px\">//comp</div><small>ARRAY RUNTIME</small><div class=\"wf-card\" style=\"padding:10px;background:var(--wf-accent-soft)\"><div style=\"display:flex;align-items:center;gap:8px\"><strong>compact</strong><span class=\"wf-pill accent\">Available</span></div><p>Compact this agent’s real session context.</p><small>Pi RPC · emits compaction event</small></div><hr/><small>PROVIDER TEMPLATES</small><div style=\"padding:8px\"><strong>/handoff</strong><br/><small>Personal prompt template</small></div><small>Selecting //compact runs a capability. It never sends “/compact” to the model.</small></div>"}
+      />
+    </Artboard>
+
+    <Artboard
+      id="file-picker"
+      label="Files — @"
+      surface="popover"
+      x={2900}
+      y={0}
+      order={4}
+    >
+      <Screen
+        surface="popover"
+        caption="Directories navigate like cd; accepting a file creates a structured reference chip."
+        html={"<div style=\"display:flex;flex-direction:column;gap:9px;padding:16px;box-sizing:border-box;height:100%\"><div style=\"display:flex;align-items:center;gap:5px;white-space:nowrap;overflow:hidden\"><strong>falcon</strong><span data-icon=\"chevronRight\"></span><span>ui</span><span data-icon=\"chevronRight\"></span><span>src</span></div><input value=\"cred rou\" aria-label=\"Find a file\"/><div class=\"wf-card\" style=\"display:flex;flex-direction:column;padding:0\"><div style=\"display:flex;align-items:center;gap:8px;padding:9px\"><span data-icon=\"chevronRight\"></span><strong>routes</strong><div style=\"flex:1\"></div><small>directory</small></div><div style=\"padding:9px;background:var(--wf-accent-soft);border-top:1.4px solid var(--wf-line)\"><strong>CredentialsRoute.svelte</strong><br/><small>ui/src/routes/admin/credentials/CredentialsRoute.svelte</small></div><div style=\"padding:9px;border-top:1.4px solid var(--wf-line)\"><strong>credential-router.ts</strong><br/><small>server/routing/credential-router.ts</small></div></div><label style=\"display:flex;align-items:center;gap:8px\"><input type=\"checkbox\"/> Show ignored and hidden</label><div style=\"display:flex;gap:8px;align-items:center\"><span class=\"wf-chip accent\">@CredentialsRoute.svelte</span><div style=\"flex:1\"></div><small>Return attach</small></div></div>"}
+      />
+    </Artboard>
+  </Section>
+
+  <Annotation
+    id="agent-context-note"
+    title="Context is per agent"
+    targetId="agent-tile-context"
+    placement="bottom"
+  >
+
+The active backend, `record.cwd`, checkout root, git root, and provider trust state are captured together. A nested Falcon checkout must never resolve from the outer Array project folder.
+
+  </Annotation>
+
+  <Annotation
+    id="typed-selection-note"
+    title="Selection is an action"
+    targetId="skill-picker"
+    placement="bottom"
+  >
+
+Rows carry typed payloads. Skills invoke provider-owned capabilities; files become validated references; runtime commands call explicit RPCs. Text insertion is only one payload case.
+
+  </Annotation>
+
+  <Annotation
+    id="namespace-note"
+    title="Three namespaces"
+    targetId="runtime-picker"
+    placement="bottom"
+  >
+
+`$` means skills, `/` means provider templates/commands, and `//` means Array/runtime operations. This prevents a control operation from masquerading as prompt prose.
+
+  </Annotation>
+
+  <Annotation
+    id="file-note"
+    title="Reuse the safe file path"
+    targetId="file-picker"
+    placement="bottom"
+  >
+
+The picker creates the same `AgentPromptFileReference` and chip used by drag/drop. Absolute transport paths remain host-local and never enter sync metadata.
+
+  </Annotation>
+</DesignBoard>
