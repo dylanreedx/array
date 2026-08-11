@@ -25,6 +25,9 @@ public struct CodexAgentStateReader: AgentStateReader {
 
     private let sessionsRoot: URL
     private let config: CodexReaderConfig
+    private var rolloutLocator: CodexRolloutLocator {
+        CodexRolloutLocator(sessionsRoot: sessionsRoot, archivedSessionsRoot: nil)
+    }
     public static var defaultSessionsRoot: URL {
         URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
             .appendingPathComponent(".codex/sessions", isDirectory: true)
@@ -184,32 +187,7 @@ public struct CodexAgentStateReader: AgentStateReader {
     }
 
     private func rolloutFiles() -> [URL] {
-        guard
-            let enumerator = FileManager.default.enumerator(
-                at: sessionsRoot,
-                includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
-                options: [],
-                errorHandler: nil
-            )
-        else {
-            return []
-        }
-
-        var files: [(url: URL, mtime: Date)] = []
-        for case let url as URL in enumerator {
-            guard url.lastPathComponent.hasPrefix("rollout-"),
-                  url.pathExtension == "jsonl" else { continue }
-            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
-            guard values?.isRegularFile == true else { continue }
-            files.append((url, values?.contentModificationDate ?? .distantPast))
-        }
-
-        return files.sorted { lhs, rhs in
-            if lhs.mtime != rhs.mtime {
-                return lhs.mtime > rhs.mtime
-            }
-            return lhs.url.path < rhs.url.path
-        }.map(\.url)
+        rolloutLocator.rolloutFiles()
     }
 
     private func modificationDate(of url: URL) -> Date? {
@@ -218,25 +196,8 @@ public struct CodexAgentStateReader: AgentStateReader {
     }
 
     private func readSessionMeta(from url: URL) -> CodexSessionMeta? {
-        guard
-            let handle = try? FileHandle(forReadingFrom: url),
-            let line = handle.readLine(maxBytes: 64 * 1024)
-        else {
-            return nil
-        }
-        try? handle.close()
-
-        guard
-            let object = Self.jsonObject(from: line),
-            object["type"] as? String == "session_meta",
-            let payload = object["payload"] as? [String: Any],
-            let cwd = payload["cwd"] as? String,
-            let timestampRaw = payload["timestamp"] as? String ?? object["timestamp"] as? String,
-            let timestamp = Self.parseISO8601(timestampRaw)
-        else {
-            return nil
-        }
-        return CodexSessionMeta(cwd: cwd, timestamp: timestamp)
+        guard let meta = rolloutLocator.readSessionMeta(from: url) else { return nil }
+        return CodexSessionMeta(cwd: meta.cwd, timestamp: meta.timestamp)
     }
 
     private func readTailEvents(at url: URL) -> [CodexRolloutEvent] {
@@ -293,17 +254,6 @@ public struct CodexAgentStateReader: AgentStateReader {
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
-    private static func parseISO8601(_ raw: String) -> Date? {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractional.date(from: raw) {
-            return date
-        }
-
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
-        return plain.date(from: raw)
-    }
 }
 
 private struct CodexSessionMeta: Equatable {
@@ -328,12 +278,9 @@ private extension FileHandle {
         while data.count < maxBytes {
             let chunk = try? read(upToCount: 1)
             guard let chunk, !chunk.isEmpty else { break }
-            if chunk.first == UInt8(ascii: "\n") {
-                break
-            }
+            if chunk.first == UInt8(ascii: "\n") { break }
             data.append(chunk)
         }
-        guard !data.isEmpty else { return nil }
-        return String(data: data, encoding: .utf8)
+        return data.isEmpty ? nil : String(data: data, encoding: .utf8)
     }
 }

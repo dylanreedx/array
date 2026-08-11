@@ -93,6 +93,10 @@ struct NormalizedTranscriptMessage: Equatable {
     var reasoning: String = ""
     /// Assistant tool calls, in order.
     var toolCalls: [ToolCall] = []
+    /// Whether this normalized row represents a conversational message for the
+    /// restored-count notice. Codex reasoning/tool rows are separate rollout
+    /// records belonging to the assistant message, so they set this false.
+    var countsAsMessage: Bool = true
     /// toolResult: which tool call it completes, and whether it failed.
     var toolCallId: String = ""
     var toolFailed: Bool = false
@@ -169,7 +173,7 @@ public enum ManagedTranscriptRehydrator {
             case .userPrompt:
                 closeTurn()
                 steps.append(.userPrompt(message.text))
-                messageCount += 1
+                if message.countsAsMessage { messageCount += 1 }
             case .assistant:
                 let turnId = ensureTurn()
                 if !message.reasoning.isEmpty {
@@ -191,7 +195,7 @@ public enum ManagedTranscriptRehydrator {
                     steps.append(.event(.itemStarted(
                         threadId: threadId, itemId: call.id, kind: kind, title: title)))
                 }
-                messageCount += 1
+                if message.countsAsMessage { messageCount += 1 }
             case .toolResult:
                 _ = ensureTurn()
                 let kind = itemKinds[message.toolCallId] ?? .commandExecution
@@ -229,6 +233,9 @@ extension ManagedTranscriptRehydrator {
         public var model: String
         public var claudeCLIAvailable: Bool
         public var homeURL: URL
+        public var codexThreadId: String?
+        public var codexHomeURL: URL
+        public var preferredRoute: AgentBackendConfig.Route?
         public var limits: RehydrationLimits
 
         public init(
@@ -237,6 +244,9 @@ extension ManagedTranscriptRehydrator {
             model: String,
             claudeCLIAvailable: Bool,
             homeURL: URL,
+            codexThreadId: String? = nil,
+            codexHomeURL: URL? = nil,
+            preferredRoute: AgentBackendConfig.Route? = nil,
             limits: RehydrationLimits = RehydrationLimits()
         ) {
             self.agentUUID = agentUUID
@@ -244,16 +254,19 @@ extension ManagedTranscriptRehydrator {
             self.model = model
             self.claudeCLIAvailable = claudeCLIAvailable
             self.homeURL = homeURL
+            self.codexThreadId = codexThreadId
+            self.codexHomeURL = codexHomeURL
+                ?? homeURL.appendingPathComponent(".codex", isDirectory: true)
+            self.preferredRoute = preferredRoute
             self.limits = limits
         }
     }
 
-    /// Reads the previous session's transcript, choosing the provider by FILE
-    /// EXISTENCE (the two id formats cannot collide). If both a claude and a pi
-    /// session file exist for this agent — a model switched between launches —
-    /// the same routing policy the runner uses breaks the tie
-    /// (`ClaudeCLIBackend.routesToClaude`). Returns nil when neither exists, so
-    /// the caller falls back to the plain "previous session" notice.
+    /// Reads the previous session's transcript. Claude and Pi use Array-derived
+    /// identities; Codex is accepted only when its session_meta exactly matches
+    /// the persisted `codexThreadId`. The runner's preferred route wins when its
+    /// proven file exists, preventing an older provider file from hiding the
+    /// current conversation.
     ///
     /// Call OFF the main thread: session files run to hundreds of messages.
     public static func rehydrate(_ inputs: Inputs) -> RehydratedTranscript? {
@@ -266,30 +279,51 @@ extension ManagedTranscriptRehydrator {
             homeURL: inputs.homeURL,
             cwd: inputs.cwd,
             sessionId: piSessionId(forAgentUUID: inputs.agentUUID))
+        let codexURL = inputs.codexThreadId.flatMap {
+            CodexSessionTranscriptReader.locateRollout(
+                codexHomeURL: inputs.codexHomeURL, threadId: $0)
+        }
 
         let claudeExists = fileExists(claudeURL)
         let piExists = piURL != nil
+        let codexExists = codexURL != nil
 
-        let useClaude: Bool
-        if claudeExists, piExists {
-            useClaude = ClaudeCLIBackend.routesToClaude(
-                model: inputs.model, claudeCLIAvailable: inputs.claudeCLIAvailable)
-        } else if claudeExists {
-            useClaude = true
-        } else if piExists {
-            useClaude = false
+        let available: [AgentBackendConfig.Route] = [
+            claudeExists ? .claude : nil,
+            codexExists ? .codex : nil,
+            piExists ? .pi : nil,
+        ].compactMap { $0 }
+        guard !available.isEmpty else { return nil }
+
+        let route: AgentBackendConfig.Route
+        if let preferred = inputs.preferredRoute, available.contains(preferred) {
+            route = preferred
+        } else if available.count == 1 {
+            route = available[0]
+        } else if codexExists, inputs.model.hasPrefix("openai-codex/") {
+            route = .codex
+        } else if claudeExists, piExists {
+            route = ClaudeCLIBackend.routesToClaude(
+                model: inputs.model, claudeCLIAvailable: inputs.claudeCLIAvailable) ? .claude : .pi
         } else {
+            // Multiple historical providers and no routing fact that proves
+            // which is current: keep the honest notice instead of guessing.
             return nil
         }
 
-        if useClaude {
+        switch route {
+        case .claude:
             return ClaudeSessionTranscriptReader.read(
                 sessionFileURL: claudeURL, threadId: threadId, limits: inputs.limits)
-        } else if let piURL {
+        case .codex:
+            guard let codexURL, let codexThreadId = inputs.codexThreadId else { return nil }
+            return CodexSessionTranscriptReader.read(
+                sessionFileURL: codexURL, threadId: codexThreadId, limits: inputs.limits)
+        case .pi:
+            guard let piURL else { return nil }
             return PiSessionTranscriptReader.read(
                 sessionFileURL: piURL, threadId: threadId, limits: inputs.limits)
         }
-        return nil
     }
 
     static func fileExists(_ url: URL) -> Bool {

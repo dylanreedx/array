@@ -1,6 +1,8 @@
 # 03 — Transcript rehydration on resume
 
-Status: planned, mapped, not started. Dylan's intent (2026-08-09): on relaunch
+Status: **shipped for Claude/Pi 2026-08-10; Codex source implementation added
+2026-08-10 under plan 09, with installed-app smoke intentionally pending.**
+Dylan's intent (2026-08-09): on relaunch
 a restored agent tile should show the **full prior transcript**, presented as a
 **summary that expands** to the whole previous conversation — replacing today's
 empty "Previous session — send a prompt to continue." notice
