@@ -56,9 +56,12 @@ func runAgentContextOccupancyChecks() {
     expect(notEnriched.usedTokens == nil && notEnriched.maxTokens == nil,
            "…and it must not be enriched into one: that is the 237% reading, got \(String(describing: notEnriched.usedTokens))/\(String(describing: notEnriched.maxTokens))")
 
-    // The provider's own window wins over the catalogue's. codex reports 258,400
-    // for gpt-5.6-sol where pi's models-store says 272,000; the process running
-    // the turn is the authority on its own limit.
+    // A window already ON the snapshot wins over the catalogue's — the process
+    // running the turn is the authority on its own limit. No stream we consume
+    // states one today (codex's `model_context_window` is in its rollout log,
+    // not in `codex exec --json`), so this guards the seam rather than a live
+    // path: the day a translator does report a window, the catalogue must not
+    // overwrite it.
     let providerWindow = AgentContextOccupancy.withDerivedOccupancy(codex, contextWindow: 272_000)
     expect(providerWindow.maxTokens == 258_400,
            "a window the provider reported must not be overwritten by the catalogue's, got \(String(describing: providerWindow.maxTokens))")
