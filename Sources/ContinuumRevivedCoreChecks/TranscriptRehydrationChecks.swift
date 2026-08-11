@@ -351,8 +351,14 @@ private func runTranscriptRehydrationDispatchChecks() {
         let home = base.appendingPathComponent("codex-archive", isDirectory: true)
         let codexHome = home.appendingPathComponent(".codex", isDirectory: true)
         let archived = writeCodex(home: home, threadId: "archived-id", marker: "ARCHIVED", archived: true)
-        expect(CodexSessionTranscriptReader.locateRollout(codexHomeURL: codexHome, threadId: "archived-id")?.path == archived.path,
-               "Codex locator must find an exact archived rollout when no active copy exists")
+        // Resolve BOTH sides: the fixture URL keeps the `/var/...` spelling the
+        // temp dir handed us, while the locator's directory enumerator returns
+        // the symlink-resolved `/private/var/...` for the very same file. Compare
+        // canonical paths or this asserts on the spelling instead of the file.
+        let locatedArchived = CodexSessionTranscriptReader.locateRollout(
+            codexHomeURL: codexHome, threadId: "archived-id")
+        expect(locatedArchived?.resolvingSymlinksInPath().path == archived.resolvingSymlinksInPath().path,
+               "Codex locator must find an exact archived rollout when no active copy exists; wanted \(archived.resolvingSymlinksInPath().path) got \(String(describing: locatedArchived?.resolvingSymlinksInPath().path))")
         _ = writeCodex(home: home, threadId: "duplicate-id", marker: "ONE", filename: "rollout-one.jsonl")
         _ = writeCodex(home: home, threadId: "duplicate-id", marker: "TWO", filename: "rollout-two.jsonl")
         expect(CodexSessionTranscriptReader.locateRollout(codexHomeURL: codexHome, threadId: "duplicate-id") == nil,
