@@ -9,6 +9,7 @@ Last updated: 2026-08-10
 - Base: `825bbe8` (`array/integration`, `Resolve relay program preflight`)
 - Design commit: `ffc53f0` (`docs: plan managed agent capabilities`)
 - Phase 1 implementation commit: `721a1d2` (`feat: add semantic agent completions`)
+- Phase 2 implementation: complete locally in this progress update
 - Remote state: local only; nothing pushed
 
 The primary checkout and production Array app/state were not modified or launched.
@@ -34,6 +35,19 @@ The primary checkout and production Array app/state were not modified or launche
 - Routed resolved file selections through the same structured draft reference/chip collection used by drag/drop.
 - Preserved the registry's existing async cancellation, deterministic ranking, deduplication, and provider aggregation while retaining the preferred row's payload and provenance.
 
+### Phase 2 real `@` navigation
+
+- Added a Core-owned `AgentFileIndex` actor with context-keyed caching, a 50,000-entry default ceiling, a 50-result default ceiling, cancellation guards, and explicit invalidation.
+- Made Git the authoritative discovery path for repositories through `git ls-files --cached --others --exclude-standard`, preserving tracked files while honoring standard ignore rules.
+- Added a bounded, hidden/cache-excluding, symlink-safe fallback walker for non-Git folders.
+- Kept the exact managed record `cwd` as the checkout/index root; the Array project, repository helper, and process current directory are never consulted by the index.
+- Added stable fuzzy ordering: exact basename, basename prefix, basename subsequence, path-segment prefix, then relative-path subsequence, with deterministic gap/directory/path-length/lexical ties.
+- Rechecked existence at query time so a path deleted after indexing cannot remain actionable, and excluded symlinks from both navigation and acceptance.
+- Centralized conservative file content-type resolution in `AgentFileReferenceRules`, shared by drag/drop and indexed acceptance, so both produce the same `AgentPromptFileReference` contract even when Launch Services returns a dynamic UTI.
+- Added host-only `navigationPath` query state, visible disabled-row breadcrumbs, Return/Right/Tab descent, and Left/empty-query Backspace ascent without placing the selected directory path into draft text.
+- Bound each managed tile to a real file registry and an immutable completion context derived from its supervisor record. Reattach/Home changes rebind and cancel the previous completion generation; detach clears the context.
+- Replaced only the fake `@README.md` tile provider. Existing slash/skill fallback fixtures remain text-only and cannot claim semantic capabilities.
+
 ## Deterministic witnesses
 
 Passed:
@@ -43,13 +57,23 @@ Passed:
 /Users/dylan/Documents/personal/Array/.build/debug/Array --agent-completion-semantic-check
 ```
 
-The Core witness covers all payload cases, immutable query context, source-compatible text defaults, preferred payload/provenance retention through deduplication, trigger isolation, cancellation, and the existing required RED subprocess.
+The Core witness covers all payload cases, immutable query context, source-compatible text defaults, preferred payload/provenance retention through deduplication, trigger isolation, cancellation, and the existing required RED subprocess. Its real temporary Git fixture additionally proves:
+
+- `falcon-platform/falcon` is the only indexed root; an `OUTER.md` decoy cannot leak in;
+- ignored and deleted files cannot appear;
+- symlinks cannot escape the checkout;
+- files with spaces and quotes remain literal capabilities;
+- empty-query directory-first browsing, deterministic fuzzy order, result bounds, cancellation, untrusted-context refusal, and directory payloads;
+- indexed acceptance equals the drag/drop `AgentPromptFileReference` shape.
 
 The AppKit witness proves:
 
 - a rejected runtime command returns its exact typed payload and does not insert deliberately poisonous fallback text;
 - a resolved file removes only the `@` query and becomes one structured file-reference chip;
-- rebinding replaces agent/backend/checkout context for the visible query.
+- Right-arrow directory descent shows a breadcrumb while leaving only `@` in the draft;
+- empty-query Backspace ascends without draft mutation;
+- rebinding replaces agent/backend/checkout context for the visible query;
+- a real managed tile binds the supervisor record's exact nested checkout root.
 
 The `Array` app product and `ContinuumRevivedCoreChecks` product both build successfully. `git diff --check` passed before the implementation commit.
 
@@ -61,23 +85,11 @@ The visual-plan package was not cached, and network package resolution is blocke
 
 ## Not completed yet
 
-- No managed-agent tile currently binds a real `AgentCompletionContext`; only the contract, composer seam, and rebind witness exist.
-- No real file index or fuzzy `@` navigation exists.
 - No Pi, Claude, or Codex capability catalog adapter exists.
 - No provider-native skill/template/runtime invocation is wired.
-- No precedence/conflict UI, trust-disabled rows, breadcrumbs, or live invalidation exists.
+- No precedence/conflict UI, trust-disabled rows, or filesystem/backend-settings live invalidation exists. Deleted indexed paths are filtered immediately; adding a new path requires explicit index invalidation or a context rebind.
 - Nothing has been pushed, merged, packaged, or released.
 
-## Recommended next slice: Phase 2, real `@` navigation
+## Recommended next slice: Phase 3, provider discovery
 
-1. Add a Core-owned bounded file-index actor keyed by immutable completion context.
-2. Resolve the allowed root from the managed agent checkout, not Array's globally active project or process cwd.
-3. Use a deterministic fuzzy rank with stable tie-breaking and bounded result count.
-4. Respect ignored files, deletion, symlinks, spaces, quotes, and worktree roots.
-5. Return `.directory` payloads for navigation and `.file` payloads for acceptance.
-6. Add breadcrumb/navigation state outside draft text.
-7. Bind the registry plus context from the managed agent tile and cancel/rebuild on backend or checkout changes.
-8. Prove the Falcon nested-root case: index `falcon-platform/falcon`, never its outer folder.
-9. Prove file selection produces the same `AgentPromptFileReference` shape as drag/drop.
-
-Do not start provider adapters until the `@` index/root boundary and semantic acceptance path are green together.
+The `@` index/root/navigation/semantic-acceptance gate is green together. The next separately authorized slice can add discovery-only Pi/Claude/Codex catalogs behind the existing typed registry. Keep discovery read-only first; provider-native invocation should remain a later independently witnessed step.

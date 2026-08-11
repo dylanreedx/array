@@ -12,6 +12,7 @@ final class CompletionPopoverController {
     private var generation: UInt64 = 0
     private weak var textView: ComposerTextView?
     private var insertionInProgress = false
+    private var completionsByChoiceID: [String: AgentCompletion] = [:]
     private(set) var qaRequestStartCount = 0
 
     var isPresented: Bool { popover.isPresented }
@@ -26,6 +27,7 @@ final class CompletionPopoverController {
         selection: NSRange,
         source: any AgentCompletionSuggestionSource,
         context: AgentCompletionContext?,
+        navigationPath: String?,
         anchor: NSRect,
         relativeTo textView: ComposerTextView,
         onAccept: @escaping (AgentCompletion, NSRange) -> Void
@@ -54,7 +56,8 @@ final class CompletionPopoverController {
             trigger: detectedQuery.trigger,
             text: detectedQuery.text,
             replacementRange: detectedQuery.replacementRange,
-            context: context
+            context: context,
+            navigationPath: detectedQuery.trigger == "@" ? navigationPath : nil
         )
 
         // Hide old-query rows immediately instead of leaving actionable stale
@@ -81,14 +84,26 @@ final class CompletionPopoverController {
                 (key: "completion-\(index)", completion: completion)
             }
             let byKey = Dictionary(uniqueKeysWithValues: keyed.map { ($0.key, $0.completion) })
+            self.completionsByChoiceID = byKey
+            var items: [ChoiceItem] = []
+            if query.trigger == "@", let navigationPath = query.navigationPath, !navigationPath.isEmpty {
+                let rootName = query.context?.checkoutRoot.lastPathComponent ?? "checkout"
+                items.append(ChoiceItem(
+                    id: "completion-breadcrumb",
+                    title: ([rootName] + navigationPath.split(separator: "/").map(String.init)).joined(separator: "  ›  "),
+                    detail: "Left or Backspace to go up",
+                    enabled: false
+                ))
+            }
+            items.append(contentsOf: keyed.map {
+                ChoiceItem(
+                    id: $0.key,
+                    title: $0.completion.title,
+                    detail: $0.completion.detail
+                )
+            })
             self.popover.present(
-                items: keyed.map {
-                    ChoiceItem(
-                        id: $0.key,
-                        title: $0.completion.title,
-                        detail: $0.completion.detail
-                    )
-                },
+                items: items,
                 selectedID: nil,
                 anchor: anchor,
                 relativeTo: textView,
@@ -115,7 +130,12 @@ final class CompletionPopoverController {
     /// editor first responder so typing and IME continue through TextKit.
     @discardableResult
     func perform(_ command: ChoiceListCommand) -> Bool {
-        popover.perform(command)
+        if command == .open,
+           let focusedID = popover.listView?.focusedID,
+           let completion = completionsByChoiceID[focusedID] {
+            guard case .directory = completion.payload else { return true }
+        }
+        return popover.perform(command)
     }
 
     /// Called for Escape, caret movement that has no active query, and tile
@@ -131,6 +151,7 @@ final class CompletionPopoverController {
         popover.dismiss()
         textView?.suggestionsAreVisible = false
         textView = nil
+        completionsByChoiceID = [:]
     }
 
     // Deterministic AppKit probes inspect the real presented list and panel.

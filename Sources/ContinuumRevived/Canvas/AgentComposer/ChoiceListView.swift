@@ -18,7 +18,7 @@ struct ChoiceItem: Identifiable, Equatable {
 }
 
 enum ChoiceListCommand {
-    case previous, next, first, last, accept, cancel
+    case previous, next, first, last, accept, open, ascend, cancel
 }
 
 /// Token-painted choice rows with one keyboard and accessibility selection path.
@@ -130,9 +130,11 @@ final class ChoiceListView: NSView, TokenThemed {
             focusedID = enabled.last?.id
             updateRows()
             announceFocusedChoice()
-        case .accept:
+        case .accept, .open:
             guard let item = items.first(where: { $0.id == focusedID && $0.enabled }) else { return }
             choose(item)
+        case .ascend:
+            break
         case .cancel:
             onDismiss?()
         }

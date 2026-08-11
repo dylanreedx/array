@@ -2131,6 +2131,22 @@ final class AgentSupervisor {
         return cwd.deletingLastPathComponent().deletingLastPathComponent()
     }
 
+    /// Immutable completion scope for one managed tile. The checkout root is the
+    /// record's exact cwd—even when the Array project or parent repository is a
+    /// broader directory—so Falcon-like nested repositories cannot leak outward.
+    func completionContext(for agentID: AgentID) -> AgentCompletionContext? {
+        guard let record = records[agentID] else { return nil }
+        let checkoutRoot = URL(fileURLWithPath: record.cwd, isDirectory: true).standardizedFileURL
+        return AgentCompletionContext(
+            agentID: agentID,
+            backend: AgentBackendConfig.resolved(),
+            checkoutRoot: checkoutRoot,
+            gitRoot: checkoutRoot,
+            arrayProjectRoot: Self.repositoryRoot(of: record).standardizedFileURL,
+            trustState: .trusted
+        )
+    }
+
     // MARK: - Fan-out (P2D.6)
 
     /// One selected work item: the identifier the source surface knows it by (a
@@ -4257,11 +4273,13 @@ private final class CompletionProbeState: @unchecked Sendable {
     private var returned = 0
     private var queries: [String] = []
     private var contexts: [AgentCompletionContext?] = []
+    private var navigationPaths: [String?] = []
 
     func record(_ query: AgentCompletionQuery) {
         lock.withLock {
             queries.append(query.text)
             contexts.append(query.context)
+            navigationPaths.append(query.navigationPath)
         }
     }
     func markStarted() { lock.withLock { started += 1 } }
@@ -4270,6 +4288,7 @@ private final class CompletionProbeState: @unchecked Sendable {
     var returnedCount: Int { lock.withLock { returned } }
     var observedQueries: [String] { lock.withLock { queries } }
     var observedContexts: [AgentCompletionContext?] { lock.withLock { contexts } }
+    var observedNavigationPaths: [String?] { lock.withLock { navigationPaths } }
 }
 
 /// The stale branch deliberately ignores task cancellation and completes after a
@@ -4312,6 +4331,29 @@ private struct CompletionProbeSource: AgentCompletionSuggestionSource {
                     displayName: "README.md",
                     contentType: "text/markdown",
                     fileURL: URL(fileURLWithPath: "/tmp/array-completion-probe/README.md")
+                ))
+            )]
+        }
+        if query.trigger == "@", query.text == "dir" {
+            return [AgentCompletion(
+                id: "sources-directory",
+                title: "Sources/",
+                insertionText: "@Sources",
+                payload: .directory(DirectoryNavigationTarget(
+                    directoryURL: URL(fileURLWithPath: "/tmp/array-context-a/Sources", isDirectory: true)
+                ))
+            )]
+        }
+        if query.trigger == "@", query.text.isEmpty, query.navigationPath == "Sources" {
+            return [AgentCompletion(
+                id: "nested-file",
+                title: "Nested.swift",
+                detail: "Sources/Nested.swift",
+                insertionText: "@Sources/Nested.swift",
+                payload: .file(AgentPromptFileReference(
+                    displayName: "Nested.swift",
+                    contentType: "public.swift-source",
+                    fileURL: URL(fileURLWithPath: "/tmp/array-context-a/Sources/Nested.swift")
                 ))
             )]
         }
@@ -4608,6 +4650,28 @@ func runAgentCompletionSemanticChecks() async throws {
         throw fail("file result did not become one structured draft reference")
     }
 
+    replaceText("@dir")
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, {
+        composer.qaCompletionTitles == ["Sources/"]
+    }) else { throw fail("directory result did not present") }
+    window.sendEvent(try event(keyCode: 124, characters: "", windowNumber: window.windowNumber))
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, {
+        textView.string == "@"
+            && state.observedNavigationPaths.last == "Sources"
+            && composer.qaCompletionTitles == ["array-context-a  ›  Sources", "Nested.swift"]
+    }) else {
+        throw fail("directory acceptance mutated the draft with a path or failed to show scoped breadcrumbs")
+    }
+    let observationsBeforeAscend = state.observedNavigationPaths.count
+    window.sendEvent(try event(keyCode: 51, characters: "\u{8}", windowNumber: window.windowNumber))
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, {
+        textView.string == "@"
+            && state.observedNavigationPaths.count > observationsBeforeAscend
+            && state.observedNavigationPaths.last! == nil
+    }) else {
+        throw fail("empty-query Backspace did not ascend without mutating draft text")
+    }
+
     replaceText("/he")
     guard await waitUntil(timeout: 1, pollInterval: 0.01, {
         state.observedContexts.last == contextA
@@ -4618,6 +4682,40 @@ func runAgentCompletionSemanticChecks() async throws {
         state.observedContexts.last == contextB
             && composer.qaCompletionTitles == ["help", "hello"]
     }) else { throw fail("rebind did not atomically replace backend/cwd context") }
+
+    let managedRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("array-completion-managed-root-\(UUID().uuidString)", isDirectory: true)
+        .appendingPathComponent("falcon-platform/falcon", isDirectory: true)
+    try FileManager.default.createDirectory(at: managedRoot, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: managedRoot.deletingLastPathComponent().deletingLastPathComponent()) }
+    let managedStore = AgentStore(
+        applicationSupportDirectory: managedRoot.deletingLastPathComponent().appendingPathComponent("agent-store", isDirectory: true)
+    )
+    let managedSupervisor = AgentSupervisor(
+        store: managedStore,
+        makeRunner: { _ in ScriptedAgentRunner(script: []) }
+    )
+    let managedAgentID = managedSupervisor.spawn(
+        role: "completion-root",
+        prompt: nil,
+        cwd: managedRoot,
+        model: AgentModelConfig.resolvedFromDefaults().model,
+        thinking: AgentModelConfig.resolvedFromDefaults().thinking
+    )
+    let managedTile = ManagedAgentTileNSView(tile: Tile(
+        id: UUID(),
+        kind: .managedAgent,
+        title: "completion-root",
+        frame: TileFrame(x: 0, y: 0, width: 520, height: 420),
+        zPosition: .fromLegacyRank(1),
+        runtimeRef: nil,
+        metadata: TileMetadata(launchProfileId: "managed")
+    ))
+    managedTile.attach(agentID: managedAgentID, supervisor: managedSupervisor)
+    defer { managedTile.detach() }
+    guard managedTile.qaCompletionContext?.checkoutRoot == managedRoot.standardizedFileURL else {
+        throw fail("managed tile did not bind the record's exact nested checkout root")
+    }
 }
 
 /// Gated on `--image-supervisor-check`. This is intentionally separate from the

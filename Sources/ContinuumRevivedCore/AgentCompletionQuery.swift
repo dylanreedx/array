@@ -46,17 +46,22 @@ public struct AgentCompletionQuery: Equatable, Sendable {
     public let text: String
     public let replacementRange: NSRange
     public let context: AgentCompletionContext?
+    /// Host-local browser scope for `@` completion. This is presentation state,
+    /// not prompt text, and is intentionally absent from every persisted draft.
+    public let navigationPath: String?
 
     public init(
         trigger: Character,
         text: String,
         replacementRange: NSRange,
-        context: AgentCompletionContext? = nil
+        context: AgentCompletionContext? = nil,
+        navigationPath: String? = nil
     ) {
         self.trigger = trigger
         self.text = text
         self.replacementRange = replacementRange
         self.context = context
+        self.navigationPath = navigationPath
     }
 }
 

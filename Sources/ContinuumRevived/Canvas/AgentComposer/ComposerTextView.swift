@@ -201,6 +201,8 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate {
         case 115: command = .first
         case 119: command = .last
         case 36, 76: command = .accept
+        case 124, 48: command = .open // Right or Tab descends into a focused directory.
+        case 123, 51: command = .ascend // Left or empty-query Backspace ascends.
         default: return false
         }
         return composerObserver?.composerRequestedCompletionCommand(self, command: command) == true

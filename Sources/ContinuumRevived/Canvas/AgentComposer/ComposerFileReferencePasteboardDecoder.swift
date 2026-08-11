@@ -36,8 +36,7 @@ enum ComposerFileReferencePasteboardDecoder {
         guard let values,
               values.isRegularFile == true,
               values.isReadable == true,
-              let type = values.contentType,
-              AgentFileReferenceRules.isReferenceable(type)
+              let type = AgentFileReferenceRules.referenceableContentType(for: url)
         else { return nil }
         let name = ComposerImageDisplay.sanitizedFilename(values.name ?? url.lastPathComponent)
         return AgentPromptFileReference(displayName: name, contentType: type.identifier, fileURL: url)

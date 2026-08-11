@@ -94,6 +94,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     private var completionSource: any AgentCompletionSuggestionSource =
         AgentCompletionProviderRegistry(providers: AgentCompletionFixtures.providers())
     private var completionContext: AgentCompletionContext?
+    /// `@` browsing state belongs to the live composer surface, never the draft.
+    private var completionNavigationPath: String?
     private var draftStore: AgentComposerDraftStore?
     private var draftAgentID: AgentID?
     private weak var actionSink: (any AgentTileActionSink)?
@@ -607,7 +609,18 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         _ textView: ComposerTextView,
         command: ChoiceListCommand
     ) -> Bool {
-        completionController.perform(command)
+        if command == .ascend {
+            guard let active = AgentCompletionQueryDetector.activeQuery(
+                in: textView.string,
+                selection: textView.selectedRange()
+            ), active.trigger == "@", active.text.isEmpty,
+                  let current = completionNavigationPath, !current.isEmpty else { return false }
+            let parent = (current as NSString).deletingLastPathComponent
+            completionNavigationPath = parent == "." || parent.isEmpty ? nil : parent
+            refreshCompletionSuggestions()
+            return true
+        }
+        return completionController.perform(command)
     }
 
     func composerRequestedDismissSuggestions(_ textView: ComposerTextView) {
@@ -620,6 +633,11 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
             completionController.dismiss()
             return
         }
+        let activeQuery = AgentCompletionQueryDetector.activeQuery(
+            in: textView.string,
+            selection: textView.selectedRange()
+        )
+        if activeQuery?.trigger != "@" { completionNavigationPath = nil }
         completionController.update(
             text: textView.string,
             selection: textView.selectedRange(),
@@ -628,6 +646,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
                 triggers: variant.completionTriggers
             ),
             context: completionContext,
+            navigationPath: completionNavigationPath,
             anchor: completionAnchor(),
             relativeTo: textView
         ) { [weak self] completion, replacementRange in
@@ -642,8 +661,13 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         case let .file(reference):
             textView.insertCompletion("", replacementRange: replacementRange)
             addFileReferences([reference])
-        case .directory:
-            _ = onCompletionAction?(completion.payload)
+        case let .directory(target):
+            guard let root = completionContext?.checkoutRoot.standardizedFileURL else { return }
+            let directory = target.directoryURL.standardizedFileURL
+            guard directory.path.hasPrefix(root.path + "/") else { return }
+            completionNavigationPath = String(directory.path.dropFirst(root.path.count + 1))
+            textView.insertCompletion("@", replacementRange: replacementRange)
+            DispatchQueue.main.async { [weak self] in self?.refreshCompletionSuggestions() }
         case .skill, .promptTemplate, .runtimeCommand:
             guard onCompletionAction?(completion.payload) == true else { return }
             textView.insertCompletion("", replacementRange: replacementRange)
@@ -1078,6 +1102,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     var qaCompletionFocusedTitle: String? { completionController.qaFocusedTitle }
     var qaCompletionPanelFrame: NSRect? { completionController.qaPanelFrame }
     var qaCompletionRequestStartCount: Int { completionController.qaRequestStartCount }
+    var qaCompletionContext: AgentCompletionContext? { completionContext }
 
     func qaBindCompletionSource(_ source: any AgentCompletionSuggestionSource) {
         bindCompletionSource(source)
@@ -1095,6 +1120,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
 
     func bindCompletionContext(_ context: AgentCompletionContext?) {
         completionController.dismiss()
+        completionNavigationPath = nil
         completionContext = context
         refreshCompletionSuggestions()
     }
