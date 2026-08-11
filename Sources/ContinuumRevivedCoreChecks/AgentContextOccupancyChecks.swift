@@ -36,11 +36,32 @@ func runAgentContextOccupancyChecks() {
     expect(AgentContextOccupancy.promptTokens(from: claude) == 42_000,
            "claude occupancy must sum input + cache read + cache write, got \(String(describing: AgentContextOccupancy.promptTokens(from: claude)))")
 
-    // codex: input_tokens is already the total; cached is a subset. Summing it
-    // would double-count the cached portion.
-    let codex = snapshot(source: .codexTurnUsage, input: 66_300, output: 1_500, cacheRead: 60_000)
-    expect(AgentContextOccupancy.promptTokens(from: codex) == 66_300,
-           "codex occupancy must be input_tokens alone, got \(String(describing: AgentContextOccupancy.promptTokens(from: codex)))")
+    // codex: ONLY a per-request reading counts. `token_count` sets `usedTokens`
+    // from `last_token_usage`; that is the occupancy.
+    let codex = snapshot(source: .codexTurnUsage, input: 73_176, output: 1_203,
+                         cacheRead: 70_400, used: 74_379, max: 258_400)
+    expect(AgentContextOccupancy.promptTokens(from: codex) == 74_379,
+           "codex occupancy is its per-request total, got \(String(describing: AgentContextOccupancy.promptTokens(from: codex)))")
+
+    // THE 237% REGRESSION, with the exact numbers that produced it. A
+    // `turn.completed.usage` block carries the session CUMULATIVE totals and no
+    // `usedTokens`; deriving occupancy from its `inputTokens` divided 643,673 by
+    // a 272,000 window and painted 237%. It must answer nil instead, and must
+    // not be enriched into a fake reading either.
+    let codexCumulative = snapshot(source: .codexTurnUsage, input: 643_673, output: 3_938,
+                                   cacheRead: 557_824)
+    expect(AgentContextOccupancy.promptTokens(from: codexCumulative) == nil,
+           "a cumulative codex block has no occupancy — it is the whole session added up, got \(String(describing: AgentContextOccupancy.promptTokens(from: codexCumulative)))")
+    let notEnriched = AgentContextOccupancy.withDerivedOccupancy(codexCumulative, contextWindow: 272_000)
+    expect(notEnriched.usedTokens == nil && notEnriched.maxTokens == nil,
+           "…and it must not be enriched into one: that is the 237% reading, got \(String(describing: notEnriched.usedTokens))/\(String(describing: notEnriched.maxTokens))")
+
+    // The provider's own window wins over the catalogue's. codex reports 258,400
+    // for gpt-5.6-sol where pi's models-store says 272,000; the process running
+    // the turn is the authority on its own limit.
+    let providerWindow = AgentContextOccupancy.withDerivedOccupancy(codex, contextWindow: 272_000)
+    expect(providerWindow.maxTokens == 258_400,
+           "a window the provider reported must not be overwritten by the catalogue's, got \(String(describing: providerWindow.maxTokens))")
 
     // pi's per-message usage does not document whether input includes cache, so
     // it is deliberately left underived rather than guessed at.

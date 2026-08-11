@@ -37,6 +37,13 @@ private func runCodexTranslatorMappingChecks() {
         #"{"type":"item.started","item":{"id":"item_3","type":"command_execution","command":"/bin/zsh -lc 'SECRET-FAILING-COMMAND'","aggregated_output":"","exit_code":null,"status":"in_progress"}}"#,
         #"{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"/bin/zsh -lc 'SECRET-FAILING-COMMAND'","aggregated_output":"SECRET-FAILURE-OUTPUT\n","exit_code":2,"status":"failed"}}"#,
         #"{"type":"item.completed","item":{"id":"item_4","type":"agent_message","text":"Done."}}"#,
+        // `token_count` arrives DURING the turn and is the only per-request
+        // reading codex gives. Shape copied from a real rollout in
+        // ~/.codex/sessions: `last_token_usage` is this request,
+        // `total_token_usage` is the whole session, and the provider states its
+        // own window. Deriving occupancy from the cumulative block is what put
+        // 237% on the meter.
+        #"{"type":"token_count","info":{"total_token_usage":{"input_tokens":643673,"cached_input_tokens":557824,"cache_write_input_tokens":0,"output_tokens":3938,"reasoning_output_tokens":1700,"total_tokens":647611},"last_token_usage":{"input_tokens":73176,"cached_input_tokens":70400,"cache_write_input_tokens":0,"output_tokens":1203,"reasoning_output_tokens":516,"total_tokens":74379},"model_context_window":258400}}"#,
         #"{"type":"turn.completed","usage":{"input_tokens":46162,"cached_input_tokens":41216,"cache_write_input_tokens":0,"output_tokens":231,"reasoning_output_tokens":0}}"#,
     ]
 
@@ -57,6 +64,25 @@ private func runCodexTranslatorMappingChecks() {
         .itemStarted(threadId: codexTID, itemId: "run1-item_3", kind: .commandExecution, title: "Shell"),
         .itemCompleted(threadId: codexTID, itemId: "run1-item_3", kind: .commandExecution, status: .failed),
         .contentDelta(threadId: codexTID, turnId: turnId, streamKind: .assistant, delta: "Done."),
+        // token_count, mid-turn: usage accounting takes the SESSION total…
+        .tokenUsageUpdated(threadId: codexTID, snapshot: TokenUsageSnapshot(
+            inputTokens: 643673, outputTokens: 3938, totalCostUsd: nil)),
+        // …while occupancy takes the PER-REQUEST block, with the provider's own
+        // window. 74,379 of 258,400 is 29%; the cumulative 643,673 against a
+        // catalogue 272,000 was the 237% the meter used to paint.
+        .contextWindowUpdated(threadId: codexTID, snapshot: AgentContextWindowSnapshot(
+            usedTokens: 74379,
+            maxTokens: 258400,
+            inputTokens: 73176,
+            outputTokens: 1203,
+            cacheReadTokens: 70400,
+            cacheWriteTokens: 0,
+            totalProcessedTokens: 74379,
+            totalCostUsd: nil,
+            automaticCompaction: nil,
+            observedAt: observedAt,
+            source: .codexTurnUsage,
+            freshness: .live)),
         .tokenUsageUpdated(threadId: codexTID, snapshot: TokenUsageSnapshot(
             // input_tokens is ALREADY the total — NOT summed with cached (the
             // opposite of the claude backend). 46162, not 46162+41216.

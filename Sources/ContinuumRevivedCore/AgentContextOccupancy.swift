@@ -6,17 +6,24 @@ import Foundation
 /// size, so the radial meter had nothing to fill. Both numbers exist, though,
 /// and neither is invented here:
 ///
-/// - **Window size** comes from pi's published models-store (`contextWindow`),
-///   the same file the display names come from. Absent store, absent reading.
-/// - **Occupancy** is the prompt actually sent on the last turn — everything the
-///   model had in context at that moment. The composition differs per provider
-///   and is taken from each translator's documented shape, NOT assumed:
-///   claude's `input_tokens` excludes cache, so the cache counters must be added;
-///   codex's `input_tokens` is already the total and must NOT be summed again.
+/// - **Window size** comes from the PROVIDER first when it says (codex reports
+///   `model_context_window`, 258,400 for gpt-5.6-sol), and otherwise from pi's
+///   published models-store (`contextWindow`, which says 272,000 for the same
+///   model). The provider running the turn is the authority on its own window.
+///   Absent both, absent reading.
+/// - **Occupancy** is the prompt on the LAST REQUEST — everything the model had
+///   in context at that moment. Per provider, from each translator's documented
+///   shape, NOT assumed: claude's `input_tokens` excludes cache, so the cache
+///   counters must be added; codex publishes a per-request block of its own.
 ///
-/// This is a last-turn reading, not a live one: it is accurate as of the most
-/// recent completed turn and does not move while a turn is in flight. Callers
-/// present it as such.
+/// THE TRAP, paid for once: a cumulative number is not an occupancy. Codex's
+/// `turn.completed.usage` totals the whole SESSION, and using it drove the meter
+/// to 237% — a percentage that only ever climbs. Occupancy must come from a
+/// per-request reading, and anything cumulative belongs to cost accounting.
+///
+/// Liveness differs by provider: codex emits `token_count` repeatedly DURING a
+/// turn, so its reading moves as the agent works. claude reports at turn end,
+/// so its reading is last-turn. Callers present what they have.
 public enum AgentContextOccupancy {
     /// The prompt-token total for the observed turn, or nil when the snapshot's
     /// source has no documented occupancy shape (pi's per-message usage does not
@@ -33,10 +40,19 @@ public enum AgentContextOccupancy {
             let total = parts.reduce(0, +)
             return total > 0 ? total : nil
         case .codexTurnUsage:
-            // codex's input_tokens is ALREADY the total prompt; cached_input_tokens
-            // is a subset of it (see CodexEventTranslator). Summing double-counts.
-            guard let input = snapshot.inputTokens, input > 0 else { return nil }
-            return input
+            // ONLY a per-request reading counts here. `token_count` sets
+            // `usedTokens` from codex's `last_token_usage`; `turn.completed.usage`
+            // carries the SESSION CUMULATIVE totals and sets no `usedTokens` at
+            // all, so it correctly answers nil rather than offering a number that
+            // grows without bound.
+            //
+            // This used to return `inputTokens`, on the true-but-irrelevant
+            // grounds that codex does not split cache out of it. The number is
+            // right about cache and wrong about scope: it is the whole session
+            // added up, so the meter read 237% of a 272,000-token window off
+            // 643,673 cumulative input.
+            guard let used = snapshot.usedTokens, used > 0 else { return nil }
+            return used
         case .providerSessionStats:
             // Authoritative occupancy is reported directly when it exists.
             return snapshot.usedTokens

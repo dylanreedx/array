@@ -418,6 +418,13 @@ enum AgentRadialContextMeterPresenter {
                 warningMarker: nil)
         }
         let arithmetic = occupancyArithmetic(snapshot)
+        // RAW, NOT CAPPED — a deliberate contract (`--ui-geometry-check`:
+        // "over-capacity label lost raw arithmetic"). A reading above 100% is
+        // how a wrong denominator becomes visible: the 237% that codex's
+        // cumulative session total produced was spotted on sight and fixed at
+        // the source in `AgentContextOccupancy`. Capping it here would have hidden
+        // the defect instead, and would also lie about a context that genuinely
+        // overflows before the provider compacts it.
         let rawPercent = arithmetic.map { Int(($0.fraction * 100).rounded()) }
         let renderFraction = arithmetic?.fraction
         // Non-authoritative sources (claude/codex per-turn usage) carry token

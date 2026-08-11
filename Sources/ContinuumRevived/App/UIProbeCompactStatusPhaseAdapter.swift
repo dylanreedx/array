@@ -296,6 +296,13 @@ extension UIProbeGeometry {
                     "stale context arithmetic must pass through unchanged and still read as a number, got \(context.label)")
         try require(context.detailText.contains("Freshness: stale"),
                     "staleness must still be disclosed in the meter tooltip, got \(context.detailText)")
+
+        // An over-capacity reading keeps its RAW number by contract (the
+        // over-capacity assertions in `--ui-geometry-check`). 237% was not a
+        // display bug — the display faithfully reported a wrong denominator, and
+        // that is what made it findable. The fix belongs in
+        // `AgentContextOccupancy`, which no longer derives occupancy from
+        // codex's cumulative session totals.
         try require(AgentRadialContextMeterPresenter.present(
             AgentContextWindowSnapshot(
                 usedTokens: 90,

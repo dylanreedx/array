@@ -101,6 +101,9 @@ public struct CodexEventTranslator {
         case "turn.failed":
             return translateTurnFailed(object)
 
+        case "token_count":
+            return tokenCountEvents(object)
+
         default:
             // item.updated, and any event the normalized timeline does not need.
             return []
@@ -224,11 +227,78 @@ public struct CodexEventTranslator {
         return events
     }
 
+    /// codex `token_count`, which arrives **DURING** a turn, repeatedly, and is
+    /// the only honest source for "how full is the context right now".
+    ///
+    /// THREE THINGS THIS GETS RIGHT THAT `turn.completed.usage` CANNOT
+    /// (measured against a real rollout in `~/.codex/sessions`, after the meter
+    /// was observed reading 237%):
+    ///
+    ///   1. `last_token_usage` is THIS request; `total_token_usage` is the whole
+    ///      session added up. The context holds the former. Reading the latter
+    ///      makes the meter climb past 100% and never come down — 643,673
+    ///      cumulative input against a 272,000 window is where 237% came from.
+    ///   2. `model_context_window` is the provider's own number (258,400 for
+    ///      gpt-5.6-sol) and it disagrees with pi's catalogue (272,000). The
+    ///      provider running the turn is the authority on its own window.
+    ///   3. It is emitted mid-turn, so the ring fills while the agent works
+    ///      instead of jumping once the turn ends.
+    ///
+    /// `usedTokens` is `last.total_tokens` (prompt + completion): the next
+    /// request carries this turn's output back in as input, so it is the closest
+    /// thing to "what the model is about to be handed".
+    private func tokenCountEvents(_ object: [String: Any]) -> [AgentRuntimeEvent] {
+        guard let info = object["info"] as? [String: Any] else { return [] }
+        let last = info["last_token_usage"] as? [String: Any]
+        let total = info["total_token_usage"] as? [String: Any]
+        // Prefer the per-request block; a `token_count` without one is not worth
+        // guessing at, because the only other number available is cumulative.
+        guard let last else { return [] }
+        let used = Self.intValue(last["total_tokens"])
+        let input = Self.intValue(last["input_tokens"])
+        let output = Self.intValue(last["output_tokens"])
+        let window = Self.intValue(info["model_context_window"])
+        guard (used ?? 0) > 0 else { return [] }
+        var events: [AgentRuntimeEvent] = []
+        // Cost/usage accounting still wants the SESSION total — that is a
+        // different question from occupancy and the cumulative number is the
+        // right answer to it.
+        if let total, let totalInput = Self.intValue(total["input_tokens"]) {
+            events.append(.tokenUsageUpdated(
+                threadId: threadId,
+                snapshot: TokenUsageSnapshot(
+                    inputTokens: totalInput,
+                    outputTokens: Self.intValue(total["output_tokens"]) ?? 0,
+                    totalCostUsd: nil)))
+        }
+        events.append(.contextWindowUpdated(
+            threadId: threadId,
+            snapshot: AgentContextWindowSnapshot(
+                usedTokens: used,
+                maxTokens: window,
+                inputTokens: input,
+                outputTokens: output,
+                cacheReadTokens: Self.intValue(last["cached_input_tokens"]),
+                cacheWriteTokens: Self.intValue(last["cache_write_input_tokens"]),
+                totalProcessedTokens: used,
+                totalCostUsd: nil,
+                automaticCompaction: nil,
+                observedAt: now(),
+                source: .codexTurnUsage,
+                freshness: .live)))
+        return events
+    }
+
     /// codex `turn.completed.usage`. **Token semantics differ from claude:**
     /// `input_tokens` is already the TOTAL prompt tokens and `cached_input_tokens`
     /// is a SUBSET of it (OpenAI convention) — do NOT sum, or you double-count.
     /// No cost field (subscription, not metered) → `totalCostUsd = nil`. A
     /// zero-token block publishes nothing (don't clobber real telemetry).
+    ///
+    /// THIS BLOCK IS CUMULATIVE and therefore never sets `usedTokens`: it is the
+    /// session's running total, not what is in the context. `token_count` above
+    /// is what fills the meter; this stays for the turn-end cost/usage summary
+    /// and for a codex build that emits no `token_count` at all.
     private func usageEvents(_ raw: Any?) -> [AgentRuntimeEvent] {
         guard let usage = raw as? [String: Any] else { return [] }
         let input = Self.intValue(usage["input_tokens"])
