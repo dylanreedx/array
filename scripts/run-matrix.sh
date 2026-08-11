@@ -228,6 +228,7 @@ run_app_check .build/debug/Array --ui-test-support-check
 # Also source-scans Sources/ContinuumRevived so no view can construct its own
 # PiAgentRunner and become a second owner.
 run_app_check .build/debug/Array --agent-supervisor-check
+run_app_check .build/debug/Array --agent-display-name-check
 # P2A.7: agents persisted by a previous launch are adopted at boot — idle, with
 # their identity/model/role intact, the tiled one re-resolved from its tileId and
 # carrying a previous-session notice — and a prompt is what starts them again.

@@ -129,6 +129,7 @@ final class ManagedAgentTileNSView: TileNSView {
     /// (P5.5 live finding, `plan-P5.5-review-corrections.md` defect 1).
     private var capabilityObserverToken: UUID?
     private var runtimeObservationObserverToken: UUID?
+    private var displayNameObserverToken: UUID?
     private let toolDetailStore = AgentToolDetailStore()
     private let managedImageThumbnailPipeline = ComposerImageIOThumbnailPipeline()
     private var managedImageMetadata: [AgentImageAttachmentID: AgentImageAttachmentMetadata] = [:]
@@ -363,6 +364,11 @@ final class ManagedAgentTileNSView: TileNSView {
         // event, and without the tile ever reading a repository itself.
         agentSource = supervisor
         headerAgentName = supervisor.records[agentID]?.displayName
+        displayNameObserverToken = supervisor.addDisplayNameObserver(for: agentID) { [weak self] name in
+            guard let self, self.headerAgentName != name else { return }
+            self.headerAgentName = name
+            self.applyAgentHeader(status: self.descriptor.status)
+        }
         locationProjectName = projectName
         applyBranchContext(supervisor.branchContext(for: agentID))
         refreshLocationStatus()
@@ -454,6 +460,10 @@ final class ManagedAgentTileNSView: TileNSView {
         if let runtimeObservationObserverToken, let agentID = attachedAgentID {
             agentSource?.removeRuntimeObservationObserver(runtimeObservationObserverToken, for: agentID)
             self.runtimeObservationObserverToken = nil
+        }
+        if let displayNameObserverToken, let agentID = attachedAgentID {
+            agentSource?.removeDisplayNameObserver(displayNameObserverToken, for: agentID)
+            self.displayNameObserverToken = nil
         }
         if let agentID = attachedAgentID, let v2DraftStore {
             Task { await v2DraftStore.flush(agentID: agentID) }
@@ -2205,6 +2215,7 @@ final class ManagedAgentTileNSView: TileNSView {
             + "titleActions=\(titleBarContextMenuForQA().items.map(\.title))"
     }
     var qaUsesV2HeaderShell: Bool { agentHeader.superview != nil }
+    var qaAgentHeaderName: String { agentHeader.qaName }
     func qaSubmitPrompt(_ prompt: String) {
         guard let composer = v2Composer else { return }
         composer.apply(AgentComposerDraft(

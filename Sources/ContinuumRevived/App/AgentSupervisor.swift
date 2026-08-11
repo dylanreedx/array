@@ -869,6 +869,10 @@ final class AgentSupervisor {
     private let nameGenerationTimeout: TimeInterval
     private let attachmentStore: AgentComposerAttachmentStore
     private var runtimeObservationObservers: [AgentID: [UUID: (AgentRuntimeObservation) -> Void]] = [:]
+    /// Live views of an agent's identity. Names are record state rather than
+    /// runtime events, so the transcript stream cannot carry first-prompt,
+    /// manual, or generated renames to an already-attached tile.
+    private var displayNameObservers: [AgentID: [UUID: (String) -> Void]] = [:]
     /// App-lifetime recovery owner. This is deliberately independent of tile
     /// subscriptions so launch failures and provider rejection restore drafts
     /// even when no tile remains bound.
@@ -1150,6 +1154,30 @@ final class AgentSupervisor {
         runtimeObservationObservers[id]?[token] = nil
         if runtimeObservationObservers[id]?.isEmpty == true {
             runtimeObservationObservers[id] = nil
+        }
+    }
+
+    @discardableResult
+    func addDisplayNameObserver(
+        for id: AgentID,
+        _ observer: @escaping (String) -> Void
+    ) -> UUID {
+        let token = UUID()
+        displayNameObservers[id, default: [:]][token] = observer
+        return token
+    }
+
+    func removeDisplayNameObserver(_ token: UUID, for id: AgentID) {
+        displayNameObservers[id]?[token] = nil
+        if displayNameObservers[id]?.isEmpty == true {
+            displayNameObservers[id] = nil
+        }
+    }
+
+    private func notifyDisplayNameChanged(for record: AgentRecord) {
+        guard let observers = displayNameObservers[record.id] else { return }
+        for observer in observers.values {
+            observer(record.displayName)
         }
     }
 
@@ -3693,24 +3721,28 @@ final class AgentSupervisor {
 
     private func persist(_ record: AgentRecord) {
         do {
-            let merged = try withAgentStoreLock {
+            let persisted = try withAgentStoreLock {
                 var candidate = record
                 // Ordinary mutations (rename, tile binding, lifecycle, and
                 // activity) may come from a supervisor restored before another
                 // supervisor allocated a child. Read the durable parent while the
                 // same store-level lock is held and never lower its high-water.
-                if let durable = try store.load(id: record.id) {
+                let durable = try store.load(id: record.id)
+                if let durable {
                     candidate.nextChildOrdinal = max(
                         candidate.nextChildOrdinal,
                         durable.nextChildOrdinal
                     )
                 }
                 try upsertRecord(candidate)
-                return candidate
+                return (record: candidate, previousDisplayName: durable?.displayName)
             }
             // Keep the live copy coherent too: a stale parent write that was
             // merged upward must not leave this supervisor holding the old value.
-            records[record.id] = merged
+            records[record.id] = persisted.record
+            if persisted.previousDisplayName != persisted.record.displayName {
+                notifyDisplayNameChanged(for: persisted.record)
+            }
         } catch {
             warn("AgentSupervisor: could not persist agent \(record.id.rawValue.uuidString): \(error)")
         }
@@ -5863,6 +5895,73 @@ private func checkGeneratedNameOneShot<Failure: Error>(
     return "P4.5 async cached capability gate with bounded noisy/hanging login-shell witness; fake-pi stdin/--no-session with controlled HOME/config artifact absence, strict one-field JSON/noise rejection, auth/executable gates, exact companion-envelope prompt/generated scrub, production CAS, supervisor-owned burst cap/release, normal-exit/input-failure/timeout process-group cleanup, bounded pipe drains, and prior-name preservation"
 }
 
+/// Focused witness for record-backed names reaching an already-attached tile.
+/// Kept separate from the broad supervisor corpus so a failure in an unrelated
+/// composer contract cannot prevent this live identity boundary from running.
+@MainActor
+func runAgentDisplayNameChecks() async throws {
+    struct CheckError: Error, CustomStringConvertible {
+        let description: String
+    }
+    func fail(_ message: String) -> CheckError { CheckError(description: message) }
+
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-agent-display-name-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = AgentStore(applicationSupportDirectory: root)
+    let config = AgentModelConfig.resolvedFromDefaults()
+    let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+    let runner = ScriptedAgentRunner(script: [.sessionStateChanged(.ready)])
+    let supervisor = AgentSupervisor(store: store, makeRunner: { _ in runner })
+
+    func makeView(for id: AgentID) throws -> ManagedAgentTileNSView {
+        let tile = Tile(
+            id: UUID(), kind: .managedAgent, title: "GPT-5.6",
+            frame: TileFrame(x: 0, y: 0, width: 480, height: 320),
+            zPosition: .fromLegacyRank(0), runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed-agent")
+        )
+        let view = ManagedAgentTileNSView(tile: tile)
+        view.attach(agentID: id, supervisor: supervisor)
+        guard view.qaAgentHeaderName == AgentRecord.defaultAgentName else {
+            throw fail("a fresh attached tile did not show the record's sentinel")
+        }
+        return view
+    }
+
+    let promptedID = supervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd,
+        model: config.model, thinking: config.thinking
+    )
+    let promptedView = try makeView(for: promptedID)
+    defer { promptedView.detach() }
+    supervisor.send("Fix\n\tparser", to: promptedID)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+              runner.runCount == 1 && !supervisor.isRunning(promptedID)
+          }),
+          promptedView.qaAgentHeaderName == "Fix parser" else {
+        throw fail("a first-prompt name did not reach the attached tile header: \(promptedView.qaAgentHeaderName)")
+    }
+    guard supervisor.rename(agentID: promptedID, to: "Human chosen"),
+          promptedView.qaAgentHeaderName == "Human chosen" else {
+        throw fail("a manual name did not reach the attached tile header: \(promptedView.qaAgentHeaderName)")
+    }
+
+    let generatedID = supervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd,
+        model: config.model, thinking: config.thinking
+    )
+    let generatedView = try makeView(for: generatedID)
+    defer { generatedView.detach() }
+    guard let request = supervisor.beginNameGeneration(agentID: generatedID),
+          supervisor.applyGeneratedName("Generated title", for: request, agentID: generatedID),
+          generatedView.qaAgentHeaderName == "Generated title" else {
+        throw fail("a generated name did not reach the attached tile header: \(generatedView.qaAgentHeaderName)")
+    }
+
+    print("agent display names: first-prompt, manual, and generated names refresh attached tile headers")
+}
+
 @MainActor
 private func checkAgentNameContract<Failure: Error>(
     config: AgentModelConfig.Resolution,
@@ -5893,7 +5992,6 @@ private func checkAgentNameContract<Failure: Error>(
           initial.displayName != id.rawValue.uuidString else {
         throw fail("a new agent did not start with the shared sentinel instead of an identifier")
     }
-
     supervisor.send("Fix\n\tparser", to: id)
     guard await waitUntil(timeout: 5, pollInterval: 0.02, { runner.runCount == 1 && !supervisor.isRunning(id) }) else {
         throw fail("the first prompt did not finish in the deterministic naming runner")
