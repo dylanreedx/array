@@ -227,29 +227,55 @@ public struct AgentModelPaletteRow: Equatable, Sendable {
     }
 }
 
-/// A closed agent, offered so it can be brought back. The tile is gone but the
-/// record, transcript and worktree are not — this row is the ONLY way to reach
-/// one once the workspace sidebar's History section is gone, so it carries the
-/// agent id rather than a tile id (a closed agent has no tile, which is exactly
-/// why `jumpToTile` cannot represent it).
-public struct HistoryAgentPaletteRow: Equatable, Sendable {
+/// An agent with NO canvas tile, offered so it can still be reached.
+///
+/// `jumpToTile` is built from tiles on the canvas, so it cannot represent any of
+/// these — and "closed" is not the only tile-less lifecycle. An agent is also
+/// tile-less while headless (never given a tile), snoozed, or settled;
+/// `AgentInventory` unions "tiled or headless" records, and the record's
+/// `displayName` deliberately survives its tile because the AGENT is the entity.
+/// Keyed by agent id for that reason: there is no tile id to key on.
+///
+/// This row is the only way to reach any of them once the workspace sidebar's
+/// agent inbox is gone (.plans/10-command-center-absorbs-sidebar.md).
+public struct TilelessAgentPaletteRow: Equatable, Sendable {
     public let agentId: UUID
     public let displayName: String
     /// Model display name or provider id — the same metadata the inbox row
     /// shows, searchable without becoming part of the command identity.
     public let detail: String?
+    /// Closed (`InboxSection.history`) rather than merely tile-less. Decides
+    /// History vs the live categories, and it is asked of
+    /// `InboxSort.section(for:now:)` at the call site so this type never owns a
+    /// second copy of the rule.
+    public let isClosed: Bool
+    /// Live status word, when the agent has a turn snapshot.
+    public let statusLabel: String?
+    /// Set when the agent is blocked on the user; promotes the row to Needs You
+    /// exactly as it does for a tiled agent.
+    public let attentionReason: CommandCenterAttentionReason?
 
-    public init(agentId: UUID, displayName: String, detail: String? = nil) {
+    public init(
+        agentId: UUID,
+        displayName: String,
+        detail: String? = nil,
+        isClosed: Bool = false,
+        statusLabel: String? = nil,
+        attentionReason: CommandCenterAttentionReason? = nil
+    ) {
         self.agentId = agentId
         self.displayName = displayName
         self.detail = detail
+        self.isClosed = isClosed
+        self.statusLabel = statusLabel
+        self.attentionReason = attentionReason
     }
 }
 
 public enum LaunchPaletteRow: Equatable, Sendable {
     case profile(LaunchPaletteProfileRow)
     case agentModel(AgentModelPaletteRow)
-    case historyAgent(HistoryAgentPaletteRow)
+    case tilelessAgent(TilelessAgentPaletteRow)
     case action(LaunchPaletteAction)
     case project(ProjectPickerRow)
     case workspace(WorkspaceEntry)
@@ -276,7 +302,8 @@ public enum LaunchPaletteRow: Equatable, Sendable {
             }
         case let .jumpToTile(tile): return "Jump to \(tile.title)"
         case let .jumpToZone(zone): return "Jump to \(zone.title)"
-        case let .historyAgent(agent): return "Reopen \(agent.displayName)"
+        case let .tilelessAgent(agent):
+            return agent.isClosed ? "Reopen \(agent.displayName)" : "Open \(agent.displayName)"
         }
     }
 
@@ -284,7 +311,7 @@ public enum LaunchPaletteRow: Equatable, Sendable {
         switch self {
         case let .profile(profile): return profile.isSelectable
         case .agentModel: return true
-        case .historyAgent: return true
+        case .tilelessAgent: return true
         case .action: return true
         case let .project(project): return project.isSelectable
         case let .workspace(workspace): return !workspace.projectIds.isEmpty
@@ -304,11 +331,16 @@ public enum LaunchPaletteRow: Equatable, Sendable {
             let haystacks = [model.displayName, model.id, model.providerName, "agent model provider"].map { $0.lowercased() }
             let queryTokens = query.split(separator: " ").map(String.init)
             return queryTokens.allSatisfy { token in haystacks.contains { $0.contains(token) } }
-        case let .historyAgent(agent):
-            // `history`/`closed`/`reopen` as aliases so the section is findable by
-            // name, not only by remembering what the agent was called.
-            let haystacks = [agent.displayName, agent.detail ?? "", "history closed reopen agent"]
-                .map { $0.lowercased() }
+        case let .tilelessAgent(agent):
+            // Section vocabulary as well as the agent's own name, so the block is
+            // findable without remembering what the agent was called.
+            let vocabulary = agent.isClosed
+                ? "history closed reopen agent"
+                : "agent open headless no tile"
+            let haystacks = [
+                agent.displayName, agent.detail ?? "", agent.statusLabel ?? "",
+                agent.attentionReason?.displayName ?? "", vocabulary,
+            ].map { $0.lowercased() }
             let queryTokens = query.split(separator: " ").map(String.init)
             return queryTokens.allSatisfy { token in haystacks.contains { $0.contains(token) } }
         case let .action(action):
@@ -418,7 +450,7 @@ public enum LaunchPaletteModel {
     public static let defaultItemLimit = 12
     public static let recentItemLimit = 5
 
-    public static func makeRows(profiles: [LaunchPaletteProfileRow], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], contextualActions: [LaunchPaletteAction] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = [], jumpZones: [JumpZoneRow] = [], historyAgents: [HistoryAgentPaletteRow] = []) -> [LaunchPaletteRow] {
+    public static func makeRows(profiles: [LaunchPaletteProfileRow], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], contextualActions: [LaunchPaletteAction] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = [], jumpZones: [JumpZoneRow] = [], tilelessAgents: [TilelessAgentPaletteRow] = []) -> [LaunchPaletteRow] {
         profiles.map(LaunchPaletteRow.profile)
             + CommandRegistry.paletteActions().map(LaunchPaletteRow.action)
             + contextualActions.map(LaunchPaletteRow.action)
@@ -433,7 +465,7 @@ public enum LaunchPaletteModel {
                 LaunchPaletteRow.workspaceAction(.deleteWorkspace(workspace.id), workspace)
             ]
         } + projects.map(LaunchPaletteRow.project)
-            + historyAgents.map(LaunchPaletteRow.historyAgent)
+            + tilelessAgents.map(LaunchPaletteRow.tilelessAgent)
     }
 
     public static func filterRows(_ rows: [LaunchPaletteRow], query: String) -> [LaunchPaletteRow] {
@@ -537,14 +569,31 @@ public enum LaunchPaletteModel {
             return item(row, category, tile.title, subtitleParts.joined(separator: " · "), icon, aliases, tile.attentionReason != nil, true, "tile:\(tile.id.uuidString)")
         case let .jumpToZone(zone):
             return item(row, .agentsAndTiles, zone.title, "Zone", "square.dashed", ["jump", "go", "zone"], false, true, "zone:\(zone.id.uuidString)")
-        case let .historyAgent(agent):
-            // NOT default-visible: History is searched for, never volunteered onto
-            // the empty-query home. NOT a safe recent either — the recent entry
-            // would name an agent that is no longer closed once you reopen it.
-            let subtitle = ["Closed", agent.detail].compactMap { $0 }.joined(separator: " · ")
-            return item(row, .history, agent.displayName, subtitle, "clock.arrow.circlepath",
-                        ["history", "closed", "reopen", "agent"], false, false,
-                        "history-agent:\(agent.agentId.uuidString)")
+        case let .tilelessAgent(agent):
+            // A CLOSED agent draws in History: it is the block you go looking for,
+            // so it is never volunteered onto the empty-query home and is never a
+            // safe recent (reopening ends its membership, leaving the recent
+            // pointing at a section the agent has left).
+            //
+            // A merely TILE-LESS agent — headless, snoozed or settled — is live
+            // work with nowhere to show, so it draws with the other agents, and is
+            // promoted to Needs You when it is blocked on the user exactly as a
+            // tiled agent would be. Those ARE default-visible: an agent waiting on
+            // you must not be something you have to know to search for.
+            let attention = agent.attentionReason
+            let category: CommandCenterCategory = agent.isClosed
+                ? .history
+                : (attention == nil ? .agentsAndTiles : .needsYou)
+            let lead = agent.isClosed ? "Closed" : (attention?.displayName ?? agent.statusLabel ?? "No tile")
+            let subtitle = [lead, agent.detail].compactMap { $0 }.joined(separator: " · ")
+            let icon = agent.isClosed ? "clock.arrow.circlepath" : "sparkles"
+            let aliases = agent.isClosed
+                ? ["history", "closed", "reopen", "agent"]
+                : ["agent", "open", "no tile", "headless", attention?.displayName, agent.statusLabel]
+                    .compactMap { $0 }
+            return item(row, category, agent.displayName, subtitle, icon, aliases,
+                        agent.isClosed ? false : attention != nil, false,
+                        "tileless-agent:\(agent.agentId.uuidString)")
         case let .action(action):
             return actionPresentation(action, row: row)
         }

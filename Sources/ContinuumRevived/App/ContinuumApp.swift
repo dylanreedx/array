@@ -6685,22 +6685,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let jumpZones = (canvasView?.navZoneRenderModels ?? []).map { model in
             JumpZoneRow(id: model.placement.zoneId, title: model.displayName)
         }
-        // Closed agents. `jumpTiles` above cannot represent one — it is built from
-        // tiles ON THE CANVAS and closing a tile is exactly what parks an agent —
-        // so without this the command center has no way to reach History at all.
-        // The membership rule is InboxSort's, not a second copy: ask the same
-        // function the inbox asks, so the two cannot disagree about what "closed"
-        // means (.plans/05-close-to-history.md, .plans/10-command-center-absorbs-sidebar.md).
-        let historyNow = Date()
-        let historyAgents = buildAgentInboxRows(now: historyNow)
-            .filter { InboxSort.section(for: $0.lifecycle, now: historyNow) == .history }
-            .map { row in
-                HistoryAgentPaletteRow(
+        // Every agent with NO canvas tile. `jumpTiles` above is built from tiles on
+        // the canvas, so it cannot represent any of them, and "closed" is not the
+        // only tile-less lifecycle: an agent is also tile-less while headless,
+        // snoozed or settled. Without this the command center can only reach agents
+        // that happen to be on screen, which is why deleting the sidebar's inbox
+        // would strand the rest (.plans/10-command-center-absorbs-sidebar.md).
+        //
+        // Membership is asked of InboxSort, never re-derived here, so the palette
+        // and the inbox cannot disagree about what closed means
+        // (.plans/05-close-to-history.md).
+        let tilelessNow = Date()
+        // Exclude anything jumpTiles already offers — one agent, one row.
+        let tiledAgentIDs = Set((canvasView?.navigationTileSnapshots() ?? []).compactMap {
+            agentSupervisor.agent(forTile: $0.tileId)?.rawValue
+        })
+        let tilelessAgents = buildAgentInboxRows(now: tilelessNow)
+            .filter { !tiledAgentIDs.contains($0.id) }
+            .map { row -> TilelessAgentPaletteRow in
+                let state = agentSupervisor.turnSnapshot(for: AgentID(rawValue: row.id))
+                    .map(commandCenterAgentState)
+                return TilelessAgentPaletteRow(
                     agentId: row.id,
                     displayName: row.title,
-                    detail: row.model.flatMap { AgentModelCatalog.shared.displayName(for: $0) ?? $0 })
+                    detail: row.model.flatMap { AgentModelCatalog.shared.displayName(for: $0) ?? $0 },
+                    isClosed: InboxSort.section(for: row.lifecycle, now: tilelessNow) == .history,
+                    statusLabel: state?.label,
+                    attentionReason: state?.attention)
             }
-        palette.show(near: host, profiles: rows.profiles, projects: rows.projects, workspaces: rows.workspaces, contextualActions: contextualActions, harnessRoles: harnessRolesForActiveProject(), jumpTiles: jumpTiles, jumpZones: jumpZones, historyAgents: historyAgents, initialQuery: initialQuery)
+        palette.show(near: host, profiles: rows.profiles, projects: rows.projects, workspaces: rows.workspaces, contextualActions: contextualActions, harnessRoles: harnessRolesForActiveProject(), jumpTiles: jumpTiles, jumpZones: jumpZones, tilelessAgents: tilelessAgents, initialQuery: initialQuery)
     }
 
     private func commandCenterAgentState(
@@ -6761,7 +6774,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // reopens the record, gives the agent a tile again (a closed agent has
         // none), reveals it, clears the unread mark and arms focus — in that order,
         // for reasons documented at that call site.
-        palette.onReopenHistoryAgent = { [weak self] agentId in
+        palette.onOpenTilelessAgent = { [weak self] agentId in
             self?.revealAgentFromInbox(agentId) ?? false
         }
         palette.onClose = { [weak self] in

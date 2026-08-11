@@ -107,27 +107,28 @@ func runCommandCenterChecks() {
     // its own, deleting the sidebar strands the record, its transcript and its
     // worktree permanently. These assertions are that row's teeth.
     let closedAgentID = UUID()
-    let closedAgent = HistoryAgentPaletteRow(
-        agentId: closedAgentID, displayName: "Rehydrate codex", detail: "GPT-5.6 Sol")
-    let historyRows = LaunchPaletteModel.makeRows(profiles: [], historyAgents: [closedAgent])
-    expect(historyRows.contains(.historyAgent(closedAgent)),
+    let closedAgent = TilelessAgentPaletteRow(
+        agentId: closedAgentID, displayName: "Rehydrate codex", detail: "GPT-5.6 Sol",
+        isClosed: true)
+    let historyRows = LaunchPaletteModel.makeRows(profiles: [], tilelessAgents: [closedAgent])
+    expect(historyRows.contains(.tilelessAgent(closedAgent)),
            "makeRows must offer a closed agent — nothing else can reach one")
 
-    let historyPresented = LaunchPaletteModel.presentation(for: .historyAgent(closedAgent))
+    let historyPresented = LaunchPaletteModel.presentation(for: .tilelessAgent(closedAgent))
     expect(historyPresented.category == .history,
            "a closed agent draws in History, not among live tiles")
     expect(historyPresented.title == "Rehydrate codex",
            "History keeps the agent's own name as command identity")
     expect(historyPresented.subtitle == "Closed · GPT-5.6 Sol",
            "History says the agent is closed and carries its model as metadata")
-    expect(historyPresented.stableID == "history-agent:\(closedAgentID.uuidString)",
+    expect(historyPresented.stableID == "tileless-agent:\(closedAgentID.uuidString)",
            "History dispatch identity is the AGENT id — a closed agent has no tile id")
 
     // Searchable by the agent's name, by its model, and by the section's own
     // vocabulary, so it is findable without remembering what it was called.
     for query in ["rehydrate", "gpt 5.6", "history", "closed", "reopen"] {
         expect(LaunchPaletteModel.makeSections(rows: historyRows, query: query)
-                .flatMap(\.items).contains(where: { $0.row == .historyAgent(closedAgent) }),
+                .flatMap(\.items).contains(where: { $0.row == .tilelessAgent(closedAgent) }),
                "a closed agent must be findable by \"\(query)\"")
     }
 
@@ -141,4 +142,62 @@ func runCommandCenterChecks() {
     expect(!LaunchPaletteModel.makeSections(rows: historyRows, query: "")
             .contains(where: { $0.category == .history }),
            "the curated home shows no History section until it is searched for")
+
+    // MARK: Tile-less · closed is NOT the only lifecycle without a tile
+    //
+    // AgentInventory unions "tiled or headless" records, and the row builder's
+    // locked decision is that displayName survives the tile because the AGENT is
+    // the entity. So an agent is also tile-less while headless, snoozed or
+    // settled — and `jumpToTile` cannot represent any of those either. Removing
+    // the sidebar's inbox with only History covered would strand all three.
+    let headlessID = UUID()
+    let headless = TilelessAgentPaletteRow(
+        agentId: headlessID, displayName: "Overnight sweep", detail: "Claude Opus 5",
+        isClosed: false, statusLabel: "Working")
+    let blockedID = UUID()
+    let blocked = TilelessAgentPaletteRow(
+        agentId: blockedID, displayName: "Migrate schema", detail: "GPT-5.6 Sol",
+        isClosed: false, statusLabel: "Needs attention", attentionReason: .approval)
+
+    let tilelessRows = LaunchPaletteModel.makeRows(
+        profiles: [], tilelessAgents: [closedAgent, headless, blocked])
+    for row in [closedAgent, headless, blocked] {
+        expect(tilelessRows.contains(.tilelessAgent(row)),
+               "makeRows must offer every tile-less agent, not only closed ones: \(row.displayName)")
+    }
+
+    // A tile-less agent that is NOT closed is live work with nowhere to show, so
+    // it draws with the other agents rather than in History.
+    let headlessPresented = LaunchPaletteModel.presentation(for: .tilelessAgent(headless))
+    expect(headlessPresented.category == .agentsAndTiles,
+           "a headless working agent is live work — it must not be filed under History")
+    expect(headlessPresented.subtitle == "Working · Claude Opus 5",
+           "a tile-less agent carries its live status, not the word Closed")
+    expect(headlessPresented.title == "Overnight sweep",
+           "a tile-less agent keeps its own name as command identity")
+
+    // Blocked on the user ⇒ Needs You and default-visible, exactly as for a tiled
+    // agent. An agent waiting on you must never be something you have to know to
+    // search for.
+    let blockedPresented = LaunchPaletteModel.presentation(for: .tilelessAgent(blocked))
+    expect(blockedPresented.category == .needsYou,
+           "a tile-less agent blocked on the user belongs in Needs You")
+    expect(blockedPresented.isDefaultVisible,
+           "a tile-less agent waiting on you must appear without being searched for")
+    expect(LaunchPaletteModel.makeSections(rows: tilelessRows, query: "")
+            .contains(where: { section in
+                section.category == .needsYou
+                    && section.items.contains { $0.row == .tilelessAgent(blocked) }
+            }),
+           "the curated home surfaces a tile-less agent that needs you")
+
+    // Every tile-less agent is findable, and each keeps its own dispatch identity.
+    for (row, query) in [(headless, "overnight"), (headless, "headless"), (blocked, "migrate"), (blocked, "approval")] {
+        expect(LaunchPaletteModel.makeSections(rows: tilelessRows, query: query)
+                .flatMap(\.items).contains(where: { $0.row == .tilelessAgent(row) }),
+               "a tile-less agent must be findable by \"\(query)\"")
+    }
+    expect(Set([closedAgent, headless, blocked].map {
+        LaunchPaletteModel.presentation(for: .tilelessAgent($0)).stableID
+    }).count == 3, "each tile-less agent keeps a distinct dispatch identity")
 }
