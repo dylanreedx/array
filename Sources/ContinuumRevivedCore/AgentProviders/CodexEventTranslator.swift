@@ -34,14 +34,12 @@ import Foundation
 // `runToken`. Turn ids are salted for the same reason (the thread id is stable
 // across processes, like claude's).
 public struct CodexEventTranslator {
+    public private(set) var providerThreadId: String?
     private var threadId: String = "codex-unknown"
     private let runToken: String
     private var turnCounter: Int = 0
     private var currentTurnId: String
     private var workingDirectory: URL?
-    /// `input_tokens` as of the previous turn, for the delta above. nil means
-    /// "no baseline" and suppresses the occupancy reading entirely.
-    private var priorCumulativeInputTokens: Int?
     private let now: @Sendable () -> Date
 
     /// Same host-local side channel as the pi/claude translators': an explicit
@@ -53,15 +51,10 @@ public struct CodexEventTranslator {
     public init(
         workingDirectory: URL? = nil,
         runToken: String = UUID().uuidString.lowercased().prefix(8).description,
-        priorCumulativeInputTokens: Int? = 0,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.workingDirectory = workingDirectory?.standardizedFileURL
         self.runToken = runToken
-        // Defaults to 0, the FRESH-thread baseline: the first prompt of a thread
-        // is the whole cumulative, so the delta against zero is exactly right.
-        // A resume with no stored reading must pass nil explicitly.
-        self.priorCumulativeInputTokens = priorCumulativeInputTokens
         self.now = now
         self.currentTurnId = "codex-unknown#\(runToken)-t0"
     }
@@ -88,6 +81,7 @@ public struct CodexEventTranslator {
             // event (threadIds are rebound before delivery). No turn yet.
             if let id = object["thread_id"] as? String, !id.isEmpty {
                 threadId = id
+                providerThreadId = id
                 onRuntimeObservation?(.threadId(id))
             }
             return [.sessionStateChanged(.ready), .sessionStateChanged(.running)]
@@ -245,35 +239,15 @@ public struct CodexEventTranslator {
     /// (subscription, not metered) → `totalCostUsd = nil`. A zero-token block
     /// publishes nothing (don't clobber real telemetry).
     ///
-    /// **AND IT IS CUMULATIVE FOR THE SESSION.** Measured, two turns of a real
-    /// thread: 15,005 then 30,026 for the same trivial exchange. So the context
-    /// occupancy is the DELTA — `input_tokens` now minus `input_tokens` as of the
-    /// previous turn — because cumulative(n) is the sum of every prompt and
-    /// prompt(n) is what the model actually held. Using the cumulative figure
-    /// directly is what made the meter read 237% and climb forever.
-    ///
-    /// `priorCumulativeInputTokens` supplies the subtrahend: 0 for a fresh
-    /// thread (the first prompt IS the cumulative), the stored previous reading
-    /// on a resume, and nil when a resumed thread has no stored reading to
-    /// subtract — in which case NO occupancy is published, because the only
-    /// alternative is the unbounded number this exists to avoid.
-    private mutating func usageEvents(_ raw: Any?) -> [AgentRuntimeEvent] {
+    /// **AND IT IS CUMULATIVE FOR THE SESSION.** It remains useful for the row's
+    /// accounting total, but never emits context occupancy. Exact occupancy is
+    /// joined by `CodexAgentRunner` from the rollout log after process exit.
+    private func usageEvents(_ raw: Any?) -> [AgentRuntimeEvent] {
         guard let usage = raw as? [String: Any] else { return [] }
         let input = Self.intValue(usage["input_tokens"])
         let output = Self.intValue(usage["output_tokens"])
-        let cacheRead = Self.intValue(usage["cached_input_tokens"])
-        let cacheWrite = Self.intValue(usage["cache_write_input_tokens"])
         let total = (input ?? 0) + (output ?? 0)
         guard total > 0 else { return [] }
-        // The per-request prompt, when a baseline exists to measure against.
-        // `max(0, …)` because a compaction can lower the running total, and a
-        // negative occupancy is worse than none.
-        let used: Int? = {
-            guard let input, let prior = priorCumulativeInputTokens else { return nil }
-            let delta = input - prior
-            return delta > 0 ? delta : nil
-        }()
-        if let input { priorCumulativeInputTokens = input }
         return [
             .tokenUsageUpdated(
                 threadId: threadId,
@@ -281,21 +255,6 @@ public struct CodexEventTranslator {
                     inputTokens: input ?? 0,
                     outputTokens: output ?? 0,
                     totalCostUsd: nil)),
-            .contextWindowUpdated(
-                threadId: threadId,
-                snapshot: AgentContextWindowSnapshot(
-                    usedTokens: used,
-                    maxTokens: nil,
-                    inputTokens: input,
-                    outputTokens: output,
-                    cacheReadTokens: cacheRead,
-                    cacheWriteTokens: cacheWrite,
-                    totalProcessedTokens: total,
-                    totalCostUsd: nil,
-                    automaticCompaction: nil,
-                    observedAt: now(),
-                    source: .codexTurnUsage,
-                    freshness: .live)),
         ]
     }
 

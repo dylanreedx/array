@@ -134,6 +134,11 @@ if CommandLine.arguments.contains("--agent-context-occupancy-check") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--codex-agent-backend-check") {
+    runCodexAgentBackendChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--local-transcript-node-check") {
     runLocalTranscriptNodeChecks()
     Foundation.exit(0)

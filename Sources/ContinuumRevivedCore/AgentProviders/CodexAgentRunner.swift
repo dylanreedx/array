@@ -164,28 +164,18 @@ public final class CodexAgentRunner: @unchecked Sendable {
         public var threadId: String?
         /// Extra args before the prompt.
         public var extraArgs: [String]
-        /// `turn.completed.usage.input_tokens` as of the previous turn of THIS
-        /// thread. codex reports that figure cumulatively for the session, so the
-        /// context occupancy is the delta against this baseline
-        /// (`CodexEventTranslator.usageEvents`). 0 for a fresh thread; nil for a
-        /// resumed thread with no stored reading, which publishes no occupancy
-        /// rather than the unbounded cumulative number.
-        public var priorCumulativeInputTokens: Int?
-
         public init(
             model: String,
             effort: String? = nil,
             cwd: URL,
             threadId: String? = nil,
-            extraArgs: [String] = [],
-            priorCumulativeInputTokens: Int? = 0
+            extraArgs: [String] = []
         ) {
             self.model = model
             self.effort = effort
             self.cwd = cwd
             self.threadId = threadId
             self.extraArgs = extraArgs
-            self.priorCumulativeInputTokens = priorCumulativeInputTokens
         }
     }
 
@@ -242,14 +232,14 @@ public final class CodexAgentRunner: @unchecked Sendable {
     private var translator: CodexEventTranslator
     private var buffer = Data()
     private var stderrBuffer = Data()   // queue-confined
+    private var pendingTerminalEvents: [AgentRuntimeEvent] = [] // queue-confined
     private var process: Process?       // queue-confined (set in run, read in stop)
     private var stopRequested = false   // queue-confined; suppresses the self-heal
+    private var runtimeObservationHandler: (@Sendable (AgentRuntimeObservation) -> Void)?
 
     public init(config: Config) {
         self.config = config
-        self.translator = CodexEventTranslator(
-            workingDirectory: config.cwd,
-            priorCumulativeInputTokens: config.priorCumulativeInputTokens)
+        self.translator = CodexEventTranslator(workingDirectory: config.cwd)
     }
 
     /// Runs codex with `prompt`, streaming events to `onEvent` until it exits.
@@ -262,20 +252,32 @@ public final class CodexAgentRunner: @unchecked Sendable {
     public func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
         if config.threadId == nil {
             let result = try runOnce(mode: .fresh, threadId: nil, prompt: prompt, onEvent: onEvent)
+            publish(result.finalEvents, onEvent: onEvent)
             if result.exitCode != 0 {
                 throw RunError.codexFailed(exitCode: result.exitCode, stderr: result.stderr)
             }
             return
         }
         let resumed = try runOnce(mode: .resume, threadId: config.threadId, prompt: prompt, onEvent: onEvent)
-        if resumed.exitCode == 0 { return }
+        if resumed.exitCode == 0 {
+            publish(resumed.finalEvents, onEvent: onEvent)
+            return
+        }
         // Self-heal: a stored id whose rollout was deleted/archived/cleaned.
         guard CodexCLIBackend.isUnknownSessionFailure(stderr: resumed.stderr) else {
+            publish(resumed.finalEvents, onEvent: onEvent)
             throw RunError.codexFailed(exitCode: resumed.exitCode, stderr: resumed.stderr)
         }
         let shouldHeal: Bool = queue.sync { !stopRequested }
-        guard shouldHeal else { return }
+        guard shouldHeal else {
+            publish(resumed.finalEvents, onEvent: onEvent)
+            return
+        }
+        // The rejected resume's terminal/accounting/rollout telemetry is
+        // deliberately dropped. A new translator gives the fresh process a
+        // clean thread/turn identity and prevents stale-attempt state leaking.
         let fresh = try runOnce(mode: .fresh, threadId: nil, prompt: prompt, onEvent: onEvent)
+        publish(fresh.finalEvents, onEvent: onEvent)
         if fresh.exitCode != 0 {
             throw RunError.codexFailed(exitCode: fresh.exitCode, stderr: fresh.stderr)
         }
@@ -300,7 +302,10 @@ public final class CodexAgentRunner: @unchecked Sendable {
     public func observeRuntimeObservations(
         _ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void
     ) {
-        queue.sync { translator.onRuntimeObservation = handler }
+        queue.sync {
+            runtimeObservationHandler = handler
+            translator.onRuntimeObservation = handler
+        }
     }
 
     // MARK: - one spawn
@@ -310,7 +315,9 @@ public final class CodexAgentRunner: @unchecked Sendable {
         threadId: String?,
         prompt: AgentPrompt,
         onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void
-    ) throws -> (exitCode: Int32, stderr: String) {
+    ) throws -> (exitCode: Int32, stderr: String, finalEvents: [AgentRuntimeEvent]) {
+        let startingRolloutURL = threadId.flatMap { CodexRolloutTelemetry.rolloutURL(threadId: $0) }
+        let startingOffset = startingRolloutURL.flatMap { CodexRolloutTelemetry.fileSize(of: $0) } ?? 0
         let process = Process()
         let command = Self.liveResolvedCommand()
         process.executableURL = URL(fileURLWithPath: command.executable)
@@ -344,7 +351,13 @@ public final class CodexAgentRunner: @unchecked Sendable {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
-        queue.sync { buffer.removeAll(); stderrBuffer.removeAll() }
+        queue.sync {
+            buffer.removeAll()
+            stderrBuffer.removeAll()
+            pendingTerminalEvents.removeAll()
+            translator = CodexEventTranslator(workingDirectory: config.cwd)
+            translator.onRuntimeObservation = runtimeObservationHandler
+        }
 
         stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let chunk = handle.availableData
@@ -371,15 +384,40 @@ public final class CodexAgentRunner: @unchecked Sendable {
 
         let remainder = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
         let stderrRemainder = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-        let errText: String = queue.sync {
+        let finalState: (stderr: String, threadId: String?, terminal: [AgentRuntimeEvent]) = queue.sync {
             if !remainder.isEmpty { consume(remainder, onEvent: onEvent) }
             flushBuffer(onEvent: onEvent)
             stderrBuffer.append(stderrRemainder)
             let text = String(decoding: stderrBuffer, as: UTF8.self)
+            let providerThreadId = translator.providerThreadId
+            let terminal = pendingTerminalEvents
             self.process = nil
-            return text
+            return (text, providerThreadId, terminal)
         }
-        return (process.terminationStatus, errText)
+        let providerThreadId = finalState.threadId ?? threadId
+        // A resumed archived rollout can be moved back into sessions. Keep the
+        // current-run offset while the original path still exists; if it was
+        // moved, resolve the same exact thread again and treat the new file as
+        // this run's file. Never fall back to offset zero on an unchanged file,
+        // which would republish an old request when this process made none.
+        let originalStillExists = startingRolloutURL.flatMap {
+            CodexRolloutTelemetry.fileSize(of: $0)
+        } != nil
+        let resolvedURL: URL? = originalStillExists
+            ? startingRolloutURL
+            : providerThreadId.flatMap { CodexRolloutTelemetry.rolloutURL(threadId: $0) }
+        let readOffset = originalStillExists ? startingOffset : 0
+        let snapshot = resolvedURL.flatMap {
+            CodexRolloutTelemetry.latestSnapshot(
+                in: $0,
+                afterOffset: readOffset,
+                freshness: .live)
+        }
+        let finalEvents = CodexRolloutTelemetry.orderedFinalEvents(
+            threadId: providerThreadId ?? "codex-unknown",
+            terminalEvents: finalState.terminal,
+            snapshot: snapshot)
+        return (process.terminationStatus, finalState.stderr, finalEvents)
     }
 
     // MARK: - queue-confined line assembly
@@ -401,9 +439,25 @@ public final class CodexAgentRunner: @unchecked Sendable {
 
     private func emit(_ lineData: Data.SubSequence, onEvent: @Sendable (AgentRuntimeEvent) -> Void) {
         guard let line = String(data: Data(lineData), encoding: .utf8) else { return }
-        for event in translator.translate(line: line) {
+        let events = translator.translate(line: line)
+        let isTerminal = events.contains {
+            if case .turnCompleted = $0 { return true }
+            return false
+        }
+        if isTerminal {
+            pendingTerminalEvents.append(contentsOf: events)
+            return
+        }
+        for event in events {
             onEvent(event)
         }
+    }
+
+    private func publish(
+        _ events: [AgentRuntimeEvent],
+        onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void
+    ) {
+        queue.sync { events.forEach(onEvent) }
     }
 }
 

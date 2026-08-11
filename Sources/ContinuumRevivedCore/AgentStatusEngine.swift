@@ -288,12 +288,16 @@ public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
     /// `input_tokens` is already the total, cache counters are a subset — not
     /// authoritative occupancy).
     case codexTurnUsage
+    /// Codex's rollout-log `event_msg/token_count`: `last_token_usage` is the
+    /// most recent model request and `model_context_window` is that request's
+    /// provider-reported limit.
+    case codexRolloutTokenCount
     case providerSessionStats
     case unknown(String)
 
     public var isAuthoritativeForContextOccupancy: Bool {
         switch self {
-        case .providerSessionStats:
+        case .providerSessionStats, .codexRolloutTokenCount:
             return true
         case .piMessageUsage, .claudeResultUsage, .codexTurnUsage, .unknown:
             return false
@@ -305,6 +309,7 @@ public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
         case .piMessageUsage: return "piMessageUsage"
         case .claudeResultUsage: return "claudeResultUsage"
         case .codexTurnUsage: return "codexTurnUsage"
+        case .codexRolloutTokenCount: return "codexRolloutTokenCount"
         case .providerSessionStats: return "providerSessionStats"
         case .unknown(let raw): return raw
         }
@@ -316,6 +321,7 @@ public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
         case "piMessageUsage": self = .piMessageUsage
         case "claudeResultUsage": self = .claudeResultUsage
         case "codexTurnUsage": self = .codexTurnUsage
+        case "codexRolloutTokenCount": self = .codexRolloutTokenCount
         case "providerSessionStats": self = .providerSessionStats
         default: self = .unknown(raw)
         }

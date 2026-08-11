@@ -6,15 +6,15 @@ import Foundation
 /// size, so the radial meter had nothing to fill. Both numbers exist, though,
 /// and neither is invented here:
 ///
-/// - **Window size** comes from the provider when a stream states one, and
-///   otherwise from pi's published models-store (`contextWindow`). Neither
-///   `codex exec --json` nor claude states one today, so in practice it is the
-///   catalogue. Absent both, absent reading — never a fabricated denominator.
+/// - **Window size** comes from the provider when telemetry states one, and
+///   otherwise from pi's published models-store (`contextWindow`). Codex states
+///   it in its rollout log (not `exec --json`). Absent both, absent reading —
+///   never a fabricated denominator.
 /// - **Occupancy** is the prompt on the LAST REQUEST — everything the model had
 ///   in context at that moment. Per provider, from each translator's measured
 ///   shape, NOT assumed: claude's `input_tokens` excludes cache, so the cache
-///   counters must be added; codex reports cumulatively, so its translator
-///   subtracts the previous turn and publishes the delta as `usedTokens`.
+///   counters must be added; codex occupancy comes only from the rollout log's
+///   per-request `last_token_usage.total_tokens`.
 ///
 /// THE TRAP, paid for twice: a cumulative number is not an occupancy. Codex's
 /// `turn.completed.usage` totals the whole SESSION — measured at 15,005 then
@@ -41,20 +41,14 @@ public enum AgentContextOccupancy {
             guard !parts.isEmpty else { return nil }
             let total = parts.reduce(0, +)
             return total > 0 ? total : nil
-        case .codexTurnUsage:
-            // ONLY a per-request reading counts here. `token_count` sets
-            // `usedTokens` from codex's `last_token_usage`; `turn.completed.usage`
-            // carries the SESSION CUMULATIVE totals and sets no `usedTokens` at
-            // all, so it correctly answers nil rather than offering a number that
-            // grows without bound.
-            //
-            // This used to return `inputTokens`, on the true-but-irrelevant
-            // grounds that codex does not split cache out of it. The number is
-            // right about cache and wrong about scope: it is the whole session
-            // added up, so the meter read 237% of a 272,000-token window off
-            // 643,673 cumulative input.
-            guard let used = snapshot.usedTokens, used > 0 else { return nil }
+        case .codexRolloutTokenCount:
+            guard let used = snapshot.usedTokens, used >= 0 else { return nil }
             return used
+        case .codexTurnUsage:
+            // `turn.completed.usage` is session-cumulative accounting. It is
+            // never context occupancy, even when a legacy record already has
+            // used/max populated from an older derivation.
+            return nil
         case .providerSessionStats:
             // Authoritative occupancy is reported directly when it exists.
             return snapshot.usedTokens
@@ -71,6 +65,12 @@ public enum AgentContextOccupancy {
         _ snapshot: AgentContextWindowSnapshot,
         contextWindow: Int?
     ) -> AgentContextWindowSnapshot {
+        if snapshot.source == .codexTurnUsage {
+            var sanitized = snapshot
+            sanitized.usedTokens = nil
+            sanitized.maxTokens = nil
+            return sanitized
+        }
         guard snapshot.usedTokens == nil || snapshot.maxTokens == nil else { return snapshot }
         guard let window = contextWindow, window > 0,
               let used = promptTokens(from: snapshot) else { return snapshot }

@@ -38,7 +38,7 @@ func runAgentContextOccupancyChecks() {
 
     // codex: ONLY a per-request reading counts. `token_count` sets `usedTokens`
     // from `last_token_usage`; that is the occupancy.
-    let codex = snapshot(source: .codexTurnUsage, input: 73_176, output: 1_203,
+    let codex = snapshot(source: .codexRolloutTokenCount, input: 73_176, output: 1_203,
                          cacheRead: 70_400, used: 74_379, max: 258_400)
     expect(AgentContextOccupancy.promptTokens(from: codex) == 74_379,
            "codex occupancy is its per-request total, got \(String(describing: AgentContextOccupancy.promptTokens(from: codex)))")
@@ -55,6 +55,11 @@ func runAgentContextOccupancyChecks() {
     let notEnriched = AgentContextOccupancy.withDerivedOccupancy(codexCumulative, contextWindow: 272_000)
     expect(notEnriched.usedTokens == nil && notEnriched.maxTokens == nil,
            "…and it must not be enriched into one: that is the 237% reading, got \(String(describing: notEnriched.usedTokens))/\(String(describing: notEnriched.maxTokens))")
+    let persistedLegacy = snapshot(source: .codexTurnUsage, input: 4_160_000,
+                                   used: 4_160_000, max: 272_000)
+    let sanitizedLegacy = AgentContextOccupancy.withDerivedOccupancy(persistedLegacy, contextWindow: 272_000)
+    expect(sanitizedLegacy.usedTokens == nil && sanitizedLegacy.maxTokens == nil,
+           "a persisted legacy Codex used/max pair must be actively sanitized")
 
     // A window already ON the snapshot wins over the catalogue's — the process
     // running the turn is the authority on its own limit. No stream we consume
