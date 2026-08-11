@@ -1,4 +1,5 @@
 check --add-zone-check
+check --agent-display-name-check
 check --agent-fanout-check
 check --agent-inbox-check
 check --agent-incremental-refresh-check
@@ -29,6 +30,7 @@ check --browser-restore-state-check
 check --browser-target-blank-check
 check --browser-ui-delegate-check
 check --browser-url-focus-check
+check --camera-chrome-redraw-check
 check --companion-sync-health-check
 check --component-lab-check
 check --conductor-queue-tile-check
@@ -148,6 +150,7 @@ leg run swift run ContinuumRevivedRelayChecks
 leg run swift run ContinuumRevivedSyncChecks
 leg run swift run ContinuumRevivedSyncIntegrationChecks
 leg run_app_check .build/debug/Array --add-zone-check
+leg run_app_check .build/debug/Array --agent-display-name-check
 leg run_app_check .build/debug/Array --agent-fanout-check
 leg run_app_check .build/debug/Array --agent-inbox-check
 leg run_app_check .build/debug/Array --agent-incremental-refresh-check
@@ -178,6 +181,7 @@ leg run_app_check .build/debug/Array --browser-restore-state-check
 leg run_app_check .build/debug/Array --browser-target-blank-check
 leg run_app_check .build/debug/Array --browser-ui-delegate-check
 leg run_app_check .build/debug/Array --browser-url-focus-check
+leg run_app_check .build/debug/Array --camera-chrome-redraw-check
 leg run_app_check .build/debug/Array --companion-sync-health-check
 leg run_app_check .build/debug/Array --component-lab-check
 leg run_app_check .build/debug/Array --conductor-queue-tile-check

@@ -298,6 +298,7 @@ run_app_check .build/debug/Array --agent-status-check
 run_app_check .build/debug/Array --tile-world-bounds-check
 run_app_check .build/debug/Array --tile-drag-grab-check
 run_app_check .build/debug/Array --tile-chrome-scale-check
+run_app_check .build/debug/Array --camera-chrome-redraw-check
 run_app_check .build/debug/Array --resize-dimensions-hud-check
 run_app_check .build/debug/Array --bring-to-front-focus-check
 run_app_check .build/debug/Array --note-click-focus-check
