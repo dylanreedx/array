@@ -256,6 +256,22 @@ public enum SettingsSchema {
                 title: "Appearance",
                 iconSystemName: "paintbrush",
                 fields: [
+                    .choice(
+                        key: CommandCenterAppearanceConfig.glassinessKey,
+                        label: "Command Menu Appearance",
+                        options: CommandCenterAppearanceConfig.options,
+                        default: CommandCenterAppearanceConfig.defaultGlassiness.rawValue
+                    ),
+                    .slider(
+                        key: CommandCenterAppearanceConfig.customOpacityKey,
+                        label: "Custom Command Menu Opacity",
+                        range: CommandCenterAppearanceConfig.customOpacityRange,
+                        default: CommandCenterAppearanceConfig.defaultCustomOpacity,
+                        visibleWhen: SettingsVisibility(
+                            key: CommandCenterAppearanceConfig.glassinessKey,
+                            equals: CommandCenterGlassiness.custom.rawValue
+                        )
+                    ),
                     .toggle(
                         key: FocusBorderConfig.enabledKey,
                         label: "Focus Border",

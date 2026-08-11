@@ -5,8 +5,9 @@ import Foundation
 /// The generic, type-driven settings surface (docs/24 S4). A floating dark/
 /// monospaced `NSPanel` — a sidebar of `SettingsSchema.sections()` titles plus a
 /// detail pane that renders each section's fields *by their kind*: toggle →
-/// checkbox, text → text field, choice → popup, info → copy, shortcuts → read-only
-/// `ShortcutCatalog` guide. Adding a section/field changes nothing here — that is
+/// checkbox, text → text field, choice → popup, slider → bounded numeric control,
+/// info → copy, shortcuts → read-only `ShortcutCatalog` guide. Adding a
+/// section/field changes nothing here — that is
 /// the extensibility contract. Field edits write LIVE through the bound
 /// `SettingsField.setValue` to UserDefaults (chord capture is A7, not here).
 @MainActor
@@ -168,7 +169,9 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         let header = label(section.title, size: 16, weight: .semibold, color: .labelColor)
         stack.addArrangedSubview(header)
 
-        for field in section.fields {
+        bindings.removeAll()
+        sliderValueLabels.removeAll()
+        for field in section.fields where field.isVisible(in: defaults) {
             stack.addArrangedSubview(controlRow(for: field))
         }
     }
@@ -183,6 +186,8 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
             return textRow(for: field)
         case .choice(_, _, let options, _):
             return choiceRow(for: field, options: options)
+        case .slider:
+            return sliderRow(for: field)
         case .info:
             return infoRow(for: field)
         case .shortcuts:
@@ -234,6 +239,33 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         }
         bindings[ObjectIdentifier(popup)] = field
         return vGroup([labelView, popup])
+    }
+
+    private func sliderRow(for field: SettingsField) -> NSView {
+        guard case let .slider(_, _, range, fallback, _) = field else { return NSView() }
+        let labelView = label(field.label, size: 12, weight: .regular, color: .secondaryLabelColor)
+        let slider = NSSlider(value: fallback, minValue: range.lowerBound, maxValue: range.upperBound, target: self, action: #selector(sliderChanged(_:)))
+        slider.isContinuous = true
+        slider.numberOfTickMarks = 15
+        slider.allowsTickMarkValuesOnly = false
+        slider.translatesAutoresizingMaskIntoConstraints = false
+        slider.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        if case .double(let value) = field.currentValue(in: defaults) { slider.doubleValue = value }
+        let valueLabel = label(Self.opacityLabel(slider.doubleValue), size: 11, weight: .medium, color: .labelColor)
+        valueLabel.alignment = .right
+        valueLabel.translatesAutoresizingMaskIntoConstraints = false
+        valueLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        let row = NSStackView(views: [slider, valueLabel])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 10
+        bindings[ObjectIdentifier(slider)] = field
+        sliderValueLabels[ObjectIdentifier(slider)] = valueLabel
+        return vGroup([labelView, row])
+    }
+
+    private static func opacityLabel(_ value: Double) -> String {
+        "\(Int((value * 100).rounded()))%"
     }
 
     private func modelPickerRow(for field: SettingsField, options: [String]) -> NSView {
@@ -530,6 +562,16 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
             refreshModelPickerForHarnessChange()
         }
         notifySettingsChanged()
+        if field.key == CommandCenterAppearanceConfig.glassinessKey {
+            renderSelectedSection()
+        }
+    }
+
+    @objc private func sliderChanged(_ sender: NSSlider) {
+        guard let field = bindings[ObjectIdentifier(sender)] else { return }
+        field.setValue(.double(sender.doubleValue), in: defaults)
+        sliderValueLabels[ObjectIdentifier(sender)]?.stringValue = Self.opacityLabel(sender.doubleValue)
+        notifySettingsChanged()
     }
 
     @objc private func textCommitted(_ sender: NSTextField) {
@@ -551,6 +593,7 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     private var bindings: [ObjectIdentifier: SettingsField] = [:]
+    private var sliderValueLabels: [ObjectIdentifier: NSTextField] = [:]
     /// The default-model picker trigger, kept for the self-check: it must be
     /// the SAME component the tile composer uses, fed by the same catalogue.
     private(set) var modelPickerButtonForQA: ProviderModelButton?
@@ -630,11 +673,15 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         renderSelectedSection()
     }
     var detailControlCountForQA: Int {
-        // Header label + one row per field.
+        // Header label + one row per currently visible field.
         (detailStack?.arrangedSubviews.count ?? 0)
     }
     func firstToggleControlForQA() -> NSButton? {
         detailStack?.arrangedSubviews.compactMap { $0 as? NSButton }.first
+    }
+    func firstSliderControlForQA() -> NSSlider? {
+        guard let stack = detailStack else { return nil }
+        return firstDescendant(of: stack, ofType: NSSlider.self)
     }
 
     /// The chord text currently rendered for a catalog entry's row, or nil if the
@@ -670,14 +717,14 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
 
     /// True when every field in the selected section produced at least one
     /// editable/displayable control of the kind its type demands (toggle →
-    /// NSButton, text → NSTextField, choice → NSPopUpButton, info → static
-    /// NSTextField, shortcuts → a non-empty guide list).
+    /// NSButton, text → NSTextField, choice → NSPopUpButton, slider → NSSlider,
+    /// info → static NSTextField, shortcuts → a non-empty guide list).
     func selectedSectionFieldsAllRenderedForQA() -> Bool {
         guard sections.indices.contains(selectedSectionIndex) else { return false }
         guard let stack = detailStack else { return false }
         // Arranged subviews: [header] + [one row per field], in field order.
         let rows = Array(stack.arrangedSubviews.dropFirst())
-        let fields = sections[selectedSectionIndex].fields
+        let fields = sections[selectedSectionIndex].fields.filter { $0.isVisible(in: defaults) }
         guard rows.count == fields.count else { return false }
         for (field, row) in zip(fields, rows) {
             switch field {
@@ -690,6 +737,8 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
                 // trigger; every other choice stays a stock popup.
                 if firstDescendant(of: row, ofType: NSPopUpButton.self) == nil,
                    firstDescendant(of: row, ofType: ChoiceButton.self) == nil { return false }
+            case .slider:
+                if firstDescendant(of: row, ofType: NSSlider.self) == nil { return false }
             case .info:
                 if firstDescendant(of: row, ofType: NSTextField.self, where: { !$0.stringValue.isEmpty && !$0.isEditable }) == nil { return false }
             case .shortcuts:
@@ -801,6 +850,31 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         let storedAfter = defaults.object(forKey: key) != nil ? defaults.bool(forKey: key) : nil
         guard case .bool(let reflected) = toggleField.currentValue(in: defaults), reflected == target, storedAfter == target else {
             throw SettingsPanelSelfCheckError.toggleDidNotRoundTrip(stored: storedAfter, expected: target)
+        }
+
+        // 3a. Custom command-menu opacity is progressive disclosure: the
+        // bounded slider is absent for Frosted, appears for Custom, and writes a
+        // numeric value through the same generic SettingsField binding.
+        if let appearanceIndex = sections.firstIndex(where: { $0.id == "appearance" }) {
+            panel.selectSectionForQA(appearanceIndex)
+            guard panel.firstSliderControlForQA() == nil else {
+                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("appearance: custom slider visible for Frosted")
+            }
+            defaults.set(CommandCenterGlassiness.custom.rawValue, forKey: CommandCenterAppearanceConfig.glassinessKey)
+            panel.renderSelectedSection()
+            guard let slider = panel.firstSliderControlForQA() else {
+                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("appearance: custom slider missing for Custom")
+            }
+            slider.doubleValue = 0.70
+            panel.sliderChanged(slider)
+            guard abs(defaults.double(forKey: CommandCenterAppearanceConfig.customOpacityKey) - 0.70) < 0.0001 else {
+                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("appearance: custom slider did not persist its numeric value")
+            }
+            defaults.set(CommandCenterGlassiness.frosted.rawValue, forKey: CommandCenterAppearanceConfig.glassinessKey)
+            panel.renderSelectedSection()
+            guard panel.firstSliderControlForQA() == nil else {
+                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("appearance: custom slider did not hide after leaving Custom")
+            }
         }
 
         // 3b. Consolidation witness: the agents section's default-model field

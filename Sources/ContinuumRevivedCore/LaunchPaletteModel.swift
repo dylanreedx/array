@@ -142,13 +142,50 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     }
 }
 
+public enum CommandCenterAttentionReason: String, Equatable, Sendable {
+    case approval
+    case input
+
+    public var displayName: String {
+        switch self {
+        case .approval: return "Approval requested"
+        case .input: return "Waiting for your input"
+        }
+    }
+}
+
+/// A navigable tile plus the optional presentation facts already owned by the
+/// app. The id/title-only initializer remains source-compatible for older
+/// callers and checks; command-center copy never has to infer agent identity
+/// from a title such as "Jump to GPT 5.6".
 public struct JumpTileRow: Equatable, Sendable {
     public let id: UUID
     public let title: String
+    public let kind: TileKind?
+    public let contextTitle: String?
+    public let modelID: String?
+    public let modelDisplayName: String?
+    public let statusLabel: String?
+    public let attentionReason: CommandCenterAttentionReason?
 
-    public init(id: UUID, title: String) {
+    public init(
+        id: UUID,
+        title: String,
+        kind: TileKind? = nil,
+        contextTitle: String? = nil,
+        modelID: String? = nil,
+        modelDisplayName: String? = nil,
+        statusLabel: String? = nil,
+        attentionReason: CommandCenterAttentionReason? = nil
+    ) {
         self.id = id
         self.title = title
+        self.kind = kind
+        self.contextTitle = contextTitle
+        self.modelID = modelID
+        self.modelDisplayName = modelDisplayName
+        self.statusLabel = statusLabel
+        self.attentionReason = attentionReason
     }
 }
 
@@ -176,8 +213,23 @@ public struct LaunchPaletteProfileRow: Equatable, Sendable {
     }
 }
 
+/// One exact, fully-qualified managed-agent model offered by the command
+/// center's shallow New Agent configuration step.
+public struct AgentModelPaletteRow: Equatable, Sendable {
+    public let id: String
+    public let displayName: String
+    public let providerName: String
+
+    public init(id: String, displayName: String, providerName: String) {
+        self.id = id
+        self.displayName = displayName
+        self.providerName = providerName
+    }
+}
+
 public enum LaunchPaletteRow: Equatable, Sendable {
     case profile(LaunchPaletteProfileRow)
+    case agentModel(AgentModelPaletteRow)
     case action(LaunchPaletteAction)
     case project(ProjectPickerRow)
     case workspace(WorkspaceEntry)
@@ -188,6 +240,7 @@ public enum LaunchPaletteRow: Equatable, Sendable {
     public var displayName: String {
         switch self {
         case let .profile(profile): return profile.displayName
+        case let .agentModel(model): return model.displayName
         case let .action(action): return action.displayName
         case let .project(project):
             if project.worktreeOf != nil {
@@ -209,6 +262,7 @@ public enum LaunchPaletteRow: Equatable, Sendable {
     public var isSelectable: Bool {
         switch self {
         case let .profile(profile): return profile.isSelectable
+        case .agentModel: return true
         case .action: return true
         case let .project(project): return project.isSelectable
         case let .workspace(workspace): return !workspace.projectIds.isEmpty
@@ -224,6 +278,10 @@ public enum LaunchPaletteRow: Equatable, Sendable {
         case let .profile(profile):
             return profile.displayName.lowercased().contains(query)
                 || profile.id.lowercased().contains(query)
+        case let .agentModel(model):
+            let haystacks = [model.displayName, model.id, model.providerName, "agent model provider"].map { $0.lowercased() }
+            let queryTokens = query.split(separator: " ").map(String.init)
+            return queryTokens.allSatisfy { token in haystacks.contains { $0.contains(token) } }
         case let .action(action):
             if action == .previousView || action == .previousTile || action == .previousZone {
                 let tokens = query.split(separator: " ").map(String.init)
@@ -265,7 +323,68 @@ public enum LaunchPaletteRow: Equatable, Sendable {
     }
 }
 
+public enum CommandCenterCategory: String, CaseIterable, Equatable, Sendable {
+    case needsYou = "Needs You"
+    case recent = "Recent"
+    case agentsAndTiles = "Agents & Tiles"
+    case workspacesAndProjects = "Workspaces & Projects"
+    case actions = "Actions"
+    case create = "Create"
+    case models = "Choose Model"
+    case developer = "Developer"
+}
+
+/// Product-facing command-center copy and policy. `row` remains the stable
+/// dispatch identity; the AppKit surface never has to derive language from an
+/// enum case or reverse-map a cleaned-up title.
+public struct CommandCenterItem: Equatable, Sendable {
+    public let row: LaunchPaletteRow
+    public let category: CommandCenterCategory
+    public let title: String
+    public let subtitle: String?
+    public let iconSystemName: String
+    public let aliases: [String]
+    public let isDefaultVisible: Bool
+    public let isSafeRecent: Bool
+    public let stableID: String
+
+    public init(
+        row: LaunchPaletteRow,
+        category: CommandCenterCategory,
+        title: String,
+        subtitle: String? = nil,
+        iconSystemName: String,
+        aliases: [String] = [],
+        isDefaultVisible: Bool,
+        isSafeRecent: Bool,
+        stableID: String
+    ) {
+        self.row = row
+        self.category = category
+        self.title = title
+        self.subtitle = subtitle
+        self.iconSystemName = iconSystemName
+        self.aliases = aliases
+        self.isDefaultVisible = isDefaultVisible
+        self.isSafeRecent = isSafeRecent
+        self.stableID = stableID
+    }
+}
+
+public struct CommandCenterSection: Equatable, Sendable {
+    public let category: CommandCenterCategory
+    public let items: [CommandCenterItem]
+
+    public init(category: CommandCenterCategory, items: [CommandCenterItem]) {
+        self.category = category
+        self.items = items
+    }
+}
+
 public enum LaunchPaletteModel {
+    public static let defaultItemLimit = 12
+    public static let recentItemLimit = 5
+
     public static func makeRows(profiles: [LaunchPaletteProfileRow], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], contextualActions: [LaunchPaletteAction] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = [], jumpZones: [JumpZoneRow] = []) -> [LaunchPaletteRow] {
         profiles.map(LaunchPaletteRow.profile)
             + CommandRegistry.paletteActions().map(LaunchPaletteRow.action)
@@ -291,6 +410,187 @@ public enum LaunchPaletteModel {
             return [.action(.openURL(candidate))] + filtered
         }
         return filtered
+    }
+
+    public static func makeSections(
+        rows: [LaunchPaletteRow],
+        query: String,
+        recentIDs: [String] = []
+    ) -> [CommandCenterSection] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            var matchedRows = filterRows(rows, query: trimmed)
+            let normalizedTokens = trimmed.lowercased().split(whereSeparator: { $0.isWhitespace }).map(String.init)
+            for row in rows where !matchedRows.contains(row) {
+                let presented = presentation(for: row)
+                let haystacks = ([presented.title, presented.subtitle ?? ""] + presented.aliases).map { $0.lowercased() }
+                if normalizedTokens.allSatisfy({ token in haystacks.contains(where: { $0.contains(token) }) }) {
+                    matchedRows.append(row)
+                }
+            }
+            let items = matchedRows
+                .map(presentation(for:))
+                .sorted { rankPrecedes($0, $1, query: trimmed) }
+            return rankedSections(from: items)
+        }
+
+        let allItems = rows.map(presentation(for:))
+        let byID = allItems.reduce(into: [String: CommandCenterItem]()) { result, item in
+            if result[item.stableID] == nil { result[item.stableID] = item }
+        }
+        let needsYouItems = Array(allItems.filter { $0.category == .needsYou }.prefix(defaultItemLimit))
+        let needsYouIDs = Set(needsYouItems.map(\.stableID))
+        let recentItems = Array(sanitizeRecentIDs(recentIDs, rows: rows)
+            .compactMap { byID[$0] }
+            .filter { !needsYouIDs.contains($0.stableID) }
+            .prefix(max(0, defaultItemLimit - needsYouItems.count)))
+        var remaining = max(0, defaultItemLimit - needsYouItems.count - recentItems.count)
+        var homeItems: [CommandCenterItem] = []
+        for category in [CommandCenterCategory.create, .models, .workspacesAndProjects, .actions] {
+            let candidates = allItems.filter {
+                let candidate = $0
+                return candidate.category == category
+                    && candidate.isDefaultVisible
+                    && !recentItems.contains(where: { $0.stableID == candidate.stableID })
+            }
+            let slice = Array(candidates.prefix(remaining))
+            homeItems.append(contentsOf: slice)
+            remaining -= slice.count
+            if remaining == 0 { break }
+        }
+
+        var result: [CommandCenterSection] = []
+        if !needsYouItems.isEmpty { result.append(CommandCenterSection(category: .needsYou, items: needsYouItems)) }
+        if !recentItems.isEmpty { result.append(CommandCenterSection(category: .recent, items: recentItems)) }
+        result.append(contentsOf: sections(from: homeItems, order: [.create, .models, .workspacesAndProjects, .actions]))
+        return result
+    }
+
+    public static func presentation(for row: LaunchPaletteRow) -> CommandCenterItem {
+        switch row {
+        case let .profile(profile):
+            let title = profile.displayName.lowercased() == "shell" ? "Terminal" : profile.displayName
+            return item(row, .create, title, profile.detail, "terminal", [profile.id, "launch", "profile"], true, true, "profile:\(profile.id)")
+        case let .agentModel(model):
+            return item(row, .models, model.displayName, model.providerName, "cpu", [model.id, "agent", "model", "provider"], true, false, "agent-model:\(model.id)")
+        case let .project(project):
+            let subtitle = project.worktreeOf == nil ? project.rootPath : "Worktree · \(project.rootPath)"
+            return item(row, .workspacesAndProjects, project.name, subtitle, "folder", ["project", "canvas", "add"], true, true, "project:\(project.id.uuidString)")
+        case let .workspace(workspace):
+            let count = workspace.projectIds.count
+            return item(row, .workspacesAndProjects, workspace.name, "Workspace · \(count) project\(count == 1 ? "" : "s")", "square.grid.2x2", ["switch", "workspace"], true, true, "workspace:\(workspace.id.uuidString)")
+        case let .workspaceAction(action, workspace):
+            switch action {
+            case .renameWorkspace:
+                return item(row, .developer, "Rename \(workspace.name)", "Workspace administration", "pencil", ["workspace"], false, false, "workspace-rename:\(workspace.id.uuidString)")
+            case .deleteWorkspace:
+                return item(row, .developer, "Delete \(workspace.name)", "Workspace administration", "trash", ["workspace", "remove"], false, false, "workspace-delete:\(workspace.id.uuidString)")
+            default:
+                return actionPresentation(action, row: row)
+            }
+        case let .jumpToTile(tile):
+            let category: CommandCenterCategory = tile.attentionReason == nil ? .agentsAndTiles : .needsYou
+            let kind = tile.kind?.displayName ?? "Tile"
+            var subtitleParts: [String] = []
+            if let attention = tile.attentionReason { subtitleParts.append(attention.displayName) }
+            if let status = tile.statusLabel, tile.attentionReason == nil { subtitleParts.append(status) }
+            if let model = tile.modelDisplayName { subtitleParts.append(model) }
+            if let context = tile.contextTitle { subtitleParts.append(context) }
+            if subtitleParts.isEmpty { subtitleParts.append(kind) }
+            let aliases = ["jump", "go", "tile", kind, tile.modelID, tile.modelDisplayName, tile.contextTitle, tile.statusLabel, tile.attentionReason?.displayName]
+                .compactMap { $0 }
+            let icon = tile.kind == .managedAgent ? "sparkles" : "rectangle.on.rectangle"
+            return item(row, category, tile.title, subtitleParts.joined(separator: " · "), icon, aliases, tile.attentionReason != nil, true, "tile:\(tile.id.uuidString)")
+        case let .jumpToZone(zone):
+            return item(row, .agentsAndTiles, zone.title, "Zone", "square.dashed", ["jump", "go", "zone"], false, true, "zone:\(zone.id.uuidString)")
+        case let .action(action):
+            return actionPresentation(action, row: row)
+        }
+    }
+
+    public static func sanitizeRecentIDs(_ ids: [String], rows: [LaunchPaletteRow]) -> [String] {
+        let safe = rows.map(presentation(for:)).filter(\.isSafeRecent).reduce(into: [String: CommandCenterItem]()) { result, item in
+            result[item.stableID] = item
+        }
+        var seen = Set<String>()
+        return ids.filter { safe[$0] != nil && seen.insert($0).inserted }.prefix(recentItemLimit).map { $0 }
+    }
+
+    public static func recordingRecent(_ row: LaunchPaletteRow, in ids: [String], succeeded: Bool) -> [String] {
+        let presented = presentation(for: row)
+        guard succeeded, presented.isSafeRecent else { return ids }
+        return Array(([presented.stableID] + ids.filter { $0 != presented.stableID }).prefix(recentItemLimit))
+    }
+
+    private static func sections(from items: [CommandCenterItem], order: [CommandCenterCategory]) -> [CommandCenterSection] {
+        order.compactMap { category in
+            let members = items.filter { $0.category == category }
+            return members.isEmpty ? nil : CommandCenterSection(category: category, items: members)
+        }
+    }
+
+    private static func rankedSections(from items: [CommandCenterItem]) -> [CommandCenterSection] {
+        var order: [CommandCenterCategory] = []
+        var grouped: [CommandCenterCategory: [CommandCenterItem]] = [:]
+        for item in items {
+            if grouped[item.category] == nil { order.append(item.category) }
+            grouped[item.category, default: []].append(item)
+        }
+        return order.map { CommandCenterSection(category: $0, items: grouped[$0] ?? []) }
+    }
+
+    private static func searchRank(for item: CommandCenterItem, query: String) -> (Int, Int, String) {
+        let normalized = query.lowercased()
+        let title = item.title.lowercased()
+        let match: Int
+        if title == normalized { match = 0 }
+        else if title.hasPrefix(normalized) { match = 1 }
+        else if title.contains(normalized) { match = 2 }
+        else { match = 3 }
+        let category = [CommandCenterCategory.needsYou, .agentsAndTiles, .workspacesAndProjects, .actions, .create, .models, .developer].firstIndex(of: item.category) ?? 99
+        return (match, category, title)
+    }
+
+    private static func rankPrecedes(_ lhs: CommandCenterItem, _ rhs: CommandCenterItem, query: String) -> Bool {
+        let left = searchRank(for: lhs, query: query)
+        let right = searchRank(for: rhs, query: query)
+        if left.0 != right.0 { return left.0 < right.0 }
+        if left.1 != right.1 { return left.1 < right.1 }
+        return left.2 < right.2
+    }
+
+    private static func actionPresentation(_ action: LaunchPaletteAction, row: LaunchPaletteRow) -> CommandCenterItem {
+        switch action {
+        case .newManagedAgent: return item(row, .create, "Agent", "Start a focused coding session", "sparkles", ["new", "managed", "assistant"], true, true, "action:new-agent")
+        case .newHeadlessAgent: return item(row, .developer, "Background agent", "Run without a canvas tile", "bolt.horizontal", ["headless", "tileless"], false, false, "action:headless-agent")
+        case .fanOutQueueSelection: return item(row, .developer, "Fan out selected tickets", "Start one agent per selected ticket", "arrow.triangle.branch", ["queue", "batch"], false, false, "action:fan-out")
+        case .newNote: return item(row, .create, "Note", "Add a canvas note", "note.text", ["new"], true, true, "action:new-note")
+        case .newBrowser: return item(row, .create, "Browser", "Open a web tile", "globe", ["new", "web"], true, true, "action:new-browser")
+        case .openFile: return item(row, .actions, "Open file", "Choose a file in this project", "doc", [], false, true, "action:open-file")
+        case .openFileTree: return item(row, .create, "File tree", "Browse project files", "list.bullet.indent", ["open"], true, true, "action:file-tree")
+        case .newDiffReview: return item(row, .create, "Diff review", "Review working changes", "plusminus", ["git", "new"], true, true, "action:diff-review")
+        case .fitCanvasToAll: return item(row, .actions, "Show entire canvas", "Fit every tile and zone", "arrow.up.left.and.arrow.down.right", ["fit", "zoom", "all"], true, true, "action:fit-canvas")
+        case .previousView: return item(row, .actions, "Previous view", "Return to the last canvas view", "arrow.uturn.backward", ["back"], false, true, "action:previous-view")
+        case .previousTile: return item(row, .actions, "Previous tile", "Return to the last focused tile", "arrow.left.to.line", ["back", "jump"], false, true, "action:previous-tile")
+        case .previousZone: return item(row, .actions, "Previous zone", "Return to the last focused zone", "arrow.left.to.line.compact", ["back", "jump"], false, true, "action:previous-zone")
+        case .toggleWorkspaceSidebar: return item(row, .developer, "Activity dock", "Show or hide workspace navigation", "sidebar.left", ["toggle", "sidebar"], false, true, "action:activity-dock")
+        case let .openURL(url): return item(row, .actions, "Open \(url)", "Browser", "globe", ["url", "web"], false, true, "url:\(url)")
+        case let .switchProject(id): return item(row, .workspacesAndProjects, "Switch project", nil, "folder", [], false, true, "project-switch:\(id.uuidString)")
+        case let .addProjectToCanvas(id): return item(row, .workspacesAndProjects, "Add project", "Place on this canvas", "folder.badge.plus", [], false, true, "project-add:\(id.uuidString)")
+        case .newWorkspace: return item(row, .create, "Workspace", "Create a spatial workspace", "square.grid.2x2", ["new"], true, true, "action:new-workspace")
+        case let .renameWorkspace(id): return item(row, .developer, "Rename workspace", nil, "pencil", [], false, false, "workspace-rename:\(id.uuidString)")
+        case let .deleteWorkspace(id): return item(row, .developer, "Delete workspace", nil, "trash", [], false, false, "workspace-delete:\(id.uuidString)")
+        case let .switchWorkspace(id): return item(row, .workspacesAndProjects, "Switch workspace", nil, "square.grid.2x2", [], false, true, "workspace-switch:\(id.uuidString)")
+        case .openInspectorForFocusedBrowser: return item(row, .developer, "Inspect current browser", "Open Web Inspector", "wrench.and.screwdriver", ["focused"], false, true, "action:browser-inspector")
+        case let .spawnHarnessRole(role): return item(row, .developer, role.displayName, "Harness agent", "hammer", ["run", "spawn", "role"], false, false, "harness:\(role.id)")
+        case let .jumpToTile(id): return item(row, .agentsAndTiles, "Tile", nil, "rectangle.on.rectangle", ["jump"], false, true, "tile:\(id.uuidString)")
+        case let .jumpToZone(id): return item(row, .agentsAndTiles, "Zone", nil, "square.dashed", ["jump"], false, true, "zone:\(id.uuidString)")
+        case .createZone: return item(row, .create, "Zone", "Group related canvas work", "square.dashed", ["new", "create"], true, true, "action:create-zone")
+        }
+    }
+
+    private static func item(_ row: LaunchPaletteRow, _ category: CommandCenterCategory, _ title: String, _ subtitle: String?, _ icon: String, _ aliases: [String], _ defaultVisible: Bool, _ safeRecent: Bool, _ stableID: String) -> CommandCenterItem {
+        CommandCenterItem(row: row, category: category, title: title, subtitle: subtitle, iconSystemName: icon, aliases: aliases, isDefaultVisible: defaultVisible, isSafeRecent: safeRecent, stableID: stableID)
     }
 
     public static func urlCandidate(from query: String) -> String? {
