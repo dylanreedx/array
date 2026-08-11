@@ -175,12 +175,21 @@ final class ProviderModelPickerView: NSView, TokenThemed {
         self.groups = groups
         self.selectedModelID = selectedID
         self.selectedGroupID = selectedID.map(ProviderModelGrouping.provider(forID:)) ?? groups.first?.id ?? "other"
+        // Sized for the ONE headered list the pane now shows (see `headeredItems`),
+        // not for the widest single group — the list holds every provider, so a
+        // per-group size would clip it. Height is capped so a large catalogue makes
+        // the pane scroll instead of growing past the screen; width still comes from
+        // the content so no title truncates.
+        let headeredForSizing: [ChoiceItem] = groups.count > 1
+            ? groups.flatMap { group in
+                [ChoiceItem(id: "provider-header:\(group.id)", title: group.title, detail: nil, enabled: false)]
+                    + group.models
+            }
+            : (groups.first?.models ?? [])
         var paneSize = NSSize(width: 160, height: 44)
-        for group in groups {
-            let size = ChoiceListView(items: group.models, selectedID: nil).intrinsicContentSize
-            paneSize.width = max(paneSize.width, size.width)
-            paneSize.height = max(paneSize.height, size.height)
-        }
+        let intrinsic = ChoiceListView(items: headeredForSizing, selectedID: nil).intrinsicContentSize
+        paneSize.width = max(paneSize.width, intrinsic.width)
+        paneSize.height = max(paneSize.height, min(intrinsic.height, 420))
         self.listPaneSize = paneSize
         super.init(frame: .zero)
 
@@ -251,19 +260,42 @@ final class ProviderModelPickerView: NSView, TokenThemed {
     private func selectGroup(id: String) {
         guard id != selectedGroupID else { return }
         selectedGroupID = id
-        installList(for: id)
+        let firstModel = groups.first(where: { $0.id == id })?.models.first(where: \.enabled)?.id
+        installList(for: id, focusing: firstModel)
         needsLayout = true
         layoutSubtreeIfNeeded()
         for button in railButtons { button.isSelectedProvider = button.groupID == id }
         window?.makeFirstResponder(listView)
     }
 
-    private func installList(for groupID: String) {
+    /// Every provider's models in ONE list, each block behind a disabled header
+    /// row, rather than only the selected provider's.
+    ///
+    /// The rail alone was not enough of a signal: with a Claude model selected the
+    /// pane opened on Anthropic, and a codex user concluded their models were
+    /// missing — reported repeatedly as "only Anthropic models" when nothing was
+    /// filtered (the backend resolves to pi with `allowedProviders: nil`). Headers
+    /// are disabled `ChoiceItem`s, which `ChoiceListView` already skips for focus
+    /// and keyboard movement, so they read as labels and cannot be chosen. The rail
+    /// stays as a jump affordance. One provider ⇒ no header, because a lone label
+    /// over every row it owns is noise.
+    private var headeredItems: [ChoiceItem] {
+        guard groups.count > 1 else { return groups.first?.models ?? [] }
+        return groups.flatMap { group in
+            [ChoiceItem(id: "provider-header:\(group.id)", title: group.title, detail: nil, enabled: false)]
+                + group.models
+        }
+    }
+
+    private func installList(for groupID: String, focusing focusID: String? = nil) {
         listView?.removeFromSuperview()
-        let group = groups.first(where: { $0.id == groupID }) ?? ProviderModelGrouping.Group(id: groupID, title: groupID, models: [])
+        let items = headeredItems
+        // The rail no longer swaps the pane's CONTENT — every provider is always
+        // listed — so it jumps: focus lands on that provider's first model.
+        let wanted = focusID ?? selectedModelID
         let list = ChoiceListView(
-            items: group.models,
-            selectedID: group.models.contains(where: { $0.id == selectedModelID }) ? selectedModelID : nil
+            items: items,
+            selectedID: items.contains(where: { $0.id == wanted }) ? wanted : nil
         )
         list.onSelection = { [weak self] item in self?.onSelection?(item) }
         list.onDismiss = { [weak self] in self?.onDismiss?() }
@@ -307,6 +339,14 @@ final class ProviderModelPickerView: NSView, TokenThemed {
     var qaVisibleModelIDs: [String] { listView?.qaItems.map(\.id) ?? [] }
     var qaVisibleModelTitles: [String] { listView?.qaItems.map(\.title) ?? [] }
     var qaVisibleModelDetails: [String?] { listView?.qaItems.map(\.detail) ?? [] }
+    /// Every provider header row is disabled, so it reads as a label and can never
+    /// be committed as a model choice.
+    var qaFocusedModelID: String? { listView?.focusedID }
+    var qaHeaderIDsAreDisabled: Bool {
+        (listView?.qaItems ?? [])
+            .filter { $0.id.hasPrefix("provider-header:") }
+            .allSatisfy { !$0.enabled }
+    }
     func selectProviderForQA(_ id: String) { selectGroup(id: id) }
     func chooseModelForQA(_ id: String) { listView?.choose(id: id) }
 }
@@ -556,15 +596,35 @@ extension ProviderModelButton {
                    "rail lists the catalogue's providers, got \(picker.qaProviderIDs)")
         try expect(picker.qaSelectedProviderID == "openai-codex",
                    "picker opens on the selected model's provider")
-        try expect(picker.qaVisibleModelIDs == ["openai-codex/gpt-a", "openai-codex/gpt-b"],
-                   "right pane lists the active provider's models, got \(picker.qaVisibleModelIDs)")
+        // UPDATED DELIBERATELY: the pane used to list ONLY the active provider's
+        // models, which is why a Claude default made a codex user conclude their
+        // models were gone — reported repeatedly as "only Anthropic models" when the
+        // backend resolves to pi with `allowedProviders: nil` and nothing is
+        // filtered. Every provider is listed now, each block behind a disabled
+        // header, with the rail kept as a jump affordance.
+        try expect(picker.qaVisibleModelIDs == [
+                       "provider-header:openai-codex", "openai-codex/gpt-a", "openai-codex/gpt-b",
+                       "provider-header:anthropic", "anthropic/claude-x",
+                   ],
+                   "right pane must list EVERY provider's models behind a header, got \(picker.qaVisibleModelIDs)")
+        // Headers are labels, not choices: `ChoiceListView` skips disabled rows for
+        // focus and keyboard movement, so one can never be committed as a model.
+        try expect(picker.qaHeaderIDsAreDisabled,
+                   "provider headers must be non-selectable")
 
-        // 3. Switching providers swaps the pane without resizing the panel.
+        // 3. The rail JUMPS instead of swapping: every provider stays listed, and
+        //    picking one moves focus to its first model. Swapping the pane is what
+        //    hid codex behind a click in the first place.
         let widthBefore = button.qaPickerView.flatMap { $0.window?.frame.width }
         picker.selectProviderForQA("anthropic")
-        try expect(picker.qaVisibleModelIDs == ["anthropic/claude-x"],
-                   "switching the rail swaps the model pane, got \(picker.qaVisibleModelIDs)")
-        try expect(picker.qaVisibleModelTitles == ["Claude X"] && picker.qaVisibleModelDetails == ["claude-x"],
+        try expect(picker.qaVisibleModelIDs == [
+                       "provider-header:openai-codex", "openai-codex/gpt-a", "openai-codex/gpt-b",
+                       "provider-header:anthropic", "anthropic/claude-x",
+                   ],
+                   "the rail must not hide the other providers, got \(picker.qaVisibleModelIDs)")
+        try expect(picker.qaFocusedModelID == "anthropic/claude-x",
+                   "picking a provider focuses its first model, got \(String(describing: picker.qaFocusedModelID))")
+        try expect(picker.qaVisibleModelTitles.contains("Claude X") && picker.qaVisibleModelDetails.contains("claude-x"),
                    "the live surface renders the display name with the id caption, got \(picker.qaVisibleModelTitles)/\(picker.qaVisibleModelDetails)")
         try expect(button.qaPickerView.flatMap { $0.window?.frame.width } == widthBefore,
                    "provider switch must not resize the panel")
