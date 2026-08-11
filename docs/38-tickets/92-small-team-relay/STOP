@@ -1,0 +1,3 @@
+Paused 2026-08-06. Recreated after the Array consolidation — the original STOP
+markers were untracked and did not survive the clone from continuum-overnight.
+Do not remove without Dylan explicitly resuming overnight development.

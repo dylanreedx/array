@@ -1,0 +1,531 @@
+---
+title: Array companion catch-up and architecture refactor
+brief: Bring the iPhone companion, provider layer, and relay onto one durable, provider-neutral architecture with full transcript and control parity.
+status: in_progress
+localOnly: true
+---
+
+# Array companion catch-up and architecture refactor
+
+- Status: **in progress — Phase 0 authority packet; relay implementation loop remains stopped**
+- Owner: Dylan
+- Scope: macOS Array, iPhone companion, provider backends, sync/relay, pairing/auth, shared agent content/UI, verification, migration, and release
+- Current baseline: desktop Array 0.4.2 (build 8); iPhone Continuum 0.1.0 dogfood client; legacy in-memory/long-poll relay
+
+## Progress
+
+- **2026-08-10 — Phase 0 authority packet started.** This umbrella plan and the prepared ticket-92 relay program are being committed together as the local implementation authority.
+- The relay program's `STOP` remains armed. Its implementation loop must not start until the preserved queue-91 P4.6 candidate is resolved and the checkout satisfies the relay runbook's clean-tree/preflight rules.
+- Existing desktop command-center, agent-home, context-occupancy, brand, archive, and website work is outside this packet and remains untouched.
+
+## Outcome
+
+Array will have one provider-neutral agent architecture and two first-class clients. A managed agent started through Claude Code, Codex, or pi will produce the same durable semantic transcript and lifecycle stream. The Mac and an authorized iPhone will reduce that stream into the same conversation, status, approval, and command state. A separately installed relay will persist accepted data before broadcasting it, survive UI and relay restarts, and report sleeping or disconnected execution hosts honestly.
+
+The completed product must support this concrete workflow:
+
+1. Dylan starts a managed agent on the Mac using Claude Code, Codex, or pi.
+2. The iPhone shows the same agent, live status, transcript blocks, tool activity, context facts, and pending human requests.
+3. Dylan can send a prompt or follow-up, answer an approval/input request, stop the agent, or reopen its workspace from the phone when his execution host is online and his device has the capability.
+4. Closing the Array window does not stop the relay service. Relay restart does not lose pairings, cursors, transcripts, commands, or push registrations.
+5. If the execution Mac sleeps, the phone retains readable history, marks the host offline, and refuses execution commands instead of pretending they were delivered.
+6. No provider credential, environment value, private absolute path, raw process handle, or generic shell authority enters the relay.
+
+## Definition of done
+
+- The formal provider backend registry owns execution, availability, auth readiness, model catalogue contribution, capability reporting, resume state, and transcript import for Claude Code, Codex, and pi.
+- `AgentSupervisor` selects backends through that registry and no longer contains provider construction switches.
+- Provider output normalizes into a versioned semantic agent-document mutation stream used by both live rendering and transcript rehydration.
+- The relay persists identity, authorization, workspaces, agents, generations/sequences, transcript mutations, snapshots, commands, receipts, blobs, push registrations, quotas, and backup metadata in SQLite WAL.
+- The relay transport is bounded HTTP/WebSocket over a private-network-first deployment, with application-layer credentials, heartbeat, replay cursors, backpressure, and graceful restart.
+- The iPhone is split into maintainable feature and infrastructure modules; it is branded Array and is no longer one monolithic `ContinuumApp.swift` implementation.
+- Mac and iPhone show the same authorized transcript and command outcomes from snapshot plus tail replay.
+- Pairing credentials are server-generated, stored hashed at rest on the relay, stored in Keychain on clients, scoped by workspace capabilities, expiring/revocable, and never carried in URLs or JSON hello bodies.
+- CloudKit and the ticket-86 relay remain available only during a measured compatibility window, then are removed from the production default path.
+- The full verification matrix is trustworthy: known-red blockers that prevent later legs from executing are fixed or split into non-blocking, independently reported gates.
+- Simulator, physical-device, restart, sleep/offline, backup/restore, migration, and rollback acceptance passes are recorded before release.
+
+## Non-goals
+
+- Public multi-tenant SaaS, public signup, organization billing, SCIM, SSO, or a globally replicated control plane.
+- Moving provider credentials or raw provider processes into the relay.
+- Generic remote shell or arbitrary filesystem browsing from the phone.
+- Exactly-once provider execution. Ambiguous post-dispatch failures end in `indeterminate` and require reconciliation or an explicit retry.
+- Horizontal relay scaling, Kafka/Redis, distributed consensus, or object storage before the single-node limits are measured and exceeded.
+- Migrating an agent process off a sleeping execution host. Another already-awake host may continue only its own agents.
+- Rewriting canvas op-log semantics that already converge; the existing spatial `SyncMessage` path remains separate from privileged agent content/control frames.
+
+## Current state and gaps
+
+### What is worth preserving
+
+- `AgentSupervisor` already owns agents independently from tiles and multicasts runtime events.
+- `AgentRunning` gives deterministic checks an execution seam.
+- `PiAgentRunner`, `ClaudeAgentRunner`, and `CodexAgentRunner` isolate provider process management and translators.
+- `AgentRuntimeEvent` gives status/activity consumers a provider-neutral live vocabulary.
+- `ManagedTranscriptRehydrator` proves provider session files can reconstruct local display history without republishing sensitive bodies.
+- `ContinuumRevivedAgentContent` and `ContinuumRevivedAgentUI` already enforce one-way shared-module boundaries.
+- `SyncTransport`, `SyncMessageDemux`, spatial op-log/snapshots, activity projection, approval response, pairing, and freshness semantics are working foundations.
+- The phone already has Agents, Canvas, Approvals, Settings, relay/CloudKit selection, pairing, stale/offline presentation, APNs categories, and operator-gated canvas mutations.
+
+### What must change
+
+- `AgentRunning` covers only run/stop/observations. Backend availability, auth, catalogue, routing, resume state, transcript import, and capabilities remain spread across static types and switches.
+- `AgentSupervisor.productionRunner(for:)` knows every provider and must change for each new backend.
+- Live transcript projection, disk rehydration, and sanitized companion activity are adjacent representations without one durable semantic mutation contract.
+- The current relay uses process-memory authority, a lifetime-local sequence, raw HTTP long-poll, token registration from client-supplied scope bits, and an in-memory ring. It is a dogfood bridge, not a durable control service.
+- The current `SyncMessage` vocabulary intentionally excludes full transcript/control content. Expanding it would mix spatial replication with privileged interactive operations and weaken authorization review.
+- The entire phone state/lifecycle/navigation implementation is concentrated in `ios/Continuum/Sources/ContinuumApp.swift`.
+- The phone still presents the Continuum 0.1.0 identity while the desktop product is Array.
+- Full-matrix execution is obstructed by known-red legs; later checks can remain unexecuted without an independent result.
+- The prepared small-team relay design and scripts are not tracked, so there is no committed implementation authority yet.
+
+## Target architecture
+
+```text
+┌──────────────────────────── Execution hosts ────────────────────────────┐
+│                                                                        │
+│  AgentSupervisor                                                       │
+│       │                                                                │
+│       ▼                                                                │
+│  ManagedAgentBackendRegistry                                           │
+│   ├─ ClaudeBackend  ─ Claude CLI + session reader                       │
+│   ├─ CodexBackend   ─ Codex CLI + stored thread id + session reader     │
+│   └─ PiBackend      ─ pi CLI + session reader                           │
+│       │                                                                │
+│       ▼                                                                │
+│  AgentDocumentMutation + host-only runtime observations                 │
+│       ├─ local semantic transcript store                                │
+│       ├─ desktop reducer/presentation                                   │
+│       ├─ sanitized notification projection (Class A)                    │
+│       └─ authorized relay publisher (Class B, no Class C)               │
+└───────────────────────────────┬────────────────────────────────────────┘
+                                │ environment credential / outbound WS
+                                ▼
+┌──────────────────────── Trusted single-node Array Relay ───────────────┐
+│  RelayProtocol     RelayAuthorization     RelayStore (SQLite WAL)       │
+│  RelayNIO          DurableHub             BlobStore / APNs / backups    │
+│  persist → authorize → sequence → broadcast → replay                    │
+└───────────────────────────────┬────────────────────────────────────────┘
+                                │ device credential / HTTP + WS
+                ┌───────────────┴────────────────┐
+                ▼                                ▼
+┌─────────────────────────┐       ┌─────────────────────────┐
+│ macOS Array client      │       │ iPhone Array client     │
+│ canvas + full agent UI  │       │ canvas + full agent UI  │
+│ local execution owner   │       │ transcript + commands   │
+└─────────────────────────┘       └─────────────────────────┘
+```
+
+### Dependency boundaries
+
+```text
+ContinuumRevivedAgentContent        semantic transcript/document values
+              ▲
+              │ optional semantic value dependency only
+ContinuumRevivedRelayProtocol       Foundation-only frames, ids, limits, capabilities
+          ▲                 ▲
+          │                 └──────── RelayClient
+ContinuumRevivedRelayCore           GRDB store, auth, policy, durable hub
+          ▲
+ContinuumRevivedRelayNIO            HTTP/WebSocket server adapter
+          ▲
+continuum-relay                     config, secrets, service lifecycle, admin CLI
+
+ContinuumRevivedCore                provider registry + host adapter
+          ▲
+ContinuumRevived                    macOS wiring and UI
+
+RelayProtocol + RelayClient + AgentContent + AgentUI
+          ▲
+Array iOS feature modules
+```
+
+Rules enforced by dedicated check targets:
+
+- RelayProtocol cannot import Core, Sync, GRDB, NIO, CloudKit, UI, or host runtime code.
+- RelayCore cannot import app UI, provider runners, CloudKit, or server adapters.
+- RelayClient cannot import RelayCore or server persistence.
+- AgentContent remains UI-free and provider-free.
+- Provider credentials and host observations remain outside every Codable relay type.
+- The existing `ContinuumRevivedSync.SyncTransport` remains the canvas/spatial compatibility seam; privileged agent traffic uses RelayProtocol.
+
+## Hard-to-reverse decisions
+
+### 1. Durable transcript contract
+
+The canonical relayed transcript is a versioned stream of semantic `AgentDocumentMutation` values, not raw provider JSON, AppKit/SwiftUI view models, or lossy activity summaries. Mutations use opaque workspace, environment, agent, generation, turn, item, and mutation IDs. Snapshot plus tail must reduce to the same document as complete replay.
+
+Provider adapters may retain provider-specific cursor/session facts locally, but the transcript mutation schema must not encode Claude/Codex/pi-specific wire events. Unknown semantic block kinds are preserved as bounded opaque native-rendered blocks; they are never rendered as arbitrary HTML.
+
+### 2. Two information planes
+
+- **Class A — notification projection:** categories, safe configured titles, lifecycle, and opaque IDs. It can feed APNs and lock-screen UI; it contains no prompt, response, tool body, path, or credential.
+- **Class B — authenticated interactive content:** transcript mutations, rendered tool/diff content, prompts, answers, and explicit agent commands. It requires device/environment identity, workspace membership, operation capability, limits, and audit metadata.
+- **Class C — host-only runtime/secrets:** provider credentials, environment values, private absolute paths, process handles, signing material, generic shell commands, and unrelated files. It never enters RelayProtocol, relay persistence, logs, metrics, backups, or APNs.
+
+The existing taint scanner remains defense in depth for Class A and compatibility messages. It is not authorization for Class B.
+
+### 3. Relay identity and credentials
+
+The relay creates one-use pairing invitations and returns 256-bit opaque credentials exactly once. It stores only credential hashes and metadata. A human device and an execution environment are different principal kinds with non-interchangeable credentials. Workspace capabilities are server-derived and stored; clients never submit raw scope bits as authority.
+
+Initial capabilities:
+
+- `transcript.read`
+- `tool.read`
+- `prompt.send`
+- `agent.steer`
+- `approval.respond`
+- `agent.stop`
+- `agent.create`
+- `canvas.read`
+- `canvas.edit`
+- `device.manage`
+- `workspace.admin`
+- `relay.admin`
+- execution-host publish/consume capabilities scoped to configured workspaces
+
+### 4. Command delivery
+
+Every command has a device-scoped idempotency key and durable state:
+
+```text
+received → authorized → committed → forwarded → hostAccepted → completed
+                                      ├────────→ refused
+                                      ├────────→ expired
+                                      └────────→ indeterminate
+```
+
+The relay persists a command before forwarding it. The host revalidates the command against its local agent/project/model catalogue and may refuse it. A disconnect after forwarding but before acknowledgement is `indeterminate`; the relay never blindly redispatches provider execution.
+
+### 5. Migration strategy
+
+Migration is additive and reversible:
+
+1. Build new protocol/core/client modules without changing the production transport selection.
+2. Dual-publish sanitized legacy activity plus new semantic frames from the Mac in dogfood builds.
+3. Make the iPhone prefer the new relay while retaining a one-release compatibility fallback.
+4. Compare reducers and cursors in shadow mode; do not enable phone commands until read parity is proven.
+5. Enable commands one capability at a time.
+6. Remove token-registration and scope authority from the legacy relay before public/private-network exposure.
+7. Retire the long-poll relay and CloudKit production default only after physical-device, restart, backup/restore, and rollback acceptance.
+
+No persisted provider session, `AgentRecord`, canvas op-log, pairing record, or phone cache is destructively rewritten without a versioned decoder and an exported rollback fixture.
+
+## Proposed data model
+
+The durable relay owns these tables or equivalent repositories:
+
+- `relay_metadata`: schema version, relay ID/fingerprint, creation and migration facts.
+- `workspaces`: stable opaque workspace identity and safe display metadata.
+- `devices`: principal identity, credential hash, expiry, revocation, last-used metadata.
+- `workspace_memberships`: canonical capabilities by device/workspace.
+- `pairing_grants`: one-use invitation hash, requested role, expiry, consumed fact.
+- `environments`: execution-host principal, credential hash, lease, safe catalog revision.
+- `agents`: workspace/environment ownership, generation, latest sequence, lifecycle.
+- `agent_events`: unique `(agent_id, generation, sequence)` plus stable host event identity and bounded mutation payload.
+- `agent_snapshots`: semantic document snapshot through a committed sequence.
+- `commands`: unique `(device_id, idempotency_key)`, payload kind, state, timestamps, refusal/indeterminate metadata.
+- `provider_requests`: outstanding approval/input request and durable resolution.
+- `blobs`: content hash, size, media semantics, storage path, quota/refcount facts.
+- `push_registrations`: encrypted APNs token material and device/category metadata.
+- `rate_limit_buckets`, `quota_usage`, `backup_metadata`, and migration ledger.
+
+Persistence invariants:
+
+- Foreign keys on; WAL/busy/synchronous policy explicit and measured.
+- Authorization, generation/sequence assignment, event insert, and quota reservation occur atomically where they belong to one accepted action.
+- Persist before broadcast.
+- Identical host retries return the existing committed event; conflicting bytes for one identity are rejected.
+- Snapshot plus tail equals complete replay.
+- Blob paths derive only from verified content hashes below a relay-owned root.
+- Backups contain a consistent database and referenced-blob manifest and are encrypted before leaving the host.
+
+## Provider backend contract
+
+Add a public/core protocol and registry with a narrow host-owned process adapter:
+
+```swift
+public protocol ManagedAgentBackend: Sendable {
+    var id: ManagedAgentBackendID { get }
+    var capabilities: ManagedAgentBackendCapabilities { get }
+
+    func availability() async -> BackendAvailability
+    func authenticationReadiness() async -> BackendAuthenticationReadiness
+    func catalogue() async -> BackendModelCatalogue
+    func supports(modelID: String) -> Bool
+    func makeRunner(for record: AgentRecord) throws -> any AgentRunning
+    func resumeReference(for record: AgentRecord) -> BackendResumeReference
+    func transcriptSource(for record: AgentRecord) -> BackendTranscriptSource?
+}
+```
+
+`ManagedAgentBackendRegistry` owns ordered backends, explicit user preference, capability-aware routing, catalogue union/deduplication, availability caching, and human-readable failure reasons. The registry must never silently route an explicitly selected unavailable Claude/Codex harness to pi. It returns a structured refusal pointing to Environment Setup. The default “automatic” policy may prefer native subscription CLIs by provider and fall back to pi only when the user selected automatic/pi-all-providers behavior.
+
+The initial adapters wrap existing code rather than rewrite it:
+
+- Claude: `ClaudeCLIBackend`, `ClaudeAgentRunner`, `ClaudeEventTranslator`, `ClaudeSessionTranscriptReader`.
+- Codex: `CodexCLIBackend`, `CodexAgentRunner`, `CodexEventTranslator`, stored `codexThreadId`, session transcript reader added if the semantic store cannot satisfy old history.
+- pi: `PiAgentRunner`, `PiEventTranslator`, `PiSessionTranscriptReader`, live catalogue/auth probe.
+
+Once registry routing is live, remove provider construction switches and duplicate onboarding/model-picker policy. Keep provider CLI auth ownership unchanged.
+
+## File and module plan
+
+### Package and new relay modules
+
+- `Package.swift`
+  - Add RelayProtocol, RelayCore, RelayNIO, RelayClient, and their check/integration targets.
+  - Add reviewed portable crypto and SwiftNIO dependencies.
+  - Keep CloudKit linked only to the compatibility Sync target.
+- `Sources/ContinuumRevivedRelayProtocol/`
+  - IDs, capabilities, `RelayFrame`, transcript/snapshot/command/presence/blob envelopes, version negotiation, refusal codes, payload limits.
+- `Sources/ContinuumRevivedRelayCore/`
+  - GRDB migrations/repositories, authorization, durable sequencing, snapshot/replay, command state machine, quotas, backup metadata.
+- `Sources/ContinuumRevivedRelayNIO/`
+  - HTTP/WebSocket routing, TLS/private-network policy, heartbeat, backpressure, body/frame limits, graceful shutdown.
+- `Sources/ContinuumRevivedRelayClient/`
+  - Portable authenticated client, cursor/cache coordination, reconnect, command receipt stream, host connector.
+- `Sources/continuum-relay/main.swift`
+  - Config validation, secret loading, admin CLI, service install/status, health/readiness, backup/restore/doctor, signal handling.
+
+### Provider and semantic content
+
+- `Sources/ContinuumRevived/App/AgentSupervisor.swift`
+  - Consume the registry; remove provider-specific construction/routing switches; publish semantic mutations and command receipts through one host gateway.
+- `Sources/ContinuumRevivedCore/ManagedAgentBackend.swift`
+  - Backend protocol, IDs, availability/auth/capability/catalogue/resume contracts.
+- `Sources/ContinuumRevivedCore/ManagedAgentBackendRegistry.swift`
+  - Registration, preference resolution, routing, caching, catalogue union, structured refusal.
+- `Sources/ContinuumRevivedCore/AgentProviders/*`
+  - Adapt existing runners/translators/readers to the formal contract; keep process and credential handling on the host.
+- `Sources/ContinuumRevivedAgentContent/`
+  - Freeze durable `AgentDocumentMutation`, reducer, snapshot, unknown-block preservation, size limits, and migration decoders.
+- `Sources/ContinuumRevivedCore/AgentProviders/ManagedTranscriptRehydrator.swift`
+  - Migrate old provider-session history into the same semantic reducer locally; stop maintaining a second replay vocabulary.
+- `Sources/ContinuumRevivedCore/AgentProviders/ManagedAgentActivityBridge.swift`
+  - Derive Class-A notification/status activity from the semantic document/lifecycle source rather than from an independent lossy path.
+
+### Mac gateway and compatibility sync
+
+- `Sources/ContinuumRevived/App/ContinuumApp.swift`
+  - Wire relay client/host connector, environment lease, semantic publisher, command executor, migration/shadow diagnostics, and transport selection.
+- `Sources/ContinuumRevivedSync/`
+  - Keep spatial op-log, canvas snapshots, demux, CloudKit, and ticket-86 relay only as compatibility code during migration.
+- `Sources/ContinuumRevivedCore/Auth/`
+  - Stop exporting active local session tokens as relay credentials; preserve local Mac pairing only as a bootstrap exchange into relay-issued credentials.
+
+### iPhone decomposition and identity
+
+Split `ios/Continuum/Sources/ContinuumApp.swift` into:
+
+```text
+ios/Array/
+  App/
+    ArrayCompanionApp.swift
+    AppCoordinator.swift
+    AppEnvironment.swift
+  Infrastructure/
+    RelaySessionController.swift
+    CompanionCache.swift
+    PushRegistrationController.swift
+    DiagnosticsStore.swift
+  Features/
+    Pairing/
+    Agents/
+    AgentDetail/
+    Canvas/
+    Approvals/
+    Settings/
+  Shared/
+    Navigation.swift
+    FreshnessPresentation.swift
+```
+
+- Preserve the current four-tab product surface while moving ownership into feature models.
+- Use RelayClient directly for privileged agent content/control and keep the existing Sync transport only for spatial compatibility until migration completes.
+- Persist bounded workspace/agent snapshots, cursors, command receipts, and freshness metadata; never persist credentials outside Keychain.
+- Rename the Xcode project/target/display identity from Continuum to Array before the next external companion build. Preserve the existing bundle identifier until App Store ownership/migration is explicitly verified; product identity and bundle identity are separate changes.
+- Move build/version history into an iOS release ledger aligned with the desktop release process.
+
+## Ordered implementation program
+
+Each packet begins from a clean checkout, carries a deterministic RED witness, lands as one scoped commit, and leaves compatibility behavior green unless the packet explicitly advances a migration gate.
+
+### Phase 0 — commit authority and restore trustworthy gates
+
+1. Reconcile/preserve current untracked work and commit this plan plus the relay decisions/design as the implementation authority.
+2. Fix or isolate the `--agent-supervisor-check` naming flake so later matrix legs always run and report independently.
+3. Split the matrix into named resumable groups that report all failures instead of halting at the first known red.
+4. Record the baseline: macOS build, iOS simulator build, Core/AgentContent/AgentUI/Sync/Relay checks, current relay simulator dogfood, and known red/skip inventory.
+5. Add a source/dependency census that prevents legacy and new relay symbols from silently crossing module boundaries.
+
+**Exit gate:** every planned check leg executes and produces an attributable result; no new architecture work starts while most of the matrix remains hidden.
+
+### Phase 1 — freeze semantic and wire contracts
+
+1. Freeze `AgentDocumentMutation`, document snapshot, IDs, generations/sequences, limits, and unknown-block behavior in AgentContent.
+2. Freeze RelayProtocol version negotiation, principal kinds, capabilities, Class-A/Class-B envelopes, refusal codes, command states, and idempotency keys.
+3. Add golden Codable fixtures and forward/backward/unknown-case compatibility checks.
+4. Record the Class A/B/C information boundary and update the old blanket I5 rule without weakening host-secret prohibitions.
+5. Add a structural sensitive-data audit over all RelayFrame cases, logs, error descriptions, APNs builders, and fixture output.
+
+**Exit gate:** the durable public contracts are reviewable without any server/client implementation and fail deterministically on a breaking mutation.
+
+### Phase 2 — complete the provider refactor
+
+1. Introduce `ManagedAgentBackend` and the registry around existing adapters.
+2. Move route selection, availability/auth, catalogue union, resume references, capability reporting, and transcript-source selection into the registry.
+3. Make onboarding, Settings, and composer model pickers consume one registry projection.
+4. Replace silent explicit-harness fallback with structured unavailable/auth-required refusal.
+5. Convert live provider events and old-session rehydration into the same semantic mutation reducer.
+6. Keep a compatibility adapter back to `AgentRuntimeEvent` until all desktop status consumers have migrated.
+
+**Exit gate:** adding a fixture fourth backend requires registration plus its adapter/checks, without edits to `AgentSupervisor`, onboarding, Settings, or the model picker.
+
+### Phase 3 — durable single-node relay core
+
+1. Add GRDB migrations and repositories for the proposed data model.
+2. Implement hashed credentials, one-use pairing, membership/capability authorization, revocation, expiry, and rate limits.
+3. Implement persist-before-broadcast sequencing, replay, snapshots, durable cursors, command receipts, quotas, and blob references.
+4. Add backup creation, encryption handoff, restore validation, corruption diagnostics, and migration rollback fixtures.
+5. Add deterministic clock/random/credential seams for checks; never weaken production entropy.
+
+**Exit gate:** process-level restart tests prove no loss of pairings, events, cursors, commands, or quota facts; unauthorized workspace access is refused for every route/repository operation.
+
+### Phase 4 — production transport and service lifecycle
+
+1. Add SwiftNIO HTTP/WebSocket service with bounded decode, heartbeat, lease expiry, reconnect/backoff, outbound queues, and graceful shutdown.
+2. Default to loopback. Require explicit reviewed configuration for non-loopback/private-network bind and TLS termination.
+3. Add application-layer device/environment authentication without URL or JSON-body credentials.
+4. Add `continuum-relay install|start|stop|status|doctor|backup|restore|devices|revoke` workflows for launchd and systemd.
+5. Add metadata-only health/readiness/metrics and bounded log rotation.
+6. Prove macOS and Linux builds plus actual subprocess/socket fault tests.
+
+**Exit gate:** closing Array leaves the relay service healthy on an awake host; relay restart and network flap replay without duplicates or gaps.
+
+### Phase 5 — execution-host gateway and dual publication
+
+1. Connect `AgentSupervisor`/semantic store to the host connector with an environment credential and workspace allowlist.
+2. Publish semantic snapshots/tails and sanitized activity from the same source.
+3. Advertise safe provider/model/project catalog revisions; keep paths and credentials host-only.
+4. Consume commands, revalidate locally, execute through existing supervisor actions, and return durable receipts.
+5. Dual-publish existing activity/spatial compatibility messages while recording shadow parity diagnostics.
+6. Handle Array quit, host reconnect, relay restart, generation rollover, and deleted/archived agent states explicitly.
+
+**Exit gate:** a real Claude, Codex, and pi session each survives separate runner processes and relay restart with one coherent transcript and no sensitive-data audit finding.
+
+### Phase 6 — iPhone modularization and read parity
+
+1. Rename the iPhone product surface to Array and split app coordination, infrastructure, and features from the monolithic source.
+2. Add RelaySessionController, bounded cache, cursor persistence, receipt store, diagnostics, and clear local reset/unpair behavior.
+3. Render the shared semantic transcript and existing shared status UI natively, including Markdown, reasoning disclosures, tool calls/results, diffs, unknown blocks, truncation, and attachments.
+4. Keep Agents, Canvas, Approvals, and Settings behavior intact while moving them to feature modules.
+5. Run old/new reducer shadow comparison and display a diagnostic mismatch without exposing payload bodies.
+
+**Exit gate:** simulator cold start from snapshot plus tail matches the Mac transcript and status for all three providers; airplane/offline mode retains bounded readable history with truthful timestamps.
+
+### Phase 7 — enable phone control capability by capability
+
+1. `approval.respond` and input responses, because the existing product already exposes this intent.
+2. `prompt.send` and follow-up/steer with local host revalidation and visible queued/forwarded/accepted/completed/indeterminate receipts.
+3. `agent.stop` with explicit target generation and stale-command refusal.
+4. `agent.create` only from a host-advertised opaque project/provider/model catalogue revision—never a phone-supplied path or arbitrary executable.
+5. Canvas edit remains on the existing op-log path but consumes the same device/workspace capability authority.
+6. Disable every mutation while the execution environment is sleeping/offline or the capability is absent; never queue execution invisibly.
+
+**Exit gate:** every command reaches exactly one durable terminal state in the UI, and a forced disconnect after forward produces `indeterminate`, not a false success or automatic retry.
+
+### Phase 8 — push, operations, and bounded content
+
+1. Move APNs token registration and direct push delivery under relay authorization/configuration.
+2. Keep APNs payloads Class A only; the app fetches Class B state after authentication.
+3. Add content-addressed blob upload/download with media allowlists, per-item/workspace quotas, reference authorization, and native rendering.
+4. Add device/environment administration, revocation with active-socket eviction, storage/backup diagnostics, and safe audit metadata.
+5. Measure the target envelope: 10 teammates, 30 devices, 20 environments, 100 active/recent agents, 50–100 sockets, configured queue/blob/workspace limits.
+
+**Exit gate:** quota, slow-consumer, reconnect storm, push redaction, revocation, backup/restore, and capacity checks pass on the target host.
+
+### Phase 9 — migration, dogfood, and compatibility retirement
+
+1. Run local Mac + simulator dogfood with dual publication and shadow comparison.
+2. Run a physical iPhone pass with a build-number/source marker visible in Settings.
+3. Test relay process restart, Array quit/relaunch, execution-host reboot, network transition, credential revocation, database restore, and schema migration.
+4. Test real system sleep/wake using an external phone or second host as the witness.
+5. Promote the new relay to default while retaining one explicit compatibility rollback release.
+6. Remove legacy token registration/scope authority, then retire long-poll production routing and CloudKit as a required/default transport.
+7. Keep fixture decoders/import tools for the supported rollback window; delete compatibility code only after the rollback window closes.
+
+**Exit gate:** Dylan can complete the concrete workflow at the top of this plan on a physical phone across restart and sleep/offline scenarios, and can roll back without losing identity or transcript state.
+
+### Phase 10 — release and documentation closure
+
+1. Add the iPhone release ledger, install/TestFlight/device runbook, relay deployment runbook, backup/restore drill, incident/revocation runbook, and provider-adapter authoring guide.
+2. Update `AGENTS.md`, architecture overview, provider docs, companion spec, and tickets so shipped state and remaining work agree.
+3. Record dependency/license/security review for SwiftNIO and crypto.
+4. Produce signed/notarized macOS artifacts, the supported relay service artifact, and an iPhone build through the chosen distribution path.
+5. Run clean-machine Mac installation/update and clean-device iPhone pairing/migration acceptance.
+
+**Exit gate:** docs describe the code that shipped, all artifacts identify as Array, rollback/support steps are executable, and no plan/ticket claims implemented work remains outstanding.
+
+## Verification strategy
+
+### Deterministic checks
+
+- Provider contract fixtures for Claude/Codex/pi plus a synthetic fourth backend proving registry extensibility.
+- Semantic reducer golden fixtures, unknown cases, snapshot-plus-tail equality, duplicate/conflict handling, and bounded truncation.
+- RelayProtocol round trips, version negotiation, payload limits, capability coverage, Class A/B/C audits, and refusal codes.
+- Temporary-SQLite migrations, persistence-before-broadcast, restart replay, cursor recovery, command transitions, credential hashing/revocation, workspace isolation, quotas, blobs, and backup/restore.
+- Client reconnect, heartbeat/lease, queue/backpressure, idempotency, and indeterminate dispatch.
+- iPhone feature-model tests/checks for cache, freshness, navigation intent, command receipts, capability removal, and unpair/reset.
+- Dependency/source scans that enforce the target module graph.
+
+### Real-route acceptance
+
+- Build macOS and iOS from clean derived/build directories and assert unique source markers before install.
+- Start a real relay subprocess against a temporary store; pair a simulator through the production pairing route.
+- Run one real two-turn agent session through each installed backend and compare Mac/iPhone transcript semantics.
+- Send an approval, follow-up, stop, and configured-agent create command through the physical transport and assert on host action plus durable receipt.
+- Restart the relay between snapshot and tail; restart Array during a turn; disconnect the network after command forward; restore a backup onto a fresh relay store.
+- Verify no provider credentials, environment values, private absolute paths, raw tool payloads forbidden by policy, or bearer tokens appear in relay database scans, logs, metrics, APNs payloads, crash diagnostics, or QA artifacts.
+- Observe real Mac sleep/wake externally; confirm readable history remains and mutations are refused until the host lease returns.
+
+### Release gates
+
+- No hidden matrix legs and no new known-red entries.
+- Three consecutive full offline matrix passes.
+- Three consecutive relay process/integration suites with fault injection.
+- Simulator matrix across supported iOS versions/device classes.
+- Physical-device pairing, push, transcript, command, restart, offline, and migration checklist signed off.
+- Backup restore drill and credential-revocation drill signed off.
+- Independent security review of authorization coverage, workspace isolation, secret handling, relay bind/TLS configuration, APNs, and backup custody.
+
+## Risks and controls
+
+- **Schema lock-in:** freeze only provider-neutral semantics and preserve unknown blocks; require compatibility fixtures before changing public IDs or payloads.
+- **Sensitive transcript exposure:** separate information classes, authorize every operation, keep credentials host-only, encrypt transport/backups, limit payloads, and scan all observability surfaces.
+- **Duplicate or ambiguous execution:** persist commands first, use device idempotency keys, target agent generation, and expose `indeterminate` without blind retry.
+- **Half-migrated clients:** dual-publish, shadow-compare, negotiate protocol capabilities, retain a bounded compatibility fallback, and gate commands after read parity.
+- **Monolith moved rather than removed:** feature modules own state/actions; AppCoordinator only composes dependencies and navigation.
+- **Provider abstraction overgrowth:** wrap existing adapters first; the protocol contains demonstrated cross-provider capabilities, not speculative provider APIs.
+- **Relay operational burden:** one-node/private-network-first deployment, SQLite/local blobs, explicit limits, doctor/backup/restore tooling, and no public bind by default.
+- **Untrustworthy verification:** Phase 0 precedes refactoring and makes every leg execute independently.
+- **Identity/App Store breakage:** change display/project identity separately from the bundle identifier and verify ownership/provisioning before any bundle migration.
+
+## Explicit defaults for approval
+
+Unless Dylan changes them during review, implementation proceeds with these decisions:
+
+1. **Deployment:** private-network-first single relay on an existing awake Mac/Linux host; a low-cost VPS is optional after local acceptance.
+2. **Storage:** SQLite WAL plus relay-owned content-addressed local blobs.
+3. **Transport:** SwiftNIO HTTP/WebSocket; loopback default; TLS at an explicitly configured private-network/reverse-proxy boundary plus application credentials.
+4. **Transcript:** authorized full semantic transcript and tool/diff content on the relay; provider credentials, environment values, private absolute paths, and generic shell authority remain host-only.
+5. **Product identity:** rename the iPhone product/project/display surface to Array; keep the current bundle identifier until provisioning/App Store ownership is verified.
+6. **First command slice:** approval/input response, then prompt/follow-up, then stop, then restricted create-agent.
+7. **Legacy transports:** dual-run for migration, one explicit rollback release, then remove them from the production default path.
+8. **Provider routing:** explicit Claude/Codex selection never silently falls back to pi; automatic/pi-all-providers mode may use documented fallback.
+
+## Approval boundary
+
+Approval of this plan authorizes ticketing and implementation in the ordered phases. It does not authorize destructive migration of existing companion/agent data, public internet exposure of the relay, changing the iOS bundle identifier, uploading an iPhone build, releasing artifacts, or retiring compatibility transports without their named acceptance gates.

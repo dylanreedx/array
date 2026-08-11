@@ -1,0 +1,286 @@
+---
+title: "Hardened ~$5/month small-team relay"
+brief: "Turn Continuum’s development relay into a durable, private, single-node hub for Dylan and a small trusted office without hosted SaaS dependencies."
+version: 1
+---
+
+> Local context copy. `_DESIGN.md` and `_DECISIONS.md` are authoritative for implementation; no further hosted visual-plan synchronization is required. Budget language here has been updated to Dylan’s approximately $5/month target.
+
+## Outcome
+
+Continuum should ship a **boring, single-node Array Relay** for Dylan and a small office rather than reproduce T3 Connect’s public multi-tenant cloud. One relay process runs on existing Mac or Linux hardware, uses SQLite WAL and local blob storage, accepts Mac/iPhone clients over LAN or a private network, and maintains durable transcript replay and command receipts. Execution hosts retain provider credentials, environment variables, raw processes, signing keys, and filesystem authority.
+
+**Done means:** closing the Mac app does not stop an awake relay service; restart does not lose pairings, transcript history, cursors, commands, or push registrations; a paired phone can read full authorized transcripts and perform explicit agent actions; an execution Mac that sleeps is shown honestly offline; another awake host can continue; every mutation is capability-checked and idempotent; and the normal deployment remains within the owner-approved approximately $5/month budget.
+
+<Callout id="small-team-decision" tone="decision">
+**Product boundary:** target one trusted relay, approximately 10 teammates, 30 devices, 20 execution environments, 100 active/recent agents, and up to 100 concurrent sockets. Prefer vertical simplicity and explicit limits. Public signup, untrusted tenants, automatic per-user tunnels, globally replicated storage, and horizontal failover are outside this plan.
+</Callout>
+
+## Concrete product scenario
+
+Dylan runs Array Relay on an existing always-on office Mac mini. His development Mac, a teammate’s Mac, an iPhone, and an optional Linux build host pair once. Each execution host makes one authenticated outbound WebSocket connection to the relay. Clients see only workspaces they are allowed to access.
+
+Dylan starts an agent on his development Mac, reads structured transcript and tool output from his phone, answers an approval, and sends a follow-up. The host commits provider-neutral transcript events locally and publishes them to the relay. The relay commits each accepted event before broadcasting it to clients. If the development Mac sleeps, the phone continues to read the relay’s durable transcript mirror but shows the agent as offline and refuses new execution commands. A Linux build agent remains controllable because its host is still awake.
+
+The relay administrator can list devices, revoke a lost phone, rotate an execution-host credential, inspect storage usage, create an encrypted backup, and restore the same relay identity on replacement hardware.
+
+## Scope and explicit non-goals
+
+<Table id="scope-table" columns={["In the small-team release", "Deferred until demonstrated need"]} rows={[["One trusted relay on existing Mac/Linux hardware", "Public multi-tenant SaaS or anonymous signup"], ["LAN, existing VPN, WireGuard, or a private mesh", "Automatic Cloudflare tunnel allocation and DNS lifecycle"], ["SQLite WAL plus local content-addressed blobs", "PlanetScale, Redis, Kafka, object storage, or distributed consensus"], ["One-use pairing and revocable opaque device credentials", "Clerk, OAuth/PKCE, DPoP, owner certificate hierarchies, or cross-control-plane mint proofs"], ["Workspace membership and granular capabilities", "Organization billing, SCIM, SSO, audit export, or delegated tenant administration"], ["Durable transcript mirror and command receipts", "Raw provider credentials, arbitrary host filesystem replication, or provider process migration"], ["Direct APNs from the relay when configured", "A hosted push service or mandatory cloud notification broker"], ["Measured capacity on one target machine", "Claims of unlimited or horizontally scalable capacity"]]} density="relaxed" />
+
+<Callout id="zero-cost-truth" tone="warning">
+**Budget truth:** target approximately $5/month or less and record actual current cost. Existing hardware, electricity, internet access, domains, VPN licensing, backups, Apple Developer membership, tax, and provider price changes still exist. Existing office hardware may have no incremental hosting invoice; a small VPS may be worth a modest recurring bill.
+</Callout>
+
+## Architecture
+
+<Diagram id="relay-architecture" data={{"html":"<div class='diagram-panel arch'><div class='lane clients'><div class='diagram-muted lane-title'>FIRST-CLASS CLIENTS</div><div class='node-row'><div class='diagram-node' data-rough><strong>Mac app</strong><span>full workspace UI</span></div><div class='diagram-node' data-rough><strong>iPhone app</strong><span>transcript + control</span></div><div class='diagram-node' data-rough><strong>Admin CLI</strong><span>pair, revoke, backup</span></div></div></div><div class='flow-label'>LAN / PRIVATE VPN · TLS · DEVICE CREDENTIAL</div><div class='diagram-box relay' data-rough><div class='diagram-muted lane-title'>ARRAY RELAY · TRUSTED SINGLE NODE</div><div class='relay-grid'><div class='diagram-card'><strong>SwiftNIO HTTP + WebSocket</strong><span>limits, heartbeat, backpressure</span></div><div class='diagram-card'><strong>Authorization</strong><span>workspace membership + capabilities</span></div><div class='diagram-card'><strong>SQLite WAL</strong><span>devices, events, cursors, receipts</span></div><div class='diagram-card'><strong>Blob store + APNs</strong><span>large output, optional push</span></div></div></div><div class='flow-label'>OUTBOUND HOST SOCKET · ENVIRONMENT CREDENTIAL</div><div class='lane hosts'><div class='diagram-muted lane-title'>EXECUTION HOSTS</div><div class='node-row'><div class='diagram-node' data-rough><strong>Dylan’s Mac</strong><span>local projects + providers</span></div><div class='diagram-node' data-rough><strong>Office server</strong><span>awake shared agents</span></div><div class='diagram-node' data-rough><strong>Optional VPS</strong><span>independent power boundary</span></div></div></div><div class='host-only'>HOST-ONLY: provider credentials · environment variables · raw processes · signing keys · unrelated filesystem content</div></div>","css":".arch{display:grid;gap:14px;padding:18px}.lane{display:grid;gap:9px}.lane-title{font-size:12px;font-weight:800;letter-spacing:.08em}.node-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.diagram-node,.diagram-card{display:grid;gap:4px;min-height:72px}.diagram-node span,.diagram-card span{color:var(--wf-muted);font-size:13px}.flow-label{text-align:center;color:var(--wf-accent);font-size:12px;font-weight:800;letter-spacing:.06em}.relay{display:grid;gap:12px;border-color:var(--wf-accent)}.relay-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.host-only{padding:10px 12px;border:1px dashed var(--wf-warn);color:var(--wf-muted);text-align:center;font-size:12px}@media(max-width:760px){.node-row,.relay-grid{grid-template-columns:1fr}}","frame":"hide"}} />
+
+### Authority boundaries
+
+- **Execution host:** final authority over provider calls, tools, projects, processes, and approvals that touch host resources. It may reject any relayed command.
+- **Relay:** trusted office identity and routing authority. It authenticates devices/hosts, enforces workspace membership, stores the client-facing event mirror, assigns durable relay cursors, and records command outcomes.
+- **Client:** presents authorized state and submits explicit commands. It never receives provider credentials or a generic remote shell capability.
+- **APNs:** receives only sanitized Class-A notification projection; opening the app fetches authenticated content from the relay.
+
+This is deliberately less decentralized than a public T3-like system. The relay host and its backups are sensitive infrastructure and must be protected accordingly.
+
+## Information classes
+
+The small-team relay explicitly supersedes the current absolute I5 assumption that all transcript-length or host-path-shaped content is forbidden from relay transit.
+
+<Table id="information-classes" columns={["Class", "May cross relay?", "Examples", "Enforcement"]} rows={[["A · sanitized notification", "Yes; may reach APNs", "agent finished, approval requested, safe title, opaque IDs", "Dedicated PushPayload builder, 4 KB APNs limit, no transcript/tool body"], ["B · authenticated interactive content", "Yes; authorized workspace members only", "prompt text, transcript mutations, Markdown, tool arguments/results, approval questions, relative project references", "Typed message schemas, capability checks, size limits, audit metadata, storage quota"], ["C · host-only secret/runtime", "Never", "provider keys, environment variables, signing keys, raw process handles, tmux targets, unrelated absolute paths, arbitrary file contents", "Types do not expose fields; host adapters project safe values; secret-pattern scanner is defense-in-depth only"]]} density="relaxed" />
+
+`SyncPayloadTaint` remains useful for legacy Class-A/spatial messages and adversarial checks, but it is not the safety boundary for Class-B agent content. Key-name and string-length scanning cannot determine authorization or intent. The wire protocol must make allowed content explicit and structurally omit Class-C values.
+
+## Host power and lifecycle
+
+<Table id="power-table" columns={["State", "Relay or local host behavior", "Client behavior"]} rows={[["Array window closed; service host awake", "A separately installed service continues", "Remain connected"], ["Screen locked or display off", "Processes continue while system remains awake", "Remain connected"], ["Idle sleep approaching", "Optional power assertion may keep an active local host awake", "Show explicit keeping-awake status"], ["Explicit Sleep, lid close, low battery, or thermal forced sleep", "Host processes and sockets suspend", "Show environment sleeping/offline; retain bounded cache"], ["Wake or network return", "Reconnect host socket and reconcile from durable cursor", "Refresh authorization and replay without duplication"], ["Execution Mac sleeps; office relay remains awake", "Relay serves mirrored history but cannot execute on sleeping host", "Read-only history remains available; mutating command refused"], ["VPS/office execution host remains awake", "Its agents continue independently", "Normal control remains available"]]} density="relaxed" />
+
+A power assertion can prevent idle sleep only. It must be released when no local turn is active and cannot claim to defeat forced sleep. Physical sleep/wake behavior requires external-observer testing.
+
+## Deployment profiles
+
+<Table id="deployment-profiles" columns={["Profile", "Reachability", "Incremental monthly cost", "Tradeoff"]} rows={[["Personal development", "Loopback/LAN or an existing private mesh", "$0", "Unavailable when Dylan’s Mac sleeps or loses network"], ["Office default", "Existing always-on Mac mini/Linux host plus office VPN/WireGuard", "$0 when hardware/network already exist", "Office host becomes the availability and recovery boundary"], ["Private mesh", "Tailscale or equivalent", "Potentially $0 only within current plan/licensing terms", "Do not base office distribution on an unverified personal-use allowance"], ["Public TLS", "Caddy + Let’s Encrypt + port forwarding", "$0 software; domain/hardware may cost", "More firewall, abuse, patching, and monitoring responsibility"], ["Cloudflare Tunnel", "Outbound tunnel to a stable owned hostname", "May fit free tier; domain still required", "Convenient but becomes a provider dependency; defer until VPN setup is a proven problem"], ["Always-on cloud VM", "Public or private routed host", "Not honestly guaranteed at $0", "Use only when uptime is worth a real budget"]]} density="relaxed" />
+
+The first supported production profile is **private-network-only**. The server binds to an explicitly configured interface; loopback remains the development default. TLS terminates at an existing private mesh, Caddy, or another configured reverse proxy. Native clients still authenticate at the application layer.
+
+## Identity, pairing, and recovery
+
+<Callout id="auth-decision" tone="decision">
+The relay host is the small team’s trust root. Recovery consists of the relay identity, an administrator recovery key, the SQLite database, and the blob directory in an encrypted backup. There is no hosted account and no distributed owner certificate chain in the first release.
+</Callout>
+
+### Device pairing
+
+1. An administrator creates a pairing invitation with an exact workspace role and five-minute expiry.
+2. The QR carries a 256-bit random one-use secret. A manual fallback uses a rate-limited high-entropy code.
+3. Exchange is atomic: the first successful exchange consumes the invitation; concurrent or expired attempts fail.
+4. The relay creates a device record and returns a 256-bit opaque credential. The client stores it in Keychain.
+5. The relay stores only `SHA-256(credential)` plus device, expiry, last-used, and revocation metadata.
+6. Requests are accepted only over approved TLS/private-network routes and are checked against the stored device/workspace capabilities.
+7. Administrators can list, revoke, expire, and rotate devices without restarting the relay.
+
+### Execution-host pairing
+
+Execution hosts receive separate environment credentials and cannot act as human devices. Hosts connect outbound, advertise configured workspaces/projects/providers, and prove liveness with a renewable lease. A host credential is scoped to one environment ID and may publish events or consume commands only for its configured workspaces.
+
+### Session policy
+
+The first release uses opaque bearer credentials rather than JWT/DPoP. That is acceptable only with TLS/private-network transport, Keychain storage, high entropy, server-side expiry, revocation, rate limiting, and log redaction. A device credential is never accepted in URL query parameters. Protocol traces show only credential fingerprints.
+
+## Workspace authorization
+
+<Table id="capability-matrix" columns={["Capability", "Viewer", "Operator", "Workspace admin", "Execution host"]} rows={[["transcript.read", "✓", "✓", "✓", "publish own workspace"], ["tool.read", "optional", "✓", "✓", "publish own workspace"], ["prompt.send", "—", "✓", "✓", "consume when addressed"], ["agent.steer", "—", "✓", "✓", "consume when addressed"], ["approval.respond", "—", "✓", "✓", "consume when addressed"], ["agent.stop", "—", "✓", "✓", "consume when addressed"], ["agent.create", "—", "configured projects only", "✓", "execute configured projects only"], ["device.manage", "—", "—", "workspace devices", "—"], ["workspace.admin", "—", "—", "✓", "—"], ["relay.admin", "—", "—", "relay administrator only", "—"]]} density="relaxed" />
+
+Roles are templates; the stored grant is an explicit capability set. `/v1/tokens` must not accept a client-provided raw scope. The relay derives capabilities from an administrator-created invitation and workspace membership. Every route and WebSocket message declares its required capability.
+
+## Durable storage model
+
+<DataModel id="relay-model" entities={[{"id":"workspace","name":"workspaces","fields":[{"name":"id","type":"UUID","pk":true},{"name":"name","type":"TEXT"},{"name":"created_at","type":"TIMESTAMP"}]},{"id":"device","name":"devices","fields":[{"name":"id","type":"UUID","pk":true},{"name":"label","type":"TEXT"},{"name":"credential_hash","type":"BLOB"},{"name":"expires_at","type":"TIMESTAMP"},{"name":"last_seen_at","type":"TIMESTAMP","nullable":true},{"name":"revoked_at","type":"TIMESTAMP","nullable":true}]},{"id":"membership","name":"workspace_memberships","fields":[{"name":"workspace_id","type":"UUID","fk":"workspaces.id"},{"name":"device_id","type":"UUID","fk":"devices.id"},{"name":"capabilities","type":"TEXT"}]},{"id":"pairing","name":"pairing_grants","fields":[{"name":"id","type":"UUID","pk":true},{"name":"secret_hash","type":"BLOB"},{"name":"workspace_id","type":"UUID","fk":"workspaces.id"},{"name":"capabilities","type":"TEXT"},{"name":"expires_at","type":"TIMESTAMP"},{"name":"consumed_at","type":"TIMESTAMP","nullable":true}]},{"id":"environment","name":"environments","fields":[{"name":"id","type":"UUID","pk":true},{"name":"credential_hash","type":"BLOB"},{"name":"label","type":"TEXT"},{"name":"lease_expires_at","type":"TIMESTAMP","nullable":true},{"name":"revoked_at","type":"TIMESTAMP","nullable":true}]},{"id":"agent","name":"agents","fields":[{"name":"id","type":"UUID","pk":true},{"name":"workspace_id","type":"UUID","fk":"workspaces.id"},{"name":"environment_id","type":"UUID","fk":"environments.id"},{"name":"generation","type":"INTEGER"},{"name":"status","type":"TEXT"},{"name":"last_sequence","type":"INTEGER"}]},{"id":"event","name":"agent_events","fields":[{"name":"agent_id","type":"UUID","fk":"agents.id"},{"name":"generation","type":"INTEGER"},{"name":"sequence","type":"INTEGER"},{"name":"kind","type":"TEXT"},{"name":"payload_json","type":"BLOB"},{"name":"persisted_at","type":"TIMESTAMP"}]},{"id":"snapshot","name":"agent_snapshots","fields":[{"name":"agent_id","type":"UUID","fk":"agents.id"},{"name":"generation","type":"INTEGER"},{"name":"through_sequence","type":"INTEGER"},{"name":"document_json","type":"BLOB"}]},{"id":"command","name":"commands","fields":[{"name":"id","type":"UUID","pk":true},{"name":"device_id","type":"UUID","fk":"devices.id"},{"name":"agent_id","type":"UUID","fk":"agents.id"},{"name":"idempotency_key","type":"TEXT"},{"name":"kind","type":"TEXT"},{"name":"state","type":"TEXT"},{"name":"result_json","type":"BLOB","nullable":true}]},{"id":"blob","name":"blobs","fields":[{"name":"sha256","type":"TEXT","pk":true},{"name":"workspace_id","type":"UUID","fk":"workspaces.id"},{"name":"byte_count","type":"INTEGER"},{"name":"relative_path","type":"TEXT"},{"name":"created_at","type":"TIMESTAMP"}]},{"id":"push","name":"push_tokens","fields":[{"name":"device_id","type":"UUID","fk":"devices.id"},{"name":"token_ciphertext","type":"BLOB"},{"name":"environment","type":"TEXT"},{"name":"updated_at","type":"TIMESTAMP"}]}]} relations={[{"from":"workspace","to":"membership","kind":"1-n","label":"grants"},{"from":"device","to":"membership","kind":"1-n","label":"joins"},{"from":"workspace","to":"agent","kind":"1-n","label":"contains"},{"from":"environment","to":"agent","kind":"1-n","label":"runs"},{"from":"agent","to":"event","kind":"1-n","label":"emits"},{"from":"agent","to":"snapshot","kind":"1-n","label":"compacts"},{"from":"agent","to":"command","kind":"1-n","label":"receives"},{"from":"workspace","to":"blob","kind":"1-n","label":"stores"},{"from":"device","to":"push","kind":"1-n","label":"registers"}]} />
+
+### Persistence rules
+
+- Configure SQLite WAL, foreign keys, busy timeout, full migration history, and bounded transaction durations.
+- Assign `(generation, sequence)` and insert the event in one transaction. Broadcast only after commit.
+- Use a new generation only when an environment loses/rebuilds its local log; never reset a sequence silently.
+- Create periodic semantic snapshots. Cold clients load the newest snapshot and replay the tail.
+- Enforce uniqueness on `(agent_id, generation, sequence)` and `(device_id, idempotency_key)`.
+- Keep transcript events until explicit archive/delete. Apply quotas to blobs and unusually large tool output.
+- Store blobs below a relay-owned directory by content hash. Never accept a caller-supplied filesystem path.
+- Use OS full-disk encryption plus strict file permissions in v1. Backups must be encrypted separately before leaving the host.
+
+## Wire protocol
+
+The existing generic `SyncMessage` remains for spatial/canvas synchronization. Privileged phone control uses a separate, versioned `RelayFrame` vocabulary rather than widening the generic stream.
+
+<Table id="wire-frames" columns={["Frame family", "Direction", "Purpose", "Limit/default"]} rows={[["hello / welcome", "bidirectional", "protocol version, device/environment identity, subscriptions, resume cursors", "16 KiB"], ["event.publish / event.batch", "host → relay → clients", "provider-neutral transcript/status/tool mutations", "256 KiB envelope"], ["snapshot.request / snapshot", "client ↔ relay", "cold bootstrap and compaction recovery", "compressed; bounded by workspace policy"], ["command.submit / command.receipt", "client ↔ relay", "prompt, steer, approval, stop, create", "64 KiB; idempotency required"], ["presence.lease / presence.changed", "host ↔ relay → clients", "environment availability and last-seen state", "renew every 15 s; stale after 45 s"], ["blob.offer / blob.fetch", "host/client ↔ relay", "large tool output and attachments by hash", "25 MiB object default"], ["ping / pong / error", "bidirectional", "liveness and machine-readable refusals", "small fixed schema"]]} density="relaxed" />
+
+Each frame carries `protocolVersion`, `messageID`, `workspaceID`, an optional `environmentID`/`agentID`, and a tagged payload. Unknown major versions are refused. New optional fields may be ignored only within a compatible major version. Decode limits are applied before allocating the full payload.
+
+### Backpressure
+
+Each connection has a bounded outbound queue, initially 512 frames or 8 MiB. A slow client is disconnected with its last committed cursor; reconnect uses snapshot plus replay. The relay does not let one phone retain unbounded memory or block event persistence for other clients.
+
+## Transcript contract
+
+The canonical client document is provider-neutral and uses the existing semantic mutation direction in `ContinuumRevivedAgentContent`:
+
+- user and assistant message begin/delta/end;
+- provider-supported reasoning-summary begin/delta/end, subject to owner display settings;
+- tool-call begin/argument delta/end;
+- tool-result begin/delta/end;
+- approval or user-input requested/resolved;
+- agent status and terminal outcome;
+- attachment/blob references;
+- explicit redaction or archival mutations.
+
+No event becomes executable HTML. Native renderers handle Markdown, ANSI, links, tool JSON, diffs, and opaque fallback blocks. Unknown provider blocks remain visible as bounded plain/structured content rather than being executed or silently discarded.
+
+## Command semantics
+
+<Diagram id="command-state" data={{"html":"<div class='diagram-panel cmd'><div class='diagram-muted title'>DURABLE COMMAND RECEIPT</div><div class='states'><div class='diagram-node' data-rough><strong>received</strong><span>authorized + committed</span></div><div class='arrow'>→</div><div class='diagram-node' data-rough><strong>forwarded</strong><span>sent once to live host</span></div><div class='arrow'>→</div><div class='diagram-node' data-rough><strong>hostAccepted</strong><span>host owns reconciliation</span></div><div class='branches'><div class='diagram-node ok' data-rough><strong>resolved</strong><span>provider/host outcome</span></div><div class='diagram-node warn' data-rough><strong>failed</strong><span>safe terminal refusal</span></div><div class='diagram-node warn' data-rough><strong>indeterminate</strong><span>dispatch boundary ambiguous</span></div></div></div><div class='note'>Same device + idempotency key always returns the same receipt. Relay restart never blindly resends forwarded or host-accepted execution.</div></div>","css":".cmd{display:grid;gap:14px;padding:18px}.title{font-size:12px;font-weight:800;letter-spacing:.08em}.states{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;gap:10px;align-items:center}.diagram-node{display:grid;gap:4px;min-height:72px}.diagram-node span,.note{color:var(--wf-muted);font-size:13px}.arrow{color:var(--wf-accent);font-weight:800}.branches{display:grid;gap:8px}.ok{border-color:var(--wf-ok)}.warn{border-color:var(--wf-warn)}.note{text-align:center}@media(max-width:780px){.states{grid-template-columns:1fr}.arrow{text-align:center;transform:rotate(90deg)}}","frame":"hide"}} />
+
+- Serialize mutating commands per agent.
+- Refuse prompt, steer, approval, stop, and create commands while the target environment is offline; do not silently queue stale execution.
+- Persist `received` before forwarding.
+- Require the execution host to acknowledge the command ID before the relay records `hostAccepted`.
+- If relay or host crashes after dispatch but before a durable outcome, expose `indeterminate`; require provider reconciliation or explicit human retry.
+- `agent.stop` requests graceful termination. A separately named abort/kill command requires a stronger capability and host support.
+- Phone-created agents are limited to projects, worktrees, providers, models, and environment variables preconfigured on that execution host.
+
+## Server, networking, and process model
+
+Replace the Darwin-only raw BSD HTTP server with a SwiftNIO adapter while preserving transport-independent actors and deterministic checks.
+
+- HTTP/1.1 and WebSocket support through SwiftNIO/NIOHTTP1/NIOWebSocket.
+- TLS normally terminates at the selected private-network/reverse-proxy boundary; add NIOSSL only if direct TLS termination becomes necessary.
+- Explicit bind address; loopback default; refuse accidental public wildcard binding unless an administrator acknowledges it.
+- Header, body, frame, connection, and request-duration limits.
+- Authentication and rate limiting before expensive decode/database work.
+- Graceful shutdown stops admission, drains bounded work, commits final state, and closes sockets with a retryable reason.
+- `launchd` on macOS and `systemd` on Linux use restart-on-failure. A per-user Mac LaunchAgent survives UI quit but does not promise operation after logout or system sleep.
+
+## Push notifications
+
+Reuse `APNSPushService` and `PushPayloadBuilder` as the Class-A projection boundary. The relay stores APNs device tokens encrypted with relay-local key material and sends directly to APNs when a `.p8` is configured. Notification text remains sanitized; transcript and tool bodies are fetched after the app authenticates.
+
+APNs is optional. Without Apple credentials, the phone reconnects on foreground and receives no remote notification. Failure to deliver a push never changes the durable agent/approval state.
+
+## Capacity, quotas, and overload behavior
+
+<Table id="capacity-targets" columns={["Dimension", "Initial target", "Required behavior at limit"]} rows={[["Teammates", "10", "New membership requires admin action"], ["Paired devices", "30", "Pairing refused with actionable admin message"], ["Execution environments", "20", "Additional registration refused; existing hosts unaffected"], ["Active/recent agents", "100", "Archive/delete or raise configured limit"], ["Concurrent sockets", "100", "429/503 or close with retry delay; no process crash"], ["Normal frame", "256 KiB", "413/frame-too-large before full decode"], ["Blob", "25 MiB default", "Reject or require administrator quota override"], ["Workspace storage", "5 GiB default", "Stop accepting new large output; retain metadata and control"], ["Outbound queue", "512 frames or 8 MiB/connection", "Disconnect slow consumer and resume by cursor"]]} density="relaxed" />
+
+Before claiming these targets, benchmark on the intended relay hardware with 100 sockets, 100 events/second for ten minutes, a 1,000-event/second short burst, repeated 10,000-event cold replays, and concurrent backup/checkpoint activity. Record p50/p95/p99 commit and command-receipt latency, memory, WAL growth, CPU, reconnect time, and dropped/refused work.
+
+## Operations and recovery
+
+The relay must be operable without a hosted observability stack.
+
+- `/health/live` reports process liveness only; `/health/ready` checks database migration state and writable storage.
+- Local structured logs rotate by size/time and redact authorization headers, pairing secrets, APNs tokens, transcript bodies, tool arguments, and environment values.
+- A local metrics snapshot reports connections, event commit latency, queue depth, WAL size, workspace bytes, auth failures, rate-limit refusals, APNs outcomes, and oldest unarchived event.
+- `continuum-relay status|doctor|devices|revoke|backup|restore|compact` provides the essential administrator workflow.
+- Use SQLite’s online backup API, then package the database, blob manifest, relay identity, and configuration into an encrypted archive. Keep a documented retention default such as seven daily and four weekly backups.
+- Restore into an isolated directory, run integrity and blob-manifest checks, then deliberately activate the restored relay identity. Never run original and restored copies concurrently with the same identity.
+- Migrations are monotonic and transactional. Keep compatibility with one previous wire major during rolling client upgrades; reject unsupported versions clearly.
+
+## Security hardening checklist
+
+<Checklist id="security-checklist" items={[{"id":"auth-hashes","label":"Persist only high-entropy credential hashes and public metadata","checked":false},{"id":"pair-atomic","label":"Make pairing expiry and one-use consumption atomic under concurrency","checked":false},{"id":"scope-derived","label":"Derive grants server-side; never accept client-supplied scope bits","checked":false},{"id":"route-capabilities","label":"Declare and test the capability required by every route/frame","checked":false},{"id":"rate-limits","label":"Rate-limit pairing, authentication, publish, command, and blob endpoints per source/device","checked":false},{"id":"typed-classification","label":"Replace taint scanning as the Class-B boundary with typed allowlisted messages","checked":false},{"id":"limits","label":"Enforce header/body/frame/queue/storage/time limits before expensive work","checked":false},{"id":"logs","label":"Run adversarial secret-leak tests over logs, errors, metrics, backups, and push payloads","checked":false},{"id":"workspace-isolation","label":"Prove cross-workspace reads, subscriptions, blob fetches, and commands are refused","checked":false},{"id":"revoke-live","label":"Disconnect active sockets immediately when a device or host is revoked","checked":false},{"id":"backup-security","label":"Encrypt and restore-test backups; document custody of the admin recovery key","checked":false},{"id":"independent-review","label":"Require a focused adversarial review before internet exposure","checked":false}]} />
+
+## Existing code reuse and change map
+
+<FileTree id="implementation-tree" title="Relay hardening change map" entries={[{"path":"Package.swift","change":"modified","note":"Keep existing GRDB; add SwiftNIO HTTP/WebSocket products and a Linux-capable relay target boundary."},{"path":"Sources/ContinuumRevivedSync/RelayHub.swift","change":"modified","note":"Replace in-memory ring/sequence authority with persist-before-broadcast repository calls, workspace subscriptions, bounded fan-out, and durable cursors."},{"path":"Sources/ContinuumRevivedSync/RelayHTTPServer.swift","change":"modified","note":"Retire the Darwin raw-socket/one-request long-poll adapter in favor of bounded SwiftNIO HTTP/WebSocket routing."},{"path":"Sources/ContinuumRevivedSync/RelayWire.swift","change":"modified","note":"Add the separate versioned RelayFrame, typed event/command/presence/blob envelopes, machine-readable refusals, and capability declarations."},{"path":"Sources/ContinuumRevivedSync/RelaySyncTransport.swift","change":"modified","note":"Move from long-poll to WebSocket with snapshot/replay cursors, heartbeat, backoff, and bounded reconnect behavior."},{"path":"Sources/ContinuumRevivedSync/SyncTransport.swift","change":"modified","note":"Keep generic spatial SyncMessage narrow; do not use it as the privileged full-control protocol."},{"path":"Sources/ContinuumRevivedSync/RelayStore.swift","change":"added","note":"GRDB migrations and repositories for workspaces, devices, environments, events, snapshots, commands, blobs, push tokens, and quotas."},{"path":"Sources/ContinuumRevivedSync/RelayAuthorization.swift","change":"added","note":"Credential hashing, pairing exchange, membership lookup, route capability checks, revocation, and rate-limit keys."},{"path":"Sources/ContinuumRevivedSync/RelayNIOService.swift","change":"added","note":"Linux/macOS HTTP/WebSocket lifecycle, decode limits, graceful shutdown, health, and metrics."},{"path":"Sources/ContinuumRevivedCore/Auth/CompanionAuthService.swift","change":"modified","note":"Stop exporting active local session tokens to the relay; issue relay-specific device registrations and persist revocation/expiry truth once."},{"path":"Sources/ContinuumRevivedCore/Scope.swift","change":"modified","note":"Replace broad orchestrationOperate publication authority with named granular capabilities or an equivalent stable capability set."},{"path":"Sources/ContinuumRevivedCore/SyncPayloadTaintScanner.swift","change":"modified","note":"Retain as defense-in-depth for legacy/sanitized payloads; remove its absolute ban on authenticated Class-B transcript content."},{"path":"Sources/ContinuumRevivedCore/ConnectionSupervisor.swift","change":"modified","note":"Reuse wake/network/backoff state machine for relay and execution-host sockets; add honest sleeping/offline projection and cursor reconciliation."},{"path":"Sources/ContinuumRevivedCore/RemoteReach.swift","change":"modified","note":"Keep localhost/private-mesh/tunnel vocabulary but make private-network deployment the first supported profile."},{"path":"Sources/ContinuumRevivedCore/APNSPushService.swift","change":"modified","note":"Reuse sanitized payload construction; move device-token persistence and direct APNs delivery under relay configuration."},{"path":"Sources/ContinuumRevivedAgentContent/AgentDocumentMutation.swift","change":"modified","note":"Freeze provider-neutral durable transcript mutations used identically by Mac, iPhone, snapshots, and replay."},{"path":"Sources/continuum-relay/main.swift","change":"modified","note":"Wire config, store, auth, hub, NIO server, APNs, signals, launchd/systemd diagnostics, backup, and doctor commands."},{"path":"Sources/ContinuumRevivedRelayChecks/","change":"modified","note":"Add persistence, auth, WebSocket, replay, fault, quota, migration, backup/restore, and capacity checks."},{"path":"ios/Continuum/Sources/ContinuumApp.swift","change":"modified","note":"Consume authenticated Class-B transcript/control frames, persist bounded cursors/cache, register APNs token, and show honest offline state."}]} />
+
+Exact new filenames may be adjusted to the repository’s target layout during ticketing; the ownership boundaries above are the contract.
+
+## Ordered implementation plan
+
+### Phase 0 — freeze contracts and decisions
+
+1. Record the small-team scale target, private-network deployment, trusted-relay authority, transcript mirror, storage quotas, and recovery model as locked decisions.
+2. Explicitly supersede current I5 for authenticated Class-B agent content while retaining Class-C host-secret prohibitions.
+3. Freeze `RelayFrame`, capability names, `(generation, sequence)`, command state/uniqueness, and error codes before database or UI work.
+4. Capture RED evidence for current restart loss, scope enrollment, plaintext in-memory registry, unsafe taint assumptions, and Darwin-only server behavior without changing existing expectations to manufacture acceptance.
+
+### Phase 1 — durable single-node core
+
+1. Add `RelayStore` migrations and repository APIs using existing GRDB.
+2. Move token metadata, environment registration, sequences, snapshots, events, command receipts, quotas, and push tokens into SQLite.
+3. Commit before broadcast and prove restart/cursor behavior in process-level tests.
+4. Add online backup, restore validation, schema migration, and storage accounting before exposing new networking.
+
+### Phase 2 — auth and workspace isolation
+
+1. Implement administrator-created one-use pairing with server-derived capabilities.
+2. Stop reusing `CompanionAuthService.activeSessionTokens()` as relay credentials.
+3. Add device/environment revocation, expiry, last-seen, active-socket eviction, and rate limits.
+4. Generate an authorization coverage test that fails when any route/frame lacks a required capability.
+
+### Phase 3 — production transport
+
+1. Add SwiftNIO HTTP/WebSocket service and retire production reliance on raw BSD long-poll.
+2. Add handshake/version negotiation, heartbeat, lease expiry, bounded queues, frame limits, reconnect backoff, and graceful shutdown.
+3. Preserve deterministic in-process hub tests and add real-socket process tests on macOS and Linux.
+4. Support loopback and private-network configuration first; public wildcard bind remains guarded.
+
+### Phase 4 — full transcript and commands
+
+1. Connect provider adapters to the frozen semantic mutation stream.
+2. Persist snapshots and replay the same document mutations on Mac and iPhone.
+3. Add prompt, steer/follow-up, approval/user-input, stop, and preconfigured-agent creation commands with durable receipts.
+4. Implement offline refusal and indeterminate-dispatch recovery; do not claim exactly-once provider execution.
+5. Add content-addressed large-output/blob handling and native non-executable rendering.
+
+### Phase 5 — operations, phone, and push
+
+1. Add admin CLI workflows, health/readiness, local metrics, log rotation, backup scheduling, restore drill, and quota controls.
+2. Wire iPhone cache/cursor state, workspace views, full authorized transcript, command receipts, and offline UI.
+3. Register APNs tokens and send sanitized direct pushes when configured.
+4. Package per-user `launchd` and Linux `systemd` services with explicit awake/logout/reboot semantics.
+
+### Phase 6 — measured office rollout
+
+1. Dogfood loopback, then physical phone over the selected private network.
+2. Add one teammate and one additional execution host before broadening membership.
+3. Run capacity, crash, network-fault, sleep/wake, backup/restore, credential-revocation, and cross-workspace isolation tests on the actual relay machine.
+4. Operate for a defined soak period with storage and latency reports. Consider Cloudflare Tunnel only if private-network onboarding is the demonstrated blocker.
+
+## Verification strategy
+
+<Table id="verification-pyramid" columns={["Layer", "When", "Required evidence"]} rows={[["Pure contracts/reducers", "Every change", "Schema compatibility, capability matrix, cursor invariants, command state machine, transcript reduction"], ["SQLite integration", "Every persistence/auth change", "Atomic pairing race, persist-before-broadcast, restart replay, migrations, quota accounting, backup/restore integrity"], ["Real relay process", "Every server change", "Launch binary on an ephemeral port, pair, WebSocket connect, publish, command, kill/restart, resume"], ["Network fault harness", "Transport milestones", "Disconnect before/after command host-ack, slow consumer, duplicate/reordered reconnect, malformed/oversized frames, TLS reset"], ["Mac + iPhone route", "Phone milestones", "Physical device over LAN/private VPN, background/foreground, cached transcript, approval and prompt receipts"], ["Power lifecycle", "Service/power changes", "UI quit, lock/display off, idle-sleep policy, forced sleep, lid close, wake replay, independent VPS continuation"], ["Security gate", "Before teammate rollout and internet exposure", "Cross-workspace denial, replay/revocation/rate limits, endpoint binding, secret-log scan, backup theft model, independent review"], ["Capacity/soak", "Before declaring office-ready", "100 sockets, sustained/burst events, 10k replay, checkpoint/backup contention, seven-day real workload report"]]} density="relaxed" />
+
+### Required end-to-end smoke
+
+1. Start from an empty relay data directory on the intended host.
+2. Initialize the relay and save the administrator recovery material.
+3. Pair one Mac execution host and one physical iPhone using a five-minute invitation.
+4. Create an agent from a preconfigured project/provider on the phone.
+5. Observe user/assistant/tool mutations and submit a follow-up with a stable idempotency key.
+6. Kill the relay after forwarding a command, restart it, and verify the existing receipt is returned without blind provider redispatch.
+7. Revoke the phone and prove its active socket and subsequent REST/WebSocket requests are rejected.
+8. Restore an encrypted backup into an isolated directory, verify database/blob integrity, and confirm transcript replay through the latest committed cursor.
+
+### Real sleep/wake protocol
+
+A phone or VPS must act as the witness because a test runner on the sleeping Mac also stops. Record relay/environment heartbeat timestamps, `pmset -g assertions`, `pmset -g log`, event cursors, command receipts, and provider history across:
+
+- Array window quit while host remains awake;
+- screen lock/display sleep;
+- idle sleep without a power assertion;
+- active-turn idle-sleep assertion when enabled;
+- explicit Sleep or `pmset sleepnow`;
+- physical MacBook lid close;
+- wake and cursor-based recovery;
+- development Mac asleep while an awake office/VPS environment continues.
+
+Acceptance requires no claimed local progress during actual sleep, honest offline/read-only phone state, and duplicate-free replay after wake.
+
+## Release gate
+
+<Checklist id="release-gate" items={[{"id":"contracts","label":"Wire, capability, event, cursor, command, and information-class contracts are approved","checked":false},{"id":"restart","label":"Pairings, events, snapshots, cursors, commands, push tokens, and quotas survive restart","checked":false},{"id":"auth","label":"One-use pairing, server-derived scopes, revocation, expiry, and rate limits pass adversarial checks","checked":false},{"id":"isolation","label":"Two-workspace test proves no cross-workspace transcript, blob, subscription, or command access","checked":false},{"id":"phone","label":"Physical iPhone completes transcript, prompt, approval, stop, reconnect, and cached-offline flows","checked":false},{"id":"sleep","label":"External witness captures forced sleep and duplicate-free wake recovery","checked":false},{"id":"restore","label":"Encrypted backup restores on replacement hardware and original/restored identity collision is prevented","checked":false},{"id":"capacity","label":"Target hardware meets the measured 100-socket office workload without unbounded queues or WAL growth","checked":false},{"id":"ops","label":"Admin can status, doctor, pair, revoke, backup, restore, compact, and inspect quota without editing SQLite","checked":false},{"id":"review","label":"Independent security and failure-mode review clears private-team rollout","checked":false}]} />
+
+## Open Questions
+
+<QuestionForm id="open-questions" questions={[{"id":"relay-host","title":"Which existing machine should be the first always-on office relay?","subtitle":"This choice defines uptime, backup custody, and where APNs credentials live.","mode":"single","options":[{"id":"office-mac-mini","label":"Existing office Mac mini","detail":"Best fit if it is already powered, FileVault-protected, and routinely online.","recommended":true},{"id":"dylan-mac","label":"Dylan’s development Mac","detail":"Fastest initial setup but unavailable during sleep, travel, reboot, and development disruption."},{"id":"office-linux","label":"Existing Linux/NAS host","detail":"Potentially stronger uptime, but requires confirming Swift runtime, storage, backups, and APNs key handling."}]},{"id":"workspace-privacy","title":"Should teammates be mutually private by default?","subtitle":"The plan always enforces workspace membership; this sets the default invitation behavior.","mode":"single","options":[{"id":"private-default","label":"Private workspace by default; invite teammates explicitly","detail":"Safer and costs little once membership enforcement exists.","recommended":true},{"id":"office-shared","label":"All office members see all workspaces by default","detail":"Simpler collaboration but makes accidental transcript exposure more likely."}]},{"id":"keep-awake","title":"Should an active local agent keep a plugged-in Mac from idle sleeping?","subtitle":"This cannot override explicit Sleep, lid close, low battery, or thermal forced sleep.","mode":"single","options":[{"id":"ac-default","label":"Yes while plugged in and an active local turn is running","detail":"Show a visible keeping-awake status and release immediately when work stops.","recommended":true},{"id":"opt-in","label":"Owner opt-in per machine","detail":"More conservative energy policy; local agents may pause unexpectedly until configured."},{"id":"never","label":"Never hold a power assertion","detail":"Use the office/VPS host for all unattended execution."}]},{"id":"backup-destination","title":"Where should encrypted relay backups go?","subtitle":"A backup that remains only on the relay disk does not protect against disk or machine loss.","mode":"single","options":[{"id":"existing-office-backup","label":"Existing office backup system or encrypted NAS","detail":"No new hosted bill if already operated and tested.","recommended":true},{"id":"manual-external","label":"Rotated encrypted external drive","detail":"No service dependency but requires a disciplined manual restore drill."},{"id":"icloud-drive","label":"Encrypted archive in existing iCloud Drive","detail":"Convenient but introduces Apple-account availability and sync behavior into recovery."}]},{"id":"private-network","title":"Which private-network route should physical-phone dogfood use first?","subtitle":"The application protocol stays the same; this is an operational choice.","mode":"single","options":[{"id":"existing-vpn","label":"Existing office VPN/WireGuard","detail":"Best zero-new-service path when already available.","recommended":true},{"id":"tailscale","label":"Tailscale after confirming team licensing","detail":"Excellent onboarding, but office use must fit current terms rather than assume the personal free allowance."},{"id":"lan-only","label":"LAN only for the first milestone","detail":"Strictly $0 and simplest, but does not validate off-site phone use."}]}]} submitLabel="Record relay decisions" />
