@@ -65,9 +65,12 @@ func runCommandCenterChecks() {
     let exactAgent = LaunchPaletteModel.makeSections(rows: rows, query: "agent").flatMap(\.items).first
     expect(exactAgent?.title == "Agent", "exact typed matches outrank category defaults without a Best Match section")
 
+    // RETIRED: the sidebar is unmounted, so ⌘K must NOT offer a command that
+    // toggles it (.plans/10-command-center-absorbs-sidebar.md). Asserted as absent
+    // rather than deleted, so re-exposing a dead command fails here.
     let activity = LaunchPaletteModel.makeSections(rows: rows, query: "activity dock").flatMap(\.items)
-    expect(activity.first?.row == .action(.toggleWorkspaceSidebar), "clean aliases find legacy sidebar action")
-    expect(activity.first?.category == .developer, "administrative chrome action is categorized as Developer")
+    expect(!activity.contains { $0.row == .action(.toggleWorkspaceSidebar) },
+           "the unmounted sidebar's toggle must not be offered in the command center")
 
     let recentTile = LaunchPaletteModel.recordingRecent(.jumpToTile(JumpTileRow(id: tileID, title: "Fix command menu")), in: [], succeeded: true)
     let deduped = LaunchPaletteModel.recordingRecent(.jumpToTile(JumpTileRow(id: tileID, title: "Fix command menu")), in: recentTile, succeeded: true)

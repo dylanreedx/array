@@ -44,7 +44,12 @@ public enum CommandRegistry {
             CanvasCommand(id: "view.previousView", action: .previousView),
             CanvasCommand(id: "view.previousTile", action: .previousTile),
             CanvasCommand(id: "view.previousZone", action: .previousZone),
-            CanvasCommand(id: "view.toggleWorkspaceSidebar", action: .toggleWorkspaceSidebar),
+            // Not palette-visible: the workspace sidebar is no longer mounted, so
+            // offering "Activity dock" in ⌘K would be a command that does nothing
+            // (.plans/10-command-center-absorbs-sidebar.md). The command id stays so
+            // the shortcut catalogue keeps its chord entry rather than silently
+            // dropping a registered binding.
+            CanvasCommand(id: "view.toggleWorkspaceSidebar", action: .toggleWorkspaceSidebar, paletteVisible: false),
             CanvasCommand(id: "workspace.new", action: .newWorkspace),
         ]
     }
