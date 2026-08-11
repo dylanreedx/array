@@ -10254,9 +10254,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// binding, not identity, so `nil` is a headless agent; a non-nil `prompt` runs
     /// on spawn (`AgentSupervisor.spawn`'s own parameter).
     private func spawnSupervisedAgent(tileId: UUID?, prompt: String? = nil) -> AgentID? {
-        guard let activeProject,
-              let cwd = usableAgentHomeDirectory(
-                  URL(fileURLWithPath: activeProject.rootPath, isDirectory: true)) else {
+        // Plan 07. This used to read `activeProject.rootPath` unconditionally, which
+        // is why changing an agent's Home never carried: the next ⌘K agent went back
+        // to the active project regardless of where you had just been working.
+        // Precedence now comes from `ManagedAgentSpawnHomeResolver` — explicit →
+        // selected agent → context gravity → active project — and the resolver is
+        // pure, so the ordering is witnessed in Core rather than asserted here.
+        //
+        // The SELECTED agent is the one whose tile has focus; its Home is ordinary
+        // record state, so inheriting it is just reading it. Context gravity is not
+        // wired at this call site yet and passes nil, which the precedence tolerates
+        // (the rung is skipped, not defaulted).
+        var selectedAgentHome: AgentHome?
+        if let focusedTile = focusedTileIdForPaletteContext(),
+           let focusedAgent = agentSupervisor.agent(forTile: focusedTile),
+           let record = agentSupervisor.records[focusedAgent] {
+            // `projectRoot` is left nil: this call site knows the agent's checkout
+            // and its project id, and the resolver reads only those. Inventing a
+            // root by re-deriving it from the registry here would add a second
+            // source of truth for something nothing on this path consumes.
+            selectedAgentHome = AgentHome(
+                projectId: record.projectId,
+                projectRoot: nil,
+                checkoutRoot: URL(fileURLWithPath: record.cwd, isDirectory: true))
+        }
+        let activeProjectHome: AgentHome? = activeProject.map { project in
+            let root = URL(fileURLWithPath: project.rootPath, isDirectory: true)
+            return AgentHome(projectId: project.id, projectRoot: root, checkoutRoot: root)
+        }
+        // Validation stays at the App boundary — Core must not gain ambient
+        // filesystem authority — and refusal stays refusal: an unusable Home beeps
+        // rather than falling back to the process cwd.
+        guard let resolution = ManagedAgentSpawnHomeResolver.resolve(
+                selectedAgent: selectedAgentHome,
+                activeProject: activeProjectHome),
+              let cwd = usableAgentHomeDirectory(resolution.home.checkoutRoot) else {
             NSSound.beep()
             fputs("Managed agent spawn refused: choose an explicit Home; process cwd is never an agent Home fallback\n", stderr)
             return nil
@@ -10265,7 +10297,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             tileId: tileId,
             prompt: prompt,
             cwd: cwd,
-            projectId: activeProject.id)
+            projectId: resolution.home.projectId)
     }
 
     /// Explicit-Home variant used only after the owner chooses a registered

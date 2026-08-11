@@ -5,6 +5,7 @@ import Foundation
 // These checks are pure Core and provider-neutral. They deliberately avoid App,
 // real stores, persistence, baselines, and transport.
 func runAgentContextGravityChecks() {
+    checkManagedAgentSpawnHomePrecedence()
     checkContainingProjectZoneWinsOverNearbyCrossProjectTile()
     checkNearbyExternalWhatDoesNotInfluenceHome()
     checkNearbyAgreementDoesNotForceIncidentalSubdirectory()
@@ -17,6 +18,67 @@ func runAgentContextGravityChecks() {
     checkInheritedWhereRejectsSymlinkEscapeAndFileCandidates()
     checkStableTieBreakersAreIndependentOfInputOrder()
     print("AgentContextGravity P4 checks passed: P4.R1-P4.R11")
+}
+
+private func checkManagedAgentSpawnHomePrecedence() {
+    let explicit = AgentHome(
+        projectId: nil,
+        projectRoot: nil,
+        checkoutRoot: url("/tmp/continuum-spawn-home/explicit"))
+    let selectedProjectId = UUID(uuidString: "A9200000-0000-4000-8000-000000000001")!
+    let selected = AgentHome(
+        projectId: selectedProjectId,
+        projectRoot: url("/tmp/continuum-spawn-home/selected-project"),
+        checkoutRoot: url("/tmp/continuum-spawn-home/selected-checkout"))
+    let gravityHome = AgentHome(
+        projectId: nil,
+        projectRoot: nil,
+        checkoutRoot: url("/tmp/continuum-spawn-home/gravity"))
+    let gravity = AgentScopeBinding(
+        home: gravityHome,
+        whereDirectory: gravityHome.checkoutRoot,
+        provenance: .managedAgent(agentId: "nearby"),
+        state: .provisional)
+    let active = AgentHome(
+        projectId: UUID(uuidString: "A9200000-0000-4000-8000-000000000002")!,
+        projectRoot: url("/tmp/continuum-spawn-home/active"),
+        checkoutRoot: url("/tmp/continuum-spawn-home/active"))
+
+    let explicitResult = ManagedAgentSpawnHomeResolver.resolve(
+        explicit: explicit,
+        selectedAgent: selected,
+        contextGravity: gravity,
+        activeProject: active)
+    expect(explicitResult?.home == explicit && explicitResult?.provenance == .explicitAction,
+           "managed spawn Home gives an explicit action first priority")
+
+    let selectedResult = ManagedAgentSpawnHomeResolver.resolve(
+        selectedAgent: selected,
+        contextGravity: gravity,
+        activeProject: active)
+    expect(selectedResult?.home == selected && selectedResult?.provenance == .selectedAgent,
+           "managed spawn Home gives the selected managed agent priority over inferred context")
+    expect(selectedResult?.home.projectId == selectedProjectId,
+           "managed spawn Home preserves a selected registered project's identity")
+
+    let customSelected = ManagedAgentSpawnHomeResolver.resolve(
+        selectedAgent: explicit,
+        contextGravity: gravity,
+        activeProject: active)
+    expect(customSelected?.home.checkoutRoot == explicit.checkoutRoot && customSelected?.home.projectId == nil,
+           "managed spawn Home preserves a selected custom folder without fabricating a project id")
+
+    let gravityResult = ManagedAgentSpawnHomeResolver.resolve(
+        contextGravity: gravity,
+        activeProject: active)
+    expect(gravityResult?.home == gravityHome && gravityResult?.provenance == .contextGravity,
+           "managed spawn Home uses context gravity when no selected agent exists")
+
+    let activeResult = ManagedAgentSpawnHomeResolver.resolve(activeProject: active)
+    expect(activeResult?.home == active && activeResult?.provenance == .activeProject,
+           "managed spawn Home keeps the validated active project as the final fallback")
+    expect(ManagedAgentSpawnHomeResolver.resolve() == nil,
+           "managed spawn Home has no implicit process-cwd fallback")
 }
 
 private func checkContainingProjectZoneWinsOverNearbyCrossProjectTile() {
