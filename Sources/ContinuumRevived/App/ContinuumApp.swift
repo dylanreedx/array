@@ -2891,10 +2891,9 @@ enum ContinuumApp {
 
         let viewMenuItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
         let viewMenu = NSMenu(title: "View")
-        // No "Show Workspace Sidebar" item: the sidebar is not mounted any more, so
-        // a menu command for it would be a control that does nothing
-        // (.plans/10-command-center-absorbs-sidebar.md). ⌘K is the navigation
-        // surface, and it reaches every agent including those with no canvas tile.
+        let sidebarItem = NSMenuItem(title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: "S")
+        sidebarItem.keyEquivalentModifierMask = [.command, .shift]
+        viewMenu.addItem(sidebarItem)
         viewMenu.addItem(NSMenuItem(title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: ""))
         viewMenuItem.submenu = viewMenu
         mainMenu.addItem(viewMenuItem)
@@ -2966,13 +2965,7 @@ enum ContinuumApp {
         try expectMenuItem(editMenu, title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
 
         guard let viewMenu = mainMenu.item(withTitle: "View")?.submenu else { throw SelfCheckError("missing View menu") }
-        // RETIRED, not forgotten: "Show Workspace Sidebar" is gone because the
-        // sidebar is no longer mounted (.plans/10-command-center-absorbs-sidebar.md).
-        // Asserted as ABSENT rather than deleted, so re-adding a command for a
-        // surface that does not exist fails here instead of shipping.
-        guard viewMenu.items.allSatisfy({ $0.title != "Show Workspace Sidebar" }) else {
-            throw SelfCheckError("View menu still offers Show Workspace Sidebar — the sidebar is unmounted, so the command would do nothing")
-        }
+        try expectMenuItem(viewMenu, title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: "S", modifiers: [.command, .shift])
         try expectMenuItem(viewMenu, title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: "")
 
         guard let helpMenu = mainMenu.item(withTitle: "Help")?.submenu else { throw SelfCheckError("missing Help menu") }
@@ -7391,19 +7384,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         splitView.autoresizingMask = [.width, .height]
         splitView.delegate = self
 
-        // The workspace sidebar is NOT mounted any more: ⌘K is the only navigation
-        // surface (.plans/10-command-center-absorbs-sidebar.md). It was safe to
-        // unmount only once the command center could reach every agent WITHOUT a
-        // canvas tile — closed, headless, snoozed and settled alike — because the
-        // sidebar's inbox was previously the sole way to reach those, and taking it
-        // away first would have stranded the record, transcript and worktree.
-        //
-        // `workspaceSidebarView` therefore stays nil in production. Every caller
-        // optional-chains or guards, so those paths become no-ops; the split-view
-        // delegate methods key off `workspaceSplitView` and the (now absent)
-        // divider, so they answer harmlessly. Checks that exercise the sidebar
-        // construct their own and assign the property directly.
-        let contentPane = NSView(frame: NSRect(x: 0, y: 0, width: frame.width, height: frame.height))
+        let width = CGFloat(WorkspaceSidebarConfig.resolveWidth())
+        let divider = splitView.dividerThickness
+        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: width, height: frame.height))
+        sidebar.autoresizingMask = [.height]
+        configureWorkspaceSidebar(sidebar)
+
+        // This is the persistent LEFT workspace sidebar. It is intentionally
+        // distinct from the old bug where the ⌘K overlay was adopted by this
+        // split view and rendered as a right-edge pane. The plain container
+        // returned below prevents that overlay regression while preserving this
+        // actual workspace surface.
+
+        let contentPane = NSView(frame: NSRect(x: width + divider, y: 0, width: max(0, frame.width - width - divider), height: frame.height))
         contentPane.autoresizingMask = [.width, .height]
         let topBar = WorkspaceTopBarView(frame: NSRect(x: 0, y: max(0, frame.height - 38), width: contentPane.bounds.width, height: 38))
         configureWorkspaceTopBar(topBar)
@@ -7424,9 +7417,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             canvasView.bottomAnchor.constraint(equalTo: contentPane.bottomAnchor),
         ])
 
+        splitView.addSubview(sidebar)
         splitView.addSubview(contentPane)
+        workspaceSidebarView = sidebar
         workspaceTopBarView = topBar
         workspaceSplitView = splitView
+        reloadWorkspaceSidebar()
+        applyWorkspaceSidebarVisibility(WorkspaceSidebarConfig.resolveVisible())
 
         // Return a PLAIN container, not the split view itself.
         //
@@ -7519,11 +7516,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         topBar.onDeleteWorkspace = { [weak self] workspaceId in
             self?.deleteWorkspaceAndRelaunch(workspaceId: workspaceId)
         }
-        // No sidebar toggle: the top bar's ☰ button is gone with the sidebar
-        // (.plans/10-command-center-absorbs-sidebar.md). It was the last visible
-        // control still pointing at an unmounted surface — removing the View menu
-        // item and the palette action but leaving a button in the chrome is a
-        // half-removal the user sees.
+        topBar.onToggleSidebar = { [weak self] in
+            self?.toggleWorkspaceSidebar()
+        }
     }
 
     private func currentWorkspaceIdForSidebar() -> UUID? {
@@ -8506,13 +8501,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(widthPersistenceWorked, "sidebar width should round-trip through UserDefaults")
         try expect(visibilityPersistenceWorked, "sidebar visibility should round-trip through UserDefaults")
 
-        // INVERTED (.plans/10-command-center-absorbs-sidebar.md): the sidebar is not
-        // mounted, so ⌘K must NOT offer a command that toggles it — that would be a
-        // control for a surface the user cannot see. The config round-trips above
-        // are kept: the stored keys still exist and must stay well-behaved.
         let paletteRows = LaunchPaletteModel.filterRows(LaunchPaletteModel.makeRows(profiles: []), query: "workspace sidebar")
         let paletteActionDiscoverable = paletteRows.contains { $0.displayName == LaunchPaletteAction.toggleWorkspaceSidebar.displayName }
-        try expect(!paletteActionDiscoverable, "the unmounted sidebar's toggle must not be command-palette discoverable")
+        try expect(paletteActionDiscoverable, "workspace sidebar toggle should be command-palette discoverable")
 
         let timestamp = String(Int(Date().timeIntervalSince1970))
         let directory = URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true)
@@ -8649,22 +8640,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         ))
         let content = app.makeWorkspaceContentView(canvasView: canvas, frame: NSRect(x: 0, y: 0, width: 1_200, height: 800))
         content.layoutSubtreeIfNeeded()
-        // INVERTED, not deleted (.plans/10-command-center-absorbs-sidebar.md). This
-        // check used to prove the mount left a sidebar visible with no user action.
-        // The sidebar is unmounted now — ⌘K is the only navigation surface — so the
-        // same entry point must produce NO sidebar, and the canvas must own the
-        // whole content width. Keeping the leg pointed at the real
-        // `makeWorkspaceContentView` means re-introducing the sidebar fails here
-        // instead of shipping, which deleting the leg would not have caught.
-        guard let splitView = app.workspaceSplitView else {
-            throw CheckError.failed("workspace mount did not retain the split view")
+        guard let splitView = app.workspaceSplitView,
+              let sidebar = app.workspaceSidebarView else {
+            throw CheckError.failed("workspace sidebar mount did not retain split/sidebar views")
         }
         splitView.layoutSubtreeIfNeeded()
+        sidebar.layoutSubtreeIfNeeded()
 
-        try expect(app.workspaceSidebarView == nil,
-                   "the workspace mount must not create a sidebar any more — ⌘K is the navigation surface")
-        try expect(splitView.subviews.count == 1,
-                   "the split view must hold only the content pane, got \(splitView.subviews.count) subviews")
+        let sidebarIsHiddenAfterMount = sidebar.isHidden
+        let sidebarWidthAfterMount = Double(sidebar.frame.width)
+        let workspaceRowsRenderedAfterMount = sidebar.workspaceRowsRenderedForQA
+        try expect(!sidebarIsHiddenAfterMount, "mount must leave sidebar visible with no user action")
+        try expect(sidebarWidthAfterMount > 0, "mount must allocate positive sidebar width, got \(sidebarWidthAfterMount)")
+        try expect(workspaceRowsRenderedAfterMount >= 1, "mount reload must render at least one workspace row, got \(workspaceRowsRenderedAfterMount)")
         // The content view an overlay attaches to must NOT be a layout container.
         // While it was the NSSplitView, ⌘K became a split PANE and its centred
         // float was overwritten on layout — it rendered full-height against the
@@ -8673,14 +8661,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                    "the window content view must not be an NSSplitView — it would lay out ⌘K as a pane and discard its floating frame")
         try expect(content.subviews.contains(where: { $0 === splitView }),
                    "the plain content container must host the split view")
-        let contentWidthAfterMount = Double(splitView.subviews.first?.frame.width ?? 0)
-        try expect(contentWidthAfterMount > 1_000,
-                   "the content pane must span the window without a sidebar taking width, got \(contentWidthAfterMount)")
-        // The config's own default is untouched: nothing reads it at mount now, and
-        // leaving it alone keeps this leg honest about WHY the sidebar is absent
-        // (not mounted) rather than conflating it with "configured hidden".
-        try expect(defaultVisibleResolved,
-                   "WorkspaceSidebarConfig default is deliberately unchanged; absence comes from not mounting")
 
         let timestamp = String(Int(Date().timeIntervalSince1970))
         let directory = URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true)
@@ -8692,9 +8672,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let manifest: [String: Any] = [
             "check": "workspace-sidebar-default-visible",
             "defaultVisibleResolved": defaultVisibleResolved,
-            "sidebarMountedAfterMount": false,
-            "splitViewSubviewsAfterMount": splitView.subviews.count,
-            "contentWidthAfterMount": contentWidthAfterMount,
+            "sidebarIsHiddenAfterMount": sidebarIsHiddenAfterMount,
+            "dividerPositionAfterMount": sidebarWidthAfterMount,
+            "workspaceRowsRenderedAfterMount": workspaceRowsRenderedAfterMount,
             "artifactPath": artifact.path,
         ]
         try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)

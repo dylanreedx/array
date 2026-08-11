@@ -105,11 +105,11 @@ swift build --product ContinuumRevivedCoreChecks   # ALWAYS rebuild before trust
 .build/debug/ContinuumRevivedCoreChecks --command-center-check
 ```
 
-When you must retire a witness because behaviour intentionally changed, **invert
-it, don't delete it**. Four of today's assertions now assert absence (the mount
-must produce no sidebar; the toggle must not be palette-discoverable; the View
-menu must not offer it; searching "workspace sidebar" must return nothing). The
-sidebar cannot creep back silently.
+When behaviour intentionally changes, change the witness rather than deleting
+it. The sidebar checks now lock the corrected distinction: the persistent left
+workspace sidebar must mount and remain toggleable, while the window content
+view must remain a plain container so ⌘K can never be laid out as an accidental
+right-edge split-view pane.
 
 ### Step 6 — Gate it
 
@@ -182,10 +182,11 @@ honours only the LAST `--product`. Rebuild the exact product before trusting it.
 
 Shipped today: ⌘K command-center redesign; semantic completions + fuzzy `@` file
 navigation; codex context occupancy from the rollout log; camera-move chrome
-redraw fix; codex transcript rehydration; **the workspace sidebar removed** with
-every tile-less agent reachable from ⌘K first; managed agents inheriting the Home
-you're working in; the iOS build repaired; ⌘K floating properly; provider headers
-in **both** model surfaces; agent tiles named after the model they run.
+redraw fix; codex transcript rehydration; every tile-less agent reachable from
+⌘K; managed agents inheriting the Home you're working in; the iOS build
+repaired; ⌘K floating properly instead of rendering as a right-edge pane;
+provider headers in **both** model surfaces; agent tiles named after the model
+they run. The persistent **left workspace sidebar is mounted**.
 
 `array/integration` = `main`, nothing unreleased.
 

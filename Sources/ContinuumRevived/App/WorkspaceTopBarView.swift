@@ -24,6 +24,7 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     private let createButton: NSButton
     private let renameButton: NSButton
     private let deleteButton: NSButton
+    private let toggleSidebarButton: NSButton
 
     private var currentWorkspaceId: UUID?
     /// The save state the label is currently showing, so `applyTokens()` can
@@ -34,6 +35,7 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     var onCreateWorkspace: (() -> Void)?
     var onRenameWorkspace: ((UUID) -> Void)?
     var onDeleteWorkspace: ((UUID) -> Void)?
+    var onToggleSidebar: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         nameLabel = NSTextField(labelWithString: "Workspace")
@@ -75,6 +77,10 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         deleteButton.controlSize = .small
         deleteButton.toolTip = "Delete workspace"
 
+        toggleSidebarButton = NSButton(title: "☰", target: nil, action: nil)
+        toggleSidebarButton.bezelStyle = .rounded
+        toggleSidebarButton.controlSize = .small
+        toggleSidebarButton.toolTip = "Toggle workspace sidebar"
 
         super.init(frame: frameRect)
 
@@ -90,6 +96,7 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         createButton.setAccessibilityIdentifier("ContinuumWorkspaceTopBarCreate")
         renameButton.setAccessibilityIdentifier("ContinuumWorkspaceTopBarRename")
         deleteButton.setAccessibilityIdentifier("ContinuumWorkspaceTopBarDelete")
+        toggleSidebarButton.setAccessibilityIdentifier("ContinuumWorkspaceTopBarToggleSidebar")
 
         switchWorkspaceButton.target = self
         switchWorkspaceButton.action = #selector(switchWorkspaceSelected(_:))
@@ -99,6 +106,8 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         renameButton.action = #selector(renameWorkspaceClicked(_:))
         deleteButton.target = self
         deleteButton.action = #selector(deleteWorkspaceClicked(_:))
+        toggleSidebarButton.target = self
+        toggleSidebarButton.action = #selector(toggleSidebarClicked(_:))
 
         let identityStack = NSStackView(views: [nameLabel, countsLabel, saveStateLabel, managementMessageLabel])
         identityStack.orientation = .horizontal
@@ -107,7 +116,7 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         identityStack.translatesAutoresizingMaskIntoConstraints = false
         identityStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        let actionsStack = NSStackView(views: [switchWorkspaceButton, createButton, renameButton, deleteButton])
+        let actionsStack = NSStackView(views: [toggleSidebarButton, switchWorkspaceButton, createButton, renameButton, deleteButton])
         actionsStack.orientation = .horizontal
         actionsStack.alignment = .centerY
         actionsStack.spacing = 6
@@ -222,6 +231,13 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         return true
     }
 
+    @discardableResult
+    func clickToggleSidebarForQA() -> Bool {
+        guard toggleSidebarButton.isEnabled else { return false }
+        toggleSidebarButton.performClick(nil)
+        return true
+    }
+
 
     @objc private func switchWorkspaceSelected(_ sender: NSPopUpButton) {
         guard let idString = sender.selectedItem?.representedObject as? String,
@@ -242,6 +258,10 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     @objc private func deleteWorkspaceClicked(_ sender: NSButton) {
         guard let currentWorkspaceId else { return }
         onDeleteWorkspace?(currentWorkspaceId)
+    }
+
+    @objc private func toggleSidebarClicked(_ sender: NSButton) {
+        onToggleSidebar?()
     }
 
     private static func countsText(projectCount: Int, zoneCount: Int) -> String {

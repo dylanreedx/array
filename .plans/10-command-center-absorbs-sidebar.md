@@ -1,5 +1,11 @@
 # ⌘K absorbs the sidebar, then the sidebar goes
 
+> **Decision reversed 2026-08-11:** keep the persistent **left workspace
+> sidebar**. The sidebar that had to go was the accidental **right-edge ⌘K
+> rendering**, caused by mounting the command-center overlay inside an
+> `NSSplitView`. ⌘K remains a floating overlay hosted by a plain container;
+> the real workspace sidebar remains mounted in the split view.
+
 Snapshot: 2026-08-11, `array/integration` after 0.4.3 + Codex rehydration.
 
 Goal: one floating command center, no persistent sidebar. The sidebar cannot
