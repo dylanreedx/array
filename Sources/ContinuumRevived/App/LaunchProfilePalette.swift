@@ -10,6 +10,10 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     var onSelectProfile: ((String) -> Bool)?
     var onSelectAgentModel: ((String) -> Bool)?
     var onSelectAction: ((LaunchPaletteAction) -> Bool)?
+    /// Bring a closed agent back. Separate from `onSelectAction` because the row
+    /// already carries the dispatch identity and the agent id is not a tile id —
+    /// a closed agent has no tile, which is the whole reason this row exists.
+    var onReopenHistoryAgent: ((UUID) -> Bool)?
     var onClose: (() -> Void)?
 
     static let rootAccessibilityIdentifier = "ContinuumLaunchProfilePaletteRoot"
@@ -36,8 +40,8 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
 
     private static let recentDefaultsKey = "continuum.commandCenter.recentIDs"
 
-    func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], contextualActions: [LaunchPaletteAction] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = [], jumpZones: [JumpZoneRow] = [], initialQuery: String = "", agentModels: [AgentModelPaletteRow]? = nil) {
-        rootRows = LaunchPaletteModel.makeRows(profiles: profiles.map(Self.profileRow(for:)), projects: projects, workspaces: workspaces, contextualActions: contextualActions, harnessRoles: harnessRoles, jumpTiles: jumpTiles, jumpZones: jumpZones)
+    func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], contextualActions: [LaunchPaletteAction] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = [], jumpZones: [JumpZoneRow] = [], historyAgents: [HistoryAgentPaletteRow] = [], initialQuery: String = "", agentModels: [AgentModelPaletteRow]? = nil) {
+        rootRows = LaunchPaletteModel.makeRows(profiles: profiles.map(Self.profileRow(for:)), projects: projects, workspaces: workspaces, contextualActions: contextualActions, harnessRoles: harnessRoles, jumpTiles: jumpTiles, jumpZones: jumpZones, historyAgents: historyAgents)
         rows = rootRows
         rootQuery = initialQuery
         navigationLevel = .root
@@ -169,6 +173,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             }
         case let .jumpToTile(tile): return "Jump to \(tile.title)"
         case let .jumpToZone(zone): return "Jump to \(zone.title)"
+        case let .historyAgent(agent): return "Reopen \(agent.displayName)"
         }
     }
 
@@ -862,6 +867,13 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         case let .jumpToZone(zone):
             let succeeded = onSelectAction?(.jumpToZone(zone.id)) ?? false
             recordRecent(selected, succeeded: succeeded)
+            close(restoreFocus: true)
+        case let .historyAgent(agent):
+            // Deliberately NOT recorded as a recent: reopening makes the agent
+            // no longer closed, so a "History" recent would point at a row that
+            // has left the section. `presentation` marks it unsafe-for-recent for
+            // the same reason; this mirrors it at the dispatch site.
+            _ = onReopenHistoryAgent?(agent.agentId) ?? false
             close(restoreFocus: true)
         }
     }

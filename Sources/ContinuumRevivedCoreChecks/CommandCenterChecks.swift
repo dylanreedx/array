@@ -98,4 +98,47 @@ func runCommandCenterChecks() {
         opacityField.setValue(.double(0.1), in: defaults)
         expect(opacityField.currentValue(in: defaults) == .double(CommandCenterAppearanceConfig.customOpacityRange.lowerBound), "custom opacity slider clamps before persistence")
     }
+
+    // MARK: History · a closed agent must stay reachable
+    //
+    // The sidebar's History section is the only surface a closed agent has, and
+    // it is being removed (.plans/10-command-center-absorbs-sidebar.md). A closed
+    // agent has NO TILE, so `jumpToTile` cannot represent it — without a row of
+    // its own, deleting the sidebar strands the record, its transcript and its
+    // worktree permanently. These assertions are that row's teeth.
+    let closedAgentID = UUID()
+    let closedAgent = HistoryAgentPaletteRow(
+        agentId: closedAgentID, displayName: "Rehydrate codex", detail: "GPT-5.6 Sol")
+    let historyRows = LaunchPaletteModel.makeRows(profiles: [], historyAgents: [closedAgent])
+    expect(historyRows.contains(.historyAgent(closedAgent)),
+           "makeRows must offer a closed agent — nothing else can reach one")
+
+    let historyPresented = LaunchPaletteModel.presentation(for: .historyAgent(closedAgent))
+    expect(historyPresented.category == .history,
+           "a closed agent draws in History, not among live tiles")
+    expect(historyPresented.title == "Rehydrate codex",
+           "History keeps the agent's own name as command identity")
+    expect(historyPresented.subtitle == "Closed · GPT-5.6 Sol",
+           "History says the agent is closed and carries its model as metadata")
+    expect(historyPresented.stableID == "history-agent:\(closedAgentID.uuidString)",
+           "History dispatch identity is the AGENT id — a closed agent has no tile id")
+
+    // Searchable by the agent's name, by its model, and by the section's own
+    // vocabulary, so it is findable without remembering what it was called.
+    for query in ["rehydrate", "gpt 5.6", "history", "closed", "reopen"] {
+        expect(LaunchPaletteModel.makeSections(rows: historyRows, query: query)
+                .flatMap(\.items).contains(where: { $0.row == .historyAgent(closedAgent) }),
+               "a closed agent must be findable by \"\(query)\"")
+    }
+
+    // Never volunteered: History is the block you go looking for, so it may not
+    // displace a row you did not ask for, and reopening ends the agent's
+    // membership in it — which would make a "recent" point at a stale section.
+    expect(!historyPresented.isDefaultVisible,
+           "History must not appear on the empty-query home")
+    expect(!historyPresented.isSafeRecent,
+           "reopening leaves History, so a closed agent is never a safe recent")
+    expect(!LaunchPaletteModel.makeSections(rows: historyRows, query: "")
+            .contains(where: { $0.category == .history }),
+           "the curated home shows no History section until it is searched for")
 }

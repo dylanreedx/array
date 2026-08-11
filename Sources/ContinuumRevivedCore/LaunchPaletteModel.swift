@@ -227,9 +227,29 @@ public struct AgentModelPaletteRow: Equatable, Sendable {
     }
 }
 
+/// A closed agent, offered so it can be brought back. The tile is gone but the
+/// record, transcript and worktree are not — this row is the ONLY way to reach
+/// one once the workspace sidebar's History section is gone, so it carries the
+/// agent id rather than a tile id (a closed agent has no tile, which is exactly
+/// why `jumpToTile` cannot represent it).
+public struct HistoryAgentPaletteRow: Equatable, Sendable {
+    public let agentId: UUID
+    public let displayName: String
+    /// Model display name or provider id — the same metadata the inbox row
+    /// shows, searchable without becoming part of the command identity.
+    public let detail: String?
+
+    public init(agentId: UUID, displayName: String, detail: String? = nil) {
+        self.agentId = agentId
+        self.displayName = displayName
+        self.detail = detail
+    }
+}
+
 public enum LaunchPaletteRow: Equatable, Sendable {
     case profile(LaunchPaletteProfileRow)
     case agentModel(AgentModelPaletteRow)
+    case historyAgent(HistoryAgentPaletteRow)
     case action(LaunchPaletteAction)
     case project(ProjectPickerRow)
     case workspace(WorkspaceEntry)
@@ -256,6 +276,7 @@ public enum LaunchPaletteRow: Equatable, Sendable {
             }
         case let .jumpToTile(tile): return "Jump to \(tile.title)"
         case let .jumpToZone(zone): return "Jump to \(zone.title)"
+        case let .historyAgent(agent): return "Reopen \(agent.displayName)"
         }
     }
 
@@ -263,6 +284,7 @@ public enum LaunchPaletteRow: Equatable, Sendable {
         switch self {
         case let .profile(profile): return profile.isSelectable
         case .agentModel: return true
+        case .historyAgent: return true
         case .action: return true
         case let .project(project): return project.isSelectable
         case let .workspace(workspace): return !workspace.projectIds.isEmpty
@@ -280,6 +302,13 @@ public enum LaunchPaletteRow: Equatable, Sendable {
                 || profile.id.lowercased().contains(query)
         case let .agentModel(model):
             let haystacks = [model.displayName, model.id, model.providerName, "agent model provider"].map { $0.lowercased() }
+            let queryTokens = query.split(separator: " ").map(String.init)
+            return queryTokens.allSatisfy { token in haystacks.contains { $0.contains(token) } }
+        case let .historyAgent(agent):
+            // `history`/`closed`/`reopen` as aliases so the section is findable by
+            // name, not only by remembering what the agent was called.
+            let haystacks = [agent.displayName, agent.detail ?? "", "history closed reopen agent"]
+                .map { $0.lowercased() }
             let queryTokens = query.split(separator: " ").map(String.init)
             return queryTokens.allSatisfy { token in haystacks.contains { $0.contains(token) } }
         case let .action(action):
@@ -332,6 +361,10 @@ public enum CommandCenterCategory: String, CaseIterable, Equatable, Sendable {
     case create = "Create"
     case models = "Choose Model"
     case developer = "Developer"
+    /// LAST, deliberately: closed agents are the only rows you go looking for,
+    /// so they may never displace one you did not ask for. Same reasoning as the
+    /// inbox's collapsed-by-default History header (.plans/05-close-to-history.md).
+    case history = "History"
 }
 
 /// Product-facing command-center copy and policy. `row` remains the stable
@@ -385,7 +418,7 @@ public enum LaunchPaletteModel {
     public static let defaultItemLimit = 12
     public static let recentItemLimit = 5
 
-    public static func makeRows(profiles: [LaunchPaletteProfileRow], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], contextualActions: [LaunchPaletteAction] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = [], jumpZones: [JumpZoneRow] = []) -> [LaunchPaletteRow] {
+    public static func makeRows(profiles: [LaunchPaletteProfileRow], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], contextualActions: [LaunchPaletteAction] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = [], jumpZones: [JumpZoneRow] = [], historyAgents: [HistoryAgentPaletteRow] = []) -> [LaunchPaletteRow] {
         profiles.map(LaunchPaletteRow.profile)
             + CommandRegistry.paletteActions().map(LaunchPaletteRow.action)
             + contextualActions.map(LaunchPaletteRow.action)
@@ -400,6 +433,7 @@ public enum LaunchPaletteModel {
                 LaunchPaletteRow.workspaceAction(.deleteWorkspace(workspace.id), workspace)
             ]
         } + projects.map(LaunchPaletteRow.project)
+            + historyAgents.map(LaunchPaletteRow.historyAgent)
     }
 
     public static func filterRows(_ rows: [LaunchPaletteRow], query: String) -> [LaunchPaletteRow] {
@@ -503,6 +537,14 @@ public enum LaunchPaletteModel {
             return item(row, category, tile.title, subtitleParts.joined(separator: " · "), icon, aliases, tile.attentionReason != nil, true, "tile:\(tile.id.uuidString)")
         case let .jumpToZone(zone):
             return item(row, .agentsAndTiles, zone.title, "Zone", "square.dashed", ["jump", "go", "zone"], false, true, "zone:\(zone.id.uuidString)")
+        case let .historyAgent(agent):
+            // NOT default-visible: History is searched for, never volunteered onto
+            // the empty-query home. NOT a safe recent either — the recent entry
+            // would name an agent that is no longer closed once you reopen it.
+            let subtitle = ["Closed", agent.detail].compactMap { $0 }.joined(separator: " · ")
+            return item(row, .history, agent.displayName, subtitle, "clock.arrow.circlepath",
+                        ["history", "closed", "reopen", "agent"], false, false,
+                        "history-agent:\(agent.agentId.uuidString)")
         case let .action(action):
             return actionPresentation(action, row: row)
         }

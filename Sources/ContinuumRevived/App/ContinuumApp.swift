@@ -6685,7 +6685,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let jumpZones = (canvasView?.navZoneRenderModels ?? []).map { model in
             JumpZoneRow(id: model.placement.zoneId, title: model.displayName)
         }
-        palette.show(near: host, profiles: rows.profiles, projects: rows.projects, workspaces: rows.workspaces, contextualActions: contextualActions, harnessRoles: harnessRolesForActiveProject(), jumpTiles: jumpTiles, jumpZones: jumpZones, initialQuery: initialQuery)
+        // Closed agents. `jumpTiles` above cannot represent one — it is built from
+        // tiles ON THE CANVAS and closing a tile is exactly what parks an agent —
+        // so without this the command center has no way to reach History at all.
+        // The membership rule is InboxSort's, not a second copy: ask the same
+        // function the inbox asks, so the two cannot disagree about what "closed"
+        // means (.plans/05-close-to-history.md, .plans/10-command-center-absorbs-sidebar.md).
+        let historyNow = Date()
+        let historyAgents = buildAgentInboxRows(now: historyNow)
+            .filter { InboxSort.section(for: $0.lifecycle, now: historyNow) == .history }
+            .map { row in
+                HistoryAgentPaletteRow(
+                    agentId: row.id,
+                    displayName: row.title,
+                    detail: row.model.flatMap { AgentModelCatalog.shared.displayName(for: $0) ?? $0 })
+            }
+        palette.show(near: host, profiles: rows.profiles, projects: rows.projects, workspaces: rows.workspaces, contextualActions: contextualActions, harnessRoles: harnessRolesForActiveProject(), jumpTiles: jumpTiles, jumpZones: jumpZones, historyAgents: historyAgents, initialQuery: initialQuery)
     }
 
     private func commandCenterAgentState(
@@ -6741,6 +6756,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         palette.onSelectAction = { [weak self] action in
             self?.performPaletteAction(action) ?? false
+        }
+        // Reuse the inbox's reveal wholesale rather than re-deriving it: it already
+        // reopens the record, gives the agent a tile again (a closed agent has
+        // none), reveals it, clears the unread mark and arms focus — in that order,
+        // for reasons documented at that call site.
+        palette.onReopenHistoryAgent = { [weak self] agentId in
+            self?.revealAgentFromInbox(agentId) ?? false
         }
         palette.onClose = { [weak self] in
             self?.focusBroker.closeModal(.palette)
