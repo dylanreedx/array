@@ -609,6 +609,7 @@ enum AgentRadialContextMeterPresenter {
         case .piMessageUsage: return "per-message usage"
         case .claudeResultUsage: return "per-turn usage"
         case .codexTurnUsage: return "per-turn usage"
+        case .codexRolloutTokenCount: return "Codex rollout token count"
         case .unknown(let raw): return "unknown (\(raw))"
         }
     }

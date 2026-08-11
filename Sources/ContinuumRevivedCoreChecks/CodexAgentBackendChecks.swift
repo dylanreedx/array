@@ -14,7 +14,7 @@ import Foundation
 // predicate, the backend routing/policy, and the catalogue union.
 func runCodexAgentBackendChecks() {
     runCodexTranslatorMappingChecks()
-    runCodexCumulativeUsageChecks()
+    runCodexRolloutTelemetryChecks()
     runCodexTranslatorGateChecks()
     runCodexRunnerArgvChecks()
     runCodexBackendPolicyChecks()
@@ -30,64 +30,135 @@ private let codexTID = "019fe980-21f0-7df1-b2a0-49d7839c7937"
 ///     turn 1  input_tokens 15005
 ///     turn 2  input_tokens 30026
 ///
-/// So the context occupancy is the delta, and dividing the cumulative figure by
-/// a context window is what put 237% on the meter and left it climbing.
+/// Neither the cumulative figure nor a delta is context occupancy. Dividing the
+/// cumulative figure by a context window is what put 237% on the meter and left
+/// it climbing; exact occupancy is rollout `last_token_usage.total_tokens`.
 ///
 /// Also pinned here: the `codex exec --json` vocabulary is `thread.started`,
 /// `turn.started`, `item.completed`, `turn.completed` and NOTHING else. codex's
 /// own rollout log carries a live per-request `token_count`; that file is not
 /// this stream, and a handler for it here fires never — which is exactly the
 /// mistake this check exists to stop being made a second time.
-private func runCodexCumulativeUsageChecks() {
-    let observedAt = Date(timeIntervalSinceReferenceDate: 456)
-    func occupancy(_ events: [AgentRuntimeEvent]) -> Int? {
-        for case let .contextWindowUpdated(_, snapshot) in events { return snapshot.usedTokens }
-        return nil
-    }
+private func runCodexRolloutTelemetryChecks() {
+    let observedAt = Date(timeIntervalSince1970: 1_786_000_000)
     func turn(_ input: Int) -> String {
         #"{"type":"turn.completed","usage":{"input_tokens":\#(input),"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}}"#
     }
     let opening = [#"{"type":"thread.started","thread_id":"t"}"#, #"{"type":"turn.started"}"#]
 
-    // A FRESH thread baselines at 0: the first prompt is the whole cumulative.
-    var fresh = CodexEventTranslator(runToken: "c1", priorCumulativeInputTokens: 0, now: { observedAt })
-    _ = fresh.translate(stream: opening)
-    expect(occupancy(fresh.translate(line: turn(15_005))) == 15_005,
-           "a fresh thread's first turn occupies its whole cumulative")
-    // …and the SECOND turn is the delta, not the running total. 30,026 - 15,005.
-    _ = fresh.translate(line: #"{"type":"turn.started"}"#)
-    expect(occupancy(fresh.translate(line: turn(30_026))) == 15_021,
-           "the second turn's occupancy is the delta (30026-15005), not the cumulative 30026")
-
-    // A RESUME seeded from the stored previous reading subtracts it.
-    var resumed = CodexEventTranslator(runToken: "c2", priorCumulativeInputTokens: 15_005, now: { observedAt })
-    _ = resumed.translate(stream: opening)
-    expect(occupancy(resumed.translate(line: turn(30_026))) == 15_021,
-           "a resumed turn subtracts the baseline the record carried")
-
-    // A RESUME with NO baseline publishes NO occupancy. This is the 237% case:
-    // the only other answer available is the unbounded cumulative figure.
-    var blind = CodexEventTranslator(runToken: "c3", priorCumulativeInputTokens: nil, now: { observedAt })
+    // Stdout's turn usage remains cumulative accounting and can never create a
+    // context event, even on a fresh turn where a zero-baseline delta looks
+    // superficially plausible.
+    var blind = CodexEventTranslator(runToken: "c1", now: { observedAt })
     _ = blind.translate(stream: opening)
     let blindEvents = blind.translate(line: turn(643_673))
-    expect(occupancy(blindEvents) == nil,
-           "with no baseline there is no occupancy — never the cumulative total, got \(String(describing: occupancy(blindEvents)))")
-    // …but the token COUNT still publishes, so the row shows "643.7k" rather
-    // than falling back to the word "unknown".
+    expect(!blindEvents.contains { if case .contextWindowUpdated = $0 { return true }; return false },
+           "cumulative stdout usage must never become context occupancy")
     var sawUsage = false
     for case let .tokenUsageUpdated(_, snapshot) in blindEvents where snapshot.inputTokens == 643_673 { sawUsage = true }
-    expect(sawUsage, "cost accounting still wants the cumulative figure even when occupancy is unknowable")
+    expect(sawUsage, "cumulative stdout usage must remain available for accounting")
 
-    // The stream's whole vocabulary. A `token_count` line — the shape codex
-    // writes to its ROLLOUT log — must translate to nothing here.
-    var rollout = CodexEventTranslator(runToken: "c4", now: { observedAt })
+    var rollout = CodexEventTranslator(runToken: "c2", now: { observedAt })
     _ = rollout.translate(stream: opening)
     let rolloutLine = #"{"type":"token_count","info":{"last_token_usage":{"input_tokens":73176,"total_tokens":74379},"model_context_window":258400}}"#
     expect(rollout.translate(line: rolloutLine).isEmpty,
            "a rollout-log token_count is not part of `codex exec --json` and must translate to nothing")
 
-    print("Codex cumulative usage checks: fresh baseline, per-turn delta (15005 -> 30026 = 15021), seeded resume, "
-        + "no-baseline abstention with the count still published, and the rollout-only token_count ignored")
+    // The exact rollout envelope. `total_tokens`, not input, is the numerator;
+    // the provider's model_context_window, not the catalogue, is the denominator.
+    let exactLine = #"{"timestamp":"2026-08-10T12:34:56.000Z","type":"event_msg","payload":{"type":"token_count","private_text":"SECRET-ROLLOUT-PAYLOAD","info":{"last_token_usage":{"input_tokens":73176,"cached_input_tokens":70400,"output_tokens":1203,"total_tokens":74379},"model_context_window":258400}}}"#
+    let exact = CodexRolloutTelemetry.snapshot(from: exactLine, fallbackDate: observedAt)
+    expect(exact?.usedTokens == 74_379 && exact?.usedTokens != exact?.inputTokens,
+           "rollout occupancy numerator must be last_token_usage.total_tokens")
+    expect(exact?.maxTokens == 258_400 && exact?.source == .codexRolloutTokenCount,
+           "rollout denominator/source must be provider authoritative")
+    expect(exact?.source.isAuthoritativeForContextOccupancy == true,
+           "codex rollout token_count must be authoritative")
+    let roundTrip = try! JSONDecoder().decode(
+        AgentContextWindowSnapshot.self,
+        from: JSONEncoder().encode(exact!))
+    expect(roundTrip == exact, "new rollout source must survive Codable round trip")
+    expect(!String(decoding: try! JSONEncoder().encode(exact!), as: UTF8.self)
+        .contains("SECRET-ROLLOUT-PAYLOAD"),
+        "raw rollout text must never cross the normalized telemetry boundary")
+
+    for rejected in [
+        rolloutLine,
+        #"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":1},"model_context_window":0}}}"#,
+        #"{"type":"event_msg","payload":{"type":"message","info":{"last_token_usage":{"total_tokens":1},"model_context_window":100}}}"#,
+        #"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":1.5},"model_context_window":100}}}"#,
+        #"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":true},"model_context_window":100}}}"#,
+        "{partial SECRET-ROLLOUT-PAYLOAD",
+    ] {
+        expect(CodexRolloutTelemetry.snapshot(from: rejected, fallbackDate: observedAt) == nil,
+               "wrong envelope, invalid window, non-token event, and malformed lines must be inert")
+    }
+
+    // Final event ordering is the lifecycle contract: accounting, exact
+    // occupancy, then terminal/ready. It applies to completed and failed turns;
+    // an interrupted run with new rollout telemetry publishes only the exact
+    // snapshot, while no new request publishes nothing.
+    let usage = AgentRuntimeEvent.tokenUsageUpdated(
+        threadId: "t", snapshot: TokenUsageSnapshot(inputTokens: 99, outputTokens: 1, totalCostUsd: nil))
+    let failed = AgentRuntimeEvent.turnCompleted(threadId: "t", turnId: "x", outcome: .failed, errorMessage: "x")
+    let ready = AgentRuntimeEvent.sessionStateChanged(.ready)
+    let ordered = CodexRolloutTelemetry.orderedFinalEvents(
+        threadId: "t", terminalEvents: [usage, failed, ready], snapshot: exact)
+    expect(ordered == [usage, .contextWindowUpdated(threadId: "t", snapshot: exact!), failed, ready],
+           "terminal join ordering must be accounting -> exact context -> terminal -> ready")
+    expect(CodexRolloutTelemetry.orderedFinalEvents(threadId: "t", terminalEvents: [], snapshot: exact).count == 1,
+           "an interrupted/failed process with a new request must retain its exact snapshot")
+    expect(CodexRolloutTelemetry.orderedFinalEvents(threadId: "t", terminalEvents: [], snapshot: nil).isEmpty,
+           "an interrupted process with no new request must publish no context snapshot")
+
+    // File witness: exact thread matching, current-run byte offset, a tool-loop
+    // token_count, later compaction, delayed final append, partial-line safety,
+    // and ambiguity abstention.
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("array-codex-rollout-\(UUID().uuidString)", isDirectory: true)
+    let sessions = root.appendingPathComponent("sessions/2026/08/10", isDirectory: true)
+    try! FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = sessions.appendingPathComponent("rollout-2026-08-10-\(codexTID).jsonl")
+    let meta = #"{"type":"session_meta","payload":{"id":"\#(codexTID)"}}"# + "\n"
+    let old = #"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":230000,"total_tokens":237000},"model_context_window":258400}}}"# + "\n"
+    try! Data((meta + old).utf8).write(to: url)
+    let otherThread = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    let otherURL = sessions.appendingPathComponent("rollout-2026-08-10-\(otherThread).jsonl")
+    let other = #"{"type":"session_meta","payload":{"id":"\#(otherThread)"}}"# + "\n"
+        + #"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":999999},"model_context_window":1000000}}}"# + "\n"
+    try! Data(other.utf8).write(to: otherURL)
+    let offset = CodexRolloutTelemetry.fileSize(of: url)!
+    expect(CodexRolloutTelemetry.rolloutURL(threadId: codexTID, codexHome: root)?.standardizedFileURL.path
+            == url.standardizedFileURL.path,
+           "rollout resolver must validate the full session_meta thread id")
+    let toolLoop = #"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":21000,"output_tokens":500,"total_tokens":22000},"model_context_window":258400}}}"# + "\n"
+    let compacted = #"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":15000,"output_tokens":700,"total_tokens":16000},"model_context_window":258400}}}"# + "\n"
+    let handle = try! FileHandle(forWritingTo: url)
+    try! handle.seekToEnd()
+    handle.write(Data((toolLoop + compacted + "{partial SECRET\n").utf8))
+    try! handle.close()
+    let latest = CodexRolloutTelemetry.latestSnapshot(in: url, afterOffset: offset)
+    expect(latest?.usedTokens == 16_000,
+           "latest post-offset request must win, including a compaction drop 237k -> 16k")
+
+    let partialURL = sessions.appendingPathComponent("partial-offset-witness.jsonl")
+    try! Data((meta + "unfinished-prefix").utf8).write(to: partialURL)
+    let partialOffset = CodexRolloutTelemetry.fileSize(of: partialURL)!
+    let partialHandle = try! FileHandle(forWritingTo: partialURL)
+    try! partialHandle.seekToEnd()
+    partialHandle.write(Data((exactLine + "\n").utf8))
+    try! partialHandle.close()
+    expect(CodexRolloutTelemetry.latestSnapshot(in: partialURL, afterOffset: partialOffset) == nil,
+           "an offset in the middle of an unfinished JSONL line must discard that line")
+
+    let archived = root.appendingPathComponent("archived_sessions", isDirectory: true)
+    try! FileManager.default.createDirectory(at: archived, withIntermediateDirectories: true)
+    try! Data(meta.utf8).write(to: archived.appendingPathComponent("duplicate-\(codexTID).jsonl"))
+    expect(CodexRolloutTelemetry.rolloutURL(threadId: codexTID, codexHome: root) == nil,
+           "multiple exact rollout matches must abstain rather than guess")
+
+    print("Codex rollout telemetry checks passed: stdout accounting separated, exact total/window parsed, ordering pinned, offset/compaction/partial/ambiguity file cases covered")
 }
 
 private func runCodexTranslatorMappingChecks() {
@@ -129,22 +200,6 @@ private func runCodexTranslatorMappingChecks() {
             // input_tokens is ALREADY the total — NOT summed with cached (the
             // opposite of the claude backend). 46162, not 46162+41216.
             inputTokens: 46162, outputTokens: 231, totalCostUsd: nil)),
-        .contextWindowUpdated(threadId: codexTID, snapshot: AgentContextWindowSnapshot(
-            // A fresh thread baselines at 0, so the first turn's delta IS its
-            // cumulative: 46,162. The second turn below is what proves the
-            // subtraction happens at all.
-            usedTokens: 46162,
-            maxTokens: nil,
-            inputTokens: 46162,
-            outputTokens: 231,
-            cacheReadTokens: 41216,
-            cacheWriteTokens: 0,
-            totalProcessedTokens: 46393,
-            totalCostUsd: nil,
-            automaticCompaction: nil,
-            observedAt: observedAt,
-            source: .codexTurnUsage,
-            freshness: .live)),
         .turnCompleted(threadId: codexTID, turnId: turnId, outcome: .completed, errorMessage: nil),
         .sessionStateChanged(.ready),
     ]

@@ -938,6 +938,9 @@ final class AgentSupervisor {
     /// after a streaming turn floods it, so a tile that attaches later seeds
     /// from this instead (`contextWindowSnapshot(for:)`).
     private var contextWindowSnapshots: [AgentID: AgentContextWindowSnapshot] = [:]
+    /// Restore-time Codex rollout lookup. Injected in checks so repair is
+    /// deterministic and never depends on a developer's real ~/.codex tree.
+    private let codexRestoredContextSnapshot: @Sendable (AgentRecord) -> AgentContextWindowSnapshot?
 
     init(
         store: AgentStore,
@@ -947,7 +950,8 @@ final class AgentSupervisor {
         nameGenerationCapabilityProvider: (@Sendable () -> AgentNameGenerationCapability?)? = nil,
         nameGenerationTimeout: TimeInterval = AgentNameOneShot.timeout,
         attachmentStore: AgentComposerAttachmentStore? = nil,
-        submissionRecoveryStore: AgentComposerDraftStore? = nil
+        submissionRecoveryStore: AgentComposerDraftStore? = nil,
+        codexRestoredContextSnapshot: (@Sendable (AgentRecord) -> AgentContextWindowSnapshot?)? = nil
     ) {
         self.store = store
         self.makeRunner = makeRunner
@@ -959,6 +963,10 @@ final class AgentSupervisor {
             applicationSupportDirectory: store.layout.applicationSupportDirectory
         )
         self.submissionRecoveryStore = submissionRecoveryStore
+        self.codexRestoredContextSnapshot = codexRestoredContextSnapshot ?? { record in
+            guard let threadId = record.codexThreadId else { return nil }
+            return CodexRolloutTelemetry.latestSnapshot(threadId: threadId, freshness: .stale)
+        }
     }
 
     /// The explicit action's cached capability gate. This is a snapshot only:
@@ -1073,22 +1081,7 @@ final class AgentSupervisor {
             model: CodexCLIBackend.modelArgument(forCatalogId: record.model),
             effort: CodexCLIBackend.effortArgument(forThinking: record.thinking),
             cwd: URL(fileURLWithPath: record.cwd, isDirectory: true),
-            threadId: record.codexThreadId,
-            // THE OCCUPANCY BASELINE. codex reports `input_tokens` cumulatively
-            // for the session, so the context reading is this turn's total minus
-            // the last one's; the record is where the last one survives a process
-            // that only lives for one turn.
-            //
-            // A FRESH thread (no stored codex id) baselines at 0, which is exact:
-            // its first prompt is the whole cumulative. A RESUMED thread with no
-            // stored reading baselines at nil, which publishes no occupancy —
-            // the honest answer, and the alternative is the unbounded number that
-            // read 237%.
-            priorCumulativeInputTokens: record.codexThreadId == nil
-                ? 0
-                : record.lastContextWindow.flatMap { snapshot in
-                    snapshot.source == .codexTurnUsage ? snapshot.inputTokens : nil
-                }
+            threadId: record.codexThreadId
         )
     }
 
@@ -1312,6 +1305,27 @@ final class AgentSupervisor {
             // them defensively and rewrite the corrected record before the inbox can
             // observe it, including when the project root is temporarily stale.
             if record.migrateDisplayNameIfNeeded() { persist(record) }
+            // Repair the two legacy Codex states before any tile can seed from
+            // them: replace with an exact stale rollout reading when available;
+            // otherwise strip the bogus used/max pair while preserving the
+            // cumulative accounting fields. restore() never owns a live runner,
+            // so this bounded tail read cannot race an active turn.
+            if record.codexThreadId != nil {
+                if var exact = codexRestoredContextSnapshot(record) {
+                    exact.freshness = .stale
+                    if record.lastContextWindow != exact {
+                        record.lastContextWindow = exact
+                        persist(record)
+                    }
+                } else if var legacy = record.lastContextWindow,
+                          legacy.source == .codexTurnUsage,
+                          legacy.usedTokens != nil || legacy.maxTokens != nil {
+                    legacy.usedTokens = nil
+                    legacy.maxTokens = nil
+                    record.lastContextWindow = legacy
+                    persist(record)
+                }
+            }
             var isDirectory: ObjCBool = false
             guard fileManager.fileExists(atPath: record.cwd, isDirectory: &isDirectory), isDirectory.boolValue else {
                 staleIDs.insert(record.id)
@@ -7269,7 +7283,46 @@ func runAgentRestoreChecks() async throws {
         lastActivityAt: createdAt.addingTimeInterval(4),
         tileId: UUID()
     )
-    for record in [tiled, headless, orphaned] { try store.upsert(record) }
+    let legacyContext = AgentContextWindowSnapshot(
+        usedTokens: 4_160_000,
+        maxTokens: 272_000,
+        inputTokens: 4_160_000,
+        outputTokens: 8_000,
+        totalProcessedTokens: 4_168_000,
+        observedAt: createdAt,
+        source: .codexTurnUsage,
+        freshness: .live)
+    let codexExact = AgentRecord(
+        id: AgentID(rawValue: UUID()),
+        displayName: "Codex exact repair",
+        model: "openai-codex/gpt-5.6-sol",
+        thinking: "high",
+        cwd: liveCwd,
+        createdAt: createdAt,
+        lastActivityAt: createdAt,
+        lastContextWindow: legacyContext,
+        codexThreadId: "exact-thread")
+    let codexSanitized = AgentRecord(
+        id: AgentID(rawValue: UUID()),
+        displayName: "Codex sanitize repair",
+        model: "openai-codex/gpt-5.6-sol",
+        thinking: "high",
+        cwd: liveCwd,
+        createdAt: createdAt,
+        lastActivityAt: createdAt,
+        lastContextWindow: legacyContext,
+        codexThreadId: "missing-thread")
+    for record in [tiled, headless, orphaned, codexExact, codexSanitized] { try store.upsert(record) }
+
+    let repairedExactSnapshot = AgentContextWindowSnapshot(
+        usedTokens: 217_800,
+        maxTokens: 258_400,
+        inputTokens: 215_000,
+        outputTokens: 2_800,
+        totalProcessedTokens: 217_800,
+        observedAt: createdAt.addingTimeInterval(10),
+        source: .codexRolloutTokenCount,
+        freshness: .live)
 
     let turn: [AgentRuntimeEvent] = [
         .sessionStateChanged(.running),
@@ -7277,7 +7330,12 @@ func runAgentRestoreChecks() async throws {
         .turnCompleted(threadId: "provider-thread", turnId: "t1", outcome: .completed, errorMessage: nil)
     ]
     let queue = ScriptedRunnerQueue([ScriptedAgentRunner(script: turn)])
-    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0) })
+    let supervisor = AgentSupervisor(
+        store: store,
+        makeRunner: { queue.next($0) },
+        codexRestoredContextSnapshot: { record in
+            record.id == codexExact.id ? repairedExactSnapshot : nil
+        })
     // Vacuity guard: if a supervisor adopted the store at init, everything below
     // would pass while saying nothing about `restore()`.
     guard supervisor.records.isEmpty else {
@@ -7287,8 +7345,9 @@ func runAgentRestoreChecks() async throws {
     // MARK: 2 · restore adopts the live records and MARKS the stale one
 
     let report = supervisor.restore()
-    guard report.restored.count == 2, Set(report.restored) == Set([tiled.id, headless.id]) else {
-        throw fail("restore adopted \(report.restored.map { $0.rawValue.uuidString }), expected exactly the tiled and headless agents")
+    guard report.restored.count == 4,
+          Set(report.restored) == Set([tiled.id, headless.id, codexExact.id, codexSanitized.id]) else {
+        throw fail("restore adopted \(report.restored.map { $0.rawValue.uuidString }), expected the tiled, headless, and two Codex repair agents")
     }
     guard report.stale == [orphaned.id] else {
         throw fail("restore did not skip the agent whose project root is gone: stale \(report.stale.map { $0.rawValue.uuidString })")
@@ -7326,6 +7385,20 @@ func runAgentRestoreChecks() async throws {
           try store.load(id: headless.id)?.displayName == AgentRecord.defaultAgentName else {
         throw fail("restore did not migrate the persisted model id to the shared sentinel")
     }
+    var expectedExact = repairedExactSnapshot
+    expectedExact.freshness = .stale
+    guard supervisor.records[codexExact.id]?.lastContextWindow == expectedExact,
+          try store.load(id: codexExact.id)?.lastContextWindow == expectedExact else {
+        throw fail("restore did not replace legacy Codex occupancy with the exact stale rollout snapshot")
+    }
+    guard let sanitized = supervisor.records[codexSanitized.id]?.lastContextWindow,
+          sanitized.source == .codexTurnUsage,
+          sanitized.usedTokens == nil,
+          sanitized.maxTokens == nil,
+          sanitized.inputTokens == legacyContext.inputTokens,
+          try store.load(id: codexSanitized.id)?.lastContextWindow == sanitized else {
+        throw fail("restore did not sanitize legacy Codex used/max while preserving accounting")
+    }
     // The conversation is continuable because the Pi session id is derived from the
     // agent id, which is what survived. Asserted, since "history is not lost"
     // depends on it entirely.
@@ -7343,7 +7416,12 @@ func runAgentRestoreChecks() async throws {
     guard queue.handedOut.isEmpty else {
         throw fail("restore constructed \(queue.handedOut.count) runner(s) — a relaunched agent must be idle until prompted")
     }
-    for (label, id) in [("tiled", tiled.id), ("headless", headless.id)] {
+    for (label, id) in [
+        ("tiled", tiled.id),
+        ("headless", headless.id),
+        ("Codex exact", codexExact.id),
+        ("Codex sanitized", codexSanitized.id),
+    ] {
         guard supervisor.isRunning(id) == false else {
             throw fail("the restored \(label) agent has a live runner")
         }
@@ -7609,7 +7687,9 @@ func runAgentRestoreChecks() async throws {
     doctored.displayName = "stale name from disk"
     try store.upsert(doctored)
     let second = supervisor.restore()
-    guard Set(second.skipped) == Set([tiled.id, headless.id, freshId]) else {
+    guard Set(second.skipped) == Set([
+        tiled.id, headless.id, codexExact.id, codexSanitized.id, freshId,
+    ]) else {
         throw fail("a second restore did not treat the live records as already-owned: skipped \(second.skipped.count)")
     }
     guard second.restored.isEmpty else {
@@ -7621,7 +7701,7 @@ func runAgentRestoreChecks() async throws {
     guard supervisor.records[headless.id]?.displayName == "continue please" else {
         throw fail("a second restore clobbered the live first-prompt name with the stored copy: \(String(describing: supervisor.records[headless.id]?.displayName))")
     }
-    guard supervisor.records.count == 3 else {
+    guard supervisor.records.count == 5 else {
         throw fail("restoring twice duplicated records: \(supervisor.records.count)")
     }
 
