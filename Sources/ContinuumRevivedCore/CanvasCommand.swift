@@ -41,6 +41,9 @@ public enum CommandRegistry {
             CanvasCommand(id: "tile.openFileTree", action: .openFileTree),
             CanvasCommand(id: "tile.newDiffReview", action: .newDiffReview),
             CanvasCommand(id: "view.fitCanvasToAll", action: .fitCanvasToAll),
+            // The searchable path to hold-⌥ Return: reveal the already-current
+            // tile for work. Same AppDelegate helper, never a second behavior.
+            CanvasCommand(id: "view.focusCurrentTile", action: .focusCurrentTile),
             CanvasCommand(id: "view.previousView", action: .previousView),
             CanvasCommand(id: "view.previousTile", action: .previousTile),
             CanvasCommand(id: "view.previousZone", action: .previousZone),
