@@ -8472,11 +8472,23 @@ enum UIProbeGeometry {
         try require(validationComposer.textView.validateUserInterfaceItem(pasteItem),
                     "Paste stayed DISABLED for an image-only pasteboard, so a pasted screenshot only beeps")
 
+        // The override must CONSULT the intake, not blanket-enable the menu. Two
+        // deterministic halves, deliberately avoiding `paste:` on an empty board:
+        // for that case the override falls through to super, and super reads the
+        // process-global pasteboard — so such an assertion would pass or fail
+        // depending on what the user happened to have copied. (It did exactly
+        // that: green by hand with an image on the clipboard, red in the matrix
+        // minutes later with text on it.)
         let emptyBoard = NSPasteboard(name: NSPasteboard.Name("continuum.composer.image.empty.\(UUID().uuidString)"))
         emptyBoard.clearContents()
-        validationComposer.textView.attachmentPasteboardProvider = { emptyBoard }
-        try require(!validationComposer.textView.validateUserInterfaceItem(pasteItem),
-                    "Paste validation returned true for an empty pasteboard, so it is blanket-enabling the menu item instead of consulting the intake")
+        try require(ComposerPasteboardIntake(from: emptyBoard).isEmpty,
+                    "an empty pasteboard produced a non-empty composer intake, so the paste-validation guard would enable Paste for nothing")
+        // A selector the override must NOT touch, whose validation depends on the
+        // selection rather than any pasteboard: an empty composer cannot copy.
+        validationComposer.textView.attachmentPasteboardProvider = { screenshotBoard }
+        let copyItem = NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        try require(!validationComposer.textView.validateUserInterfaceItem(copyItem),
+                    "paste validation is enabling unrelated actions: Copy validated true on an empty selection, so the override is not deferring to super")
 
         // The REAL send path (not a reconstruction): drive composerRequestedSend
         // through a recording sink and read the intent production would deliver.
