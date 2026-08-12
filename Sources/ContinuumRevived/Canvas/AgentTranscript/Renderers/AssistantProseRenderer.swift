@@ -89,6 +89,7 @@ final class AssistantProseView: NSView {
             addSubview(view)
             return view
         }
+        invalidateRowHeights()
         identifier = NSUserInterfaceItemIdentifier("agent.assistantProse.\(block.id.rawValue)")
         applyContainerAccessibility(for: block)
         needsLayout = true
@@ -105,18 +106,46 @@ final class AssistantProseView: NSView {
         }
     }
 
+    /// Row heights for `cachedWidth`. `layout()` runs on every display cycle, and
+    /// both halves of the old body were expensive: measuring rebuilds an attributed
+    /// string per row (with five `replacingOccurrences` passes inside the Markdown
+    /// escape), and assigning a frame to an `NSTextView` makes TextKit recompute
+    /// glyph bounds. A 0.4.16 CPU report on a Markdown file tile spent 90 seconds
+    /// at 96% CPU with 20 of 34 samples inside this method.
+    private var cachedRowHeights: [CGFloat] = []
+    private var cachedWidth: CGFloat = -1
+
+    /// QA: total row measurements across all instances, for the layout-settle
+    /// witness. Not used by production.
+    static private(set) var qaMeasurementCount = 0
+
+    private func invalidateRowHeights() {
+        cachedRowHeights = []
+        cachedWidth = -1
+    }
+
     override func layout() {
         super.layout()
         let availableWidth = max(1, bounds.width - Self.horizontalReadingInset * 2)
+        if abs(cachedWidth - availableWidth) > 0.5 || cachedRowHeights.count != rows.count {
+            cachedRowHeights = rows.map { row in
+                Self.qaMeasurementCount += 1
+                return RichInlineTextView.measuredHeight(
+                    for: row.runs,
+                    width: availableWidth,
+                    context: renderContext,
+                    textRole: row.textRole
+                )
+            }
+            cachedWidth = availableWidth
+        }
         var y = bounds.minY
         for (index, pair) in zip(rows, textFields).enumerated() {
-            let height = RichInlineTextView.measuredHeight(
-                for: pair.0.runs,
-                width: availableWidth,
-                context: renderContext,
-                textRole: pair.0.textRole
-            )
-            pair.1.frame = NSRect(x: Self.horizontalReadingInset, y: y, width: availableWidth, height: height)
+            let height = cachedRowHeights[index]
+            let frame = NSRect(x: Self.horizontalReadingInset, y: y, width: availableWidth, height: height)
+            // An unchanged frame still costs a TextKit glyph-bounds pass, and it
+            // re-dirties the view — which is what kept the display cycle spinning.
+            if pair.1.frame != frame { pair.1.frame = frame }
             y += height
             if index + 1 < rows.count { y += Self.blockSpacing }
         }

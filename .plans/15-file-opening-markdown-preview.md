@@ -45,9 +45,12 @@ right for a transcript and ruinous for a file the loader will happily admit at
 | `docs/09-decisions.md` (84 KB) | 293 | 0.137 s | 0.089 s | — |
 | generated 546 KB | 12,000 | **5.147 s** | **5.145 s** | **1.39 GB** |
 
-The 546 KB case froze the app and then killed it — and with the budget removed
-again, the perf check's own process dies with **exit 133** before it can report,
-which is the crash Dylan saw, not a slow render.
+**Correction (recorded because it was stated as evidence and was wrong):** the
+`exit 133` I attributed to the app dying under this load was my own perf check
+trapping on `Int.max + 1` in an assertion while the budget was mutated for a
+teeth run. The three `Array-2026-08-12-17*.ips` reports from that hour are those
+check runs, not Array. The 1.39 GB is a real measurement and reason enough for a
+budget, but it is **not** what took Dylan's app down.
 
 Two fixes, both small:
 
@@ -64,10 +67,34 @@ Two fixes, both small:
 `--file-markdown-perf-check` holds both, and asserts the zero-measurement
 property rather than only a stopwatch.
 
-**Still open:** `AssistantProseView.layout()` re-measures its rows on every
-layout pass, so a forced full-subtree relayout of 183 blocks still costs ~16 ms.
-That is inside the shared transcript renderer, so the same cost is paid by every
-agent transcript; caching there is a separate change with a wider blast radius.
+## What the reports actually said (0.4.17)
+
+0.4.16 did not fix it for Dylan, and the OS reports name why. Two, from his
+machine, both while a Markdown tile was open:
+
+- **`Array_2026-08-12-165030.hang`, version 0.4.15 (21)** — 75.48 s hung, main
+  thread in `FileMarkdownDocumentView.BodyView.layout()` →
+  `AssistantProseRenderer.measure` → `AgentTextStyleResolver.append` →
+  `replacingOccurrences`. That is the un-budgeted, re-measure-every-pass shape
+  0.4.16 addressed.
+- **`Array_2026-08-12-174301.cpu_resource.diag`, version 0.4.16 (22)** — 90 s of
+  CPU over 94 s at 96%, still inside window layout, but now **20 of 34 samples
+  are in `AssistantProseView.layout()`** (→ `NSTextView.setFrameSize` →
+  `_boundingRectForGlyphRange`) and only 8 in `BodyView.layout()`.
+
+So the remaining cost was in the *shared transcript renderer*, which re-measured
+every row and re-assigned every text-view frame on every layout pass. Both are
+now cached, and an unchanged frame is not re-assigned — assigning one still costs
+a TextKit glyph-bounds pass and re-dirties the view.
+
+**Honesty about the witness:** I could not reproduce a *runaway* layout loop in a
+harness, with or without legacy scrollers, at the pre-fix shape. What the check
+does prove, RED before and GREEN after, is the thing the profile is dominated by:
+20 relayouts at an unchanged width cost **241** prose row measurements before and
+**0** after. The document view also no longer sizes itself from inside `layout()`
+(height comes from `intrinsicContentSize`) and pins the scroller style to
+`.overlay`, so a scroller cannot take clip width and restart the cycle — both are
+belt-and-braces against a loop I could observe in the field but not stage.
 
 ## Scope actually shipped
 

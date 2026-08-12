@@ -25,16 +25,30 @@ final class FileMarkdownDocumentView: NSView {
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
+        // Overlay scrollers float above the content. A legacy scroller STEALS clip
+        // width when it appears, which changes the document's width, which changes
+        // its height, which can hide the scroller again — an oscillation that never
+        // settles and re-measures every block each time round.
+        scrollView.scrollerStyle = .overlay
         scrollView.drawsBackground = false
         scrollView.documentView = body
-        body.autoresizingMask = [.width]
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(scrollView)
+        // The document's height comes from `intrinsicContentSize`, never from
+        // `setFrameSize` inside `layout()`. Sizing a view during its own layout
+        // makes AppKit re-enter layout for that subtree: Dylan's 75-second hang was
+        // 53 nested `_layoutSubtreeWithOldSize:` frames with the main thread inside
+        // this view's `layout()` re-measuring prose every time round.
+        body.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor)
+            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            body.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
+            body.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
+            body.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            body.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor)
         ])
     }
 
@@ -94,6 +108,10 @@ final class FileMarkdownDocumentView: NSView {
         body.layoutSubtreeIfNeeded()
     }
 
+    /// How many times the document body has laid out. A document that settles runs
+    /// this a handful of times; a re-entrant one runs it until the watchdog fires.
+    var qaLayoutCount: Int { body.layoutCount }
+
     /// Blocks the Preview deliberately did not render (0 for an ordinary document).
     var qaTruncatedBlockCount: Int { body.truncatedBlockCount }
 
@@ -137,9 +155,10 @@ final class FileMarkdownDocumentView: NSView {
 
         private var rows: [Row] = []
         private var context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
-        private var lastLaidOutWidth: CGFloat = -1
+        private var lastReportedHeight: CGFloat = -1
         private var measuredWidth: CGFloat = -1
         private(set) var measurementCount = 0
+        private(set) var layoutCount = 0
         private(set) var truncatedBlockCount = 0
 
         var blockViews: [NSView] { rows.map(\.view) }
@@ -215,45 +234,68 @@ final class FileMarkdownDocumentView: NSView {
 
         private func invalidateMeasurements() {
             measuredWidth = -1
-            lastLaidOutWidth = -1
+            lastReportedHeight = -1
+            invalidateIntrinsicContentSize()
             needsLayout = true
         }
 
+        /// The scroll view sizes the document from this. Computing it here — rather
+        /// than assigning a frame during `layout()` — is what keeps AppKit from
+        /// re-entering layout on this subtree.
+        override var intrinsicContentSize: NSSize {
+            NSSize(width: NSView.noIntrinsicMetric, height: contentHeight(forWidth: bounds.width))
+        }
+
+        /// Total height at `width`, measuring (and caching) only when the width the
+        /// blocks were measured at actually changed. A pan, a zoom, or a repeated
+        /// layout pass reuses the heights.
+        private func contentHeight(forWidth width: CGFloat) -> CGFloat {
+            guard width > 0 else { return 0 }
+            measureIfNeeded(width: width)
+            var total = Self.documentInset * 2
+            for (index, row) in rows.enumerated() {
+                total += row.measuredHeight
+                if index + 1 < rows.count { total += Self.blockSpacing }
+            }
+            return ceil(total)
+        }
+
+        private func measureIfNeeded(width: CGFloat) {
+            guard abs(measuredWidth - width) > 0.5 else { return }
+            let available = max(1, width - Self.documentInset * 2)
+            for index in rows.indices {
+                measurementCount += 1
+                rows[index].measuredHeight = rows[index].renderer.measure(
+                    block: rows[index].block,
+                    width: available,
+                    context: context
+                )
+            }
+            measuredWidth = width
+        }
+
         override func layout() {
+            layoutCount += 1
             super.layout()
             let width = bounds.width
             guard width > 0 else { return }
             let available = max(1, width - Self.documentInset * 2)
-            // Measure only when the width the blocks were measured at actually
-            // changed. A pan, a zoom, or a repeated layout pass reuses the heights.
-            if abs(measuredWidth - width) > 0.5 {
-                for index in rows.indices {
-                    measurementCount += 1
-                    rows[index].measuredHeight = rows[index].renderer.measure(
-                        block: rows[index].block,
-                        width: available,
-                        context: context
-                    )
-                }
-                measuredWidth = width
-            }
+            measureIfNeeded(width: width)
             var y = Self.documentInset
             for (index, row) in rows.enumerated() {
-                let height = row.measuredHeight
-                let frame = NSRect(x: Self.documentInset, y: y, width: available, height: height)
+                let frame = NSRect(x: Self.documentInset, y: y, width: available, height: row.measuredHeight)
                 // Assigning an unchanged frame still marks that subview as needing
                 // layout, and a prose block re-measures every row when it lays out.
                 // Nothing moved, so nothing is touched.
                 if row.view.frame != frame { row.view.frame = frame }
-                y += height
+                y += row.measuredHeight
                 if index + 1 < rows.count { y += Self.blockSpacing }
             }
+            // Only ASK for a new height; never assign one here.
             let total = ceil(y + Self.documentInset)
-            // Sizing the document view inside layout() is what makes the scroll
-            // view scrollable; the width guard stops it re-entering forever.
-            if abs(frame.height - total) > 0.5 || abs(lastLaidOutWidth - width) > 0.5 {
-                lastLaidOutWidth = width
-                setFrameSize(NSSize(width: width, height: total))
+            if abs(lastReportedHeight - total) > 0.5 {
+                lastReportedHeight = total
+                invalidateIntrinsicContentSize()
             }
         }
     }

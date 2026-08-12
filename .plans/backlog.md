@@ -81,10 +81,13 @@ shipped. Nothing is unreleased right now.
   block means a 546 KB file built 12,000 TextKit stacks (5.1s + 5.1s, 1.39 GB,
   process killed). Preview now renders 400 blocks and says so; the real fix is
   virtualization — `AgentTranscriptListView` already does it for transcripts.
-- **`AssistantProseView.layout()` re-measures every row on every layout pass.**
-  The file document caches block heights around it, but the cost is inside the
-  shared transcript renderer, so every agent transcript pays it too (~16 ms for a
-  forced relayout of 183 blocks). Cache there next.
+- **Markdown tile hang: fixed in 0.4.17, but never reproduced in a harness.**
+  Two OS reports named it (0.4.15 `.hang`, 75s in `BodyView.layout`; 0.4.16
+  `.cpu_resource`, 90s at 96% with 20/34 samples in `AssistantProseView.layout`).
+  Row heights are cached in the prose renderer now and unchanged frames are not
+  re-assigned — witnessed 241 → 0 measurements over 20 relayouts. What is NOT
+  witnessed is the runaway loop itself; if a tile ever pins a core again, get the
+  `.cpu_resource.diag` before anything else, it named the method both times.
 - **pi occupancy abstains.** `AgentContextOccupancy` returns nil for
   `.piMessageUsage` because pi's docs don't say whether `input` already includes
   cache. Verify against a real pi run and add it — until then pi-run agents get

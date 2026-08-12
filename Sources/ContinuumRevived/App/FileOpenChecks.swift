@@ -350,6 +350,86 @@ enum FileOpenChecks {
                    "a truncated preview must SAY it stopped and point at Source")
         try expect(hugeSeconds < 1.5,
                    "a huge document must still open in under 1.5s; took \(String(format: "%.3f", hugeSeconds))s")
+
+        try runMarkdownLayoutSettlesCheck()
+    }
+
+    /// The document must SETTLE. Sizing a view from inside its own `layout()`
+    /// makes AppKit re-enter layout on that subtree, and each re-entry re-measured
+    /// every block: Dylan's 0.4.15 hang report is 75.48 seconds with 53 nested
+    /// `_layoutSubtreeWithOldSize:` frames, the main thread inside
+    /// `FileMarkdownDocumentView.BodyView.layout()` → `AssistantProseRenderer.measure`
+    /// → `AgentTextStyleResolver.append` → `replacingOccurrences`. Height now comes
+    /// from `intrinsicContentSize`, so a real window layout converges.
+    static func runMarkdownLayoutSettlesCheck() throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 420),
+                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        guard let content = window.contentView else {
+            throw Failure(message: "the window must have a content view")
+        }
+        let view = FileMarkdownDocumentView(frame: .zero)
+        view.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            view.topAnchor.constraint(equalTo: content.topAnchor),
+            view.bottomAnchor.constraint(equalTo: content.bottomAnchor)
+        ])
+
+        // Legacy scrollers are the hostile case and the one a check on a laptop
+        // never sees by default: they STEAL clip width when they appear, so a
+        // document that sizes itself from its own layout can toggle the scroller
+        // forever. macOS picks this style whenever a mouse is connected.
+        if let scrollView = view.subviews.compactMap({ $0 as? NSScrollView }).first {
+            scrollView.scrollerStyle = .legacy
+        }
+        view.apply(markdown: perfFixture(), theme: .dark)
+        content.layoutSubtreeIfNeeded()
+        window.layoutIfNeeded()
+        let settledLayouts = view.qaLayoutCount
+        let settledMeasurements = view.qaMeasurementCount
+        let blocks = view.qaBlockViews.count
+
+        try expect(view.qaDocumentHeight > view.qaClipHeight,
+                   "the fixture must be tall enough to scroll (document \(view.qaDocumentHeight) vs clip \(view.qaClipHeight))")
+        try expect(settledLayouts <= 8,
+                   "a real window layout must settle in a handful of passes; the body laid out \(settledLayouts) times")
+        try expect(settledMeasurements <= blocks * 2,
+                   "settling must not re-measure the document repeatedly; \(blocks) blocks were measured \(settledMeasurements) times")
+
+        // Heights that straddle the clip height are where a scroller that steals
+        // width oscillates forever. Walk the window across that boundary.
+        for height in stride(from: 320.0, through: 900.0, by: 20.0) {
+            window.setContentSize(NSSize(width: 640, height: height))
+            content.layoutSubtreeIfNeeded()
+            window.layoutIfNeeded()
+        }
+        let sweepLayouts = view.qaLayoutCount - settledLayouts
+        let sweepMeasurements = view.qaMeasurementCount - settledMeasurements
+        print("markdown layout: \(blocks) blocks settled in \(settledLayouts) layout(s)/\(settledMeasurements) measurement(s); 30-step height sweep cost \(sweepLayouts) layout(s)/\(sweepMeasurements) measurement(s)")
+
+        try expect(sweepLayouts <= 120,
+                   "a 30-step height sweep must cost a bounded number of layouts; it cost \(sweepLayouts)")
+        // A legacy scroller appearing changes the clip WIDTH once, which is a
+        // legitimate re-measure. What must not happen is measuring per pass.
+        try expect(sweepMeasurements <= blocks,
+                   "a height sweep may re-measure at most once (a scroller taking width); it measured \(sweepMeasurements) for \(blocks) blocks")
+
+        // The document view is only half of it: each prose block re-measured its own
+        // rows and re-assigned its text view frames on every layout pass. A 0.4.16
+        // CPU report on a Markdown tile burned 90s at 96% CPU with 20 of 34 samples
+        // inside AssistantProseView.layout().
+        let proseBefore = AssistantProseView.qaMeasurementCount
+        for _ in 0..<20 {
+            view.qaRelayout()
+            content.layoutSubtreeIfNeeded()
+            window.layoutIfNeeded()
+        }
+        let proseMeasurements = AssistantProseView.qaMeasurementCount - proseBefore
+        print("markdown layout: 20 further relayouts cost \(proseMeasurements) prose row measurement(s)")
+        try expect(proseMeasurements == 0,
+                   "20 relayouts at an unchanged width must cost NO prose row measurement; they cost \(proseMeasurements)")
     }
 
     /// ~550 KB of ordinary Markdown — well inside the loader's 1 MB ceiling.
