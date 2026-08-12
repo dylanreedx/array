@@ -411,6 +411,7 @@ run_app_check .build/debug/Array --leader-jump-check
 run_app_check .build/debug/Array --leader-zone-jump-check
 run_app_check .build/debug/Array --palette-jump-check
 run_app_check .build/debug/Array --palette-zone-check
+run_app_check .build/debug/Array --tile-reveal-work-check
 run_app_check .build/debug/Array --leader-snap-check
 run_app_check .build/debug/Array --palette-captures-keys-over-browser-check
 run_app_check .build/debug/Array --zindex-relaunch-hit-test-check

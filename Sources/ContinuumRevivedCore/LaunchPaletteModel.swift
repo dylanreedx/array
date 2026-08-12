@@ -14,6 +14,10 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     case openFileTree
     case newDiffReview
     case fitCanvasToAll
+    /// Reveal the already-current tile for work — the searchable twin of
+    /// hold-⌥ Return. Same helper, same framing; this row exists so the action
+    /// is discoverable without knowing the chord.
+    case focusCurrentTile
     case previousView
     case previousTile
     case previousZone
@@ -51,6 +55,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return "New Diff Review"
         case .fitCanvasToAll:
             return "Fit Canvas to All"
+        case .focusCurrentTile:
+            return "Focus Current Tile"
         case .previousView:
             return "Back to Previous View"
         case .previousTile:
@@ -106,6 +112,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return ["new", "diff", "review", "git"]
         case .fitCanvasToAll:
             return ["fit", "zoom", "all", "canvas"]
+        case .focusCurrentTile:
+            return ["focus", "current", "tile", "reveal", "work", "activate"]
         case .previousView:
             return ["back", "previous", "view", "camera"]
         case .previousTile:
@@ -677,6 +685,7 @@ public enum LaunchPaletteModel {
         case .openFileTree: return item(row, .create, "File tree", "Browse project files", "list.bullet.indent", ["open"], true, true, "action:file-tree")
         case .newDiffReview: return item(row, .create, "Diff review", "Review working changes", "plusminus", ["git", "new"], true, true, "action:diff-review")
         case .fitCanvasToAll: return item(row, .actions, "Show entire canvas", "Fit every tile and zone", "arrow.up.left.and.arrow.down.right", ["fit", "zoom", "all"], true, true, "action:fit-canvas")
+        case .focusCurrentTile: return item(row, .actions, "Focus current tile", "Reveal the highlighted tile for work", "scope", ["reveal", "work", "activate"], false, true, "action:focus-current-tile")
         case .previousView: return item(row, .actions, "Previous view", "Return to the last canvas view", "arrow.uturn.backward", ["back"], false, true, "action:previous-view")
         case .previousTile: return item(row, .actions, "Previous tile", "Return to the last focused tile", "arrow.left.to.line", ["back", "jump"], false, true, "action:previous-tile")
         case .previousZone: return item(row, .actions, "Previous zone", "Return to the last focused zone", "arrow.left.to.line.compact", ["back", "jump"], false, true, "action:previous-zone")

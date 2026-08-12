@@ -97,6 +97,7 @@ check --ticket-queue-tile-check
 check --tile-action-check
 check --tile-chrome-scale-check
 check --tile-drag-grab-check
+check --tile-reveal-work-check
 check --tile-world-bounds-check
 check --topology-migration-check
 check --ui-baseline-check
@@ -250,6 +251,7 @@ leg run_app_check .build/debug/Array --ticket-queue-tile-check
 leg run_app_check .build/debug/Array --tile-action-check
 leg run_app_check .build/debug/Array --tile-chrome-scale-check
 leg run_app_check .build/debug/Array --tile-drag-grab-check
+leg run_app_check .build/debug/Array --tile-reveal-work-check
 leg run_app_check .build/debug/Array --tile-world-bounds-check
 leg run_app_check .build/debug/Array --topology-migration-check
 leg run_app_check .build/debug/Array --ui-baseline-check

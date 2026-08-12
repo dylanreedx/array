@@ -7797,37 +7797,103 @@ do {
     expect(offscreen == nil, "offscreen tile should not receive placement")
 }
 
-// MARK: - T07 camera framing table
+// MARK: - T07 camera framing table (reveal/work — .plans/13-tile-reveal-work-framing.md)
 
 do {
     let viewportSize = CGSize(width: 800, height: 600)
     let terminalRect = CGRect(x: 1000, y: 800, width: 300, height: 200)
     let lowZoom = CanvasViewport(x: 0, y: 0, zoom: 0.3)
-    let framedTerminal = CameraFraming.jumpViewport(for: terminalRect, kind: .terminal, currentViewport: lowZoom, viewportSize: viewportSize)
-    expect(abs(framedTerminal.zoom - 0.85) < 0.0001, "terminal jump below readable zoom should target 0.85")
+    let framedTerminal = CameraFraming.revealWorkViewport(for: terminalRect, kind: .terminal, currentViewport: lowZoom, viewportSize: viewportSize)
+    expect(abs(framedTerminal.zoom - CameraFraming.editableTargetZoom(for: .terminal)) < 0.0001, "terminal reveal from overview should land on the WORKING zoom (0.95), not the readable floor")
     let visibleRatio = CameraFraming.mostlyVisibleAreaRatio(worldRect: terminalRect, viewport: framedTerminal, viewportSize: viewportSize)
     expect(visibleRatio >= CameraFraming.mostlyVisibleAreaRatio, "framed terminal should be mostly visible")
+    expect(CameraFraming.isComposedForWork(worldRect: terminalRect, viewport: framedTerminal, viewportSize: viewportSize), "a tile that fits should end up inside the context gutter")
 
-    let alreadyReadable = CanvasEngine.centeredViewport(worldRect: terminalRect, viewportSize: viewportSize, zoom: 0.95)
-    let preserved = CameraFraming.jumpViewport(for: terminalRect, kind: .terminal, currentViewport: alreadyReadable, viewportSize: viewportSize)
-    expect(preserved == alreadyReadable, "already readable and mostly visible target should preserve viewport/zoom")
+    // No-op rule: preserved only when already at working zoom AND fully inside
+    // the context gutter — not merely "mostly visible".
+    let alreadyWorking = CanvasEngine.centeredViewport(worldRect: terminalRect, viewportSize: viewportSize, zoom: 0.95)
+    let preserved = CameraFraming.revealWorkViewport(for: terminalRect, kind: .terminal, currentViewport: alreadyWorking, viewportSize: viewportSize)
+    expect(preserved == alreadyWorking, "a tile already at working zoom inside the gutter preserves the viewport")
 
-    let offscreenReadable = CanvasViewport(x: 0, y: 0, zoom: 0.95)
-    let panned = CameraFraming.jumpViewport(for: terminalRect, kind: .terminal, currentViewport: offscreenReadable, viewportSize: viewportSize)
-    expect(abs(panned.zoom - 0.95) < 0.0001, "offscreen but readable target should pan without changing zoom")
+    // 80% visible at working zoom is NOT composed for work: the tile is clipped
+    // by the window edge with no context on that side.
+    // Placed so the tile's screen frame starts at x=565: 235 of its 285 screen
+    // px are on screen (82%), the rest hangs off the right edge.
+    let clippedWorking = CanvasViewport(x: 1000 - 565 / 0.95, y: alreadyWorking.y, zoom: 0.95)
+    let clippedRatio = CameraFraming.mostlyVisibleAreaRatio(worldRect: terminalRect, viewport: clippedWorking, viewportSize: viewportSize)
+    expect(clippedRatio >= CameraFraming.mostlyVisibleAreaRatio, "table precondition: the clipped case is still >= 75% visible")
+    expect(!CameraFraming.isComposedForWork(worldRect: terminalRect, viewport: clippedWorking, viewportSize: viewportSize), "mostly-visible is not composed-for-work")
+    let recomposed = CameraFraming.revealWorkViewport(for: terminalRect, kind: .terminal, currentViewport: clippedWorking, viewportSize: viewportSize)
+    expect(recomposed == alreadyWorking, "a mostly-visible-but-clipped tile is recomposed, not preserved")
 
+    // Idempotence: re-revealing what reveal/work just produced never drifts.
+    let reRevealed = CameraFraming.revealWorkViewport(for: terminalRect, kind: .terminal, currentViewport: framedTerminal, viewportSize: viewportSize)
+    expect(reRevealed == framedTerminal, "re-revealing a revealed tile is a viewport no-op")
+
+    // A user zoomed in CLOSER than the working zoom keeps their scale.
+    let closerThanWorking = CanvasEngine.centeredViewport(worldRect: terminalRect, viewportSize: viewportSize, zoom: 1.2)
+    let keptCloser = CameraFraming.revealWorkViewport(for: terminalRect, kind: .terminal, currentViewport: CanvasViewport(x: closerThanWorking.x + 400, y: closerThanWorking.y, zoom: 1.2), viewportSize: viewportSize)
+    expect(abs(keptCloser.zoom - 1.2) < 0.0001, "a reveal must never zoom OUT from a closer working view")
+
+    // …and a user zoomed in ABOVE the jump clamp keeps their scale too.
+    // `maxJumpZoom` bounds the zoom the policy may ASK FOR; it must never pull
+    // back a camera the user already chose. The canvas permits 4.0
+    // (CanvasEngine.defaultZoomRange), so a 2× tile dragged down to 1.25 is the
+    // zoom-out this mode forbids. The offset origin keeps the tile OUT of the
+    // context gutter, so the recompose path (not the no-op path) is what has to
+    // hold the zoom — otherwise this row has no teeth.
+    let deepZoom = CanvasViewport(x: Double(terminalRect.minX) - 8, y: Double(terminalRect.minY) - 8, zoom: 2.0)
+    expect(deepZoom.zoom > CameraFraming.maxJumpZoom, "table precondition: the deep-zoom row must sit ABOVE maxJumpZoom")
+    expect(!CameraFraming.isComposedForWork(worldRect: terminalRect, viewport: deepZoom, viewportSize: viewportSize), "table precondition: the deep-zoom camera must not already be composed, or the no-op rule would carry this row")
+    let keptDeep = CameraFraming.revealWorkViewport(for: terminalRect, kind: .terminal, currentViewport: deepZoom, viewportSize: viewportSize)
+    expect(abs(keptDeep.zoom - deepZoom.zoom) < 0.0001, "a reveal must not zoom OUT past maxJumpZoom from a closer view; got \(keptDeep.zoom) from \(deepZoom.zoom)")
+    expect(CameraFraming.isComposedForWork(worldRect: terminalRect, viewport: keptDeep, viewportSize: viewportSize), "the recomposed deep-zoom reveal still composes the tile for work")
+
+    // Small note tile: fits easily, centered, gutter far exceeds the minimum.
+    let smallNoteRect = CGRect(x: 40, y: 40, width: 200, height: 170)
+    let framedSmallNote = CameraFraming.revealWorkViewport(for: smallNoteRect, kind: .note, currentViewport: lowZoom, viewportSize: viewportSize)
+    expect(abs(framedSmallNote.zoom - CameraFraming.editableTargetZoom(for: .note)) < 0.0001, "small note reveal targets the note working zoom")
+    let smallNoteScreen = CanvasEngine.tileScreenFrame(TileFrame(x: 40, y: 40, width: 200, height: 170), viewport: framedSmallNote)
+    expect(abs(smallNoteScreen.midX - viewportSize.width / 2) < 0.1 && abs(smallNoteScreen.midY - viewportSize.height / 2) < 0.1, "a tile that fits is centered")
+    expect(smallNoteScreen.minX >= CGFloat(CameraFraming.contextGutterScreenPx), "a small tile keeps at least the context gutter")
+
+    // Default note tile (fits both axes at working zoom).
+    let defaultNoteRect = CGRect(x: 300, y: 200, width: 420, height: 300)
+    let framedDefaultNote = CameraFraming.revealWorkViewport(for: defaultNoteRect, kind: .note, currentViewport: lowZoom, viewportSize: viewportSize)
+    expect(CameraFraming.isComposedForWork(worldRect: defaultNoteRect, viewport: framedDefaultNote, viewportSize: viewportSize), "default note reveal is composed for work")
+
+    // Wide-but-short browser: X cannot fit, Y can. The axes are decided
+    // independently — reveal the left edge, keep the whole height visible.
+    let wideRect = CGRect(x: 1000, y: 800, width: 1400, height: 400)
+    let framedWide = CameraFraming.revealWorkViewport(for: wideRect, kind: .browser, currentViewport: lowZoom, viewportSize: viewportSize)
+    expect(abs(framedWide.zoom - CameraFraming.editableTargetZoom(for: .browser)) < 0.0001, "wide browser keeps browser working zoom")
+    let wideScreen = CanvasEngine.tileScreenFrame(TileFrame(x: 1000, y: 800, width: 1400, height: 400), viewport: framedWide)
+    expect(abs(wideScreen.minX - CGFloat(CameraFraming.tilePaddingScreenPx)) < 0.1, "an axis that cannot fit is revealed from the left with padding")
+    expect(abs(wideScreen.midY - viewportSize.height / 2) < 0.1, "the axis that fits is still centered")
+
+    // Tall-but-narrow file tree: the mirror case.
+    let tallRect = CGRect(x: 1000, y: 800, width: 300, height: 1200)
+    let framedTall = CameraFraming.revealWorkViewport(for: tallRect, kind: .fileTree, currentViewport: lowZoom, viewportSize: viewportSize)
+    let tallScreen = CanvasEngine.tileScreenFrame(TileFrame(x: 1000, y: 800, width: 300, height: 1200), viewport: framedTall)
+    expect(abs(tallScreen.minY - CGFloat(CameraFraming.tilePaddingScreenPx)) < 0.1, "a tall tile is revealed from the top with padding")
+    expect(abs(tallScreen.midX - viewportSize.width / 2) < 0.1, "the narrow axis is centered")
+
+    // Oversized default terminal: usability wins over fitting.
     let defaultTerminalRect = CGRect(x: 1000, y: 800, width: 900, height: 584)
-    let framedDefaultTerminal = CameraFraming.jumpViewport(for: defaultTerminalRect, kind: .terminal, currentViewport: lowZoom, viewportSize: viewportSize)
-    expect(abs(framedDefaultTerminal.zoom - CameraFraming.minimumReadableZoom(for: .terminal)) < 0.0001, "default terminal jump should keep terminal-readable zoom instead of fitting down")
+    let framedDefaultTerminal = CameraFraming.revealWorkViewport(for: defaultTerminalRect, kind: .terminal, currentViewport: lowZoom, viewportSize: viewportSize)
+    expect(abs(framedDefaultTerminal.zoom - CameraFraming.editableTargetZoom(for: .terminal)) < 0.0001, "oversized terminal keeps working zoom instead of fitting down to an unusable overview")
+    expect(framedDefaultTerminal.zoom >= CameraFraming.minimumReadableZoom(for: .terminal), "oversized terminal never drops below readable")
     let defaultTerminalScreen = CanvasEngine.tileScreenFrame(TileFrame(x: 1000, y: 800, width: 900, height: 584), viewport: framedDefaultTerminal)
     expect(defaultTerminalScreen.minX >= CameraFraming.tilePaddingScreenPx - 0.1, "wide terminal should be revealed from the left with padding")
-    expect(defaultTerminalScreen.minY >= CameraFraming.tilePaddingScreenPx - 0.1, "tall terminal should be revealed from the top with padding")
     let defaultVisible = defaultTerminalScreen.intersection(CGRect(origin: .zero, size: viewportSize))
-    expect(!defaultVisible.isNull && (defaultVisible.width * defaultVisible.height) / (defaultTerminalScreen.width * defaultTerminalScreen.height) >= CGFloat(CameraFraming.mostlyVisibleAreaRatio), "readable terminal reveal should keep most of the tile visible")
+    expect(!defaultVisible.isNull && (defaultVisible.width * defaultVisible.height) / (defaultTerminalScreen.width * defaultTerminalScreen.height) >= CGFloat(CameraFraming.mostlyVisibleAreaRatio), "oversized terminal reveal should keep most of the tile visible")
+    let reRevealedTerminal = CameraFraming.revealWorkViewport(for: defaultTerminalRect, kind: .terminal, currentViewport: framedDefaultTerminal, viewportSize: viewportSize)
+    expect(reRevealedTerminal == framedDefaultTerminal, "re-revealing an oversized tile is a viewport no-op too")
 
     expect(CameraFraming.minimumReadableZoom(for: .note) == 0.60, "note readable zoom policy")
     expect(CameraFraming.minimumReadableZoom(for: .browser) == 0.70, "browser readable zoom policy")
     expect(CameraFraming.minimumReadableZoom(for: .fileTree) == 0.70, "file-tree readable zoom policy")
+    expect(CameraFraming.contextGutterScreenPx > CameraFraming.tilePaddingScreenPx, "the context gutter is more generous than the bare tile padding")
 }
 
 // MARK: - T16 readability policy and zone framing table

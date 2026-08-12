@@ -72,6 +72,10 @@ final class CanvasNSView: NSView, TokenThemed {
     private var zoneChromeViews: [UUID: ZoneChromeNSView] = [:]
     private var navModeOverlayView: NavModeOverlayNSView?
     var navModeHintLine = NavKeymap.default.hintLine
+    /// The hold-leader HUD's own vocabulary. `⏎` is listed because the current
+    /// tile, when fully visible, carries no jump label by design — Return is the
+    /// only way to say "this one, reveal it for work".
+    static let leaderHintLine = "letter jump · ⏎ reveal current tile · ←→↑↓ dock · esc cancel"
     /// Which chrome the shared nav overlay draws: the legacy `⌃Space` nav-mode
     /// (zone badges + hint line) or the hold-leader jump labels.
     enum NavOverlayPresentation { case navMode, leaderLabels }
@@ -1539,16 +1543,28 @@ final class CanvasNSView: NSView, TokenThemed {
         leaderZoneJumpAssignments().first { $0.key == key.lowercased() }?.zoneId
     }
 
+    /// The reveal/work camera for a tile, computed from the SAME navigation
+    /// snapshot labels and hit-testing use, so canvas tiles and `ZoneLayer`
+    /// tiles are both framed in true world coordinates.
     func framedViewportForTileJump(_ tileId: UUID) -> CanvasViewport? {
         guard let snapshot = navigationTileSnapshot(for: tileId) else { return nil }
         let frame = snapshot.worldFrame
         let rect = CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
-        return CameraFraming.jumpViewport(for: rect, kind: snapshot.kind, currentViewport: canvasState.viewport, viewportSize: bounds.size)
+        return CameraFraming.revealWorkViewport(for: rect, kind: snapshot.kind, currentViewport: canvasState.viewport, viewportSize: bounds.size)
     }
 
     /// Frames the tile as a readable jump target. This first T07 slice snaps to
     /// the computed camera target; animation remains out of scope until a
     /// transition coordinator/recorder is added.
+    ///
+    /// The NON-keyboard reveals come through here — inbox Space preview,
+    /// `TileSpawner.revealTile`, and (via `jumpToTileFromPalette`) a sidebar tile
+    /// click. All three deliberately use the same reveal/work framing as a ⌘K
+    /// tile jump: each one exists to put a tile in front of the user to READ or
+    /// USE, which is what that policy produces, and two of them take the tile's
+    /// input scope as well. The policy's "never zoom out" rule is what makes that
+    /// safe from a closer camera; the Space-preview case is witnessed in
+    /// `--agent-inbox-check`.
     func centerOnTile(_ tileId: UUID) {
         guard let viewport = framedViewportForTileJump(tileId) else { return }
         setViewport(viewport)
@@ -5969,7 +5985,16 @@ private final class NavModeOverlayNSView: NSView {
 
     var selectedTileId: UUID? { canvas?.canvasState.lastActiveTileId }
     var zoneBadgeCount: Int { canvas?.zoneRenderModels.count ?? 0 }
-    var hintLine: String { canvas?.navModeHintLine ?? NavKeymap.default.hintLine }
+    /// What the overlay actually draws, so the QA snapshot can't report a hint
+    /// the user never sees. The two presentations describe two different key
+    /// vocabularies.
+    var hintLine: String {
+        guard let canvas else { return NavKeymap.default.hintLine }
+        switch canvas.navOverlayPresentation {
+        case .navMode: return canvas.navModeHintLine
+        case .leaderLabels: return CanvasNSView.leaderHintLine
+        }
+    }
 
     override var isFlipped: Bool { true }
 
@@ -5999,9 +6024,10 @@ private final class NavModeOverlayNSView: NSView {
         case .navMode:
             drawSelectionRing(in: canvas)
             drawZoneBadges(in: canvas)
-            drawHintLine()
+            drawHintLine(hintLine)
         case .leaderLabels:
             drawTileLabels(in: canvas)
+            drawHintLine(hintLine)
         }
     }
 
@@ -6062,12 +6088,11 @@ private final class NavModeOverlayNSView: NSView {
         }
     }
 
-    private func drawHintLine() {
+    private func drawHintLine(_ text: String) {
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 13, weight: .medium),
             .foregroundColor: NSColor.white.withAlphaComponent(0.92)
         ]
-        let text = hintLine
         let size = text.size(withAttributes: attributes)
         let padding = CGSize(width: 14, height: 8)
         let rect = CGRect(
