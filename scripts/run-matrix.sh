@@ -39,6 +39,135 @@ run() {
   "$@"
 }
 
+# A non-app leg (checks executable or hygiene script) that must NOT abort the run.
+# Builds keep using `run`, because a failed build makes every later result
+# meaningless — but one red checks executable must not hide the other seventeen.
+run_leg() {
+  local status
+  printf '\n==> %s\n' "$*"
+  set +e
+  "$@"
+  status=$?
+  set -e
+  matrix_classify "$(matrix_leg_name "$@")" "$status"
+}
+
+# Legs documented as KNOWN-RED in docs/38-tickets/95-go-live.md and the dogfood
+# playbook. They are EXPECTED to fail; anything else failing is a regression.
+#
+# Why this list exists: the app legs used to be bare calls under `set -e`, so the
+# FIRST known-red aborted the run. On 2026-08-12 that meant a real
+# `scripts/run-matrix.sh` reached 4 of 135 app legs — everything past
+# `--palette-first-responder-restore-check` was dead code, which is how
+# `--composer-image-components-check` sat in this file failing from the day it was
+# written without anyone noticing. Two documented reds must cost two results, not
+# a hundred and thirty.
+MATRIX_KNOWN_RED=(
+  --component-lab-check
+  --ui-baseline-check
+  --agent-supervisor-check
+  --nav-mode-check
+  --palette-first-responder-restore-check
+  # Inherited reds, not independent ones. `ContinuumRevivedPaletteChecks` prints
+  # its own model assertions and THEN shells out to the app's
+  # --palette-first-responder-restore-check, so it cannot be green while that
+  # leg is red. `check-root-docs.sh` demands 9 README markers from the
+  # pre-65d420a doc taxonomy, one of which ("Continuum Revived") now
+  # contradicts the user-visible-identity rule. Both must leave this list the
+  # moment their cause is fixed — the report calls out an entry that passes.
+  "swift run ContinuumRevivedPaletteChecks"
+  scripts/check-root-docs.sh
+)
+# Advisory legs whose status the caller captures itself (`|| var=$?`); these must
+# keep returning their real status or that handling silently stops working.
+MATRIX_ADVISORY=(
+  --ui-tour-check
+)
+MATRIX_UNEXPECTED_FAILURES=()
+MATRIX_KNOWN_RED_OBSERVED=()
+MATRIX_KNOWN_RED_UNEXPECTED_PASS=()
+MATRIX_LEGS_RUN=0
+
+matrix_leg_name() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --*-check) printf '%s' "$arg"; return 0 ;;
+    esac
+  done
+  printf '%s' "$*"
+}
+
+matrix_list_contains() {
+  local needle=$1; shift
+  local item
+  for item in "$@"; do
+    [[ "$item" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+# Records one leg's outcome and returns 0 so the run continues. The ONLY exception
+# is an advisory leg, whose real status its caller captures itself.
+matrix_classify() {
+  local leg=$1 status=$2
+  MATRIX_LEGS_RUN=$((MATRIX_LEGS_RUN + 1))
+
+  if matrix_list_contains "$leg" "${MATRIX_ADVISORY[@]}"; then
+    return "$status"
+  fi
+
+  if matrix_list_contains "$leg" "${MATRIX_KNOWN_RED[@]}"; then
+    if [[ $status -ne 0 ]]; then
+      MATRIX_KNOWN_RED_OBSERVED+=("$leg")
+      printf 'KNOWN-RED (documented, expected): %s exited %d — continuing.\n' "$leg" "$status"
+    else
+      MATRIX_KNOWN_RED_UNEXPECTED_PASS+=("$leg")
+      printf 'KNOWN-RED PASSED: %s — the allowlist in this script is stale.\n' "$leg"
+    fi
+    return 0
+  fi
+
+  if [[ $status -ne 0 ]]; then
+    MATRIX_UNEXPECTED_FAILURES+=("$leg")
+    printf 'FAILED: %s exited %d — recorded; the matrix continues so one regression cannot hide the rest.\n' \
+      "$leg" "$status"
+  fi
+  return 0
+}
+
+# Prints the verdict and decides the exit code. Known-reds are reported apart from
+# regressions, and a known-red that PASSES is called out too — a stale allowlist
+# silently re-hides whatever it still covers.
+matrix_report() {
+  local label=$1
+  printf '\n---- %s: %d leg(s) run ----\n' "$label" "$MATRIX_LEGS_RUN"
+
+  if [[ ${#MATRIX_KNOWN_RED_OBSERVED[@]} -gt 0 ]]; then
+    printf 'KNOWN-RED, expected (%d): %s\n' \
+      "${#MATRIX_KNOWN_RED_OBSERVED[@]}" "${MATRIX_KNOWN_RED_OBSERVED[*]}"
+  fi
+
+  if [[ ${#MATRIX_KNOWN_RED_UNEXPECTED_PASS[@]} -gt 0 ]]; then
+    printf 'KNOWN-RED that PASSED — remove from MATRIX_KNOWN_RED in this script (%d): %s\n' \
+      "${#MATRIX_KNOWN_RED_UNEXPECTED_PASS[@]}" "${MATRIX_KNOWN_RED_UNEXPECTED_PASS[*]}"
+  fi
+
+  if [[ ${#MATRIX_UNEXPECTED_FAILURES[@]} -gt 0 ]]; then
+    printf 'FAILED (%d):\n' "${#MATRIX_UNEXPECTED_FAILURES[@]}"
+    local leg
+    for leg in "${MATRIX_UNEXPECTED_FAILURES[@]}"; do
+      printf '  - %s\n' "$leg"
+    done
+    printf '\n%s FAILED: %d leg(s) regressed. Their output is above, in order.\n' \
+      "$label" "${#MATRIX_UNEXPECTED_FAILURES[@]}"
+    return 1
+  fi
+
+  printf '\n%s passed.\n' "$label"
+  return 0
+}
+
 run_app_check() {
   local project_root app_support status
   local tmux_args=()
@@ -73,7 +202,8 @@ run_app_check() {
   set -e
 
   rm -rf "$project_root" "$app_support"
-  return "$status"
+
+  matrix_classify "$(matrix_leg_name "$@")" "$status"
 }
 
 # Ticket P0.1: compile the iOS app, not just the macOS package. Core is shared
@@ -123,7 +253,7 @@ run_ios_build() {
 # Ticket P0.11: first leg, so a matrix that lost a check goes red before it
 # spends minutes building. The guard is a normal leg, so deleting it removes its
 # own inventory record and trips the same gate.
-run scripts/check-matrix-inventory.sh
+run_leg scripts/check-matrix-inventory.sh
 # Program 91 setup: keep the 50-ticket agent-tile queue, dependency order,
 # packet structure, ledger rows, and supervised review gates from drifting.
 run scripts/check-agent-tile-ux-program.sh
@@ -134,24 +264,24 @@ run scripts/check-sidebar-native-ux-program.sh
 # any Apple semantic colour on a hardcoded fill that is not line-scoped in
 # docs/38-tickets/90-agent-ux/color-hygiene-allowlist.txt, and equally red when
 # an allowlisted line disappears, so the list cannot rot.
-run scripts/check-color-hygiene.sh
+run_leg scripts/check-color-hygiene.sh
 run swift build
 run_ios_build
-run swift run ContinuumRevivedCoreChecks
+run_leg swift run ContinuumRevivedCoreChecks
 # Ticket P1.1: the shared agent-UI module's own leg. It links AgentUI alone, so
 # it also proves the dependency direction — a token that reaches back into Core
 # cannot compile here. StatusChip's assertions moved here from
 # ContinuumRevivedCoreChecks unchanged.
-run swift run ContinuumRevivedAgentUIChecks
+run_leg swift run ContinuumRevivedAgentUIChecks
 # Ticket 91/P0.2: the semantic agent-content module's own leg. It links
 # AgentContent alone, so it proves the dependency direction the same way the
 # AgentUI leg does, and it scans the module's sources and both manifest target
 # blocks so a forbidden import or declared dependency is red before it is ever
 # used. Fast and pure: no app bundle, no display, no provider process.
-run swift run ContinuumRevivedAgentContentChecks
-run swift run ContinuumRevivedSyncChecks
+run_leg swift run ContinuumRevivedAgentContentChecks
+run_leg swift run ContinuumRevivedSyncChecks
 # Ticket 86 (D4-R1): relay hub core — auth/scope, lossless catch-up, I5 gate.
-run swift run ContinuumRevivedRelayChecks
+run_leg swift run ContinuumRevivedRelayChecks
 # Ticket 57: gated real-CloudKit backend leg. Skips gracefully (exit 0,
 # cloudkit_available=false in the manifest) unless CLOUDKIT_ENABLED=1 is set
 # — never set in this matrix; the real leg is device-gate-owed. Explicitly
@@ -160,9 +290,9 @@ run swift run ContinuumRevivedRelayChecks
 # CLOUDKIT_ENABLED=1 happens to be exported in the ambient shell environment
 # the matrix runs in.
 CLOUDKIT_ENABLED=0 run swift run ContinuumRevivedSyncIntegrationChecks
-run swift run ContinuumRevivedPaletteChecks
-run swift run ContinuumRevivedFileTreeChecks
-run swift run ContinuumRevivedPerfChecks
+run_leg swift run ContinuumRevivedPaletteChecks
+run_leg swift run ContinuumRevivedFileTreeChecks
+run_leg swift run ContinuumRevivedPerfChecks
 run_app_check .build/debug/Array --companion-sync-health-check
 run_app_check .build/debug/Array --push-payload-dump-check
 run_app_check .build/debug/Array --palette-duplicate-root-check
@@ -399,11 +529,11 @@ if [[ "$FAST" -eq 0 ]]; then
 else
   printf '\n==> skipping scripts/check-app-bundle.sh --configuration debug (--fast)\n'
 fi
-run scripts/check-root-docs.sh
+run_leg scripts/check-root-docs.sh
 run git diff --check
 
 if [[ "$FAST" -eq 1 ]]; then
-  printf '\nFast matrix passed.\n'
+  matrix_report "Fast matrix"
 else
-  printf '\nMatrix passed.\n'
+  matrix_report "Matrix"
 fi

@@ -56,7 +56,7 @@ collect_flags() {
 # e.g. `CLOUDKIT_ENABLED=0 run swift run ...` stays one stable record even if
 # the env prefix changes.
 collect_legs() {
-  { matrix_source | grep -ohE '^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*(run|run_app_check|run_ios_build)([[:space:]].*)?$' || true; } |
+  { matrix_source | grep -ohE '^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*(run|run_leg|run_app_check|run_ios_build)([[:space:]].*)?$' || true; } |
     sed -E 's/^[[:space:]]+//; s/^([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)+//' |
     sort -u |
     sed 's/^/leg /'

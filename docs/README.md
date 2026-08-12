@@ -23,7 +23,6 @@ hard rules are the same file — `CLAUDE.md` symlinks to it.
 - [`38-tickets/`](./38-tickets/) — the ticket/program system every change is
   developed under. Stable paths (code comments cite them); the go-live program
   record is [`38-tickets/95-go-live.md`](./38-tickets/95-go-live.md).
-- [`archive/`](./archive/) — retired docs.
 
 ### Forward plans
 

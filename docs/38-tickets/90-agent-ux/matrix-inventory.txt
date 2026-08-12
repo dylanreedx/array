@@ -136,19 +136,19 @@ check --zone-tier-transition-check
 leg run git diff --check
 leg run scripts/check-agent-tile-ux-program.sh
 leg run scripts/check-app-bundle.sh --configuration debug
-leg run scripts/check-color-hygiene.sh
-leg run scripts/check-matrix-inventory.sh
-leg run scripts/check-root-docs.sh
+leg run_leg scripts/check-color-hygiene.sh
+leg run_leg scripts/check-matrix-inventory.sh
+leg run_leg scripts/check-root-docs.sh
 leg run scripts/check-sidebar-native-ux-program.sh
 leg run swift build
-leg run swift run ContinuumRevivedAgentContentChecks
-leg run swift run ContinuumRevivedAgentUIChecks
-leg run swift run ContinuumRevivedCoreChecks
-leg run swift run ContinuumRevivedFileTreeChecks
-leg run swift run ContinuumRevivedPaletteChecks
-leg run swift run ContinuumRevivedPerfChecks
-leg run swift run ContinuumRevivedRelayChecks
-leg run swift run ContinuumRevivedSyncChecks
+leg run_leg swift run ContinuumRevivedAgentContentChecks
+leg run_leg swift run ContinuumRevivedAgentUIChecks
+leg run_leg swift run ContinuumRevivedCoreChecks
+leg run_leg swift run ContinuumRevivedFileTreeChecks
+leg run_leg swift run ContinuumRevivedPaletteChecks
+leg run_leg swift run ContinuumRevivedPerfChecks
+leg run_leg swift run ContinuumRevivedRelayChecks
+leg run_leg swift run ContinuumRevivedSyncChecks
 leg run swift run ContinuumRevivedSyncIntegrationChecks
 leg run_app_check .build/debug/Array --add-zone-check
 leg run_app_check .build/debug/Array --agent-display-name-check
