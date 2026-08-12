@@ -35,8 +35,20 @@ Every substantive change carries a deterministic witness: a `--*-check`
 self-check flag on the app binary, a CoreChecks section, or a bundle-harness
 assertion — RED before the fix, GREEN after, runnable offline. If a claim has
 no witness, it isn't verified. The matrix (`scripts/run-matrix.sh`) is the
-gate; two KNOWN-RED pre-existing legs are documented in the go-live doc — do
-not chase them as regressions and do not add new ones silently.
+gate; the KNOWN-RED legs are listed in `MATRIX_KNOWN_RED` inside that script
+(7 as of 0.4.13, explained in the go-live doc) — do not chase them as
+regressions and do not add new ones silently.
+
+**A witness only counts if the gate reports it, and only if it watches
+behaviour.** Both halves have failed here expensively. A check registered in
+`run-matrix.sh` but sitting after a red leg never ran at all — the matrix used to
+halt on the first failure, so a real run reported **4 of 135 app legs**, and a
+check that had failed since the day it was written went unnoticed while every
+image pasted into a composer was silently discarded (fixed in `865b0d3`; read the
+summary the matrix now prints at the end, not the exit code alone). And a check
+that asserted the app's *source contained a string* stayed green while a reviewer
+inverted the exact behaviour it claimed to guard. Assert outcomes, and confirm a
+real matrix run prints your leg.
 
 ### 3. CLIs own their auth — never API keys
 
@@ -191,10 +203,21 @@ cost a session to learn:
 
 ## Verifying
 
-- Full gate: `scripts/run-matrix.sh` (KNOWN-RED legs documented in the
-  go-live doc).
+- Full gate: `scripts/run-matrix.sh`. It runs every leg and ends with a report —
+  legs run, expected KNOWN-RED (from `MATRIX_KNOWN_RED`), any KNOWN-RED that
+  unexpectedly PASSED, and real failures. Judge a run by that summary. Builds
+  still halt on purpose; a failed build makes later results meaningless.
+  `CONTINUUM_SKIP_UI_BASELINES=1` skips the two display-dependent baseline legs
+  without touching a baseline. **Never** `CONTINUUM_UPDATE_BASELINES=1`.
+  Editing that script: two program checks pin lines in it verbatim with
+  `grep -Fxc` (one also locks its first four lines), and the committed inventory
+  records legs by literal invocation, so renaming a wrapper reads as deleted
+  checks.
 - Targeted: `swift run ContinuumRevivedCoreChecks`, or a single app leg like
-  `.build/debug/Array --onboarding-panel-check`.
+  `.build/debug/Array --onboarding-panel-check`. **Never guess a flag** — an
+  unknown one falls through the cascade and boots the full app, hanging the
+  shell. Enumerate:
+  `grep -oE '\-\-[a-z0-9-]+-check' Sources/ContinuumRevived/App/ContinuumApp.swift | sort -u`
 - Bundle: `scripts/check-app-bundle.sh` (dev channel by default;
   `--channel prod` for release verification). It asserts identity, Sparkle
   embedding, launch smoke, and pollution guards over the real dirs.

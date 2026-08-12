@@ -21,11 +21,38 @@ Status as of 2026-08-09 (end of day):
 - **Verification state**: full build, bundle harness, CoreChecks suite, geometry,
   supervisor/restore/tmux/topology legs all green. Two KNOWN-RED gates, both
   pre-existing (verified failing at pre-work HEAD `566e615`): `--component-lab-check`
-  pixel baselines (36 stale; integration waves ran `CONTINUUM_SKIP_SURFACE_CHECKS=1`;
+  pixel baselines (integration waves ran `CONTINUUM_SKIP_SURFACE_CHECKS=1`;
   needs a supervised re-bless with Dylan reviewing diffs) and the
   `--agent-supervisor-check` NAMING section (timing flake, three distinct failure
   messages across runs; the context-seam assertions behind it run once naming is
   fixed — the standalone CoreChecks suite covers the rest).
+
+  **Updated 2026-08-12.** Two corrections to the paragraph above, both measured:
+
+  1. **The baseline count is NOT 36.** `--component-lab-check` reports **44** and
+     `--ui-baseline-check` **45**, identical across three worktrees holding
+     different subsets of that day's commits — so the drift predates them and is
+     unexplained. It was 36 the previous night. **Re-measure before using the
+     number as a regression signal; do not quote it.** Note also that a surface
+     with no committed baseline at all ("no committed baseline") is invisible to
+     the count in both directions — the agent-inbox surface changed height
+     320x660 → 320x652 without moving it.
+  2. **The KNOWN-RED set is larger than two**, and `run-matrix.sh` no longer
+     halts on any of them (see `865b0d3`; before that a real run reached 4 of 135
+     app legs). The allowlist lives in `MATRIX_KNOWN_RED` in that script and is
+     the authoritative list; as of 0.4.13 it is 7 entries: the two above, plus
+     `--ui-baseline-check`; `--palette-first-responder-restore-check` and
+     `--nav-mode-check` (**one defect** — ⌘K's default row selection ranks on
+     text alone, so "Create Zone…" outranks a zone named Alpha for the query
+     "z"); and two INHERITED reds that are not independent failures —
+     `swift run ContinuumRevivedPaletteChecks` (it invokes the palette
+     first-responder leg itself) and `scripts/check-root-docs.sh` (9 markers from
+     the pre-`65d420a` doc taxonomy, one of which demands "Continuum Revived" in
+     the user-facing README and so contradicts the identity rule).
+
+  Red but **outside the gate entirely**, so no matrix run covers them:
+  `--terminal-default-readability-check`, `--previous-focus-navigation-check`,
+  `--zone-framing-readability-check`.
 - **Phase 2 (Sparkle) DONE (2026-08-09, evening)** — implemented and proven end-to-end
   locally: a 0.2.0(2) test install fetched a localhost appcast, EdDSA-validated,
   downloaded the 0.2.1(3) DMG, and swapped the bundle on quit (signature intact after
