@@ -8088,7 +8088,7 @@ func runAgentRestoreChecks() async throws {
     // The signature carries P3.9's `agentID:` — revealing a headless agent wires an
     // agent that already exists into a fresh tile. Still an EXACT match, so a rename
     // still turns this scan red rather than blind.
-    let wiring = try paletteAgentSpawnBranch("private func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil) {")
+    let wiring = try paletteAgentSpawnBranch("private func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil, initialProviderSettings: AgentModelConfig.Resolution? = nil) {")
     guard wiring.contains("needsPreviousSessionNotice("), wiring.contains("rehydratePreviousSessionOrNotice(") else {
         throw fail("wireManagedAgentTile does not route a restored agent through rehydration/notice, so a restored agent renders as a blank tile:\n\(wiring)")
     }
@@ -9285,7 +9285,10 @@ private func checkHeadlessAgents(
     // branch (the vacuity guard for the same patterns) spawns WITH one, and quitting
     // stops the agents.
     let headlessBranch = try paletteAgentSpawnBranch("private func spawnHeadlessAgentFromPalette() {")
-    let managedBranch = try paletteAgentSpawnBranch("private func spawnManagedAgentFromPalette() {")
+    // The ⌘K model step gave this a parameter and a result; the scan string went
+    // stale and this leg has been reading as BLIND (a throw) behind the KNOWN-RED
+    // naming section ever since. Pinned to the real signature again.
+    let managedBranch = try paletteAgentSpawnBranch("private func spawnManagedAgentFromPalette(model: String? = nil) -> Bool {")
     // `spawnManagedAgent` is in the pattern because of the negative test: a headless
     // branch that simply CALLS the managed one creates a tile without naming the
     // spawner, and the first draft of this pattern passed that mutation.
@@ -9309,7 +9312,7 @@ private func checkHeadlessAgents(
     guard headlessBranch.contains("promptForAgentTask("), headlessBranch.contains("prompt: prompt") else {
         throw fail("the headless spawn branch does not collect and pass a first prompt, so it spawns an agent that never runs:\n\(headlessBranch)")
     }
-    let spawnHelper = try paletteAgentSpawnBranch("private func spawnSupervisedAgent(tileId: UUID?, prompt: String? = nil) -> AgentID? {")
+    let spawnHelper = try paletteAgentSpawnBranch("private func spawnSupervisedAgent(tileId: UUID?, prompt: String? = nil, providerSettings: AgentModelConfig.Resolution? = nil) -> AgentID? {")
     guard spawnHelper.contains("prompt: prompt") else {
         throw fail("the app's spawn helper drops the prompt, so the headless agent would not run:\n\(spawnHelper)")
     }

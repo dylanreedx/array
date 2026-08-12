@@ -51,6 +51,7 @@ check --leader-jump-check
 check --leader-snap-check
 check --leader-zone-jump-check
 check --location-action-surface-check
+check --managed-agent-model-spawn-check
 check --multi-zone-render-check
 check --nav-mode-check
 check --new-tile-cwd-check
@@ -203,6 +204,7 @@ leg run_app_check .build/debug/Array --leader-jump-check
 leg run_app_check .build/debug/Array --leader-snap-check
 leg run_app_check .build/debug/Array --leader-zone-jump-check
 leg run_app_check .build/debug/Array --location-action-surface-check
+leg run_app_check .build/debug/Array --managed-agent-model-spawn-check
 leg run_app_check .build/debug/Array --multi-zone-render-check
 leg run_app_check .build/debug/Array --nav-mode-check
 leg run_app_check .build/debug/Array --new-tile-cwd-check

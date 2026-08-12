@@ -216,14 +216,22 @@ public struct LaunchPaletteProfileRow: Equatable, Sendable {
 /// One exact, fully-qualified managed-agent model offered by the command
 /// center's shallow New Agent configuration step.
 public struct AgentModelPaletteRow: Equatable, Sendable {
+    public enum Kind: Equatable, Sendable {
+        case catalog
+        case configuredDefault
+        case recentlyUsed
+    }
+
     public let id: String
     public let displayName: String
     public let providerName: String
+    public let kind: Kind
 
-    public init(id: String, displayName: String, providerName: String) {
+    public init(id: String, displayName: String, providerName: String, kind: Kind = .catalog) {
         self.id = id
         self.displayName = displayName
         self.providerName = providerName
+        self.kind = kind
     }
 }
 

@@ -215,6 +215,7 @@ final class ManagedAgentTileNSView: TileNSView {
         tile: Tile,
         threadId: String = "thread-main",
         descriptor: AgentDescriptor? = nil,
+        providerSettings: AgentModelConfig.Resolution? = nil,
         statusRowPlacement: AgentStatusRowPlacement = .aboveComposer,
         monotonicNow: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     ) {
@@ -227,6 +228,7 @@ final class ManagedAgentTileNSView: TileNSView {
         self.statusRowPlacement = statusRowPlacement
         self.projectionMonotonicNow = monotonicNow
         self.model = ManagedAgentTranscriptModel(threadId: threadId, monotonicNow: monotonicNow)
+        self.providerSettings = providerSettings ?? AgentModelConfig.resolvedFromDefaults()
         // P5.5 acceptance: v2 IS the tile. The reversible construction seam and
         // the legacy view-only card path were removed at this supervised gate.
         self.transcriptCollectionFixture = AgentTranscriptListView(toolDetailStore: toolDetailStore)

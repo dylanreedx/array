@@ -296,6 +296,10 @@ run_leg swift run ContinuumRevivedPerfChecks
 run_app_check .build/debug/Array --companion-sync-health-check
 run_app_check .build/debug/Array --push-payload-dump-check
 run_app_check .build/debug/Array --palette-duplicate-root-check
+# Ordered HERE, ahead of the KNOWN-RED restore leg below: this script is
+# `set -euo pipefail` with bare calls, so it aborts at the first red leg and
+# everything after it never runs. A witness the gate cannot reach never runs at all.
+run_app_check .build/debug/Array --managed-agent-model-spawn-check
 run_app_check .build/debug/Array --palette-first-responder-restore-check
 run_app_check .build/debug/Array --settings-panel-check
 run_app_check .build/debug/Array --onboarding-panel-check

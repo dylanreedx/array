@@ -84,6 +84,23 @@ public enum AgentModelConfig {
         )
     }
 
+    /// Resolve an EXPLICIT model choice (⌘K's model step) against the catalogue
+    /// as it stands now. `nil` selection is generic creation and falls through to
+    /// the stored default; a selection outside `modelOptions` returns nil —
+    /// REFUSED, never substituted, the same rule
+    /// `AgentSupervisor.setProviderSettings` applies to a per-agent write.
+    ///
+    /// The refusal is not theoretical: the palette's rows are the catalogue as it
+    /// was when the model step opened, and a live `pi --list-models` probe (kicked
+    /// at startup, and by the tile's own picker) can land while the palette is up
+    /// and narrow the list to the providers that are actually authed.
+    public static func resolved(selection: String?, defaults: UserDefaults = .standard) -> Resolution? {
+        let base = resolvedFromDefaults(defaults: defaults)
+        guard let selection else { return base }
+        guard modelOptions.contains(selection) else { return nil }
+        return Resolution(model: selection, thinking: base.thinking)
+    }
+
     private static func oneOf(_ value: String?, _ options: [String], _ fallback: String) -> String {
         guard let value, options.contains(value) else { return fallback }
         return value
