@@ -5977,8 +5977,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // Return activates the tile that is ALREADY current — the self-action the
         // label alphabet cannot express, because a fully-visible current tile is
         // deliberately excluded from the labels. Resolved BEFORE label lookup so
-        // no alphabet edit can ever shadow it.
-        if event.keyCode == 36 {
+        // no alphabet edit can ever shadow it. Numpad Enter (76) counts: the
+        // leader swallows it either way, so treating it as anything other than
+        // Return would just be a dead key.
+        if event.keyCode == 36 || event.keyCode == 76 {
             let tileId = canvasView?.canvasState.lastActiveTileId
             disarmLeader() // closes the leader modal (restores prior scope) + hides HUD
             guard let tileId, canvasView?.navigationTileSnapshot(for: tileId) != nil else { return true }
@@ -6001,7 +6003,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             navSelectedZoneId = zoneId
             focusHistory.recordZoneFocus(zoneId, reason: .completedZoneJump)
-            markZoneCurrentTile(zoneId, reason: .completedZoneJump)
+            completeZoneJump(zoneId)
             return true
         }
         if !key.isEmpty, let tileId = canvasView?.leaderJumpTarget(forLabel: key) {
@@ -6389,7 +6391,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         navSelectedZoneId = zoneId
         canvasView.setViewport(viewport)
         focusHistory.recordZoneFocus(zoneId, reason: .completedZoneJump)
-        markZoneCurrentTile(zoneId, reason: .completedZoneJump)
+        // Nav mode is still open and still owns input; see completeZoneJump.
+        completeZoneJump(zoneId, landingInputOnCanvas: false)
     }
 
     private func fitAllNavZones() {
@@ -11105,14 +11108,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return firstTileInZone(zoneId)
     }
 
-    /// Makes a zone's remembered/first tile the current (highlighted) navigation
-    /// target after a zone jump — WITHOUT touching the overview camera and
-    /// WITHOUT taking input scope. Zone jumps produce overview; the tile becomes
-    /// workable only when the user activates it (hold-⌥ Return / a tile jump).
-    private func markZoneCurrentTile(_ zoneId: UUID, reason: FocusHistoryEventReason) {
+    /// The shared LANDING for every zone jump — ⌘K row, leader zone key, ordinal
+    /// / next-previous, and Go to Previous Zone. Two halves, both required:
+    ///
+    /// 1. Input scope lands on the CANVAS, deterministically, whatever route got
+    ///    here. A zone jump does not take a tile's input scope (the overview
+    ///    camera is not a place to type), but it must not leave the PREVIOUS
+    ///    tile holding the keyboard either: that tile is usually somewhere the
+    ///    new overview has scrolled off screen, so the user's next keystrokes
+    ///    would vanish into a tile they cannot see. `.tileSpawned` is the
+    ///    broker's existing "this action already chose the post-close scope,
+    ///    don't restore the modal's snapshot" signal — the same one every
+    ///    palette spawn and tile jump uses.
+    /// 2. The zone's remembered (else first) tile becomes CURRENT/highlighted,
+    ///    without moving the overview camera. It becomes workable only when the
+    ///    user activates it (hold-⌥ Return / ⌘K "Focus Current Tile" / a tile
+    ///    jump).
+    ///
+    /// The tile-focus record is always `.completedZoneJump`, so no zone route
+    /// pushes its tile onto the recent-tiles stack: "Go to Previous Tile" means
+    /// the same thing however you reached the zone.
+    ///
+    /// - Parameter landingInputOnCanvas: false for the ONE route whose modal
+    ///   stays open across the jump — nav mode's ordinal / next-previous keys.
+    ///   Nav mode routes keys only while it owns `activeSurface`
+    ///   (`handleHotkey`), so taking that surface mid-mode would silently deafen
+    ///   it; and while it is open no TILE holds the keyboard, so there is
+    ///   nothing to strand. Where nav mode leaves scope on exit is nav mode's
+    ///   own (legacy) contract, out of this plan's scope.
+    private func completeZoneJump(_ zoneId: UUID, landingInputOnCanvas: Bool = true) {
+        if landingInputOnCanvas {
+            focusBroker.enterScope(.canvas, reason: .tileSpawned)
+        }
         guard let canvasView, let tileId = currentTileForZone(zoneId) else { return }
         canvasView.markActive(tileId: tileId)
-        focusHistory.recordTileFocus(tileId, zoneId: zoneId, reason: reason)
+        focusHistory.recordTileFocus(tileId, zoneId: zoneId, reason: .completedZoneJump)
     }
 
     /// Hold-⌥ Return / "Focus Current Tile": activate the tile that is ALREADY
@@ -11137,7 +11167,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// sets navSelectedZoneId, and makes the zone's remembered (else first) tile
     /// current/highlighted. It deliberately does NOT take that tile's input scope
     /// — the camera is at overview zoom, where typing into a tile you cannot read
-    /// is a trap. Hold-⌥ Return (or a tile jump) is what activates it.
+    /// is a trap. Hold-⌥ Return (or a tile jump) is what activates it. Input
+    /// lands on the canvas instead of wherever it was; see `completeZoneJump`.
     @discardableResult
     private func jumpToZoneFromPalette(_ zoneId: UUID) -> Bool {
         guard let canvasView,
@@ -11147,7 +11178,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvasView.setViewport(viewport)
         navSelectedZoneId = zoneId
         focusHistory.recordZoneFocus(zoneId, reason: .paletteJump)
-        markZoneCurrentTile(zoneId, reason: .paletteJump)
+        completeZoneJump(zoneId)
         return true
     }
 
@@ -11176,14 +11207,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let canvasView,
               let zoneId = focusHistory.previousZone(valid: { [weak self] id in self?.canvasView?.navZoneRenderModels.contains(where: { $0.placement.zoneId == id }) == true }) else { NSSound.beep(); return false }
         navSelectedZoneId = zoneId
-        if let tileId = focusHistory.lastFocusedTileByZone[zoneId], canvasView.navigationTileSnapshot(for: tileId) != nil {
-            canvasView.markActive(tileId: tileId)
-            revealTileForWork(tileId, historyReason: .previousNavigation, scopeReason: .tileSpawned)
-        } else if let viewport = canvasView.fitZoneToViewport(zoneId: zoneId) {
+        // Go to Previous Zone is a ZONE jump: overview camera, remembered/first
+        // tile current, no tile input scope — same contract as every other zone
+        // route, through the same helper. It used to reveal the remembered tile
+        // for work instead, which made it the one zone command that zoomed into
+        // a tile and took its keyboard, and its own inline remembered-tile
+        // lookup left a zone with NO current tile when that tile had been
+        // deleted.
+        if let viewport = canvasView.fitZoneToViewport(zoneId: zoneId) {
             recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: viewport)
             canvasView.setViewport(viewport)
         }
         focusHistory.recordZoneFocus(zoneId, reason: .previousNavigation)
+        completeZoneJump(zoneId)
         return true
     }
 
@@ -17330,7 +17366,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let expectedOverview = CameraFraming.zoneOverviewViewport(for: CGRect(x: 0, y: 0, width: 1200, height: 800), viewportSize: CGSize(width: 1400, height: 900))
         try expect(vpEqual(canvas.viewport, expectedOverview), "assertion 1: zone jump must produce the zone overview; got (\(canvas.viewport.x),\(canvas.viewport.y),\(canvas.viewport.zoom))")
         try expect(canvas.canvasState.lastActiveTileId == aId, "assertion 1: zone jump must make the zone's first tile current; got \(String(describing: canvas.canvasState.lastActiveTileId))")
-        try expect(app.focusBroker.activeSurface == .modal(.palette), "assertion 1: a zone jump must not steal input scope into a tile; got \(String(describing: app.focusBroker.activeSurface))")
+        try expect(app.focusBroker.activeSurface == .canvas, "assertion 1: a zone jump must not steal input scope into a tile — it lands on the canvas; got \(String(describing: app.focusBroker.activeSurface))")
         app.focusBroker.closeModal(.palette)
         try expect(app.focusBroker.activeSurface == .canvas, "assertion 1: closing the palette after a zone jump returns to canvas navigation; got \(String(describing: app.focusBroker.activeSurface))")
         let overviewViewport = canvas.viewport
@@ -17403,6 +17439,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         app.handleFlagsChanged(try flagsEvent([]))
         try expect(app.focusBroker.activeSurface == .tile(aId), "assertion 6: the leader label must land on tile A")
         try expect(vpEqual(canvas.viewport, paletteFramedA), "assertion 6: leader-label and ⌘K jumps must share one framing policy; leader (\(canvas.viewport.x),\(canvas.viewport.y),\(canvas.viewport.zoom)) vs palette (\(paletteFramedA.x),\(paletteFramedA.y),\(paletteFramedA.zoom))")
+
+        // 9) The ⌘K "Focus Current Tile" row is the SAME activation as hold-⌥
+        //    Return — including its palette-dismissal contract. It must frame the
+        //    current tile for work, enter that tile's scope, and STAY there when
+        //    the palette closes rather than bouncing back to whichever tile held
+        //    the keyboard before ⌘K (its `.tileSpawned` scope reason).
+        canvas.setViewport(overviewViewport)
+        _ = app.focusBroker.requestFocus(.tile(bId), reason: .userClick)
+        canvas.markActive(tileId: aId)
+        try expect(app.focusBroker.activeSurface == .tile(bId), "assertion 9 precondition: B must hold input scope before ⌘K; got \(String(describing: app.focusBroker.activeSurface))")
+        try expect(canvas.canvasState.lastActiveTileId == aId, "assertion 9 precondition: A must be the current tile")
+        app.focusBroker.openModal(.palette)
+        let focusCurrentResult = app.performPaletteAction(.focusCurrentTile)
+        try expect(focusCurrentResult, "assertion 9: the Focus Current Tile row must report that it acted")
+        try expect(canvas.canvasState.lastActiveTileId == aId, "assertion 9: Focus Current Tile must not change which tile is current; got \(String(describing: canvas.canvasState.lastActiveTileId))")
+        try expect(app.focusBroker.activeSurface == .tile(aId), "assertion 9: Focus Current Tile must enter the current tile's scope; got \(String(describing: app.focusBroker.activeSurface))")
+        try expect(vpEqual(canvas.viewport, revealViewport), "assertion 9: the ⌘K row must land on the same reveal/work framing as hold-⌥ Return; got (\(canvas.viewport.x),\(canvas.viewport.y),\(canvas.viewport.zoom)) want (\(revealViewport.x),\(revealViewport.y),\(revealViewport.zoom))")
+        app.focusBroker.closeModal(.palette)
+        try expect(app.focusBroker.activeSurface == .tile(aId), "assertion 9: closing the palette after Focus Current Tile must not bounce focus back to the pre-palette tile; got \(String(describing: app.focusBroker.activeSurface))")
 
         // ── Scenario 2: an oversized terminal ─────────────────────────────────
         // 4) It cannot fit at a usable zoom, so usability wins: keep working zoom
@@ -17481,6 +17536,90 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(emptyCanvas.viewport == beforeStaleViewport, "assertion 8: a stale current tile must not move the camera")
         try expect(emptyApp.focusBroker.activeSurface == .canvas, "assertion 8: a stale current tile must not enter a nonexistent tile scope; got \(String(describing: emptyApp.focusBroker.activeSurface))")
 
+        // ── Scenario 4: Go to Previous Zone is a ZONE jump ────────────────────
+        // 10) It is the fifth zone route and must behave like the other four:
+        //     zone OVERVIEW camera, remembered (else FIRST) tile current through
+        //     the shared resolver, input scope on the canvas. It used to reveal
+        //     the remembered tile for work — the one zone command that zoomed
+        //     into a tile and took its keyboard — with its own inline lookup that
+        //     left a zone with NO current tile once that tile was deleted.
+        let zoneP1 = UUID(uuidString: "00000000-0000-0000-0000-00000000CD01")!
+        let zoneP2 = UUID(uuidString: "00000000-0000-0000-0000-00000000CD02")!
+        let p1aId = UUID(uuidString: "00000000-0000-0000-0000-00000000CD1A")!
+        let p1bId = UUID(uuidString: "00000000-0000-0000-0000-00000000CD1B")!
+        let p2aId = UUID(uuidString: "00000000-0000-0000-0000-00000000CD2A")!
+        let placementP1 = ZonePlacement(zoneId: zoneP1, projectId: nil, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 600, height: 400), color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "P1")
+        let placementP2 = ZonePlacement(zoneId: zoneP2, projectId: nil, origin: ZonePoint(x: 2000, y: 0), size: ZoneSize(width: 600, height: 400), color: "sky", collapsed: false, hydrationPolicy: .automatic, name: "P2")
+        let tileP1A = Tile(id: p1aId, kind: .note, title: "P1A", frame: TileFrame(x: 40, y: 40, width: 200, height: 150), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let tileP1B = Tile(id: p1bId, kind: .note, title: "P1B", frame: TileFrame(x: 300, y: 40, width: 200, height: 150), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
+        let tileP2A = Tile(id: p2aId, kind: .note, title: "P2A", frame: TileFrame(x: 2040, y: 40, width: 200, height: 150), zPosition: .fromLegacyRank(3), runtimeRef: nil, metadata: TileMetadata())
+        let zoneCanvas = CanvasNSView(
+            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 0.30), tiles: [tileP1A, tileP1B, tileP2A], groups: [], lastActiveTileId: nil),
+            zoneRenderModels: [
+                CanvasNSView.ZoneRenderModel(placement: placementP1, displayName: "P1"),
+                CanvasNSView.ZoneRenderModel(placement: placementP2, displayName: "P2")
+            ]
+        )
+        zoneCanvas.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        let zoneWindow = NSWindow(contentRect: zoneCanvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        zoneWindow.contentView = zoneCanvas
+        zoneWindow.orderFrontRegardless()
+        let zoneApp = AppDelegate()
+        zoneApp.canvasView = zoneCanvas
+        zoneCanvas.focusBroker = zoneApp.focusBroker
+        zoneApp.focusBroker.onAcceptedTileFocus = { [weak zoneCanvas] id in zoneCanvas?.markActive(tileId: id) }
+        for tile in [tileP1A, tileP1B, tileP2A] {
+            zoneCanvas.install(tileView: TileNSView(tile: tile), for: tile)
+        }
+        _ = zoneApp.focusBroker.requestFocus(.canvas, reason: .userClick)
+
+        let expectedP1Overview = CameraFraming.zoneOverviewViewport(for: CGRect(x: 0, y: 0, width: 600, height: 400), viewportSize: CGSize(width: 800, height: 600))
+        zoneApp.focusBroker.openModal(.palette)
+        _ = zoneApp.performPaletteAction(.jumpToZone(zoneP1))
+        zoneApp.focusBroker.closeModal(.palette)
+        try expect(zoneCanvas.canvasState.lastActiveTileId == p1aId, "assertion 10 precondition: P1's first tile must be current")
+        zoneApp.focusBroker.openModal(.palette)
+        _ = zoneApp.performPaletteAction(.jumpToZone(zoneP2))
+        zoneApp.focusBroker.closeModal(.palette)
+        try expect(zoneCanvas.canvasState.lastActiveTileId == p2aId, "assertion 10 precondition: P2's first tile must be current")
+        // Give P2's tile the keyboard, the way activating it would: coming back to
+        // P1 must not leave input in a tile that P1's overview has scrolled away.
+        _ = zoneApp.focusBroker.requestFocus(.tile(p2aId), reason: .userClick)
+        try expect(zoneApp.focusBroker.activeSurface == .tile(p2aId), "assertion 10 precondition: P2's tile must hold input scope")
+        try expect(zoneApp.performPaletteAction(.previousZone), "assertion 10: Go to Previous Zone must act")
+        try expect(vpEqual(zoneCanvas.viewport, expectedP1Overview), "assertion 10: Go to Previous Zone must produce P1's OVERVIEW, not a tile reveal; got (\(zoneCanvas.viewport.x),\(zoneCanvas.viewport.y),\(zoneCanvas.viewport.zoom)) want (\(expectedP1Overview.x),\(expectedP1Overview.y),\(expectedP1Overview.zoom))")
+        try expect(zoneCanvas.canvasState.lastActiveTileId == p1aId, "assertion 10: Go to Previous Zone must restore P1's remembered tile; got \(String(describing: zoneCanvas.canvasState.lastActiveTileId))")
+        try expect(zoneApp.focusBroker.activeSurface == .canvas, "assertion 10: Go to Previous Zone must land input on the canvas, not take a tile's scope; got \(String(describing: zoneApp.focusBroker.activeSurface))")
+
+        // …and a zone whose remembered tile has been DELETED falls back to that
+        // zone's first tile through the shared resolver, instead of arriving with
+        // no current tile at all.
+        zoneCanvas.removeTile(id: p1aId)
+        zoneApp.focusBroker.openModal(.palette)
+        _ = zoneApp.performPaletteAction(.jumpToZone(zoneP2))
+        zoneApp.focusBroker.closeModal(.palette)
+        try expect(zoneCanvas.canvasState.lastActiveTileId == p2aId, "assertion 10 precondition: back in P2 with its tile current")
+        try expect(zoneApp.performPaletteAction(.previousZone), "assertion 10: Go to Previous Zone must act with a deleted remembered tile")
+        try expect(zoneCanvas.canvasState.lastActiveTileId == p1bId, "assertion 10: a deleted remembered tile must fall back to the zone's FIRST tile; got \(String(describing: zoneCanvas.canvasState.lastActiveTileId))")
+        try expect(vpEqual(zoneCanvas.viewport, expectedP1Overview), "assertion 10: the fallback case must still produce P1's overview")
+        try expect(zoneApp.focusBroker.activeSurface == .canvas, "assertion 10: the fallback case must still land input on the canvas; got \(String(describing: zoneApp.focusBroker.activeSurface))")
+
+        // 11) The ONE zone route that must NOT land input on the canvas: nav
+        //     mode's ordinal jump. Nav mode stays open across the jump and
+        //     `handleHotkey` routes keys to it only while it owns activeSurface,
+        //     so taking that surface here would leave its overlay up with a dead
+        //     keyboard. It still gets the shared current-tile resolution.
+        guard let navOrdinalEvent = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, characters: "1", charactersIgnoringModifiers: "1", isARepeat: false, keyCode: 18) else {
+            throw CheckError.failed("assertion 11: could not synthesize the nav-mode ordinal keyDown")
+        }
+        zoneCanvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 0.30))
+        zoneApp.openNavMode()
+        try expect(zoneApp.focusBroker.activeSurface == .modal(.navMode), "assertion 11 precondition: nav mode must own input scope; got \(String(describing: zoneApp.focusBroker.activeSurface))")
+        try expect(zoneApp.handleHotkey(navOrdinalEvent), "assertion 11: nav mode must consume the ordinal key")
+        try expect(vpEqual(zoneCanvas.viewport, expectedP1Overview), "assertion 11: the ordinal jump must fit zone P1; got (\(zoneCanvas.viewport.x),\(zoneCanvas.viewport.y),\(zoneCanvas.viewport.zoom))")
+        try expect(zoneCanvas.canvasState.lastActiveTileId == p1bId, "assertion 11: the ordinal jump must resolve P1's current tile through the shared helper; got \(String(describing: zoneCanvas.canvasState.lastActiveTileId))")
+        try expect(zoneApp.focusBroker.activeSurface == .modal(.navMode), "assertion 11: an ordinal zone jump must leave nav mode owning input, or its overlay stays up with a dead keyboard; got \(String(describing: zoneApp.focusBroker.activeSurface))")
+
         let manifest: [String: Any] = [
             "check": "tile-reveal-work",
             "path": "performPaletteAction (⌘K rows) + synthesized .flagsChanged/.keyDown → handleFlagsChanged/handleHotkey → handleLeaderKey (real input path)",
@@ -17502,6 +17641,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 "6 ⌘K tile jump and leader-label jump share one framing policy",
                 "7 re-activating a framed tile is a viewport no-op that repairs focus",
                 "8 empty zones and stale current tiles move neither camera nor focus",
+                "9 the ⌘K Focus Current Tile row shares the hold-⌥ Return framing and survives palette dismissal",
+                "10 Go to Previous Zone is a zone jump: overview, remembered-else-first tile, canvas scope",
+                "11 nav mode's ordinal jump keeps nav mode's own input scope while sharing the current-tile resolution",
             ],
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
@@ -17819,6 +17961,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(vpEqual(canvas.viewport, vpBeforeEsc),
                    "assertion 8: Esc must not move the viewport")
 
+        // 9. A leader zone jump LANDS input scope on the canvas. It must not leave
+        //    the keyboard in the tile that held it before ⌥ — the new zone
+        //    overview has usually scrolled that tile off screen, so the user's
+        //    next keystrokes would disappear into a tile they cannot see. (The
+        //    leader closes its modal on the way out, and a modal close restores
+        //    the pre-leader surface unless the action has already chosen one.)
+        let zone9AId = UUID(uuidString: "00000000-0000-0000-0000-000000001891")!
+        let zone9BId = UUID(uuidString: "00000000-0000-0000-0000-000000001892")!
+        let tileId9 = UUID(uuidString: "00000000-0000-0000-0000-000000001893")!
+        let placement9A = ZonePlacement(zoneId: zone9AId, projectId: pId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 300, height: 200), color: "blue", collapsed: false, hydrationPolicy: .automatic, navKey: nil)
+        let placement9B = ZonePlacement(zoneId: zone9BId, projectId: pId, origin: ZonePoint(x: 1000, y: 0), size: ZoneSize(width: 300, height: 200), color: "mint", collapsed: false, hydrationPolicy: .automatic, navKey: nil)
+        let tile9 = Tile(id: tileId9, kind: .note, title: "T9", frame: TileFrame(x: 50, y: 50, width: 200, height: 150), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let expected9B = CameraFraming.zoneOverviewViewport(for: CGRect(x: 1000, y: 0, width: 300, height: 200), viewportSize: vpSize)
+        let canvas9 = CanvasNSView(
+            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tile9], groups: [], lastActiveTileId: nil),
+            activeZone: nil,
+            zoneRenderModels: [
+                CanvasNSView.ZoneRenderModel(placement: placement9A, displayName: "Zone9A"),
+                CanvasNSView.ZoneRenderModel(placement: placement9B, displayName: "Zone9B"),
+            ],
+            showsZoneChrome: false
+        )
+        canvas9.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        let window9 = NSWindow(contentRect: canvas9.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window9.contentView = canvas9
+        window9.orderFrontRegardless()
+        let app9 = AppDelegate()
+        app9.canvasView = canvas9
+        canvas9.focusBroker = app9.focusBroker
+        app9.focusBroker.onAcceptedTileFocus = { [weak canvas9] id in canvas9?.markActive(tileId: id) }
+        canvas9.install(tileView: TileNSView(tile: tile9), for: tile9)
+        app9.leaderDwell = 0
+        _ = app9.focusBroker.requestFocus(.tile(tileId9), reason: .userClick)
+        try expect(app9.focusBroker.activeSurface == .tile(tileId9),
+                   "assertion 9 precondition: zone 9A's tile must hold input scope before ⌥; got \(String(describing: app9.focusBroker.activeSurface))")
+        app9.handleFlagsChanged(try flagsEvent([.option], keyCode: 58))
+        try expect(app9.focusBroker.activeSurface == .modal(.leader),
+                   "assertion 9 precondition: the leader must open over the focused tile")
+        try expect(canvas9.leaderZoneJumpTarget(forKey: "2") == zone9BId,
+                   "assertion 9 precondition: '2' must resolve to zone 9B's auto ordinal")
+        _ = app9.handleHotkey(try keyDown("2", 19, mods: [.option]))
+        try expect(vpEqual(canvas9.viewport, expected9B),
+                   "assertion 9 precondition: '2' must fit-jump to zone 9B; got (\(canvas9.viewport.x),\(canvas9.viewport.y),\(canvas9.viewport.zoom))")
+        let stranded9 = CanvasEngine.tileScreenFrame(tile9.frame, viewport: canvas9.viewport)
+        try expect(!canvas9.bounds.intersects(stranded9),
+                   "assertion 9 precondition: zone 9B's overview must strand the pre-leader tile off screen; got \(stranded9) in \(canvas9.bounds)")
+        try expect(app9.focusBroker.activeSurface == .canvas,
+                   "assertion 9: a leader zone jump must land input scope on the canvas, not back in the off-screen pre-leader tile; got \(String(describing: app9.focusBroker.activeSurface))")
+
         let autoOrdinalMap = assignments.reduce(into: [String: String]()) { dict, pair in
             dict[pair.zoneId.uuidString] = pair.key
         }
@@ -17827,6 +18018,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "path": "synthesized .flagsChanged + .keyDown NSEvents → handleFlagsChanged / handleHotkey → handleLeaderKey (real input path)",
             "autoOrdinalMap": autoOrdinalMap,
             "configuredOverrideTarget": "zC (navKey='q') → fit(0,1000,300×200)",
+            "zoneJumpInputLanding": "canvas (never the off-screen pre-leader tile)",
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -18034,11 +18226,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             hydrationPolicy: .automatic,
             name: "Beta"
         )
-        // Tile inside zone B's world rect (1400..2200, 0..600).
+        // Tile inside zone B's world rect (1400..2200, 0..600), plus one inside
+        // zone A. The zone-A tile is the PRE-PALETTE input scope: at the starting
+        // viewport it is on screen, and zone B's overview strands it far off
+        // screen — so "where does input land after the jump" has a wrong answer
+        // that a user would feel (keystrokes into an invisible tile).
         let tileBId = UUID(uuidString: "00000000-0000-0000-0000-000000000B21")!
+        let tileAId = UUID(uuidString: "00000000-0000-0000-0000-000000000A11")!
         let tileInB = Tile(id: tileBId, kind: .note, title: "B-tile", frame: TileFrame(x: 1450, y: 50, width: 200, height: 150), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let tileInA = Tile(id: tileAId, kind: .note, title: "A-tile", frame: TileFrame(x: 50, y: 50, width: 200, height: 150), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
         let canvas = CanvasNSView(
-            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileInB], groups: [], lastActiveTileId: nil),
+            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileInA, tileInB], groups: [], lastActiveTileId: nil),
             zoneRenderModels: [
                 CanvasNSView.ZoneRenderModel(placement: zoneA, displayName: "Alpha"),
                 CanvasNSView.ZoneRenderModel(placement: zoneB, displayName: "Beta")
@@ -18052,10 +18250,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         app.canvasView = canvas
         canvas.focusBroker = app.focusBroker
         app.focusBroker.onAcceptedTileFocus = { [weak canvas] id in canvas?.markActive(tileId: id) }
+        canvas.install(tileView: TileNSView(tile: tileInA), for: tileInA)
         canvas.install(tileView: TileNSView(tile: tileInB), for: tileInB)
-        _ = app.focusBroker.requestFocus(.canvas, reason: .userClick)
 
-        // Precondition: open palette modal (snapshots .canvas).
+        /// The tile currently holding INPUT focus, if its screen frame is entirely
+        /// outside the window. Non-nil is the regression this fixture exists for.
+        func strandedInputFocusTile() -> UUID? {
+            guard let surface = app.focusBroker.activeSurface,
+                  case let .tile(id) = surface,
+                  let snapshot = canvas.navigationTileSnapshot(for: id) else { return nil }
+            let screen = CanvasEngine.tileScreenFrame(snapshot.worldFrame, viewport: canvas.viewport)
+            return canvas.bounds.intersects(screen) ? nil : id
+        }
+
+        // Precondition: the palette is opened FROM a tile (snapshots .tile(A)),
+        // which is what makes the landing assertions below real instead of a
+        // restatement of the snapshot restore.
+        _ = app.focusBroker.requestFocus(.tile(tileAId), reason: .userClick)
+        try expect(app.focusBroker.activeSurface == .tile(tileAId), "precondition: the pre-palette input scope must be zone A's tile; got \(String(describing: app.focusBroker.activeSurface))")
+        try expect(strandedInputFocusTile() == nil, "precondition: the pre-palette tile must start ON screen")
         app.focusBroker.openModal(.palette)
         try expect(app.focusBroker.activeSurface == .modal(.palette), "precondition: palette modal open; got \(String(describing: app.focusBroker.activeSurface))")
 
@@ -18079,9 +18292,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // (.plans/13-tile-reveal-work-framing.md). Activation is hold-⌥ Return /
         // "Focus Current Tile", witnessed by --tile-reveal-work-check.
         try expect(canvas.canvasState.lastActiveTileId == tileBId, "palette jump-to-zone: zone B's tile must become the current navigation target; got \(String(describing: canvas.canvasState.lastActiveTileId))")
-        try expect(app.focusBroker.activeSurface == .modal(.palette), "palette jump-to-zone: the zone jump must not take a tile's input scope; got \(String(describing: app.focusBroker.activeSurface))")
+        try expect(app.focusBroker.activeSurface == .canvas, "palette jump-to-zone: the zone jump must not take a tile's input scope — it lands on the canvas; got \(String(describing: app.focusBroker.activeSurface))")
+        // Teeth: zone B's overview has scrolled the pre-palette tile off screen,
+        // so restoring the palette's snapshot here would hand the user's next
+        // keystrokes to a tile they cannot see.
+        let strandedScreenFrame = CanvasEngine.tileScreenFrame(tileInA.frame, viewport: canvas.viewport)
+        try expect(!canvas.bounds.intersects(strandedScreenFrame), "palette jump-to-zone precondition: zone B's overview must strand the pre-palette tile off screen; got \(strandedScreenFrame) in \(canvas.bounds)")
         app.focusBroker.closeModal(.palette)
-        try expect(app.focusBroker.activeSurface == .canvas, "palette jump-to-zone: closing the palette restores canvas navigation, not a tile; got \(String(describing: app.focusBroker.activeSurface))")
+        try expect(app.focusBroker.activeSurface == .canvas, "palette jump-to-zone: closing the palette must land on canvas navigation, not restore the pre-palette tile; got \(String(describing: app.focusBroker.activeSurface))")
+        try expect(strandedInputFocusTile() == nil, "palette jump-to-zone: input focus must never be left in a tile the new zone overview scrolled off screen; stranded \(String(describing: strandedInputFocusTile()))")
 
         // Assert 6 — unknown zone id is a no-op.
         let beforeViewport = canvas.viewport
@@ -25336,6 +25555,30 @@ extension AppDelegate {
                 && revealSupervisor.attention(for: thereAgent) == previewAttentionBefore
                 && previewCanvas.canvasState.tiles.count == previewTileCountBefore,
                "preview must not switch workspace, focus/activate, clear attention, or attach a tile")
+
+    // Space preview deliberately shares the keyboard jump's reveal/work framing
+    // (.plans/13-tile-reveal-work-framing.md): a preview exists to make the tile
+    // READABLE, which is exactly what that policy produces. That makes the
+    // policy's "never zoom OUT" rule a preview guarantee too — previewing a tile
+    // you are already zoomed into must not yank the camera back out. The offset
+    // origin keeps the tile out of the context gutter so the framing has to
+    // recompose rather than no-op, or this has no teeth.
+    guard let previewWorld = previewCanvas.navigationTileSnapshot(for: previewTile)?.worldFrame else {
+        throw CheckError.failed("preview setup needs the target tile's world frame")
+    }
+    let previewWorldRect = CGRect(x: previewWorld.x, y: previewWorld.y, width: previewWorld.width, height: previewWorld.height)
+    let deepPreviewViewport = CanvasViewport(x: Double(previewWorld.x) - 8, y: Double(previewWorld.y) - 8, zoom: 2.5)
+    previewCanvas.setViewport(deepPreviewViewport)
+    try expect(abs(previewCanvas.canvasState.viewport.zoom - deepPreviewViewport.zoom) < 0.0001,
+               "preview precondition: the canvas must accept a 2.5× camera — got \(previewCanvas.canvasState.viewport.zoom)")
+    try expect(deepPreviewViewport.zoom > CameraFraming.maxJumpZoom,
+               "preview precondition: the deep-zoom camera must sit above maxJumpZoom")
+    try expect(!CameraFraming.isComposedForWork(worldRect: previewWorldRect, viewport: previewCanvas.canvasState.viewport, viewportSize: previewCanvas.bounds.size),
+               "preview precondition: the deep-zoom camera must not already be composed for work, or the no-op rule would carry this assertion")
+    try expect(revealInbox.sendTableKeyForQA(keyCode: 49),
+               "Space must travel through the production inbox table a second time")
+    try expect(previewCanvas.canvasState.viewport.zoom >= deepPreviewViewport.zoom - 0.0001,
+               "Space preview must never zoom OUT from a closer camera; 2.5× became \(previewCanvas.canvasState.viewport.zoom)")
 
     // Text-entry gate: every reserved category plus jump-only ⌘5 is withheld
     // BEFORE global dispatch, while unmatched typing still reaches the editor.

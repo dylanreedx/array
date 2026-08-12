@@ -4,12 +4,18 @@ import Foundation
 public enum CameraFraming {
     public static let mostlyVisibleAreaRatio = 0.75
     public static let tilePaddingScreenPx = 64.0
-    /// Screen-space band of surrounding canvas a reveal/work framing tries to
-    /// keep around the tile. Wider than `tilePaddingScreenPx` on purpose: its
-    /// job is CONTEXT (a gap-adjacent neighbor's edge stays on screen), not
-    /// merely "the tile isn't flush against the window edge". Only the no-op
-    /// rule reads it — composition centers the tile, which yields at least this
-    /// much gutter whenever the geometry allows.
+    /// Screen-space band of surrounding canvas a reveal/work framing aims for.
+    /// Wider than `tilePaddingScreenPx` on purpose: its job is CONTEXT (a
+    /// gap-adjacent neighbor's edge stays on screen), not merely "the tile isn't
+    /// flush against the window edge".
+    ///
+    /// Only the no-op rule reads it. Composition centers the tile, which yields
+    /// this much gutter only when the tile's screen size leaves room for it —
+    /// a tile within `2 × contextGutterScreenPx` of the viewport's size on an
+    /// axis gets less, and a viewport-sized tile gets none. Such a tile is
+    /// therefore never `isComposedForWork`, so every activation recomposes it;
+    /// composition is idempotent, so that repeats the same viewport rather than
+    /// drifting.
     public static let contextGutterScreenPx = 96.0
     public static let minJumpZoom = 0.25
     public static let maxJumpZoom = 1.25
@@ -80,9 +86,13 @@ public enum CameraFraming {
            isComposedForWork(worldRect: worldRect, viewport: currentViewport, viewportSize: viewportSize) {
             return currentViewport
         }
-        // Never zoom OUT to reveal: a user already closer than the kind's
-        // working zoom keeps their scale (clamped to the jump range).
-        let targetZoom = min(max(max(currentViewport.zoom, workingZoom), minJumpZoom), maxJumpZoom)
+        // Never zoom OUT to reveal. `minJumpZoom`/`maxJumpZoom` bound the zoom
+        // this policy may ASK FOR; they never pull back a camera the user has
+        // already chosen. The canvas permits up to 4.0
+        // (`CanvasEngine.defaultZoomRange`), so clamping the composed result
+        // would drag someone editing a note at 2.5× back out to 1.25 — exactly
+        // the zoom-out this mode exists to prevent.
+        let targetZoom = max(currentViewport.zoom, min(max(workingZoom, minJumpZoom), maxJumpZoom))
         return revealWorkComposition(for: worldRect, viewportSize: viewportSize, zoom: targetZoom)
     }
 

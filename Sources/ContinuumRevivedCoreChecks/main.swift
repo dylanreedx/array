@@ -7835,6 +7835,20 @@ do {
     let keptCloser = CameraFraming.revealWorkViewport(for: terminalRect, kind: .terminal, currentViewport: CanvasViewport(x: closerThanWorking.x + 400, y: closerThanWorking.y, zoom: 1.2), viewportSize: viewportSize)
     expect(abs(keptCloser.zoom - 1.2) < 0.0001, "a reveal must never zoom OUT from a closer working view")
 
+    // …and a user zoomed in ABOVE the jump clamp keeps their scale too.
+    // `maxJumpZoom` bounds the zoom the policy may ASK FOR; it must never pull
+    // back a camera the user already chose. The canvas permits 4.0
+    // (CanvasEngine.defaultZoomRange), so a 2× tile dragged down to 1.25 is the
+    // zoom-out this mode forbids. The offset origin keeps the tile OUT of the
+    // context gutter, so the recompose path (not the no-op path) is what has to
+    // hold the zoom — otherwise this row has no teeth.
+    let deepZoom = CanvasViewport(x: Double(terminalRect.minX) - 8, y: Double(terminalRect.minY) - 8, zoom: 2.0)
+    expect(deepZoom.zoom > CameraFraming.maxJumpZoom, "table precondition: the deep-zoom row must sit ABOVE maxJumpZoom")
+    expect(!CameraFraming.isComposedForWork(worldRect: terminalRect, viewport: deepZoom, viewportSize: viewportSize), "table precondition: the deep-zoom camera must not already be composed, or the no-op rule would carry this row")
+    let keptDeep = CameraFraming.revealWorkViewport(for: terminalRect, kind: .terminal, currentViewport: deepZoom, viewportSize: viewportSize)
+    expect(abs(keptDeep.zoom - deepZoom.zoom) < 0.0001, "a reveal must not zoom OUT past maxJumpZoom from a closer view; got \(keptDeep.zoom) from \(deepZoom.zoom)")
+    expect(CameraFraming.isComposedForWork(worldRect: terminalRect, viewport: keptDeep, viewportSize: viewportSize), "the recomposed deep-zoom reveal still composes the tile for work")
+
     // Small note tile: fits easily, centered, gutter far exceeds the minimum.
     let smallNoteRect = CGRect(x: 40, y: 40, width: 200, height: 170)
     let framedSmallNote = CameraFraming.revealWorkViewport(for: smallNoteRect, kind: .note, currentViewport: lowZoom, viewportSize: viewportSize)

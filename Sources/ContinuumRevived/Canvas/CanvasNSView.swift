@@ -1556,6 +1556,15 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Frames the tile as a readable jump target. This first T07 slice snaps to
     /// the computed camera target; animation remains out of scope until a
     /// transition coordinator/recorder is added.
+    ///
+    /// The NON-keyboard reveals come through here — inbox Space preview,
+    /// `TileSpawner.revealTile`, and (via `jumpToTileFromPalette`) a sidebar tile
+    /// click. All three deliberately use the same reveal/work framing as a ⌘K
+    /// tile jump: each one exists to put a tile in front of the user to READ or
+    /// USE, which is what that policy produces, and two of them take the tile's
+    /// input scope as well. The policy's "never zoom out" rule is what makes that
+    /// safe from a closer camera; the Space-preview case is witnessed in
+    /// `--agent-inbox-check`.
     func centerOnTile(_ tileId: UUID) {
         guard let viewport = framedViewportForTileJump(tileId) else { return }
         setViewport(viewport)
