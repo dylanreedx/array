@@ -39,6 +39,7 @@ check --conductor-queue-tile-check
 check --cross-project-agents-check
 check --diff-tile-check
 check --drag-magnetize-check
+check --file-markdown-perf-check
 check --file-markdown-preview-check
 check --file-open-active-context-check
 check --file-tree-boot-persistence-check
@@ -185,6 +186,7 @@ leg run_app_check .build/debug/Array --conductor-queue-tile-check
 leg run_app_check .build/debug/Array --cross-project-agents-check
 leg run_app_check .build/debug/Array --diff-tile-check
 leg run_app_check .build/debug/Array --drag-magnetize-check
+leg run_app_check .build/debug/Array --file-markdown-perf-check
 leg run_app_check .build/debug/Array --file-markdown-preview-check
 leg run_app_check .build/debug/Array --file-open-active-context-check
 leg run_app_check .build/debug/Array --file-tree-boot-persistence-check

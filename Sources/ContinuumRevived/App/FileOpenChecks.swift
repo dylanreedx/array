@@ -269,6 +269,122 @@ enum FileOpenChecks {
                    "an empty path must fail with a user-facing message; got \(empty)")
     }
 
+    // MARK: - Section 4: the rendered document must not re-measure on every layout
+
+    /// A Markdown tile lays out whenever the canvas does — every pan, zoom, tile
+    /// move and appearance flip. Measuring a block is NOT cheap: prose builds a
+    /// fresh attributed string per row, and a fenced block (which is where a GFM
+    /// table lands) measures its entire source at unbounded width. Re-measuring
+    /// every block on every pass froze the app on a real repo document.
+    static func runMarkdownPerformanceCheck() throws {
+        let document = perfFixture()
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
+        let view = FileMarkdownDocumentView(frame: NSRect(x: 0, y: 0, width: 620, height: 460))
+        host.addSubview(view)
+
+        let renderStart = ProcessInfo.processInfo.systemUptime
+        view.apply(markdown: document, theme: .dark)
+        view.layoutSubtreeIfNeeded()
+        let renderSeconds = ProcessInfo.processInfo.systemUptime - renderStart
+
+        let blocks = view.qaBlockViews.count
+        try expect(blocks > 40, "the performance fixture must produce a realistically large document; got \(blocks) blocks")
+        try expect(view.qaVisibleText().contains("perf-sentinel"),
+                   "the performance fixture must actually render its content")
+
+        // What a canvas pan/zoom actually does to a tile: reposition it and lay it
+        // out again. The document did not change and its width did not change, so
+        // this must cost no measurement at all.
+        let measurementsAfterRender = view.qaMeasurementCount
+        let panStart = ProcessInfo.processInfo.systemUptime
+        for step in 0..<30 {
+            host.frame = NSRect(x: CGFloat(step), y: CGFloat(step), width: 900, height: 700)
+            view.frame = NSRect(x: CGFloat(step), y: 0, width: 620, height: 460)
+            view.qaRelayout()
+        }
+        let panSeconds = ProcessInfo.processInfo.systemUptime - panStart
+        let panMeasurements = view.qaMeasurementCount - measurementsAfterRender
+
+        // A width change is the one thing that legitimately re-measures.
+        view.frame = NSRect(x: 0, y: 0, width: 520, height: 460)
+        view.layoutSubtreeIfNeeded()
+        view.qaRelayout()
+        let resizeMeasurements = view.qaMeasurementCount - measurementsAfterRender - panMeasurements
+
+        print("markdown perf: \(blocks) blocks, first render \(String(format: "%.3f", renderSeconds))s, 30 same-width relayouts \(String(format: "%.3f", panSeconds))s, measurements render=\(measurementsAfterRender) pan=\(panMeasurements) resize=\(resizeMeasurements)")
+
+        try expect(panMeasurements == 0,
+                   "30 same-width relayouts must re-measure NOTHING; they measured \(panMeasurements) block(s)")
+        // ~16ms per FORCED full-subtree relayout of 183 blocks is AppKit laying out
+        // 183 TextKit stacks, not this view re-deciding anything — the measurement
+        // count above is the assertion with teeth. This is the coarse guard that
+        // notices a return to per-pass measuring, with 2x headroom over measured.
+        try expect(panSeconds < 1.0,
+                   "30 same-width relayouts must stay under 1s; took \(String(format: "%.3f", panSeconds))s")
+        try expect(resizeMeasurements > 0 && resizeMeasurements <= blocks,
+                   "a width change must re-measure each block exactly once; it measured \(resizeMeasurements) for \(blocks) blocks")
+        try expect(renderSeconds < 2.0,
+                   "the first render of a large document must stay under 2s; took \(String(format: "%.3f", renderSeconds))s")
+        try expect(view.qaTruncatedBlockCount == 0,
+                   "a document of \(blocks) blocks must render in full, not truncate")
+
+        // The file loader admits up to 1 MB. Un-budgeted, a 546 KB Markdown file
+        // built 12,000 TextKit views: 5.1s to build, 5.1s to lay out, 1.39 GB
+        // resident — the app froze and then died. Preview is now bounded and says
+        // where it stopped.
+        let hugeHost = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
+        let huge = FileMarkdownDocumentView(frame: NSRect(x: 0, y: 0, width: 620, height: 460))
+        hugeHost.addSubview(huge)
+        let hugeSource = hugeFixture()
+        let hugeStart = ProcessInfo.processInfo.systemUptime
+        huge.apply(markdown: hugeSource, theme: .dark)
+        huge.layoutSubtreeIfNeeded()
+        let hugeSeconds = ProcessInfo.processInfo.systemUptime - hugeStart
+        let budget = FileMarkdownDocumentView.maximumRenderedBlocks
+        print("markdown perf: \(hugeSource.count) chars rendered as \(huge.qaBlockViews.count) view(s) in \(String(format: "%.3f", hugeSeconds))s, \(huge.qaTruncatedBlockCount) block(s) held back")
+        try expect(huge.qaBlockViews.count <= budget + 1,
+                   "a huge document must render at most \(budget) blocks plus one notice; it built \(huge.qaBlockViews.count) views")
+        try expect(huge.qaTruncatedBlockCount > 1_000,
+                   "the huge fixture must actually exceed the budget; only \(huge.qaTruncatedBlockCount) block(s) were held back")
+        try expect(huge.qaVisibleText().contains("Switch to Source"),
+                   "a truncated preview must SAY it stopped and point at Source")
+        try expect(hugeSeconds < 1.5,
+                   "a huge document must still open in under 1.5s; took \(String(format: "%.3f", hugeSeconds))s")
+    }
+
+    /// ~550 KB of ordinary Markdown — well inside the loader's 1 MB ceiling.
+    private static func hugeFixture() -> String {
+        (0..<4_000).map { index in
+            "## Section \(index)\n\nProse with `code`, **strong** text and a [link](https://example.com/\(index)).\n\n- item a\n- item b\n"
+        }.joined(separator: "\n")
+    }
+
+    /// Shaped like the documents that froze: long prose, a fenced block, and a
+    /// wide GFM table (which the parser renders as one monospace fallback block
+    /// whose source measures at unbounded width).
+    private static func perfFixture() -> String {
+        var lines: [String] = ["# perf-sentinel", ""]
+        for index in 0..<60 {
+            lines.append("## Section \(index)")
+            lines.append("")
+            lines.append(String(repeating: "Prose with `code`, **strong** text and a [link](https://example.com/\(index)). ", count: 8))
+            lines.append("")
+            lines.append("- item one for \(index)")
+            lines.append("- item two for \(index)")
+            lines.append("")
+        }
+        lines.append("| version | build | notes |")
+        lines.append("| ------- | ----- | ----- |")
+        for index in 0..<20 {
+            lines.append("| 0.\(index).0 | \(index) | \(String(repeating: "a long ledger note that never wraps ", count: 60)) |")
+        }
+        lines.append("")
+        lines.append("```swift")
+        lines.append(String(repeating: "let padding = \"wide\"  // \(String(repeating: "x", count: 200))\n", count: 40))
+        lines.append("```")
+        return lines.joined(separator: "\n")
+    }
+
     // MARK: - Section 3: an agent's local-file link opens beside the agent
 
     /// Drives the real production chain — assistant Markdown → semantic link →

@@ -495,6 +495,10 @@ run_app_check .build/debug/Array --file-markdown-preview-check
 # .plans/15: an explicit local-file link in an agent's answer opens beside that
 # agent, resolved against ITS checkout — and cannot reach outside it.
 run_app_check .build/debug/Array --agent-local-file-link-check
+# .plans/15: one AppKit view per semantic block is ruinous for a big file — 546 KB
+# of Markdown built 12,000 TextKit stacks, 1.39 GB resident, and the process died.
+# Preview is budgeted and says where it stopped, and a relayout re-measures nothing.
+run_app_check .build/debug/Array --file-markdown-perf-check
 run_app_check .build/debug/Array --workspace-profile-check
 run_app_check .build/debug/Array --add-zone-check
 run_app_check .build/debug/Array --browser-lru-budget-check

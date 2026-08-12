@@ -77,6 +77,14 @@ shipped. Nothing is unreleased right now.
 - **Markdown file tiles: tables, images, live reload, persisted mode**
   (`.plans/15` deferred list). Tables currently fall through to the parser's
   readable monospace fallback — visible, not pretty.
+- **Preview is budgeted, not virtualized** (0.4.16). One AppKit view per semantic
+  block means a 546 KB file built 12,000 TextKit stacks (5.1s + 5.1s, 1.39 GB,
+  process killed). Preview now renders 400 blocks and says so; the real fix is
+  virtualization — `AgentTranscriptListView` already does it for transcripts.
+- **`AssistantProseView.layout()` re-measures every row on every layout pass.**
+  The file document caches block heights around it, but the cost is inside the
+  shared transcript renderer, so every agent transcript pays it too (~16 ms for a
+  forced relayout of 183 blocks). Cache there next.
 - **pi occupancy abstains.** `AgentContextOccupancy` returns nil for
   `.piMessageUsage` because pi's docs don't say whether `input` already includes
   cache. Verify against a real pi run and add it — until then pi-run agents get

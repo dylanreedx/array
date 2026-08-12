@@ -32,6 +32,43 @@ Persistence followed the same fork: the layer path writes the layer's tiles
 through the active controller's own `ProjectStore`, so project A's canvas is
 untouched — asserted directly.
 
+## The cost of one view per block (0.4.16)
+
+Shipping 0.4.15 exposed what "reuse the transcript renderers" really costs: they
+build **one AppKit view with its own TextKit stack per semantic block**, which is
+right for a transcript and ruinous for a file the loader will happily admit at
+1 MB. Measured on the real renderer:
+
+| document | blocks | build | layout | resident |
+|---|---|---|---|---|
+| `docs/VERSIONING.md` (28 KB) | 11 | 0.030 s | 0.021 s | — |
+| `docs/09-decisions.md` (84 KB) | 293 | 0.137 s | 0.089 s | — |
+| generated 546 KB | 12,000 | **5.147 s** | **5.145 s** | **1.39 GB** |
+
+The 546 KB case froze the app and then killed it — and with the budget removed
+again, the perf check's own process dies with **exit 133** before it can report,
+which is the crash Dylan saw, not a slow render.
+
+Two fixes, both small:
+
+1. **Preview is budgeted at 400 blocks** and appends a rendered notice saying how
+   many blocks it held back and to switch to Source. Source is one `NSTextView`
+   holding the whole file, which TextKit handles fine, so nothing is lost —
+   546 KB now renders in 0.509 s at 126 MB.
+2. **Measured heights are cached per width.** `layout()` re-measured every block
+   on every pass, and measuring is not cheap: prose rebuilds an attributed string
+   per row, and a fenced block — where a GFM table lands — measures its entire
+   source at unbounded width. 30 same-width relayouts measured 5,490 blocks
+   before; they measure 0 now.
+
+`--file-markdown-perf-check` holds both, and asserts the zero-measurement
+property rather than only a stopwatch.
+
+**Still open:** `AssistantProseView.layout()` re-measures its rows on every
+layout pass, so a forced full-subtree relayout of 183 blocks still costs ~16 ms.
+That is inside the shared transcript renderer, so the same cost is paid by every
+agent transcript; caching there is a separate change with a wider blast radius.
+
 ## Scope actually shipped
 
 Everything in "Outcome" plus tile dedupe (opening an open file reveals it),

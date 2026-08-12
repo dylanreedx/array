@@ -14,6 +14,9 @@ import ContinuumRevivedCore
 /// registry's readable-source fallback rather than disappearing.
 @MainActor
 final class FileMarkdownDocumentView: NSView {
+    /// Preview renders at most this many semantic blocks; see `BodyView`.
+    static var maximumRenderedBlocks: Int { BodyView.maximumRenderedBlocks }
+
     private let scrollView = NSScrollView()
     private let body = BodyView()
 
@@ -81,6 +84,19 @@ final class FileMarkdownDocumentView: NSView {
 
     var qaClipHeight: CGFloat { scrollView.contentView.bounds.height }
 
+    /// How many times a block has been measured since this view was built.
+    var qaMeasurementCount: Int { body.measurementCount }
+
+    /// Forces the document body through a real layout pass, the way a canvas
+    /// relayout does. Used to prove a pan costs no measurement.
+    func qaRelayout() {
+        body.needsLayout = true
+        body.layoutSubtreeIfNeeded()
+    }
+
+    /// Blocks the Preview deliberately did not render (0 for an ordinary document).
+    var qaTruncatedBlockCount: Int { body.truncatedBlockCount }
+
     /// Every `RichInlineTextView` in the document, for link and selection assertions.
     func qaInlineTextViews() -> [RichInlineTextView] {
         var found: [RichInlineTextView] = []
@@ -99,15 +115,32 @@ final class FileMarkdownDocumentView: NSView {
         private static let blockSpacing = CGFloat(Space.m)
         private static let documentInset = CGFloat(Space.m)
 
+        /// Each semantic block becomes one AppKit view with its own TextKit stack.
+        /// That is affordable for a document, ruinous for a dump: a 546 KB Markdown
+        /// file parses to 12,000 blocks, which cost 5.1s to build, 5.1s to lay out
+        /// and 1.39 GB resident — and the loader admits files up to 1 MB, so the
+        /// next one along is a jetsam kill, not a slow render. Preview renders up to
+        /// this many blocks and then says so out loud; Source always holds the whole
+        /// file in one text view, which TextKit is built for.
+        static let maximumRenderedBlocks = 400
+
         private struct Row {
             let block: AgentBlock
             let renderer: any AgentBlockRendering
             let view: NSView
+            /// Height for the last width it was measured at. Layout runs on every
+            /// canvas pass; re-measuring is not free (prose rebuilds an attributed
+            /// string per row, and a fenced block — where a GFM table lands —
+            /// measures its whole source at unbounded width).
+            var measuredHeight: CGFloat = 0
         }
 
         private var rows: [Row] = []
         private var context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
         private var lastLaidOutWidth: CGFloat = -1
+        private var measuredWidth: CGFloat = -1
+        private(set) var measurementCount = 0
+        private(set) var truncatedBlockCount = 0
 
         var blockViews: [NSView] { rows.map(\.view) }
 
@@ -128,10 +161,18 @@ final class FileMarkdownDocumentView: NSView {
         func apply(markdown: String, theme: TokenTheme) {
             context.appearance = theme
             rows.forEach { $0.view.removeFromSuperview() }
+            rows = []
+            truncatedBlockCount = 0
             guard let entryID = AgentNodeID(rawValue: "file:markdown") else { return }
             let parsed = MarkdownAgentMarkupParser().parse(markdown, entryID: entryID, previous: [])
             let registry = AgentBlockRendererRegistry.production
-            rows = parsed.blocks.compactMap { block in
+
+            var blocks = parsed.blocks
+            if blocks.count > Self.maximumRenderedBlocks {
+                truncatedBlockCount = blocks.count - Self.maximumRenderedBlocks
+                blocks = Array(blocks.prefix(Self.maximumRenderedBlocks))
+            }
+            rows = blocks.compactMap { block in
                 guard let renderer = try? registry.renderer(for: block.kind) else { return nil }
                 let view = renderer.makeView()
                 renderer.update(view: view, block: block, context: context)
@@ -139,8 +180,10 @@ final class FileMarkdownDocumentView: NSView {
                 addSubview(view)
                 return Row(block: block, renderer: renderer, view: view)
             }
-            lastLaidOutWidth = -1
-            needsLayout = true
+            if truncatedBlockCount > 0, let notice = makeTruncationRow(entryID: entryID, registry: registry) {
+                rows.append(notice)
+            }
+            invalidateMeasurements()
         }
 
         func applyTheme(_ theme: TokenTheme) {
@@ -149,6 +192,29 @@ final class FileMarkdownDocumentView: NSView {
                 row.renderer.update(view: row.view, block: row.block, context: context)
                 row.renderer.updateAccessibility(view: row.view, block: row.block, context: context)
             }
+            invalidateMeasurements()
+        }
+
+        /// Nothing silently disappears: the boundary is a rendered paragraph in the
+        /// document, and Source still holds every byte.
+        private func makeTruncationRow(
+            entryID: AgentNodeID,
+            registry: AgentBlockRendererRegistry
+        ) -> Row? {
+            guard let id = entryID.childID(stableKey: "truncation-notice"),
+                  let renderer = try? registry.renderer(for: .paragraph)
+            else { return nil }
+            let text = "Preview stops here — \(truncatedBlockCount) more block(s) in this file. Switch to Source for the whole document."
+            let block = AgentBlock(id: id, kind: .paragraph, payload: .paragraph([.emphasis([.text(text)])]))
+            let view = renderer.makeView()
+            renderer.update(view: view, block: block, context: context)
+            renderer.updateAccessibility(view: view, block: block, context: context)
+            addSubview(view)
+            return Row(block: block, renderer: renderer, view: view)
+        }
+
+        private func invalidateMeasurements() {
+            measuredWidth = -1
             lastLaidOutWidth = -1
             needsLayout = true
         }
@@ -158,10 +224,27 @@ final class FileMarkdownDocumentView: NSView {
             let width = bounds.width
             guard width > 0 else { return }
             let available = max(1, width - Self.documentInset * 2)
+            // Measure only when the width the blocks were measured at actually
+            // changed. A pan, a zoom, or a repeated layout pass reuses the heights.
+            if abs(measuredWidth - width) > 0.5 {
+                for index in rows.indices {
+                    measurementCount += 1
+                    rows[index].measuredHeight = rows[index].renderer.measure(
+                        block: rows[index].block,
+                        width: available,
+                        context: context
+                    )
+                }
+                measuredWidth = width
+            }
             var y = Self.documentInset
             for (index, row) in rows.enumerated() {
-                let height = row.renderer.measure(block: row.block, width: available, context: context)
-                row.view.frame = NSRect(x: Self.documentInset, y: y, width: available, height: height)
+                let height = row.measuredHeight
+                let frame = NSRect(x: Self.documentInset, y: y, width: available, height: height)
+                // Assigning an unchanged frame still marks that subview as needing
+                // layout, and a prose block re-measures every row when it lays out.
+                // Nothing moved, so nothing is touched.
+                if row.view.frame != frame { row.view.frame = frame }
                 y += height
                 if index + 1 < rows.count { y += Self.blockSpacing }
             }
