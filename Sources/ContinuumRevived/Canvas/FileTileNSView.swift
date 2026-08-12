@@ -3,12 +3,30 @@ import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
-/// Tile view that hosts a read-only plain-text preview of a single file.
+/// Tile view that hosts a read-only preview of a single file: the monospaced
+/// source viewer for text and code, and — for `.md`/`.markdown` — a native
+/// rendered document with a tile-local Preview/Source switch.
 @MainActor
 final class FileTileNSView: TileNSView {
+    enum Mode: Equatable {
+        case preview
+        case source
+    }
+
     private(set) var textView: NSTextView
     private let scrollView: NSScrollView
     private let filePath: String?
+    /// Markdown files only. Deliberately view-local: reopening or restoring a
+    /// Markdown tile returns to Preview, so this slice adds nothing to
+    /// `TileMetadata` or sync before dogfooding says it is worth it.
+    private(set) var mode: Mode = .preview
+    private(set) var presentation: FilePreview.Presentation = .sourceText
+    /// One immutable loaded-text snapshot shared by both modes, so switching is
+    /// instant and Preview can never drift from Source inside one tile.
+    private(set) var loadedText: String?
+    private var markdownView: FileMarkdownDocumentView?
+    private var modeControl: NSSegmentedControl?
+    private var pendingReveal: (line: Int, column: Int?)?
     /// The "file unavailable" placeholder, built lazily by `showMessage`. Held so
     /// `applyTokens()` can re-paint it — it is a content view like any other, and
     /// a placeholder that stays dark under Aqua is the same bug as a tile that does.
@@ -71,13 +89,130 @@ final class FileTileNSView: TileNSView {
         applyDocumentTokens(to: textView)
         messageContainer?.layer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(in: self)
         messageLabel?.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        markdownView?.applyTheme(effectiveTokenTheme)
     }
 
     override func acquireFocus(reason: FocusRequest) -> Bool {
         canvas?.bringToFront(tileId: tile.id)
-        window?.makeFirstResponder(textView)
+        window?.makeFirstResponder(mode == .preview ? (markdownView ?? textView) : textView)
         return true
     }
+
+    // MARK: - Markdown mode
+
+    /// Switches the body in place. The tile keeps its identity, its persisted
+    /// metadata, and its already-loaded text.
+    func setMode(_ newMode: Mode) {
+        guard presentation == .markdown, newMode != mode else { return }
+        mode = newMode
+        modeControl?.selectedSegment = newMode == .preview ? 0 : 1
+        showBody()
+    }
+
+    @objc private func modeControlChanged(_ sender: NSSegmentedControl) {
+        setMode(sender.selectedSegment == 0 ? .preview : .source)
+    }
+
+    private func installModeControl() {
+        guard modeControl == nil else { return }
+        let control = NSSegmentedControl(labels: ["Preview", "Source"], trackingMode: .selectOne, target: self, action: #selector(modeControlChanged(_:)))
+        control.controlSize = .small
+        control.font = NSFont.systemFont(ofSize: 10, weight: .medium)
+        control.selectedSegment = mode == .preview ? 0 : 1
+        control.setAccessibilityLabel("Markdown display mode")
+        modeControl = control
+        setTitleBarAccessory(control)
+    }
+
+    /// Installs the body for the current mode from the loaded snapshot.
+    private func showBody() {
+        guard let loadedText else { return }
+        switch (presentation, mode) {
+        case (.markdown, .preview):
+            let view = markdownView ?? FileMarkdownDocumentView(frame: bounds)
+            markdownView = view
+            view.apply(markdown: loadedText, theme: effectiveTokenTheme)
+            setContentView(view)
+        default:
+            textView.string = loadedText
+            setContentView(scrollView)
+            applyPendingReveal()
+        }
+    }
+
+    /// Scrolls the source view to a one-based line (and optional column) without
+    /// persisting anything. Called when an agent link named `file.swift:42`.
+    /// Markdown tiles switch to Source first: a coordinate refers to the text.
+    func reveal(line: Int, column: Int? = nil) {
+        guard line > 0 else { return }
+        pendingReveal = (line, column)
+        if presentation == .markdown, mode != .source {
+            setMode(.source)
+        } else {
+            applyPendingReveal()
+        }
+    }
+
+    private func applyPendingReveal() {
+        guard let pendingReveal, !textView.string.isEmpty else { return }
+        self.pendingReveal = nil
+        let text = textView.string as NSString
+        var lineStart = 0
+        var currentLine = 1
+        while currentLine < pendingReveal.line {
+            let searchRange = NSRange(location: lineStart, length: text.length - lineStart)
+            let newline = text.range(of: "\n", options: [], range: searchRange)
+            guard newline.location != NSNotFound else { break }
+            lineStart = newline.location + newline.length
+            currentLine += 1
+        }
+        let lineEnd = text.range(
+            of: "\n",
+            options: [],
+            range: NSRange(location: lineStart, length: text.length - lineStart)
+        )
+        let lineLength = (lineEnd.location == NSNotFound ? text.length : lineEnd.location) - lineStart
+        var location = lineStart
+        if let column = pendingReveal.column, column > 1 {
+            location = min(lineStart + column - 1, lineStart + max(lineLength, 0))
+        }
+        let range = NSRange(location: min(location, text.length), length: 0)
+        textView.scrollRangeToVisible(range)
+        // Select from the coordinate to the end of that line — a subtle "here",
+        // never a selection that runs past the line.
+        let selectionLength = max(0, min(lineStart + lineLength, text.length) - range.location)
+        textView.setSelectedRange(NSRange(location: range.location, length: selectionLength))
+        // The QA reveal assertion reads the clip origin, which only moves once
+        // AppKit has laid the document out.
+        scrollView.layoutSubtreeIfNeeded()
+        textView.scrollRangeToVisible(range)
+    }
+
+    /// QA: the one-based line currently at the top of the visible source rect.
+    func qaFirstVisibleSourceLine() -> Int? {
+        guard let layoutManager = textView.layoutManager, let container = textView.textContainer else { return nil }
+        layoutManager.ensureLayout(for: container)
+        let visible = textView.visibleRect
+        let glyphRange = layoutManager.glyphRange(forBoundingRect: visible, in: container)
+        guard glyphRange.location != NSNotFound else { return nil }
+        let charIndex = layoutManager.characterIndexForGlyph(at: glyphRange.location)
+        let text = textView.string as NSString
+        guard charIndex <= text.length else { return nil }
+        var line = 1
+        var index = 0
+        while index < charIndex {
+            let newline = text.range(of: "\n", options: [], range: NSRange(location: index, length: charIndex - index))
+            guard newline.location != NSNotFound else { break }
+            index = newline.location + newline.length
+            line += 1
+        }
+        return line
+    }
+
+    /// QA: the rendered Markdown document, when one is installed.
+    var qaMarkdownDocument: FileMarkdownDocumentView? { markdownView }
+    /// QA: the mode control, which must exist for Markdown and never otherwise.
+    var qaModeControl: NSSegmentedControl? { modeControl }
 
     struct TextVisibilityEvidence: CustomStringConvertible {
         var containsExpectedText = false
@@ -230,9 +365,14 @@ final class FileTileNSView: TileNSView {
     private func apply(_ result: FilePreview) {
         switch result {
         case let .text(content):
-            setContentView(scrollView)
-            textView.string = content
+            loadedText = content
+            presentation = filePath.map { FilePreview.presentation(forPath: $0) } ?? .sourceText
+            if presentation == .markdown {
+                installModeControl()
+            }
+            showBody()
         case let .unavailable(message):
+            loadedText = nil
             showMessage(message)
         }
     }

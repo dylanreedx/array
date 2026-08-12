@@ -5,6 +5,7 @@ check --agent-inbox-check
 check --agent-incremental-refresh-check
 check --agent-input-check
 check --agent-inventory-wiring-check
+check --agent-local-file-link-check
 check --agent-message-bus-check
 check --agent-observer-independence-check
 check --agent-restore-check
@@ -38,6 +39,8 @@ check --conductor-queue-tile-check
 check --cross-project-agents-check
 check --diff-tile-check
 check --drag-magnetize-check
+check --file-markdown-preview-check
+check --file-open-active-context-check
 check --file-tree-boot-persistence-check
 check --file-tree-hardening-check
 check --focus-border-check
@@ -138,19 +141,8 @@ check --zone-tier-transition-check
 leg run git diff --check
 leg run scripts/check-agent-tile-ux-program.sh
 leg run scripts/check-app-bundle.sh --configuration debug
-leg run_leg scripts/check-color-hygiene.sh
-leg run_leg scripts/check-matrix-inventory.sh
-leg run_leg scripts/check-root-docs.sh
 leg run scripts/check-sidebar-native-ux-program.sh
 leg run swift build
-leg run_leg swift run ContinuumRevivedAgentContentChecks
-leg run_leg swift run ContinuumRevivedAgentUIChecks
-leg run_leg swift run ContinuumRevivedCoreChecks
-leg run_leg swift run ContinuumRevivedFileTreeChecks
-leg run_leg swift run ContinuumRevivedPaletteChecks
-leg run_leg swift run ContinuumRevivedPerfChecks
-leg run_leg swift run ContinuumRevivedRelayChecks
-leg run_leg swift run ContinuumRevivedSyncChecks
 leg run swift run ContinuumRevivedSyncIntegrationChecks
 leg run_app_check .build/debug/Array --add-zone-check
 leg run_app_check .build/debug/Array --agent-display-name-check
@@ -159,6 +151,7 @@ leg run_app_check .build/debug/Array --agent-inbox-check
 leg run_app_check .build/debug/Array --agent-incremental-refresh-check
 leg run_app_check .build/debug/Array --agent-input-check
 leg run_app_check .build/debug/Array --agent-inventory-wiring-check
+leg run_app_check .build/debug/Array --agent-local-file-link-check
 leg run_app_check .build/debug/Array --agent-message-bus-check
 leg run_app_check .build/debug/Array --agent-observer-independence-check
 leg run_app_check .build/debug/Array --agent-restore-check
@@ -192,6 +185,8 @@ leg run_app_check .build/debug/Array --conductor-queue-tile-check
 leg run_app_check .build/debug/Array --cross-project-agents-check
 leg run_app_check .build/debug/Array --diff-tile-check
 leg run_app_check .build/debug/Array --drag-magnetize-check
+leg run_app_check .build/debug/Array --file-markdown-preview-check
+leg run_app_check .build/debug/Array --file-open-active-context-check
 leg run_app_check .build/debug/Array --file-tree-boot-persistence-check
 leg run_app_check .build/debug/Array --file-tree-hardening-check
 leg run_app_check .build/debug/Array --focus-border-check
@@ -290,6 +285,17 @@ leg run_app_check .build/debug/Array --zone-resize-check
 leg run_app_check .build/debug/Array --zone-save-isolation-check
 leg run_app_check .build/debug/Array --zone-tier-transition-check
 leg run_ios_build
+leg run_leg scripts/check-color-hygiene.sh
+leg run_leg scripts/check-matrix-inventory.sh
+leg run_leg scripts/check-root-docs.sh
+leg run_leg swift run ContinuumRevivedAgentContentChecks
+leg run_leg swift run ContinuumRevivedAgentUIChecks
+leg run_leg swift run ContinuumRevivedCoreChecks
+leg run_leg swift run ContinuumRevivedFileTreeChecks
+leg run_leg swift run ContinuumRevivedPaletteChecks
+leg run_leg swift run ContinuumRevivedPerfChecks
+leg run_leg swift run ContinuumRevivedRelayChecks
+leg run_leg swift run ContinuumRevivedSyncChecks
 bundle-check --app-support-channel-check
 bundle-check --delete-confirm-policy-defaults-check
 bundle-check --file-tree-boot-persistence-check
@@ -298,7 +304,7 @@ bundle-check --palette-duplicate-root-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 21
 count ContinuumRevivedAgentUIChecks 19
-count ContinuumRevivedCoreChecks 74
+count ContinuumRevivedCoreChecks 77
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

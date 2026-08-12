@@ -10735,4 +10735,9 @@ runAgentTranscriptProjectionChecks()
 // local authorship, caller-owned stable IDs, retries, and provider-history isolation.
 runLocalTranscriptNodeChecks()
 
+// Plan: .plans/15-file-opening-markdown-preview.md — resolving an agent's
+// local-file link inside its own checkout, and the file-kind classification the
+// file tile presents from.
+runAgentLocalFileLinkChecks()
+
 print("ContinuumRevivedCoreChecks passed")

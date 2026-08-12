@@ -153,7 +153,18 @@ frozen fallback in QA).
    name goes in `tokenAdoptedOwners` with owner-scoped legal values
    (`UIProbeAppearance.swift`), and resting states paint `nil`, never
    `.clear` (a painted transparent is an unregistered literal).
-9. **Two installs on ONE project root.** The channel split covers Application
+9. **Spawning a tile through `canvasView.install` + `saveCanvas(canvasState)`.**
+   The canvas has TWO models for project tiles. At boot the flat
+   `canvasState.tiles` (WORLD frames) owns the active project; once
+   `WorkspaceRuntime` has called `setZones`, the active project's tiles live in a
+   `ZoneLayer` (ZONE-LOCAL frames) and the flat collection still holds the
+   DEPARTED project's. A spawn that ignores this installs into a stale model,
+   frames the tile against a zone that is no longer on screen, and persists it
+   through the wrong project's store — this is exactly what file opening did
+   until `.plans/15`. Use `CanvasNSView.installProjectTile` and
+   `TileSpawner.makeProjectTilePlacement`; terminal, note, browser, and agent
+   spawns have NOT been migrated yet and still carry the bug.
+10. **Two installs on ONE project root.** The channel split covers Application
    Support and the defaults domain. It does NOT cover a project: the canvas,
    tiles, notes, managed sessions and lock live in `<root>/.array/`, keyed by
    the filesystem path and nothing else. Two apps on one root share those files

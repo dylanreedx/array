@@ -256,19 +256,11 @@ final class WorkspaceRuntime {
         canvasView.setZones(layers)
         installedLayers = layers
 
+        // Declare the spawn target BEFORE anything can spawn into it.
+        canvasView.setActiveProjectZone(document.lastActiveZoneId)
+
         // Attach UI to the active controller so dirty tracking and focus callbacks work.
-        if let active = activeController {
-            let activeStore = active.projectStore
-            let spawner = TileSpawner(
-                canvasView: canvasView,
-                ghostty: ghostty,
-                browserEngine: browserEngine,
-                projectStore: activeStore,
-                project: active.project,
-                managedSessionStore: active.managedSessionStore
-            )
-            active.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
-        }
+        attachActiveControllerUI(canvasView: canvasView)
 
         // Restore focus: active zone's last-active tile, or fall back to canvas.
         restoreFocus(from: canvasView)
@@ -437,6 +429,85 @@ final class WorkspaceRuntime {
         return zoneId
     }
 
+    // MARK: - Active spawner ownership
+
+    /// Called with every `TileSpawner` this runtime builds, so `AppDelegate` can
+    /// wire its app-owned handlers onto the arriving spawner instead of only onto
+    /// the one it built at boot.
+    var onSpawnerCreated: ((TileSpawner) -> Void)?
+
+    /// Builds the arriving active project's spawner and hands it to that
+    /// controller, which now owns it strongly (see `ZoneRuntimeController.tileSpawner`).
+    private func attachActiveControllerUI(canvasView: CanvasNSView) {
+        guard let active = activeController else { return }
+        let spawner = TileSpawner(
+            canvasView: canvasView,
+            ghostty: ghostty,
+            browserEngine: browserEngine,
+            projectStore: active.projectStore,
+            project: active.project,
+            managedSessionStore: active.managedSessionStore
+        )
+        onSpawnerCreated?(spawner)
+        active.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
+    }
+
+    // MARK: - Opening a project file (one active-context route)
+
+    enum FileOpenPlacement {
+        case automatic
+        case at(CGPoint)
+        /// Gap-adjacent to an existing tile — used by an agent opening a file it
+        /// just referenced, so the file lands beside the agent that named it.
+        case beside(tileId: UUID)
+    }
+
+    enum FileOpenOutcome: Equatable {
+        /// A new file tile was created and focused.
+        case opened(tileId: UUID)
+        /// The file was already open; that tile was focused where it stood.
+        case revealed(tileId: UUID)
+        /// User-facing reason. Callers surface it; nobody should only beep.
+        case failure(String)
+    }
+
+    /// The single route for opening a project file as an Array tile. Command
+    /// Center, file-tree activation, canvas file drop, and agent local-file links
+    /// all come through here so the active project/zone is resolved at invocation
+    /// time rather than captured when some earlier spawner was built.
+    @discardableResult
+    func openProjectFile(path: String, placement: FileOpenPlacement = .automatic) -> FileOpenOutcome {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .failure("That file path is empty.") }
+        guard let spawner = activeController?.tileSpawner else {
+            return .failure("No active project is open, so there is nowhere to put the file.")
+        }
+
+        let title = URL(fileURLWithPath: trimmed).lastPathComponent
+        let outcome: TileSpawner.FileOutcome
+        switch placement {
+        case .automatic:
+            outcome = spawner.spawnFile(path: trimmed, title: title)
+        case let .at(worldPoint):
+            outcome = spawner.spawnFile(path: trimmed, title: title, at: worldPoint)
+        case let .beside(tileId):
+            outcome = spawner.spawnFile(path: trimmed, title: title, beside: tileId)
+        }
+
+        switch outcome {
+        case let .spawned(tileId):
+            _ = focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
+            return .opened(tileId: tileId)
+        case let .alreadyOpen(tileId):
+            _ = focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
+            return .revealed(tileId: tileId)
+        case .invalidPath:
+            return .failure("Couldn't open \(title): that path isn't a file Array can show.")
+        case let .failure(error):
+            return .failure("Couldn't open \(title): \(error.localizedDescription)")
+        }
+    }
+
     // MARK: - Workspace Switch (T09)
 
     /// Tear down the current workspace's zone layers + runtimes and install the target
@@ -551,17 +622,9 @@ final class WorkspaceRuntime {
         acquiredProjectIds = newlyAcquired
 
         // Attach UI to the new active controller.
-        if let canvas = canvasView, let active = activeController {
-            let activeStore = active.projectStore
-            let spawner = TileSpawner(
-                canvasView: canvas,
-                ghostty: ghostty,
-                browserEngine: browserEngine,
-                projectStore: activeStore,
-                project: active.project,
-                managedSessionStore: active.managedSessionStore
-            )
-            active.attachUI(canvasView: canvas, tileSpawner: spawner, focusBroker: focusBroker)
+        if let canvas = canvasView {
+            canvas.setActiveProjectZone(targetDocument.lastActiveZoneId)
+            attachActiveControllerUI(canvasView: canvas)
         }
 
         if let canvas = canvasView {

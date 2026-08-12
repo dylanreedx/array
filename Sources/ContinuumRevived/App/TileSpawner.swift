@@ -119,7 +119,12 @@ final class TileSpawner {
         self.environmentProvider = environmentProvider
         self.browserProfiles = browserProfiles
         canvasView.onFileURLDrop = { [weak self] path, worldPoint in
-            _ = self?.spawnFile(path: path, at: worldPoint)
+            guard let self else { return }
+            if let fileOpenHandler {
+                fileOpenHandler(path, worldPoint)
+            } else {
+                _ = spawnFile(path: path, at: worldPoint)
+            }
         }
     }
 
@@ -635,6 +640,8 @@ final class TileSpawner {
 
     enum FileOutcome {
         case spawned(tileId: UUID)
+        /// A tile for this exact file is already on the canvas; it is not moved.
+        case alreadyOpen(tileId: UUID)
         case invalidPath
         case failure(Error)
     }
@@ -1800,36 +1807,115 @@ final class TileSpawner {
 
     // MARK: - File tiles
 
+    /// Set by `AppDelegate` so a file-tree activation or a canvas drop routes
+    /// through the one active-context open action (`WorkspaceRuntime.openProjectFile`)
+    /// instead of calling back into whichever spawner instance happened to wire the
+    /// tile. Nil in checks that drive a spawner directly.
+    var fileOpenHandler: ((String, CGPoint?) -> Void)?
+
     /// Spawns a read-only file preview tile and persists the canvas state.
     func spawnFile(path: String, title: String? = nil, at worldPoint: CGPoint? = nil) -> FileOutcome {
+        spawnFile(path: path, title: title, at: worldPoint, beside: nil)
+    }
+
+    /// Opens the file gap-adjacent to an existing tile, or focuses it in place when
+    /// it is already open.
+    func spawnFile(path: String, title: String? = nil, beside anchorTileId: UUID) -> FileOutcome {
+        spawnFile(path: path, title: title, at: nil, beside: anchorTileId)
+    }
+
+    /// Gap between an anchor tile and the file tile docked beside it.
+    static let anchoredFileGap: Double = 24
+
+    private func spawnFile(
+        path: String,
+        title: String?,
+        at worldPoint: CGPoint?,
+        beside anchorTileId: UUID?
+    ) -> FileOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
         let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedPath.isEmpty else { return .invalidPath }
+        // One canonical spelling per file, so "already open" is decidable and the
+        // persisted metadata does not depend on how the path was authored.
+        let canonicalPath = URL(fileURLWithPath: trimmedPath).standardizedFileURL.resolvingSymlinksInPath().path
 
-        let frame = makePlacement(
-            worldPoint: worldPoint,
-            size: CanvasEngine.defaultFrame(for: .file),
-            in: canvasView
-        )
-        let nextZ = CanvasEngine.zPositionAbove(canvasView.canvasState.tiles)
+        let siblings = canvasView.projectTiles()
+        if let existing = siblings.first(where: { $0.kind == .file && $0.metadata.filePath == canonicalPath }) {
+            return .alreadyOpen(tileId: existing.id)
+        }
+
+        let size = CanvasEngine.defaultFrame(for: .file)
+        let anchor = anchorTileId.flatMap { id in siblings.first(where: { $0.id == id }) }
+        let frame: TileFrame
+        if let anchor {
+            frame = Self.anchoredFrame(size: size, anchor: anchor.frame, siblings: siblings)
+        } else {
+            frame = makeProjectTilePlacement(worldPoint: worldPoint, size: size, in: canvasView)
+        }
+
         let tile = Tile(
             id: UUID(),
             kind: .file,
-            title: title ?? URL(fileURLWithPath: trimmedPath).lastPathComponent,
+            title: title ?? URL(fileURLWithPath: canonicalPath).lastPathComponent,
             frame: frame,
-            zPosition: nextZ,
+            zPosition: CanvasEngine.zPositionAbove(siblings),
+            zoneId: anchor?.zoneId,
             runtimeRef: nil,
-            metadata: TileMetadata(filePath: trimmedPath)
+            metadata: TileMetadata(filePath: canonicalPath)
         )
         let view = FileTileNSView(tile: tile)
-        canvasView.install(tileView: view, for: tile)
+        let target = canvasView.installProjectTile(tileView: view, for: tile)
 
         do {
-            try projectStore.saveCanvas(canvasView.canvasState)
+            try persistProjectCanvas(after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
         return .spawned(tileId: tile.id)
+    }
+
+    /// Top-aligned, `anchoredFileGap` to the right of `anchor`. Falls back to
+    /// directly below when that slot already holds a tile, and to nil-driven
+    /// automatic placement only when neither adjacent slot is free.
+    private static func anchoredFrame(size: CGSize, anchor: TileFrame, siblings: [Tile]) -> TileFrame {
+        let seed = TileFrame(x: anchor.x, y: anchor.y, width: Double(size.width), height: Double(size.height))
+        let occupied = siblings.map(\.frame)
+        // `TileArrangement.Direction` names the direction of TRAVEL, and the tile
+        // parks on the near side of what it runs into. Travelling `.left` toward the
+        // anchor therefore lands to its RIGHT, and `.up` lands directly below it.
+        for direction in [TileArrangement.Direction.left, .up] {
+            let candidate = TileArrangement.dockDestination(seed, direction: direction, against: anchor, gap: anchoredFileGap)
+            let overlaps = occupied.contains { other in
+                candidate.x < other.x + other.width && other.x < candidate.x + candidate.width &&
+                    candidate.y < other.y + other.height && other.y < candidate.y + candidate.height
+            }
+            if !overlaps { return candidate }
+        }
+        return TileArrangement.dockDestination(seed, direction: .left, against: anchor, gap: anchoredFileGap)
+    }
+
+    /// Persists through the model that actually received the tile. The flat
+    /// `canvasState` is only authoritative while the single-zone boot path owns the
+    /// active project; once `setZones` has installed layers, the layer's tiles are.
+    private func persistProjectCanvas(
+        after target: CanvasNSView.ProjectTileTarget,
+        in canvasView: CanvasNSView
+    ) throws {
+        switch target {
+        case .flatCanvasState:
+            try projectStore.saveCanvas(canvasView.canvasState)
+        case let .zoneLayer(zoneId):
+            guard let tiles = canvasView.tiles(inZone: zoneId) else { throw SpawnError.canvasUnavailable }
+            var state = ((try? projectStore.tryLoadCanvas()) ?? nil) ?? CanvasState(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                tiles: [],
+                groups: [],
+                lastActiveTileId: nil
+            )
+            state.tiles = tiles
+            try projectStore.saveCanvas(state)
+        }
     }
 
     /// Installs a file tile view for an existing `Tile` during canvas restore.
@@ -3127,6 +3213,8 @@ final class TileSpawner {
         switch spawner.spawnFile(path: sampleFile.path, title: nil) {
         case let .spawned(createdTileId):
             fileTileId = createdTileId
+        case let .alreadyOpen(existingTileId):
+            fileTileId = existingTileId
         case .invalidPath:
             throw CheckError.failed("spawnFile rejected valid path")
         case let .failure(error):
@@ -3221,6 +3309,7 @@ final class TileSpawner {
         let tileId: UUID
         switch spawner.spawnRunArtifacts(runDirectoryPath: runDir.path) {
         case let .spawned(createdTileId): tileId = createdTileId
+        case let .alreadyOpen(existingTileId): tileId = existingTileId
         case .invalidPath: throw CheckError.failed("spawnRunArtifacts rejected valid path")
         case let .failure(error): throw CheckError.failed("spawnRunArtifacts failed: \(error)")
         }
@@ -5062,7 +5151,12 @@ final class TileSpawner {
             self?.fileTreePersistenceHandler?()
         }
         view.onSpawnFile = { [weak self] path in
-            _ = self?.spawnFile(path: path, title: URL(fileURLWithPath: path).lastPathComponent)
+            guard let self else { return }
+            if let fileOpenHandler {
+                fileOpenHandler(path, nil)
+            } else {
+                _ = spawnFile(path: path, title: URL(fileURLWithPath: path).lastPathComponent)
+            }
         }
         view.onOpenFile = { [weak self] path in
             self?.openFileInPreferredEditor(path: path)
@@ -6683,6 +6777,41 @@ final class TileSpawner {
             return patched
         }
         return arguments + [path]
+    }
+
+    /// Placement for a tile that will be installed through `installProjectTile`.
+    ///
+    /// A ZoneLayer stores ZONE-LOCAL frames (`_layoutLayerTile` adds the zone origin
+    /// back); the flat single-zone path stores world frames. Only the file-open route
+    /// installs layer-aware today, so only it may place in local space — the other
+    /// spawn paths still call `install`/`saveCanvas` directly and must keep the
+    /// existing world-frame behaviour until they migrate too.
+    private func makeProjectTilePlacement(worldPoint: CGPoint?, size: CGSize, in canvasView: CanvasNSView) -> TileFrame {
+        guard let zone = canvasView.activeProjectZonePlacement else {
+            return makePlacement(worldPoint: worldPoint, size: size, in: canvasView)
+        }
+        if let worldPoint {
+            let local = CanvasEngine.zoneLocalPoint(world: worldPoint, zone: zone)
+            return TileFrame(
+                x: Double(local.x) - Double(size.width) / 2,
+                y: Double(local.y) - Double(size.height) / 2,
+                width: Double(size.width),
+                height: Double(size.height)
+            )
+        }
+        let zoom = canvasView.viewport.zoom.isFinite && canvasView.viewport.zoom > 0 ? canvasView.viewport.zoom : 1
+        let visibleWidth = max(Double(canvasView.bounds.width) / zoom, Double(size.width))
+        let visibleHeight = max(Double(canvasView.bounds.height) / zoom, Double(size.height))
+        return CanvasEngine.placementFrame(
+            size: size,
+            viewport: CanvasViewport(
+                x: canvasView.viewport.x - zone.origin.x,
+                y: canvasView.viewport.y - zone.origin.y,
+                zoom: zoom
+            ),
+            visibleSize: CGSize(width: visibleWidth * zoom, height: visibleHeight * zoom),
+            existing: canvasView.projectTiles().map(\.frame)
+        )
     }
 
     private func makePlacement(worldPoint: CGPoint?, size: CGSize, in canvasView: CanvasNSView) -> TileFrame {

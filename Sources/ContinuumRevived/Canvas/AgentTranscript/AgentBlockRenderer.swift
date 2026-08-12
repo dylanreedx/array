@@ -8,6 +8,11 @@ import ContinuumRevivedAgentUI
 enum AgentRenderAction {
     case copy(blockID: AgentNodeID)
     case activateLink(blockID: AgentNodeID, url: URL)
+    /// A destination shaped like a file in the responding agent's checkout. The
+    /// raw authored string is carried through unchanged — relative paths and
+    /// `path:line:column` forms keep their information — because only the host,
+    /// holding that agent's live cwd, can resolve and authorize it.
+    case openLocalFile(blockID: AgentNodeID, destination: String)
     case openDiff(blockID: AgentNodeID)
     case retry(blockID: AgentNodeID)
     case submitResponse(requestID: String, value: String)

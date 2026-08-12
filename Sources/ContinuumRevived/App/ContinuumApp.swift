@@ -981,6 +981,42 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--file-open-active-context-check") {
+            do {
+                _ = NSApplication.shared
+                try FileOpenChecks.runActiveContextCheck()
+                print("ContinuumRevivedFileOpenActiveContextChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--agent-local-file-link-check") {
+            do {
+                _ = NSApplication.shared
+                try FileOpenChecks.runAgentLocalFileLinkCheck()
+                print("ContinuumRevivedAgentLocalFileLinkChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--file-markdown-preview-check") {
+            do {
+                _ = NSApplication.shared
+                try FileOpenChecks.runMarkdownPreviewCheck()
+                print("ContinuumRevivedFileMarkdownPreviewChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--topology-migration-check") {
             do {
                 let artifact = try AppDelegate.runTopologyMigrationSelfCheck()
@@ -3210,7 +3246,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var projectStore: (any ProjectStoring)? { workspaceRuntime?.activeController?.projectStore }
     private var activeProject: Project? { workspaceRuntime?.activeController?.project }
     private var registryStore: RegistryStore?
-    private var tileSpawner: TileSpawner?
+    /// The spawner built at launch for the BOOT project. It is only the fallback:
+    /// `WorkspaceRuntime.switchWorkspace` builds a new spawner for the arriving
+    /// project, and an app action that captured this one would install tiles into the
+    /// departed project's canvas and persist them through its store.
+    private var bootTileSpawner: TileSpawner?
+    /// The spawner for whatever project is active RIGHT NOW. Resolve at invocation.
+    private var tileSpawner: TileSpawner? {
+        workspaceRuntime?.activeController?.tileSpawner ?? bootTileSpawner
+    }
     /// The app-lifetime owner of every agent (P2A.3). Replaces the per-tile
     /// `managedAgentRunners` dictionary this view used to hold: the supervisor owns
     /// the runner and the record, and a tile is one subscriber to its event stream.
@@ -3572,7 +3616,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             spawner.browserProfileDeleteHandler = { [weak self] tileId, profileId in
                 self?.deleteBrowserProfile(tileId: tileId, profileId: profileId)
             }
-            self.tileSpawner = spawner
+            self.bootTileSpawner = spawner
+            configureFileOpenRoute(on: spawner)
+            workspaceRuntime?.onSpawnerCreated = { [weak self] arriving in
+                self?.configureFileOpenRoute(on: arriving)
+            }
             installSettingsChangeObserver()
             workspaceRuntime?.activeController?.onBrowserRuntimeHydrated = { [weak self] runtime in
                 self?.wireContentProcessTerminationHandler(runtime)
@@ -10453,6 +10501,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         view.onLocationActionMenuRequested = { [weak self] requestedAgentID, anchor in
             self?.showLocationActionMenu(for: requestedAgentID, anchoredTo: anchor)
         }
+        view.onOpenLocalFile = { [weak self] destination in
+            self?.openAgentLocalFile(destination, agentID: agentId, sourceTileId: tileId)
+        }
         // Replays the agent's history, then follows the tail; re-wiring the same
         // tile to the same agent is a no-op inside `attach`, so none of the three
         // call sites can double-ingest. Project NAME is supplied by the app's
@@ -11789,8 +11840,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func openFileFromPalette() {
-        guard let spawner = tileSpawner,
-              let project = activeProject else { return }
+        guard let project = activeProject else { return }
         let projectRoot = URL(fileURLWithPath: project.rootPath, isDirectory: true)
         let panel = NSOpenPanel()
         panel.title = "Open File"
@@ -11802,17 +11852,91 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard panel.runModal() == .OK,
               let selectedURL = panel.url else { return }
         guard LaunchPaletteModel.isFileURL(selectedURL, insideProjectRoot: projectRoot) else {
-            NSSound.beep()
+            presentFileOpenFailure("\(selectedURL.lastPathComponent) is outside this project.")
             return
         }
 
-        switch spawner.spawnFile(path: selectedURL.standardizedFileURL.path, title: selectedURL.lastPathComponent) {
-        case let .spawned(tileId):
+        openProjectFile(path: selectedURL.standardizedFileURL.path)
+    }
+
+    /// The one app-level file-open action. Command Center, file-tree activation,
+    /// canvas file drop, and an agent's local-file link all land here, so the active
+    /// project and zone are resolved now instead of when some earlier spawner was
+    /// built. "Open in Preferred Editor" stays a separate external action.
+    @discardableResult
+    func openProjectFile(
+        path: String,
+        placement: WorkspaceRuntime.FileOpenPlacement = .automatic
+    ) -> WorkspaceRuntime.FileOpenOutcome {
+        guard let workspaceRuntime else {
+            let outcome = WorkspaceRuntime.FileOpenOutcome.failure("No project is open yet.")
+            presentFileOpenFailure("No project is open yet.")
+            return outcome
+        }
+        let outcome = workspaceRuntime.openProjectFile(path: path, placement: placement)
+        switch outcome {
+        case let .opened(tileId), let .revealed(tileId):
             focusSpawnedTile(tileId)
-        case .invalidPath:
-            fputs("TileSpawner.spawnFile rejected empty file path\n", stderr)
-        case let .failure(error):
-            fputs("TileSpawner.spawnFile failed: \(error)\n", stderr)
+        case let .failure(message):
+            presentFileOpenFailure(message)
+        }
+        return outcome
+    }
+
+    /// A failed open has to say so. Beeping (or writing to stderr) left the user
+    /// looking at an unchanged canvas with no idea why.
+    private func presentFileOpenFailure(_ message: String) {
+        fputs("Open file failed: \(message)\n", stderr)
+        let alert = NSAlert()
+        alert.messageText = "Couldn't open that file"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    /// Resolves a local-file link an agent authored and opens it beside that agent.
+    ///
+    /// The agent's CURRENT `cwd` is the only base a relative path resolves against:
+    /// not the process working directory, and not "the active project" — an agent
+    /// running in an isolated worktree means a file it names lives in that checkout.
+    /// Containment is enforced against the same checkout, so authored content can
+    /// request resolution but cannot reach outside where its agent is working.
+    @discardableResult
+    func openAgentLocalFile(_ destination: String, agentID: AgentID, sourceTileId: UUID) -> Bool {
+        guard let record = agentSupervisor.records[agentID] else { return false }
+        let result = agentLocalFileOpener().open(
+            destination: destination,
+            checkoutRoot: URL(fileURLWithPath: record.cwd, isDirectory: true),
+            sourceTileId: sourceTileId
+        )
+        if case let .refused(reason) = result {
+            // A link that resolves to nothing is content, not an error worth a
+            // modal: the agent may be naming a file it has not written yet.
+            fputs("Agent local-file link did not resolve inside \(record.cwd): \(reason)\n", stderr)
+            return false
+        }
+        return true
+    }
+
+    func agentLocalFileOpener() -> AgentLocalFileOpener {
+        AgentLocalFileOpener(
+            openFile: { [weak self] path, placement in
+                self?.openProjectFile(path: path, placement: placement)
+                    ?? .failure("No project is open yet.")
+            },
+            fileTile: { [weak self] tileId in
+                self?.canvasView?.tileView(for: tileId) as? FileTileNSView
+            }
+        )
+    }
+
+    /// Points a spawner's file-tree and drop routes at the shared open action.
+    private func configureFileOpenRoute(on spawner: TileSpawner) {
+        spawner.fileOpenHandler = { [weak self] path, worldPoint in
+            guard let self else { return }
+            let placement: WorkspaceRuntime.FileOpenPlacement = worldPoint.map { .at($0) } ?? .automatic
+            openProjectFile(path: path, placement: placement)
         }
     }
 
@@ -11959,7 +12083,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         runtimes.removeAll()
         noteViews.removeAll()
         fileTreeViews.removeAll()
-        tileSpawner = nil
+        bootTileSpawner = nil
         ghostty?.shutdown()
         ghostty = nil
         browserEngine?.shutdown()
@@ -16338,7 +16462,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ghostty: nil,
             browserEngine: browserEngine
         )
-        delegate.tileSpawner = TileSpawner(
+        delegate.bootTileSpawner = TileSpawner(
             canvasView: canvas,
             ghostty: nil,
             browserEngine: browserEngine,
@@ -16866,7 +16990,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             browserEngine: browserEngine
         )
         canvas.focusBroker = delegate.focusBroker
-        delegate.tileSpawner = TileSpawner(
+        delegate.bootTileSpawner = TileSpawner(
             canvasView: canvas,
             ghostty: nil,
             browserEngine: browserEngine,
@@ -18463,7 +18587,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             project: project,
             browserProfiles: [profile]
         )
-        app.tileSpawner = spawner
+        app.bootTileSpawner = spawner
 
         let browserTileId: UUID
         switch spawner.spawnBrowser(url: "data:text/html;charset=utf-8,<html><head><title>Inspector Actions</title></head><body>ok</body></html>") {
@@ -25041,7 +25165,7 @@ extension AppDelegate {
     revealApp.canvasView = revealCanvas
     try revealRuntime.install(into: revealCanvas, appRegistry: revealRegistry)
     revealCanvas.layoutSubtreeIfNeeded()
-    revealApp.tileSpawner = TileSpawner(
+    revealApp.bootTileSpawner = TileSpawner(
         canvasView: revealCanvas, ghostty: nil, browserEngine: browserEngine,
         projectStore: hereStore, project: hereProject)
 

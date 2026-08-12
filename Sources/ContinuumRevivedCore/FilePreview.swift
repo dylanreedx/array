@@ -6,6 +6,20 @@ public enum FilePreview: Equatable, Sendable {
     case text(String)
     case unavailable(String)
 
+    /// How a successfully loaded file should be presented. Core classifies; it
+    /// never parses or styles Markdown.
+    public enum Presentation: Equatable, Sendable {
+        case sourceText
+        case markdown
+    }
+
+    /// Markdown is decided by the real path extension, case-insensitively. A
+    /// filename that merely CONTAINS `.md` (`notes.md.txt`, `mdfile`) is source.
+    public static func presentation(forPath path: String) -> Presentation {
+        let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
+        return ext == "md" || ext == "markdown" ? .markdown : .sourceText
+    }
+
     public static func load(path: String) -> FilePreview {
         load(path: path) { url in
             try Data(contentsOf: url)

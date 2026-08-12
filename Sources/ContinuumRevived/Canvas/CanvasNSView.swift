@@ -2103,6 +2103,8 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         zoneLayers = []
         zoneLayerOrder = []
+        // The departing zone set owns the spawn target; the caller re-declares it.
+        activeProjectZoneId = nil
 
         // Install the new layers back-to-front by zone zPosition.
         let orderedLayers = layers.sorted { lhs, rhs in
@@ -2150,6 +2152,7 @@ final class CanvasNSView: NSView, TokenThemed {
         layer.chrome?.removeFromSuperview()
         zoneLayers.removeAll { $0.placement.zoneId == zoneId }
         zoneLayerOrder.removeAll { $0 == zoneId }
+        if activeProjectZoneId == zoneId { activeProjectZoneId = nil }
     }
 
     /// Update only a layer's placement in place; relays its tiles + chrome.
@@ -2198,6 +2201,96 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Test introspection: the tile ids a layer currently owns.
     func tileIds(inZone zoneId: UUID) -> [UUID] {
         zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.tiles.map(\.id) ?? []
+    }
+
+    /// The tiles a layer currently owns, in its live in-memory order. This is the
+    /// authoritative model for a project's tiles once `setZones` has run — the flat
+    /// `canvasState.tiles` collection does not represent them (T09 shape-B gap).
+    func tiles(inZone zoneId: UUID) -> [Tile]? {
+        zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.tiles
+    }
+
+    // MARK: - Active project zone (spawn target)
+
+    /// The installed layer a NEW project tile belongs in, set by `WorkspaceRuntime`
+    /// from the workspace document's `lastActiveZoneId` whenever it installs or
+    /// swaps a zone set. nil at boot, where the single-zone `activeZone` +
+    /// `canvasState.tiles` path still owns the active project.
+    private(set) var activeProjectZoneId: UUID?
+
+    func setActiveProjectZone(_ zoneId: UUID?) {
+        guard let zoneId, zoneLayers.contains(where: { $0.placement.zoneId == zoneId }) else {
+            activeProjectZoneId = nil
+            return
+        }
+        activeProjectZoneId = zoneId
+    }
+
+    /// Every tile belonging to the ACTIVE project, read from whichever model owns
+    /// it. Spawn placement, "is this file already open", and z-ordering must all
+    /// consult this rather than `canvasState.tiles`, which goes stale the moment
+    /// `setZones` installs layers.
+    func projectTiles() -> [Tile] {
+        if let activeProjectZoneId, let tiles = tiles(inZone: activeProjectZoneId) { return tiles }
+        return canvasState.tiles
+    }
+
+    /// Where `installProjectTile` actually put a tile. Callers persist through the
+    /// matching model: the flat path saves `canvasState`, the layer path saves the
+    /// layer's tiles into that project's own store.
+    enum ProjectTileTarget: Equatable {
+        case flatCanvasState
+        case zoneLayer(UUID)
+    }
+
+    /// The active project zone's placement, when a layer owns it. New tiles must be
+    /// framed in ZONE-LOCAL coordinates for a layer (`_layoutLayerTile` converts
+    /// via the placement origin) and in WORLD coordinates for the flat path.
+    var activeProjectZonePlacement: ZonePlacement? {
+        guard let activeProjectZoneId else { return nil }
+        return zoneLayers.first(where: { $0.placement.zoneId == activeProjectZoneId })?.placement
+    }
+
+    /// Installs a newly spawned project tile into whichever model owns the active
+    /// project — the ZoneLayer installed by `setZones`, or the flat single-zone
+    /// path at boot. Without this, a spawn after a workspace switch appended to the
+    /// stale flat `canvasState` and laid the tile out against the DEPARTED zone's
+    /// placement, so it never appeared in the zone the user was looking at.
+    @discardableResult
+    func installProjectTile(tileView: TileNSView, for tile: Tile) -> ProjectTileTarget {
+        guard let zoneId = activeProjectZoneId,
+              let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId })
+        else {
+            install(tileView: tileView, for: tile)
+            return .flatCanvasState
+        }
+
+        if let existing = layer.tileViews[tile.id] {
+            focusBroker?.unregister(existing.focusSurfaceID)
+            existing.removeFromSuperview()
+        }
+        var installed = tile
+        installed.zoneId = zoneId
+        layer.tileViews[tile.id] = tileView
+        if let index = layer.tiles.firstIndex(where: { $0.id == tile.id }) {
+            layer.tiles[index] = installed
+        } else {
+            layer.tiles.append(installed)
+        }
+        tileView.canvas = self
+        let tileId = tile.id
+        tileView.onClose = { [weak self] in self?.onTileCloseRequested?(tileId) }
+        tileView.onStopRun = { [weak self] in self?.onTileStopRunRequested?(tileId) }
+        addSubview(tileView)
+        focusBroker?.register(tileView)
+        _layoutLayerTile(installed, in: layer)
+        if let chrome = layer.chrome {
+            chrome.frame = _zoneLayerChromeScreenFrame(layer)
+            chrome.needsDisplay = true
+        }
+        reorderTileSubviewsByZIndex()
+        delegate?.canvasSidebarModelDidChange(self)
+        return .zoneLayer(zoneId)
     }
 
     /// QA (T19): the current stored placement for a ZoneLayer (reflects adaptive-bounds recompute).

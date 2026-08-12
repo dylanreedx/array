@@ -485,6 +485,16 @@ run_app_check .build/debug/Array --zone-registry-refcount-check
 run_app_check .build/debug/Array --agent-message-bus-check
 run_app_check .build/debug/Array --workspace-runtime-install-check
 run_app_check .build/debug/Array --workspace-switch-check
+# .plans/15: opening a project file resolves the ACTIVE project/zone at invocation
+# time. Before the repair, an open after an in-process workspace switch installed
+# into the departed zone's model and persisted through the boot project's store.
+run_app_check .build/debug/Array --file-open-active-context-check
+# .plans/15: a .md/.markdown tile renders natively and keeps a Preview/Source
+# switch; every other file keeps the monospaced horizontally scrolling source view.
+run_app_check .build/debug/Array --file-markdown-preview-check
+# .plans/15: an explicit local-file link in an agent's answer opens beside that
+# agent, resolved against ITS checkout — and cannot reach outside it.
+run_app_check .build/debug/Array --agent-local-file-link-check
 run_app_check .build/debug/Array --workspace-profile-check
 run_app_check .build/debug/Array --add-zone-check
 run_app_check .build/debug/Array --browser-lru-budget-check

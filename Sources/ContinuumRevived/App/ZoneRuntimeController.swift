@@ -20,7 +20,14 @@ final class ZoneRuntimeController {
     var fileTreeViews: [UUID: FileTreeTileNSView] = [:]
 
     weak var canvasView: CanvasNSView?
-    weak var tileSpawner: TileSpawner?
+    /// STRONG on purpose. `WorkspaceRuntime.install`/`switchWorkspace` build the
+    /// spawner for the arriving active project and hand it over here; while this was
+    /// `weak`, that spawner had no other owner and deallocated before the switch
+    /// returned, leaving every spawn action pointed at the boot project's spawner.
+    /// `detachUI()` clears it, so the controller does not outlive its UI. TileSpawner
+    /// holds `canvasView` weakly and every controller callback it exposes captures
+    /// `[weak self]`, so this is not a cycle.
+    var tileSpawner: TileSpawner?
     var onBrowserRuntimeHydrated: ((WKWebViewBrowserRuntime) -> Void)?
     /// Fired after `SessionObserver`'s `StatusWriter` persists a status
     /// change and pushes it onto the live tile view (docs/38-tickets/

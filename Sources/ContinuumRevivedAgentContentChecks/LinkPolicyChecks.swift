@@ -8,13 +8,21 @@ func runLinkPolicyChecks() {
         ("mailto:person@example.com", .openExternally),
         ("continuum://pair", .openInternally),
         ("continuum:settings", .openInternally),
-        ("file:///Users/example/secret.txt", .displayOnly),
-        ("/Users/example/secret.txt", .displayOnly),
-        ("../private/notes.txt", .displayOnly),
+        ("file:///Users/example/secret.txt", .openLocalFile),
+        ("file://localhost/Users/example/secret.txt", .openLocalFile),
+        ("/Users/example/secret.txt", .openLocalFile),
+        ("../private/notes.txt", .openLocalFile),
+        ("./Sources/App.swift", .openLocalFile),
+        ("Sources/App.swift", .openLocalFile),
+        ("Sources/App.swift:42:8", .openLocalFile),
+        ("Sources/App.swift#L42C8", .openLocalFile),
+        ("App.swift:42", .openLocalFile),
+        ("relative/path", .openLocalFile),
+        ("file://other-host/share/secret.txt", .displayOnly),
         ("~/Desktop/token.txt", .displayOnly),
         ("C:\\Users\\example\\secret.txt", .displayOnly),
         ("custom://extension/item", .displayOnly),
-        ("relative/path", .displayOnly),
+        ("readme", .displayOnly),
         ("javascript:alert(1)", .displayOnly),
         ("JaVaScRiPt:alert(1)", .displayOnly),
         ("data:text/html,<script>alert(1)</script>", .displayOnly),
@@ -53,8 +61,8 @@ func runLinkPolicyChecks() {
            "email autolinks must preserve a readable label and semantic mailto destination")
     expect(links[2].0 == "file:///Users/example/report.txt" &&
            links[2].2 == [.text("the local report")] &&
-           AgentLinkPolicy.disposition(for: links[2].0) == .displayOnly,
-           "file links must retain copyable label/destination while remaining non-activatable")
+           AgentLinkPolicy.disposition(for: links[2].0) == .openLocalFile,
+           "file links must retain copyable label/destination and request host resolution, never external opening")
 
     let roundTrip = try? JSONDecoder().decode(
         AgentBlock.self,
@@ -63,13 +71,36 @@ func runLinkPolicyChecks() {
     expect(roundTrip == parsed.blocks[0],
            "semantic link labels, titles, and destinations must survive JSON round-trip")
 
+    verifyNavigationSplitting()
     verifyFileLinkNegativeWitness()
     print("Link policy checks passed: syntax, autolinks, round-trip, and safe external/internal/display/reject classification")
 }
 
+/// Navigation metadata is separated from the path without the content layer ever
+/// touching a filesystem.
+private func verifyNavigationSplitting() {
+    let cases: [(String, String, Int?, Int?)] = [
+        ("Sources/App.swift", "Sources/App.swift", nil, nil),
+        ("Sources/App.swift:42", "Sources/App.swift", 42, nil),
+        ("Sources/App.swift:42:8", "Sources/App.swift", 42, 8),
+        ("Sources/App.swift#L42", "Sources/App.swift", 42, nil),
+        ("Sources/App.swift#L42C8", "Sources/App.swift", 42, 8),
+        ("file:///tmp/a/App.swift:7", "file:///tmp/a/App.swift", 7, nil),
+        // Not coordinates: a zero line, a non-numeric tail, an anchor word.
+        ("Sources/App.swift:0", "Sources/App.swift:0", nil, nil),
+        ("Sources/App.swift:main", "Sources/App.swift:main", nil, nil),
+        ("Docs/guide.md#usage", "Docs/guide.md#usage", nil, nil)
+    ]
+    for (input, path, line, column) in cases {
+        let split = AgentLocalFileDestination.splitNavigation(input)
+        expect(split.path == path && split.line == line && split.column == column,
+               "splitNavigation(\(input.debugDescription)) produced \(split), expected (\(path), \(String(describing: line)), \(String(describing: column)))")
+    }
+}
+
 /// Mutates the final pure policy in an isolated package. This required negative
-/// witness proves that making file URLs activatable turns the focused assertion
-/// red without modifying the working tree.
+/// witness proves that a local file cannot be laundered into an EXTERNALLY
+/// authorized destination: authored content may only ever request host resolution.
 private func verifyFileLinkNegativeWitness() {
     let fileManager = FileManager.default
     let root = fileManager.temporaryDirectory
@@ -84,10 +115,10 @@ private func verifyFileLinkNegativeWitness() {
 
         let productionURL = repoRoot.appendingPathComponent("Sources/ContinuumRevivedAgentContent/AgentLink.swift")
         var source = try String(contentsOf: productionURL, encoding: .utf8)
-        let safe = "case \"file\":\n            return .displayOnly"
-        let unsafe = "case \"file\":\n            return .openExternally"
+        let safe = "if AgentLocalFileDestination.isCandidate(destination) { return .openLocalFile }"
+        let unsafe = "if AgentLocalFileDestination.isCandidate(destination) { return .openExternally }"
         expect(source.components(separatedBy: safe).count == 2,
-               "link negative witness must find exactly one file-policy branch")
+               "link negative witness must find exactly one local-file policy branch")
         source = source.replacingOccurrences(of: safe, with: unsafe)
         try source.write(to: library.appendingPathComponent("AgentLink.swift"), atomically: true, encoding: .utf8)
 
@@ -103,9 +134,11 @@ private func verifyFileLinkNegativeWitness() {
         try """
         import Foundation
         import LinkPolicy
-        if AgentLinkPolicy.disposition(for: "file:///Users/example/private.txt") != .displayOnly {
-            fputs("FAIL: file URLs must remain visible but non-activatable\\n", stderr)
-            Foundation.exit(1)
+        for destination in ["file:///Users/example/private.txt", "/Users/example/private.txt", "Sources/App.swift"] {
+            if AgentLinkPolicy.disposition(for: destination) != .openLocalFile {
+                fputs("FAIL: a local file may only request host resolution, never external opening\\n", stderr)
+                Foundation.exit(1)
+            }
         }
         """.write(to: executable.appendingPathComponent("main.swift"), atomically: true, encoding: .utf8)
     } catch {
@@ -126,9 +159,9 @@ private func verifyFileLinkNegativeWitness() {
     process.waitUntilExit()
     let errorText = String(decoding: errorData, as: UTF8.self)
     expect(process.terminationStatus == 1,
-           "activating file URLs must make the isolated check exit 1, got \(process.terminationStatus): \(errorText)")
-    expect(errorText.contains("FAIL: file URLs must remain visible but non-activatable"),
-           "file-link mutation must fail the safety assertion, stderr was: \(errorText)")
+           "externally authorizing a local file must make the isolated check exit 1, got \(process.terminationStatus): \(errorText)")
+    expect(errorText.contains("FAIL: a local file may only request host resolution, never external opening"),
+           "local-file mutation must fail the safety assertion, stderr was: \(errorText)")
 
-    print("Link policy negative witness passed: mutated file activation exited 1 at the safety assertion")
+    print("Link policy negative witness passed: externally authorizing a local file exited 1 at the safety assertion")
 }

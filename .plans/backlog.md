@@ -64,6 +64,19 @@ shipped. Nothing is unreleased right now.
 
 ### Follow-ups these opened
 
+- **Every other spawn path is still wrong after a workspace switch**
+  (`.plans/15`, 2026-08-12). File opening was repaired and witnessed
+  (`--file-open-active-context-check`), but terminal, note, browser, diff-review
+  and agent spawns still call `canvasView.install` + `saveCanvas(canvasState)`,
+  so after an in-process switch they install into the DEPARTED project's flat
+  model, frame against its zone origin, and persist through its store. The
+  pattern to copy is `CanvasNSView.installProjectTile` +
+  `TileSpawner.makeProjectTilePlacement`; the trap is that the flat model stores
+  WORLD frames while a `ZoneLayer` stores ZONE-LOCAL ones. One check per spawn
+  kind, or one parameterised over kinds.
+- **Markdown file tiles: tables, images, live reload, persisted mode**
+  (`.plans/15` deferred list). Tables currently fall through to the parser's
+  readable monospace fallback — visible, not pretty.
 - **pi occupancy abstains.** `AgentContextOccupancy` returns nil for
   `.piMessageUsage` because pi's docs don't say whether `input` already includes
   cache. Verify against a real pi run and add it — until then pi-run agents get

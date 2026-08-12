@@ -122,15 +122,23 @@ final class RichInlineTextView: NSTextView, NSTextViewDelegate {
         setAccessibilityLabel(string)
     }
 
-    /// Re-evaluates pure policy at action time. No destination is resolved
-    /// relative to an agent working directory, and display-only/rejected links
-    /// never reach the action sink.
+    /// Re-evaluates pure policy at action time. Display-only and rejected links
+    /// never reach the action sink, and a local-file candidate is emitted as its
+    /// own semantic action carrying the RAW destination — this view never resolves
+    /// a path against a working directory, and never launders a file into a URL
+    /// the host would treat as externally authorized.
     @discardableResult
     func activateLink(at index: Int, context: AgentRenderContext? = nil) -> Bool {
         guard let blockID,
               let link = linkRanges.first(where: { NSLocationInRange(index, $0.range) })
         else { return false }
         let currentDisposition = AgentLinkPolicy.disposition(for: link.destination)
+        if currentDisposition == .openLocalFile {
+            (context ?? renderContext).actions.perform(
+                .openLocalFile(blockID: blockID, destination: link.destination)
+            )
+            return true
+        }
         guard currentDisposition == .openExternally || currentDisposition == .openInternally,
               let url = URL(string: link.destination)
         else { return false }
@@ -155,11 +163,15 @@ final class RichInlineTextView: NSTextView, NSTextViewDelegate {
         menu.addItem(copy)
 
         let disposition = AgentLinkPolicy.disposition(for: link.destination)
-        if disposition == .openExternally || disposition == .openInternally {
-            let open = NSMenuItem(title: "Open Link", action: #selector(openLink(_:)), keyEquivalent: "")
+        switch disposition {
+        case .openExternally, .openInternally, .openLocalFile:
+            let title = disposition == .openLocalFile ? "Open File" : "Open Link"
+            let open = NSMenuItem(title: title, action: #selector(openLink(_:)), keyEquivalent: "")
             open.representedObject = index
             open.target = self
             menu.addItem(open)
+        case .displayOnly, .reject:
+            break
         }
         return menu
     }

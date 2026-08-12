@@ -1732,8 +1732,10 @@ enum UIProbeAppearance {
             .hardBreak, .text("next"), .softBreak, .text("soft")
         ]
         var activated: [URL] = []
+        var localFiles: [String] = []
         let actions = AgentRenderActions { action in
             if case let .activateLink(_, url) = action { activated.append(url) }
+            if case let .openLocalFile(_, destination) = action { localFiles.append(destination) }
         }
         let lightContext = AgentRenderContext(actions: actions, tokens: .transcript, appearance: .light)
         let view = RichInlineTextView(frame: NSRect(x: 0, y: 0, width: 420, height: 100))
@@ -1758,11 +1760,12 @@ enum UIProbeAppearance {
         }
         guard view.linkRanges.count == 2,
               view.linkRanges[0].disposition == .openExternally,
-              view.linkRanges[1].disposition == .displayOnly,
+              view.linkRanges[1].disposition == .openLocalFile,
               view.activateLink(at: view.linkRanges[0].range.location),
-              !view.activateLink(at: view.linkRanges[1].range.location),
-              activated.map(\URL.absoluteString) == ["https://example.com/docs"] else {
-            throw fail("rich inline unsafe-link negative witness: display-only file link activated or safe link did not")
+              view.activateLink(at: view.linkRanges[1].range.location),
+              activated.map(\URL.absoluteString) == ["https://example.com/docs"],
+              localFiles == ["file:///Users/example/private.txt"] else {
+            throw fail("rich inline link witness: a local file must request host resolution with its raw destination and never become a URL action, and an https link must stay a URL action")
         }
 
         let lightColor = attributed.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor

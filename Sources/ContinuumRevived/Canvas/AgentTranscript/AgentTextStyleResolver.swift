@@ -105,7 +105,8 @@ enum AgentTextStyleResolver {
                         .underlineStyle: NSUnderlineStyle.single.rawValue,
                         .agentLinkDestination: destination
                     ], range: range)
-                    if disposition == .openExternally || disposition == .openInternally {
+                    if disposition == .openExternally || disposition == .openInternally ||
+                        disposition == .openLocalFile {
                         output.addAttribute(.link, value: destination, range: range)
                     }
                     links.append(LinkRange(range: range, destination: destination, title: title,
