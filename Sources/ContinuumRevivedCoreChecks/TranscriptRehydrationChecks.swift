@@ -256,14 +256,18 @@ private func runTranscriptRehydrationDispatchChecks() {
     @discardableResult
     func writeCodex(
         home: URL, threadId: String, marker: String, archived: Bool = false,
-        filename: String = "rollout-fixture.jsonl"
+        filename: String = "rollout-fixture.jsonl", metaPadBytes: Int = 0
     ) -> URL {
         let rootName = archived ? "archived_sessions" : "sessions/2026/08/10"
         let dir = home.appendingPathComponent(".codex/\(rootName)", isDirectory: true)
         try! fm.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = dir.appendingPathComponent(filename)
+        // Real rollouts carry the environment/instruction preamble on the
+        // session_meta line, so it runs ~18 KB — the size that made a
+        // byte-at-a-time read ruinous. `metaPadBytes` reproduces that weight.
+        let pad = metaPadBytes > 0 ? #","pad":"\#(String(repeating: "x", count: metaPadBytes))""# : ""
         let lines = [
-            #"{"type":"session_meta","payload":{"id":"\#(threadId)","cwd":"\#(cwd)","timestamp":"2026-08-10T12:00:00.000Z"}}"#,
+            #"{"type":"session_meta","payload":{"id":"\#(threadId)","cwd":"\#(cwd)","timestamp":"2026-08-10T12:00:00.000Z"\#(pad)}}"#,
             #"{"type":"event_msg","payload":{"type":"user_message","message":"\#(marker)"}}"#,
             #"{"type":"event_msg","payload":{"type":"agent_message","message":"reply"}}"#,
         ]
@@ -363,6 +367,55 @@ private func runTranscriptRehydrationDispatchChecks() {
         _ = writeCodex(home: home, threadId: "duplicate-id", marker: "TWO", filename: "rollout-two.jsonl")
         expect(CodexSessionTranscriptReader.locateRollout(codexHomeURL: codexHome, threadId: "duplicate-id") == nil,
                "Codex locator must fail closed for duplicate active matches")
+    }
+
+    // 8 · Locating a thread in a real-sized corpus must not cost a syscall per
+    //     byte. 0.4.4–0.4.10 read the ~18 KB session_meta line ONE BYTE AT A
+    //     TIME for every rollout in ~/.codex/sessions: 688 files ≈ 15.5 million
+    //     read() calls per scan, which pinned prod at 97% CPU for 90 s inside
+    //     rehydratePreviousSessionOrNotice (Array_2026-08-11-142854
+    //     .cpu_resource.diag). The fixture filenames deliberately do NOT carry
+    //     the thread id, so this drives the full meta scan rather than the
+    //     filename fast path. The budget is wall-clock because the defect IS
+    //     the syscall count, and it was calibrated by running this fixture
+    //     against both implementations: the per-byte loop measured 3.32 s at
+    //     201 files (so ~6.6 s at 401), the buffered read ~0.03 s. A 1 s
+    //     ceiling therefore sits ~6x under the broken cost and ~30x over the
+    //     fixed one.
+    do {
+        let home = base.appendingPathComponent("codex-scan-cost", isDirectory: true)
+        let codexHome = home.appendingPathComponent(".codex", isDirectory: true)
+        let wanted = "019ff241-208f-7940-9d21-e8b3bd28f4a9"
+        for index in 0..<400 {
+            writeCodex(home: home, threadId: "decoy-\(index)", marker: "DECOY",
+                       filename: "rollout-decoy-\(index).jsonl", metaPadBytes: 18 * 1024)
+        }
+        writeCodex(home: home, threadId: wanted, marker: "WANTED",
+                   filename: "rollout-target.jsonl", metaPadBytes: 18 * 1024)
+
+        let started = Date()
+        let located = CodexSessionTranscriptReader.locateRollout(codexHomeURL: codexHome, threadId: wanted)
+        let elapsed = Date().timeIntervalSince(started)
+        expect(located?.lastPathComponent == "rollout-target.jsonl",
+               "scan cost: the wanted rollout must still be located, got \(String(describing: located?.lastPathComponent))")
+        expect(elapsed < 1.0,
+               "scan cost: locating one thread among 401 padded rollouts took \(String(format: "%.2f", elapsed))s — a per-byte read loop is back")
+        print("Codex rollout scan cost: 401 padded rollouts scanned in \(String(format: "%.3f", elapsed))s")
+    }
+
+    // 9 · The filename fast path never outranks the file's own session_meta: a
+    //     rollout NAMED after the wanted thread but carrying a different id
+    //     must lose to the correctly-identified file.
+    do {
+        let home = base.appendingPathComponent("codex-name-impostor", isDirectory: true)
+        let codexHome = home.appendingPathComponent(".codex", isDirectory: true)
+        let wanted = "019ff237-b008-7f83-9ca8-7ee2d5b66f96"
+        writeCodex(home: home, threadId: "some-other-thread", marker: "IMPOSTOR",
+                   filename: "rollout-2026-08-11T15-06-03-\(wanted).jsonl")
+        writeCodex(home: home, threadId: wanted, marker: "REAL", filename: "rollout-real.jsonl")
+        let located = CodexSessionTranscriptReader.locateRollout(codexHomeURL: codexHome, threadId: wanted)
+        expect(located?.lastPathComponent == "rollout-real.jsonl",
+               "Codex locator must confirm the thread id from session_meta, not from the filename; got \(String(describing: located?.lastPathComponent))")
     }
 }
 #endif

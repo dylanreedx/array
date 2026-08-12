@@ -154,11 +154,10 @@ public struct CodexAgentStateReader: AgentStateReader {
 
     private func threadNameFromIndex(for rolloutURL: URL) -> String? {
         let indexURL = sessionsRoot.appendingPathComponent("session_index.jsonl", isDirectory: false)
-        guard let handle = try? FileHandle(forReadingFrom: indexURL) else { return nil }
-        defer { try? handle.close() }
 
         var found: String?
-        while let line = handle.readLine(maxBytes: 64 * 1024) {
+        // Whole-file read: this runs on every status poll, per codex tile.
+        for line in CodexRolloutLocator.lines(of: indexURL, maxBytes: 4 * 1024 * 1024) {
             guard
                 let object = Self.jsonObject(from: line),
                 Self.indexRow(object, matches: rolloutURL),
@@ -269,18 +268,5 @@ private struct CodexRolloutEvent: Equatable {
 
     var isMeaningful: Bool {
         type == "response_item" || type == "event_msg"
-    }
-}
-
-private extension FileHandle {
-    func readLine(maxBytes: Int) -> String? {
-        var data = Data()
-        while data.count < maxBytes {
-            let chunk = try? read(upToCount: 1)
-            guard let chunk, !chunk.isEmpty else { break }
-            if chunk.first == UInt8(ascii: "\n") { break }
-            data.append(chunk)
-        }
-        return data.isEmpty ? nil : String(data: data, encoding: .utf8)
     }
 }
