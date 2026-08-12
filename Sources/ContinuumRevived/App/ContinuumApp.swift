@@ -8331,7 +8331,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
            let activeProjectId = activeProject?.id, recordProject != activeProjectId {
             fputs("Reveal from inbox: \(agentId.rawValue.uuidString) belongs to project \(recordProject.uuidString) but its new tile lands in the active project \(activeProjectId.uuidString) — the app spawns into the active project only\n", stderr)
         }
-        switch spawner.spawnManagedAgent() {
+        // The agent EXISTS, so its tile is titled and its bootstrap line written from
+        // ITS record, not from the Settings default: `wireManagedAgentTile` below binds
+        // this agent and `ManagedAgentTileNSView.attach` then puts the record's model
+        // in the composer, so a Settings-titled tile read "Claude Opus 5" over a
+        // composer saying "GPT-5.6 Sol". The seam takes the supervisor rather than a
+        // resolution so this call site cannot omit the lookup again.
+        switch spawner.spawnManagedAgentForExistingAgent(agentId, supervisor: agentSupervisor) {
         case let .spawned(tileId):
             wireManagedAgentTile(tileId, agentID: agentId)
             scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "inbox-reveal-attach", debounce: 0.2)
@@ -10223,21 +10229,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func spawnManagedAgentFromPalette(model: String? = nil) -> Bool {
         guard let spawner = tileSpawner else { return false }
-        // The catalogue guard the old post-attach `setProviderSettings` write owned,
-        // moved AHEAD of construction. The palette's rows are the catalogue as it was
-        // when the model step opened, so a live probe landing while it is up can leave
-        // a row pointing at a model that is no longer offered. Refusing here creates no
-        // tile and no agent at all; the old order created a default-model one and then
-        // reported failure.
-        guard let providerSettings = AgentModelConfig.resolved(selection: model) else { return false }
-        switch spawner.spawnManagedAgent(providerSettings: providerSettings) {
-        case let .spawned(tileId):
+        // The catalogue guard, the refusal's own voice, and the atomic threading all
+        // live in `TileSpawner.spawnManagedAgentForSelectedModel` — one function, so
+        // `--managed-agent-model-spawn-check` can DRIVE them and watch a departed
+        // model leave no tile and no agent, instead of scanning this file for the
+        // guard's text (which pinned the call, not the refusal: a reviewer swapped
+        // the guard for `?? resolvedFromDefaults()` and the check stayed green).
+        switch spawner.spawnManagedAgentForSelectedModel(model, wire: { tileId, providerSettings in
             wireManagedAgentTile(tileId, initialProviderSettings: providerSettings)
+        }) {
+        case let .spawned(tileId, providerSettings):
             let modelApplied = agentSupervisor.agent(forTile: tileId)
                 .flatMap { agentSupervisor.records[$0]?.model } == providerSettings.model
             focusSpawnedTile(tileId)
             scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "managed-agent-spawn", debounce: 0.2)
             return modelApplied
+        case .refusedModel:
+            // Already beeped and named itself on stderr, inside the seam — the
+            // palette closes on dispatch either way, so the refusal has to speak.
+            return false
         case let .failure(error):
             fputs("TileSpawner.spawnManagedAgent failed: \(error)\n", stderr)
             return false
@@ -10357,8 +10367,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// yet: revealing a headless agent spawns a tile FOR it, so the spawn branch
     /// below — which would create a second agent over the top of it — must not run.
     ///
-    /// Kept on ONE line: `--agent-supervisor-check` pins this whole signature by exact
-    /// line match (`paletteAgentSpawnBranch`), so wrapping it blinds that scan.
+    /// Kept on ONE line: `--agent-restore-check` pins this whole signature by exact
+    /// line match (`runAgentRestoreChecks`, via `paletteAgentSpawnBranch`), so wrapping
+    /// it blinds that scan.
     private func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil, initialProviderSettings: AgentModelConfig.Resolution? = nil) {
         guard let view = canvasView?.tileView(for: tileId) as? ManagedAgentTileNSView else { return }
         let supervisor = agentSupervisor

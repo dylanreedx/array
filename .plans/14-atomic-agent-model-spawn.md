@@ -130,3 +130,58 @@ Run in the isolated worktree with its OWN `.build` (debug):
   sharing the machine with another worktree's builds. The targeted legs above
   stand in; a full matrix run remains owed before merge.
 - Visual review remains before merge.
+
+## Review follow-up (second commit)
+
+An adversarial review of the first commit defeated its own witness and found four
+other holes. What changed:
+
+1. **The catalogue guard is witnessed by BEHAVIOR now.** The first draft asserted
+   that `ContinuumApp.swift` contained the string
+   `AgentModelConfig.resolved(selection: model)` — which pins the call, not the
+   refusal. A reviewer replaced the guard's `else { return false }` with
+   `?? AgentModelConfig.resolvedFromDefaults()`, rebuilt, and the check still
+   printed `passed`. ⌘K's whole spawn is now one function on the spawner,
+   `spawnManagedAgentForSelectedModel`, and the check DRIVES it: a departed id
+   leaves no tile, nothing on the persisted canvas, no wired record, and a
+   spoken refusal naming the model. The negative scan for the old post-attach
+   write is replaced by reading the composer from inside the `wire` callback —
+   the tile already holds the chosen model when the record is written, so there
+   is nothing left for a post-attach repair to do.
+2. **The refusal speaks.** It beeped and said nothing before: ⌘K dispatches and
+   closes whatever the result, so picking a departed model did nothing at all,
+   visibly or on stderr. `announceRefusal` is injectable so the check can
+   capture the message instead of beeping.
+3. **Invariant 3 has a witness.** `resolved(selection: nil)` RETURNS
+   `resolvedFromDefaults()` by construction, so comparing them could not fail.
+   The check writes a model into its own defaults suite and asserts the spawned
+   tile's title and resolution against that literal.
+4. **Reveal-from-inbox is titled from the agent's record.** Deleting
+   `renameManagedAgentTileForModel` left that path with no repair: it spawned
+   from Settings while `attach` put the record's real model in the composer, so
+   a revealed agent's tile read "Claude Opus 5" over a composer saying
+   "GPT-5.6 Sol". `spawnManagedAgentForExistingAgent(_:supervisor:)` takes the
+   supervisor, so the call site cannot omit the lookup, and the check drives it
+   with a real record.
+5. **No check writes the owner's model choice.** `LaunchProfilePalette` takes its
+   defaults injected; `--palette-duplicate-root-check` uses a private suite, and
+   asserts at the end of its body — before any restoring `defer` — that the
+   standard domain's model/recents keys are untouched. `check-app-bundle.sh` runs
+   that leg inside the app bundle, so `--channel prod` had been rewriting the real
+   configured agent model for the length of the run. (A per-run suite still leaves
+   an EMPTY plist in the real `~/Library/Preferences`: `removePersistentDomain`
+   empties the domain, and cfprefsd rewrites the file after the process exits —
+   measured, and not fixable by unlinking it. Unique-per-run names are kept anyway,
+   as the other QA suites in this target do, because two worktrees can run one leg
+   at the same moment and a shared suite would make the gate flaky.)
+6. **`--managed-agent-model-spawn-check` moved up the matrix**, ahead of the
+   KNOWN-RED `--palette-first-responder-restore-check`: the script is
+   `set -euo pipefail` with bare calls, so it aborted before ever reaching the
+   new leg.
+
+Two corrections to the first commit's claims: `wireManagedAgentTile`'s scan
+belongs to `--agent-restore-check` (`runAgentRestoreChecks`), not
+`--agent-supervisor-check`; and of the three `paletteAgentSpawnBranch` scans, only
+`spawnManagedAgentFromPalette` was actually stale in committed history (since
+`091eeae`) — `wireManagedAgentTile` and `spawnSupervisedAgent` both matched at
+`44fbe73`, verified by replaying the scan against those revisions.

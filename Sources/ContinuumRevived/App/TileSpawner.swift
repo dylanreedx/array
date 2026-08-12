@@ -624,6 +624,15 @@ final class TileSpawner {
         case failure(Error)
     }
 
+    /// ⌘K's managed-agent spawn. `refusedModel` is a THIRD outcome on purpose: an
+    /// explicit choice that has left the live catalogue is refused, not substituted
+    /// and not a construction failure, and the caller must be able to say so.
+    enum ManagedAgentSelectionOutcome {
+        case spawned(tileId: UUID, providerSettings: AgentModelConfig.Resolution)
+        case refusedModel(String)
+        case failure(Error)
+    }
+
     enum FileOutcome {
         case spawned(tileId: UUID)
         case invalidPath
@@ -1368,9 +1377,95 @@ final class TileSpawner {
         return .spawned(tileId: tileId)
     }
 
-    /// Deterministic witness for Cmd+K's explicit-model construction contract.
-    /// The tile can be exercised without a provider process; the app-source guard
-    /// covers the production handoff from the palette into both construction legs.
+    /// ⌘K's managed-agent spawn, whole, in ONE function: validate the explicit
+    /// choice against the catalogue AS IT STANDS, say so out loud if it has left,
+    /// and otherwise hand the SAME resolution to tile creation and to the agent
+    /// record (`wire`) before the view can attach and copy a model off it.
+    ///
+    /// It lives here, and not at the AppDelegate call site, because here it can be
+    /// WITNESSED: `runManagedAgentModelSpawnSelfCheck` drives this exact function
+    /// with a departed id and observes that no tile was built, no record was wired,
+    /// and a refusal naming the model was spoken. The first draft of that witness
+    /// asserted only that `ContinuumApp.swift` CONTAINED the guard's call — a
+    /// reviewer then replaced `else { return false }` with
+    /// `?? AgentModelConfig.resolvedFromDefaults()`, silently substituting the
+    /// default for the departed model (the exact inverse of the fix), rebuilt, and
+    /// the check still printed `passed`.
+    ///
+    /// The refusal is not theoretical: the palette's rows are the catalogue as it was
+    /// when the model step opened, and a live `pi --list-models` probe landing while
+    /// it is up narrows the list to the providers pi reports as authed, so a row can
+    /// outlive its model.
+    func spawnManagedAgentForSelectedModel(
+        _ selection: String?,
+        defaults: UserDefaults = .standard,
+        announceRefusal: @MainActor (String) -> Void = TileSpawner.announceManagedAgentModelRefusal,
+        wire: (UUID, AgentModelConfig.Resolution) -> Void
+    ) -> ManagedAgentSelectionOutcome {
+        guard let providerSettings = AgentModelConfig.resolved(selection: selection, defaults: defaults) else {
+            // `resolved` returns nil only for a non-nil selection outside the
+            // catalogue, so this is always a real id someone picked.
+            let refused = selection ?? ""
+            announceRefusal(Self.managedAgentModelRefusalMessage(for: refused))
+            return .refusedModel(refused)
+        }
+        switch spawnManagedAgent(providerSettings: providerSettings) {
+        case let .spawned(tileId):
+            wire(tileId, providerSettings)
+            return .spawned(tileId: tileId, providerSettings: providerSettings)
+        case let .failure(error):
+            return .failure(error)
+        }
+    }
+
+    /// A refused ⌘K model choice, said out loud. ⌘K dispatches and closes whatever
+    /// the result, so a bare `return false` was a keystroke that did nothing at all
+    /// and explained nothing — this matches the neighbouring refusals in
+    /// `ContinuumApp.swift`, which beep and name themselves on stderr.
+    static func announceManagedAgentModelRefusal(_ message: String) {
+        NSSound.beep()
+        fputs(message + "\n", stderr)
+    }
+
+    static func managedAgentModelRefusalMessage(for selection: String) -> String {
+        "New agent refused: \(selection) is no longer offered by the model catalogue (a live model probe narrowed it while the command center was open) — no tile and no agent were created. Reopen the command center and choose from the current list."
+    }
+
+    /// A tile for an agent that ALREADY EXISTS — revealing a tileless agent from the
+    /// inbox or from ⌘K's History row.
+    ///
+    /// Every pre-attach projection (the tile title, the bootstrap line) comes from
+    /// THAT agent's record, never from the Settings default. Closing a tile is not
+    /// deleting an agent, so a revealed agent still runs whatever model it was
+    /// spawned with, and `ManagedAgentTileNSView.attach` puts that model in the
+    /// composer footer regardless — which is how a tile ended up titled
+    /// "Claude Opus 5" over a composer reading "GPT-5.6 Sol". `tile.title` is
+    /// user-visible: ⌘K renders "Jump to <title>".
+    ///
+    /// Takes the SUPERVISOR rather than a resolution so the call site cannot forget
+    /// to look one up — the omission this repairs — and so the rule has one home the
+    /// self-check can drive.
+    func spawnManagedAgentForExistingAgent(
+        _ agentID: AgentID,
+        supervisor: AgentSupervisor
+    ) -> ManagedAgentOutcome {
+        spawnManagedAgent(providerSettings: supervisor.providerSettings(for: agentID))
+    }
+
+    /// Deterministic witness for ⌘K's explicit-model spawn contract.
+    ///
+    /// BEHAVIOR, not source text. Every rule below is asserted by driving the same
+    /// function production drives — `spawnManagedAgentForSelectedModel` and
+    /// `spawnManagedAgentForExistingAgent` — and then observing what it built: the
+    /// tile, its user-visible title, the composer seed, the resolution handed to the
+    /// agent record, and the refusal's own spoken message. The first draft asserted
+    /// that `ContinuumApp.swift` CONTAINED the guard's call, which pins the call and
+    /// not the refusal: a reviewer substituted the Settings default for a departed
+    /// model and this check stayed green.
+    ///
+    /// Two narrow scans remain at the end. Each reads ONE AppDelegate method body —
+    /// methods that need a live app to execute — and asserts only that production
+    /// still routes through a seam whose behavior is witnessed here.
     static func runManagedAgentModelSpawnSelfCheck() throws {
         struct CheckError: Error, CustomStringConvertible {
             let description: String
@@ -1412,53 +1507,200 @@ final class TileSpawner {
             browserEngine: browserEngine,
             projectStore: store,
             project: project)
-        let selected = AgentModelConfig.Resolution(
-            model: "openai-codex/gpt-5.6-luna",
-            thinking: "high")
-        let tileID: UUID
-        switch spawner.spawnManagedAgent(providerSettings: selected) {
-        case let .spawned(id): tileID = id
-        case let .failure(error): throw CheckError(description: "explicit-model tile spawn failed: \(error)")
+        // This check WRITES the configured model, and that key is the user's own
+        // choice: it goes to a private suite, never to the standard domain. The
+        // seam takes its defaults injected for exactly this reason.
+        let suiteName = "continuum.qa.managed-agent-model-spawn.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            throw CheckError(description: "could not open the private defaults suite this check writes into")
         }
-        guard let view = canvas.tileView(for: tileID) as? ManagedAgentTileNSView else {
-            throw CheckError(description: "explicit-model spawn did not install a managed-agent view")
-        }
-        let expectedName = AgentModelCatalog.shared.displayName(for: selected.model)
-            ?? selected.model.split(separator: "/").last.map(String.init)
-            ?? selected.model
-        try expect(view.qaProviderSettings == selected,
-                   "composer was not seeded from the explicit spawn resolution: \(view.qaProviderSettings)")
-        let actualTitle = canvas.canvasState.tiles.first(where: { $0.id == tileID })?.title
-        try expect(actualTitle == expectedName,
-                   "tile title was not seeded from the explicit spawn resolution: expected \(expectedName), got \(String(describing: actualTitle))")
+        // Unique per run, and erased after it: two worktrees can run this leg at the
+        // same moment, and a shared suite would have them overwriting each other's
+        // fixture mid-check. Same shape as the other QA suites in this target.
+        defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        // The catalogue guard the old post-attach `setProviderSettings` write owned.
-        // QA never probes, so `modelOptions` is the frozen fallback here.
+        // QA never probes, so `modelOptions` is the frozen fallback and the catalogue
+        // holds no display names — a tile title falls back to the id's model segment,
+        // which is what the literal titles below assert.
         let live = AgentModelConfig.modelOptions
-        try expect(live.contains(selected.model),
-                   "the QA catalogue no longer offers \(selected.model); this witness is testing nothing")
-        try expect(AgentModelConfig.resolved(selection: selected.model)?.model == selected.model,
-                   "an in-catalogue explicit choice must outrank the stored default")
-        try expect(AgentModelConfig.resolved(selection: nil)?.model == AgentModelConfig.resolvedFromDefaults().model,
-                   "generic creation with no selection must still resolve from Settings")
-        try expect(AgentModelConfig.resolved(selection: "openai-codex/gpt-5.6") == nil,
-                   "a partial id must be refused, not handed to a --model pattern match")
+        let chosen = "openai-codex/gpt-5.6-luna"
+        let configured = "openai-codex/gpt-5.6-sol"
+        let reconfigured = "openai-codex/gpt-5.4-mini"
+        let revealedModel = "openai-codex/gpt-5.5"
         let departed = "openai-codex/gpt-5.6-luna-retired"
+        for id in [chosen, configured, reconfigured, revealedModel] {
+            try expect(live.contains(id), "the QA catalogue no longer offers \(id); this witness is testing nothing")
+            try expect(AgentModelCatalog.shared.displayName(for: id) == nil,
+                       "a live catalogue probe ran in QA, so \(id)'s title is pi's display name and the literal titles below are wrong")
+        }
         try expect(!live.contains(departed), "fixture id \(departed) must not be a real catalogue id")
-        try expect(AgentModelConfig.resolved(selection: departed) == nil,
-                   "a model that left the live catalogue while the palette was open must be refused, not spawned")
+        defaults.set(configured, forKey: AgentModelConfig.modelKey)
+        // Not `AgentModelConfig.defaultThinking`, so a resolution that ignored these
+        // defaults cannot accidentally agree with them.
+        defaults.set("high", forKey: AgentModelConfig.thinkingKey)
 
-        let appSourceURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
-            .appendingPathComponent("Sources/ContinuumRevived/App/ContinuumApp.swift")
-        let appSource = try String(contentsOf: appSourceURL, encoding: .utf8)
-        try expect(appSource.contains("AgentModelConfig.resolved(selection: model)"),
-                   "Cmd+K does not validate its selected model against the live catalogue before spawning")
-        try expect(appSource.contains("spawner.spawnManagedAgent(providerSettings: providerSettings)"),
-                   "Cmd+K does not pass its selected resolution into tile creation")
-        try expect(appSource.contains("wireManagedAgentTile(tileId, initialProviderSettings: providerSettings)"),
-                   "Cmd+K does not pass the same selected resolution into the agent record before attach")
-        try expect(!appSource.contains("agentSupervisor.setProviderSettings(agentID: agentID, model: model"),
-                   "Cmd+K still mutates the model after attaching the composer")
+        var refusals: [String] = []
+        var wired: [(tileId: UUID, settings: AgentModelConfig.Resolution)] = []
+        var composerAtWireTime: [AgentModelConfig.Resolution] = []
+        // Called where production wires the agent RECORD. Reading the composer here
+        // is what proves the tile was already built from this resolution — the
+        // post-attach repair this replaces could only ever run later.
+        func wire(_ tileId: UUID, _ settings: AgentModelConfig.Resolution) {
+            if let view = canvas.tileView(for: tileId) as? ManagedAgentTileNSView {
+                composerAtWireTime.append(view.qaProviderSettings)
+            }
+            wired.append((tileId, settings))
+        }
+
+        // MARK: 1 · a model that left the catalogue while ⌘K was open builds NOTHING
+
+        let refused = spawner.spawnManagedAgentForSelectedModel(
+            departed,
+            defaults: defaults,
+            announceRefusal: { refusals.append($0) },
+            wire: wire)
+        guard case let .refusedModel(refusedID) = refused, refusedID == departed else {
+            throw CheckError(description: "a model outside the live catalogue must be REFUSED, never substituted: \(refused)")
+        }
+        try expect(canvas.canvasState.tiles.isEmpty,
+                   "a refused model still built \(canvas.canvasState.tiles.count) tile(s); refusing must leave nothing behind")
+        let persistedAfterRefusal = try store.loadCanvas().tiles
+        try expect(persistedAfterRefusal.isEmpty,
+                   "a refused model persisted \(persistedAfterRefusal.count) tile(s) into the project canvas")
+        try expect(wired.isEmpty, "a refused model still wired an agent record: \(wired)")
+        try expect(refusals.count == 1 && refusals[0].contains(departed),
+                   "a refused model must SAY so and name the model — ⌘K dispatches and closes whatever the result, so a silent refusal is a keystroke that does nothing at all: \(refusals)")
+
+        // …and a partial id, which `--model` would fuzzy-match onto whichever model
+        // the provider picked, is refused by the same guard (P0.10).
+        let partial = spawner.spawnManagedAgentForSelectedModel(
+            "openai-codex/gpt-5.6",
+            defaults: defaults,
+            announceRefusal: { refusals.append($0) },
+            wire: wire)
+        guard case .refusedModel = partial else {
+            throw CheckError(description: "a partial id must be refused, not handed to a --model pattern match: \(partial)")
+        }
+        try expect(canvas.canvasState.tiles.isEmpty && wired.isEmpty,
+                   "a refused partial id built something: \(canvas.canvasState.tiles.count) tile(s), \(wired.count) record(s)")
+
+        // MARK: 2 · the explicit choice outranks Settings and reaches everything at once
+
+        let explicit = spawner.spawnManagedAgentForSelectedModel(
+            chosen,
+            defaults: defaults,
+            announceRefusal: { refusals.append($0) },
+            wire: wire)
+        guard case let .spawned(chosenTile, chosenSettings) = explicit else {
+            throw CheckError(description: "an in-catalogue explicit choice did not spawn: \(explicit)")
+        }
+        try expect(chosenSettings == AgentModelConfig.Resolution(model: chosen, thinking: "high"),
+                   "the explicit choice did not outrank the configured default \(configured), or lost the configured thinking level: \(chosenSettings)")
+        guard let chosenView = canvas.tileView(for: chosenTile) as? ManagedAgentTileNSView else {
+            throw CheckError(description: "the explicit-model spawn installed no managed-agent view")
+        }
+        try expect(chosenView.qaProviderSettings == chosenSettings,
+                   "the composer was not seeded from the explicit spawn resolution: \(chosenView.qaProviderSettings)")
+        let chosenTitle = canvas.canvasState.tiles.first(where: { $0.id == chosenTile })?.title
+        try expect(chosenTitle == "gpt-5.6-luna",
+                   "the tile title was not seeded from the explicit spawn resolution: \(String(describing: chosenTitle))")
+        try expect(wired.count == 1 && wired[0].tileId == chosenTile && wired[0].settings == chosenSettings,
+                   "the agent record was not given the SAME resolution the tile was built from: \(wired)")
+        try expect(composerAtWireTime == [chosenSettings],
+                   "the composer did not already hold the chosen model when the record was wired — the model is being repaired after attach again, which is the bug: \(composerAtWireTime)")
+
+        // MARK: 3 · generic creation with NO selection still comes from Settings
+
+        // Against a literal, and against a value written HERE. Comparing
+        // `resolved(selection: nil)` with `resolvedFromDefaults()` — the first draft's
+        // assertion — cannot fail: the former returns the latter by construction.
+        defaults.set(reconfigured, forKey: AgentModelConfig.modelKey)
+        defaults.set("low", forKey: AgentModelConfig.thinkingKey)
+        let generic = spawner.spawnManagedAgentForSelectedModel(
+            nil,
+            defaults: defaults,
+            announceRefusal: { refusals.append($0) },
+            wire: wire)
+        guard case let .spawned(genericTile, genericSettings) = generic else {
+            throw CheckError(description: "generic creation with no selection did not spawn: \(generic)")
+        }
+        try expect(genericSettings == AgentModelConfig.Resolution(model: reconfigured, thinking: "low"),
+                   "generic creation must read Settings: expected \(reconfigured)/low, got \(genericSettings)")
+        let genericTitle = canvas.canvasState.tiles.first(where: { $0.id == genericTile })?.title
+        try expect(genericTitle == "gpt-5.4-mini",
+                   "a generic tile was not titled from the Settings model: \(String(describing: genericTitle))")
+
+        // MARK: 4 · a tile revealed for an EXISTING agent is titled from its record
+
+        // Closing a tile is not deleting an agent, so revealing one from the inbox
+        // gives an existing agent a new view. Spawning that view from Settings left
+        // the tile titled after the configured default while `attach` put the
+        // record's real model in the composer — and `tile.title` is user-visible
+        // ("Jump to <title>" in ⌘K).
+        let agentStore = AgentStore(
+            applicationSupportDirectory: root.appendingPathComponent("app-support", isDirectory: true))
+        let supervisor = AgentSupervisor(store: agentStore, warn: { _ in })
+        try expect(AgentModelConfig.resolvedFromDefaults().model != revealedModel,
+                   "the ambient configured default IS \(revealedModel); this witness could not tell the record from Settings")
+        let revealed = supervisor.spawn(
+            role: nil, prompt: nil, cwd: root, model: revealedModel, thinking: "xhigh")
+        switch spawner.spawnManagedAgentForExistingAgent(revealed, supervisor: supervisor) {
+        case let .spawned(revealTile):
+            guard let revealView = canvas.tileView(for: revealTile) as? ManagedAgentTileNSView else {
+                throw CheckError(description: "revealing an agent installed no managed-agent view")
+            }
+            try expect(revealView.qaProviderSettings == AgentModelConfig.Resolution(model: revealedModel, thinking: "xhigh"),
+                       "a revealed agent's composer was not seeded from its own record: \(revealView.qaProviderSettings)")
+            let revealTitle = canvas.canvasState.tiles.first(where: { $0.id == revealTile })?.title
+            try expect(revealTitle == "gpt-5.5",
+                       "a revealed agent's tile was titled from Settings rather than from its own record: \(String(describing: revealTitle))")
+        case let .failure(error):
+            throw CheckError(description: "revealing an existing agent failed to spawn a tile: \(error)")
+        }
+
+        try expect(refusals.count == 2,
+                   "an accepted spawn spoke a refusal: \(refusals)")
+
+        // MARK: 5 · and production still goes through both witnessed seams
+
+        let paletteBody = try appDelegateMethodBody(
+            "private func spawnManagedAgentFromPalette(model: String? = nil) -> Bool {")
+        try expect(paletteBody.contains("spawnManagedAgentForSelectedModel("),
+                   "⌘K's spawn no longer routes through the seam every rule above is witnessed on:\n\(paletteBody)")
+        let revealBody = try appDelegateMethodBody(
+            "private func attachTileToAgentFromInbox(_ agentId: AgentID) -> UUID? {")
+        try expect(revealBody.contains("spawnManagedAgentForExistingAgent("),
+                   "revealing an agent no longer routes through the seam, so its tile is titled from Settings again:\n\(revealBody)")
+    }
+
+    /// The body of one `AppDelegate` method, comments stripped, bounded by the closing
+    /// brace at the method's own four-space indentation. Same mechanism and same
+    /// reason as `paletteAgentSpawnBranch` in AgentSupervisor.swift: those methods
+    /// need a live app to execute. A signature that no longer matches THROWS rather
+    /// than reading as a pass — a blind scan is worse than no scan.
+    private static func appDelegateMethodBody(_ signature: String) throws -> String {
+        struct ScanError: Error, CustomStringConvertible { let description: String }
+        let path = "Sources/ContinuumRevived/App/ContinuumApp.swift"
+        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent(path)
+        guard let source = try? String(contentsOf: url, encoding: .utf8) else {
+            throw ScanError(description: "could not read \(path) — run this check from the repo root")
+        }
+        let lines = source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard let start = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == signature }) else {
+            throw ScanError(description: "no `\(signature)` in \(path) — it was renamed or removed, and this scan is now blind")
+        }
+        var body: [String] = []
+        for line in lines[(start + 1)...] {
+            if line == "    }" { break }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("//") { continue }
+            body.append(line)
+        }
+        guard !body.isEmpty else {
+            throw ScanError(description: "`\(signature)` scanned as an empty body")
+        }
+        return body.joined(separator: "\n")
     }
 
     // MARK: - Note tiles

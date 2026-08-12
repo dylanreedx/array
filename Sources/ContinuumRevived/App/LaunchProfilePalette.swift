@@ -41,13 +41,27 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     private static let recentDefaultsKey = "continuum.commandCenter.recentIDs"
     private static let recentAgentModelDefaultsKey = "continuum.commandCenter.recentAgentModelID"
 
+    /// Every defaults read and write the palette itself makes — the recents list, the
+    /// remembered model, and the read of the configured default. Injectable because
+    /// `runDuplicateRootSelfCheck` runs INSIDE the app bundle from
+    /// `check-app-bundle.sh`, and it drives the model step: writing
+    /// `AgentModelConfig.modelKey` into `.standard` there rewrote the user's own
+    /// configured agent model for the length of the run, and permanently if the run
+    /// died before its `defer`. Production passes nothing and gets `.standard`.
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        super.init()
+    }
+
     func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], contextualActions: [LaunchPaletteAction] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = [], jumpZones: [JumpZoneRow] = [], tilelessAgents: [TilelessAgentPaletteRow] = [], initialQuery: String = "", agentModels: [AgentModelPaletteRow]? = nil) {
         rootRows = LaunchPaletteModel.makeRows(profiles: profiles.map(Self.profileRow(for:)), projects: projects, workspaces: workspaces, contextualActions: contextualActions, harnessRoles: harnessRoles, jumpTiles: jumpTiles, jumpZones: jumpZones, tilelessAgents: tilelessAgents)
         rows = rootRows
         rootQuery = initialQuery
         navigationLevel = .root
         let catalogModels = agentModels ?? Self.availableAgentModels()
-        agentModelRows = Self.agentModelChoices(catalogModels, defaults: .standard)
+        agentModelRows = Self.agentModelChoices(catalogModels, defaults: defaults)
             .map(LaunchPaletteRow.agentModel)
         guard let hostView = host.contentView else { return }
         let wasVisible = isVisible
@@ -188,31 +202,54 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         guard fallbackAgentModelName(for: "openai-codex/gpt-5.6-sol") == "GPT-5.6 Sol" else {
             throw PaletteSelfCheckError.failed("agent-model fallback leaked its raw model id into the primary title")
         }
-        let defaults = UserDefaults.standard
-        let previousRecents = defaults.object(forKey: recentDefaultsKey)
-        let previousGlassiness = defaults.object(forKey: CommandCenterAppearanceConfig.glassinessKey)
-        let previousCustomOpacity = defaults.object(forKey: CommandCenterAppearanceConfig.customOpacityKey)
-        let previousAgentModel = defaults.object(forKey: AgentModelConfig.modelKey)
-        let previousRecentAgentModel = defaults.object(forKey: recentAgentModelDefaultsKey)
-        defaults.removeObject(forKey: recentDefaultsKey)
+        // FIRST, before anything here writes anything: every key the palette itself
+        // owns, snapshotted on the USER's domain and compared at the end of this body —
+        // before any restoring `defer` could hide a write. That is the witness for the
+        // suite below, and the save/restore dance this replaces fails it.
+        let standard = UserDefaults.standard
+        let paletteOwnedKeys = [AgentModelConfig.modelKey, recentDefaultsKey, recentAgentModelDefaultsKey]
+        // Read by VALUE, never `String(describing: object(forKey:))`: an array's
+        // description carries its object address, so two reads of one unchanged key
+        // could compare unequal.
+        func paletteOwnedStandardValues() -> [String] {
+            [
+                standard.string(forKey: AgentModelConfig.modelKey) ?? "<absent>",
+                (standard.stringArray(forKey: recentDefaultsKey) ?? ["<absent>"]).joined(separator: ","),
+                standard.string(forKey: recentAgentModelDefaultsKey) ?? "<absent>",
+            ]
+        }
+        let standardBefore = paletteOwnedStandardValues()
+        // The palette's own state goes to a PRIVATE SUITE, not the user's domain.
+        // `check-app-bundle.sh` runs this leg inside the app bundle, so under
+        // `--channel prod` the old dance rewrote the real configured agent model — the
+        // owner's model choice — for the length of the run, and left it rewritten if
+        // the run died before its `defer`.
+        let suiteName = "continuum.qa.palette-duplicate-root.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            throw PaletteSelfCheckError.failed("could not open the private defaults suite this check writes into")
+        }
+        // Unique per run, and erased after it: two worktrees can run this leg at the
+        // same moment, and a shared suite would have them overwriting each other's
+        // fixture mid-check. Same shape as the other QA suites in this target.
+        defer { defaults.removePersistentDomain(forName: suiteName) }
         defaults.set("openai-codex/gpt-5.6-sol", forKey: AgentModelConfig.modelKey)
-        defaults.removeObject(forKey: recentAgentModelDefaultsKey)
+        // Glassiness is the one key that stays on the standard domain:
+        // `CommandCenterSurfaceView.applyAppearance` reads it there itself, so the
+        // appearance witness below cannot be redirected without threading defaults
+        // into the view too. It is save/restored, as before — and it is an appearance
+        // preference, not the owner's model choice.
+        let previousGlassiness = standard.object(forKey: CommandCenterAppearanceConfig.glassinessKey)
+        let previousCustomOpacity = standard.object(forKey: CommandCenterAppearanceConfig.customOpacityKey)
         defer {
-            if let previousRecents { defaults.set(previousRecents, forKey: recentDefaultsKey) }
-            else { defaults.removeObject(forKey: recentDefaultsKey) }
-            if let previousGlassiness { defaults.set(previousGlassiness, forKey: CommandCenterAppearanceConfig.glassinessKey) }
-            else { defaults.removeObject(forKey: CommandCenterAppearanceConfig.glassinessKey) }
-            if let previousCustomOpacity { defaults.set(previousCustomOpacity, forKey: CommandCenterAppearanceConfig.customOpacityKey) }
-            else { defaults.removeObject(forKey: CommandCenterAppearanceConfig.customOpacityKey) }
-            if let previousAgentModel { defaults.set(previousAgentModel, forKey: AgentModelConfig.modelKey) }
-            else { defaults.removeObject(forKey: AgentModelConfig.modelKey) }
-            if let previousRecentAgentModel { defaults.set(previousRecentAgentModel, forKey: recentAgentModelDefaultsKey) }
-            else { defaults.removeObject(forKey: recentAgentModelDefaultsKey) }
+            if let previousGlassiness { standard.set(previousGlassiness, forKey: CommandCenterAppearanceConfig.glassinessKey) }
+            else { standard.removeObject(forKey: CommandCenterAppearanceConfig.glassinessKey) }
+            if let previousCustomOpacity { standard.set(previousCustomOpacity, forKey: CommandCenterAppearanceConfig.customOpacityKey) }
+            else { standard.removeObject(forKey: CommandCenterAppearanceConfig.customOpacityKey) }
         }
         let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600), styleMask: [.borderless], backing: .buffered, defer: false)
         let hostView = NSView(frame: host.contentRect(forFrameRect: host.frame))
         host.contentView = hostView
-        let palette = LaunchProfilePalette()
+        let palette = LaunchProfilePalette(defaults: defaults)
         let profiles: [TileSpawner.AnnotatedProfile] = []
         for _ in 0..<5 {
             palette.show(near: host, profiles: profiles)
@@ -268,17 +305,17 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         guard let surface = palette.paletteView as? CommandCenterSurfaceView else {
             throw PaletteSelfCheckError.failed("missing command-center surface for appearance witness")
         }
-        defaults.set(CommandCenterGlassiness.solid.rawValue, forKey: CommandCenterAppearanceConfig.glassinessKey)
+        standard.set(CommandCenterGlassiness.solid.rawValue, forKey: CommandCenterAppearanceConfig.glassinessKey)
         surface.reapplyAppearanceForQA()
         guard surface.appearanceSnapshotForQA == .init(usesBlur: false, opacity: 1) else {
             throw PaletteSelfCheckError.failed("Solid did not produce an opaque, blur-free command center")
         }
-        defaults.set(CommandCenterGlassiness.frosted.rawValue, forKey: CommandCenterAppearanceConfig.glassinessKey)
+        standard.set(CommandCenterGlassiness.frosted.rawValue, forKey: CommandCenterAppearanceConfig.glassinessKey)
         surface.reapplyAppearanceForQA()
         guard surface.appearanceSnapshotForQA == .init(usesBlur: true, opacity: 0.84) else {
             throw PaletteSelfCheckError.failed("Frosted did not produce the 84% default command center")
         }
-        defaults.set(CommandCenterGlassiness.glass.rawValue, forKey: CommandCenterAppearanceConfig.glassinessKey)
+        standard.set(CommandCenterGlassiness.glass.rawValue, forKey: CommandCenterAppearanceConfig.glassinessKey)
         surface.reapplyAppearanceForQA()
         guard surface.appearanceSnapshotForQA == .init(usesBlur: true, opacity: 0.72) else {
             throw PaletteSelfCheckError.failed("Glass did not produce the 72% command center")
@@ -292,7 +329,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             throw PaletteSelfCheckError.failed("command-center token fill did not change across light/dark appearances")
         }
         host.appearance = nil
-        defaults.removeObject(forKey: CommandCenterAppearanceConfig.glassinessKey)
+        standard.removeObject(forKey: CommandCenterAppearanceConfig.glassinessKey)
         palette.close()
 
         host.setContentSize(NSSize(width: 360, height: 260))
@@ -433,6 +470,12 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         palette.onSelectAgentModel = nil
         guard paletteRootCount(in: hostView) == 0 else {
             throw PaletteSelfCheckError.unexpectedRootCount(paletteRootCount(in: hostView), expected: 0)
+        }
+        let standardAfter = paletteOwnedStandardValues()
+        guard standardAfter == standardBefore else {
+            throw PaletteSelfCheckError.failed(
+                "this check wrote the palette's own state into the USER's defaults domain \(paletteOwnedKeys): \(standardBefore) -> \(standardAfter). check-app-bundle.sh runs this leg inside the app bundle, so under --channel prod one of those keys is the owner's configured agent model."
+            )
         }
     }
 
@@ -875,7 +918,6 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     }
 
     private func applyFilter(query: String) {
-        let defaults = UserDefaults.standard
         let storedRecentIDs = defaults.stringArray(forKey: Self.recentDefaultsKey) ?? []
         let recentIDs = navigationLevel == .root
             ? LaunchPaletteModel.sanitizeRecentIDs(storedRecentIDs, rows: rows)
@@ -978,7 +1020,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             close(restoreFocus: true)
         case let .agentModel(model):
             let succeeded = onSelectAgentModel?(model.id) ?? false
-            if succeeded { UserDefaults.standard.set(model.id, forKey: Self.recentAgentModelDefaultsKey) }
+            if succeeded { defaults.set(model.id, forKey: Self.recentAgentModelDefaultsKey) }
             recordRecent(.action(.newManagedAgent), succeeded: succeeded)
             close(restoreFocus: true)
         case let .action(action):
@@ -1070,7 +1112,6 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     }
 
     private func recordRecent(_ row: LaunchPaletteRow, succeeded: Bool) {
-        let defaults = UserDefaults.standard
         let existing = defaults.stringArray(forKey: Self.recentDefaultsKey) ?? []
         let updated = LaunchPaletteModel.recordingRecent(row, in: existing, succeeded: succeeded)
         if updated != existing { defaults.set(updated, forKey: Self.recentDefaultsKey) }
