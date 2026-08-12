@@ -33,6 +33,7 @@ check --browser-url-focus-check
 check --camera-chrome-redraw-check
 check --companion-sync-health-check
 check --component-lab-check
+check --composer-image-components-check
 check --conductor-queue-tile-check
 check --cross-project-agents-check
 check --diff-tile-check
@@ -184,6 +185,7 @@ leg run_app_check .build/debug/Array --browser-url-focus-check
 leg run_app_check .build/debug/Array --camera-chrome-redraw-check
 leg run_app_check .build/debug/Array --companion-sync-health-check
 leg run_app_check .build/debug/Array --component-lab-check
+leg run_app_check .build/debug/Array --composer-image-components-check
 leg run_app_check .build/debug/Array --conductor-queue-tile-check
 leg run_app_check .build/debug/Array --cross-project-agents-check
 leg run_app_check .build/debug/Array --diff-tile-check

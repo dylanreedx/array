@@ -125,6 +125,15 @@ struct ComposerDecodedImagePasteboardItem: Equatable, Sendable {
         guard !ext.isEmpty, let type = UTType(filenameExtension: ext) else { return UTType.png.identifier }
         return type.identifier
     }
+
+    /// Decoding speaks UTType identifiers (`public.png`), because that is what
+    /// ImageIO reports and what `acceptedContentTypes` gates on. Core's managed
+    /// attachment store is platform-neutral and validates an `image/*` MIME type
+    /// instead, so the AppKit side must translate before crossing that seam —
+    /// handing it `public.png` is refused as an unvalidated image.
+    var managedContentType: String {
+        UTType(contentType)?.preferredMIMEType ?? contentType
+    }
 }
 
 struct ComposerImageAttachmentImportPipeline: Sendable {
@@ -333,7 +342,10 @@ enum ComposerImageDisplay {
     }
 
     static func typeLabel(_ contentType: String?) -> String {
-        guard let contentType, let type = UTType(contentType) else { return "Image" }
+        // Managed attachments persist the store's `image/*` MIME type, while
+        // freshly decoded pasteboard items still carry a UTType identifier. Read
+        // both so a stored chip is not labelled a generic "Image".
+        guard let contentType, let type = UTType(contentType) ?? UTType(mimeType: contentType) else { return "Image" }
         if type == .png { return "PNG" }
         if type == .jpeg { return "JPEG" }
         if type == .tiff { return "TIFF" }

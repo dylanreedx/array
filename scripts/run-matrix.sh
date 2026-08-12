@@ -305,6 +305,11 @@ run_app_check .build/debug/Array --note-click-focus-check
 # P5.5 correction: the same click-focus contract for the v2 agent composer — the
 # broker steal, an editor-glyph click, and a padding-ring click all land in the editor.
 run_app_check .build/debug/Array --agent-tile-click-focus-check
+# The composer's paste/drop intake: image decoding, thumbnail cache, attachment
+# rail, cross-agent rebind isolation, and the shared mixed image/file-reference
+# route through the real managed attachment store. It shipped with 44fbe73 but
+# was never wired here, so a full matrix went green over a red witness.
+run_app_check .build/debug/Array --composer-image-components-check
 # Queue 91 P3.7/P3.S1: the real Home action policy rejects file, missing,
 # non-file, and stale registered roots without mutating the agent; the native
 # menu switches from Change Home to New Agent Here after work/history exists.

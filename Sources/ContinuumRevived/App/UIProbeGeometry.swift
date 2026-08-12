@@ -8414,6 +8414,15 @@ enum UIProbeGeometry {
                     "the mixed paste/drop route lost its document reference: \(composer.qaFileReferenceRailNames)")
         try require(composer.qaImageImportFailureCount == 0,
                     "a valid image import recorded a failure")
+        // Pin the seam that broke it: decoding reports a UTType identifier, but
+        // the managed store validates a platform-neutral `image/*` MIME type, so
+        // handing it `public.png` refuses every pasted image.
+        try require(composer.qaImageAttachmentContentTypes == ["image/png"],
+                    "the managed store did not persist the image's MIME content type, got \(composer.qaImageAttachmentContentTypes)")
+        try require(ComposerImageDisplay.detailLabel(
+                        contentType: composer.qaImageAttachmentContentTypes.first ?? nil,
+                        width: 8, height: 8) == "PNG · 8×8",
+                    "a stored attachment's rail detail label lost its type from the persisted content type")
         composer.qaRemoveImageAttachment(at: 0)
         composer.qaRemoveFileReference(at: 2)
         try require(composer.qaImageAttachmentCount == 0
