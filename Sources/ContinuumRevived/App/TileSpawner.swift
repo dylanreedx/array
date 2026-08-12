@@ -1304,7 +1304,11 @@ final class TileSpawner {
     /// Spawns the product-managed agent surface. This path deliberately does
     /// not create a terminal session descriptor; raw CLI terminals remain the
     /// explicit fallback profiles in `LaunchProfileRegistry`.
-    func spawnManagedAgent(agentKind: AgentKind = .managed, at worldPoint: CGPoint? = nil) -> ManagedAgentOutcome {
+    func spawnManagedAgent(
+        agentKind: AgentKind = .managed,
+        at worldPoint: CGPoint? = nil,
+        providerSettings: AgentModelConfig.Resolution? = nil
+    ) -> ManagedAgentOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
         let now = Date()
         let tileId = UUID()
@@ -1315,13 +1319,11 @@ final class TileSpawner {
             in: canvasView
         )
         let nextZ = CanvasEngine.zPositionAbove(canvasView.canvasState.tiles)
-        // The tile is named after the model it will actually run, not a literal.
-        // "GPT-5.6" was hardcoded here and in the bootstrap line below, so every
-        // managed tile's chrome read "Agent · GPT-5.6" no matter which model the
-        // composer showed — the picker was right and the header contradicted it.
-        // Resolved from defaults, the same source the spawn itself uses, so the
-        // header cannot disagree with the model that gets routed.
-        let spawnModelID = AgentModelConfig.resolvedFromDefaults().model
+        // One resolution seeds every pre-attach projection. Cmd+K supplies its
+        // explicit choice; generic creation falls back to Settings. Wiring gives
+        // the same resolution to the agent record before the view attaches.
+        let resolvedProviderSettings = providerSettings ?? AgentModelConfig.resolvedFromDefaults()
+        let spawnModelID = resolvedProviderSettings.model
         let spawnModelName = AgentModelCatalog.shared.displayName(for: spawnModelID)
             ?? spawnModelID.split(separator: "/").last.map(String.init)
             ?? spawnModelID
@@ -1335,7 +1337,12 @@ final class TileSpawner {
             metadata: TileMetadata(launchProfileId: "managed-agent", projectRelativeCwd: ".")
         )
         let descriptor = AgentDescriptor(agentKind: agentKind, worktreePath: nil, status: .configuring, statusUpdatedAt: now)
-        let view = ManagedAgentTileNSView(tile: tile, threadId: threadId, descriptor: descriptor)
+        let view = ManagedAgentTileNSView(
+            tile: tile,
+            threadId: threadId,
+            descriptor: descriptor,
+            providerSettings: resolvedProviderSettings
+        )
         view.ingest(.sessionStateChanged(.ready))
         view.ingest(.contentDelta(threadId: threadId, turnId: "bootstrap", streamKind: .assistant, delta: "Ready. Type a prompt below to run \(spawnModelName) in this tile."))
         canvasView.install(tileView: view, for: tile)
@@ -1359,6 +1366,99 @@ final class TileSpawner {
             return .failure(error)
         }
         return .spawned(tileId: tileId)
+    }
+
+    /// Deterministic witness for Cmd+K's explicit-model construction contract.
+    /// The tile can be exercised without a provider process; the app-source guard
+    /// covers the production handoff from the palette into both construction legs.
+    static func runManagedAgentModelSpawnSelfCheck() throws {
+        struct CheckError: Error, CustomStringConvertible {
+            let description: String
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError(description: message) }
+        }
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("array-managed-agent-model-spawn-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let project = Project(
+            id: UUID(),
+            name: "managed-agent-model-spawn-check",
+            rootPath: root.path,
+            createdAt: Date(),
+            updatedAt: Date(),
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning)
+        )
+        let store = ProjectStore(projectRoot: root)
+        try store.saveProject(project)
+        try store.saveCanvas(CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [],
+            groups: [],
+            lastActiveTileId: nil))
+        let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+        let browserEngine = BrowserEngineContext()
+        defer { browserEngine.shutdown() }
+        let spawner = TileSpawner(
+            canvasView: canvas,
+            ghostty: nil,
+            browserEngine: browserEngine,
+            projectStore: store,
+            project: project)
+        let selected = AgentModelConfig.Resolution(
+            model: "openai-codex/gpt-5.6-luna",
+            thinking: "high")
+        let tileID: UUID
+        switch spawner.spawnManagedAgent(providerSettings: selected) {
+        case let .spawned(id): tileID = id
+        case let .failure(error): throw CheckError(description: "explicit-model tile spawn failed: \(error)")
+        }
+        guard let view = canvas.tileView(for: tileID) as? ManagedAgentTileNSView else {
+            throw CheckError(description: "explicit-model spawn did not install a managed-agent view")
+        }
+        let expectedName = AgentModelCatalog.shared.displayName(for: selected.model)
+            ?? selected.model.split(separator: "/").last.map(String.init)
+            ?? selected.model
+        try expect(view.qaProviderSettings == selected,
+                   "composer was not seeded from the explicit spawn resolution: \(view.qaProviderSettings)")
+        let actualTitle = canvas.canvasState.tiles.first(where: { $0.id == tileID })?.title
+        try expect(actualTitle == expectedName,
+                   "tile title was not seeded from the explicit spawn resolution: expected \(expectedName), got \(String(describing: actualTitle))")
+
+        // The catalogue guard the old post-attach `setProviderSettings` write owned.
+        // QA never probes, so `modelOptions` is the frozen fallback here.
+        let live = AgentModelConfig.modelOptions
+        try expect(live.contains(selected.model),
+                   "the QA catalogue no longer offers \(selected.model); this witness is testing nothing")
+        try expect(AgentModelConfig.resolved(selection: selected.model)?.model == selected.model,
+                   "an in-catalogue explicit choice must outrank the stored default")
+        try expect(AgentModelConfig.resolved(selection: nil)?.model == AgentModelConfig.resolvedFromDefaults().model,
+                   "generic creation with no selection must still resolve from Settings")
+        try expect(AgentModelConfig.resolved(selection: "openai-codex/gpt-5.6") == nil,
+                   "a partial id must be refused, not handed to a --model pattern match")
+        let departed = "openai-codex/gpt-5.6-luna-retired"
+        try expect(!live.contains(departed), "fixture id \(departed) must not be a real catalogue id")
+        try expect(AgentModelConfig.resolved(selection: departed) == nil,
+                   "a model that left the live catalogue while the palette was open must be refused, not spawned")
+
+        let appSourceURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("Sources/ContinuumRevived/App/ContinuumApp.swift")
+        let appSource = try String(contentsOf: appSourceURL, encoding: .utf8)
+        try expect(appSource.contains("AgentModelConfig.resolved(selection: model)"),
+                   "Cmd+K does not validate its selected model against the live catalogue before spawning")
+        try expect(appSource.contains("spawner.spawnManagedAgent(providerSettings: providerSettings)"),
+                   "Cmd+K does not pass its selected resolution into tile creation")
+        try expect(appSource.contains("wireManagedAgentTile(tileId, initialProviderSettings: providerSettings)"),
+                   "Cmd+K does not pass the same selected resolution into the agent record before attach")
+        try expect(!appSource.contains("agentSupervisor.setProviderSettings(agentID: agentID, model: model"),
+                   "Cmd+K still mutates the model after attaching the composer")
     }
 
     // MARK: - Note tiles

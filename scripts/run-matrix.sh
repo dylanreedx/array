@@ -170,6 +170,7 @@ run_app_check .build/debug/Array --palette-first-responder-restore-check
 run_app_check .build/debug/Array --settings-panel-check
 run_app_check .build/debug/Array --onboarding-panel-check
 run_app_check .build/debug/Array --provider-model-picker-check
+run_app_check .build/debug/Array --managed-agent-model-spawn-check
 # Channel split: the bare binary must resolve the DEV store ("Array Dev").
 run_app_check .build/debug/Array --app-support-channel-check
 if [[ "${CONTINUUM_SKIP_UI_BASELINES:-0}" == "1" ]]; then

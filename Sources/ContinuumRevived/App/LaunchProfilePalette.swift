@@ -39,13 +39,16 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     private var navigationLevel = NavigationLevel.root
 
     private static let recentDefaultsKey = "continuum.commandCenter.recentIDs"
+    private static let recentAgentModelDefaultsKey = "continuum.commandCenter.recentAgentModelID"
 
     func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], contextualActions: [LaunchPaletteAction] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = [], jumpZones: [JumpZoneRow] = [], tilelessAgents: [TilelessAgentPaletteRow] = [], initialQuery: String = "", agentModels: [AgentModelPaletteRow]? = nil) {
         rootRows = LaunchPaletteModel.makeRows(profiles: profiles.map(Self.profileRow(for:)), projects: projects, workspaces: workspaces, contextualActions: contextualActions, harnessRoles: harnessRoles, jumpTiles: jumpTiles, jumpZones: jumpZones, tilelessAgents: tilelessAgents)
         rows = rootRows
         rootQuery = initialQuery
         navigationLevel = .root
-        agentModelRows = (agentModels ?? Self.availableAgentModels()).map(LaunchPaletteRow.agentModel)
+        let catalogModels = agentModels ?? Self.availableAgentModels()
+        agentModelRows = Self.agentModelChoices(catalogModels, defaults: .standard)
+            .map(LaunchPaletteRow.agentModel)
         guard let hostView = host.contentView else { return }
         let wasVisible = isVisible
         let paletteView = ensurePaletteView()
@@ -189,7 +192,11 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         let previousRecents = defaults.object(forKey: recentDefaultsKey)
         let previousGlassiness = defaults.object(forKey: CommandCenterAppearanceConfig.glassinessKey)
         let previousCustomOpacity = defaults.object(forKey: CommandCenterAppearanceConfig.customOpacityKey)
+        let previousAgentModel = defaults.object(forKey: AgentModelConfig.modelKey)
+        let previousRecentAgentModel = defaults.object(forKey: recentAgentModelDefaultsKey)
         defaults.removeObject(forKey: recentDefaultsKey)
+        defaults.set("openai-codex/gpt-5.6-sol", forKey: AgentModelConfig.modelKey)
+        defaults.removeObject(forKey: recentAgentModelDefaultsKey)
         defer {
             if let previousRecents { defaults.set(previousRecents, forKey: recentDefaultsKey) }
             else { defaults.removeObject(forKey: recentDefaultsKey) }
@@ -197,6 +204,10 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             else { defaults.removeObject(forKey: CommandCenterAppearanceConfig.glassinessKey) }
             if let previousCustomOpacity { defaults.set(previousCustomOpacity, forKey: CommandCenterAppearanceConfig.customOpacityKey) }
             else { defaults.removeObject(forKey: CommandCenterAppearanceConfig.customOpacityKey) }
+            if let previousAgentModel { defaults.set(previousAgentModel, forKey: AgentModelConfig.modelKey) }
+            else { defaults.removeObject(forKey: AgentModelConfig.modelKey) }
+            if let previousRecentAgentModel { defaults.set(previousRecentAgentModel, forKey: recentAgentModelDefaultsKey) }
+            else { defaults.removeObject(forKey: recentAgentModelDefaultsKey) }
         }
         let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600), styleMask: [.borderless], backing: .buffered, defer: false)
         let hostView = NSView(frame: host.contentRect(forFrameRect: host.frame))
@@ -329,7 +340,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             if case let .section(title) = entry { return title }
             return nil
         }
-        guard mixedHeaders == ["Anthropic", "OpenAI Codex"] else {
+        guard mixedHeaders == ["Quick Start", "Anthropic", "OpenAI Codex"] else {
             throw PaletteSelfCheckError.failed("the model step must head each provider's block, got \(mixedHeaders)")
         }
         guard palette.displayEntries.contains(where: { entry in
@@ -346,6 +357,21 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             AgentModelPaletteRow(id: "openai-codex/gpt-5.6-sol", displayName: "GPT-5.6 Sol", providerName: "OpenAI Codex · openai-codex/gpt-5.6-sol"),
             AgentModelPaletteRow(id: "openai-codex/gpt-5.6-luna", displayName: "GPT-5.6 Luna", providerName: "OpenAI Codex · openai-codex/gpt-5.6-luna"),
         ]
+        // A REFUSED model dispatch must leave no trace. This is the observable end of
+        // `AgentModelConfig.resolved(selection:)`: a row that left the live catalogue
+        // while the palette was open spawns nothing, and ⌘K must not then offer it
+        // back as "Recently Used".
+        palette.onSelectAgentModel = { _ in false }
+        palette.show(near: host, profiles: [], initialQuery: "Agent", agentModels: agentModels)
+        palette.commitSelection()
+        guard let refusedSearch = palette.searchField else { throw PaletteSelfCheckError.missingSearchField }
+        refusedSearch.stringValue = "luna"
+        palette.applyFilter(query: "luna")
+        palette.commitSelection()
+        guard !palette.isVisible, defaults.string(forKey: recentAgentModelDefaultsKey) == nil else {
+            throw PaletteSelfCheckError.failed("a refused model dispatch was remembered as the recent model")
+        }
+
         var selectedModelID: String?
         palette.onSelectAgentModel = { modelID in
             selectedModelID = modelID
@@ -354,8 +380,8 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         palette.show(near: host, profiles: [], initialQuery: "Agent", agentModels: agentModels)
         palette.commitSelection()
         guard palette.isVisible, palette.isChoosingAgentModelForQA,
-              palette.selectedDisplayNameForQA == "GPT-5.6 Sol" else {
-            throw PaletteSelfCheckError.failed("New Agent did not drill forward to the exact model list")
+              palette.selectedDisplayNameForQA == "Default — GPT-5.6 Sol" else {
+            throw PaletteSelfCheckError.failed("New Agent did not lead with the explicit configured-default shortcut")
         }
         guard let searchField = palette.searchField else { throw PaletteSelfCheckError.missingSearchField }
         searchField.stringValue = "luna"
@@ -370,8 +396,8 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             if case let .section(title) = entry { return title }
             return nil
         }
-        guard singleHeaders == [CommandCenterCategory.models.rawValue] else {
-            throw PaletteSelfCheckError.failed("a single-provider model step keeps the plain header, got \(singleHeaders)")
+        guard singleHeaders == ["Quick Start", CommandCenterCategory.models.rawValue] else {
+            throw PaletteSelfCheckError.failed("a single-provider model step keeps quick start above one plain catalogue header, got \(singleHeaders)")
         }
         _ = palette.control(searchField, textView: NSTextView(), doCommandBy: #selector(NSResponder.cancelOperation(_:)))
         guard palette.isVisible, !palette.isChoosingAgentModelForQA,
@@ -388,9 +414,22 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         palette.commitSelection()
         guard !palette.isVisible,
               selectedModelID == "openai-codex/gpt-5.6-luna",
-              defaults.stringArray(forKey: recentDefaultsKey)?.first == "action:new-agent" else {
-            throw PaletteSelfCheckError.failed("model selection did not dispatch the exact id and record the completed parent action")
+              defaults.stringArray(forKey: recentDefaultsKey)?.first == "action:new-agent",
+              defaults.string(forKey: recentAgentModelDefaultsKey) == "openai-codex/gpt-5.6-luna" else {
+            throw PaletteSelfCheckError.failed("model selection did not dispatch the exact id and record the completed parent action/model")
         }
+        palette.show(near: host, profiles: [], initialQuery: "Agent", agentModels: agentModels)
+        palette.commitSelection()
+        let quickTitles = palette.displayEntries.compactMap { entry -> String? in
+            guard case let .item(item) = entry,
+                  case let .agentModel(model) = item.row,
+                  model.kind != .catalog else { return nil }
+            return model.displayName
+        }
+        guard quickTitles == ["Default — GPT-5.6 Sol", "Recently Used — GPT-5.6 Luna"] else {
+            throw PaletteSelfCheckError.failed("model shortcuts did not keep stable default separate from recent choice: \(quickTitles)")
+        }
+        palette.close()
         palette.onSelectAgentModel = nil
         guard paletteRootCount(in: hostView) == 0 else {
             throw PaletteSelfCheckError.unexpectedRootCount(paletteRootCount(in: hostView), expected: 0)
@@ -757,6 +796,36 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         }
     }
 
+    private static func agentModelChoices(
+        _ catalog: [AgentModelPaletteRow],
+        defaults: UserDefaults
+    ) -> [AgentModelPaletteRow] {
+        guard !catalog.isEmpty else { return [] }
+        // Keyed, not `uniqueKeysWithValues`: the catalogue is a live parse of another
+        // process's output, and a repeated id there must not trap the app on ⌘K.
+        let byID = Dictionary(catalog.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let resolvedDefaultID = AgentModelConfig.resolvedFromDefaults(defaults: defaults).model
+        let defaultModel = byID[resolvedDefaultID] ?? catalog[0]
+        var choices = [AgentModelPaletteRow(
+            id: defaultModel.id,
+            displayName: "Default — \(defaultModel.displayName)",
+            providerName: "Configured in Settings · \(defaultModel.id)",
+            kind: .configuredDefault
+        )]
+        if let recentID = defaults.string(forKey: recentAgentModelDefaultsKey),
+           recentID != defaultModel.id,
+           let recentModel = byID[recentID] {
+            choices.append(AgentModelPaletteRow(
+                id: recentModel.id,
+                displayName: "Recently Used — \(recentModel.displayName)",
+                providerName: "Last successful Cmd+K agent · \(recentModel.id)",
+                kind: .recentlyUsed
+            ))
+        }
+        choices.append(contentsOf: catalog)
+        return choices
+    }
+
     private static func fallbackAgentModelName(for id: String) -> String {
         let model = id.split(separator: "/", maxSplits: 1).last.map(String.init) ?? id
         let parts = model.split(separator: "-").map(String.init)
@@ -823,19 +892,31 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             // when nothing was filtered at all. Provider blocks stay in catalogue
             // order; only the headers are added.
             if section.category == .models {
+                let quickItems = section.items.filter { item in
+                    guard case let .agentModel(model) = item.row else { return false }
+                    return model.kind != .catalog
+                }
+                let catalogItems = section.items.filter { item in
+                    guard case let .agentModel(model) = item.row else { return true }
+                    return model.kind == .catalog
+                }
                 var order: [String] = []
                 var byProvider: [String: [CommandCenterItem]] = [:]
-                for item in section.items {
+                for item in catalogItems {
                     let provider = ProviderModelGrouping.provider(forID: item.row.agentModelID ?? "")
                     if byProvider[provider] == nil { order.append(provider) }
                     byProvider[provider, default: []].append(item)
                 }
+                let quickEntries: [CommandCenterDisplayEntry] = quickItems.isEmpty
+                    ? []
+                    : [.section("Quick Start")] + quickItems.map(CommandCenterDisplayEntry.item)
                 // A single provider keeps the plain header — a lone "ANTHROPIC" over
                 // every row it owns is noise, not information.
                 if order.count <= 1 {
-                    return [.section(section.category.rawValue)] + section.items.map(CommandCenterDisplayEntry.item)
+                    return quickEntries
+                        + (catalogItems.isEmpty ? [] : [.section(section.category.rawValue)] + catalogItems.map(CommandCenterDisplayEntry.item))
                 }
-                return order.flatMap { provider in
+                return quickEntries + order.flatMap { provider in
                     [.section(ProviderModelGrouping.displayName(forProvider: provider))]
                         + (byProvider[provider] ?? []).map(CommandCenterDisplayEntry.item)
                 }
@@ -897,6 +978,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             close(restoreFocus: true)
         case let .agentModel(model):
             let succeeded = onSelectAgentModel?(model.id) ?? false
+            if succeeded { UserDefaults.standard.set(model.id, forKey: Self.recentAgentModelDefaultsKey) }
             recordRecent(.action(.newManagedAgent), succeeded: succeeded)
             close(restoreFocus: true)
         case let .action(action):

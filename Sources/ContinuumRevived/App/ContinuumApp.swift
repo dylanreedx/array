@@ -936,6 +936,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--managed-agent-model-spawn-check") {
+            do {
+                _ = NSApplication.shared
+                try TileSpawner.runManagedAgentModelSpawnSelfCheck()
+                print("ContinuumRevivedManagedAgentModelSpawnChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--project-root-resolution-check") {
             do {
                 try AppDelegate.runProjectRootResolutionSelfCheck()
@@ -10209,41 +10221,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    @discardableResult
-    /// Name a managed-agent tile after the model it runs. One copy of the rule, so
-    /// the spawner's title and a later explicit choice cannot drift apart.
-    private func renameManagedAgentTileForModel(tileId: UUID, modelID: String) {
-        guard let canvasView,
-              var tile = canvasView.canvasState.tiles.first(where: { $0.id == tileId }),
-              tile.kind == .managedAgent else { return }
-        let name = AgentModelCatalog.shared.displayName(for: modelID)
-            ?? modelID.split(separator: "/").last.map(String.init)
-            ?? modelID
-        guard tile.title != name else { return }
-        tile.title = name
-        canvasView.updateTile(tile)
-    }
-
     private func spawnManagedAgentFromPalette(model: String? = nil) -> Bool {
         guard let spawner = tileSpawner else { return false }
-        switch spawner.spawnManagedAgent() {
+        // The catalogue guard the old post-attach `setProviderSettings` write owned,
+        // moved AHEAD of construction. The palette's rows are the catalogue as it was
+        // when the model step opened, so a live probe landing while it is up can leave
+        // a row pointing at a model that is no longer offered. Refusing here creates no
+        // tile and no agent at all; the old order created a default-model one and then
+        // reported failure.
+        guard let providerSettings = AgentModelConfig.resolved(selection: model) else { return false }
+        switch spawner.spawnManagedAgent(providerSettings: providerSettings) {
         case let .spawned(tileId):
-            wireManagedAgentTile(tileId)
-            var modelApplied = true
-            if let model {
-                if let agentID = agentSupervisor.agent(forTile: tileId) {
-                    let thinking = AgentModelConfig.resolvedFromDefaults().thinking
-                    agentSupervisor.setProviderSettings(agentID: agentID, model: model, thinking: thinking)
-                    modelApplied = agentSupervisor.records[agentID]?.model == model
-                    // The spawner named the tile after the DEFAULT model, because the
-                    // tile exists before this explicit choice is applied. Rename it to
-                    // what the agent will actually run, or the ⌘K drill-down leaves a
-                    // header contradicting the composer.
-                    if modelApplied { renameManagedAgentTileForModel(tileId: tileId, modelID: model) }
-                } else {
-                    modelApplied = false
-                }
-            }
+            wireManagedAgentTile(tileId, initialProviderSettings: providerSettings)
+            let modelApplied = agentSupervisor.agent(forTile: tileId)
+                .flatMap { agentSupervisor.records[$0]?.model } == providerSettings.model
             focusSpawnedTile(tileId)
             scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "managed-agent-spawn", debounce: 0.2)
             return modelApplied
@@ -10280,7 +10271,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// root and id, and the configured model/thinking level. `tileId` is a view
     /// binding, not identity, so `nil` is a headless agent; a non-nil `prompt` runs
     /// on spawn (`AgentSupervisor.spawn`'s own parameter).
-    private func spawnSupervisedAgent(tileId: UUID?, prompt: String? = nil) -> AgentID? {
+    /// Kept on ONE line: `--agent-supervisor-check` pins this whole signature by exact
+    /// line match (`paletteAgentSpawnBranch`), so wrapping it blinds that scan.
+    private func spawnSupervisedAgent(tileId: UUID?, prompt: String? = nil, providerSettings: AgentModelConfig.Resolution? = nil) -> AgentID? {
         // Plan 07. This used to read `activeProject.rootPath` unconditionally, which
         // is why changing an agent's Home never carried: the next ⌘K agent went back
         // to the active project regardless of where you had just been working.
@@ -10324,7 +10317,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             tileId: tileId,
             prompt: prompt,
             cwd: cwd,
-            projectId: resolution.home.projectId)
+            projectId: resolution.home.projectId,
+            providerSettings: providerSettings)
     }
 
     /// Explicit-Home variant used only after the owner chooses a registered
@@ -10335,9 +10329,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         tileId: UUID?,
         prompt: String? = nil,
         cwd: URL,
-        projectId: UUID?
+        projectId: UUID?,
+        providerSettings: AgentModelConfig.Resolution? = nil
     ) -> AgentID {
-        let model = AgentModelConfig.resolvedFromDefaults()
+        let model = providerSettings ?? AgentModelConfig.resolvedFromDefaults()
         return agentSupervisor.spawn(
             role: nil,
             prompt: prompt,
@@ -10361,7 +10356,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// P3.9 passes `agentID` for the one case that has an agent already and no tile
     /// yet: revealing a headless agent spawns a tile FOR it, so the spawn branch
     /// below — which would create a second agent over the top of it — must not run.
-    private func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil) {
+    ///
+    /// Kept on ONE line: `--agent-supervisor-check` pins this whole signature by exact
+    /// line match (`paletteAgentSpawnBranch`), so wrapping it blinds that scan.
+    private func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil, initialProviderSettings: AgentModelConfig.Resolution? = nil) {
         guard let view = canvasView?.tileView(for: tileId) as? ManagedAgentTileNSView else { return }
         let supervisor = agentSupervisor
         let agentId: AgentID
@@ -10388,7 +10386,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             return
         } else {
-            guard let spawnedAgentID = spawnSupervisedAgent(tileId: tileId) else { return }
+            guard let spawnedAgentID = spawnSupervisedAgent(
+                tileId: tileId,
+                providerSettings: initialProviderSettings
+            ) else { return }
             agentId = spawnedAgentID
         }
         // The view binding lives in one place (P2A.5), so this is the site that
