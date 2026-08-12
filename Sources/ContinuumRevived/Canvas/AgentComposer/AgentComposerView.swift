@@ -520,7 +520,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
                 guard self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
                 do {
                     let validation = try AgentComposerImageValidation(
-                        validatedContentType: item.contentType,
+                        validatedContentType: item.managedContentType,
                         pixelWidth: item.pixelWidth,
                         pixelHeight: item.pixelHeight,
                         byteCount: item.byteCount
@@ -1101,6 +1101,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     var qaFileReferenceRailAccessibilityLabels: [String] { fileReferenceRail.qaAccessibilityLabels }
     var qaHasSendableAttachments: Bool { composerHasSendableAttachments(textView) }
     var qaImageAttachmentCount: Int { importedAttachments.count }
+    var qaImageAttachmentContentTypes: [String?] { importedAttachments.map(\.metadata.contentType) }
     var qaImageImportFailureCount: Int { imageImportFailureCount }
     var qaImageImportFailureCategories: [String] { imageImportFailureCategories }
 
