@@ -229,6 +229,12 @@ cost a session to learn:
   unknown one falls through the cascade and boots the full app, hanging the
   shell. Enumerate:
   `grep -oE '\-\-[a-z0-9-]+-check' Sources/ContinuumRevived/App/ContinuumApp.swift | sort -u`
+- Performance: a new tile, renderer, or document view goes through the checklist
+  in [docs/internals/performance.md](docs/internals/performance.md) before it
+  ships. One view per content item and any measurement inside `layout()` are how
+  the Markdown tile froze the app for three releases; that file also lists the
+  OS reports to read FIRST when something is slow, because reasoning about it
+  cost two of those releases.
 - Bundle: `scripts/check-app-bundle.sh` (dev channel by default;
   `--channel prod` for release verification). It asserts identity, Sparkle
   embedding, launch smoke, and pollution guards over the real dirs.

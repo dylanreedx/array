@@ -12,6 +12,8 @@ hard rules are the same file — `CLAUDE.md` symlinks to it.
 - [Architecture overview](./internals/architecture-overview.md)
 - [Agent providers (pi, claude, codex)](./internals/providers.md)
 - [QA: the matrix, self-checks, witnesses](./internals/qa.md)
+- [Performance on the canvas](./internals/performance.md) — the traps that froze
+  the Markdown tile, and how to get evidence instead of theories
 
 ### Runbooks
 

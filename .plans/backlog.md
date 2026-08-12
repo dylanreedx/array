@@ -81,6 +81,9 @@ shipped. Nothing is unreleased right now.
   block means a 546 KB file built 12,000 TextKit stacks (5.1s + 5.1s, 1.39 GB,
   process killed). Preview now renders 400 blocks and says so; the real fix is
   virtualization — `AgentTranscriptListView` already does it for transcripts.
+- **Read [docs/internals/performance.md](../docs/internals/performance.md)
+  before building a new tile or renderer.** It is the standing checklist and the
+  evidence-gathering order, written from the three releases below.
 - **Markdown tile hang: fixed in 0.4.17, but never reproduced in a harness.**
   Two OS reports named it (0.4.15 `.hang`, 75s in `BodyView.layout`; 0.4.16
   `.cpu_resource`, 90s at 96% with 20/34 samples in `AssistantProseView.layout`).
