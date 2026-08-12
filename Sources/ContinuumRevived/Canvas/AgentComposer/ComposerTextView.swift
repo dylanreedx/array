@@ -136,11 +136,33 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate {
         promptHistory.recordAccepted(prompt, for: promptHistoryAgentID)
     }
 
+    /// Where `paste:` and its validation read from. Production is the general
+    /// pasteboard; checks substitute a private one so they can drive the real
+    /// override without mutating process-global state. Both the action and its
+    /// validation MUST read the same source, or the menu can enable a paste the
+    /// handler then refuses (or the reverse, which is the bug below).
+    var attachmentPasteboardProvider: () -> NSPasteboard = { .general }
+
     override func paste(_ sender: Any?) {
-        let pasteboard = NSPasteboard.general
-        if !handleAttachmentIntake(from: pasteboard) {
+        if !handleAttachmentIntake(from: attachmentPasteboardProvider()) {
             super.paste(sender)
         }
+    }
+
+    /// A plain-text NSTextView (`isRichText = false`, `importsGraphics = false`)
+    /// reports it cannot read an image-only pasteboard, so AppKit DISABLES
+    /// `paste:` and ⌘V just beeps — `paste(_:)` above is never called and the
+    /// image intake never gets a chance. A macOS screenshot is exactly that case:
+    /// its pasteboard item carries `public.png` and nothing else. A browser's
+    /// "copy image" also puts HTML/text flavours on the board, so validation
+    /// passed and pasting worked there — same code, different pasteboard, which
+    /// is why this looked like a screenshot-only bug.
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(NSText.paste(_:)),
+           !ComposerPasteboardIntake(from: attachmentPasteboardProvider()).isEmpty {
+            return true
+        }
+        return super.validateUserInterfaceItem(item)
     }
 
     override func performDragOperation(_ draggingInfo: NSDraggingInfo) -> Bool {

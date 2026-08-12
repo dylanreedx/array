@@ -8446,6 +8446,38 @@ enum UIProbeGeometry {
         try require(unboundComposer.qaImageImportFailureCategories == ["attachment-store-unavailable"],
                     "the image-import failure did not preserve its bounded category")
 
+        // Claiming the paste is not enough: AppKit asks the responder whether
+        // `paste:` is even VALID first, and a plain-text NSTextView answers by
+        // checking whether the pasteboard holds a type it can read. A macOS
+        // screenshot puts `public.png` and NOTHING else on the board, so ⌘V was
+        // disabled and only beeped — `paste(_:)` never ran and the intake above
+        // never got a chance. A browser's "copy image" also writes HTML/text
+        // flavours, which is why pasting worked from Chrome and not from a
+        // screenshot. Drives the real override through an injected pasteboard so
+        // the check never touches the process-global one.
+        let validationComposer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 520, height: 96))
+        validationComposer.bindDraftStore(draftStore, agentID: AgentID(rawValue: UUID()))
+        let pasteItem = NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+
+        let screenshotBoard = NSPasteboard(name: NSPasteboard.Name("continuum.composer.image.screenshot.\(UUID().uuidString)"))
+        screenshotBoard.clearContents()
+        let screenshotItem = NSPasteboardItem()
+        screenshotItem.setData(try makeProbeImageData(width: 12, height: 6, type: .png), forType: .png)
+        screenshotBoard.writeObjects([screenshotItem])
+        // Exactly the real shape: one item, PNG only, no text/HTML companion.
+        try require(screenshotBoard.pasteboardItems?.count == 1
+                    && screenshotBoard.pasteboardItems?.first?.types == [.png],
+                    "the screenshot fixture stopped being an image-only pasteboard, so it no longer reproduces the disabled-paste case")
+        validationComposer.textView.attachmentPasteboardProvider = { screenshotBoard }
+        try require(validationComposer.textView.validateUserInterfaceItem(pasteItem),
+                    "Paste stayed DISABLED for an image-only pasteboard, so a pasted screenshot only beeps")
+
+        let emptyBoard = NSPasteboard(name: NSPasteboard.Name("continuum.composer.image.empty.\(UUID().uuidString)"))
+        emptyBoard.clearContents()
+        validationComposer.textView.attachmentPasteboardProvider = { emptyBoard }
+        try require(!validationComposer.textView.validateUserInterfaceItem(pasteItem),
+                    "Paste validation returned true for an empty pasteboard, so it is blanket-enabling the menu item instead of consulting the intake")
+
         // The REAL send path (not a reconstruction): drive composerRequestedSend
         // through a recording sink and read the intent production would deliver.
         // A witness that rebuilt the prompt itself would keep passing if the send
