@@ -43,6 +43,32 @@ func runStrictAgentHarnessChecks() throws {
         evidence: .init(hasCodexThread: false, hasClaudeConversation: true, hasPiSession: true),
         storedPreference: .claudeCode) == nil, "ambiguous Claude/Pi evidence guessed")
 
+    // Every state that refuses a prompt must SAY why. All three are reachable in
+    // ordinary use — a legacy record whose harness could not be inferred, the
+    // seconds after launch while the catalogue probe is still out, and a model that
+    // is not the harness's. Each was silent before: `send` returned false, the
+    // caller returned, and the prompt simply did not go.
+    let refusalCatalog = AgentModelCatalog()
+    refusalCatalog.resetForQA(snapshot: .init(harness: .claudeCode, readiness: .ready, models: ["anthropic/opus"]))
+    refusalCatalog.resetForQA(snapshot: .init(harness: .codex, readiness: .checking, models: ["openai-codex/gpt-5.6-sol"]))
+    refusalCatalog.resetForQA(snapshot: .init(harness: .pi, readiness: .loggedOut, models: ["google/gemini"]))
+
+    var unresolved = record(.claudeCode, model: "anthropic/opus")
+    unresolved.harness = nil
+    func refusal(_ probe: AgentRecord) -> String {
+        AgentSupervisor.sendRefusal(record: probe, catalog: refusalCatalog) ?? "<accepted>"
+    }
+    try expect(refusal(unresolved).contains("harness ownership is unresolved"),
+               "an unresolved harness refused without saying so: \(refusal(unresolved))")
+    try expect(refusal(record(.codex, model: "openai-codex/gpt-5.6-sol")).contains("still starting up"),
+               "a still-probing harness refused without saying so: \(refusal(record(.codex, model: "openai-codex/gpt-5.6-sol")))")
+    try expect(refusal(record(.pi, model: "google/gemini")).contains("logged out"),
+               "a logged-out harness refused without saying so: \(refusal(record(.pi, model: "google/gemini")))")
+    try expect(refusal(record(.claudeCode, model: "openai-codex/gpt-5.6-sol")).contains("cannot run"),
+               "a model the harness does not own refused without saying so: \(refusal(record(.claudeCode, model: "openai-codex/gpt-5.6-sol")))")
+    try expect(AgentSupervisor.sendRefusal(record: record(.claudeCode, model: "anthropic/opus"), catalog: refusalCatalog) == nil,
+               "a ready harness holding its own model was refused")
+
     let countable = AgentModelCatalog(probeExecutor: { _, arguments, _ in
         switch arguments {
         case ["--list-models"]: return "provider model context max-out thinking images\nopenai-codex gpt-test 1 1 yes no"

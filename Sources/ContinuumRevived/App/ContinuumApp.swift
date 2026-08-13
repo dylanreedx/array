@@ -10543,7 +10543,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // The supervisor validates the persisted harness and its cached
             // readiness before accepting the prompt. Only acknowledge a send
             // after acceptance so a refusal leaves the compose draft intact.
-            guard supervisor.send(prompt, to: agentId) else { return }
+            guard supervisor.send(prompt, to: agentId) else {
+                // A refusal used to be silent: the draft survived, but nothing said
+                // why nothing happened. Show the supervisor's own reason.
+                if let refusal = supervisor.sendRefusal(for: agentId) {
+                    view.showSendRefusedNotice(refusal)
+                }
+                return
+            }
             view.appendUserPrompt(prompt)
             view.acceptCurrentSendIntent()
         }

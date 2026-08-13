@@ -1907,21 +1907,8 @@ final class AgentSupervisor {
             warn("AgentSupervisor.send: agent \(id.rawValue.uuidString) already has a prompt in flight (\(type(of: inFlight)))")
             return false
         }
-        guard let harness = record.harness else {
-            warn("Agent harness ownership is unresolved. Choose a harness and compatible model. Help → Environment Setup…")
-            return false
-        }
-        let harnessSnapshot = AgentModelCatalog.shared.snapshot(for: harness)
-        guard harnessSnapshot.readiness.canRun, harnessSnapshot.models.contains(record.model) else {
-            let state: String
-            switch harnessSnapshot.readiness {
-            case .checking: state = "is still checking"
-            case .missing: state = "is missing"
-            case .loggedOut: state = "is logged out"
-            case .unavailable(let reason): state = "is unavailable (\(reason))"
-            case .ready: state = "cannot run model \(record.model)"
-            }
-            warn("\(harness.rawValue) \(state). Open Help → Environment Setup…")
+        if let refusal = sendRefusal(for: id) {
+            warn("AgentSupervisor.send: \(refusal)")
             return false
         }
         let firstPromptText = Self.visibleNamingText(from: prompt)
@@ -1999,6 +1986,49 @@ final class AgentSupervisor {
             DispatchQueue.main.async { self?.clearRunner(runner, for: id) }
         }
         return true
+    }
+
+    /// Why a prompt for `id` would be refused right now, or nil if it would be
+    /// accepted. The ONE copy of the rule — `send` asks this rather than deciding
+    /// again, so the tile cannot show a reason the supervisor does not act on.
+    ///
+    /// It exists because refusing was invisible: `send` returned false, the caller
+    /// returned, and the prompt simply did not go. Strict harness ownership makes
+    /// that reachable in ordinary use — a legacy record whose harness could not be
+    /// inferred, a CLI that is not logged in, and the seconds after launch while
+    /// the catalogue probe is still out, during which readiness is `.checking` for
+    /// every harness. Silence there reads as a broken app.
+    func sendRefusal(for id: AgentID) -> String? {
+        guard let record = records[id] else { return nil }
+        return Self.sendRefusal(record: record)
+    }
+
+    /// The rule itself, over a record and a catalogue — pure enough to pin every
+    /// refusing state in the matrix without a store, a home directory, or the
+    /// shared catalogue's global state.
+    static func sendRefusal(record: AgentRecord, catalog: AgentModelCatalog = .shared) -> String? {
+        guard let harness = record.harness else {
+            return "This agent's harness ownership is unresolved. Choose Claude Code, Codex, or Pi and a model it owns."
+        }
+        let snapshot = catalog.snapshot(for: harness)
+        guard snapshot.readiness.canRun else {
+            switch snapshot.readiness {
+            case .checking:
+                return "\(harness.rawValue) is still starting up — try again in a moment."
+            case .missing:
+                return "\(harness.rawValue) is not installed. Open Help ▸ Environment Setup…"
+            case .loggedOut:
+                return "\(harness.rawValue) is logged out. Sign in with its own login command, then try again."
+            case .unavailable(let reason):
+                return "\(harness.rawValue) is unavailable (\(reason)). Open Help ▸ Environment Setup…"
+            case .ready:
+                return nil
+            }
+        }
+        guard snapshot.models.contains(record.model) else {
+            return "\(harness.rawValue) cannot run \(record.model). Pick a model this harness owns."
+        }
+        return nil
     }
 
     /// Text-only compatibility wrapper for existing callers and checks.

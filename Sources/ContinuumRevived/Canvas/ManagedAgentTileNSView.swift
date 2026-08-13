@@ -787,6 +787,19 @@ final class ManagedAgentTileNSView: TileNSView {
     /// packet's option (b).
     static let previousSessionNoticeText = "Previous session — send a prompt to continue."
 
+    /// Says why a prompt was not sent, in the transcript where the user is already
+    /// looking. The id carries the reason so the same refusal twice is one notice
+    /// (the projection rejects a duplicate id) while a CHANGED reason — "still
+    /// starting up" giving way to "logged out" — appends and is seen.
+    func showSendRefusedNotice(_ text: String) {
+        model.appendNotice(
+            id: "notice-send-refused-\(text.hashValue)",
+            title: "not sent",
+            text: text
+        )
+        synchronizeV2Transcript(final: true)
+    }
+
     func showPreviousSessionNotice() {
         model.appendNotice(
             id: "notice-previous-session",
