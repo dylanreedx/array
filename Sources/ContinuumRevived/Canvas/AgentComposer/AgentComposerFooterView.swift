@@ -105,8 +105,22 @@ final class AgentComposerFooterView: NSView, TokenThemed {
         // old hard-coded 390 was compact where full fits and full where it
         // clipped, depending entirely on the catalogue's string lengths).
         let compact = requiredWidth(usingCompactLabels: false) > bounds.width
-        if compact != usesCompactLabels {
+        // A third control landed on this row (harness) and a narrow tile cannot
+        // hold three even abbreviated. Something has to give, and the stack's own
+        // answer was the worst one: the harness and effort buttons resist
+        // compression outright, so the deficit fell entirely on the model button —
+        // the one control the user actually changes per turn — and drove it to
+        // ZERO width at 320pt. The harness yields instead, and yields by hiding
+        // rather than squeezing, because a truncated harness name is not a control
+        // anyone can use. It returns as soon as the row can hold it.
+        //
+        // The decision reads the THREE-control requirement whether or not the
+        // harness is currently hidden, so hiding cannot shrink the number that
+        // decides to hide and oscillate.
+        let hidesHarness = requiredWidth(usingCompactLabels: true) > bounds.width
+        if compact != usesCompactLabels || hidesHarness != harnessButton.isHidden {
             usesCompactLabels = compact
+            harnessButton.isHidden = hidesHarness
             rebuildChoices()
         }
     }

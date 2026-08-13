@@ -621,10 +621,31 @@ extension ProviderModelButton {
         //    backend's providers. The fixture catalogue from step 2 (two codex +
         //    one anthropic id) is still active via its defer. Pure form first,
         //    then the resolved form through `.standard` (save/restore).
+        // Strict ownership replaced FILTERING with per-harness catalogues: Codex no
+        // longer narrows pi's live list, it serves its own. Seed Codex's own
+        // snapshot and assert the composer reads exactly that — the property the
+        // filter assertion was protecting (one catalogue, not two that can drift)
+        // still holds, it is just keyed by harness now.
+        AgentModelCatalog.shared.resetForQA(snapshot: .init(
+            harness: .codex,
+            readiness: .ready,
+            models: ["openai-codex/gpt-a", "openai-codex/gpt-b"]))
         try expect(AgentModelConfig.modelOptions(for: .codex) == ["openai-codex/gpt-a", "openai-codex/gpt-b"],
-                   "Codex backend must narrow to openai-codex/*, got \(AgentModelConfig.modelOptions(for: .codex))")
+                   "Codex must serve its own catalogue, got \(AgentModelConfig.modelOptions(for: .codex))")
+        try expect(AgentModelConfig.modelOptions(for: .codex).allSatisfy {
+                       AgentHarnessConfig.isProviderCompatible(model: $0, harness: .codex)
+                   },
+                   "Codex offered a model it does not own: \(AgentModelConfig.modelOptions(for: .codex))")
+        AgentModelCatalog.shared.resetForQA(snapshot: .init(
+            harness: .claudeCode,
+            readiness: .ready,
+            models: ["anthropic/claude-x"]))
         try expect(AgentModelConfig.modelOptions(for: .claudeCode) == ["anthropic/claude-x"],
-                   "Claude Code backend must narrow to anthropic/*, got \(AgentModelConfig.modelOptions(for: .claudeCode))")
+                   "Claude Code must serve its own catalogue, got \(AgentModelConfig.modelOptions(for: .claudeCode))")
+        try expect(AgentModelConfig.modelOptions(for: .claudeCode).allSatisfy {
+                       AgentHarnessConfig.isProviderCompatible(model: $0, harness: .claudeCode)
+                   },
+                   "Claude Code offered a model it does not own: \(AgentModelConfig.modelOptions(for: .claudeCode))")
         try expect(AgentModelConfig.modelOptions(for: .pi) == ["openai-codex/gpt-a", "openai-codex/gpt-b", "anthropic/claude-x"],
                    "pi backend must show every provider, got \(AgentModelConfig.modelOptions(for: .pi))")
 

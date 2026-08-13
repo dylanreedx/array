@@ -1329,6 +1329,18 @@ final class AgentSupervisor {
                 record.harness = LegacyAgentHarnessMigration.resolve(
                     evidence: evidence,
                     storedPreference: AgentHarnessConfig.explicitlyStored())
+                // The stored preference decides what a NEW agent gets; it is not
+                // evidence about THIS record. When it hands a record a harness that
+                // cannot run the record's own model — a settings default of Claude
+                // Code meeting an `openai-codex/*` agent — the pairing is a dead
+                // agent: every send refused, forever, for a record that ran fine
+                // yesterday. Pi is the multi-provider harness and is what these
+                // records ran under before ownership existed, so it takes them back.
+                if let resolved = record.harness,
+                   !AgentHarnessConfig.isProviderCompatible(model: record.model, harness: resolved),
+                   AgentHarnessConfig.isProviderCompatible(model: record.model, harness: .pi) {
+                    record.harness = .pi
+                }
                 if record.harness != nil { persistBeforeAdoption(record) }
             }
             // Legacy records used model ids, role ids, UUIDs, or blank names. Read

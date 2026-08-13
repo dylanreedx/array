@@ -658,6 +658,18 @@ final class CanvasNSView: NSView, TokenThemed {
             tileViews.removeValue(forKey: id)
         }
         canvasState.tiles.removeAll { $0.id == id }
+        // A tile installed through `installProjectTile` after `setZones` lives in a
+        // ZoneLayer, not the flat collection — clearing only `canvasState.tiles`
+        // took its VIEW away while leaving the model entry to be persisted and
+        // rehydrated on the next load. The layer owns its own view map too.
+        for layer in zoneLayers {
+            if let view = layer.tileViews[id] {
+                focusBroker?.unregister(view.focusSurfaceID)
+                view.removeFromSuperview()
+                layer.tileViews.removeValue(forKey: id)
+            }
+            layer.tiles.removeAll { $0.id == id }
+        }
         if canvasState.lastActiveTileId == id {
             canvasState.lastActiveTileId = nil
         }

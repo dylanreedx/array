@@ -1407,8 +1407,15 @@ final class TileSpawner {
         let now = Date()
         let tileId = UUID()
         let threadId = "managed-\(tileId.uuidString)"
-        let frame = makeProjectTilePlacement(worldPoint: worldPoint, size: CanvasEngine.defaultFrame(for: .managedAgent), in: canvasView)
-        let nextZ = CanvasEngine.zPositionAbove(canvasView.projectTiles())
+        // DELIBERATELY the flat model, not `makeProjectTilePlacement`/`installProjectTile`.
+        // Routing agent spawns into the active zone layer is the right destination
+        // (hazard 9), but the layer is REBUILT on a workspace switch and rebuilds a
+        // `.managedAgent` tile as a plain descriptor view — switch away and back and a
+        // live agent tile returns as a dead placeholder. File tiles were migrated with
+        // that path understood; agents need the zone re-installation to reconstruct
+        // their views first. Until then this keeps the shipped behaviour.
+        let frame = makePlacement(worldPoint: worldPoint, size: CanvasEngine.defaultFrame(for: .managedAgent), in: canvasView)
+        let nextZ = CanvasEngine.zPositionAbove(canvasView.canvasState.tiles)
         // One resolution seeds every pre-attach projection. Cmd+K supplies its
         // explicit choice; generic creation falls back to Settings. Wiring gives
         // the same resolution to the agent record before the view attaches.
@@ -1438,7 +1445,7 @@ final class TileSpawner {
         )
         view.ingest(.sessionStateChanged(.ready))
         view.ingest(.contentDelta(threadId: threadId, turnId: "bootstrap", streamKind: .assistant, delta: "Ready. Type a prompt below to run \(spawnModelName) in this tile."))
-        let projectTarget = canvasView.installProjectTile(tileView: view, for: tile)
+        canvasView.install(tileView: view, for: tile)
 
         do {
             try managedSessionStore.upsert(ManagedAgentSessionRecord(
@@ -1453,7 +1460,7 @@ final class TileSpawner {
                 resumeCursor: nil,
                 runtimePayload: nil
             ))
-            try persistProjectCanvas(after: projectTarget, in: canvasView)
+            try persistProjectCanvas(after: .flatCanvasState, in: canvasView)
         } catch {
             try? managedSessionStore.delete(tileId: tileId)
             return .failure(error)

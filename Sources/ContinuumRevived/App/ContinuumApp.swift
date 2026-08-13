@@ -4774,7 +4774,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     func deleteTile(id: UUID) {
         guard let canvasView else { return }
-        guard let tile = canvasView.canvasState.tiles.first(where: { $0.id == id }) else { return }
+        // `projectTiles()`, not the flat collection: once the active project's tiles
+        // live in a ZoneLayer, looking a tile up here found nothing and deleteTile
+        // returned silently — closing an agent tile did nothing at all, and the
+        // agent it belonged to was never archived out of the inbox.
+        guard let tile = canvasView.projectTiles().first(where: { $0.id == id })
+            ?? canvasView.canvasState.tiles.first(where: { $0.id == id }) else { return }
 
         fputs("deleteTile entry kind=\(tile.kind.rawValue) id=\(id.uuidString)\n", stderr)
         var deleteOutcome = "deleted"
