@@ -41,8 +41,14 @@ public final class AgentModelCatalog: @unchecked Sendable {
     private var liveRefreshEnabled = false
     private var lastRefreshStartedAt: Date?
     private var refreshInFlight = false
+    // The probe spawns a provider CLI, so both the executor seam and the resolved
+    // command it speaks in are macOS-only. Naming `PiAgentRunner.ResolvedCommand`
+    // unconditionally broke the iOS build of Core, which the macOS `swift build`
+    // cannot see.
+    #if os(macOS)
     public typealias ProbeExecutor = @Sendable (PiAgentRunner.ResolvedCommand, [String], TimeInterval) -> String?
     private let probeExecutor: ProbeExecutor?
+    #endif
     private var probeLaunchCount = 0
 
     private var readinessByHarness: [AgentHarness: HarnessReadiness] = [
@@ -50,11 +56,16 @@ public final class AgentModelCatalog: @unchecked Sendable {
     ]
     private var refreshedAtByHarness: [AgentHarness: Date] = [:]
 
+    #if os(macOS)
     /// Public so checks can exercise instances without touching `shared`. An injected
     /// executor is used only by behavioral tests; production uses bounded Process.
     public init(probeExecutor: ProbeExecutor? = nil) {
         self.probeExecutor = probeExecutor
     }
+    #else
+    /// iOS has no provider CLI to probe: it serves the curated catalogues only.
+    public init() {}
+    #endif
 
     public var probeLaunchCountForQA: Int { lock.withLock { probeLaunchCount } }
     public var refreshInFlightForQA: Bool { lock.withLock { refreshInFlight } }
