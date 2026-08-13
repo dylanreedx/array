@@ -231,33 +231,33 @@ extension ManagedTranscriptRehydrator {
         public var agentUUID: UUID
         public var cwd: String
         public var model: String
+        public var harness: AgentHarness?
         public var claudeCLIAvailable: Bool
         public var homeURL: URL
         public var codexThreadId: String?
         public var codexHomeURL: URL
-        public var preferredRoute: AgentBackendConfig.Route?
         public var limits: RehydrationLimits
 
         public init(
             agentUUID: UUID,
             cwd: String,
             model: String,
+            harness: AgentHarness? = nil,
             claudeCLIAvailable: Bool,
             homeURL: URL,
             codexThreadId: String? = nil,
             codexHomeURL: URL? = nil,
-            preferredRoute: AgentBackendConfig.Route? = nil,
             limits: RehydrationLimits = RehydrationLimits()
         ) {
             self.agentUUID = agentUUID
             self.cwd = cwd
             self.model = model
+            self.harness = harness
             self.claudeCLIAvailable = claudeCLIAvailable
             self.homeURL = homeURL
             self.codexThreadId = codexThreadId
             self.codexHomeURL = codexHomeURL
                 ?? homeURL.appendingPathComponent(".codex", isDirectory: true)
-            self.preferredRoute = preferredRoute
             self.limits = limits
         }
     }
@@ -284,35 +284,10 @@ extension ManagedTranscriptRehydrator {
                 codexHomeURL: inputs.codexHomeURL, threadId: $0)
         }
 
-        let claudeExists = fileExists(claudeURL)
-        let piExists = piURL != nil
-        let codexExists = codexURL != nil
+        guard let harness = inputs.harness else { return nil }
 
-        let available: [AgentBackendConfig.Route] = [
-            claudeExists ? .claude : nil,
-            codexExists ? .codex : nil,
-            piExists ? .pi : nil,
-        ].compactMap { $0 }
-        guard !available.isEmpty else { return nil }
-
-        let route: AgentBackendConfig.Route
-        if let preferred = inputs.preferredRoute, available.contains(preferred) {
-            route = preferred
-        } else if available.count == 1 {
-            route = available[0]
-        } else if codexExists, inputs.model.hasPrefix("openai-codex/") {
-            route = .codex
-        } else if claudeExists, piExists {
-            route = ClaudeCLIBackend.routesToClaude(
-                model: inputs.model, claudeCLIAvailable: inputs.claudeCLIAvailable) ? .claude : .pi
-        } else {
-            // Multiple historical providers and no routing fact that proves
-            // which is current: keep the honest notice instead of guessing.
-            return nil
-        }
-
-        switch route {
-        case .claude:
+        switch harness {
+        case .claudeCode:
             return ClaudeSessionTranscriptReader.read(
                 sessionFileURL: claudeURL, threadId: threadId, limits: inputs.limits)
         case .codex:

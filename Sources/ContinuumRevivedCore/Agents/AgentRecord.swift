@@ -173,6 +173,9 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     public var namingRequest: NamingRequest?
     /// Id matching a `.pi/agents/<role>.md`. An id, never shown as a title.
     public var role: String?
+    /// Strict owner of runner, catalogue, transcript and provider side channels.
+    /// Optional only for decoding legacy records; every new record supplies it.
+    public var harness: AgentHarness?
     /// Fully-qualified model id — the exact catalogue entry, per P0.10's
     /// `AgentModelConfig` (a prefix lets Pi's fuzzy matcher choose silently).
     public var model: String
@@ -449,6 +452,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         displayNameSource: AgentDisplayNameSource = .manual,
         namingRequest: NamingRequest? = nil,
         role: String? = nil,
+        harness: AgentHarness? = nil,
         model: String,
         thinking: String,
         cwd: String,
@@ -480,6 +484,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         self.displayNameSource = displayNameSource
         self.namingRequest = namingRequest
         self.role = role
+        self.harness = harness
         self.model = model
         self.thinking = thinking
         self.cwd = cwd
@@ -596,7 +601,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     // `timeIntervalSinceReferenceDate` IS Date's storage, so no arithmetic
     // conversion happens and the round-trip is exact.
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, id, displayName, displayNameSource, namingRequest, role, model, thinking, cwd
+        case schemaVersion, id, displayName, displayNameSource, namingRequest, role, harness, model, thinking, cwd
         case worktreeBranch, projectId, parentAgentID, sourceItemId
         case parentRelativeOrdinal, nextChildOrdinal
         case createdAtReferenceInterval, lastActivityAtReferenceInterval
@@ -623,6 +628,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         id = try container.decode(AgentID.self, forKey: .id)
         displayName = try container.decode(String.self, forKey: .displayName)
         role = try container.decodeIfPresent(String.self, forKey: .role)
+        harness = try container.decodeIfPresent(AgentHarness.self, forKey: .harness)
         model = try container.decode(String.self, forKey: .model)
         // A pre-provenance record has no source field. Identifier-shaped and
         // blank legacy seeds were automatic, while every other old title is
@@ -707,6 +713,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         try container.encode(displayNameSource, forKey: .displayNameSource)
         try container.encodeIfPresent(namingRequest, forKey: .namingRequest)
         try container.encodeIfPresent(role, forKey: .role)
+        try container.encodeIfPresent(harness, forKey: .harness)
         try container.encode(model, forKey: .model)
         try container.encode(thinking, forKey: .thinking)
         try container.encode(cwd, forKey: .cwd)

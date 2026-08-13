@@ -212,7 +212,7 @@ public enum SettingsSchema {
                     // agent starts with — each agent tile overrides its own
                     // next turn in the composer. The old "Agent Model" label
                     // read as if it drove every agent.
-                    .info(label: "Defaults for newly created agents. Each agent tile picks its own model and effort for the next turn in its composer."),
+                    .info(label: "Defaults for newly created agents only. Each existing agent persists its own harness, model, and effort for the next turn in its composer."),
                     // Which CLI runs managed agents. pi covers every provider
                     // (the default); Claude Code narrows to Anthropic models and
                     // Codex to OpenAI models, each pinning that provider's native

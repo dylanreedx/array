@@ -115,7 +115,7 @@ extension PiSessionTranscriptReader {
     /// slug dir. If the slug dir is absent or holds no match, falls back to
     /// scanning every session subdir — the session id (`array-agent-<uuid>`) is
     /// globally unique, so a scan is sound and de-risks the slug encoding.
-    static func locateSessionFile(homeURL: URL, cwd: String, sessionId: String) -> URL? {
+    public static func locateSessionFile(homeURL: URL, cwd: String, sessionId: String) -> URL? {
         let sessionsRoot = homeURL.appendingPathComponent(".pi/agent/sessions", isDirectory: true)
         let suffix = "_\(sessionId).jsonl"
 

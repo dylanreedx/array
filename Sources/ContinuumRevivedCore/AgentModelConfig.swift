@@ -1,31 +1,14 @@
 import Foundation
 
-/// Resolves which Pi model (and thinking level) a managed agent runs with, from
-/// UserDefaults, mirroring `FocusBorderConfig` / `TileGapResolver`.
-///
-/// Ticket: docs/38-tickets/90-agent-ux/P0.10-explicit-model-id.md
-///
-/// Why this exists: the runner used to hardcode `"openai-codex/gpt-5.6"`, which
-/// is NOT an id in Pi's catalogue — `--model` takes a *pattern*, so that string
-/// fuzzy-matched across `gpt-5.6-luna` / `-sol` / `-terra` and the tile silently
-/// ran whichever one Pi picked. Every id here is fully qualified
-/// (`provider/model-id`) and exact.
-///
-/// The options are live: `AgentModelCatalog` probes `pi --list-models` at
-/// real-app startup (pi lists only models whose provider is authed — via
-/// pi's own `/login` CLI flow, never pasted API keys), falling back to the
-/// frozen snapshot below when the probe hasn't run or pi is missing. QA never
-/// probes, so checks always see the fallback.
 public enum AgentModelConfig {
     public static let modelKey = "continuum.agents.model"
     public static let thinkingKey = "continuum.agents.thinking"
 
-    /// Pi's own default. Fully qualified: no fuzzy matching, no ambiguity.
-    public static let defaultModel = "openai-codex/gpt-5.6-sol"
+    public static let defaultModel = "anthropic/opus"
     public static let defaultThinking = "medium"
 
-    /// Frozen snapshot of `pi --list-models` (openai-codex, 2026-07-25): what
-    /// the picker offers until the live probe succeeds, and always in QA.
+    /// Frozen Pi fixture for deterministic QA/offline presentation. It is never
+    /// evidence that production Pi is authenticated.
     public static let fallbackModelOptions = [
         "openai-codex/gpt-5.6-sol",
         "openai-codex/gpt-5.6-luna",
@@ -36,28 +19,14 @@ public enum AgentModelConfig {
         "openai-codex/gpt-5.3-codex-spark",
     ]
 
-    /// Fully-qualified ids, verbatim from pi's own list — the single source
-    /// shared by `SettingsSchema` (the `.choice` options), the tile composer,
-    /// and provider-settings validation.
-    ///
-    /// The list is narrowed to the resolved backend's providers (Plan 02 §4.4):
-    /// filtering here auto-applies everywhere `modelOptions` is read, with zero
-    /// call-site edits. The DEFAULT backend (`.pi`) filters to nil, so this is
-    /// byte-identical to the pre-plan list — no existing check's model set moves.
-    public static var modelOptions: [String] { modelOptions(for: AgentBackendConfig.resolved()) }
-
-    /// The catalogue narrowed to `backend`'s providers, with the "never blank
-    /// the picker" guard: if narrowing empties the list (e.g. Codex selected
-    /// before the catalog union added `openai-codex/*`), fall back to the
-    /// unfiltered list rather than showing nothing — the same rule
-    /// `AgentModelCatalog.apply` and `resolvedFromDefaults` already follow.
-    public static func modelOptions(for backend: AgentBackend) -> [String] {
-        let all = AgentModelCatalog.shared.options()
-        let filtered = AgentBackendConfig.filter(all, for: backend)
-        return filtered.isEmpty ? all : filtered
+    public static var modelOptions: [String] {
+        modelOptions(for: AgentHarnessConfig.resolved())
     }
 
-    /// The levels `pi --thinking <level>` accepts.
+    public static func modelOptions(for harness: AgentHarness) -> [String] {
+        AgentModelCatalog.shared.models(for: harness)
+    }
+
     public static let thinkingOptions = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
     public struct Resolution: Equatable, Sendable {
@@ -70,35 +39,47 @@ public enum AgentModelConfig {
         }
     }
 
-    /// An unrecognized stored value falls back to the default rather than being
-    /// handed to Pi — a typo must not reintroduce fuzzy matching. With a live
-    /// catalogue the default itself can be unavailable (its provider not
-    /// authed); the first usable model stands in, because handing Pi a model
-    /// it can't run fails every spawn.
     public static func resolvedFromDefaults(defaults: UserDefaults = .standard) -> Resolution {
-        let options = modelOptions
-        let modelFallback = options.contains(defaultModel) ? defaultModel : (options.first ?? defaultModel)
+        let harness = AgentHarnessConfig.resolved(defaults: defaults)
+        let options = modelOptions(for: harness)
+        let harnessDefault = harness == .claudeCode ? defaultModel : (options.first ?? defaultModel)
         return Resolution(
-            model: oneOf(defaults.string(forKey: modelKey), options, modelFallback),
+            model: oneOf(defaults.string(forKey: modelKey), options, harnessDefault),
             thinking: oneOf(defaults.string(forKey: thinkingKey), thinkingOptions, defaultThinking)
         )
     }
 
-    /// Resolve an EXPLICIT model choice (⌘K's model step) against the catalogue
-    /// as it stands now. `nil` selection is generic creation and falls through to
-    /// the stored default; a selection outside `modelOptions` returns nil —
-    /// REFUSED, never substituted, the same rule
-    /// `AgentSupervisor.setProviderSettings` applies to a per-agent write.
-    ///
-    /// The refusal is not theoretical: the palette's rows are the catalogue as it
-    /// was when the model step opened, and a live `pi --list-models` probe (kicked
-    /// at startup, and by the tile's own picker) can land while the palette is up
-    /// and narrow the list to the providers that are actually authed.
+    /// Strict new-agent selection. A stored model that does not belong to the
+    /// chosen harness is not rewritten or substituted.
+    public static func launchSelection(
+        harness explicitHarness: AgentHarness? = nil,
+        model explicitModel: String? = nil,
+        thinking explicitThinking: String? = nil,
+        defaults: UserDefaults = .standard
+    ) -> AgentLaunchSelection? {
+        let harness = explicitHarness ?? AgentHarnessConfig.resolved(defaults: defaults)
+        let model = explicitModel ?? defaults.string(forKey: modelKey) ?? (harness == .claudeCode ? defaultModel : "")
+        let thinking = explicitThinking ?? defaults.string(forKey: thinkingKey) ?? defaultThinking
+        guard modelOptions(for: harness).contains(model),
+              AgentHarnessConfig.isProviderCompatible(model: model, harness: harness),
+              thinkingOptions.contains(thinking) else { return nil }
+        return AgentLaunchSelection(harness: harness, model: model, thinking: thinking)
+    }
+
     public static func resolved(selection: String?, defaults: UserDefaults = .standard) -> Resolution? {
         let base = resolvedFromDefaults(defaults: defaults)
         guard let selection else { return base }
-        guard modelOptions.contains(selection) else { return nil }
+        let harness = AgentHarnessConfig.resolved(defaults: defaults)
+        guard modelOptions(for: harness).contains(selection) else { return nil }
         return Resolution(model: selection, thinking: base.thinking)
+    }
+
+    public static func validates(_ selection: AgentLaunchSelection, requireReady: Bool = true) -> Bool {
+        let snapshot = AgentModelCatalog.shared.snapshot(for: selection.harness)
+        return (!requireReady || snapshot.readiness.canRun)
+            && snapshot.models.contains(selection.model)
+            && AgentHarnessConfig.isProviderCompatible(model: selection.model, harness: selection.harness)
+            && thinkingOptions.contains(selection.thinking)
     }
 
     private static func oneOf(_ value: String?, _ options: [String], _ fallback: String) -> String {

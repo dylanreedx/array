@@ -271,12 +271,15 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     private func modelPickerRow(for field: SettingsField, options: [String]) -> NSView {
         let labelView = label(field.label, size: 12, weight: .regular, color: .secondaryLabelColor)
         let button = ProviderModelButton(title: field.label)
-        button.items = options.map {
-            ChoiceItem(id: $0, title: AgentModelCatalog.shared.displayName(for: $0) ?? $0)
+        let harness = AgentHarnessConfig.resolved(defaults: defaults)
+        let snapshot = AgentModelCatalog.shared.snapshot(for: harness)
+        let current = defaults.string(forKey: AgentModelConfig.modelKey) ?? AgentModelConfig.defaultModel
+        var items = snapshot.models.map { ChoiceItem(id: $0, title: snapshot.displayNames[$0] ?? $0) }
+        if !snapshot.models.contains(current) {
+            items.append(ChoiceItem(id: current, title: "⚠ \(current) — choose a \(harness.rawValue) model"))
         }
-        if case .string(let value) = field.currentValue(in: defaults), options.contains(value) {
-            button.selectedID = value
-        }
+        button.items = items
+        button.selectedID = current
         button.onSelection = { [weak self] item in
             guard let self else { return }
             field.setValue(.string(item.id), in: self.defaults)
@@ -287,23 +290,20 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         return vGroup([labelView, button])
     }
 
-    /// The agent harness re-filters which models are runnable. The model picker
-    /// lives in the same panel as the harness toggle, so it must rebuild the
-    /// instant the harness changes — not on next open. If the stored default
-    /// model isn't runnable by the new harness, fall back to the first one it
-    /// can run and persist that so no unrunnable model is left selected.
+    /// Rebuilds presentation from the selected harness snapshot. An incompatible
+    /// stored model remains visible and invalid until the user explicitly picks
+    /// a compatible model; changing the harness never rewrites this field.
     private func refreshModelPickerForHarnessChange() {
         guard let button = modelPickerButtonForQA else { return }
-        let options = AgentModelConfig.modelOptions  // already filtered by the just-written harness
-        button.items = options.map {
-            ChoiceItem(id: $0, title: AgentModelCatalog.shared.displayName(for: $0) ?? $0)
+        let harness = AgentHarnessConfig.resolved(defaults: defaults)
+        let snapshot = AgentModelCatalog.shared.snapshot(for: harness)
+        let current = defaults.string(forKey: AgentModelConfig.modelKey) ?? AgentModelConfig.defaultModel
+        var items = snapshot.models.map { id in ChoiceItem(id: id, title: snapshot.displayNames[id] ?? id) }
+        if !snapshot.models.contains(current) {
+            items.append(ChoiceItem(id: current, title: "⚠ \(current) — choose a \(harness.rawValue) model"))
         }
-        if case .string(let current)? = modelPickerField?.currentValue(in: defaults), options.contains(current) {
-            button.selectedID = current
-        } else if let first = options.first {
-            button.selectedID = first
-            modelPickerField?.setValue(.string(first), in: defaults)
-        }
+        button.items = items
+        button.selectedID = current
     }
 
     private func infoRow(for field: SettingsField) -> NSView {
@@ -897,42 +897,35 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
             }
         }
 
-        // 3c. Backend filtering (Plan 02 §4.4): the resolved backend narrows the
-        // SAME `AgentModelConfig.modelOptions` both the settings picker and the
-        // composer read. Fixture a two-provider catalogue and flip the global
-        // backend (in `.standard`, which `resolved()` reads); restore both.
+        // 3c. Strict harness snapshots retain provenance and a harness-only change
+        // never rewrites an incompatible model.
         do {
-            let priorBackend = UserDefaults.standard.string(forKey: AgentBackendConfig.key)
-            AgentModelCatalog.shared.resetForQA(options: ["openai-codex/gpt-x", "anthropic/claude-y"])
-            // Each flip asserts BOTH the data narrowing AND that the rendered
-            // picker rebuilds LIVE in the same panel (the harness change bug):
-            // `refreshModelPickerForHarnessChange` is what `choiceChanged` calls,
-            // so the button's items must track the filtered catalogue immediately.
-            AgentBackendConfig.store(.codex)
+            AgentModelCatalog.shared.resetForQA(snapshot: .init(
+                harness: .claudeCode, readiness: .ready, models: ["anthropic/claude-y"]))
+            AgentModelCatalog.shared.resetForQA(snapshot: .init(
+                harness: .codex, readiness: .ready, models: ["openai-codex/gpt-x"]))
+            AgentModelCatalog.shared.resetForQA(snapshot: .init(
+                harness: .pi, readiness: .ready, models: ["google/gemini-z"]))
+            defaults.set("anthropic/claude-y", forKey: AgentModelConfig.modelKey)
+
+            defaults.set(AgentHarness.codex.rawValue, forKey: AgentHarnessConfig.key)
             panel.refreshModelPickerForHarnessChange()
-            guard AgentModelConfig.modelOptions == ["openai-codex/gpt-x"],
-                  panel.modelPickerButtonForQA?.items.map(\.id) == ["openai-codex/gpt-x"] else {
-                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: Codex harness must narrow the live picker to openai-codex/*, got \(panel.modelPickerButtonForQA?.items.map(\.id) ?? [])")
+            guard panel.modelPickerButtonForQA?.items.map(\.id) == [
+                    "openai-codex/gpt-x", "anthropic/claude-y"
+                  ],
+                  panel.modelPickerButtonForQA?.selectedID == "anthropic/claude-y",
+                  defaults.string(forKey: AgentModelConfig.modelKey) == "anthropic/claude-y" else {
+                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: switching to Codex did not retain the incompatible stored model as an explicit invalid choice; items=\(panel.modelPickerButtonForQA?.items.map(\.id) ?? []) selected=\(String(describing: panel.modelPickerButtonForQA?.selectedID)) stored=\(defaults.string(forKey: AgentModelConfig.modelKey) ?? "nil")")
             }
-            AgentBackendConfig.store(.claudeCode)
+
+            defaults.set(AgentHarness.pi.rawValue, forKey: AgentHarnessConfig.key)
             panel.refreshModelPickerForHarnessChange()
-            guard AgentModelConfig.modelOptions == ["anthropic/claude-y"],
-                  panel.modelPickerButtonForQA?.items.map(\.id) == ["anthropic/claude-y"] else {
-                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: Claude Code harness must narrow the live picker to anthropic/*, got \(panel.modelPickerButtonForQA?.items.map(\.id) ?? [])")
+            guard panel.modelPickerButtonForQA?.items.map(\.id) == [
+                    "google/gemini-z", "anthropic/claude-y"
+                  ],
+                  defaults.string(forKey: AgentModelConfig.modelKey) == "anthropic/claude-y" else {
+                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: Pi snapshot leaked another harness or rewrote the incompatible model")
             }
-            AgentBackendConfig.store(.pi)
-            panel.refreshModelPickerForHarnessChange()
-            guard AgentModelConfig.modelOptions == ["openai-codex/gpt-x", "anthropic/claude-y"],
-                  panel.modelPickerButtonForQA?.items.map(\.id) == ["openai-codex/gpt-x", "anthropic/claude-y"] else {
-                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: pi harness must show every provider in the live picker, got \(panel.modelPickerButtonForQA?.items.map(\.id) ?? [])")
-            }
-            // End clean rather than restoring `priorBackend`: the standard
-            // domain is shared across matrix legs and persists on the machine,
-            // so restoring a stale leftover would perpetuate it into other legs
-            // (it flaked the provider-model-picker rail). QA never means to keep
-            // a harness value; clearing returns the pi default.
-            _ = priorBackend
-            UserDefaults.standard.removeObject(forKey: AgentBackendConfig.key)
             AgentModelCatalog.shared.resetForQA()
         }
 

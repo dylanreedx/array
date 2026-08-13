@@ -60,14 +60,16 @@ shipped. Nothing is unreleased right now.
   they have `tileId == nil`, indistinguishable from a legitimately headless
   agent, and guessing wrong hides running work.
 
-## NEXT UP — nothing named. Waiting on Dylan's next dogfood report.
+## IN PROGRESS — strict managed-agent harness ownership
+
+Plan 16 is implementing persisted Claude Code/Codex/Pi ownership, per-harness catalogues, strict rehydration and managed-tile project/zone installation.
 
 ### Follow-ups these opened
 
-- **Every other spawn path is still wrong after a workspace switch**
+- **Remaining non-agent spawn paths are still wrong after a workspace switch**
   (`.plans/15`, 2026-08-12). File opening was repaired and witnessed
   (`--file-open-active-context-check`), but terminal, note, browser, diff-review
-  and agent spawns still call `canvasView.install` + `saveCanvas(canvasState)`,
+  and the remaining non-agent spawns still call `canvasView.install` + `saveCanvas(canvasState)`,
   so after an in-process switch they install into the DEPARTED project's flat
   model, frame against its zone origin, and persist through its store. The
   pattern to copy is `CanvasNSView.installProjectTile` +

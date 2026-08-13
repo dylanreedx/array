@@ -13,22 +13,29 @@ private final class FooterAlphaSamples: @unchecked Sendable {
 @MainActor
 final class AgentComposerFooterView: NSView, TokenThemed {
     typealias SettingsWriter = (_ model: String?, _ thinking: String?) -> Bool
+    typealias LaunchSelectionWriter = (_ harness: AgentHarness, _ model: String, _ thinking: String) -> Bool
 
     // The model trigger presents the provider>model picker (t3code-style two
     // pane surface); items/selection/QA seams are plain ChoiceButton.
+    let harnessButton = ChoiceButton(title: "Harness")
     let modelButton: ChoiceButton = ProviderModelButton(title: "Model")
     let effortButton = ChoiceButton(title: "Effort")
     private var settings = AgentModelConfig.resolvedFromDefaults()
+    private var recordHarness = AgentHarnessConfig.resolved()
+    private var selectedHarness = AgentHarnessConfig.resolved()
     private var usesCompactLabels = false
     private var contrastObservations: [NSKeyValueObservation] = []
 
     var onSettingsWrite: SettingsWriter?
+    var onLaunchSelectionWrite: LaunchSelectionWriter?
 
     static let height = ChoiceButton.controlHeight
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
 
+        harnessButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        harnessButton.setContentHuggingPriority(.required, for: .horizontal)
         modelButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         modelButton.setContentHuggingPriority(.defaultLow, for: .horizontal)
         effortButton.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -41,6 +48,7 @@ final class AgentComposerFooterView: NSView, TokenThemed {
         // hugging priority makes the row hand it all the surplus.
         setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
         setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        harnessButton.setAccessibilityLabel("Agent harness, next turn")
         modelButton.setAccessibilityLabel("Model, next turn")
         modelButton.setAccessibilityHelp("Choose the model for this agent's next turn")
         effortButton.setAccessibilityLabel("Reasoning effort, next turn")
@@ -48,6 +56,7 @@ final class AgentComposerFooterView: NSView, TokenThemed {
         modelButton.toolTip = "Model for the next turn"
         effortButton.toolTip = "Reasoning effort for the next turn"
 
+        harnessButton.onSelection = { [weak self] item in self?.pick(harness: AgentHarness(rawValue: item.id)) }
         modelButton.onSelection = { [weak self] item in self?.pick(model: item.id) }
         effortButton.onSelection = { [weak self] item in self?.pick(thinking: item.id) }
 
@@ -60,7 +69,7 @@ final class AgentComposerFooterView: NSView, TokenThemed {
         let spacer = NSView()
         spacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
         spacer.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
-        let stack = NSStackView(views: [modelButton, effortButton, spacer])
+        let stack = NSStackView(views: [harnessButton, modelButton, effortButton, spacer])
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = CGFloat(Space.m)
@@ -71,6 +80,7 @@ final class AgentComposerFooterView: NSView, TokenThemed {
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
             stack.topAnchor.constraint(equalTo: topAnchor),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            harnessButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
             modelButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
             effortButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
         ])
@@ -116,15 +126,18 @@ final class AgentComposerFooterView: NSView, TokenThemed {
     /// per-button expression `ChoiceButton` measures itself with, so this cannot
     /// drift from what the buttons actually need.
     private func requiredWidth(usingCompactLabels compact: Bool) -> CGFloat {
-        let modelTitle = Self.displayTitle(forModel: settings.model, compact: compact)
+        let modelTitle = compact ? Self.abbreviatedModel(settings.model) : (AgentModelCatalog.shared.displayName(for: settings.model, harness: recordHarness) ?? settings.model)
         let effortTitle = compact ? Self.abbreviatedEffort(settings.thinking) : settings.thinking.capitalized
-        return ChoiceButton.fittingWidth(forTitle: modelTitle)
+        let harnessTitle = compact ? Self.abbreviatedHarness(recordHarness) : recordHarness.rawValue
+        return ChoiceButton.fittingWidth(forTitle: harnessTitle)
+            + CGFloat(Space.m) + ChoiceButton.fittingWidth(forTitle: modelTitle)
             + CGFloat(Space.m) + ChoiceButton.fittingWidth(forTitle: effortTitle)
     }
 
     var controlsEnabled: Bool {
-        get { modelButton.isEnabled && effortButton.isEnabled }
+        get { harnessButton.isEnabled && modelButton.isEnabled && effortButton.isEnabled }
         set {
+            harnessButton.isEnabled = newValue
             modelButton.isEnabled = newValue
             effortButton.isEnabled = newValue
             applyTokens()
@@ -135,6 +148,13 @@ final class AgentComposerFooterView: NSView, TokenThemed {
     /// silently replacing it would misdescribe what the next turn will run.
     func apply(_ settings: AgentModelConfig.Resolution) {
         self.settings = settings
+        rebuildChoices()
+    }
+
+    func apply(_ selection: AgentLaunchSelection) {
+        recordHarness = selection.harness
+        selectedHarness = selection.harness
+        settings = AgentModelConfig.Resolution(model: selection.model, thinking: selection.thinking)
         rebuildChoices()
     }
 
@@ -150,7 +170,7 @@ final class AgentComposerFooterView: NSView, TokenThemed {
     /// real token colors opaque; secondary text plus NSControl/accessibility state
     /// still communicates unavailability without inventing a new color role.
     private func installContrastObservers() {
-        for button in [modelButton, effortButton] {
+        for button in [harnessButton, modelButton, effortButton] {
             contrastObservations.append(button.observe(\.alphaValue, options: [.new]) { [weak self] _, _ in
                 MainActor.assumeIsolated { self?.preserveDisabledContrast() }
             })
@@ -158,7 +178,7 @@ final class AgentComposerFooterView: NSView, TokenThemed {
     }
 
     private func preserveDisabledContrast() {
-        for button in [modelButton, effortButton]
+        for button in [harnessButton, modelButton, effortButton]
         where !button.isEnabled && button.alphaValue != 1 {
             button.alphaValue = 1
         }
@@ -170,42 +190,57 @@ final class AgentComposerFooterView: NSView, TokenThemed {
     }
 
     private func rebuildChoices() {
-        var models = AgentModelConfig.modelOptions
-        if !models.contains(settings.model) { models.append(settings.model) }
-        modelButton.items = models.map {
-            ChoiceItem(id: $0, title: Self.displayTitle(forModel: $0, compact: usesCompactLabels))
+        harnessButton.items = AgentHarness.allCases.map { harness in ChoiceItem(id: harness.rawValue, title: harness.rawValue) }
+        harnessButton.selectedID = selectedHarness.rawValue
+        let snapshot = AgentModelCatalog.shared.snapshot(for: selectedHarness)
+        var models = snapshot.models
+        if selectedHarness == recordHarness, !models.contains(settings.model) { models.append(settings.model) }
+        modelButton.items = models.map { model in
+            ChoiceItem(id: model, title: usesCompactLabels ? Self.abbreviatedModel(model) : (snapshot.displayNames[model] ?? model))
         }
         var efforts = AgentModelConfig.thinkingOptions
         if !efforts.contains(settings.thinking) { efforts.append(settings.thinking) }
-        effortButton.items = efforts.map {
-            ChoiceItem(id: $0, title: usesCompactLabels ? Self.abbreviatedEffort($0) : $0.capitalized)
-        }
-        modelButton.selectedID = settings.model
+        effortButton.items = efforts.map { effort in ChoiceItem(id: effort, title: usesCompactLabels ? Self.abbreviatedEffort(effort) : effort.capitalized) }
+        modelButton.selectedID = selectedHarness == recordHarness ? settings.model : nil
         effortButton.selectedID = settings.thinking
     }
 
-    private func pick(model: String? = nil, thinking: String? = nil) {
-        let modelChanged = model.map { $0 != settings.model } ?? false
-        let thinkingChanged = thinking.map { $0 != settings.thinking } ?? false
-        guard modelChanged || thinkingChanged else { return }
-        let previous = settings
-        let next = AgentModelConfig.Resolution(
-            model: model ?? settings.model,
-            thinking: thinking ?? settings.thinking
-        )
-
-        // Required negative witness: recreates the old whole-pair write. With an
-        // off-catalog model, an effort-only change is then refused by the supervisor.
-        let wholePairWitness = ProcessInfo.processInfo.environment["CONTINUUM_P4_8_NEGATIVE_WITNESS"] == "1"
-        let accepted = onSettingsWrite?(
-            wholePairWitness ? next.model : model,
-            wholePairWitness ? next.thinking : thinking
-        ) ?? true
-        guard accepted else {
-            apply(previous)
+    private func pick(harness: AgentHarness? = nil, model: String? = nil, thinking: String? = nil) {
+        if let harness {
+            selectedHarness = harness
+            rebuildChoices()
             return
         }
-        apply(next)
+        let next = AgentModelConfig.Resolution(model: model ?? settings.model, thinking: thinking ?? settings.thinking)
+        let priorHarness = recordHarness
+        let previous = settings
+        let accepted: Bool
+        if selectedHarness != recordHarness {
+            guard model != nil else { return }
+            accepted = onLaunchSelectionWrite?(selectedHarness, next.model, next.thinking) ?? false
+        } else if let writer = onLaunchSelectionWrite {
+            accepted = writer(recordHarness, next.model, next.thinking)
+        } else {
+            accepted = onSettingsWrite?(model, thinking) ?? true
+        }
+        guard accepted else {
+            recordHarness = priorHarness
+            selectedHarness = priorHarness
+            settings = previous
+            rebuildChoices()
+            return
+        }
+        recordHarness = selectedHarness
+        settings = next
+        rebuildChoices()
+    }
+
+    static func abbreviatedHarness(_ harness: AgentHarness) -> String {
+        switch harness {
+        case .claudeCode: return "Claude"
+        case .codex: return "Codex"
+        case .pi: return "Pi"
+        }
     }
 
     static func abbreviatedModel(_ model: String) -> String {

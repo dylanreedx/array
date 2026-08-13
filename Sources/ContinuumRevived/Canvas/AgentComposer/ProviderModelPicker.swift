@@ -557,7 +557,7 @@ extension ProviderModelButton {
             return true
         }
         window.contentView?.addSubview(footer)
-        footer.apply(AgentModelConfig.Resolution(model: "openai-codex/gpt-b", thinking: "medium"))
+        footer.apply(AgentLaunchSelection(harness: .pi, model: "openai-codex/gpt-b", thinking: "medium"))
         footer.layoutSubtreeIfNeeded()
         window.orderFront(nil)
 

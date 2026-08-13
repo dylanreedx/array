@@ -372,31 +372,14 @@ private func runCodexRunnerArgvChecks() {
 }
 
 private func runCodexBackendPolicyChecks() {
-    // Routing truth table for all three backends × availability.
-    expect(AgentBackendConfig.route(model: "anthropic/x", backend: .pi, claudeAvailable: true, codexAvailable: true) == .claude,
-           "route: pi + anthropic + claude present → claude")
-    expect(AgentBackendConfig.route(model: "openai-codex/x", backend: .pi, claudeAvailable: true, codexAvailable: true) == .codex,
-           "route: pi + openai-codex + codex present → codex")
-    expect(AgentBackendConfig.route(model: "openai-codex/x", backend: .pi, claudeAvailable: true, codexAvailable: false) == .pi,
-           "route: pi + openai-codex without codex → pi")
-    expect(AgentBackendConfig.route(model: "anthropic/x", backend: .pi, claudeAvailable: false, codexAvailable: true) == .pi,
-           "route: pi + anthropic without claude → pi")
-    expect(AgentBackendConfig.route(model: "google/x", backend: .pi, claudeAvailable: true, codexAvailable: true) == .pi,
-           "route: pi + a third provider → pi")
-
-    expect(AgentBackendConfig.route(model: "openai-codex/x", backend: .codex, claudeAvailable: true, codexAvailable: true) == .codex,
-           "route: Codex backend + openai-codex + codex present → codex")
-    expect(AgentBackendConfig.route(model: "openai-codex/x", backend: .codex, claudeAvailable: true, codexAvailable: false) == .pi,
-           "route: Codex backend without codex → pi")
-    expect(AgentBackendConfig.route(model: "anthropic/x", backend: .codex, claudeAvailable: true, codexAvailable: true) == .pi,
-           "route: Codex backend narrows — a non-openai-codex model → pi")
-
-    expect(AgentBackendConfig.route(model: "anthropic/x", backend: .claudeCode, claudeAvailable: true, codexAvailable: true) == .claude,
-           "route: Claude Code backend + anthropic + claude present → claude")
-    expect(AgentBackendConfig.route(model: "anthropic/x", backend: .claudeCode, claudeAvailable: false, codexAvailable: true) == .pi,
-           "route: Claude Code backend without claude → pi")
-    expect(AgentBackendConfig.route(model: "openai-codex/x", backend: .claudeCode, claudeAvailable: true, codexAvailable: true) == .pi,
-           "route: Claude Code backend narrows — a non-anthropic model → pi")
+    // Strict harness identity is independent of installed neighbours.
+    expect(AgentHarness.allCases == [.claudeCode, .codex, .pi], "harness order")
+    expect(AgentHarnessConfig.defaultHarness == .claudeCode, "Claude Code is the default")
+    expect(AgentHarnessConfig.isProviderCompatible(model: "anthropic/opus", harness: .claudeCode), "Claude owns anthropic")
+    expect(AgentHarnessConfig.isProviderCompatible(model: "openai-codex/gpt-5.6-sol", harness: .codex), "Codex owns openai-codex")
+    expect(AgentHarnessConfig.isProviderCompatible(model: "openai-codex/gpt-5.6-sol", harness: .pi), "Pi may own the same model id")
+    expect(LegacyAgentHarnessMigration.resolve(evidence: .init(hasCodexThread: false, hasClaudeConversation: true, hasPiSession: true), storedPreference: nil) == nil, "dual session evidence fails closed")
+    expect(LegacyAgentHarnessMigration.resolve(evidence: .init(hasCodexThread: true, hasClaudeConversation: true, hasPiSession: true), storedPreference: nil) == .codex, "stored Codex thread is decisive")
 
     // Model argument: the catalogue prefix is Array's namespacing, never sent.
     expect(CodexCLIBackend.modelArgument(forCatalogId: "openai-codex/gpt-5.6-sol") == "gpt-5.6-sol",
@@ -426,20 +409,11 @@ private func runCodexBackendPolicyChecks() {
     expect(!CodexCLIBackend.isLoggedIn(statusOutput: "", exitCode: 0),
            "CodexCLIBackend: empty output must read as logged out")
 
-    // Dropdown filter + the one-copy provider split.
-    expect(AgentBackendConfig.provider(forID: "openai-codex/gpt-5.6-sol") == "openai-codex",
-           "AgentBackendConfig: provider prefix split")
-    expect(AgentBackendConfig.provider(forID: "bare") == "other",
-           "AgentBackendConfig: a slashless id groups under other")
-    let all = ["openai-codex/a", "anthropic/b", "google/c"]
-    expect(AgentBackendConfig.filter(all, for: .codex) == ["openai-codex/a"],
-           "AgentBackendConfig.filter: Codex → openai-codex only")
-    expect(AgentBackendConfig.filter(all, for: .claudeCode) == ["anthropic/b"],
-           "AgentBackendConfig.filter: Claude Code → anthropic only")
-    expect(AgentBackendConfig.filter(all, for: .pi) == all,
-           "AgentBackendConfig.filter: pi → every provider (byte-identical)")
-
-    print("CodexCLIBackend/AgentBackendConfig policy checks passed: routing truth table, model-argument stripping, effort exact-match/omit, auth parse, and dropdown filter pinned")
+    let suite = UserDefaults(suiteName: "strict-harness-\(UUID().uuidString)")!
+    defer { suite.removePersistentDomain(forName: suite.volatileDomainNames.first ?? "") }
+    suite.set("pi (all providers)", forKey: AgentHarnessConfig.key)
+    expect(AgentHarnessConfig.resolved(defaults: suite) == .pi, "legacy Pi preference migrates strictly")
+    print("CodexCLIBackend strict-harness policy checks passed: ownership, defaults, migration ambiguity, model arguments, effort, and auth pinned")
 }
 
 private func runCodexCatalogUnionChecks() {

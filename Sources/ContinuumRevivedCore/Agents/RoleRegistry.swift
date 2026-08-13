@@ -100,7 +100,7 @@ public struct RoleRegistry: Sendable {
         guard let role = byID[roleId] else { throw Failure.unknownRole(roleId) }
         var model = fallback.model
         if let declared = role.model {
-            guard AgentModelConfig.modelOptions.contains(declared) else {
+            guard AgentModelConfig.modelOptions(for: .pi).contains(declared) else {
                 throw Failure.unqualifiedModel(role: roleId, model: declared)
             }
             model = declared
