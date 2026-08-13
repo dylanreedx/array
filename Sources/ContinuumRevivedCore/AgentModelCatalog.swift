@@ -41,9 +41,40 @@ public final class AgentModelCatalog: @unchecked Sendable {
     private var liveRefreshEnabled = false
     private var lastRefreshStartedAt: Date?
     private var refreshInFlight = false
+    public typealias ProbeExecutor = @Sendable (PiAgentRunner.ResolvedCommand, [String], TimeInterval) -> String?
+    private let probeExecutor: ProbeExecutor?
+    private var probeLaunchCount = 0
 
-    /// Public so checks can exercise instances without touching `shared`.
-    public init() {}
+    private var readinessByHarness: [AgentHarness: HarnessReadiness] = [
+        .claudeCode: .ready, .codex: .ready, .pi: .ready,
+    ]
+    private var refreshedAtByHarness: [AgentHarness: Date] = [:]
+
+    /// Public so checks can exercise instances without touching `shared`. An injected
+    /// executor is used only by behavioral tests; production uses bounded Process.
+    public init(probeExecutor: ProbeExecutor? = nil) {
+        self.probeExecutor = probeExecutor
+    }
+
+    public var probeLaunchCountForQA: Int { lock.withLock { probeLaunchCount } }
+    public var refreshInFlightForQA: Bool { lock.withLock { refreshInFlight } }
+
+    public func snapshot(for harness: AgentHarness) -> AgentHarnessCatalogSnapshot {
+        lock.withLock {
+            switch harness {
+            case .claudeCode:
+                return AgentHarnessCatalogSnapshot(harness: harness, readiness: readinessByHarness[harness] ?? .checking, models: claudeBackendModels.isEmpty ? ClaudeCLIBackend.curatedCatalogModels : claudeBackendModels, displayNames: claudeBackendDisplayNames.isEmpty ? ClaudeCLIBackend.curatedCatalogDisplayNames : claudeBackendDisplayNames, refreshedAt: refreshedAtByHarness[harness])
+            case .codex:
+                return AgentHarnessCatalogSnapshot(harness: harness, readiness: readinessByHarness[harness] ?? .checking, models: codexBackendModels.isEmpty ? CodexCLIBackend.curatedCatalogModels : codexBackendModels, displayNames: codexBackendDisplayNames.isEmpty ? CodexCLIBackend.curatedCatalogDisplayNames : codexBackendDisplayNames, refreshedAt: refreshedAtByHarness[harness])
+            case .pi:
+                return AgentHarnessCatalogSnapshot(harness: harness, readiness: readinessByHarness[harness] ?? .checking, models: liveOptions ?? AgentModelConfig.fallbackModelOptions, displayNames: liveDisplayNames, contextWindows: liveContextWindows, refreshedAt: refreshedAtByHarness[harness])
+            }
+        }
+    }
+
+    public func models(for harness: AgentHarness) -> [String] { snapshot(for: harness).models }
+    public func displayName(for id: String, harness: AgentHarness) -> String? { snapshot(for: harness).displayNames[id] }
+    public func contextWindow(for id: String, harness: AgentHarness) -> Int? { snapshot(for: harness).contextWindows[id] }
 
     public func options(fallback: [String] = AgentModelConfig.fallbackModelOptions) -> [String] {
         lock.withLock {
@@ -59,6 +90,8 @@ public final class AgentModelCatalog: @unchecked Sendable {
         }
     }
 
+    /// Legacy union presentation only. Strict selection must use snapshot(for:),
+    /// which preserves harness provenance for models and metadata.
     /// Human display name for a fully-qualified id ("GPT-5.3 Codex Spark" for
     /// `openai-codex/gpt-5.3-codex-spark`), grabbed from pi's synced catalog
     /// (`~/.pi/agent/models-store.json`). Nil when the store has no entry —
@@ -151,7 +184,7 @@ public final class AgentModelCatalog: @unchecked Sendable {
     public func apply(listModelsOutput: String) {
         let parsed = Self.parse(listModelsOutput: listModelsOutput)
         guard !parsed.isEmpty else { return }
-        lock.withLock { liveOptions = parsed }
+        lock.withLock { liveOptions = parsed; readinessByHarness[.pi] = .ready; refreshedAtByHarness[.pi] = Date() }
     }
 
     public func apply(displayNames: [String: String]) {
@@ -165,6 +198,15 @@ public final class AgentModelCatalog: @unchecked Sendable {
         lock.withLock {
             claudeBackendModels = available ? ClaudeCLIBackend.curatedCatalogModels : []
             claudeBackendDisplayNames = available ? ClaudeCLIBackend.curatedCatalogDisplayNames : [:]
+            readinessByHarness[.claudeCode] = available ? .ready : .loggedOut
+            refreshedAtByHarness[.claudeCode] = Date()
+        }
+    }
+
+    public func apply(readiness: HarnessReadiness, for harness: AgentHarness) {
+        lock.withLock {
+            readinessByHarness[harness] = readiness
+            refreshedAtByHarness[harness] = Date()
         }
     }
 
@@ -175,6 +217,8 @@ public final class AgentModelCatalog: @unchecked Sendable {
         lock.withLock {
             codexBackendModels = available ? CodexCLIBackend.curatedCatalogModels : []
             codexBackendDisplayNames = available ? CodexCLIBackend.curatedCatalogDisplayNames : [:]
+            readinessByHarness[.codex] = available ? .ready : .loggedOut
+            refreshedAtByHarness[.codex] = Date()
         }
     }
 
@@ -189,6 +233,23 @@ public final class AgentModelCatalog: @unchecked Sendable {
             liveRefreshEnabled = false
             lastRefreshStartedAt = nil
             refreshInFlight = false
+            readinessByHarness = [.claudeCode: .checking, .codex: .checking, .pi: options == nil ? .checking : .ready]
+            refreshedAtByHarness = [:]
+        }
+    }
+
+    public func resetForQA(snapshot: AgentHarnessCatalogSnapshot) {
+        lock.withLock {
+            readinessByHarness[snapshot.harness] = snapshot.readiness
+            if let refreshedAt = snapshot.refreshedAt { refreshedAtByHarness[snapshot.harness] = refreshedAt }
+            switch snapshot.harness {
+            case .claudeCode:
+                claudeBackendModels = snapshot.models; claudeBackendDisplayNames = snapshot.displayNames
+            case .codex:
+                codexBackendModels = snapshot.models; codexBackendDisplayNames = snapshot.displayNames
+            case .pi:
+                liveOptions = snapshot.models; liveDisplayNames = snapshot.displayNames; liveContextWindows = snapshot.contextWindows
+            }
         }
     }
 
@@ -202,7 +263,12 @@ public final class AgentModelCatalog: @unchecked Sendable {
     /// Opt in to live probing and kick the first one. Called exactly once,
     /// from the real app's startup path — never from QA.
     public func enableLiveRefresh() {
-        lock.withLock { liveRefreshEnabled = true }
+        lock.withLock {
+            liveRefreshEnabled = true
+            readinessByHarness[.claudeCode] = .checking
+            readinessByHarness[.codex] = .checking
+            readinessByHarness[.pi] = .checking
+        }
         requestRefresh(minimumInterval: 0)
     }
 
@@ -252,8 +318,19 @@ public final class AgentModelCatalog: @unchecked Sendable {
 
     private func probePi(timeout: TimeInterval) {
         let command = PiAgentRunner.liveResolvedCommand()
-        guard let output = Self.boundedProbeOutput(
-            command: command, arguments: ["--list-models"], timeout: timeout) else { return }
+        guard command.prefixArgs.isEmpty || probeExecutor != nil else {
+            apply(readiness: .missing, for: .pi)
+            return
+        }
+        guard let output = boundedProbeOutput(
+            command: command, arguments: ["--list-models"], timeout: timeout) else {
+            apply(readiness: .loggedOut, for: .pi)
+            return
+        }
+        guard !Self.parse(listModelsOutput: output).isEmpty else {
+            apply(readiness: .unavailable("model catalogue is empty"), for: .pi)
+            return
+        }
         apply(listModelsOutput: output)
         // Best-effort display names from pi's synced catalog; usable-model
         // membership stays owned by --list-models above (the store also
@@ -273,11 +350,12 @@ public final class AgentModelCatalog: @unchecked Sendable {
     /// anthropic models.
     private func probeClaudeBackend(timeout: TimeInterval) {
         let command = ClaudeAgentRunner.liveResolvedCommand()
-        guard command.prefixArgs.isEmpty else {
+        guard command.prefixArgs.isEmpty || probeExecutor != nil else {
             apply(claudeBackendAvailable: false)
+            apply(readiness: .missing, for: .claudeCode)
             return
         }
-        let output = Self.boundedProbeOutput(
+        let output = boundedProbeOutput(
             command: command, arguments: ["auth", "status", "--json"], timeout: timeout)
         let loggedIn = output.map { ClaudeCLIBackend.isLoggedIn(authStatusJSON: Data($0.utf8)) } ?? false
         apply(claudeBackendAvailable: loggedIn)
@@ -290,11 +368,12 @@ public final class AgentModelCatalog: @unchecked Sendable {
     /// `isLoggedIn` text check then confirms the sign-in. Independent of pi.
     private func probeCodexBackend(timeout: TimeInterval) {
         let command = CodexAgentRunner.liveResolvedCommand()
-        guard command.prefixArgs.isEmpty else {
+        guard command.prefixArgs.isEmpty || probeExecutor != nil else {
             apply(codexBackendAvailable: false)
+            apply(readiness: .missing, for: .codex)
             return
         }
-        let output = Self.boundedProbeOutput(
+        let output = boundedProbeOutput(
             command: command, arguments: ["login", "status"], timeout: timeout)
         let loggedIn = output.map { CodexCLIBackend.isLoggedIn(statusOutput: $0, exitCode: 0) } ?? false
         apply(codexBackendAvailable: loggedIn)
@@ -303,11 +382,17 @@ public final class AgentModelCatalog: @unchecked Sendable {
     /// One bounded subprocess: stdout on success, nil on launch failure,
     /// nonzero exit, or timeout. Silent on every failure — the fallback (or
     /// the previous probe's result) still stands.
-    private static func boundedProbeOutput(
+    private func boundedProbeOutput(
+
         command: PiAgentRunner.ResolvedCommand,
         arguments: [String],
         timeout: TimeInterval
     ) -> String? {
+        let injected = lock.withLock { () -> ProbeExecutor? in
+            probeLaunchCount += 1
+            return probeExecutor
+        }
+        if let injected { return injected(command, arguments, timeout) }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: command.executable)
         process.arguments = command.prefixArgs + arguments

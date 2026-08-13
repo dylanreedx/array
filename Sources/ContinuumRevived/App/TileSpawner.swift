@@ -23,6 +23,7 @@ final class TileSpawner {
     enum SpawnError: Error {
         case canvasUnavailable
         case invalidPaneId(String)
+        case agentLaunchSelectionRequired
     }
 
     struct AnnotatedProfile {
@@ -55,6 +56,7 @@ final class TileSpawner {
     private let environmentProvider: () -> [String: String]
     private let tmuxControlFactory: @Sendable (String, RemoteReach, UserDefaults) -> any TmuxControl
     private var browserProfiles: [BrowserProfile]
+    private var managedAgentLaunchSelections: [UUID: AgentLaunchSelection] = [:]
 
     /// Dynamic source used by browser tile profile menus after registry edits.
     var browserProfileMenuProvider: (() -> [BrowserProfile])?
@@ -239,7 +241,7 @@ final class TileSpawner {
             size: CanvasEngine.defaultFrame(for: .terminal),
             in: canvasView
         )
-        let nextZ = CanvasEngine.zPositionAbove(canvasView.canvasState.tiles)
+        let nextZ = CanvasEngine.zPositionAbove(canvasView.projectTiles())
         var tile = Tile(
             id: UUID(),
             kind: .terminal,
@@ -708,7 +710,7 @@ final class TileSpawner {
     /// explicit choice that has left the live catalogue is refused, not substituted
     /// and not a construction failure, and the caller must be able to say so.
     enum ManagedAgentSelectionOutcome {
-        case spawned(tileId: UUID, providerSettings: AgentModelConfig.Resolution)
+        case spawned(tileId: UUID, providerSettings: AgentLaunchSelection)
         case refusedModel(String)
         case failure(Error)
     }
@@ -824,7 +826,7 @@ final class TileSpawner {
             size: CanvasEngine.defaultFrame(for: .browser),
             in: canvasView
         )
-        let nextZ = CanvasEngine.zPositionAbove(canvasView.canvasState.tiles)
+        let nextZ = CanvasEngine.zPositionAbove(canvasView.projectTiles())
         var tile = Tile(
             id: UUID(),
             kind: .browser,
@@ -1398,24 +1400,24 @@ final class TileSpawner {
     func spawnManagedAgent(
         agentKind: AgentKind = .managed,
         at worldPoint: CGPoint? = nil,
+        launchSelection: AgentLaunchSelection? = nil,
         providerSettings: AgentModelConfig.Resolution? = nil
     ) -> ManagedAgentOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
         let now = Date()
         let tileId = UUID()
         let threadId = "managed-\(tileId.uuidString)"
-        let frame = makePlacement(
-            worldPoint: worldPoint,
-            size: CanvasEngine.defaultFrame(for: .managedAgent),
-            in: canvasView
-        )
-        let nextZ = CanvasEngine.zPositionAbove(canvasView.canvasState.tiles)
+        let frame = makeProjectTilePlacement(worldPoint: worldPoint, size: CanvasEngine.defaultFrame(for: .managedAgent), in: canvasView)
+        let nextZ = CanvasEngine.zPositionAbove(canvasView.projectTiles())
         // One resolution seeds every pre-attach projection. Cmd+K supplies its
         // explicit choice; generic creation falls back to Settings. Wiring gives
         // the same resolution to the agent record before the view attaches.
-        let resolvedProviderSettings = providerSettings ?? AgentModelConfig.resolvedFromDefaults()
-        let spawnModelID = resolvedProviderSettings.model
-        let spawnModelName = AgentModelCatalog.shared.displayName(for: spawnModelID)
+        guard let resolvedSelection = launchSelection ?? providerSettings.map { value in AgentLaunchSelection(harness: AgentHarnessConfig.resolved(defaults: defaults), model: value.model, thinking: value.thinking) } ?? AgentModelConfig.launchSelection(defaults: defaults) else {
+            return .failure(SpawnError.agentLaunchSelectionRequired)
+        }
+        let resolvedProviderSettings = AgentModelConfig.Resolution(model: resolvedSelection.model, thinking: resolvedSelection.thinking)
+        let spawnModelID = resolvedSelection.model
+        let spawnModelName = AgentModelCatalog.shared.displayName(for: spawnModelID, harness: resolvedSelection.harness)
             ?? spawnModelID.split(separator: "/").last.map(String.init)
             ?? spawnModelID
         let tile = Tile(
@@ -1436,7 +1438,7 @@ final class TileSpawner {
         )
         view.ingest(.sessionStateChanged(.ready))
         view.ingest(.contentDelta(threadId: threadId, turnId: "bootstrap", streamKind: .assistant, delta: "Ready. Type a prompt below to run \(spawnModelName) in this tile."))
-        canvasView.install(tileView: view, for: tile)
+        let projectTarget = canvasView.installProjectTile(tileView: view, for: tile)
 
         do {
             try managedSessionStore.upsert(ManagedAgentSessionRecord(
@@ -1451,12 +1453,17 @@ final class TileSpawner {
                 resumeCursor: nil,
                 runtimePayload: nil
             ))
-            try projectStore.saveCanvas(canvasView.canvasState)
+            try persistProjectCanvas(after: projectTarget, in: canvasView)
         } catch {
             try? managedSessionStore.delete(tileId: tileId)
             return .failure(error)
         }
+        managedAgentLaunchSelections[tileId] = resolvedSelection
         return .spawned(tileId: tileId)
+    }
+
+    func managedAgentLaunchSelection(tileId: UUID) -> AgentLaunchSelection? {
+        managedAgentLaunchSelections[tileId]
     }
 
     /// ⌘K's managed-agent spawn, whole, in ONE function: validate the explicit
@@ -1482,19 +1489,19 @@ final class TileSpawner {
         _ selection: String?,
         defaults: UserDefaults = .standard,
         announceRefusal: @MainActor (String) -> Void = TileSpawner.announceManagedAgentModelRefusal,
-        wire: (UUID, AgentModelConfig.Resolution) -> Void
+        wire: (UUID, AgentLaunchSelection) -> Void
     ) -> ManagedAgentSelectionOutcome {
-        guard let providerSettings = AgentModelConfig.resolved(selection: selection, defaults: defaults) else {
+        guard let launchSelection = AgentModelConfig.launchSelection(model: selection, defaults: defaults), AgentModelConfig.validates(launchSelection) else {
             // `resolved` returns nil only for a non-nil selection outside the
             // catalogue, so this is always a real id someone picked.
             let refused = selection ?? ""
             announceRefusal(Self.managedAgentModelRefusalMessage(for: refused))
             return .refusedModel(refused)
         }
-        switch spawnManagedAgent(providerSettings: providerSettings) {
+        switch spawnManagedAgent(launchSelection: launchSelection) {
         case let .spawned(tileId):
-            wire(tileId, providerSettings)
-            return .spawned(tileId: tileId, providerSettings: providerSettings)
+            wire(tileId, launchSelection)
+            return .spawned(tileId: tileId, providerSettings: launchSelection)
         case let .failure(error):
             return .failure(error)
         }
@@ -1531,7 +1538,7 @@ final class TileSpawner {
         _ agentID: AgentID,
         supervisor: AgentSupervisor
     ) -> ManagedAgentOutcome {
-        spawnManagedAgent(providerSettings: supervisor.providerSettings(for: agentID))
+        spawnManagedAgent(launchSelection: supervisor.launchSelection(for: agentID))
     }
 
     /// Deterministic witness for ⌘K's explicit-model spawn contract.
@@ -1604,7 +1611,8 @@ final class TileSpawner {
         // QA never probes, so `modelOptions` is the frozen fallback and the catalogue
         // holds no display names — a tile title falls back to the id's model segment,
         // which is what the literal titles below assert.
-        let live = AgentModelConfig.modelOptions
+        defaults.set(AgentHarness.pi.rawValue, forKey: AgentHarnessConfig.key)
+        let live = AgentModelCatalog.shared.snapshot(for: .pi).models
         let chosen = "openai-codex/gpt-5.6-luna"
         let configured = "openai-codex/gpt-5.6-sol"
         let reconfigured = "openai-codex/gpt-5.4-mini"
@@ -1612,7 +1620,7 @@ final class TileSpawner {
         let departed = "openai-codex/gpt-5.6-luna-retired"
         for id in [chosen, configured, reconfigured, revealedModel] {
             try expect(live.contains(id), "the QA catalogue no longer offers \(id); this witness is testing nothing")
-            try expect(AgentModelCatalog.shared.displayName(for: id) == nil,
+            try expect(AgentModelCatalog.shared.displayName(for: id, harness: .pi) == nil,
                        "a live catalogue probe ran in QA, so \(id)'s title is pi's display name and the literal titles below are wrong")
         }
         try expect(!live.contains(departed), "fixture id \(departed) must not be a real catalogue id")
@@ -1622,12 +1630,12 @@ final class TileSpawner {
         defaults.set("high", forKey: AgentModelConfig.thinkingKey)
 
         var refusals: [String] = []
-        var wired: [(tileId: UUID, settings: AgentModelConfig.Resolution)] = []
+        var wired: [(tileId: UUID, settings: AgentLaunchSelection)] = []
         var composerAtWireTime: [AgentModelConfig.Resolution] = []
         // Called where production wires the agent RECORD. Reading the composer here
         // is what proves the tile was already built from this resolution — the
         // post-attach repair this replaces could only ever run later.
-        func wire(_ tileId: UUID, _ settings: AgentModelConfig.Resolution) {
+        func wire(_ tileId: UUID, _ settings: AgentLaunchSelection) {
             if let view = canvas.tileView(for: tileId) as? ManagedAgentTileNSView {
                 composerAtWireTime.append(view.qaProviderSettings)
             }
@@ -1676,19 +1684,19 @@ final class TileSpawner {
         guard case let .spawned(chosenTile, chosenSettings) = explicit else {
             throw CheckError(description: "an in-catalogue explicit choice did not spawn: \(explicit)")
         }
-        try expect(chosenSettings == AgentModelConfig.Resolution(model: chosen, thinking: "high"),
+        try expect(chosenSettings == AgentLaunchSelection(harness: .pi, model: chosen, thinking: "high"),
                    "the explicit choice did not outrank the configured default \(configured), or lost the configured thinking level: \(chosenSettings)")
         guard let chosenView = canvas.tileView(for: chosenTile) as? ManagedAgentTileNSView else {
             throw CheckError(description: "the explicit-model spawn installed no managed-agent view")
         }
-        try expect(chosenView.qaProviderSettings == chosenSettings,
+        try expect(chosenView.qaProviderSettings == AgentModelConfig.Resolution(model: chosenSettings.model, thinking: chosenSettings.thinking),
                    "the composer was not seeded from the explicit spawn resolution: \(chosenView.qaProviderSettings)")
         let chosenTitle = canvas.canvasState.tiles.first(where: { $0.id == chosenTile })?.title
         try expect(chosenTitle == "gpt-5.6-luna",
                    "the tile title was not seeded from the explicit spawn resolution: \(String(describing: chosenTitle))")
         try expect(wired.count == 1 && wired[0].tileId == chosenTile && wired[0].settings == chosenSettings,
                    "the agent record was not given the SAME resolution the tile was built from: \(wired)")
-        try expect(composerAtWireTime == [chosenSettings],
+        try expect(composerAtWireTime == [AgentModelConfig.Resolution(model: chosenSettings.model, thinking: chosenSettings.thinking)],
                    "the composer did not already hold the chosen model when the record was wired — the model is being repaired after attach again, which is the bug: \(composerAtWireTime)")
 
         // MARK: 3 · generic creation with NO selection still comes from Settings
@@ -1706,7 +1714,7 @@ final class TileSpawner {
         guard case let .spawned(genericTile, genericSettings) = generic else {
             throw CheckError(description: "generic creation with no selection did not spawn: \(generic)")
         }
-        try expect(genericSettings == AgentModelConfig.Resolution(model: reconfigured, thinking: "low"),
+        try expect(genericSettings == AgentLaunchSelection(harness: .pi, model: reconfigured, thinking: "low"),
                    "generic creation must read Settings: expected \(reconfigured)/low, got \(genericSettings)")
         let genericTitle = canvas.canvasState.tiles.first(where: { $0.id == genericTile })?.title
         try expect(genericTitle == "gpt-5.4-mini",
@@ -4912,13 +4920,27 @@ final class TileSpawner {
             return window
         }
 
-        guard let tmuxPath = TmuxLocator.resolve() else {
+        // Real tmux: this leg creates and kills sessions. See `TmuxIsolation` for
+        // why it refuses rather than reaching the default socket — that socket is
+        // the running app's own, and pulling its sessions quits it.
+        let tmuxPath: String
+        switch TmuxIsolation.resolve() {
+        case .ready(let resolved, _, _):
+            tmuxPath = resolved
+        case .tmuxAbsent:
             let path = try artifact([
                 "check": "terminal-tmux-live-integration",
                 "status": "skipped",
                 "reason": "tmux did not resolve from configured path, PATH, or standard fallback paths"
             ])
             return ("SKIP: terminal-tmux-live-integration-check no real tmux resolved; artifact: \(path.path)", path)
+        case .notIsolated(let reason):
+            let path = try artifact([
+                "check": "terminal-tmux-live-integration",
+                "status": "skipped",
+                "reason": "refusing to touch the live tmux server (AGENTS.md): \(reason)"
+            ])
+            return ("SKIP: terminal-tmux-live-integration-check \(reason); artifact: \(path.path)", path)
         }
 
         let fileManager = FileManager.default

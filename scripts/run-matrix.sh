@@ -6,6 +6,21 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT_DIR"
 
+# AGENTS.md, "Never touch the live tmux server from automated checks": several
+# legs drive a REAL tmux server. On the DEFAULT socket that is the one hosting a
+# running Array's terminal tiles, and pulling its sessions kills those tiles,
+# which closes the last window, which quits the app — a clean exit with no crash
+# report, indistinguishable from a crash. That happened twice on 2026-08-12.
+#
+# Give the whole matrix a disposable socket namespace of its own, exported before
+# any leg runs so every child inherits it, and drop an inherited client env so a
+# run started from inside tmux cannot be mistaken for the isolated server. The
+# CoreChecks section fails closed without this, so it also keeps that coverage.
+MATRIX_TMUX_TMPDIR=$(mktemp -d /tmp/array-matrix-tmux.XXXXXX)
+export TMUX_TMPDIR="$MATRIX_TMUX_TMPDIR"
+unset TMUX TMUX_PANE
+trap 'rm -rf "$MATRIX_TMUX_TMPDIR"' EXIT
+
 FAST=0
 if [[ $# -gt 0 ]]; then
   case "$1" in
@@ -299,6 +314,7 @@ run_app_check .build/debug/Array --palette-duplicate-root-check
 # Ordered HERE, ahead of the KNOWN-RED restore leg below: this script is
 # `set -euo pipefail` with bare calls, so it aborts at the first red leg and
 # everything after it never runs. A witness the gate cannot reach never runs at all.
+run_app_check .build/debug/Array --strict-agent-harness-check
 run_app_check .build/debug/Array --managed-agent-model-spawn-check
 run_app_check .build/debug/Array --palette-first-responder-restore-check
 run_app_check .build/debug/Array --settings-panel-check

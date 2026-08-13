@@ -11,6 +11,7 @@ check --agent-observer-independence-check
 check --agent-restore-check
 check --agent-status-check
 check --agent-supervisor-check
+check --strict-agent-harness-check
 check --agent-tile-click-focus-check
 check --app-support-channel-check
 check --bring-to-front-focus-check
@@ -203,6 +204,7 @@ leg run_app_check .build/debug/Array --leader-jump-check
 leg run_app_check .build/debug/Array --leader-snap-check
 leg run_app_check .build/debug/Array --leader-zone-jump-check
 leg run_app_check .build/debug/Array --location-action-surface-check
+leg run_app_check .build/debug/Array --strict-agent-harness-check
 leg run_app_check .build/debug/Array --managed-agent-model-spawn-check
 leg run_app_check .build/debug/Array --multi-zone-render-check
 leg run_app_check .build/debug/Array --nav-mode-check

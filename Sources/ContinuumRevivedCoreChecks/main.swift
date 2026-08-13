@@ -819,7 +819,7 @@ do {
 
 // MARK: - Ticket 48: Host / RemoteReach model
 
-do {
+remoteReachBackend: do {
     let tileId = UUID(uuidString: "A0000000-0000-4000-8000-000000004802")!
     let envId = UUID(uuidString: "A0000000-0000-4000-8000-000000004803")!
     let profile = LaunchProfile(
@@ -1043,6 +1043,16 @@ do {
     }
 
     let tmuxPath = try executablePath("tmux", fallbacks: ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"])
+    // The loopback-ssh backend proof runs the wrapped profile through
+    // `/usr/bin/script`, which needs a CONTROLLING TERMINAL: without one it exits
+    // "tcgetattr/ioctl: Operation not supported on socket", the ssh-wrapped tmux
+    // session never appears, and the assertion reports a red that says nothing
+    // about the code. The matrix runs from a terminal, so the coverage stands
+    // there; an agent shell has no tty and must skip loudly instead of flaking.
+    guard isatty(FileHandle.standardInput.fileDescriptor) == 1 else {
+        print("SKIP remote-reach backend: no controlling terminal, so /usr/bin/script cannot allocate a pty for the ssh-wrapped tmux attach")
+        break remoteReachBackend
+    }
     let sshdPath = try executablePath("sshd", fallbacks: ["/usr/sbin/sshd", "/usr/local/sbin/sshd"])
     let sshKeygenPath = try executablePath("ssh-keygen", fallbacks: ["/usr/bin/ssh-keygen"])
     let backendRoot = FileManager.default.temporaryDirectory
@@ -1082,9 +1092,17 @@ do {
     let sshdConfigURL = backendRoot.appendingPathComponent("sshd_config")
     let sshdPidURL = backendRoot.appendingPathComponent("sshd.pid")
     let sshdLogURL = backendRoot.appendingPathComponent("sshd.log")
+    // sshd sanitizes the environment it hands a user session, so an isolated
+    // TMUX_TMPDIR does NOT survive the hop: without this the remote `tmux
+    // new-session` lands on the DEFAULT socket — the running app's own — while the
+    // local `has-session` looks in the disposable namespace and never finds it.
+    // `SetEnv` on our own throwaway sshd forces the namespace across the hop, so
+    // the leg keeps its coverage and stays isolated end to end.
+    let sshdSetEnv = TmuxIsolation.disposableSocketDir().map { "SetEnv TMUX_TMPDIR=\($0)\n" } ?? ""
     let sshdConfig = """
     Port \(sshPort)
     ListenAddress 127.0.0.1
+    \(sshdSetEnv)
     HostKey \(hostKey)
     AuthorizedKeysFile \(sshDir.appendingPathComponent("authorized_keys").path)
     PidFile \(sshdPidURL.path)
@@ -8091,10 +8109,15 @@ struct NoMirrorCheckManifest: Codable, Equatable {
     var activeWindowShared: String
     var i2Distinct: Bool
     var sharedViewExemptionCorrect: Bool
+    /// Why the leg did not run, when it did not run for a reason other than a
+    /// missing tmux — today, refusing an un-isolated socket. Omitted when nil, so
+    /// the tmux-absent manifest keeps the shape ticket 29 specified.
+    var skippedReason: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case runId = "run_id"
         case tmuxAbsent = "tmux_absent"
+        case skippedReason = "skipped_reason"
         case projSession = "proj_session"
         case paneA = "pane_a"
         case paneB = "pane_b"
@@ -8107,10 +8130,10 @@ struct NoMirrorCheckManifest: Codable, Equatable {
         case sharedViewExemptionCorrect = "shared_view_exemption_correct"
     }
 
-    static func skipped(runId: String) -> NoMirrorCheckManifest {
+    static func skipped(runId: String, reason: String? = nil) -> NoMirrorCheckManifest {
         NoMirrorCheckManifest(
             runId: runId,
-            tmuxAbsent: true,
+            tmuxAbsent: reason == nil,
             projSession: "",
             paneA: "",
             paneB: "",
@@ -8120,7 +8143,8 @@ struct NoMirrorCheckManifest: Codable, Equatable {
             activeWindowB: "",
             activeWindowShared: "",
             i2Distinct: false,
-            sharedViewExemptionCorrect: false
+            sharedViewExemptionCorrect: false,
+            skippedReason: reason
         )
     }
 }
@@ -8714,10 +8738,22 @@ let noMirrorRunId = String(UUID().uuidString.prefix(8))
 let noMirrorRunDir = URL(fileURLWithPath: "qa-runs/no-mirror-\(noMirrorRunId)", isDirectory: true)
 
 i2Check: do {
-    guard let tmuxPath = TmuxLocator.resolve() else {
+    // Real tmux: this block creates project and view sessions and kills them. See
+    // `TmuxIsolation` for why it refuses rather than reaching the default socket.
+    let tmuxPath: String
+    switch TmuxIsolation.resolve() {
+    case .ready(let path, let socketDir, _):
+        tmuxPath = path
+        print("I2: isolated tmux socket namespace \(socketDir)")
+    case .tmuxAbsent:
         let manifest = NoMirrorCheckManifest.skipped(runId: noMirrorRunId)
         let path = try writeNoMirrorManifest(manifest, to: noMirrorRunDir)
         print("SKIP I2: tmux not found - tmux_absent:true - manifest at \(path.path)")
+        break i2Check
+    case .notIsolated(let reason):
+        let manifest = NoMirrorCheckManifest.skipped(runId: noMirrorRunId, reason: reason)
+        let path = try writeNoMirrorManifest(manifest, to: noMirrorRunDir)
+        print("SKIP I2: \(reason); refusing to touch the live tmux server (AGENTS.md) - manifest at \(path.path)")
         break i2Check
     }
 
@@ -8732,14 +8768,47 @@ i2Check: do {
     let viewSessionB = TmuxSession.viewSessionName(tileId: tileB)
     let viewSessionShared = TmuxSession.viewSessionName(tileId: sharedTile)
 
+    var attachedViewClients: [Process] = []
     defer {
+        for client in attachedViewClients where client.isRunning {
+            client.terminate()
+        }
         for session in [viewSessionShared, viewSessionB, viewSessionA, projectSession] {
             _ = try? tmux.run(["kill-session", "-t", session])
+        }
+        for client in attachedViewClients where client.isRunning {
+            client.waitUntilExit()
         }
     }
 
     func trimmedTmux(_ arguments: [String]) throws -> String {
         try tmux.run(arguments).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Runs the production grouped-view argv the way a terminal tile runs it: under
+    /// a pty of its own.
+    ///
+    /// `new-session -A` ATTACHES. With this executable's inherited stdio that is
+    /// either "open terminal failed: not a terminal" — a thrown error that takes
+    /// the whole run down, which is what a headless matrix leg gets — or, from an
+    /// operator's terminal, a real attach that hijacks the session they are
+    /// watching the matrix in. `/usr/bin/script` hands it a private pty, exactly as
+    /// the loopback-ssh section does, so the client is real and contained. The
+    /// client is left running (that is what pins the view) and torn down above.
+    func openGroupedView(_ profile: LaunchProfile, viewSessionName: String) throws {
+        let client = Process()
+        client.executableURL = URL(fileURLWithPath: "/usr/bin/script")
+        client.arguments = ["-q", "/dev/null", profile.command] + profile.arguments
+        client.standardOutput = Pipe()
+        client.standardError = Pipe()
+        try client.run()
+        attachedViewClients.append(client)
+        for _ in 0..<50 {
+            if (try? tmux.run(["has-session", "-t", viewSessionName])) != nil { return }
+            if !client.isRunning { break }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        expect(false, "I2: the production grouped-view profile did not create \(viewSessionName)")
     }
 
     func windowId(for target: String) throws -> String {
@@ -8775,8 +8844,8 @@ i2Check: do {
     )
     expect(productionProfileA.command == tmuxPath && productionProfileB.command == tmuxPath, "I2: production-generated local profiles must execute the resolved tmux binary")
     expect(!productionProfileA.arguments.contains("forbidden-inner-command") && !productionProfileB.arguments.contains("forbidden-inner-command"), "I2: production-generated view profiles must omit the inner command")
-    _ = try trimmedTmux(productionProfileA.arguments)
-    _ = try trimmedTmux(productionProfileB.arguments)
+    try openGroupedView(productionProfileA, viewSessionName: viewSessionA)
+    try openGroupedView(productionProfileB, viewSessionName: viewSessionB)
 
     let activeA = try trimmedTmux(TmuxSession.activeWindowTargetArguments(viewSessionName: viewSessionA))
     let activeB = try trimmedTmux(TmuxSession.activeWindowTargetArguments(viewSessionName: viewSessionB))
@@ -8799,7 +8868,7 @@ i2Check: do {
         windowTarget: paneA,
         tmuxPath: tmuxPath
     )
-    _ = try trimmedTmux(productionSharedProfile.arguments)
+    try openGroupedView(productionSharedProfile, viewSessionName: viewSessionShared)
     let activeShared = try trimmedTmux(TmuxSession.activeWindowTargetArguments(viewSessionName: viewSessionShared))
     expect(TmuxSession.isValidWindowId(activeShared), "I2: shared probe active window must be a valid window_id, got \(activeShared)")
     expect(activeShared == activeA, "I2: shared probe must observe the same window as A for the exemption assertions")

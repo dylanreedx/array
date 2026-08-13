@@ -357,9 +357,20 @@ private func runSubstrateWallClockGuard() {
 // MARK: - Real-path check: ProcessTmuxControl against a real tmux subprocess
 
 func runTmuxRealPathCheck() {
-    guard let tmuxPath = TmuxLocator.resolve() else {
+    // Real tmux: this section creates sessions and windows and kills them. See
+    // `TmuxIsolation` for why it refuses rather than reaching the default socket.
+    let tmuxPath: String
+    switch TmuxIsolation.resolve() {
+    case .ready(let path, let socketDir, _):
+        tmuxPath = path
+        print("tmux real-path check: isolated tmux socket namespace \(socketDir)")
+    case .tmuxAbsent:
         writeTmuxRealPathManifest(["tmux_absent": true])
         print("tmux real-path check: SKIPPED — tmux not found on this machine (tmux_absent=true)")
+        return
+    case .notIsolated(let reason):
+        writeTmuxRealPathManifest(["tmux_isolated": false, "skipped_reason": reason])
+        print("tmux real-path check: SKIPPED — \(reason); refusing to touch the live tmux server (AGENTS.md)")
         return
     }
 

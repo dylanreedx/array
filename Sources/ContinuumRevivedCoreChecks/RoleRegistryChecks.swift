@@ -55,12 +55,17 @@ func runRoleRegistryChecks() {
         .appendingPathComponent("continuum-role-registry-check-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: temp) }
     let agents = temp.appendingPathComponent(RoleRegistry.directoryName, isDirectory: true)
+    // Roles are a Pi concept (`.pi/agents/<role>.md`) and `RoleRegistry.resolve`
+    // validates a declared model against PI's catalogue, so the fixture must declare
+    // a Pi id. Taking it from the ambient `modelOptions` made the fixture depend on
+    // the operator's stored harness — under the default (Claude Code) it wrote an
+    // `anthropic/*` id that the registry then rejected as unqualified.
     do {
         try FileManager.default.createDirectory(at: agents, withIntermediateDirectories: true)
         try """
         ---
         name: fixture-role
-        model: \(AgentModelConfig.modelOptions[1])
+        model: \(AgentModelConfig.modelOptions(for: .pi)[1])
         reasoning: high
         tools: read, grep
         ---
@@ -70,7 +75,7 @@ func runRoleRegistryChecks() {
         // Frontmatter, but no identity: the registry has nothing to resolve from.
         try """
         ---
-        model: \(AgentModelConfig.modelOptions[1])
+        model: \(AgentModelConfig.modelOptions(for: .pi)[1])
         ---
 
         Notes that happen to live in the roles directory.
@@ -112,7 +117,7 @@ func runRoleRegistryChecks() {
         fputs("FAIL: RoleRegistry: the valid fixture role did not resolve\n", stderr)
         Foundation.exit(1)
     }
-    expect(resolved.model == AgentModelConfig.modelOptions[1] && resolved.thinking == "high",
+    expect(resolved.model == AgentModelConfig.modelOptions(for: .pi)[1] && resolved.thinking == "high",
            "RoleRegistry: the role's own model/reasoning must win over the inherited pair — got \(resolved.model) / \(resolved.thinking)")
     expect(resolved.toolsArguments == ["--tools", "read, grep"],
            "RoleRegistry: the role's tools reached Pi as \(resolved.toolsArguments)")

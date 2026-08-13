@@ -110,7 +110,7 @@ final class OnboardingPanel {
         }
         // At least one agent CLI must be installed for managed agents to run;
         // any one satisfies it, and all three can coexist and be chosen per
-        // agent via the Settings ▸ Agents backend toggle. Ready as soon as any
+        // agent via the agent composer harness control. Ready as soon as any
         // of claude/codex/pi resolves on PATH.
         func anyAgentBackendPresent() -> String? {
             for name in ["claude", "codex", "pi"] where locateOnPath(name)() != nil {
@@ -122,7 +122,7 @@ final class OnboardingPanel {
             Probe(
                 id: "agent-harness",
                 title: "Agent harness (at least one required)",
-                detail: "Managed agents need one coding CLI — Claude Code, Codex, or pi. Install any one, or all three and switch per agent in Settings ▸ Agents.",
+                detail: "Claude Code, Codex, and Pi are independent managed-agent harnesses. Install and sign in to each harness you select; Array never falls back to another CLI.",
                 missingGuidance: "Install at least one of Claude Code, Codex, or pi (options below) to run managed agents.",
                 connectProfileId: nil,
                 locate: anyAgentBackendPresent
@@ -161,8 +161,8 @@ final class OnboardingPanel {
             ),
             Probe(
                 id: "pi",
-                title: "pi (interchangeable models — the luxury)",
-                detail: "One harness that runs Claude, GPT, and other providers' models interchangeably. Optional, but install pi for the luxury of switching models freely without picking a single-provider CLI.",
+                title: "Pi",
+                detail: "Pi strictly owns its own authentication, configuration, extensions, model catalogue, sessions, tools, and spawn side channels.",
                 missingGuidance: "Install: npm install -g @earendil-works/pi-coding-agent (needs Node — no npm? brew install node first)",
                 connectProfileId: nil,
                 locate: locateOnPath("pi")
@@ -170,7 +170,7 @@ final class OnboardingPanel {
             Probe(
                 id: "pi-auth-anthropic",
                 title: "Claude models (pi ▸ anthropic)",
-                detail: "Fallback for Claude models only when Claude Code isn't installed (metered separately from a Claude subscription).",
+                detail: "Pi-owned Anthropic provider login. Selecting Pi always runs Pi; it never switches to Claude Code.",
                 missingGuidance: "Sign in: run pi in a terminal, then /login anthropic (OAuth — no API keys)",
                 connectProfileId: nil,
                 locate: piAuthStatus(provider: "anthropic")
@@ -509,11 +509,9 @@ final class OnboardingPanel {
             throw SelfCheckError.message("onboarding panel window leaked after close")
         }
 
-        // The real fresh-setup rows: the three agent backends (claude/codex/pi)
-        // are present, the "at least one required" summary leads them, and pi is
-        // framed as the interchangeable-models luxury. Constructed (locate
-        // closures are not invoked) so this stays deterministic and independent
-        // of what is installed on the QA host.
+        // The real fresh-setup rows describe three strict, independent harnesses.
+        // Construction does not invoke locators, so this remains deterministic
+        // and independent of what is installed on the QA host.
         let live = OnboardingPanel.liveProbes(environment: { [:] })
         let ids = live.map(\.id)
         for required in ["agent-harness", "claude", "codex", "pi"] where !ids.contains(required) {
@@ -531,8 +529,9 @@ final class OnboardingPanel {
             throw SelfCheckError.message("the agent-harness row must be titled 'harness' and state one is required, got \(live[harnessIdx].title)")
         }
         let piDetail = live[piIdx].detail.lowercased()
-        guard piDetail.contains("interchange"), piDetail.contains("luxury") else {
-            throw SelfCheckError.message("the pi row must frame it as the interchangeable-models luxury, got \(live[piIdx].detail)")
+        guard piDetail.contains("strictly owns"), piDetail.contains("spawn side channels"),
+              !piDetail.contains("fallback"), !piDetail.contains("luxury") else {
+            throw SelfCheckError.message("the pi row must describe strict independent ownership, got \(live[piIdx].detail)")
         }
     }
 }

@@ -69,6 +69,16 @@ extension PiAgentRunner: AgentRunning {}
 extension ClaudeAgentRunner: AgentRunning {}
 extension CodexAgentRunner: AgentRunning {}
 
+private final class RefusingAgentRunner: AgentRunning,  Sendable {
+    struct Refusal: Error, CustomStringConvertible { let description: String }
+    private let reason: String
+    init(reason: String) { self.reason = reason }
+    func run(prompt: AgentPrompt, onEvent:   (AgentRuntimeEvent) -> Void) throws { throw Refusal(description: reason) }
+    func stop() {}
+    func observeSpawnRequests(_ handler:   (SpawnRequest) -> Void) {}
+    func observeRuntimeObservations(_ handler:   (AgentRuntimeObservation) -> Void) {}
+}
+
 // MARK: - P4.5 generated-name one-shot
 
 /// The capability needed by the explicit generated-name action. It is resolved
@@ -1029,14 +1039,11 @@ final class AgentSupervisor {
     /// backend preference and the availability reads are live. The DEFAULT
     /// backend (`.pi`) preserves the shipped native-preferring behaviour exactly.
     nonisolated static func productionRunner(for record: AgentRecord) -> AgentRunning {
-        switch AgentBackendConfig.route(
-            model: record.model,
-            backend: AgentBackendConfig.resolved(),
-            claudeAvailable: ClaudeAgentRunner.liveCLIAvailable(),
-            codexAvailable: CodexAgentRunner.liveCLIAvailable()) {
-        case .claude: return claudeRunner(for: record)
+        switch record.harness {
+        case .claudeCode: return claudeRunner(for: record)
         case .codex: return codexRunner(for: record)
         case .pi: return piRunner(for: record)
+        case nil: return RefusingAgentRunner(reason: "This agent has unresolved harness ownership. Choose Claude Code, Codex, or Pi in the agent composer. Help → Environment Setup…")
         }
     }
 
@@ -1292,6 +1299,14 @@ final class AgentSupervisor {
             warn("AgentSupervisor.restore: could not read the agent store: \(error)")
             return report
         }
+        func persistBeforeAdoption(_ record: AgentRecord) {
+            do {
+                try withAgentStoreLock { try upsertRecord(record) }
+            } catch {
+                warn("AgentSupervisor.restore: could not persist migrated agent \(record.id.rawValue.uuidString): \(error)")
+            }
+        }
+
         for storedRecord in stored {
             // An agent this session already owns wins over the stored copy: `records`
             // is the live one and the store trails it by at most one persist. This is
@@ -1301,10 +1316,25 @@ final class AgentSupervisor {
                 continue
             }
             var record = storedRecord
+            if record.harness == nil {
+                let home = FileManager.default.homeDirectoryForCurrentUser
+                let claudeURL = ClaudeSessionTranscriptReader.sessionFileURL(
+                    homeURL: home, cwd: record.cwd, sessionId: Self.claudeSessionId(for: record.id))
+                let piURL = PiSessionTranscriptReader.locateSessionFile(
+                    homeURL: home, cwd: record.cwd, sessionId: Self.sessionId(for: record.id))
+                let evidence = LegacyAgentHarnessMigration.Evidence(
+                    hasCodexThread: !(record.codexThreadId ?? "").isEmpty,
+                    hasClaudeConversation: fileManager.fileExists(atPath: claudeURL.path),
+                    hasPiSession: piURL != nil)
+                record.harness = LegacyAgentHarnessMigration.resolve(
+                    evidence: evidence,
+                    storedPreference: AgentHarnessConfig.explicitlyStored())
+                if record.harness != nil { persistBeforeAdoption(record) }
+            }
             // Legacy records used model ids, role ids, UUIDs, or blank names. Read
             // them defensively and rewrite the corrected record before the inbox can
             // observe it, including when the project root is temporarily stale.
-            if record.migrateDisplayNameIfNeeded() { persist(record) }
+            if record.migrateDisplayNameIfNeeded() { persistBeforeAdoption(record) }
             // Repair the two legacy Codex states before any tile can seed from
             // them: replace with an exact stale rollout reading when available;
             // otherwise strip the bogus used/max pair while preserving the
@@ -1315,7 +1345,7 @@ final class AgentSupervisor {
                     exact.freshness = .stale
                     if record.lastContextWindow != exact {
                         record.lastContextWindow = exact
-                        persist(record)
+                        persistBeforeAdoption(record)
                     }
                 } else if var legacy = record.lastContextWindow,
                           legacy.source == .codexTurnUsage,
@@ -1323,7 +1353,7 @@ final class AgentSupervisor {
                     legacy.usedTokens = nil
                     legacy.maxTokens = nil
                     record.lastContextWindow = legacy
-                    persist(record)
+                    persistBeforeAdoption(record)
                 }
             }
             var isDirectory: ObjCBool = false
@@ -1392,21 +1422,15 @@ final class AgentSupervisor {
         let codexHomeURL = ProcessInfo.processInfo.environment["CODEX_HOME"]
             .flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: true) }
             ?? homeURL.appendingPathComponent(".codex", isDirectory: true)
-        let claudeAvailable = ClaudeAgentRunner.liveCLIAvailable()
-        let codexAvailable = CodexAgentRunner.liveCLIAvailable()
         return ManagedTranscriptRehydrator.Inputs(
             agentUUID: id.rawValue,
             cwd: record.cwd,
             model: record.model,
-            claudeCLIAvailable: claudeAvailable,
+            harness: record.harness,
+            claudeCLIAvailable: false,
             homeURL: homeURL,
             codexThreadId: record.codexThreadId,
-            codexHomeURL: codexHomeURL,
-            preferredRoute: AgentBackendConfig.route(
-                model: record.model,
-                backend: AgentBackendConfig.resolved(),
-                claudeAvailable: claudeAvailable,
-                codexAvailable: codexAvailable))
+            codexHomeURL: codexHomeURL)
     }
 
     // MARK: - Lifecycle
@@ -1423,6 +1447,7 @@ final class AgentSupervisor {
         role: String?,
         prompt: String?,
         cwd: URL,
+        harness: AgentHarness = AgentHarnessConfig.resolved(),
         model: String,
         thinking: String,
         projectId: UUID? = nil,
@@ -1437,6 +1462,7 @@ final class AgentSupervisor {
             prompt: prompt,
             cwd: cwd,
             worktreeBranch: nil,
+            harness: harness,
             model: model,
             thinking: thinking,
             projectId: projectId,
@@ -1463,6 +1489,7 @@ final class AgentSupervisor {
         role: String?,
         prompt: String?,
         cwd: URL,
+        harness: AgentHarness = AgentHarnessConfig.resolved(),
         model: String,
         thinking: String,
         projectId: UUID? = nil,
@@ -1492,6 +1519,7 @@ final class AgentSupervisor {
             prompt: prompt,
             cwd: workingDirectory,
             worktreeBranch: branch,
+            harness: harness,
             model: model,
             thinking: thinking,
             projectId: projectId,
@@ -1508,6 +1536,7 @@ final class AgentSupervisor {
         prompt: String?,
         cwd: URL,
         worktreeBranch: String?,
+        harness: AgentHarness,
         model: String,
         thinking: String,
         projectId: UUID?,
@@ -1527,6 +1556,7 @@ final class AgentSupervisor {
                 role: role,
                 cwd: cwd,
                 worktreeBranch: worktreeBranch,
+                harness: harness,
                 model: model,
                 thinking: thinking,
                 projectId: projectId,
@@ -1549,6 +1579,7 @@ final class AgentSupervisor {
                 displayName: AgentRecord.defaultAgentName,
                 displayNameSource: .sentinel,
                 role: role,
+                harness: harness,
                 model: model,
                 thinking: thinking,
                 cwd: cwd.path,
@@ -1593,6 +1624,7 @@ final class AgentSupervisor {
         role: String?,
         cwd: URL,
         worktreeBranch: String?,
+        harness: AgentHarness,
         model: String,
         thinking: String,
         projectId: UUID?,
@@ -1631,6 +1663,7 @@ final class AgentSupervisor {
                     displayName: AgentRecord.defaultAgentName,
                     displayNameSource: .sentinel,
                     role: role,
+                    harness: harness,
                     model: model,
                     thinking: thinking,
                     cwd: cwd.path,
@@ -1871,7 +1904,24 @@ final class AgentSupervisor {
         // is `P5.7-steer-follow-up`'s, and inventing it here would be a second
         // answer to supersede.
         if let inFlight = runners[id] {
-            warn("AgentSupervisor.send: agent \(id.rawValue.uuidString) already has a prompt in flight (\(type(of: inFlight))); dropping \(prompt.text.count) visible chars and \(prompt.imageAttachments.count) image attachment(s)")
+            warn("AgentSupervisor.send: agent \(id.rawValue.uuidString) already has a prompt in flight (\(type(of: inFlight)))")
+            return false
+        }
+        guard let harness = record.harness else {
+            warn("Agent harness ownership is unresolved. Choose a harness and compatible model. Help → Environment Setup…")
+            return false
+        }
+        let harnessSnapshot = AgentModelCatalog.shared.snapshot(for: harness)
+        guard harnessSnapshot.readiness.canRun, harnessSnapshot.models.contains(record.model) else {
+            let state: String
+            switch harnessSnapshot.readiness {
+            case .checking: state = "is still checking"
+            case .missing: state = "is missing"
+            case .loggedOut: state = "is logged out"
+            case .unavailable(let reason): state = "is unavailable (\(reason))"
+            case .ready: state = "cannot run model \(record.model)"
+            }
+            warn("\(harness.rawValue) \(state). Open Help → Environment Setup…")
             return false
         }
         let firstPromptText = Self.visibleNamingText(from: prompt)
@@ -1952,8 +2002,9 @@ final class AgentSupervisor {
     }
 
     /// Text-only compatibility wrapper for existing callers and checks.
-    func send(_ prompt: String, to id: AgentID) {
-        _ = send(AgentPrompt(prompt), to: id)
+    @discardableResult
+    func send(_ prompt: String, to id: AgentID) -> Bool {
+        send(AgentPrompt(prompt), to: id)
     }
 
     private nonisolated static func visibleNamingText(from prompt: AgentPrompt) -> String? {
@@ -2052,6 +2103,10 @@ final class AgentSupervisor {
         guard let parent = records[parentId] else {
             return refuseSpawn(.unknownParent, for: parentId)
         }
+        guard let parentHarness = parent.harness else {
+            warn("AgentSupervisor.handleSpawnRequest: child of \(parentId.rawValue.uuidString) not spawned: parent harness ownership is unresolved")
+            return refuseSpawn(.roleUnresolved, for: parentId)
+        }
         let depth = depth(of: parentId) + 1
         guard depth <= Self.maxSpawnDepth else {
             return refuseSpawn(.depthCapped(depth: depth, cap: Self.maxSpawnDepth), for: parentId)
@@ -2079,6 +2134,7 @@ final class AgentSupervisor {
                 role: request.role,
                 prompt: request.prompt,
                 cwd: projectRoot,
+                harness: parentHarness,
                 model: resolvedRole.model,
                 thinking: resolvedRole.thinking,
                 projectId: parent.projectId,
@@ -2162,11 +2218,11 @@ final class AgentSupervisor {
     /// record's exact cwd—even when the Array project or parent repository is a
     /// broader directory—so Falcon-like nested repositories cannot leak outward.
     func completionContext(for agentID: AgentID) -> AgentCompletionContext? {
-        guard let record = records[agentID] else { return nil }
+        guard let record = records[agentID], let harness = record.harness else { return nil }
         let checkoutRoot = URL(fileURLWithPath: record.cwd, isDirectory: true).standardizedFileURL
         return AgentCompletionContext(
             agentID: agentID,
-            backend: AgentBackendConfig.resolved(),
+            backend: harness,
             checkoutRoot: checkoutRoot,
             gitRoot: checkoutRoot,
             arrayProjectRoot: Self.repositoryRoot(of: record).standardizedFileURL,
@@ -2299,6 +2355,7 @@ final class AgentSupervisor {
         items: [FanOutItem],
         role: String?,
         cwd: URL,
+        harness: AgentHarness = AgentHarnessConfig.resolved(),
         model: String,
         thinking: String,
         projectId: UUID? = nil,
@@ -2951,32 +3008,26 @@ final class AgentSupervisor {
     /// Returns whether anything changed — as `rename` does, so a caller cannot
     /// mistake a no-op for a write.
     @discardableResult
-    func setProviderSettings(agentID id: AgentID, model: String? = nil, thinking: String? = nil) -> Bool {
-        guard var record = records[id] else {
-            warn("AgentSupervisor.setProviderSettings: no agent \(id.rawValue.uuidString)")
+    func launchSelection(for id: AgentID) -> AgentLaunchSelection? {
+        guard let record = records[id], let harness = record.harness else { return nil }
+        return AgentLaunchSelection(harness: harness, model: record.model, thinking: record.thinking)
+    }
+
+    func setProviderSettings(agentID id: AgentID, harness: AgentHarness? = nil, model: String? = nil, thinking: String? = nil) -> Bool {
+        guard var record = records[id] else { return false }
+        let effectiveHarness = harness ?? record.harness
+        guard let effectiveHarness else { return false }
+        let effectiveModel = model ?? record.model
+        let snapshot = AgentModelCatalog.shared.snapshot(for: effectiveHarness)
+        guard snapshot.models.contains(effectiveModel), AgentHarnessConfig.isProviderCompatible(model: effectiveModel, harness: effectiveHarness) else {
+            warn("AgentSupervisor.setProviderSettings: choose a model owned by \(effectiveHarness.rawValue) before switching harness")
             return false
         }
-        if let model {
-            guard AgentModelConfig.modelOptions.contains(model) else {
-                warn("AgentSupervisor.setProviderSettings: \(model) is not a fully-qualified id in AgentModelConfig.modelOptions — refusing, because `--model` takes a pattern and a partial id fuzzy-matches")
-                return false
-            }
-        }
-        if let thinking {
-            guard AgentModelConfig.thinkingOptions.contains(thinking) else {
-                warn("AgentSupervisor.setProviderSettings: \(thinking) is not one of AgentModelConfig.thinkingOptions — refusing")
-                return false
-            }
-        }
+        if let thinking, !AgentModelConfig.thinkingOptions.contains(thinking) { return false }
         var changed = false
-        if let model, record.model != model {
-            record.model = model
-            changed = true
-        }
-        if let thinking, record.thinking != thinking {
-            record.thinking = thinking
-            changed = true
-        }
+        if record.harness != effectiveHarness { record.harness = effectiveHarness; changed = true }
+        if record.model != effectiveModel { record.model = effectiveModel; changed = true }
+        if let thinking, record.thinking != thinking { record.thinking = thinking; changed = true }
         guard changed else { return false }
         records[id] = record
         persist(record)
@@ -7766,11 +7817,11 @@ func runAgentRestoreChecks() async throws {
         let codexThreadId = "019c0dex-restore-check"
         for id in [claudeAgent, piAgent] {
             try rehydrateStore.upsert(AgentRecord(
-                id: id, displayName: "restored", model: config.model, thinking: config.thinking,
+                id: id, displayName: "restored", harness: id == claudeAgent ? .claudeCode : .pi, model: config.model, thinking: config.thinking,
                 cwd: liveCwd, createdAt: createdAt, lastActivityAt: createdAt, tileId: UUID()))
         }
         try rehydrateStore.upsert(AgentRecord(
-            id: codexAgent, displayName: "restored codex", model: "openai-codex/gpt-5.6-sol",
+            id: codexAgent, displayName: "restored codex", harness: .codex, model: "openai-codex/gpt-5.6-sol",
             thinking: config.thinking, cwd: liveCwd, createdAt: createdAt,
             lastActivityAt: createdAt, tileId: UUID(), codexThreadId: codexThreadId))
         _ = rehydrateSupervisor.restore()
@@ -7836,7 +7887,7 @@ func runAgentRestoreChecks() async throws {
         ].joined(separator: "\n").write(to: claudeURL, atomically: true, encoding: .utf8)
 
         let claudeInputs = ManagedTranscriptRehydrator.Inputs(
-            agentUUID: claudeAgent.rawValue, cwd: liveCwd, model: "anthropic/opus",
+            agentUUID: claudeAgent.rawValue, cwd: liveCwd, model: "anthropic/opus", harness: .claudeCode,
             claudeCLIAvailable: true, homeURL: rehydrateHome)
         guard let claudeTranscript = ManagedTranscriptRehydrator.rehydrate(claudeInputs) else {
             throw fail("a restored claude agent with a session file did not rehydrate")
@@ -7879,7 +7930,7 @@ func runAgentRestoreChecks() async throws {
         ].joined(separator: "\n").write(to: piURL, atomically: true, encoding: .utf8)
 
         let piInputs = ManagedTranscriptRehydrator.Inputs(
-            agentUUID: piAgent.rawValue, cwd: liveCwd, model: "openai-codex/gpt-5.6",
+            agentUUID: piAgent.rawValue, cwd: liveCwd, model: "openai-codex/gpt-5.6", harness: .pi,
             claudeCLIAvailable: false, homeURL: rehydrateHome)
         guard let piTranscript = ManagedTranscriptRehydrator.rehydrate(piInputs) else {
             throw fail("a restored pi agent with a session file did not rehydrate")
@@ -7912,11 +7963,10 @@ func runAgentRestoreChecks() async throws {
         try writeCodexRollout("rollout-a-exact.jsonl", threadId: codexThreadId, prompt: "CODEX_PLANTED_PROMPT")
 
         let codexInputs = ManagedTranscriptRehydrator.Inputs(
-            agentUUID: codexAgent.rawValue, cwd: liveCwd, model: "openai-codex/gpt-5.6-sol",
+            agentUUID: codexAgent.rawValue, cwd: liveCwd, model: "openai-codex/gpt-5.6-sol", harness: .codex,
             claudeCLIAvailable: false, homeURL: rehydrateHome,
             codexThreadId: codexThreadId,
-            codexHomeURL: rehydrateHome.appendingPathComponent(".codex", isDirectory: true),
-            preferredRoute: .codex)
+            codexHomeURL: rehydrateHome.appendingPathComponent(".codex", isDirectory: true))
         guard let codexTranscript = ManagedTranscriptRehydrator.rehydrate(codexInputs) else {
             throw fail("a restored Codex agent with an exact-id rollout did not rehydrate")
         }
@@ -8088,7 +8138,7 @@ func runAgentRestoreChecks() async throws {
     // The signature carries P3.9's `agentID:` — revealing a headless agent wires an
     // agent that already exists into a fresh tile. Still an EXACT match, so a rename
     // still turns this scan red rather than blind.
-    let wiring = try paletteAgentSpawnBranch("private func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil, initialProviderSettings: AgentModelConfig.Resolution? = nil) {")
+    let wiring = try paletteAgentSpawnBranch("private func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil, initialLaunchSelection: AgentLaunchSelection? = nil) {")
     guard wiring.contains("needsPreviousSessionNotice("), wiring.contains("rehydratePreviousSessionOrNotice(") else {
         throw fail("wireManagedAgentTile does not route a restored agent through rehydration/notice, so a restored agent renders as a blank tile:\n\(wiring)")
     }

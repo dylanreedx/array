@@ -277,6 +277,7 @@ private func runTranscriptRehydrationDispatchChecks() {
     func inputs(home: URL, agentUUID: UUID, model: String, claudeCLIAvailable: Bool) -> ManagedTranscriptRehydrator.Inputs {
         ManagedTranscriptRehydrator.Inputs(
             agentUUID: agentUUID, cwd: cwd, model: model,
+            harness: model.hasPrefix("anthropic/") ? .claudeCode : .pi,
             claudeCLIAvailable: claudeCLIAvailable, homeURL: home)
     }
     func firstUserPrompt(_ transcript: RehydratedTranscript?) -> String? {
@@ -342,10 +343,9 @@ private func runTranscriptRehydrationDispatchChecks() {
         _ = writeCodex(home: home, threadId: wanted, marker: "CODEX_EXACT", filename: "rollout-a-wanted.jsonl")
         writePi(home: home, agentUUID: id, marker: "OLD_PI")
         let value = ManagedTranscriptRehydrator.rehydrate(.init(
-            agentUUID: id, cwd: cwd, model: "openai-codex/gpt-5.6",
+            agentUUID: id, cwd: cwd, model: "openai-codex/gpt-5.6", harness: .codex,
             claudeCLIAvailable: false, homeURL: home,
-            codexThreadId: wanted,
-            preferredRoute: .codex))
+            codexThreadId: wanted))
         expect(firstUserPrompt(value) == "CODEX_EXACT",
                "dispatch: Codex must select exact stored thread id and preferred route, got \(String(describing: firstUserPrompt(value)))")
     }

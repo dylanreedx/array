@@ -1,100 +1,130 @@
 import Foundation
 
-// Plan: .plans/02-codex-backend-and-toggle.md §4 (the explicit backend toggle).
-//
-// A pure, UserDefaults-backed policy type — the same shape as `AgentModelConfig`
-// / `FocusBorderConfig`: a resolver plus pure functions the matrix pins. It
-// governs TWO things and nothing else:
-//   · `filter(_:for:)` — which providers the model dropdown shows (Settings AND
-//     the tile composer, via `AgentModelConfig.modelOptions`).
-//   · `route(model:backend:...)` — which runner a spawn uses. Replaces the
-//     ad-hoc anthropic prefix check that used to live in
-//     `AgentSupervisor.productionRunner`.
-//
-// The DEFAULT is `.pi`, whose filter is nil (all providers) and whose routing is
-// the SHIPPED native-preferring behaviour (anthropic → claude, openai-codex →
-// codex, else pi). So a machine with no stored preference behaves byte-for-byte
-// as before this plan — every existing check keeps its expected model set.
-
-/// Which agent backend the user has chosen. The two explicit modes NARROW: they
-/// hide every other provider and pin the native CLI for the one provider they
-/// expose; `.pi` is the multi-provider default. Raw values are the human labels
-/// shown by the generic settings `.choice` renderer (which uses the option
-/// string as both title and stored value); the CASE names are what routing and
-/// filtering switch on.
-public enum AgentBackend: String, CaseIterable, Equatable, Sendable {
-    case pi = "pi (all providers)"
+public enum AgentHarness: String, Codable, CaseIterable, Equatable, Hashable, Sendable {
     case claudeCode = "Claude Code"
     case codex = "Codex"
+    case pi = "Pi"
 }
 
-public enum AgentBackendConfig {
+public typealias AgentBackend = AgentHarness
+
+public struct AgentLaunchSelection: Equatable, Sendable {
+    public let harness: AgentHarness
+    public let model: String
+    public let thinking: String
+
+    public init(harness: AgentHarness, model: String, thinking: String) {
+        self.harness = harness
+        self.model = model
+        self.thinking = thinking
+    }
+}
+
+public enum HarnessReadiness: Equatable, Sendable {
+    case checking
+    case ready
+    case missing
+    case loggedOut
+    case unavailable(String)
+
+    public var canRun: Bool { self == .ready }
+}
+
+public struct AgentHarnessCatalogSnapshot: Equatable, Sendable {
+    public let harness: AgentHarness
+    public let readiness: HarnessReadiness
+    public let models: [String]
+    public let displayNames: [String: String]
+    public let contextWindows: [String: Int]
+    public let refreshedAt: Date?
+
+    public init(
+        harness: AgentHarness,
+        readiness: HarnessReadiness,
+        models: [String],
+        displayNames: [String: String] = [:],
+        contextWindows: [String: Int] = [:],
+        refreshedAt: Date? = nil
+    ) {
+        self.harness = harness
+        self.readiness = readiness
+        self.models = models
+        self.displayNames = displayNames
+        self.contextWindows = contextWindows
+        self.refreshedAt = refreshedAt
+    }
+}
+
+public enum AgentHarnessConfig {
     public static let key = "continuum.agents.backend"
-    /// The default IS the current shipped behaviour (all providers, native
-    /// routing). Changing the stored value is the only thing that narrows.
-    public static let defaultBackend: AgentBackend = .pi
+    public static let defaultHarness: AgentHarness = .claudeCode
+    public static var options: [String] { AgentHarness.allCases.map(\.rawValue) }
 
-    /// The ordered option strings for the settings `.choice` (labels == stored
-    /// values, per the generic renderer's contract).
-    public static var options: [String] { AgentBackend.allCases.map(\.rawValue) }
-
-    public static func resolved(defaults: UserDefaults = .standard) -> AgentBackend {
-        AgentBackend(rawValue: defaults.string(forKey: key) ?? "") ?? defaultBackend
+    public static func explicitlyStored(defaults: UserDefaults = .standard) -> AgentHarness? {
+        guard let raw = defaults.string(forKey: key) else { return nil }
+        switch raw {
+        case AgentHarness.claudeCode.rawValue: return .claudeCode
+        case AgentHarness.codex.rawValue: return .codex
+        case AgentHarness.pi.rawValue, "pi (all providers)": return .pi
+        default: return nil
+        }
     }
 
-    /// Persist a chosen backend (used by QA to exercise filtering/routing).
-    public static func store(_ backend: AgentBackend, defaults: UserDefaults = .standard) {
-        defaults.set(backend.rawValue, forKey: key)
+    public static func resolved(defaults: UserDefaults = .standard) -> AgentHarness {
+        explicitlyStored(defaults: defaults) ?? defaultHarness
     }
 
-    /// The provider tail of a fully-qualified `provider/model` id. Slashless ids
-    /// (off-catalogue record values) group under "other". This is the ONE copy
-    /// of the split rule — `ProviderModelGrouping.provider(forID:)` in the app
-    /// target delegates here so the app and the matrix pin the same logic.
+    public static func store(_ harness: AgentHarness, defaults: UserDefaults = .standard) {
+        defaults.set(harness.rawValue, forKey: key)
+    }
+
     public static func provider(forID id: String) -> String {
         let parts = id.split(separator: "/", maxSplits: 1)
         return parts.count == 2 ? String(parts[0]) : "other"
     }
 
-    /// Providers visible for a backend. `.pi` ⇒ nil (no filter / all providers).
-    public static func allowedProviders(for backend: AgentBackend) -> Set<String>? {
-        switch backend {
-        case .pi: return nil
-        case .claudeCode: return ["anthropic"]
-        case .codex: return ["openai-codex"]
+    public static func isProviderCompatible(model: String, harness: AgentHarness) -> Bool {
+        switch harness {
+        case .claudeCode: return provider(forID: model) == "anthropic"
+        case .codex: return provider(forID: model) == "openai-codex"
+        case .pi: return model.contains("/")
+        }
+    }
+}
+
+public enum LegacyAgentHarnessMigration {
+    public struct Evidence: Equatable, Sendable {
+        public let hasCodexThread: Bool
+        public let hasClaudeConversation: Bool
+        public let hasPiSession: Bool
+        public init(hasCodexThread: Bool, hasClaudeConversation: Bool, hasPiSession: Bool) {
+            self.hasCodexThread = hasCodexThread
+            self.hasClaudeConversation = hasClaudeConversation
+            self.hasPiSession = hasPiSession
         }
     }
 
-    /// Pure dropdown filter, pinned in the matrix. `.pi` returns the ids
-    /// unchanged (byte-identical to today). The caller owns the "never blank the
-    /// picker" fallback (an empty result means fall back to the unfiltered list)
-    /// — see `AgentModelConfig.modelOptions(for:)`.
-    public static func filter(_ ids: [String], for backend: AgentBackend) -> [String] {
-        guard let allow = allowedProviders(for: backend) else { return ids }
-        return ids.filter { allow.contains(provider(forID: $0)) }
+    public static func resolve(evidence: Evidence, storedPreference: AgentHarness?) -> AgentHarness? {
+        if evidence.hasCodexThread { return .codex }
+        if evidence.hasClaudeConversation && evidence.hasPiSession { return nil }
+        if evidence.hasClaudeConversation { return .claudeCode }
+        if evidence.hasPiSession { return .pi }
+        return storedPreference ?? .claudeCode
     }
+}
 
-    /// Which runner a model routes to under a backend, given live CLI
-    /// availability. Pure and pinned in the matrix; replaces the ad-hoc check in
-    /// `productionRunner`.
-    public enum Route: Equatable, Sendable { case claude, codex, pi }
-
-    public static func route(
-        model: String,
-        backend: AgentBackend,
-        claudeAvailable: Bool,
-        codexAvailable: Bool
-    ) -> Route {
-        switch backend {
-        case .claudeCode:
-            return claudeAvailable && model.hasPrefix("anthropic/") ? .claude : .pi
-        case .codex:
-            return codexAvailable && model.hasPrefix("openai-codex/") ? .codex : .pi
-        case .pi:
-            // The SHIPPED native-preferring routing, extended with codex.
-            if claudeAvailable, model.hasPrefix("anthropic/") { return .claude }
-            if codexAvailable, model.hasPrefix("openai-codex/") { return .codex }
-            return .pi
-        }
+public enum AgentBackendConfig {
+    public static let key = AgentHarnessConfig.key
+    public static let defaultBackend = AgentHarnessConfig.defaultHarness
+    public static var options: [String] { AgentHarnessConfig.options }
+    public static func resolved(defaults: UserDefaults = .standard) -> AgentHarness {
+        AgentHarnessConfig.resolved(defaults: defaults)
     }
+    public static func explicitlyStored(defaults: UserDefaults = .standard) -> AgentHarness? {
+        AgentHarnessConfig.explicitlyStored(defaults: defaults)
+    }
+    public static func store(_ harness: AgentHarness, defaults: UserDefaults = .standard) {
+        AgentHarnessConfig.store(harness, defaults: defaults)
+    }
+    public static func provider(forID id: String) -> String { AgentHarnessConfig.provider(forID: id) }
 }

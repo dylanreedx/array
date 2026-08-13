@@ -13,36 +13,21 @@ tile status. Verification is behavioral: the CLI starts and talks. Array
 never parses provider auth state — an explicit v0 decision (go-live doc,
 Phase 4).
 
-## 2. Managed agent tiles (claude CLI or pi)
+## 2. Managed agent tiles (strict harness ownership)
 
-Headless runs driven by `AgentSupervisor` → a runner behind the `AgentRunning`
-seam. `AgentSupervisor.productionRunner(for:)` (the default `makeRunner`)
-routes each agent to the runtime the machine actually has:
+Headless runs are owned by the `AgentHarness` persisted on each `AgentRecord`:
+Claude Code constructs only `ClaudeAgentRunner`, Codex constructs only
+`CodexAgentRunner`, and Pi constructs only `PiAgentRunner`. Availability and
+authentication validate that selection; they never route to a different CLI. Settings
+seed new records only, while existing agents keep their harness across relaunches.
 
-- **claude CLI** (`ClaudeAgentRunner`) — for `anthropic/*` models when the
-  `claude` binary is installed. Spawns the user's own `claude -p
-  --output-format stream-json` headlessly; the binary does its own
-  subscription OAuth. **This is the preferred anthropic path**: it runs on the
-  user's Claude subscription (no extra metering) and needs no pi. Session
-  continuity is DERIVED, not stored — the agent's UUID is the claude session
-  id; each run tries `--resume <uuid>`, and the first-ever turn's "No
-  conversation found" failure (instant, no API call) retries once as
-  `--session-id <uuid>`.
-- **pi** (`PiAgentRunner`) — for everything else (`@earendil-works/pi-coding-agent`,
-  host-installed npm CLI, needs node — NOT bundled). Multi-provider runtime;
-  provider auth happens inside pi via `/login <provider>` (OAuth). Its
-  anthropic path is an API route (metered separately) and is the fallback only
-  when `claude` is absent.
+Each harness owns its catalogue, display names, context windows, readiness, session
+format, transcript reader, auth/config, telemetry and side channels. Pi therefore
+retains role `--tools` and spawn observations even when it runs an
+`openai-codex/*` model. Provider auth is always the selected CLI.s own login —
+never API keys (owner rule).
 
-Provider auth is always the CLI's own login — never API keys (owner rule).
-
-- **Model catalogue**: `AgentModelCatalog` probes `pi --list-models` once per
-  real-app launch (bounded, pi lists only authed providers) AND `claude auth
-  status --json` (union in the claude alias models when signed in). Ids are
-  exact `provider/model` strings — `--model` takes a pattern and partial ids
-  fuzzy-match (P0.10). QA never probes and sees the frozen fallback in
-  `AgentModelConfig.fallbackModelOptions`. The probe machinery is `#if
-  os(macOS)` (it spawns `Process`); the pure parse/options surface is shared.
+- **Model catalogue**: `AgentModelCatalog` publishes immutable per-harness snapshots. Pi membership comes only from its bounded `--list-models` probe; Claude and Codex use their authenticated native catalogues. Production never flattens them for selection. QA fixtures are deterministic presentation seeds, not authentication evidence.
 - **Readiness**: `pi auth check --provider X --json --no-refresh` and `claude
   auth status --json`, surfaced as onboarding rows.
 

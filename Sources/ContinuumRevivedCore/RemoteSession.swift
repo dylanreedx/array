@@ -129,7 +129,14 @@ private actor LocalTmuxRemoteSocket: RemoteSocket {
         }
 
         let errorText = String(decoding: err, as: UTF8.self)
-        if errorText.localizedCaseInsensitiveContains("no server running") {
+        // tmux says "no server" two different ways: "no server running on <socket>"
+        // when the socket directory exists, and "error connecting to <socket> (No
+        // such file or directory)" when it does not — which is what a machine that
+        // has never started tmux, or a run inside a fresh TMUX_TMPDIR namespace,
+        // actually gets. Both mean the same thing: an empty topology, not a probe
+        // failure.
+        if errorText.localizedCaseInsensitiveContains("no server running")
+            || errorText.localizedCaseInsensitiveContains("error connecting to") {
             return ""
         }
         throw ConnectionError.probeFailed(errorText.trimmingCharacters(in: .whitespacesAndNewlines))

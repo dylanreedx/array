@@ -39,8 +39,8 @@ public final class PiAgentRunner: @unchecked Sendable {
         /// `model`/`thinking` default from `AgentModelConfig` (Settings ▸ Agents),
         /// so changing the picker changes what the next prompt spawns.
         public init(
-            model: String = AgentModelConfig.resolvedFromDefaults().model,
-            thinking: String = AgentModelConfig.resolvedFromDefaults().thinking,
+            model: String = AgentModelConfig.resolvedFromDefaults(harness: .pi).model,
+            thinking: String = AgentModelConfig.resolvedFromDefaults(harness: .pi).thinking,
             cwd: URL,
             sessionId: String? = nil,
             extraArgs: [String] = []

@@ -936,6 +936,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--strict-agent-harness-check") {
+            do {
+                try runStrictAgentHarnessChecks()
+                print("ContinuumRevivedStrictAgentHarnessChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--managed-agent-model-spawn-check") {
             do {
                 _ = NSApplication.shared
@@ -10343,7 +10354,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // guard's text (which pinned the call, not the refusal: a reviewer swapped
         // the guard for `?? resolvedFromDefaults()` and the check stayed green).
         switch spawner.spawnManagedAgentForSelectedModel(model, wire: { tileId, providerSettings in
-            wireManagedAgentTile(tileId, initialProviderSettings: providerSettings)
+            wireManagedAgentTile(tileId, initialLaunchSelection: providerSettings)
         }) {
         case let .spawned(tileId, providerSettings):
             let modelApplied = agentSupervisor.agent(forTile: tileId)
@@ -10390,7 +10401,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// on spawn (`AgentSupervisor.spawn`'s own parameter).
     /// Kept on ONE line: `--agent-supervisor-check` pins this whole signature by exact
     /// line match (`paletteAgentSpawnBranch`), so wrapping it blinds that scan.
-    private func spawnSupervisedAgent(tileId: UUID?, prompt: String? = nil, providerSettings: AgentModelConfig.Resolution? = nil) -> AgentID? {
+    private func spawnSupervisedAgent(tileId: UUID?, prompt: String? = nil, launchSelection: AgentLaunchSelection? = nil) -> AgentID? {
         // Plan 07. This used to read `activeProject.rootPath` unconditionally, which
         // is why changing an agent's Home never carried: the next ⌘K agent went back
         // to the active project regardless of where you had just been working.
@@ -10435,7 +10446,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             prompt: prompt,
             cwd: cwd,
             projectId: resolution.home.projectId,
-            providerSettings: providerSettings)
+            launchSelection: launchSelection)
     }
 
     /// Explicit-Home variant used only after the owner chooses a registered
@@ -10447,15 +10458,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         prompt: String? = nil,
         cwd: URL,
         projectId: UUID?,
-        providerSettings: AgentModelConfig.Resolution? = nil
-    ) -> AgentID {
-        let model = providerSettings ?? AgentModelConfig.resolvedFromDefaults()
+        launchSelection: AgentLaunchSelection? = nil
+    ) -> AgentID? {
+        guard let selection = launchSelection ?? AgentModelConfig.launchSelection() else {
+            NSSound.beep()
+            fputs("Managed agent spawn refused: choose a model compatible with the selected harness. Help → Environment Setup…\n", stderr)
+            return nil
+        }
         return agentSupervisor.spawn(
             role: nil,
             prompt: prompt,
             cwd: cwd,
-            model: model.model,
-            thinking: model.thinking,
+            harness: selection.harness,
+            model: selection.model,
+            thinking: selection.thinking,
             projectId: projectId,
             tileId: tileId
         )
@@ -10477,7 +10493,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Kept on ONE line: `--agent-restore-check` pins this whole signature by exact
     /// line match (`runAgentRestoreChecks`, via `paletteAgentSpawnBranch`), so wrapping
     /// it blinds that scan.
-    private func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil, initialProviderSettings: AgentModelConfig.Resolution? = nil) {
+    private func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil, initialLaunchSelection: AgentLaunchSelection? = nil) {
         guard let view = canvasView?.tileView(for: tileId) as? ManagedAgentTileNSView else { return }
         let supervisor = agentSupervisor
         let agentId: AgentID
@@ -10504,9 +10520,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             return
         } else {
+            let launchSelection = initialLaunchSelection ?? tileSpawner?.managedAgentLaunchSelection(tileId: tileId)
             guard let spawnedAgentID = spawnSupervisedAgent(
                 tileId: tileId,
-                providerSettings: initialProviderSettings
+                launchSelection: launchSelection
             ) else { return }
             agentId = spawnedAgentID
         }
@@ -10523,10 +10540,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         view.onSubmitPrompt = { [weak view] prompt in
             guard let view else { return }
-            // Reflect the user's prompt in the transcript, then hand off to the
-            // supervisor. The reply comes back through the subscription below.
+            // The supervisor validates the persisted harness and its cached
+            // readiness before accepting the prompt. Only acknowledge a send
+            // after acceptance so a refusal leaves the compose draft intact.
+            guard supervisor.send(prompt, to: agentId) else { return }
             view.appendUserPrompt(prompt)
-            supervisor.send(prompt, to: agentId)
+            view.acceptCurrentSendIntent()
         }
 
         // P2A.4: the subscription is the TILE's now, not this file's. What stays
@@ -10717,10 +10736,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         switch spawner.spawnManagedAgent() {
         case let .spawned(tileId):
-            let agentID = spawnSupervisedAgentAtHome(
+            guard let agentID = spawnSupervisedAgentAtHome(
                 tileId: tileId,
                 cwd: cwd,
-                projectId: projectId)
+                projectId: projectId) else { return }
             wireManagedAgentTile(tileId, agentID: agentID)
             focusSpawnedTile(tileId)
             scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "location-new-agent-here", debounce: 0.2)

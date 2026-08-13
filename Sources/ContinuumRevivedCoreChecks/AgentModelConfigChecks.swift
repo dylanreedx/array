@@ -23,9 +23,28 @@ func runAgentModelConfigChecks() {
         "openai-codex/gpt-5.6-terra",
     ]
 
-    // 1. The default is an exact catalogue id — not a prefix Pi has to guess at.
-    expect(catalogue.contains(AgentModelConfig.defaultModel),
-           "defaultModel must be an exact `pi --list-models` id, got \(AgentModelConfig.defaultModel)")
+    // Strict harness ownership gave each CLI its own catalogue, so "the exact id
+    // rule" is now per-harness: an id is exact for the harness that owns it and
+    // meaningless to the other two. Pinned as literals for the same reason the pi
+    // list is — the matrix stays offline, and a curated list that moves must move
+    // here too.
+    //
+    // These are also asked for EXPLICITLY, never through the ambient
+    // `AgentHarnessConfig.resolved()`. Reading the ambient harness made this check
+    // report whatever the operator's own `continuum.agents.backend` happened to
+    // say: green on a machine storing "pi (all providers)", red in three places on
+    // a clean one. A check that changes verdict with a preference is not a witness.
+    let catalogueByHarness: [AgentHarness: Set<String>] = [
+        .pi: catalogue,
+        .claudeCode: ["anthropic/opus", "anthropic/sonnet", "anthropic/haiku"],
+        .codex: catalogue,
+    ]
+
+    // 1. The default is an exact id of the harness that seeds a new agent — not a
+    //    prefix a CLI has to guess at.
+    let defaultHarness = AgentHarnessConfig.defaultHarness
+    expect(catalogueByHarness[defaultHarness]?.contains(AgentModelConfig.defaultModel) == true,
+           "defaultModel must be an exact id in \(defaultHarness.rawValue)'s catalogue, got \(AgentModelConfig.defaultModel)")
 
     // 2. The retired literal is the bug this ticket fixes: absent from the
     //    catalogue, yet a prefix of several ids — i.e. ambiguous by construction.
@@ -33,19 +52,27 @@ func runAgentModelConfigChecks() {
     let retiredMatches = catalogue.filter { $0.hasPrefix(retired) }
     expect(!catalogue.contains(retired) && retiredMatches.count > 1,
            "the retired default \(retired) must be a non-id prefix of several ids (got \(retiredMatches.count)) — otherwise this check proves nothing")
-    expect(AgentModelConfig.defaultModel != retired && !AgentModelConfig.modelOptions.contains(retired),
-           "the ambiguous \(retired) must not be offered anywhere")
-
-    // 3. Every offered model is fully qualified (provider/id) and exact.
-    for model in AgentModelConfig.modelOptions {
-        let parts = model.split(separator: "/", omittingEmptySubsequences: false)
-        expect(parts.count == 2 && !parts[0].isEmpty && !parts[1].isEmpty,
-               "modelOptions entry must be fully qualified provider/id, got \(model)")
-        expect(catalogue.contains(model),
-               "modelOptions entry must be an exact catalogue id, got \(model)")
+    // 3. Every offered model is fully qualified (provider/id) and exact — for
+    //    EVERY harness, not just whichever one is currently selected. The
+    //    non-empty assertion is load-bearing: an empty catalogue would satisfy the
+    //    loop vacuously while leaving the picker blank and every spawn refused.
+    for harness in AgentHarness.allCases {
+        let options = AgentModelConfig.modelOptions(for: harness)
+        let expected = catalogueByHarness[harness] ?? []
+        expect(!options.isEmpty, "\(harness.rawValue) must offer at least one model")
+        expect(!options.contains(retired), "the ambiguous \(retired) must not be offered by \(harness.rawValue)")
+        for model in options {
+            let parts = model.split(separator: "/", omittingEmptySubsequences: false)
+            expect(parts.count == 2 && !parts[0].isEmpty && !parts[1].isEmpty,
+                   "\(harness.rawValue) option must be fully qualified provider/id, got \(model)")
+            expect(expected.contains(model),
+                   "\(harness.rawValue) option must be an exact id in its own catalogue, got \(model)")
+            expect(AgentHarnessConfig.isProviderCompatible(model: model, harness: harness),
+                   "\(harness.rawValue) must not offer \(model), which belongs to another harness")
+        }
+        expect(Set(options).count == options.count, "\(harness.rawValue) must not repeat an id")
     }
-    expect(Set(AgentModelConfig.modelOptions).count == AgentModelConfig.modelOptions.count,
-           "modelOptions must not repeat an id")
+    expect(AgentModelConfig.defaultModel != retired, "the ambiguous \(retired) must not be the default")
 
     // 4. Thinking levels are exactly the ones `pi --thinking` documents.
     let piThinkingLevels: Set<String> = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
@@ -64,19 +91,33 @@ func runAgentModelConfigChecks() {
     defer { defaults.removePersistentDomain(forName: suiteName) }
     defaults.removePersistentDomain(forName: suiteName)
 
-    let empty = AgentModelConfig.resolvedFromDefaults(defaults: defaults)
+    // Every resolution below names its harness. `UserDefaults(suiteName:)` also
+    // searches the app's own domain, so an ambient `continuum.agents.backend` on
+    // the operator's machine reaches a "fresh" suite and silently decides which
+    // catalogue these assertions run against.
+    let empty = AgentModelConfig.resolvedFromDefaults(harness: .claudeCode, defaults: defaults)
     expect(empty == .init(model: AgentModelConfig.defaultModel, thinking: AgentModelConfig.defaultThinking),
-           "empty defaults must resolve to the defaults, got \(empty)")
+           "empty defaults must resolve to the defaults under the seeding harness, got \(empty)")
+
+    let emptyPi = AgentModelConfig.resolvedFromDefaults(harness: .pi, defaults: defaults)
+    expect(catalogue.contains(emptyPi.model),
+           "empty defaults under Pi must resolve to an exact Pi id, never another harness's, got \(emptyPi.model)")
 
     defaults.set("openai-codex/gpt-5.6-terra", forKey: AgentModelConfig.modelKey)
     defaults.set("xhigh", forKey: AgentModelConfig.thinkingKey)
-    let overridden = AgentModelConfig.resolvedFromDefaults(defaults: defaults)
+    let overridden = AgentModelConfig.resolvedFromDefaults(harness: .pi, defaults: defaults)
     expect(overridden == .init(model: "openai-codex/gpt-5.6-terra", thinking: "xhigh"),
            "a valid override must win, got \(overridden)")
 
+    // The same stored id under a harness that does not own it is NOT substituted
+    // into that harness's argv — it falls back to something that harness can run.
+    let foreign = AgentModelConfig.resolvedFromDefaults(harness: .claudeCode, defaults: defaults)
+    expect(foreign.model == AgentModelConfig.defaultModel,
+           "a stored id owned by another harness must not survive into Claude Code, got \(foreign.model)")
+
     defaults.set(retired, forKey: AgentModelConfig.modelKey)
     defaults.set("ludicrous", forKey: AgentModelConfig.thinkingKey)
-    let rejected = AgentModelConfig.resolvedFromDefaults(defaults: defaults)
+    let rejected = AgentModelConfig.resolvedFromDefaults(harness: .claudeCode, defaults: defaults)
     expect(rejected == .init(model: AgentModelConfig.defaultModel, thinking: AgentModelConfig.defaultThinking),
            "an unrecognized stored value must fall back to the default, got \(rejected)")
 
@@ -90,10 +131,16 @@ func runAgentModelConfigChecks() {
     // 7. The runner's Config actually defaults from the resolver (a re-hardcoded
     //    literal would diverge from it), and both values reach the Pi argv.
     #if os(macOS)
-    let resolved = AgentModelConfig.resolvedFromDefaults()
+    // Pi's Config defaults from PI's catalogue, not from whichever harness settings
+    // currently seed. Under strict ownership the ambient harness can be Claude
+    // Code, and `anthropic/opus` handed to `pi --model` is a PATTERN — the fuzzy
+    // match P0.10 exists to prevent.
+    let resolved = AgentModelConfig.resolvedFromDefaults(harness: .pi)
     let config = PiAgentRunner.Config(cwd: URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true))
     expect(config.model == resolved.model && config.thinking == resolved.thinking,
-           "PiAgentRunner.Config must default from AgentModelConfig, got model=\(config.model) thinking=\(config.thinking)")
+           "PiAgentRunner.Config must default from AgentModelConfig under the Pi harness, got model=\(config.model) thinking=\(config.thinking)")
+    expect(catalogue.contains(config.model),
+           "PiAgentRunner.Config must default to an exact Pi catalogue id, got \(config.model)")
 
     let argv = PiAgentRunner.processArguments(
         model: config.model, thinking: config.thinking, sessionId: nil, extraArgs: [], prompt: "hi")
@@ -139,24 +186,29 @@ func runAgentModelCatalogChecks() {
     catalog.apply(listModelsOutput: fixture)
     expect(catalog.options(fallback: ["f/one"]) == parsed, "a successful probe replaces the fallback")
 
-    // 3. modelOptions is the shared catalogue view, and resolution falls back
-    //    to the first USABLE model when the default's provider isn't authed
-    //    (handing pi an unusable default fails every spawn).
+    // 3. The live catalogue is PI's — `resetForQA(options:)` seeds pi's probe
+    //    result — so every assertion here names the Pi harness explicitly. Reading
+    //    the ambient `modelOptions` instead made this section depend on the
+    //    operator's stored `continuum.agents.backend`: green where it says pi, red
+    //    on a machine where the default (Claude Code) stands.
+    //
+    //    Resolution falls back to the first USABLE model when the default's
+    //    provider isn't authed — handing pi an unusable default fails every spawn.
     AgentModelCatalog.shared.resetForQA(options: ["anthropic/claude-fable-5", "anthropic/claude-opus-5"])
     defer { AgentModelCatalog.shared.resetForQA() }
-    expect(AgentModelConfig.modelOptions == ["anthropic/claude-fable-5", "anthropic/claude-opus-5"],
-           "modelOptions reflects the live catalogue")
+    expect(AgentModelConfig.modelOptions(for: .pi) == ["anthropic/claude-fable-5", "anthropic/claude-opus-5"],
+           "Pi's modelOptions reflects the live catalogue")
     let suiteName = "AgentModelCatalogChecks-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suiteName)!
     defer { defaults.removePersistentDomain(forName: suiteName) }
-    let resolved = AgentModelConfig.resolvedFromDefaults(defaults: defaults)
+    let resolved = AgentModelConfig.resolvedFromDefaults(harness: .pi, defaults: defaults)
     expect(resolved.model == "anthropic/claude-fable-5",
            "when the default model is unavailable, resolution falls back to the first usable id, got \(resolved.model)")
     defaults.set("anthropic/claude-opus-5", forKey: AgentModelConfig.modelKey)
-    expect(AgentModelConfig.resolvedFromDefaults(defaults: defaults).model == "anthropic/claude-opus-5",
+    expect(AgentModelConfig.resolvedFromDefaults(harness: .pi, defaults: defaults).model == "anthropic/claude-opus-5",
            "a stored live-catalogue id wins")
     AgentModelCatalog.shared.resetForQA()
-    expect(AgentModelConfig.modelOptions == AgentModelConfig.fallbackModelOptions,
+    expect(AgentModelConfig.modelOptions(for: .pi) == AgentModelConfig.fallbackModelOptions,
            "after reset the frozen fallback stands again")
 
     // 4. Display names from pi's synced models-store: fully-qualified keys,

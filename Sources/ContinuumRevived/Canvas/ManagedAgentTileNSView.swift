@@ -284,6 +284,10 @@ final class ManagedAgentTileNSView: TileNSView {
         synchronizeV2Transcript(final: true)
     }
 
+    func acceptCurrentSendIntent() {
+        v2Composer?.acceptCurrentSendIntent()
+    }
+
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not supported")
     }
@@ -400,8 +404,8 @@ final class ManagedAgentTileNSView: TileNSView {
         // may have chosen them at spawn, or the user may have picked them in a
         // previous launch), and the global default is only what a record was seeded
         // FROM. An agent this supervisor does not know keeps the default on screen.
-        if let settings = supervisor.providerSettings(for: agentID) {
-            applyProviderSettings(settings)
+        if let selection = supervisor.launchSelection(for: agentID) {
+            applyLaunchSelection(selection)
         }
         if let composer = v2Composer,
            let snapshot = supervisor.turnSnapshot(for: agentID) {
@@ -1403,6 +1407,9 @@ final class ManagedAgentTileNSView: TileNSView {
         providerFooter.onSettingsWrite = { [weak self] model, thinking in
             self?.writeProviderSettings(model: model, thinking: thinking) ?? false
         }
+        providerFooter.onLaunchSelectionWrite = { [weak self] harness, model, thinking in
+            self?.writeLaunchSelection(harness: harness, model: model, thinking: thinking) ?? false
+        }
         applyProviderSettings(providerSettings)
 
         // The P4.10-reviewed arrangement: footer and primary action share one
@@ -1888,6 +1895,21 @@ final class ManagedAgentTileNSView: TileNSView {
     func applyProviderSettings(_ settings: AgentModelConfig.Resolution) {
         providerSettings = settings
         providerFooter.apply(settings)
+    }
+
+    func applyLaunchSelection(_ selection: AgentLaunchSelection) {
+        providerSettings = AgentModelConfig.Resolution(model: selection.model, thinking: selection.thinking)
+        providerFooter.apply(selection)
+    }
+
+    private func writeLaunchSelection(harness: AgentHarness, model: String, thinking: String) -> Bool {
+        guard let agentID = attachedAgentID, let agentSource else { return false }
+        guard agentSource.setProviderSettings(agentID: agentID, harness: harness, model: model, thinking: thinking) else {
+            if let actual = agentSource.launchSelection(for: agentID) { applyLaunchSelection(actual) }
+            return false
+        }
+        applyLaunchSelection(AgentLaunchSelection(harness: harness, model: model, thinking: thinking))
+        return true
     }
 
     /// The footer deliberately emits only the field that moved. This keeps an older
