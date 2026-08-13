@@ -118,12 +118,31 @@ Do this instead — in this order:
 4. **`/usr/bin/time -l`** on a self-check binary for peak resident size.
 5. **`.ips` crash reports** for a real crash — `EXC_BREAKPOINT`/`SIGTRAP` is a
    Swift runtime trap (force-unwrap, array bounds, **arithmetic overflow**), not
-   memory pressure. Zero `.ips` files means the app did not crash; look for a
-   `.hang` instead.
+   memory pressure.
+6. **`JetsamEvent-*.ips`** when the app vanished and left NO report of its own.
+   macOS killing a process under memory pressure writes one system-wide report,
+   not a per-process crash log. It lists every process with its footprint in
+   16 KB pages, so `rpages × 16384` is the app's size at the moment of death, and
+   `memoryStatus.memoryPages.free` is what the machine had left. Array being
+   killed at **334 MB while the system had 86 MB free and 7.1 GB compressed** is
+   a machine problem, not an app problem — and it looked exactly like an app
+   crash from the outside.
 
-Check the `Version:` line in every report before drawing a conclusion — it is easy
-to diagnose a build the user is no longer running, and easy to mistake a check
-binary's own crash for the app's.
+### Reading a report without fooling yourself
+
+Three ways a report misled this project in a single afternoon:
+
+- **Check the `Version:` line.** It is easy to diagnose a build the user is no
+  longer running.
+- **Check the pid, and when the event happened — not when the file appeared.**
+  macOS flushes a `cpu_resource.diag` minutes after the sampling window closes,
+  so two reports timestamped *after* a fix was installed both described a process
+  that had been killed *before* it.
+- **Check the process name.** Three `Array-*.ips` files turned out to be a check
+  binary trapping on its own assertion, not the app.
+
+"No crash report" is not a finding on its own. It means: not a signal crash —
+now go look for a `.hang`, a `JetsamEvent`, or a clean exit.
 
 ## Witnessing performance
 
@@ -143,6 +162,24 @@ comment which of the two has the teeth.
 
 Register the leg in `scripts/run-matrix.sh` and confirm it prints in a real run —
 see [qa.md](./qa.md).
+
+## Array is not alone on the machine
+
+A canvas of live tiles competes with everything else the user is running, and the
+users of this app run agents that build things. On a machine with Chrome,
+Notion, Codex, `ghostty`, `mysqld` and a 1.7 GB WindowServer already resident, a
+SwiftPM build of this project — several GB — is what tips the system into
+jetsam. Array does not have to be the hog to be the casualty: it was killed at
+334 MB.
+
+Two consequences worth designing around:
+
+- **Every megabyte a tile holds is a megabyte closer to being killed**, and the
+  app that dies is the one with the big window. Bounded rendering is a
+  reliability feature, not only a speed one.
+- **Agents running the matrix while the user works** is a memory event, not just
+  a CPU one. If an agent is going to build, that is a decision worth making
+  deliberately.
 
 ## Checklist for a new surface
 
