@@ -1,6 +1,7 @@
 # 16 — Restore tmux shell-tile isolation
 
-Status: **investigated; implementation not started**
+Status: **implemented; automated real-tmux and visual verification blocked by
+the sandbox and deliberately not run against Array's live tmux server**
 
 ## Outcome
 
@@ -317,3 +318,77 @@ as a deliberate rollback—not as the final architecture.
 - The production TileSpawner witness, production-generated real-tmux I2 check,
   live surface check, and full matrix all report the behavior.
 - The Array Dev dogfood passes after relaunch, not only within one process run.
+
+## Implemented on `array/tmux-shell-isolation`
+
+Production now builds every shared project/workspace terminal launch through
+`TmuxSession.groupedViewProfile`. Its exact local argv is:
+
+```text
+tmux new-session -t <array-proj-* or array-ws-*> -s array-view-<tileId> -A ; select-window -t <paneTarget>
+```
+
+The builder preserves the source profile's cwd/title, passes `";"` as one
+literal argv token, and never repeats the shell/agent command already started
+inside the owned window. `TileSpawner` uses it for fresh creation, live-target
+restart, dead-target replacement, and opted-in shared ambient terminals. The
+non-shared ambient path remains the isolated `array-<tileId>` fallback.
+
+Rollback now records whether the failed attempt created a window and whether
+the stable view already existed. It kills only a newly created window and a
+newly created view, never a reused window/view or the shared base session.
+Deliberate deletion remains ordered window then view; app/project release
+remains detach-only.
+
+`ProcessTmuxControl` is reach-aware. Local operations execute local tmux;
+SSH-forward and Tailscale operations use the same hardened SSH owner and token
+quoting as the Ghostty launch. Observer, reaper, lazy recovery, and deliberate
+tile cleanup now construct control/query paths with the owning project's
+`RemoteReach`. Tunnel returns an explicit unsupported error rather than falling
+through to local control.
+
+The Core I2 check now obtains and executes production-generated grouped-view
+profiles rather than assembling grouped/select commands separately. The new
+app check `--terminal-tmux-no-mirror-check` drives production `TileSpawner`
+fresh, live-restart, and dead-replacement paths and is registered literally in
+`scripts/run-matrix.sh`; the committed matrix inventory was regenerated.
+
+## Evidence captured
+
+Corrected production witness RED, after rebuilding the app and before changing
+production behavior:
+
+```text
+FAIL: ambient descriptor should attach through its stable grouped view, got ["attach-session", "-t", "%1"]
+```
+
+GREEN app witnesses after implementation:
+
+```text
+ContinuumRevivedTerminalTmuxPersistenceChecks passed
+ContinuumRevivedTerminalTmuxNoMirrorChecks passed
+ContinuumRevivedTerminalTmuxDeleteLifecycleChecks passed
+ContinuumRevivedTerminalAmbientWorkspaceChecks passed
+```
+
+The persistence/no-mirror artifacts prove distinct fresh pane targets and view
+names, stable view identity across live restart, the same stable view repinned
+to a replacement pane after death, shared-ambient isolation, and preservation
+of the non-shared ambient fallback. The delete lifecycle check proves window
+then view ordering, failure-tolerant cleanup, and no shared base-session kill.
+
+The app and `ContinuumRevivedCoreChecks` products rebuild successfully. Pure
+Core coverage includes the literal separator, cwd/title preservation, omission
+of the inner command, local/SSH/Tailscale invocation construction, noninteractive
+remote control construction, and explicit tunnel refusal.
+
+### Remaining supervised verification
+
+No real tmux check was allowed to contact the default socket: doing so can
+crash or disrupt the live Array app. The sandbox also denied creation of a
+disposable socket under a unique `TMUX_TMPDIR` (`Operation not permitted`).
+Consequently production-generated real-tmux I2 execution, the Ghostty live
+integration check, full matrix final summary, and Array Dev visual dogfood are
+unverified in this checkout. `AGENTS.md` now permanently requires automated
+tmux checks to unset inherited `TMUX`/`TMUX_PANE`, use a unique disposable
+`TMUX_TMPDIR`, verify `#{socket_path}` lies inside it, and fail closed otherwise.

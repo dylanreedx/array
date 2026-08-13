@@ -2725,6 +2725,19 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--terminal-tmux-no-mirror-check") {
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            do {
+                let artifact = try TileSpawner.runTerminalTmuxNoMirrorSelfCheck()
+                print("ContinuumRevivedTerminalTmuxNoMirrorChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--terminal-tmux-delete-lifecycle-check") {
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)
@@ -3343,6 +3356,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     // Process invocation, so later session/topology code can prove this
     // teardown path against the same fake the rest of the substrate uses.
     private var tmuxControlFactory: (String) -> any TmuxControl = { ProcessTmuxControl(tmuxPath: $0) }
+    private var tmuxOwnerControlFactory: ((String, RemoteReach, UserDefaults) -> any TmuxControl)?
+
+    private func makeTmuxControl(tmuxPath: String, reach: RemoteReach) -> any TmuxControl {
+        if let tmuxOwnerControlFactory {
+            return tmuxOwnerControlFactory(tmuxPath, reach, tmuxDefaults)
+        }
+        switch reach {
+        case .localhost:
+            return tmuxControlFactory(tmuxPath)
+        case .sshForward, .tailscale, .tunnel:
+            return ProcessTmuxControl(tmuxPath: tmuxPath, reach: reach, defaults: tmuxDefaults)
+        }
+    }
     private var suppressTerminateOnWindowCloseForQA = false
     private let focusBroker = FocusBroker()
     private var companionAuthService: CompanionAuthService?
@@ -4877,7 +4903,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
               let tmuxPath = tmuxPathResolver(tmuxDefaults) else {
             return
         }
-        let control = tmuxControlFactory(tmuxPath)
+        let reach = workspaceRuntime?.activeController?.project.remoteEnvironment?.reach ?? .localhost
+        let control = makeTmuxControl(tmuxPath: tmuxPath, reach: reach)
 
         let target = managedSessionRecord(forTileId: tileId)?.tmuxWindowTarget()
         if let target, TmuxSession.isValidPaneId(target) {
@@ -11733,7 +11760,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return
         }
         let sessionName = TmuxSession.ambientSessionName(workspaceId: workspaceId)
-        let control = tmuxControlFactory(tmuxPath)
+        let control = makeTmuxControl(tmuxPath: tmuxPath, reach: .localhost)
         if let error = Self.runTmuxControlOperationSync({ try await control.killSession(name: sessionName) }) {
             fputs("tmux kill-session failed for workspace=\(workspaceId.uuidString) session=\(sessionName): \(error)\n", stderr)
         }

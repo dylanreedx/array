@@ -236,7 +236,10 @@ final class ZoneRuntimeController {
         startSessionObserver()
         if let tmuxPath = TmuxLocator.resolve() {
             startReaper(
-                tmuxControl: ProcessTmuxControl(tmuxPath: tmuxPath),
+                tmuxControl: ProcessTmuxControl(
+                    tmuxPath: tmuxPath,
+                    reach: project.remoteEnvironment?.reach ?? .localhost
+                ),
                 activitySnapshotSource: { nil }
             )
         }
@@ -250,6 +253,7 @@ final class ZoneRuntimeController {
     private func startSessionObserver() {
         sessionObserver?.stop() // guards a second attachUI() the same way startReaper() does
         let tmuxPath = TmuxLocator.resolve()
+        let reach = project.remoteEnvironment?.reach ?? .localhost
         let observer = SessionObserver(
             readers: sessionObserverReadersOverrideForTesting ?? SessionObserver.Readers(
                 claude: ClaudeAgentStateReader(),
@@ -258,7 +262,11 @@ final class ZoneRuntimeController {
             ),
             paneCommandQuery: { target in
                 guard let tmuxPath else { throw TmuxControlError.paneNotFound(target: target) }
-                return try await SessionObserver.liveDisplayMessageQuery(tmuxPath: tmuxPath, target: target)
+                return try await SessionObserver.liveDisplayMessageQuery(
+                    tmuxPath: tmuxPath,
+                    target: target,
+                    reach: reach
+                )
             },
             windowTargetLookup: { [weak self] tileId in
                 guard let self else { return nil }
@@ -452,7 +460,10 @@ final class ZoneRuntimeController {
             await self.recoverManagedSessionOnFocus(
                 tileId: tileId,
                 reason: reason,
-                tmux: ProcessTmuxControl(tmuxPath: tmuxPath)
+                tmux: ProcessTmuxControl(
+                    tmuxPath: tmuxPath,
+                    reach: self.project.remoteEnvironment?.reach ?? .localhost
+                )
             )
         }
     }

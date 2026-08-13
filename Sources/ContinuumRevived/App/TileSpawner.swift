@@ -35,6 +35,13 @@ final class TileSpawner {
         case failed(Outcome)
     }
 
+    private struct TmuxWrappedProfile {
+        let profile: LaunchProfile
+        let windowTarget: String?
+        let createdWindow: Bool
+        let viewSessionExisted: Bool
+    }
+
     weak var canvasView: CanvasNSView?
     private let ghostty: GhosttyRuntimeContext?
     private let browserEngine: BrowserEngineContext
@@ -46,7 +53,7 @@ final class TileSpawner {
     private let defaults: UserDefaults
     private let tmuxPathResolver: (UserDefaults) -> String?
     private let environmentProvider: () -> [String: String]
-    private let tmuxControlFactory: @Sendable (String) -> any TmuxControl
+    private let tmuxControlFactory: @Sendable (String, RemoteReach, UserDefaults) -> any TmuxControl
     private var browserProfiles: [BrowserProfile]
 
     /// Dynamic source used by browser tile profile menus after registry edits.
@@ -97,7 +104,10 @@ final class TileSpawner {
         detector: ToolDetector = .live,
         defaults: UserDefaults = .standard,
         tmuxPathResolver: @escaping (UserDefaults) -> String? = { TmuxLocator.resolve(defaults: $0) },
-        tmuxControlFactory: @escaping @Sendable (String) -> any TmuxControl = { ProcessTmuxControl(tmuxPath: $0) },
+        tmuxControlFactory: @escaping @Sendable (String) -> any TmuxControl = {
+            ProcessTmuxControl(tmuxPath: $0)
+        },
+        tmuxOwnerControlFactory: (@Sendable (String, RemoteReach, UserDefaults) -> any TmuxControl)? = nil,
         // Go-live Phase 4: .tool resolution consults the augmented PATH
         // (well-known install dirs + login-shell upgrade), not the thin GUI
         // process PATH. Injectable so checks can pin resolution behavior.
@@ -115,7 +125,14 @@ final class TileSpawner {
         self.detector = detector
         self.defaults = defaults
         self.tmuxPathResolver = tmuxPathResolver
-        self.tmuxControlFactory = tmuxControlFactory
+        self.tmuxControlFactory = tmuxOwnerControlFactory ?? { tmuxPath, reach, defaults in
+            switch reach {
+            case .localhost:
+                return tmuxControlFactory(tmuxPath)
+            case .sshForward, .tailscale, .tunnel:
+                return ProcessTmuxControl(tmuxPath: tmuxPath, reach: reach, defaults: defaults)
+            }
+        }
         self.environmentProvider = environmentProvider
         self.browserProfiles = browserProfiles
         canvasView.onFileURLDrop = { [weak self] path, worldPoint in
@@ -233,11 +250,11 @@ final class TileSpawner {
             metadata: TileMetadata(launchProfileId: launchProfileId, projectRelativeCwd: ".")
         )
         let sessionTarget = terminalSessionTargetProvider?()
-        let wrappedProfile: (profile: LaunchProfile, windowTarget: String?)
+        let wrappedProfile: TmuxWrappedProfile
         do {
             wrappedProfile = allowTmuxPersistence
                 ? try tmuxWrappedProfileIfAvailable(profile, tileId: tile.id, target: sessionTarget)
-                : (profile, nil)
+                : TmuxWrappedProfile(profile: profile, windowTarget: nil, createdWindow: false, viewSessionExisted: false)
         } catch {
             return .failure(error)
         }
@@ -278,8 +295,20 @@ final class TileSpawner {
             terminalSpawnedHandler?(descriptor)
         } catch {
             if let target = wrappedProfile.windowTarget {
-                try? Self.runTmuxControlOperationSync { [tmuxControlFactory] in
-                    try await tmuxControlFactory(launchProfile.command).killWindow(target: target)
+                let reach = project.remoteEnvironment?.reach ?? .localhost
+                if let tmuxPath = tmuxPathResolver(defaults) {
+                    let control = tmuxControlFactory(tmuxPath, reach, defaults)
+                    if wrappedProfile.createdWindow {
+                        try? Self.runTmuxControlOperationSync {
+                            try await control.killWindow(target: target)
+                        }
+                    }
+                    if !wrappedProfile.viewSessionExisted, sessionTarget != nil {
+                        let viewSessionName = TmuxSession.viewSessionName(tileId: tile.id)
+                        try? Self.runTmuxControlOperationSync {
+                            try await control.killSession(name: viewSessionName)
+                        }
+                    }
                 }
             }
             return .failure(error)
@@ -321,32 +350,49 @@ final class TileSpawner {
         tileId: UUID,
         target: TerminalSessionTarget?,
         existingWindowTarget: String? = nil
-    ) throws -> (profile: LaunchProfile, windowTarget: String?) {
+    ) throws -> TmuxWrappedProfile {
         guard TmuxPersistenceConfig.enabled(defaults: defaults),
               let tmuxPath = tmuxPathResolver(defaults) else {
-            return (profile, nil)
+            return TmuxWrappedProfile(profile: profile, windowTarget: nil, createdWindow: false, viewSessionExisted: false)
         }
         let reach = project.remoteEnvironment?.reach ?? .localhost
         guard let target else {
-            return (TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: tmuxPath, reach: reach, defaults: defaults), nil)
+            return TmuxWrappedProfile(profile: TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: tmuxPath, reach: reach, defaults: defaults), windowTarget: nil, createdWindow: false, viewSessionExisted: false)
         }
         if case .ambient = target,
            !TmuxPersistenceConfig.ambientPerWorkspaceEnabled(defaults: defaults) {
-            return (TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: tmuxPath, reach: reach, defaults: defaults), nil)
+            return TmuxWrappedProfile(profile: TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: tmuxPath, reach: reach, defaults: defaults), windowTarget: nil, createdWindow: false, viewSessionExisted: false)
         }
-        let control = tmuxControlFactory(tmuxPath)
-        // Ticket 15: a restart/restore must not blindly create a new window when
-        // the persisted descriptor's pane is still alive — that orphans the old
-        // tmux window every relaunch. Re-bind to it instead.
-        if let existingWindowTarget, try Self.runTmuxControlOperationSync({ try await control.isAlive(paneTarget: existingWindowTarget) }) {
-            return (TmuxSession.attachWindowProfile(paneTarget: existingWindowTarget, cwd: profile.cwd, tmuxPath: tmuxPath), existingWindowTarget)
-        }
+        let control = tmuxControlFactory(tmuxPath, reach, defaults)
         let sessionName: String
         switch target {
         case let .project(projectId):
             sessionName = TmuxSession.projectSessionName(projectId: projectId)
         case let .ambient(workspaceId):
             sessionName = TmuxSession.ambientSessionName(workspaceId: workspaceId)
+        }
+        let viewSessionName = TmuxSession.viewSessionName(tileId: tileId)
+        let viewSessionExisted = try Self.runTmuxControlOperationSync {
+            try await control.sessionExists(name: viewSessionName)
+        }
+        // Ticket 15: a restart/restore must not blindly create a new window when
+        // the persisted descriptor's pane is still alive — that orphans the old
+        // tmux window every relaunch. Re-bind to it instead.
+        if let existingWindowTarget, try Self.runTmuxControlOperationSync({ try await control.isAlive(paneTarget: existingWindowTarget) }) {
+            return TmuxWrappedProfile(
+                profile: try TmuxSession.groupedViewProfile(
+                    profile: profile,
+                    tileId: tileId,
+                    baseSessionName: sessionName,
+                    windowTarget: existingWindowTarget,
+                    tmuxPath: tmuxPath,
+                    reach: reach,
+                    defaults: defaults
+                ),
+                windowTarget: existingWindowTarget,
+                createdWindow: false,
+                viewSessionExisted: viewSessionExisted
+            )
         }
         let innerCommand = Self.innerCommand(for: profile)
         let focusedPaneTarget: String? = {
@@ -375,7 +421,20 @@ final class TileSpawner {
             }
             throw SpawnError.invalidPaneId(paneTarget)
         }
-        return (TmuxSession.attachWindowProfile(paneTarget: paneTarget, cwd: profile.cwd, tmuxPath: tmuxPath), paneTarget)
+        return TmuxWrappedProfile(
+            profile: try TmuxSession.groupedViewProfile(
+                profile: profile,
+                tileId: tileId,
+                baseSessionName: sessionName,
+                windowTarget: paneTarget,
+                tmuxPath: tmuxPath,
+                reach: reach,
+                defaults: defaults
+            ),
+            windowTarget: paneTarget,
+            createdWindow: true,
+            viewSessionExisted: viewSessionExisted
+        )
     }
 
     private nonisolated static func cwdForNewWindow(profileCwd: String, control: any TmuxControl, focusedPaneTarget: String?) async throws -> String {
@@ -493,7 +552,7 @@ final class TileSpawner {
             cwd: restoredCwd,
             title: profile.title
         )
-        let wrappedProfile: (profile: LaunchProfile, windowTarget: String?)
+        let wrappedProfile: TmuxWrappedProfile
         do {
             wrappedProfile = try tmuxWrappedProfileIfAvailable(
                 profileWithCwd,
@@ -559,6 +618,22 @@ final class TileSpawner {
             try projectStore.saveCanvas(canvasView.canvasState)
             terminalSpawnedHandler?(descriptor)
         } catch {
+            if let target = wrappedProfile.windowTarget,
+               let tmuxPath = tmuxPathResolver(defaults) {
+                let reach = project.remoteEnvironment?.reach ?? .localhost
+                let control = tmuxControlFactory(tmuxPath, reach, defaults)
+                if wrappedProfile.createdWindow {
+                    try? Self.runTmuxControlOperationSync {
+                        try await control.killWindow(target: target)
+                    }
+                }
+                if !wrappedProfile.viewSessionExisted {
+                    let viewSessionName = TmuxSession.viewSessionName(tileId: tile.id)
+                    try? Self.runTmuxControlOperationSync {
+                        try await control.killSession(name: viewSessionName)
+                    }
+                }
+            }
             return .failure(error)
         }
 
@@ -3971,10 +4046,24 @@ final class TileSpawner {
         let workspaceId = UUID(uuidString: "A1818181-1818-4818-8818-181818181818")!
         tmuxSpawner.focusedTerminalCwdProvider = { tmuxFocusedCwd.path }
         let tmuxProfile = try resolvedProfile(spawner: tmuxSpawner)
-        let tmuxWrapped = try tmuxSpawner.tmuxWrappedProfileIfAvailable(tmuxProfile, tileId: UUID(), target: .ambient(workspaceId: workspaceId))
+        let cwdTileId = UUID(uuidString: "C0DEC0DE-0000-4000-8000-00000000CDCD")!
+        let tmuxWrapped = try tmuxSpawner.tmuxWrappedProfileIfAvailable(tmuxProfile, tileId: cwdTileId, target: .ambient(workspaceId: workspaceId))
         let ambientSessionName = TmuxSession.ambientSessionName(workspaceId: workspaceId)
         try expect(tmuxControl.log.contains(.newSession(name: ambientSessionName, cwd: tmuxFocusedCwd.path)), "tmux fresh spawn should create session with inherited cwd, log=\(tmuxControl.log)")
-        try expect(tmuxWrapped.profile.arguments == ["attach-session", "-t", "%1"], "tmux wrapper should attach to captured pane target, got \(tmuxWrapped.profile.arguments)")
+        // Shell-tile isolation (.plans/16) replaced `attach-session -t <pane>` with a
+        // tile-keyed grouped VIEW pinned to that same pane: the tile must still land
+        // on the captured target, but through a session of its own, so focusing this
+        // tile cannot redirect another tile sharing the workspace session.
+        try expect(
+            tmuxWrapped.profile.arguments == [
+                "new-session", "-t", ambientSessionName,
+                "-s", TmuxSession.viewSessionName(tileId: cwdTileId),
+                "-A",
+                ";",
+                "select-window", "-t", "%1"
+            ],
+            "tmux wrapper should open a tile-keyed grouped view pinned to the captured pane target, got \(tmuxWrapped.profile.arguments)"
+        )
         try expect(tmuxWrapped.profile.cwd == tmuxFocusedCwd.path, "tmux wrapper should preserve inherited cwd for descriptor persistence, got \(tmuxWrapped.profile.cwd)")
 
         let terminalSection = SettingsSchema.sections().first { $0.id == "terminal" }
@@ -4270,9 +4359,11 @@ final class TileSpawner {
         try expect(ambientTargets.count == 2 && Set(ambientTargets).count == 2, "ambient descriptors should persist two distinct pane targets, got \(ambientTargets)")
         try expect(ambientTmux.sessions[ambientSessionName] == ambientTargets, "fake ambient session should contain exactly persisted targets")
         for (index, descriptor) in ambientDescriptors.enumerated() {
-            try expect(descriptor.command == fakeTmux.path, "ambient descriptor should launch tmux attach, got \(descriptor.command)")
-            try expect(descriptor.args == ["attach-session", "-t", ambientTargets[index]], "ambient descriptor should plain-attach to captured pane, got \(descriptor.args)")
-            try expect(!descriptor.args.contains("new-session") && !descriptor.args.contains("new-window") && !descriptor.args.contains("-A"), "ambient descriptor argv must not create or attach-if-exists, got \(descriptor.args)")
+            let viewSessionName = TmuxSession.viewSessionName(tileId: descriptor.tileId)
+            let expectedViewArgs = ["new-session", "-t", ambientSessionName, "-s", viewSessionName, "-A", ";", "select-window", "-t", ambientTargets[index]]
+            try expect(descriptor.command == fakeTmux.path, "ambient descriptor should launch tmux view, got \(descriptor.command)")
+            try expect(descriptor.args == expectedViewArgs, "ambient descriptor should attach through its stable grouped view, got \(descriptor.args)")
+            try expect(descriptor.args != ["attach-session", "-t", ambientTargets[index]], "ambient descriptor must reject bare shared-session attach, got \(descriptor.args)")
         }
 
         let ambientOffDefaults = makeDefaults(enabled: true, path: fakeTmux.path)
@@ -4322,8 +4413,11 @@ final class TileSpawner {
         try expect(projectTargets.count == 3 && Set(projectTargets).count == 3, "project descriptors should persist three distinct pane targets, got \(projectTargets)")
         try expect(projectTmux.sessions[projectSessionName] == projectTargets, "fake project session should contain exactly persisted targets")
         for (index, descriptor) in projectDescriptors.enumerated() {
-            try expect(descriptor.command == fakeTmux.path, "project descriptor should launch tmux attach, got \(descriptor.command)")
-            try expect(descriptor.args == ["attach-session", "-t", projectTargets[index]], "project descriptor should plain-attach to captured pane, got \(descriptor.args)")
+            let viewSessionName = TmuxSession.viewSessionName(tileId: descriptor.tileId)
+            let expectedViewArgs = ["new-session", "-t", projectSessionName, "-s", viewSessionName, "-A", ";", "select-window", "-t", projectTargets[index]]
+            try expect(descriptor.command == fakeTmux.path, "project descriptor should launch tmux view, got \(descriptor.command)")
+            try expect(descriptor.args == expectedViewArgs, "project descriptor should attach through its stable grouped view, got \(descriptor.args)")
+            try expect(descriptor.args != ["attach-session", "-t", projectTargets[index]], "project descriptor must reject bare shared-session attach, got \(descriptor.args)")
         }
 
         // Ticket 15 ("new-tile -> new-window"): restarting a project-zone tile
@@ -4350,9 +4444,11 @@ final class TileSpawner {
         )
         let liveRestartTarget = try managedTarget(spawner: projectSpawner, tileId: restartTileId)
         try expect(liveRestartTarget == liveTargetBeforeRestart, "restart with a live persisted tmux window must reuse the same managed pane target")
+        let restartViewSessionName = TmuxSession.viewSessionName(tileId: restartTileId)
+        let expectedLiveRestartArgs = ["new-session", "-t", projectSessionName, "-s", restartViewSessionName, "-A", ";", "select-window", "-t", liveTargetBeforeRestart ?? ""]
         try expect(
-            restartedLiveDescriptor.args == ["attach-session", "-t", liveTargetBeforeRestart ?? ""],
-            "restart with a live target should plain-attach to the existing pane, got \(restartedLiveDescriptor.args)"
+            restartedLiveDescriptor.args == expectedLiveRestartArgs,
+            "restart with a live target should reattach and repin its stable grouped view, got \(restartedLiveDescriptor.args)"
         )
 
         // Now kill that window out from under the descriptor (simulating a pane
@@ -4360,7 +4456,7 @@ final class TileSpawner {
         // still fall back to creating a fresh window, exactly like today.
         try Self.runTmuxControlOperationSync { try await projectTmux.killWindow(target: liveTargetBeforeRestart ?? "") }
         let newWindowCountBeforeDeadRestart = projectTmux.log.filter { if case .newWindow = $0 { return true }; return false }.count
-        _ = try restartAndDescriptor(tileId: restartTileId, spawner: projectSpawner, store: projectStore, canvas: projectCanvas)
+        let restartedDeadDescriptor = try restartAndDescriptor(tileId: restartTileId, spawner: projectSpawner, store: projectStore, canvas: projectCanvas)
         let newWindowCountAfterDeadRestart = projectTmux.log.filter { if case .newWindow = $0 { return true }; return false }.count
         try expect(
             newWindowCountAfterDeadRestart == newWindowCountBeforeDeadRestart + 1,
@@ -4368,6 +4464,8 @@ final class TileSpawner {
         )
         let deadRestartTarget = try managedTarget(spawner: projectSpawner, tileId: restartTileId)
         try expect(deadRestartTarget != nil && deadRestartTarget != liveTargetBeforeRestart, "restart with a dead target should persist a fresh managed pane target")
+        let expectedDeadRestartArgs = ["new-session", "-t", projectSessionName, "-s", restartViewSessionName, "-A", ";", "select-window", "-t", deadRestartTarget ?? ""]
+        try expect(restartedDeadDescriptor.args == expectedDeadRestartArgs, "restart with a dead target should repin the same stable grouped view to its replacement, got \(restartedDeadDescriptor.args)")
 
         let nilTargetRecord = ManagedAgentSessionRecord(
             tileId: restartTileId,
@@ -4414,12 +4512,13 @@ final class TileSpawner {
         _ = try restartAndDescriptor(tileId: sessionGoneTile.id, spawner: sessionGoneSpawner, store: sessionGoneStore, canvas: sessionGoneCanvas)
         let sessionGoneRestartLog = Array(sessionGoneTmux.log.dropFirst(sessionGoneLogCountBeforeRestart))
         try expect(
-            sessionGoneRestartLog.prefix(3) == [
+            sessionGoneRestartLog.prefix(4) == [
+                .sessionExists(name: TmuxSession.viewSessionName(tileId: sessionGoneTile.id)),
                 .isAlive(target: sessionGoneOldTarget ?? ""),
                 .newWindow(session: sessionGoneSessionName, cwd: sessionGoneRoot.path),
                 .newSession(name: sessionGoneSessionName, cwd: sessionGoneRoot.path)
             ],
-            "restart with a dead target and missing project session must try isAlive -> newWindow -> newSession, log=\(sessionGoneRestartLog)"
+            "restart with a dead target and missing project session must check view -> isAlive -> newWindow -> newSession, log=\(sessionGoneRestartLog)"
         )
         let sessionGoneNewTarget = try managedTarget(spawner: sessionGoneSpawner, tileId: sessionGoneTile.id)
         try expect(sessionGoneNewTarget != nil && sessionGoneNewTarget != sessionGoneOldTarget, "session-gone restart should persist the newSession target")
@@ -4491,6 +4590,10 @@ final class TileSpawner {
             tmuxControlFactory: { _ in failureTmux }
         )
         let failureProjectId = UUID()
+        let failureSessionName = TmuxSession.projectSessionName(projectId: failureProjectId)
+        let siblingPane = try Self.runTmuxControlOperationSync {
+            try await failureTmux.newSession(name: failureSessionName, cwd: failureRoot.path, innerCommand: ["/bin/zsh"])
+        }
         failureSpawner.terminalProjectContextProvider = {
             ProjectEntry(id: failureProjectId, name: "Failing Project", rootPath: failureRoot.path, workspaceId: nil, lastOpenedAt: Date(), pinned: false, missing: false)
         }
@@ -4506,6 +4609,13 @@ final class TileSpawner {
             return nil
         }.first
         try expect(createdPane != nil, "save failure after project window creation should kill the captured pane, log=\(failureTmux.log)")
+        let failureViewKills = failureTmux.log.compactMap { call -> String? in
+            if case let .killSession(name) = call { return name }
+            return nil
+        }
+        try expect(failureViewKills.count == 1 && failureViewKills[0].hasPrefix("array-view-"), "save failure should clean up only its newly created stable view, log=\(failureTmux.log)")
+        try expect(failureTmux.sessions[failureSessionName] == [siblingPane], "save rollback must preserve the sibling window and shared base session, sessions=\(failureTmux.sessions)")
+        try expect(!failureTmux.log.contains(.killSession(name: failureSessionName)), "save rollback must never kill the shared base session, log=\(failureTmux.log)")
 
         let malformedDefaults = makeDefaults(enabled: true, path: fakeTmux.path)
         let malformedTmux = MalformedPaneTmuxControl(malformedTarget: "not-a-pane-id")
@@ -4575,6 +4685,17 @@ final class TileSpawner {
             "projectWindow": [
                 "sessionName": projectSessionName,
                 "targets": projectTargets,
+                "descriptors": projectDescriptors.map { ["tileId": $0.tileId.uuidString, "args": $0.args] },
+                "liveRestart": [
+                    "tileId": restartTileId.uuidString,
+                    "target": liveTargetBeforeRestart ?? "",
+                    "args": restartedLiveDescriptor.args
+                ],
+                "deadRestart": [
+                    "tileId": restartTileId.uuidString,
+                    "target": deadRestartTarget ?? "",
+                    "args": restartedDeadDescriptor.args
+                ],
                 "flushPreservedTarget": projectTargets[0],
                 "flushCwd": flushDescriptorAfter.cwd,
                 "log": projectTmux.log.map(String.init(describing:))
@@ -4603,6 +4724,80 @@ final class TileSpawner {
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let artifact = directory.appendingPathComponent("manifest.json")
         try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// App-level I2 witness. This deliberately drives the production
+    /// TileSpawner fresh/restart scenarios above, then independently reads the
+    /// emitted behavior artifact and rejects any direct shared-session attach.
+    static func runTerminalTmuxNoMirrorSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                if case let .failed(message) = self { return message }
+                return "failed"
+            }
+        }
+        func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let sourceArtifact = try runTerminalTmuxPersistenceSelfCheck()
+        guard let root = try JSONSerialization.jsonObject(with: Data(contentsOf: sourceArtifact)) as? [String: Any],
+              let project = root["projectWindow"] as? [String: Any],
+              let sessionName = project["sessionName"] as? String,
+              let targets = project["targets"] as? [String],
+              let descriptors = project["descriptors"] as? [[String: Any]],
+              let liveRestart = project["liveRestart"] as? [String: Any],
+              let deadRestart = project["deadRestart"] as? [String: Any]
+        else {
+            throw CheckError.failed("production persistence artifact omitted project no-mirror evidence")
+        }
+        try require(targets.count >= 2 && Set(targets).count == targets.count, "fresh project targets must be distinct: \(targets)")
+
+        var freshViews: Set<String> = []
+        for (index, descriptor) in descriptors.enumerated() {
+            guard let tileIdString = descriptor["tileId"] as? String,
+                  let tileId = UUID(uuidString: tileIdString),
+                  let args = descriptor["args"] as? [String]
+            else { throw CheckError.failed("malformed fresh project descriptor evidence") }
+            let viewName = TmuxSession.viewSessionName(tileId: tileId)
+            freshViews.insert(viewName)
+            let expected = ["new-session", "-t", sessionName, "-s", viewName, "-A", ";", "select-window", "-t", targets[index]]
+            try require(args == expected, "fresh project tile did not use production grouped-view argv: \(args)")
+            try require(args != ["attach-session", "-t", targets[index]], "fresh project tile used forbidden bare attach")
+        }
+        try require(freshViews.count == descriptors.count, "fresh project tiles must use distinct stable view names")
+
+        guard let restartTileIdString = liveRestart["tileId"] as? String,
+              let restartTileId = UUID(uuidString: restartTileIdString),
+              let liveTarget = liveRestart["target"] as? String,
+              let liveArgs = liveRestart["args"] as? [String],
+              let deadTarget = deadRestart["target"] as? String,
+              let deadArgs = deadRestart["args"] as? [String]
+        else { throw CheckError.failed("malformed restart no-mirror evidence") }
+        let stableView = TmuxSession.viewSessionName(tileId: restartTileId)
+        try require(liveTarget != deadTarget, "dead restart must replace the pane target")
+        try require(liveArgs == ["new-session", "-t", sessionName, "-s", stableView, "-A", ";", "select-window", "-t", liveTarget], "live restart did not repin stable view")
+        try require(deadArgs == ["new-session", "-t", sessionName, "-s", stableView, "-A", ";", "select-window", "-t", deadTarget], "dead restart did not repin the same stable view")
+
+        let directory = sourceArtifact.deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("terminal-tmux-no-mirror", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "terminal-tmux-no-mirror",
+            "sourceArtifact": sourceArtifact.path,
+            "baseSession": sessionName,
+            "freshTargets": targets,
+            "freshViews": freshViews.sorted(),
+            "stableRestartView": stableView,
+            "liveRestartTarget": liveTarget,
+            "deadRestartTarget": deadTarget,
+            "bareAttachRejected": true
+        ]
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+            .write(to: artifact, options: .atomic)
         return artifact
     }
 
@@ -4841,6 +5036,7 @@ final class TileSpawner {
             defaults: realDefaults,
             tmuxPathResolver: { _ in tmuxPath }
         )
+        realSpawner1.terminalSessionTargetProvider = { .project(projectId: realProject.id) }
 
         let realRuntime1: GhosttyTerminalRuntime
         switch realSpawner1.spawnTerminal(profileId: "shell") {
@@ -4853,14 +5049,20 @@ final class TileSpawner {
         guard let realTile = realCanvas1.canvasState.tiles.first(where: { $0.id == realRuntime1.tileId }) else {
             throw CheckError.failed("real app spawn did not persist a terminal tile")
         }
-        let realSessionName = TmuxSession.sessionName(tileId: realTile.id)
-        let realKill = TmuxSession.killSessionCommand(tileId: realTile.id, tmuxPath: tmuxPath)
+        let realSessionName = TmuxSession.projectSessionName(projectId: realProject.id)
+        let realViewSessionName = TmuxSession.viewSessionName(tileId: realTile.id)
+        let realKill = TmuxSession.killProjectSessionCommand(projectId: realProject.id, tmuxPath: tmuxPath)
         var shouldRunRealDeferKill = true
         defer {
             if shouldRunRealDeferKill {
+                _ = try? run(tmuxPath, ["kill-session", "-t", realViewSessionName], allowFailure: true)
                 _ = try? run(realKill.command, realKill.arguments, allowFailure: true)
             }
         }
+        guard let realSpawnDescriptor = try realStore.listSessions().first(where: { $0.tileId == realTile.id }) else {
+            throw CheckError.failed("real shared app spawn did not persist its terminal descriptor")
+        }
+        try expect(realSpawnDescriptor.args.contains(realViewSessionName) && realSpawnDescriptor.args.contains(realSessionName), "real app spawn must launch through the production grouped view: \(realSpawnDescriptor.args)")
 
         let realMarker = "a05-real-\(String(UUID().uuidString.prefix(8)))"
         try pump(realContext1, timeout: 8.0, waitingFor: "initial real terminal surface") {
@@ -4910,6 +5112,7 @@ final class TileSpawner {
             defaults: realDefaults,
             tmuxPathResolver: { _ in tmuxPath }
         )
+        realSpawner2.terminalSessionTargetProvider = { .project(projectId: realProject.id) }
         let realRuntime2: GhosttyTerminalRuntime
         switch realSpawner2.restartTerminalTile(tileId: realTile.id) {
         case let .restarted(runtime): realRuntime2 = runtime
@@ -4927,6 +5130,10 @@ final class TileSpawner {
         }
         let realPaneAfterRestart = try waitForCwd(tmuxPath: tmuxPath, sessionName: realSessionName, cwd: realChangedCwdPath)
         try expect(realPaneAfterRestart.paneId == realPaneBeforeDetach.paneId, "real app restart should reattach the same tmux pane")
+        guard let realRestartDescriptor = try realStore.listSessions().first(where: { $0.tileId == realTile.id }) else {
+            throw CheckError.failed("real shared app restart did not persist its terminal descriptor")
+        }
+        try expect(realRestartDescriptor.args.contains(realViewSessionName) && realRestartDescriptor.args.contains(realSessionName), "real app restart must reuse the production grouped view: \(realRestartDescriptor.args)")
         realRuntime2.sendInput(Data("printf '\(realMarker)-after-%s\\n' \"$(pwd)\"\n".utf8))
         try pump(realContext2, timeout: 8.0, waitingFor: "input after real app restart") {
             realRuntime2.visibleText().contains("\(realMarker)-after-")
@@ -4942,6 +5149,7 @@ final class TileSpawner {
         realWindow2.close()
         realBrowser2.shutdown()
         realContext2.shutdown()
+        _ = try run(tmuxPath, ["kill-session", "-t", realViewSessionName], allowFailure: true)
         let realKillResult = try run(realKill.command, realKill.arguments)
         shouldRunRealDeferKill = false
         let realPostKill = try run(tmuxPath, ["has-session", "-t", realSessionName], allowFailure: true)
@@ -4952,6 +5160,9 @@ final class TileSpawner {
             "projectRoot": realRootPath,
             "tileId": realTile.id.uuidString,
             "sessionName": realSessionName,
+            "viewSessionName": realViewSessionName,
+            "spawnArgs": realSpawnDescriptor.args,
+            "restartArgs": realRestartDescriptor.args,
             "marker": realMarker,
             "descriptorPrunedOnBoot": descriptorsPrunedOnBoot,
             "sessionSurvivedAppDetach": sessionSurvivedAppDetach,

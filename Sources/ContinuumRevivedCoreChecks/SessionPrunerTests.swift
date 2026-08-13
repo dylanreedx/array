@@ -175,7 +175,36 @@ private func runSessionPrunerLogicTests() async {
     print("SessionPruner logic checks: idle gate, active-turn guard, disconnect blindness, never-kill scan, and config resolver passed")
 }
 
+/// Refuses to run unless `TMUX_TMPDIR` points somewhere disposable.
+///
+/// This section drives REAL tmux — `new-session`, `list-sessions`, `kill-session`.
+/// Without an isolated socket that is the user's live tmux server, and pulling
+/// sessions out from under a running Array kills its terminal tiles, which closes
+/// its last window, which quits the app: a clean exit with no crash report, which
+/// is exactly what it looks like from the outside. It happened twice on
+/// 2026-08-12 while Dylan was working, caused by this check.
+///
+/// AGENTS.md ("Never touch the live tmux server from automated checks") requires
+/// isolation and says an un-isolatable check must be left unverified rather than
+/// touch the live server. So this FAILS CLOSED: no `TMUX_TMPDIR`, no tmux.
+private func isolatedTmuxTmpdir() -> String? {
+    guard let dir = ProcessInfo.processInfo.environment["TMUX_TMPDIR"],
+          !dir.isEmpty,
+          dir.hasPrefix("/tmp/") || dir.hasPrefix("/private/tmp/") || dir.hasPrefix("/var/folders/"),
+          ProcessInfo.processInfo.environment["TMUX"] == nil
+    else { return nil }
+    return dir
+}
+
 private func runSessionPrunerRealPathCheck() async {
+    guard let socketDir = isolatedTmuxTmpdir() else {
+        writeSessionPrunerManifest(name: "ticket21-session-pruner-realpath.json", fields: [
+            "tmux_isolated": false,
+            "skipped_reason": "TMUX_TMPDIR is unset or not disposable"
+        ])
+        print("SessionPruner real-path check SKIPPED: no isolated TMUX_TMPDIR — refusing to touch the live tmux server (AGENTS.md)")
+        return
+    }
     guard let tmuxPath = TmuxLocator.resolve() else {
         writeSessionPrunerManifest(name: "ticket21-session-pruner-realpath.json", fields: [
             "tmux_absent": true
@@ -183,6 +212,7 @@ private func runSessionPrunerRealPathCheck() async {
         print("SessionPruner real-path check SKIPPED: tmux_absent=true")
         return
     }
+    print("SessionPruner real-path check: isolated tmux socket namespace \(socketDir)")
 
     let control = ProcessTmuxControl(tmuxPath: tmuxPath)
     let sessionName = "continuum-pruner-check-\(UUID().uuidString)"

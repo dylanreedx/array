@@ -747,6 +747,22 @@ do {
     expect(viewKill.command == tmuxPath, "tmux view-session kill command should use resolved tmux path")
     expect(viewKill.arguments == ["kill-session", "-t", viewName], "tmux view-session kill argv should target stable view session name")
 
+    let groupedProfile = try TmuxSession.groupedViewProfile(
+        profile: profile,
+        tileId: tileId,
+        baseSessionName: "array-proj-base",
+        windowTarget: "%42",
+        tmuxPath: tmuxPath
+    )
+    expect(groupedProfile.command == tmuxPath, "grouped view profile should use the resolved local tmux path")
+    expect(groupedProfile.arguments == [
+        "new-session", "-t", "array-proj-base", "-s", viewName, "-A",
+        ";", "select-window", "-t", "%42"
+    ], "grouped view profile must emit one production argv with a literal semicolon")
+    expect(groupedProfile.arguments.contains(";") && !groupedProfile.arguments.contains("\\;"), "grouped view separator must be the literal ; argv element")
+    expect(!groupedProfile.arguments.contains(profile.command) && !groupedProfile.arguments.contains("bash"), "grouped view profile must not rerun the window's inner command")
+    expect(groupedProfile.cwd == profile.cwd && groupedProfile.title == profile.title, "grouped view profile must preserve cwd and title")
+
     let killWindow = TmuxSession.killWindowCommand(target: "%7", tmuxPath: tmuxPath)
     expect(killWindow.command == tmuxPath, "tmux kill-window command should use resolved tmux path")
     expect(killWindow.arguments == ["kill-window", "-t", "%7"], "tmux kill-window argv should target the captured pane id")
@@ -872,6 +888,38 @@ do {
 
     let tailscaleWrapped = TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: "/opt/bin/tmux", reach: .tailscale(target), defaults: defaults)
     expect(tailscaleWrapped == sshWrapped, "tailscale reach uses the same ssh argv as sshForward")
+
+    let groupedRemote = try TmuxSession.groupedViewProfile(
+        profile: profile,
+        tileId: tileId,
+        baseSessionName: "array-proj-remote",
+        windowTarget: "%9",
+        tmuxPath: "/opt/bin/tmux",
+        reach: .sshForward(target),
+        defaults: defaults
+    )
+    expect(groupedRemote.command == "/usr/bin/ssh", "remote grouped view launch must use SSH")
+    expect(groupedRemote.arguments.contains("-t") && groupedRemote.arguments.contains("dylan@prod.example"), "remote grouped view launch must target the configured SSH owner")
+    expect(groupedRemote.arguments.last?.contains("'new-session' '-t' 'array-proj-remote' '-s' 'array-view-") == true, "remote grouped view launch must quote the production tmux argv")
+    expect(groupedRemote.arguments.last?.contains("';' 'select-window' '-t' '%9'") == true, "remote grouped view launch must preserve the literal tmux separator and target")
+    expect(groupedRemote.arguments.last?.contains("'/usr/bin/env'") == false, "remote grouped view launch must not rerun the inner command")
+
+    let sshControl = ProcessTmuxControl(tmuxPath: "/opt/bin/tmux", reach: .sshForward(target), defaults: defaults)
+    let sshControlInvocation = try sshControl.resolvedInvocation(arguments: ["has-session", "-t", "array-proj-remote"])
+    expect(sshControlInvocation.command == "/usr/bin/ssh", "remote tmux control must use SSH")
+    expect(sshControlInvocation.arguments.contains("-T") && !sshControlInvocation.arguments.contains("-t"), "remote tmux control must use noninteractive SSH on the same owner")
+    expect(sshControlInvocation.arguments.contains("dylan@prod.example"), "remote tmux control must preserve the launch owner")
+    expect(sshControlInvocation.arguments.last == "'/opt/bin/tmux' 'has-session' '-t' 'array-proj-remote'", "remote control must shell-quote the same tmux path and argv")
+    let tailscaleControl = ProcessTmuxControl(tmuxPath: "/opt/bin/tmux", reach: .tailscale(target), defaults: defaults)
+    let tailscaleControlInvocation = try tailscaleControl.resolvedInvocation(arguments: ["has-session", "-t", "array-proj-remote"])
+    expect(tailscaleControlInvocation == sshControlInvocation, "Tailscale control must resolve to the same SSH owner semantics")
+    do {
+        _ = try ProcessTmuxControl(tmuxPath: "/opt/bin/tmux", reach: .tunnel(relayHost: "relay.example"), defaults: defaults)
+            .resolvedInvocation(arguments: ["has-session", "-t", "array-proj-remote"])
+        expect(false, "tunnel tmux control must remain explicitly unsupported")
+    } catch let error as TmuxSession.ReachError {
+        expect(error == .tunnelUnsupported(relayHost: "relay.example"), "tunnel tmux control should surface the explicit unsupported error")
+    }
 
     let v1JSON = """
     {
@@ -1173,7 +1221,12 @@ do {
         encoding: .utf8
     ) ?? ""
     expect(persistedTunnelProcess.terminationStatus != 0, "persisted tunnel project must crash in child process")
-    expect(persistedTunnelError.contains("tunnel reach path"), "persisted tunnel crash should include tunnel reach path, got \(persistedTunnelError)")
+    // The tunnel path now throws `TmuxSession.ReachError.tunnelUnsupported` and the
+    // wrap seam traps on it, so the message names the transport AND the relay host
+    // instead of the old "not yet wired" placeholder. What must not change: it
+    // crashes loudly rather than silently launching something local.
+    expect(persistedTunnelError.contains("tunnel") && persistedTunnelError.contains("relay.example"),
+           "persisted tunnel crash must name the unsupported tunnel transport and its relay host, got \(persistedTunnelError)")
 
     let manifest = InvariantManifest(
         invariantId: "ticket48-remote-reach-model",
@@ -8670,10 +8723,14 @@ i2Check: do {
 
 #if os(macOS)
     let tmux = ProcessTmuxControl(tmuxPath: tmuxPath)
-    let projectSession = "continuum-proj-i2-\(noMirrorRunId)"
-    let viewSessionA = "continuum-view-i2a-\(noMirrorRunId)"
-    let viewSessionB = "continuum-view-i2b-\(noMirrorRunId)"
-    let viewSessionShared = "continuum-view-i2s-\(noMirrorRunId)"
+    let projectId = UUID()
+    let tileA = UUID()
+    let tileB = UUID()
+    let sharedTile = UUID()
+    let projectSession = TmuxSession.projectSessionName(projectId: projectId)
+    let viewSessionA = TmuxSession.viewSessionName(tileId: tileA)
+    let viewSessionB = TmuxSession.viewSessionName(tileId: tileB)
+    let viewSessionShared = TmuxSession.viewSessionName(tileId: sharedTile)
 
     defer {
         for session in [viewSessionShared, viewSessionB, viewSessionA, projectSession] {
@@ -8701,10 +8758,25 @@ i2Check: do {
     expect(TmuxSession.isValidWindowId(intendedWindowB), "I2: pane B owner must be a valid window_id, got \(intendedWindowB)")
     expect(intendedWindowA != intendedWindowB, "I2: project panes must belong to distinct windows")
 
-    _ = try trimmedTmux(TmuxSession.groupedViewSessionArguments(viewSessionName: viewSessionA, projectSessionName: projectSession))
-    _ = try trimmedTmux(TmuxSession.selectWindowArguments(viewSessionName: viewSessionA, windowTarget: intendedWindowA))
-    _ = try trimmedTmux(TmuxSession.groupedViewSessionArguments(viewSessionName: viewSessionB, projectSessionName: projectSession))
-    _ = try trimmedTmux(TmuxSession.selectWindowArguments(viewSessionName: viewSessionB, windowTarget: intendedWindowB))
+    let sourceProfile = LaunchProfile(command: "/bin/zsh", arguments: ["-lc", "echo forbidden-inner-command"], cwd: "/tmp", title: "I2 production profile")
+    let productionProfileA = try TmuxSession.groupedViewProfile(
+        profile: sourceProfile,
+        tileId: tileA,
+        baseSessionName: projectSession,
+        windowTarget: paneA,
+        tmuxPath: tmuxPath
+    )
+    let productionProfileB = try TmuxSession.groupedViewProfile(
+        profile: sourceProfile,
+        tileId: tileB,
+        baseSessionName: projectSession,
+        windowTarget: paneB,
+        tmuxPath: tmuxPath
+    )
+    expect(productionProfileA.command == tmuxPath && productionProfileB.command == tmuxPath, "I2: production-generated local profiles must execute the resolved tmux binary")
+    expect(!productionProfileA.arguments.contains("forbidden-inner-command") && !productionProfileB.arguments.contains("forbidden-inner-command"), "I2: production-generated view profiles must omit the inner command")
+    _ = try trimmedTmux(productionProfileA.arguments)
+    _ = try trimmedTmux(productionProfileB.arguments)
 
     let activeA = try trimmedTmux(TmuxSession.activeWindowTargetArguments(viewSessionName: viewSessionA))
     let activeB = try trimmedTmux(TmuxSession.activeWindowTargetArguments(viewSessionName: viewSessionB))
@@ -8720,8 +8792,14 @@ i2Check: do {
     expect(mainVerdict == .distinct,
            "I2: grouped view sessions pinned to distinct windows must stay distinct, got \(mainVerdict) A=\(activeA) B=\(activeB)")
 
-    _ = try trimmedTmux(TmuxSession.groupedViewSessionArguments(viewSessionName: viewSessionShared, projectSessionName: projectSession))
-    _ = try trimmedTmux(TmuxSession.selectWindowArguments(viewSessionName: viewSessionShared, windowTarget: intendedWindowA))
+    let productionSharedProfile = try TmuxSession.groupedViewProfile(
+        profile: sourceProfile,
+        tileId: sharedTile,
+        baseSessionName: projectSession,
+        windowTarget: paneA,
+        tmuxPath: tmuxPath
+    )
+    _ = try trimmedTmux(productionSharedProfile.arguments)
     let activeShared = try trimmedTmux(TmuxSession.activeWindowTargetArguments(viewSessionName: viewSessionShared))
     expect(TmuxSession.isValidWindowId(activeShared), "I2: shared probe active window must be a valid window_id, got \(activeShared)")
     expect(activeShared == activeA, "I2: shared probe must observe the same window as A for the exemption assertions")
@@ -8742,6 +8820,11 @@ i2Check: do {
            "I2: same declared intent and same observed window must be deliberate shared view, got \(deliberateVerdict)")
     expect(accidentalVerdict == .accidentalMirror,
            "I2: distinct declared intent and same observed window must be accidental mirror, got \(accidentalVerdict)")
+
+    _ = try tmux.run(["kill-session", "-t", viewSessionA])
+    let siblingAfterDelete = try trimmedTmux(TmuxSession.activeWindowTargetArguments(viewSessionName: viewSessionB))
+    expect(siblingAfterDelete == activeB, "I2: deleting one production view must preserve the sibling's selected window")
+    _ = try tmux.run(["has-session", "-t", projectSession])
 
     let manifest = NoMirrorCheckManifest(
         runId: noMirrorRunId,

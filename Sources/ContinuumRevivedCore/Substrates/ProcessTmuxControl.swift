@@ -34,9 +34,17 @@ public struct TmuxProcessError: Error, Equatable {
 
 public final class ProcessTmuxControl: TmuxControl, @unchecked Sendable {
     private let tmuxPath: String
+    private let reach: RemoteReach
+    private let defaults: UserDefaults
 
-    public init(tmuxPath: String) {
+    public init(
+        tmuxPath: String,
+        reach: RemoteReach = .localhost,
+        defaults: UserDefaults = .standard
+    ) {
         self.tmuxPath = tmuxPath
+        self.reach = reach
+        self.defaults = defaults
     }
 
     public func newSession(name: String, cwd: String, innerCommand: [String]?) async throws -> String {
@@ -134,6 +142,16 @@ public final class ProcessTmuxControl: TmuxControl, @unchecked Sendable {
         try runProcess(arguments).stdout
     }
 
+    public func resolvedInvocation(arguments: [String]) throws -> TmuxSession.Invocation {
+        try TmuxSession.invocation(
+            tmuxPath: tmuxPath,
+            arguments: arguments,
+            reach: reach,
+            defaults: defaults,
+            mode: .control
+        )
+    }
+
     // MARK: - Process plumbing (not part of the public surface)
 
     private struct RunResult {
@@ -151,9 +169,15 @@ public final class ProcessTmuxControl: TmuxControl, @unchecked Sendable {
     }
 
     private func runIgnoringFailure(_ arguments: [String]) -> RunResult {
+        let invocation: TmuxSession.Invocation
+        do {
+            invocation = try resolvedInvocation(arguments: arguments)
+        } catch {
+            return RunResult(exitCode: -1, stdout: "", stderr: String(describing: error))
+        }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: tmuxPath)
-        process.arguments = arguments
+        process.executableURL = URL(fileURLWithPath: invocation.command)
+        process.arguments = invocation.arguments
         let outPipe = Pipe()
         let errPipe = Pipe()
         process.standardOutput = outPipe
