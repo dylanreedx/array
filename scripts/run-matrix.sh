@@ -519,6 +519,7 @@ run_app_check .build/debug/Array --project-root-resolution-check
 run_app_check .build/debug/Array --project-picker-resolution-check
 run_app_check .build/debug/Array --topology-migration-check
 run_app_check .build/debug/Array --terminal-tmux-persistence-check
+run_app_check .build/debug/Array --terminal-tmux-no-mirror-check
 run_app_check .build/debug/Array --new-tile-cwd-check
 run_app_check .build/debug/Array --terminal-tmux-delete-lifecycle-check
 run_app_check .build/debug/Array --terminal-tmux-ambient-workspace-check

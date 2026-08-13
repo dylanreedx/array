@@ -214,6 +214,20 @@ cost a session to learn:
 
 ## Verifying
 
+### Never touch the live tmux server from automated checks
+
+Array's live terminal sessions use the user's default tmux socket. Connecting
+automated checks or ad-hoc probes to that socket can crash or disrupt the live
+app. **Never run tmux, CoreChecks real-tmux coverage, or an app tmux self-check
+against the default socket while Array may be running.** Every automated tmux
+verification must set `TMUX_TMPDIR` to a unique disposable directory under
+`/tmp`, explicitly unset inherited `TMUX` and `TMUX_PANE`, start its own
+disposable tmux server in that namespace, and verify `#{socket_path}` is inside
+that directory before running a suite. Clean up only that namespace. Do not
+inspect, list, attach to, select in, or kill
+sessions on the default server. If a check cannot honor this isolation, leave
+it unverified rather than touching the live server.
+
 - Full gate: `scripts/run-matrix.sh`. It runs every leg and ends with a report —
   legs run, expected KNOWN-RED (from `MATRIX_KNOWN_RED`), any KNOWN-RED that
   unexpectedly PASSED, and real failures. Judge a run by that summary. Builds

@@ -1,0 +1,589 @@
+---
+title: "Restore tmux shell-tile isolation"
+brief: "Wire stable per-tile grouped tmux view sessions into production spawn and restart, keep every operation on one local or remote owner, and prove the result end to end."
+kind: "plan"
+status: "implemented-with-supervised-verification-remaining"
+localOnly: true
+---
+
+# Restore tmux shell-tile isolation
+
+Status: **implemented; real-tmux, full-matrix, and visual dogfood verification
+remain supervised because this sandbox cannot create an isolated tmux socket**.
+
+Branch: `array/tmux-shell-isolation`
+
+Base and current checkout commit: `0a0684a7031b2665eadb1a09fa15ecb625c47292`
+
+## Objective
+
+Repair the tmux shell-tile mirroring regression without abandoning the shared
+project-session architecture. Every terminal that uses a shared project or
+workspace session must attach through a stable per-tile grouped view session.
+Each view keeps its own selected-window state, survives a live-target restart,
+and repins to a replacement window when its persisted pane dies.
+
+Done means:
+
+1. The corrected production witness is captured RED before implementation and
+   GREEN after.
+2. Two fresh project terminals launch through distinct `array-view-<tileId>`
+   sessions pinned to distinct targets.
+3. Live restart reuses the pane, dead restart replaces it exactly once, and both
+   preserve the stable view-session identity.
+4. Shared ambient terminals are isolated when `ambientPerWorkspace=true`; the
+   existing per-tile fallback remains when it is false.
+5. Create, select, query, attach, recovery, and cleanup all address the same
+   local or remote tmux owner.
+6. Tile deletion and failed-spawn rollback remove only tile-owned resources;
+   sibling views/windows and the base session survive.
+7. The production-generated real-tmux I2 check, app-level no-mirror check,
+   Ghostty live integration, and full matrix all report the repaired behavior.
+8. Array Dev passes visual dogfood across app relaunch using only
+   `scripts/dev-app.sh` and `~/array-scratch`.
+9. The verified, scoped change is committed on the requested branch under
+   Dylan's configured identity.
+
+<Callout id="root-cause" tone="decision">
+
+**Root cause and repair:** production creates distinct windows in one shared
+base session but launches every Ghostty surface with `tmux attach-session -t
+%pane`. A pane target chooses the initial window; it does not create an
+independent selected-window pointer. The selected window belongs to the shared
+session, so clients converge and mirror. Keep the shared base, but launch every
+shared tile through `array-view-<tileId>` using one production builder:
+`new-session -t <base> -s <view> -A ; select-window -t <capturedTarget>`.
+The `";"` is one literal argv element, and the view attach never includes the
+shell or agent inner command.
+
+</Callout>
+
+## Current and target topology
+
+<Diagram id="tmux-topology" caption="The grouped view—not the shared base session—owns selected-window state. The same owner boundary applies to local and remote projects." frame="hide">
+
+```html
+<div class="topology-grid">
+  <section class="diagram-panel">
+    <div class="diagram-pill">Current: shared selection state</div>
+    <div class="diagram-node" data-rough>
+      <strong>array-proj-&lt;projectId&gt;</strong>
+      <span>window A · window B</span>
+      <span class="diagram-muted">one selected-window pointer</span>
+    </div>
+    <div class="diagram-card">
+      <strong>Ghostty tile A</strong>
+      <span>attach-session -t %paneA</span>
+    </div>
+    <div class="diagram-card">
+      <strong>Ghostty tile B</strong>
+      <span>attach-session -t %paneB</span>
+    </div>
+    <div class="diagram-card">
+      <strong>Regression</strong>
+      <span>Either client changes the base session selection; both mirror.</span>
+    </div>
+  </section>
+  <section class="diagram-panel">
+    <div class="diagram-pill">Target: per-tile selection state</div>
+    <div class="diagram-node" data-rough>
+      <strong>array-proj-* or array-ws-*</strong>
+      <span>persistent owner of window A · window B</span>
+    </div>
+    <div class="view-grid">
+      <div class="diagram-card">
+        <strong>array-view-&lt;tileA&gt;</strong>
+        <span>grouped with base · selected %paneA</span>
+      </div>
+      <div class="diagram-card">
+        <strong>array-view-&lt;tileB&gt;</strong>
+        <span>grouped with base · selected %paneB</span>
+      </div>
+    </div>
+    <div class="diagram-card">
+      <strong>Result</strong>
+      <span>Ghostty attaches to its stable view; focus and restart remain isolated.</span>
+    </div>
+  </section>
+  <section class="diagram-panel owner-panel">
+    <div class="diagram-pill">Owner invariant</div>
+    <div class="diagram-card">
+      <strong>Local project</strong>
+      <span>launch + create + query + cleanup → local tmux</span>
+    </div>
+    <div class="diagram-card">
+      <strong>SSH / Tailscale project</strong>
+      <span>launch + create + query + cleanup → the same remote tmux</span>
+    </div>
+    <div class="diagram-card">
+      <strong>Tunnel</strong>
+      <span>explicitly unsupported; never falls through to local control</span>
+    </div>
+  </section>
+</div>
+```
+
+```css
+.topology-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.topology-grid .diagram-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.topology-grid .diagram-card,
+.topology-grid .diagram-node {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 12px;
+}
+.view-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.owner-panel {
+  grid-column: 1 / -1;
+  display: grid !important;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: stretch;
+}
+.owner-panel .diagram-pill {
+  grid-column: 1 / -1;
+}
+@media (max-width: 820px) {
+  .topology-grid,
+  .view-grid,
+  .owner-panel {
+    grid-template-columns: 1fr;
+  }
+  .owner-panel {
+    grid-column: auto;
+  }
+  .owner-panel .diagram-pill {
+    grid-column: auto;
+  }
+}
+```
+
+</Diagram>
+
+## Repository evidence
+
+The requested checkout is clean and exactly on the requested base. The tree
+already contains the architectural ingredients, but they are disconnected:
+
+- `TmuxSession.viewSessionName` and `killViewSessionCommand` use stable
+  `array-view-<tileId>` identities.
+- `groupedViewSessionArguments` and `selectWindowArguments` prove grouped
+  sessions work, but no production-shaped `LaunchProfile` builder composes
+  them.
+- `TileSpawner.tmuxWrappedProfileIfAvailable` creates distinct project and
+  opted-in workspace windows, then returns `attachWindowProfile` for both fresh
+  creation and live-target restart.
+- Dead-target restart correctly creates a replacement window, but returns the
+  same broken direct attach.
+- The production persistence check explicitly expects the broken direct attach
+  and therefore protects the regression.
+- The real-tmux I2 block manually creates and selects grouped sessions rather
+  than executing production-generated argv.
+- Deliberate deletion already kills the captured window and then the stable
+  view session, even though production never creates that view.
+- Rollback after descriptor persistence failure kills the new window, but does
+  not yet model whether a view was created or reused.
+- `TmuxSession.wrap` can SSH-wrap a Ghostty launch, while `TileSpawner`, app
+  deletion, `ZoneRuntimeController` observer/reaper, and lazy recovery construct
+  local `ProcessTmuxControl`. A remote launch can therefore silently split from
+  local creation, querying, and cleanup.
+
+<TabsBlock id="load-bearing-code" orientation="vertical">
+
+  <Tab id="tile-spawner" label="TileSpawner.swift">
+
+  <AnnotatedCode
+    id="tile-spawner-current"
+    filename="Sources/ContinuumRevived/App/TileSpawner.swift"
+    language="swift"
+    code={"let reach = project.remoteEnvironment?.reach ?? .localhost\nlet control = tmuxControlFactory(tmuxPath)\n\nif let existingWindowTarget,\n   try runTmuxControlOperationSync({ try await control.isAlive(paneTarget: existingWindowTarget) }) {\n    return (TmuxSession.attachWindowProfile(\n        paneTarget: existingWindowTarget, cwd: profile.cwd, tmuxPath: tmuxPath\n    ), existingWindowTarget)\n}\n\n// create/recover the project or workspace window...\nreturn (TmuxSession.attachWindowProfile(\n    paneTarget: paneTarget, cwd: profile.cwd, tmuxPath: tmuxPath\n), paneTarget)"}
+    annotations={[
+      { lines: "1-2", label: "Owner mismatch", note: "Reach is computed, but the control factory receives only a local tmux path." },
+      { lines: "4-9", label: "Restart regression", note: "A live pane is reused correctly but still launches a direct attach to shared base-session state." },
+      { lines: "11-14", label: "Fresh/dead regression", note: "Fresh creation and dead-target replacement return the same direct attach." }
+    ]}
+  />
+
+  </Tab>
+
+  <Tab id="tmux-session" label="TmuxSession.swift">
+
+  <AnnotatedCode
+    id="tmux-session-current"
+    filename="Sources/ContinuumRevivedCore/TmuxSession.swift"
+    language="swift"
+    code={"public static func groupedViewSessionArguments(\n    viewSessionName: String, projectSessionName: String\n) -> [String] {\n    [\"new-session\", \"-d\", \"-t\", projectSessionName, \"-s\", viewSessionName, \"-A\"]\n}\n\npublic static func selectWindowArguments(\n    viewSessionName: String, windowTarget: String\n) -> [String] {\n    [\"select-window\", \"-t\", \"view:target\"]\n}\n\npublic static func attachWindowProfile(\n    paneTarget: String, cwd: String, tmuxPath: String\n) -> LaunchProfile {\n    LaunchProfile(command: tmuxPath, arguments: [\"attach-session\", \"-t\", paneTarget], cwd: cwd, title: \"Terminal\")\n}"}
+    annotations={[
+      { lines: "1-11", label: "Proven fragments", note: "Core can group and select, but production lacks one builder for the exact Ghostty launch profile." },
+      { lines: "13-17", label: "Broken production helper", note: "Shared fresh spawn and restart both call this direct-attach helper today." }
+    ]}
+  />
+
+  </Tab>
+
+  <Tab id="process-control" label="ProcessTmuxControl.swift">
+
+  <AnnotatedCode
+    id="process-control-current"
+    filename="Sources/ContinuumRevivedCore/Substrates/ProcessTmuxControl.swift"
+    language="swift"
+    code={"public final class ProcessTmuxControl: TmuxControl, @unchecked Sendable {\n    private let tmuxPath: String\n\n    public init(tmuxPath: String) {\n        self.tmuxPath = tmuxPath\n    }\n\n    private func runIgnoringFailure(_ arguments: [String]) -> RunResult {\n        let process = Process()\n        process.executableURL = URL(fileURLWithPath: tmuxPath)\n        process.arguments = arguments\n        // ...\n    }\n}"}
+    annotations={[
+      { lines: "1-6", label: "Local-only construction", note: "The real control retains a tmux path but not the RemoteReach identifying the daemon owner." },
+      { lines: "8-13", label: "Split-brain risk", note: "Create, query, and cleanup execute locally even when Ghostty launches tmux through SSH." }
+    ]}
+  />
+
+  </Tab>
+
+</TabsBlock>
+
+## Settled implementation decisions
+
+### Shared ambient remains supported
+
+When `ambientPerWorkspace=true`, use `array-ws-<workspaceId>` as the shared
+base and `array-view-<tileId>` as each terminal's isolated view. When the option
+is false, keep the existing isolated `array-<tileId>` fallback. This closes the
+same mirroring defect without silently disabling an existing option.
+
+### One builder owns grouped-view launch construction
+
+Add one production-shaped Core builder with explicit inputs:
+
+- original `LaunchProfile`;
+- stable tile ID;
+- explicit base session name;
+- captured pane/window target;
+- tmux path;
+- `RemoteReach` and defaults used for SSH construction.
+
+It preserves cwd and title, emits the literal `";"` argv token, and contains no
+inner command. Project and workspace call the same builder with different base
+names.
+
+### One reach-aware control path owns daemon operations
+
+Localhost executes tmux directly. SSH-forward and Tailscale execute the same
+tmux argv remotely through the existing hardened SSH options and token quoting.
+Tunnel remains explicitly unsupported. A caller must not calculate remote reach
+for the Ghostty launch and then create a path-only local `ProcessTmuxControl`.
+
+### Rollback is attempt-aware
+
+The spawn path records which window and view resources this attempt created or
+reused. If persistence fails, stop and remove the just-installed Ghostty surface
+before compensating, so it cannot create a late view after cleanup. Remove only
+newly created resources. Never kill a reused live window/view, a sibling, or the
+shared base session generically.
+
+### Machine and visual proofs remain distinct
+
+The new app no-mirror check deterministically drives production TileSpawner
+fresh and restart paths and executes their generated profiles against real tmux.
+The existing live integration remains the Ghostty surface proof. Final visual
+dogfood remains supervised because terminal rendering and focus behavior need
+human observation.
+
+## Implementation sequence
+
+### 1. Correct the production witness and capture RED
+
+Edit only the shared assertions in
+`TileSpawner.runTerminalTmuxPersistenceSelfCheck` first:
+
+- require one shared base project session;
+- require distinct persisted pane targets;
+- derive and require one stable, distinct `array-view-<tileId>` per tile;
+- require `new-session -t <base> -s <view> -A`, literal `";"`, and
+  `select-window -t <target>` in order;
+- require that the original shell command is absent;
+- explicitly reject `attach-session -t %pane` as the complete launch argv;
+- apply the same contract to opted-in shared ambient descriptors.
+
+Rebuild the app before running the check so a stale binary cannot hide RED:
+
+```sh
+swift build --product Array
+.build/debug/Array --terminal-tmux-persistence-check
+```
+
+Capture the exact failure output and retain it for the plan's implementation
+record. Do not change production behavior until this RED exists.
+
+### 2. Add grouped-view and reach-aware Core construction
+
+In `Sources/ContinuumRevivedCore/TmuxSession.swift`:
+
+1. Add a production `LaunchProfile` builder for the entire grouped-view attach.
+2. Use an explicit `baseSessionName` so project and workspace share the code.
+3. Preserve the profile cwd/title.
+4. Emit exactly one literal `";"` argument.
+5. Do not call `shouldPassInnerCommand` or append the original command/args.
+6. Extract or reuse one pure reach-aware command constructor so local and
+   SSH/Tailscale invocation semantics cannot drift between Ghostty launch and
+   process control.
+
+In `ProcessTmuxControl.swift`, retain the resolved reach/defaults or an
+equivalent immutable owner descriptor. Route every protocol operation through
+the common constructor. Extend `InMemoryTmuxControl` only where checks need to
+represent grouped-view existence, selection, or forced failures; do not keep a
+second manually assembled ideal topology in tests.
+
+Add Core assertions for:
+
+- stable view naming and distinction from per-tile/base names;
+- exact project and workspace base target;
+- exact selected pane target;
+- literal `";"`, never `"\\;"`;
+- no shell/agent inner command for shell and non-shell profiles;
+- cwd/title preservation;
+- local tmux command construction;
+- SSH-forward and Tailscale construction with configured host, port, config,
+  keepalive, quoting, and remote tmux path;
+- explicit tunnel refusal rather than local fallback.
+
+### 3. Wire fresh spawn and both restart branches
+
+Refactor `TileSpawner.tmuxWrappedProfileIfAvailable` to resolve one base session
+name from `TerminalSessionTarget` and obtain a control for the same reach used
+by the returned launch profile.
+
+Fresh shared spawn:
+
+1. Create a new window in the base session, retaining the current first-window
+   fallback to base-session creation.
+2. Validate and persist the captured pane target.
+3. Return the grouped-view profile for the stable tile view.
+
+Live-target restart:
+
+1. Probe the persisted target through the correct owner.
+2. Reuse the same target without creating a window.
+3. Recreate/attach the same stable view and explicitly select the target again.
+
+Dead-target restart:
+
+1. Detect the dead pane through the correct owner.
+2. Create exactly one replacement window, creating the base only if absent.
+3. Persist the new target.
+4. Repin the same stable view-session name.
+
+Nil targets and non-shared ambient terminals remain on `TmuxSession.wrap`. View
+attach never reruns the inner command; that command already started when
+`newSession` or `newWindow` created the content.
+
+### 4. Make rollback and lifecycle ownership exact
+
+Return attempt metadata from the shared spawn preparation: target, base/view
+identity, whether the target was reused, and which resources were newly
+created. If descriptor/canvas persistence fails:
+
+1. terminate/detach the failed runtime and remove its installed tile surface;
+2. kill a newly created view if it exists;
+3. kill only the newly created window;
+4. leave reused windows/views, siblings, and the base untouched.
+
+In `ContinuumApp.swift`, resolve deliberate deletion through the owning
+project/controller reach. Kill the captured window first and then
+`array-view-<tileId>`. Preserve the nil-target legacy per-tile session cleanup,
+but run it against the same owner. Keep app/window teardown and project release
+detach-only.
+
+Audit `ZoneRuntimeController` operations addressing the same session or panes:
+
+- session observer query;
+- reaper construction;
+- focus-driven lazy recovery and replacement-window creation.
+
+Each must receive the same reach-aware control. Do not broaden this work into
+tunnel transport or redesign the observer/reaper.
+
+### 5. Replace disconnected checks with production-shaped proofs
+
+#### Core real-tmux I2
+
+Make the I2 block call the new production builder for two tile IDs. Execute the
+exact builder command and arguments under a PTY, because `new-session` attaches.
+Do not reconstruct grouped-session and select-window commands inside the test.
+
+Measure:
+
+- distinct base pane and window IDs;
+- stable view names;
+- literal separator passed by the builder;
+- distinct active window IDs in the two view sessions;
+- deliberate shared-view verdict when two declared views intentionally target
+  the same window;
+- survival of view B and the base after killing view A;
+- survival of unrelated windows when cleanup runs.
+
+#### App no-mirror check
+
+Add `TileSpawner.runTerminalTmuxNoMirrorSelfCheck` and dispatch
+`--terminal-tmux-no-mirror-check` in `ContinuumApp.main()` after Ghostty
+initialization. The check must drive real TileSpawner production seams for:
+
+1. two fresh project shell spawns;
+2. live-target restart of one tile;
+3. dead-target replacement and restart;
+4. selected-window measurement after every phase;
+5. deliberate close/cleanup with sibling and base survival.
+
+The manifest records production descriptor argv, tile IDs, base/view names,
+pane and active-window IDs, restart/replacement results, and cleanup outcomes.
+A tmux-absent skip may be supported for portability, but it is not acceptable
+as the macOS release-path evidence.
+
+#### Existing app checks
+
+Extend the persistence and deletion checks for shared ambient isolation,
+rollback, malformed targets, sibling/base survival, live and dead restart, and
+local versus SSH/Tailscale construction. Keep
+`--terminal-tmux-live-integration-check` as the real Ghostty surface/restart
+proof and adapt its project phase to the shared-base/grouped-view topology.
+
+### 6. Register the gate and update the evidence plan
+
+Add a literal matrix leg before the surface-only group:
+
+```sh
+run_app_check .build/debug/Array --terminal-tmux-no-mirror-check
+```
+
+Regenerate and commit
+`docs/38-tickets/90-agent-ux/matrix-inventory.txt` so both the flag and leg are
+pinned. Do not add the new check to `MATRIX_KNOWN_RED`.
+
+Update `.plans/16-tmux-shell-tile-isolation.md` after implementation with:
+
+- actual code shape and ownership decision;
+- exact RED and GREEN commands/output;
+- fresh, restart, replacement, ambient, lifecycle, rollback, and reach results;
+- real-tmux I2 and live-integration artifact paths;
+- full matrix final summary and documented KNOWN-RED separation;
+- visual dogfood result or an explicit unverified item;
+- final commit hash.
+
+### 7. Verify and visually dogfood
+
+Run targeted rebuilt gates before the complete matrix:
+
+```sh
+swift build --product ContinuumRevivedCoreChecks
+.build/debug/ContinuumRevivedCoreChecks
+
+swift build --product Array
+.build/debug/Array --terminal-tmux-persistence-check
+.build/debug/Array --terminal-tmux-no-mirror-check
+.build/debug/Array --terminal-tmux-delete-lifecycle-check
+.build/debug/Array --terminal-tmux-ambient-workspace-check
+.build/debug/Array --terminal-tmux-live-integration-check
+
+scripts/run-matrix.sh
+```
+
+Judge the matrix by its final leg summary. Report total legs, expected
+KNOWN-RED failures, unexpected KNOWN-RED passes, and unexpected failures
+separately. A new unexpected failure is not accepted as known-red.
+
+For supervised dogfood:
+
+1. Rebuild/relaunch only with `scripts/dev-app.sh`.
+2. Use only `~/array-scratch` as the project root.
+3. Open two project shell tiles and print distinct markers.
+4. Type and change directories independently in both.
+5. Alternate focus repeatedly and confirm neither surface jumps.
+6. Inspect `tmux ls` for one project base and two grouped views.
+7. Relaunch through `scripts/dev-app.sh` and confirm both reattach to their own
+   shells.
+8. Close one tile, verify the sibling remains interactive, and verify only its
+   view/window disappear while the base survives.
+
+Never modify `/Applications/Array.app`, production Application Support or
+defaults, or Dylan's active project roots.
+
+### 8. Review and commit
+
+Inspect the complete diff, ensure only tmux-isolation files and evidence changed,
+run `git diff --check`, and verify the worktree contains no generated QA output
+intended to stay untracked. Commit once on `array/tmux-shell-isolation` under
+Dylan's configured Git identity, with no AI attribution or co-author trailers.
+
+## Expected scoped diff
+
+<FileTree
+  id="expected-files"
+  title="Expected files and responsibilities"
+  entries={[
+    { path: "Sources/ContinuumRevivedCore/TmuxSession.swift", change: "modified", note: "Production grouped-view LaunchProfile and common local/remote invocation construction." },
+    { path: "Sources/ContinuumRevivedCore/Substrates/TmuxControl.swift", change: "modified", note: "Only if the fake/owner vocabulary must model grouped view state or reach assertions." },
+    { path: "Sources/ContinuumRevivedCore/Substrates/ProcessTmuxControl.swift", change: "modified", note: "Execute create, select, query, and cleanup on the resolved owner." },
+    { path: "Sources/ContinuumRevived/App/TileSpawner.swift", change: "modified", note: "RED witness, grouped fresh/restart/dead wiring, ambient isolation, rollback, and app no-mirror check." },
+    { path: "Sources/ContinuumRevived/App/ContinuumApp.swift", change: "modified", note: "New check dispatch and reach-correct deliberate deletion." },
+    { path: "Sources/ContinuumRevived/App/ZoneRuntimeController.swift", change: "modified", note: "Reach-correct observer, reaper, and lazy recovery." },
+    { path: "Sources/ContinuumRevivedCoreChecks/main.swift", change: "modified", note: "Pure builder/reach assertions and production-generated real-tmux I2." },
+    { path: "scripts/run-matrix.sh", change: "modified", note: "Register the app-level no-mirror leg." },
+    { path: "docs/38-tickets/90-agent-ux/matrix-inventory.txt", change: "modified", note: "Pin the new check flag and matrix leg." },
+    { path: ".plans/16-tmux-shell-tile-isolation.md", change: "modified", note: "Record actual implementation and verification evidence." }
+  ]}
+/>
+
+The exact diff may be smaller if reach ownership can be centralized without a
+protocol change. It should not expand into terminal rendering, project
+persistence, tunnel transport, or unrelated lifecycle work.
+
+## Verification checklist
+
+<Checklist
+  id="verification-gates"
+  items={[
+    { id: "red", label: "Corrected persistence witness fails before implementation", note: "Capture the direct attach-session mismatch from a rebuilt binary." },
+    { id: "core", label: "Rebuilt CoreChecks pass", note: "Builder, separator, inner-command omission, naming, reach, and production-generated I2." },
+    { id: "fresh", label: "Two fresh project shells have distinct views and selected targets", note: "Measure production TileSpawner-generated argv." },
+    { id: "restart", label: "Live restart reuses its target; dead restart replaces exactly once and keeps view identity" },
+    { id: "lifecycle", label: "Delete and failure rollback preserve siblings and base", note: "Window first, view second; compensate only attempt-owned resources." },
+    { id: "ambient", label: "Opted-in shared ambient uses grouped per-tile views", note: "Opt-out remains isolated per tile." },
+    { id: "reach", label: "Local and SSH/Tailscale operations resolve to one owner", note: "Tunnel is explicit and never a local fallback." },
+    { id: "i2", label: "Production-generated real-tmux I2 passes" },
+    { id: "app", label: "No-mirror and live-integration app checks pass" },
+    { id: "matrix", label: "Full matrix summary contains no unexpected failures", note: "Report totals and documented KNOWN-RED separately." },
+    { id: "dogfood", label: "Array Dev visual dogfood passes across relaunch", note: "Use only scripts/dev-app.sh and ~/array-scratch." },
+    { id: "commit", label: "A scoped commit exists on array/tmux-shell-isolation", note: "Report exact files and hash." }
+  ]}
+/>
+
+## Risks and guardrails
+
+- **Separator semantics:** Swift passes a literal `";"` argv token. The
+  shell-escaped `"\\;"` is incorrect here.
+- **Late view creation during rollback:** stop/remove the failed Ghostty surface
+  before compensating tmux resources.
+- **Last-window behavior:** killing a failed attempt's only new window may let
+  tmux reap a base the attempt created; never issue a generic base kill.
+- **Remote split-brain:** carry reach into both launch and control construction.
+  A path-only factory is not sufficient.
+- **Observer behavior:** reads target panes directly and must not call
+  `select-window`.
+- **Matrix visibility:** the new leg must be literal, inventory-pinned, and
+  visible in the final report.
+- **Workspace safety:** keep all dogfood in Array Dev and `~/array-scratch`.
+
+## Open questions
+
+There are no design questions requiring a choice before implementation. The
+base/view topology, shared-ambient rule, literal separator, lifecycle behavior,
+remote-owner invariant, verification gates, dogfood boundary, and commit
+requirements are fixed by the task and repository evidence.

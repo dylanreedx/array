@@ -715,27 +715,18 @@ extension SessionObserver {
     /// on the concurrent thread pool, never the main actor's thread; `await`
     /// is the only suspension point, so the calling detection loop is never
     /// blocked waiting on tmux.
-    static func liveDisplayMessageQuery(tmuxPath: String, target: String) async throws -> String {
-        try await Task.detached(priority: .utility) {
-            try Self.runLiveDisplayMessageProcess(tmuxPath: tmuxPath, target: target)
+    static func liveDisplayMessageQuery(
+        tmuxPath: String,
+        target: String,
+        reach: RemoteReach = .localhost,
+        defaults: UserDefaults = .standard
+    ) async throws -> String {
+        let control = ProcessTmuxControl(tmuxPath: tmuxPath, reach: reach, defaults: defaults)
+        return try await Task.detached(priority: .utility) {
+            try control
+                .run(["display-message", "-p", "-t", target, "#{pane_current_command}\t#{pane_pid}"])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
         }.value
-    }
-
-    private nonisolated static func runLiveDisplayMessageProcess(tmuxPath: String, target: String) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: tmuxPath)
-        process.arguments = ["display-message", "-p", "-t", target, "#{pane_current_command}\t#{pane_pid}"]
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = errPipe
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw TmuxControlError.paneNotFound(target: target)
-        }
-        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: outData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 }
 

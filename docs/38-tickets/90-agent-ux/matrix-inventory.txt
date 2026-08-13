@@ -94,6 +94,7 @@ check --terminal-theme-fidelity-check
 check --terminal-tmux-ambient-workspace-check
 check --terminal-tmux-delete-lifecycle-check
 check --terminal-tmux-live-integration-check
+check --terminal-tmux-no-mirror-check
 check --terminal-tmux-observer-check
 check --terminal-tmux-observer-wiring-check
 check --terminal-tmux-persistence-check
@@ -241,6 +242,7 @@ leg run_app_check .build/debug/Array --terminal-theme-fidelity-check
 leg run_app_check .build/debug/Array --terminal-tmux-ambient-workspace-check
 leg run_app_check .build/debug/Array --terminal-tmux-delete-lifecycle-check
 leg run_app_check .build/debug/Array --terminal-tmux-live-integration-check
+leg run_app_check .build/debug/Array --terminal-tmux-no-mirror-check
 leg run_app_check .build/debug/Array --terminal-tmux-observer-check
 leg run_app_check .build/debug/Array --terminal-tmux-observer-wiring-check
 leg run_app_check .build/debug/Array --terminal-tmux-persistence-check

@@ -5,6 +5,32 @@ import Foundation
 /// P1 is pure Core: command construction, stable tile-keyed session names,
 /// kill-session argv construction, and persisted config/detection helpers.
 public enum TmuxSession {
+    public enum InvocationMode: Sendable {
+        case interactive
+        case control
+    }
+
+    public struct Invocation: Equatable, Sendable {
+        public let command: String
+        public let arguments: [String]
+
+        public init(command: String, arguments: [String]) {
+            self.command = command
+            self.arguments = arguments
+        }
+    }
+
+    public enum ReachError: Error, Equatable, CustomStringConvertible {
+        case tunnelUnsupported(relayHost: String)
+
+        public var description: String {
+            switch self {
+            case let .tunnelUnsupported(relayHost):
+                return "tmux tunnel transport is unsupported (relay: \(relayHost))"
+            }
+        }
+    }
+
     public static func sessionName(tileId: UUID) -> String {
         "array-\(tileId.uuidString)"
     }
@@ -26,32 +52,90 @@ public enum TmuxSession {
             arguments.append(profile.command)
             arguments.append(contentsOf: profile.arguments)
         }
+        let resolved: Invocation
+        do {
+            resolved = try invocation(
+                tmuxPath: tmuxPath,
+                arguments: arguments,
+                reach: reach,
+                defaults: defaults,
+                mode: .interactive
+            )
+        } catch {
+            // `wrap` predates throwing launch-profile construction. Preserve
+            // its explicit unsupported-tunnel trap while all new shared-view
+            // and process-control paths surface a typed error.
+            fatalError(String(describing: error))
+        }
+        return LaunchProfile(
+            command: resolved.command,
+            arguments: resolved.arguments,
+            cwd: profile.cwd,
+            title: profile.title
+        )
+    }
+
+    /// Builds the one production launch used by every tile whose window lives
+    /// in a shared project/workspace session. The view owns selected-window
+    /// state; the base session continues to own the actual windows.
+    public static func groupedViewProfile(
+        profile: LaunchProfile,
+        tileId: UUID,
+        baseSessionName: String,
+        windowTarget: String,
+        tmuxPath: String,
+        reach: RemoteReach = .localhost,
+        defaults: UserDefaults = .standard
+    ) throws -> LaunchProfile {
+        let arguments = [
+            "new-session", "-t", baseSessionName,
+            "-s", viewSessionName(tileId: tileId),
+            "-A",
+            ";",
+            "select-window", "-t", windowTarget
+        ]
+        let invocation = try invocation(
+            tmuxPath: tmuxPath,
+            arguments: arguments,
+            reach: reach,
+            defaults: defaults,
+            mode: .interactive
+        )
+        return LaunchProfile(
+            command: invocation.command,
+            arguments: invocation.arguments,
+            cwd: profile.cwd,
+            title: profile.title
+        )
+    }
+
+    /// Resolves a tmux argv onto its daemon owner. Ghostty launches request an
+    /// interactive SSH pty; background control/query operations explicitly do
+    /// not. Both paths share host, port, config and shell-quoting construction.
+    public static func invocation(
+        tmuxPath: String,
+        arguments: [String],
+        reach: RemoteReach,
+        defaults: UserDefaults = .standard,
+        mode: InvocationMode
+    ) throws -> Invocation {
         switch reach {
         case .localhost:
-            return LaunchProfile(
-                command: tmuxPath,
-                arguments: arguments,
-                cwd: profile.cwd,
-                title: profile.title
-            )
+            return Invocation(command: tmuxPath, arguments: arguments)
         case let .sshForward(target), let .tailscale(target):
             let command = tmuxPath.isEmpty ? "tmux" : tmuxPath
             let remoteInvocation = ([command] + arguments)
                 .map(shellEscape(_:))
                 .joined(separator: " ")
             var sshArgs = sshBaseArgs(target: target, defaults: defaults)
+            sshArgs.append(mode == .interactive ? "-t" : "-T")
             let host = [target.username, target.hostname]
                 .compactMap { $0 }
                 .joined(separator: "@")
-            sshArgs.append(contentsOf: ["-t", host, remoteInvocation])
-            return LaunchProfile(
-                command: "/usr/bin/ssh",
-                arguments: sshArgs,
-                cwd: profile.cwd,
-                title: profile.title
-            )
-        case .tunnel:
-            fatalError("tunnel reach path not yet wired")
+            sshArgs.append(contentsOf: [host, remoteInvocation])
+            return Invocation(command: "/usr/bin/ssh", arguments: sshArgs)
+        case let .tunnel(relayHost):
+            throw ReachError.tunnelUnsupported(relayHost: relayHost)
         }
     }
 
