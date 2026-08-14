@@ -284,10 +284,15 @@ public struct AgentTranscriptProjection: Sendable {
         var mutations: [AgentDocumentMutation] = [
             .beginEntry(id: id, role: .user, provenance: .localPrompt(promptID: id.rawValue))
         ]
-        if !prompt.text.isEmpty || prompt.imageAttachments.isEmpty {
-            let blockID = childID(of: id, key: "prompt")
+        // Attachment blocks precede prose so the sent turn preserves the
+        // composer's attachment-above-editor hierarchy. Only path-free metadata
+        // enters the semantic document; local URLs remain transport capabilities.
+        if !prompt.fileReferences.isEmpty {
+            let blockID = childID(of: id, key: "file-references")
             mutations.append(.upsertStructured(entryID: id, block: AgentBlock(
-                id: blockID, kind: .paragraph, payload: .paragraph([.text(prompt.text)])
+                id: blockID,
+                kind: .fileReferences,
+                payload: .fileReferences(.init(files: prompt.fileReferences.map(\.transcriptMetadata)))
             )))
         }
         if !prompt.imageAttachments.isEmpty {
@@ -296,6 +301,12 @@ public struct AgentTranscriptProjection: Sendable {
                 id: blockID,
                 kind: .imageGallery,
                 payload: .imageGallery(.init(images: prompt.imageAttachments.map(\.imagePayload)))
+            )))
+        }
+        if !prompt.text.isEmpty || (prompt.imageAttachments.isEmpty && prompt.fileReferences.isEmpty) {
+            let blockID = childID(of: id, key: "prompt")
+            mutations.append(.upsertStructured(entryID: id, block: AgentBlock(
+                id: blockID, kind: .paragraph, payload: .paragraph([.text(prompt.text)])
             )))
         }
         mutations.append(.finishEntry(id: id))

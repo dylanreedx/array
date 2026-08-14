@@ -30,7 +30,7 @@ final class AgentBlockRendererRegistry {
     static let builtInKinds: [AgentBlockKind] = [
         .paragraph, .heading, .list, .listItem, .quote, .thematicBreak,
         .fencedCode, .toolCall, .commandOutput, .plan, .diff, .approval,
-        .question, .image, .imageGallery, .error, .notice, .unknown
+        .question, .image, .imageGallery, .fileReferences, .error, .notice, .unknown
     ]
 
     static let production: AgentBlockRendererRegistry = {
@@ -61,6 +61,8 @@ final class AgentBlockRendererRegistry {
                     try registry.register(AgentImageRenderer(), for: kind)
                 } else if kind == .imageGallery {
                     try registry.register(AgentImageGalleryRenderer(), for: kind)
+                } else if kind == .fileReferences {
+                    try registry.register(AgentFileReferenceRenderer(), for: kind)
                 } else if kind == .error || kind == .notice {
                     try registry.register(ErrorNoticeRenderer(kind: kind), for: kind)
                 } else {

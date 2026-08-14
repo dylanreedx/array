@@ -47,6 +47,10 @@ public struct AgentPromptFileReference: Equatable, Sendable {
     public var piPathReference: String {
         "@\(fileURL.path)"
     }
+
+    public var transcriptMetadata: AgentFileReferenceMetadata {
+        AgentFileReferenceMetadata(displayName: displayName, contentType: contentType)
+    }
 }
 
 /// Provider-neutral prompt submitted to an agent adapter. Text is the only

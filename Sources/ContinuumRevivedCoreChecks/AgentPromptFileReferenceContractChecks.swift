@@ -83,8 +83,9 @@ func runAgentPromptFileReferenceContractChecks() {
     expect(!hostileArgs.contains("bash") && !hostileArgs.contains("-lc"),
            "Pi adapter must not introduce a shell when passing file reference paths, got \(hostileArgs)")
 
-    // The reference path must never enter the syncable/persisted transcript. The
-    // projection reads only text + images, so a referenced path cannot leak.
+    // The transcript must retain path-free file metadata so the sent message can
+    // show the same attachment chips as the composer, while the local path remains
+    // a transport-only capability that never enters syncable/persisted content.
     let promptID = AgentNodeID(rawValue: "submission:file-ref-contract")!
     var projection = AgentTranscriptProjection(threadId: "file-ref-contract-thread")
     try! projection.appendUserPrompt(id: promptID, prompt: hostile)
@@ -92,6 +93,11 @@ func runAgentPromptFileReferenceContractChecks() {
     let json = String(decoding: encoded, as: UTF8.self)
     expect(!json.contains(hostilePath) && !json.contains("@\(hostilePath)"),
            "syncable/persisted transcript document must never carry a local file reference path, got \(json)")
+    expect(json.contains("notes-7.md") && json.contains("file-references"),
+           "transcript document must retain path-free file-reference metadata for the sent-message attachment rail, got \(json)")
+    let entryKinds = projection.document.entries.first?.blocks.map(\.kind.rawValue) ?? []
+    expect(entryKinds == ["file-references", "paragraph"],
+           "sent file attachments must project above the user message prose, got \(entryKinds)")
     let body = projection.compatibilityRows.map(\.body).joined(separator: "\n")
     expect(body == "look",
            "visible transcript prose must be the prompt text alone, not the reference path; body was \(body)")
