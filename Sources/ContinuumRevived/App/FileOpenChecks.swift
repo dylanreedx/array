@@ -209,7 +209,7 @@ enum FileOpenChecks {
                    "the new file tile must belong to B's installed zone layer; layer holds \(harness.canvas.tileIds(inZone: harness.zoneB))")
         try expect(!harness.canvas.canvasState.tiles.contains(where: { $0.id == tileId }),
                    "the new file tile must NOT be appended to the stale flat canvasState after setZones")
-        try expect(view.superview === harness.canvas, "the file tile view must be installed in the canvas view tree")
+        try expect(view.superview === harness.canvas.worldPlane, "the file tile view must be installed in the canvas world plane")
         try expect(view.loadedText?.contains("Sentinel Report") == true,
                    "the file tile must have loaded the sentinel file it was asked to open")
         try expect(view.qaMarkdownDocument?.qaVisibleText().contains("Sentinel Report") == true,

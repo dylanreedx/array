@@ -161,13 +161,16 @@ final class CanvasNSView: NSView, TokenThemed {
     /// QA reader: true iff the zone's chrome paints BEHIND all its member tiles
     /// (lower subview index = painted first). Guards the chrome-over-tiles bug.
     func qaZoneChromeIsBehindMembers(_ zoneId: UUID) -> Bool {
-        guard let chrome = zoneChromeViews[zoneId], let ci = subviews.firstIndex(of: chrome) else { return false }
+        // Paint order is the WORLD PLANE's child order — zone chrome and tiles are
+        // both world content, so neither is a direct child of the canvas.
+        let order = worldPlane.subviews
+        guard let chrome = zoneChromeViews[zoneId], let ci = order.firstIndex(of: chrome) else { return false }
         let memberViews = canvasState.tiles
             .filter { tileZoneMembership[$0.id] == zoneId }
             .compactMap { tileViews[$0.id] }
         guard !memberViews.isEmpty else { return true }
         return memberViews.allSatisfy { tv in
-            guard let ti = subviews.firstIndex(of: tv) else { return false }
+            guard let ti = order.firstIndex(of: tv) else { return false }
             return ci < ti
         }
     }
