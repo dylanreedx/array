@@ -50,7 +50,19 @@ Status as of 2026-08-09 (end of day):
      the pre-`65d420a` doc taxonomy, one of which demands "Continuum Revived" in
      the user-facing README and so contradicts the identity rule).
 
-     **It is back to those 7.** `--perf-budget-zoom-check` joined the list after
+     **It is 9 now** — those 7 plus `--perf-budget-transcript-delta-check` (the
+     streaming axis's product target, published RED with its counts since turned
+     green and only its duration outstanding) and `--perf-budget-zoom-check`,
+     which went green and then came back when its witness was corrected. The
+     scenario measured layout on a headless harness and never rasterized, so it
+     scored a real pinch as fast while Dylan reported it as choppy; it now counts
+     chrome redraws and is RED at 1,392 against a bound of 192. See
+     [performance-budgets.md](../internals/performance-budgets.md).
+
+     The paragraph below is kept as written, because the sequence is the point:
+     a leg leaving this list is only as trustworthy as the witness that let it go.
+
+     **It was briefly back to those 7.** `--perf-budget-zoom-check` joined the list after
      the retained world plane (`.plans/22` Slice 3) and has now left it again.
      Its original cause — a zoom step resizing every tile view — was fixed by the
      plane, which also retired the `--perf-budget-camera-slope-check` entry that

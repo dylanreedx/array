@@ -736,6 +736,8 @@ enum PerfScenarios {
         let steps = 120
         canvas.qaResetCameraLayoutStats()
         let proseBefore = AssistantProseView.qaMeasurementCount
+        let chromeRedrawsBefore = canvas.qaTotalTileChromeRedrawCount
+        let layoutInvalidationsBefore = canvas.qaTotalTileLayoutInvalidationCount
         let start = ProcessInfo.processInfo.systemUptime
         for step in 0..<steps {
             switch gesture {
@@ -752,6 +754,8 @@ enum PerfScenarios {
         let seconds = ProcessInfo.processInfo.systemUptime - start
         let stats = canvas.qaCameraLayoutStats
         let prose = AssistantProseView.qaMeasurementCount - proseBefore
+        let chromeRedraws = canvas.qaTotalTileChromeRedrawCount - chromeRedrawsBefore
+        let layoutInvalidations = canvas.qaTotalTileLayoutInvalidationCount - layoutInvalidationsBefore
         let perStepMs = seconds / Double(steps) * 1_000
 
         var measurements: [PerfMeasurement] = []
@@ -793,6 +797,39 @@ enum PerfScenarios {
             unit: .count,
             rationale: "moving the camera does not change any document's content or logical width, so no row may be re-measured"
         ).evaluate(Double(prose)))
+
+        // The REDRAW budget, and the reason this scenario was green while a real
+        // pinch stayed choppy.
+        //
+        // Everything above measures LAYOUT. The harness never rasterizes, so a
+        // step that marks all twelve tiles for redraw at a new scale costs it
+        // nothing — while on a real canvas that is the dominant cost, because a
+        // zoom changes SCALE and layer-backed content has to be re-rendered at it.
+        // A 30-second sample of a real pinch over 9 live tiles (2026-08-14) put
+        // ~2,600 samples in CA::Layer::display_if_needed and ~960 in the forced
+        // subtree layout underneath it, against ~380 in the camera itself. The
+        // camera was the third-largest cost and the only one this scenario could
+        // see.
+        //
+        // The bound is stated in scale BUCKETS, which is the shape the fix has to
+        // take (see the research doc's semantic-zoom section): chrome and content
+        // hold steady through a pinch and refine when the bucket changes. This
+        // sweep traverses 0.4–1.0 about twice, so a bucketed implementation costs
+        // each tile a handful of crossings; today it costs each tile one redraw
+        // per step, which is \(steps).
+        measurements.append(PerfBudget(
+            metric: "\(label).chromeRedraws",
+            limit: .atMost(Double(tileCount * 16)),
+            unit: .count,
+            rationale: "a camera gesture may re-rasterize a tile's chrome when its SCALE BUCKET changes, not on every step — per-step refresh is \(tileCount * steps) here"
+        ).evaluate(Double(chromeRedraws)))
+
+        measurements.append(PerfBudget(
+            metric: "\(label).tileLayoutInvalidations",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "a camera step must not mark a tile body for relayout; that is what drags a whole subtree into the rasterization pass"
+        ).evaluate(Double(layoutInvalidations)))
 
         // Teeth in the other direction: the assertions above must not be
         // satisfiable by a canvas that quietly stopped presenting anything.

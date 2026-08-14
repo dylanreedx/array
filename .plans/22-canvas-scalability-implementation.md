@@ -297,6 +297,18 @@ run in parallel. **Exit:** delta cost bounded by changed+visible rows at
 
 ## Slice 5 — Presentation lifecycle and semantic-zoom LOD (L3)
 
+> **Promoted 2026-08-14, on real-gesture evidence.** This slice was scheduled
+> after Slice 4 and behind the perf framework. A profile of a real pinch over 9
+> live tiles moved it up: zoom's dominant cost is re-rasterizing layer-backed
+> content at each new scale (~2,600 samples) plus the forced subtree layout
+> beneath it (~960), against ~380 for the camera. Nothing in Slices 3 or 4
+> touches that, and it is what Dylan feels today — panning is smooth, zooming is
+> choppy. The semantic-zoom half of this slice (stable scale buckets through a
+> gesture, one refine at settle) is the fix, and the chrome-floor quantisation
+> deferred from Slice 3 is a subset of it: measured as a throwaway experiment,
+> 1/8 buckets take `zoom.chromeRedraws` from 1,392 to 132. The presentation
+> lifecycle half still depends on Slice 4's streaming work.
+
 **What:** presentation activity becomes an explicit state, and readability
 bands drive real rendering. Four independent axes — semantic activity,
 resource residency, presentation LOD, interaction pins — never one enum.

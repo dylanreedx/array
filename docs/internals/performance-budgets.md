@@ -114,7 +114,56 @@ reverted to exact equality it fails at 1440 writes while `canvas.pan` stays
 green. Metrics and budgets otherwise mirror `canvas.pan` (measured 0.78 ms/step,
 9% of budget).
 
-### `canvas.zoom` — gating, green (was KNOWN-RED through two distinct causes)
+### `canvas.zoom` — KNOWN-RED again, because the WITNESS was wrong
+
+**Read this one first if you are about to trust a green performance leg.**
+
+This scenario went green on 2026-08-14 after two real fixes (below). Dylan then
+zoomed a real canvas of 9 live tiles and reported it still felt choppy — while
+panning felt great. He was right, and the leg was wrong.
+
+The scenario drives `setViewport` + `layoutSubtreeIfNeeded` on a headless harness
+of notes and Markdown documents. It measures **layout**. It never rasterizes,
+never composites, and holds no live agent, terminal or browser surface. But a pan
+translates content at a fixed scale, while a zoom *changes* scale — so every
+layer-backed subtree has to be re-rendered. A 30-second `sample` of the real
+gesture:
+
+| cost | samples | what |
+|---|---|---|
+| `CA::Layer::display_if_needed` | ~2,600 | re-rasterizing at the new scale |
+| forced `layoutSubtreeIfNeeded` beneath it | ~960 | the redraw dragging deep tile subtrees |
+| chrome floors (`refreshZoomDependentChrome`) | ~380 | the per-step title-bar repaint |
+| the camera itself | ~380 | what two slices of work optimised |
+
+The camera was the *third* largest cost and the only one the scenario could see.
+
+**The fix to the witness.** It now counts chrome redraw invalidations, which is
+deterministic and headless for the same reason the camera budgets count bounds
+writes instead of timing AppKit: the invalidation is the decision we control and
+the redraw is its consequence.
+
+| metric | budget | pan | zoom |
+|---|---|---|---|
+| `chromeRedraws` | ≤ 16 per tile | **0** | **1,392** |
+| `tileLayoutInvalidations` | == 0 | 0 | 0 |
+
+`pan` scoring 0 is what makes the zoom number mean something — the counter reads
+zero on a gesture that genuinely does not re-rasterize. The bound is stated in
+scale BUCKETS because that is the shape the fix must take: chrome and content hold
+steady through a pinch and refine when the bucket changes. Quantising the chrome
+floor into 1/8 scale buckets measures **132** — verified as a throwaway
+experiment, not committed, because it is product-visible (the bar height steps
+while zooming). That addresses chrome only; the ~2,600 samples of content
+rasterization are Slice 5's semantic-zoom work.
+
+`tileLayoutInvalidations` is 0 on both today — nothing on the camera path calls
+`invalidateForCanvasLayout`. It is a standing regression guard, not a live
+finding, and it is recorded as such rather than presented as a win.
+
+#### The two real fixes that came before, and still hold
+
+
 
 Same canvas, 120 zoom steps walking the scale continuously.
 
