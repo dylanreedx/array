@@ -125,9 +125,10 @@ enum InkAlignedSymbol {
 
     /// Draw `name` so its ink lands on `slot`, in `colour`.
     ///
-    /// `fraction` overrides how much of the slot the ink fills. A dot needs a much
-    /// smaller one than a triangle: `circle.fill` at the default 0.82 is a blob, and
-    /// the whole point of an unread dot is that it is small.
+    /// `fraction` overrides how much of the slot the ink fills. Every glyph in the
+    /// status column takes the default: they are all square, so one fraction gives
+    /// them one optical weight. The parameter survives because the density mocks
+    /// draw at other sizes.
     static func draw(
         _ name: String, in slot: NSRect, colour: NSColor, alignment: Alignment,
         flipped: Bool, fraction: CGFloat = inkTargetFraction
@@ -384,7 +385,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // a second one — `AgentInboxCellView.elapsedText` already decides what a
         // duration looks like on this surface.
         let word = Self.stateWord(row, now: now)
-        let elapsed = AgentInboxCellView.elapsedText(row.elapsed)
+        let elapsed = AgentInboxCellView.elapsedText(Self.stateAge(row, now: now))
         stateLabel.stringValue = [word, elapsed].compactMap { $0 }.joined(separator: " · ")
         stateLabel.isHidden = stateLabel.stringValue.isEmpty
 
@@ -399,19 +400,17 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         modelLabel.toolTip = model.isEmpty ? nil : model
         decorations.toolTip = model.isEmpty ? nil : model
 
-        let symbol = Self.attentionSymbol(row, now: now)
-        statusGlyph.symbol = symbol
-        statusGlyph.inkFraction = symbol.map(Self.inkFraction(forSymbol:))
-            ?? InkAlignedSymbol.inkTargetFraction
+        statusGlyph.symbol = Self.attentionSymbol(row, now: now)
         statusGlyph.alignment =
             anatomy.iconPlacement == .leading ? .leadingEdge : .centred
         // The pulse is the escalation, and it is the ONLY motion on a resting row.
-        // Reduce Motion drops it with nothing lost: the word changes from `Landed` to
-        // `Waiting` either way, so the escalation is legible without a single frame
-        // of animation. A cue that only exists as movement is a cue some people never
-        // receive.
-        statusGlyph.setPulsing(
-            Self.reviewState(row, now: now) == .waiting && !prefersReducedMotion())
+        //
+        // Under Reduce Motion it drops, and unlike the two-word version this design
+        // replaced, the escalation is then carried entirely by the AGE beside the
+        // word: `Unseen · 2m` and `Unseen · 3h` are the same sentence at different
+        // volumes. A cue that exists only as movement is a cue some people never
+        // receive, so the number has to be the one that does the work.
+        statusGlyph.setPulsing(Self.hasEscalated(row, now: now) && !prefersReducedMotion())
         decorations.isWorking = row.state == .working
         decorations.drawsBranchGlyph = !branchLabel.stringValue.isEmpty
 
@@ -441,28 +440,28 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// `InboxAttention.unread` is queue-94's own "you have not seen this", whose
     /// doc comment already says the thing this design needs: *"Unread is a MARK,
     /// not a word."*
-    enum ReviewState {
-        /// Finished, unseen, recently. A quiet mark.
-        case landed
-        /// Finished, unseen, and ignored past `escalationDelay`. The mark pulses.
-        case waiting
-
-        var word: String {
-            switch self {
-            case .landed: return "Landed"
-            case .waiting: return "Waiting"
-            }
-        }
+    ///
+    /// This is ONE state, not two. An earlier version split it into `Landed` and
+    /// `Waiting` at the ten-minute mark, which made the row change its vocabulary
+    /// while its meaning stayed identical — the reader had to learn that two words
+    /// were the same fact. The age beside the word already says everything the
+    /// second word was trying to: `Unseen · 2m` and `Unseen · 3h` differ by the
+    /// number, which is the part that is actually true.
+    static func isUnseen(_ row: AgentInboxRow) -> Bool {
+        row.state == .ready && row.attention == .unread && !row.isUnconfirmed
     }
 
-    /// Whether this row is finished-and-unseen, and how insistent it has earned the
-    /// right to be. nil for everything else.
-    static func reviewState(_ row: AgentInboxRow, now: Date) -> ReviewState? {
-        guard row.state == .ready, row.attention == .unread, !row.isUnconfirmed else {
-            return nil
-        }
-        guard let since = row.lastActiveAt else { return .landed }
-        return now.timeIntervalSince(since) >= escalationDelay ? .waiting : .landed
+    /// How long an unseen row has been sitting, or nil when it is not unseen or its
+    /// age is unknown. An unseen row with no `lastActiveAt` is still unseen; it just
+    /// cannot escalate, because escalating on an unknown age would be a guess.
+    static func unseenAge(_ row: AgentInboxRow, now: Date) -> TimeInterval? {
+        guard isUnseen(row), let since = row.lastActiveAt else { return nil }
+        return max(0, now.timeIntervalSince(since))
+    }
+
+    /// An unseen row ignored past `escalationDelay`. Its mark pulses.
+    static func hasEscalated(_ row: AgentInboxRow, now: Date) -> Bool {
+        (unseenAge(row, now: now) ?? 0) >= escalationDelay
     }
 
     /// The word this row's state gets, or nil for a state that says nothing.
@@ -472,9 +471,26 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// three of five terminal outcomes rendering NO state at all. A finished agent
     /// should say it finished, and one nobody has looked at should say more than that.
     static func stateWord(_ row: AgentInboxRow, now: Date) -> String? {
-        if let review = reviewState(row, now: now) { return review.word }
+        if isUnseen(row) { return "Unseen" }
         if let label = row.state.label { return label }
         return row.isUnconfirmed ? nil : "Done"
+    }
+
+    /// The number beside the word.
+    ///
+    /// `row.elapsed` is a LIVE turn's duration and is documented as meaningful only
+    /// while working — which is why every finished row rendered its state with no
+    /// time at all, including the one state whose entire meaning is how long it has
+    /// been sitting there. A finished row's number is its AGE.
+    ///
+    /// Additive by construction: it fills in only where `row.elapsed` was already
+    /// nil. The formatter is the shipped one, so a duration looks the same here as
+    /// it does on every other surface.
+    static func stateAge(_ row: AgentInboxRow, now: Date) -> TimeInterval? {
+        if let elapsed = row.elapsed { return elapsed }
+        guard row.state == .ready, !row.isUnconfirmed, let since = row.lastActiveAt
+        else { return nil }
+        return max(0, now.timeIntervalSince(since))
     }
 
     /// Three glyphs, and most rows get none.
@@ -487,21 +503,20 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// Approval and input deliberately share the hand. That is NOT the P0.1 defect
     /// of the two sharing a word — the icon says "you are needed" and the word still
     /// says which kind.
+    ///
+    /// `eye.circle.fill` rather than a bare eye because the column scales each symbol
+    /// by its LARGEST dimension: a bare `eye.fill` is roughly 2:1, so it would be
+    /// sized by its width and land at about half the height of the triangle beside
+    /// it. The disc is square, like every other glyph in the column, and it pulses
+    /// cleanly — one shape fading, not an outline shimmering.
     static func attentionSymbol(_ row: AgentInboxRow, now: Date) -> String? {
-        if reviewState(row, now: now) != nil { return "circle.fill" }
+        if isUnseen(row) { return "eye.circle.fill" }
         switch row.state {
         case .working: return nil   // the throbber, not a symbol
         case .approval, .input: return "hand.raised.fill"
         case .failed: return "exclamationmark.triangle.fill"
         case .ready: return nil
         }
-    }
-
-    /// The unread dot is a DOT. At the shared 0.82 ink fraction a filled circle is a
-    /// blob the size of the error triangle, which would make "finished" shout louder
-    /// than "broken".
-    static func inkFraction(forSymbol symbol: String) -> CGFloat {
-        symbol == "circle.fill" ? 0.42 : InkAlignedSymbol.inkTargetFraction
     }
 
     /// The app's own throbber, added only while a row is working.
@@ -570,15 +585,29 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// | working | blue, plus the moving glyph | in flight, wants nothing |
     /// | approval, input | amber | a decision is wanted — ONE colour for both |
     /// | failed | red | it broke |
-    /// | done, and you saw it | green | it went well, and it is closed |
-    /// | landed / waiting | rose | finished, and nobody has looked |
+    /// | unseen | mint | finished, and nobody has looked |
+    /// | done, and you saw it | **no colour** | it went well, it is closed, it is over |
     ///
-    /// The rose is the one that had to be argued for: see `AccentToken.accentReview`.
-    /// It is a sixth accent because neither of its neighbours can carry it — green
-    /// loses it among the rows you already read, amber makes it look like something
-    /// is blocking when nothing is.
+    /// Ruled 2026-08-14, round 8. Two changes, and the second is what makes the
+    /// first legal.
+    ///
+    /// The rose that carried "unseen" was 21° of hue from the failure red, so a
+    /// finished row and a broken one read as the same kind of event at a glance.
+    /// Mint replaces it: `Unseen` is a *finished* state, nobody is blocked, and the
+    /// green family says exactly that — the family resemblance to a row you already
+    /// read is the point, since the only difference between them is whether you
+    /// looked.
+    ///
+    /// Which is why **`.ready` returns nil**. Mint sits 25° from the old
+    /// `accentDone` green — the same near-miss, one hue over. Retiring green from
+    /// the row costs nothing (a settled row is the one row asking for nothing) and
+    /// buys mint a 48° gap to its nearest neighbour, the widest in the palette.
+    /// Colour on a row now means one thing and one thing only: this wants you.
+    ///
+    /// A done row is not left to rot, either — see the nudge pill, which is how it
+    /// eventually asks to be put away.
     static func accentToken(_ row: AgentInboxRow, now: Date) -> AccentToken? {
-        if reviewState(row, now: now) != nil { return .accentReview }
+        if isUnseen(row) { return .accentReview }
         switch row.state {
         case .working: return .accentWorking
         // ONE colour for the two kinds of asking. This deliberately drops
@@ -586,7 +615,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // is read one at a time and a list is read as a column.
         case .approval, .input: return .accentApproval
         case .failed: return .accentFailed
-        case .ready: return .accentDone
+        // Seen, finished, closed. `accentColour` routes nil to `textSecondary`.
+        case .ready: return nil
         }
     }
 
@@ -763,7 +793,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// have an edge treatment saying "look here" and no glyph, or the reverse.
     static func isAttention(_ row: AgentInboxRow?, now: Date) -> Bool {
         guard let row else { return false }
-        if reviewState(row, now: now) != nil { return true }
+        if isUnseen(row) { return true }
         switch row.state {
         case .working, .approval, .input, .failed: return true
         case .ready: return false

@@ -55,6 +55,7 @@ import Foundation
 //   accentInput      6.32 (canvas)    5.35 (cardUserMsg)  4.5
 //   accentFailed     5.27 (canvas)    5.85 (cardUserMsg)  4.5
 //   accentDone       5.90 (canvas)    6.74 (cardUserMsg)  4.5
+//   accentReview     5.41 (canvas)    7.35 (cardUserMsg)  4.5
 //
 // The worst background is `canvas` in light and `cardUserMessage` in dark for
 // every token — the two ends of the surface ladder — which is what makes
@@ -504,6 +505,7 @@ public enum AgentTileTokens {
 //   accentInput        5.58    5.65    4.5
 //   accentFailed       4.65    6.18    4.5
 //   accentDone         5.21    7.12    4.5
+//   accentReview       4.77    7.75    4.5
 //   controlBoundary    3.11    3.63    3.0
 //   focusRing          6.10    6.43    3.0
 //
@@ -632,11 +634,26 @@ public enum AccentToken: String, CaseIterable, Sendable {
     /// green makes it indistinguishable from the forty finished rows you already
     /// read, which is the exact failure program 96 added the state to prevent.
     ///
-    /// Rose rather than another warm hue so it cannot be confused with the amber
-    /// beside it at a glance, which is the whole job. `0xE5799B` is Dylan's pick and
-    /// is the dark-theme value; the light one is the darkened variant that clears
-    /// the 4.5:1 text floor on a near-white surface, exactly as every accent above
-    /// is built.
+    /// Mint. The first attempt at this was a rose, `0xE5799B`, and it shipped for
+    /// one round before Dylan rejected it on sight: it read as a second error
+    /// colour. He was right, and it is measurable — the dark failure red is hue 3°
+    /// and that rose was 342°, **21° apart**, with nothing in the gate to notice.
+    ///
+    /// Mint instead, because "unseen" belongs to the FINISHED family, not the alarm
+    /// family: nothing is blocked, the work went well, it is simply sitting there.
+    /// The family resemblance to a row you already read is the point — the only
+    /// difference between those two rows is whether you looked.
+    ///
+    /// Which is why this can only be mint if a settled row stops being green. At 25°
+    /// from `accentDone` it would have repeated the rose's failure one hue over, so
+    /// program 96's row retires green (a settled row is the one row asking for
+    /// nothing) and mint gets a 48° gap to its nearest neighbour — the widest in the
+    /// palette. See `runAccentSeparationCheck`, which now enforces that gap so the
+    /// next near-miss goes red instead of shipping.
+    ///
+    /// `0x4CD6B4` is Dylan's hue at a value that clears the accent band; the light
+    /// one is the darkened variant that clears the 4.5:1 text floor on a near-white
+    /// surface, exactly as every accent above is built.
     case accentReview
 
     public var color: TokenColor {
@@ -644,13 +661,13 @@ public enum AccentToken: String, CaseIterable, Sendable {
         // Light values are the darkened (-600/-700) variants that clear 4.5:1 on
         // a near-white surface; dark values are the lighter (-300) ones. Both
         // ends hold the hue: 217/213 blue, 36/35 amber, 265/267 violet,
-        // 2/3 red, 139/140 green, 340/342 rose.
+        // 2/3 red, 139/140 green, 168/165 mint.
         case .accentWorking: return TokenColor(light: srgb(0x1257C7), dark: srgb(0x5FA8FF))
         case .accentApproval: return TokenColor(light: srgb(0x845000), dark: srgb(0xFFB347))
         case .accentInput: return TokenColor(light: srgb(0x6B2FBF), dark: srgb(0xC08CFF))
         case .accentFailed: return TokenColor(light: srgb(0xB92420), dark: srgb(0xFF8A85))
         case .accentDone: return TokenColor(light: srgb(0x186630), dark: srgb(0x4FD07A))
-        case .accentReview: return TokenColor(light: srgb(0xA83259), dark: srgb(0xE5799B))
+        case .accentReview: return TokenColor(light: srgb(0x096B57), dark: srgb(0x4CD6B4))
         }
     }
 

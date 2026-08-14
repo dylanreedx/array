@@ -1217,10 +1217,10 @@ func runSidebarSurfaceChecks() {
         ("accentInput", .light, 5.58), ("accentInput", .dark, 5.65),
         ("accentFailed", .light, 4.65), ("accentFailed", .dark, 6.18),
         ("accentDone", .light, 5.21), ("accentDone", .dark, 7.12),
-        // Program 96. 4.75 against the strongest fill is the tightest margin in
-        // this table — a quarter of a point of headroom, recorded rather than
-        // rounded away, so a future palette nudge to the rose goes red first.
-        ("accentReview", .light, 4.75), ("accentReview", .dark, 5.05),
+        // Program 96, round 8. The rose this replaced ran 4.75 against the
+        // strongest fill — the tightest margin the table held. The mint is
+        // ordinary at both ends; the failure red is now the tightest at 4.65.
+        ("accentReview", .light, 4.77), ("accentReview", .dark, 7.75),
         ("controlBoundary", .light, 3.11), ("controlBoundary", .dark, 3.63),
         ("focusRing", .light, 6.10), ("focusRing", .dark, 6.43)
     ]
