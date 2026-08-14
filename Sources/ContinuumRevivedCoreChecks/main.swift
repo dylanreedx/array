@@ -4884,6 +4884,155 @@ do {
     expect(viewportRect.intersects(CGRect(x: placed.x, y: placed.y, width: placed.width, height: placed.height)), "Fallback from far-away last tile is clamped into visible viewport, got \(placed)")
 }
 
+// MARK: - TileSpawnPlacement: centre-aware spawn placement (.plans/18)
+//
+// Pure geometry only. Every expectation is written out by hand from the fixture
+// numbers, never obtained by calling the policy. The app leg
+// (`Array --spawn-placement-check`) covers the model routing and coordinate space
+// that these cases deliberately do not know about.
+
+func spawnSibling(_ frame: TileFrame, z: Int = 1) -> Tile {
+    Tile(id: UUID(), kind: .note, title: "sibling", frame: frame, zPosition: .fromLegacyRank(z), runtimeRef: nil, metadata: TileMetadata())
+}
+func spawnContext(size: CGSize, viewport: CanvasViewport, visible: CGSize, siblings: [Tile], gap: Double = 8) -> TileSpawnPlacement.Context {
+    TileSpawnPlacement.Context(newSize: size, viewport: viewport, visibleSize: visible, siblings: siblings, gap: gap)
+}
+
+do {
+    // Empty centre, panned and zoomed. Screen centre (400,300) at zoom 2 is world
+    // (1000 + 400/2, 500 + 300/2) = (1200, 650); a 200x100 tile centred there starts
+    // at (1100, 600). The world centre must come from the SCREEN centre, so a zoom
+    // that is ignored silently moves the tile half a viewport away.
+    let placed = TileSpawnPlacement.automatic(spawnContext(
+        size: CGSize(width: 200, height: 100),
+        viewport: CanvasViewport(x: 1000, y: 500, zoom: 2),
+        visible: CGSize(width: 800, height: 600),
+        siblings: []
+    ))
+    expect(placed == TileFrame(x: 1100, y: 600, width: 200, height: 100), "Panned + zoomed empty centre derives the world centre from the screen centre, got \(placed)")
+}
+
+do {
+    // Anchor detection uses canvas z-order, not storage order. Both tiles contain the
+    // world centre (400,300); the one on top must win, and it is stored FIRST.
+    let topmost = spawnSibling(TileFrame(x: 200, y: 200, width: 400, height: 200), z: 9)
+    let beneath = spawnSibling(TileFrame(x: 300, y: 250, width: 200, height: 100), z: 1)
+    let placed = TileSpawnPlacement.automatic(spawnContext(
+        size: CGSize(width: 100, height: 50),
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        visible: CGSize(width: 800, height: 600),
+        siblings: [topmost, beneath]
+    ))
+    // Topmost is the rank-9 tile even though it is stored first and is the larger of
+    // the two: right edge 600 + gap 8 = 608, centred on its midY 300.
+    expect(placed == TileFrame(x: 608, y: 275, width: 100, height: 50), "Anchor is the TOPMOST tile under the centre, got \(placed)")
+}
+
+do {
+    // Unequal sizes are centre-aligned on the perpendicular axis, so the pair reads as
+    // a relationship rather than another row-major artifact. Anchor midY = 300.
+    let anchor = spawnSibling(TileFrame(x: 300, y: 200, width: 200, height: 200))
+    let placed = TileSpawnPlacement.automatic(spawnContext(
+        size: CGSize(width: 120, height: 60),
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        visible: CGSize(width: 800, height: 600),
+        siblings: [anchor]
+    ))
+    expect(placed == TileFrame(x: 508, y: 270, width: 120, height: 60), "Docked candidate is perpendicular-centre aligned to an unequal anchor, got \(placed)")
+}
+
+do {
+    // Right blocked, left free: left must win on collision class alone. Anchor
+    // 300..500 x 200..400; the blocker sits exactly where the right candidate goes.
+    let anchor = spawnSibling(TileFrame(x: 300, y: 200, width: 200, height: 200))
+    let blocker = spawnSibling(TileFrame(x: 508, y: 250, width: 100, height: 100))
+    let placed = TileSpawnPlacement.automatic(spawnContext(
+        size: CGSize(width: 100, height: 100),
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        visible: CGSize(width: 800, height: 600),
+        siblings: [anchor, blocker]
+    ))
+    expect(placed == TileFrame(x: 192, y: 250, width: 100, height: 100), "A blocked right side docks left, got \(placed)")
+}
+
+do {
+    // Both horizontal sides blocked and both vertical sides free and equally visible:
+    // the documented direction order right > left > below > above picks below.
+    let anchor = spawnSibling(TileFrame(x: 300, y: 250, width: 200, height: 100))
+    let rightBlocker = spawnSibling(TileFrame(x: 508, y: 250, width: 100, height: 100))
+    let leftBlocker = spawnSibling(TileFrame(x: 192, y: 250, width: 100, height: 100))
+    let placed = TileSpawnPlacement.automatic(spawnContext(
+        size: CGSize(width: 100, height: 100),
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        visible: CGSize(width: 800, height: 600),
+        siblings: [anchor, rightBlocker, leftBlocker]
+    ))
+    expect(placed == TileFrame(x: 350, y: 358, width: 100, height: 100), "Blocked horizontal sides dock below, got \(placed)")
+}
+
+do {
+    // Above is the only collision-free side, and it wins even though it is last in the
+    // direction order — the order is a tie-break, never a ranking.
+    let anchor = spawnSibling(TileFrame(x: 300, y: 250, width: 200, height: 100))
+    let rightBlocker = spawnSibling(TileFrame(x: 508, y: 200, width: 200, height: 200))
+    let leftBlocker = spawnSibling(TileFrame(x: 92, y: 200, width: 200, height: 200))
+    let belowBlocker = spawnSibling(TileFrame(x: 300, y: 358, width: 200, height: 200))
+    let placed = TileSpawnPlacement.automatic(spawnContext(
+        size: CGSize(width: 100, height: 100),
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        visible: CGSize(width: 800, height: 600),
+        siblings: [anchor, rightBlocker, leftBlocker, belowBlocker]
+    ))
+    expect(placed == TileFrame(x: 350, y: 142, width: 100, height: 100), "Above wins when it is the only collision-free side, got \(placed)")
+}
+
+do {
+    // Bounded outward search: the immediate right candidate is blocked, so ring 1
+    // clears the blocker (maxX 700) plus the gap. It must NOT revert to a top-left
+    // scan, and it must clear the blocker rather than step 32pt into it.
+    let anchor = spawnSibling(TileFrame(x: 300, y: 250, width: 200, height: 100))
+    let rightBlocker = spawnSibling(TileFrame(x: 508, y: 200, width: 192, height: 200))
+    let leftBlocker = spawnSibling(TileFrame(x: 0, y: 200, width: 292, height: 200))
+    let belowBlocker = spawnSibling(TileFrame(x: 300, y: 358, width: 200, height: 400))
+    let aboveBlocker = spawnSibling(TileFrame(x: 300, y: 0, width: 200, height: 242))
+    let placed = TileSpawnPlacement.automatic(spawnContext(
+        size: CGSize(width: 100, height: 100),
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        visible: CGSize(width: 800, height: 600),
+        siblings: [anchor, rightBlocker, leftBlocker, belowBlocker, aboveBlocker]
+    ))
+    expect(placed == TileFrame(x: 708, y: 250, width: 100, height: 100), "A blocked side searches outward past the blocker, got \(placed)")
+}
+
+do {
+    // Saturation: nothing collision-free within the bounded search, so the least-bad
+    // candidate is chosen — and the SAME crowded input returns the SAME frame.
+    let anchor = spawnSibling(TileFrame(x: 300, y: 250, width: 200, height: 100))
+    let wall = spawnSibling(TileFrame(x: -5_000, y: -5_000, width: 10_000, height: 10_000), z: 0)
+    let context = spawnContext(
+        size: CGSize(width: 100, height: 100),
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        visible: CGSize(width: 800, height: 600),
+        siblings: [anchor, wall]
+    )
+    let first = TileSpawnPlacement.automatic(context)
+    let second = TileSpawnPlacement.automatic(context)
+    expect(first == second, "Saturated placement is deterministic, got \(first) then \(second)")
+    expect(first == TileFrame(x: 508, y: 250, width: 100, height: 100), "Saturated placement keeps the anchor relationship on the first side, got \(first)")
+}
+
+do {
+    // A tile larger than the viewport keeps its working size: the axis that fits is
+    // centred, the axis that cannot gets a stable padded origin.
+    let placed = TileSpawnPlacement.automatic(spawnContext(
+        size: CGSize(width: 1_200, height: 300),
+        viewport: CanvasViewport(x: 100, y: 200, zoom: 1),
+        visible: CGSize(width: 800, height: 600),
+        siblings: []
+    ))
+    expect(placed == TileFrame(x: 108, y: 350, width: 1_200, height: 300), "An oversized tile keeps its size, pads the axis that cannot fit and centres the one that can, got \(placed)")
+}
+
 // MARK: - TileArrangement: geometry
 
 do {
