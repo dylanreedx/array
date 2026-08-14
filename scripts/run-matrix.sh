@@ -83,6 +83,14 @@ MATRIX_KNOWN_RED=(
   --agent-supervisor-check
   --nav-mode-check
   --palette-first-responder-restore-check
+  # The streaming axis's product target, published RED before the fix so the fix
+  # has something to turn green (.plans/22 Slice 4). A one-row delta costs
+  # O(history): 10,000 block visits and 36 ms on a 10,000-row transcript. Its
+  # teeth budgets are GREEN in the same run — the delta does invalidate exactly
+  # the 1 row it changed — so this is a locality defect, not a broken update
+  # path. Published in docs/internals/performance-budgets.md; do NOT bisect it
+  # as a regression.
+  --perf-budget-transcript-delta-check
   # Inherited reds, not independent ones. `ContinuumRevivedPaletteChecks` prints
   # its own model assertions and THEN shells out to the app's
   # --palette-first-responder-restore-check, so it cannot be green while that
@@ -536,6 +544,16 @@ run_app_check .build/debug/Array --perf-budget-check --scenario canvas.fractiona
 # green with the retained world plane (.plans/22 Slice 3), which is also when both
 # it and --perf-budget-zoom-check leave MATRIX_KNOWN_RED.
 run_app_check .build/debug/Array --perf-budget-camera-slope-check
+# The STREAMING axis of the scalability contract, KNOWN-RED on purpose and for
+# the same shape of reason as the camera legs: the cost driver is history length,
+# so a fixture that never varies it can sit green while a delta is linear in the
+# conversation. apply(document:patch:) receives a real AgentDocumentPatch naming
+# the changed nodes and then calls flatten(document) anyway, walking every entry
+# and every block — measured at 10,000 nodes and 36 ms for ONE revised tail row
+# on a 10,000-row transcript, while the same run reports it invalidated exactly
+# 1 top-level row. The locality is already known and thrown away. Goes green with
+# .plans/22 Slice 4, which is also when it leaves MATRIX_KNOWN_RED.
+run_app_check .build/debug/Array --perf-budget-transcript-delta-check
 # The camera's correctness oracle, recorded BEFORE the retained world plane so it
 # can mean something afterwards: two independent mechanisms — the model
 # (CanvasEngine over world rects) and the installed view geometry (front-to-back,

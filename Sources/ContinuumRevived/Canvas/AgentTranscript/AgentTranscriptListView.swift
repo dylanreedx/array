@@ -433,6 +433,22 @@ final class AgentTranscriptListView: NSView {
     var qaLastInvalidatedTopLevelCount: Int { lastInvalidatedTopLevelCount }
     var qaRenderingErrorDescription: String? { renderingError.map(String.init(describing:)) }
 
+    /// QA: how much work the row index cost. `qaFlattenNodeVisits` counts every
+    /// block node walked including nested children, `qaFlattenedRowCount` the rows
+    /// emitted, and `qaFullFlattenCount` the number of whole-document rebuilds.
+    /// The streaming contract is that a one-row delta scales with the change and
+    /// the visible rows, never with total history, so all three must stay flat as
+    /// the transcript grows. Drives `--perf-budget-transcript-delta-check`.
+    private(set) var qaFlattenNodeVisits = 0
+    private(set) var qaFlattenedRowCount = 0
+    private(set) var qaFullFlattenCount = 0
+
+    func qaResetFlattenStats() {
+        qaFlattenNodeVisits = 0
+        qaFlattenedRowCount = 0
+        qaFullFlattenCount = 0
+    }
+
     override func accessibilityChildren() -> [Any]? {
         // Expose the actual virtualized semantic hosts in collection/document
         // order instead of trusting AppKit's reuse-pool traversal order. Each
@@ -1070,8 +1086,15 @@ final class AgentTranscriptListView: NSView {
         var owners: [AgentNodeID: Set<AgentNodeID>] = [:]
         var toolDetailIDs: [AgentNodeID: AgentToolDetailKey] = [:]
         var topLevelIDs: Set<AgentNodeID> = []
+        qaFullFlattenCount += 1
+        var nodeVisits = 0
+        defer {
+            qaFlattenNodeVisits += nodeVisits
+            qaFlattenedRowCount += rows.count
+        }
 
         func index(_ block: AgentBlock, owner: AgentNodeID, detailID: AgentToolDetailKey?) {
+            nodeVisits += 1
             owners[block.id] = [owner]
             if let detailID { toolDetailIDs[block.id] = detailID }
             block.children.forEach { index($0, owner: owner, detailID: detailID) }
