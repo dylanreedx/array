@@ -1,8 +1,10 @@
 # 22 — Canvas scalability implementation plan
 
-Status: **SLICE 1′ AND SLICE 3 LANDED, FULL MATRIX GREEN (159 legs, the expected
-8 KNOWN-RED, no failures).** `canvas.zoom` remains known-red for a NEW and
-narrower reason, written up below and awaiting a product decision. Stage 0 (the tolerant camera guard with its fractional-zoom witness,
+Status: **SLICE 1′ AND SLICE 3 LANDED AND COMPLETE.** `canvas.zoom` is now
+gating-green at 4.7 ms/step: the retained world plane removed the camera's
+per-tile cost, and decoupling the content inset from the chrome floor removed the
+second cause it exposed. `--perf-budget-zoom-check` has left `MATRIX_KNOWN_RED`,
+which is back to its 7 pre-existing entries. Stage 0 (the tolerant camera guard with its fractional-zoom witness,
 the opt-in `canvas.stress` scenario, and the two ownership-leak fixes) landed
 ahead of this plan. Slices 4–8 still reshape transcript streaming or the
 presentation lifecycle and do not begin until Dylan approves each one.
@@ -24,36 +26,38 @@ zone chrome hold world frames a camera step never touches.
 | `stress.tilesLaidOutPerStep` | 48 → **0** |
 | hit-test / z-order / focus / spawn oracles | all green |
 | `--perf-budget-camera-slope-check` off KNOWN-RED | done |
-| `--perf-budget-zoom-check` off KNOWN-RED | **NOT done — see below** |
+| `--perf-budget-zoom-check` off KNOWN-RED | done, in a follow-up — see below |
 
-**The one exit criterion missed, and why it is still a good result.** Removing
-the camera's per-tile cost exposed a second, independent cause of zoom expense
-that was hidden underneath it: a tile's chrome floors are
-`max(worldConstant, screenPx / zoom)`, so below the floor threshold the title
-bar's world height changes on every zoom step, and because
-`contentTopInsetWorldHeight` is aliased to it the tile's content reflows and
-every prose row re-measures. That is 48 ms/step and 14,490 measurements, with
-`boundsWrites` at zero — the same symptom, a different disease.
+**The exit criterion that needed a second fix.** Removing the camera's per-tile
+cost exposed a second, independent cause of zoom expense hidden underneath it:
+a tile's chrome floors are `max(worldConstant, screenPx / zoom)`, and
+`contentTopInsetWorldHeight` was aliased to that floor, so the tile's content
+re-framed and reflowed on every step. 49.1 ms/step and 14,490 prose measurements
+with `boundsWrites` at zero — the same symptom, a different disease.
 
-Dropping the chrome refresh makes `canvas.zoom` green at 1.5 ms/step and zero
-prose measurements, but leaves the grab strip and drawn bar stale at low zoom,
-which `--camera-chrome-redraw-check` correctly fails. So the two candidate fixes
-are both **product-visible** and are left for a decision rather than taken
-silently:
+Dylan chose the decoupling over quantising the floor, and it landed on
+2026-08-14: `contentTopInsetWorldHeight` is now the unfloored `titleBarHeight`,
+so an enlarged low-zoom grab strip overlays the top of the body rather than
+pushing it down. **49.1 → 4.7 ms/step, 14,490 → 0 prose measurements**, with the
+chrome floors themselves untouched. `--perf-budget-zoom-check` left
+`MATRIX_KNOWN_RED` in the same commit that turned it green.
 
-1. **Quantise the chrome floor** into discrete zoom buckets with hysteresis —
-   chrome holds steady during a pinch and refines once at settle. This is what
-   the research doc already prescribes for zoom-dependent detail, and it would
-   generalise to preview/LOD buckets later. Cost: the bar height visibly steps
-   rather than sliding while zooming out.
-2. **Stop aliasing `contentTopInsetWorldHeight` to the floor**, so an enlarged
-   grab strip overlays the top of the content instead of reflowing it. Cheaper
-   and more surgical. Cost: at low zoom the bar covers a sliver of content.
+Two things that surfaced doing it, both worth keeping:
 
-Recommendation: (2) first — it is a two-line change with an obvious witness
-(`zoom.proseMeasurements == 0` while `--camera-chrome-redraw-check` stays green)
-and it does not alter chrome geometry at all, only what the chrome overlaps.
-Take (1) later as part of Slice 5's LOD work, where hysteresis belongs anyway.
+- **The floor is active far more often than "when zoomed out" suggests.**
+  `minScreenGrabPx` (28) exceeds `titleBarHeight` (24), so it binds for every
+  zoom below **1.167** — the whole 0.4–1.0 fixture sweep, not an edge case.
+- **Two more witnesses encoded the implementation rather than the property.**
+  `--tile-chrome-scale-check` and `--tile-world-bounds-check` both asserted
+  `contentTop == flooredBarHeight` and so failed a correct canvas, exactly like
+  the `frameWrites >= 1` anti-teeth did in Slice 3. They now assert
+  zoom-invariance of the body's top (measured across the sweep from laid-out
+  views, not re-derived), that the bar always reaches the body, and that a zoom
+  never calls `setFrameSize` on a body — the last unconditionally, where it
+  previously held only while the floor happened to sit still.
+
+Quantising the floor into zoom buckets with hysteresis remains the right move
+later, as part of Slice 5's LOD work where hysteresis belongs anyway.
 
 **A second measured tradeoff, recorded not smoothed.** The `canvas.stress` pan
 duration regressed from ~5.4–6.0 to ~7.4–9.3 ms/step even though every work

@@ -308,11 +308,10 @@ class TileNSView: NSView, TokenThemed {
     }
 
     private func layoutContentView() {
-        // Most tile bodies track the (zoom-floored) bar height so the body never
-        // overlaps the bar or leaves a gap beneath it. Terminal tiles override
-        // this inset to keep the Ghostty grid stable while the camera zooms;
-        // their larger low-zoom grab strip is visual chrome over a stable body,
-        // not a terminal resize request.
+        // The inset is zoom-independent, so a camera move never re-frames the body:
+        // an enlarged low-zoom grab strip is visual chrome OVER a stable body, not
+        // a resize request. That rule was written for the Ghostty grid and now
+        // holds for every tile kind — see `contentTopInsetWorldHeight`.
         let barHeight = contentTopInsetWorldHeight
         let nextFrame = NSRect(x: 0, y: barHeight, width: bounds.width, height: max(0, bounds.height - barHeight))
         if contentView?.frame != nextFrame {
@@ -612,9 +611,15 @@ class TileNSView: NSView, TokenThemed {
     /// region — no second divergent floor to drift out of sync.
     var chromeBarHeight: CGFloat { grabHeightInLocalCoordinates }
 
-    /// World y-offset for the content view. Defaults to the visual chrome height;
-    /// terminal tiles override this so camera zoom does not reflow the PTY grid.
-    var contentTopInsetWorldHeight: CGFloat { chromeBarHeight }
+    /// World y-offset for the content view. Deliberately the UNFLOORED bar height,
+    /// so it does not change with the camera: `chromeBarHeight` is
+    /// `max(titleBarHeight, minScreenGrabPx/zoom)`, and since `minScreenGrabPx`
+    /// (28) exceeds `titleBarHeight` (24), every zoom below 1.167 moves that floor
+    /// on every step. Aliasing the inset to it re-framed the body on each step and
+    /// reflowed the document. At low zoom the enlarged grab strip therefore overlays
+    /// the top of the body rather than pushing it down — chrome geometry is
+    /// unchanged, only what it covers.
+    var contentTopInsetWorldHeight: CGFloat { Self.titleBarHeight }
 
     private(set) var qaCanvasLayoutInvalidationCount = 0
 

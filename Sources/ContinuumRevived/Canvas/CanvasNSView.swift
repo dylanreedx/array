@@ -4149,26 +4149,28 @@ final class CanvasNSView: NSView, TokenThemed {
         var bounds: [String: [String: Double]] = [:]
         var edgePasses: [String: Bool] = [:]
         var cornerPasses: [String: Bool] = [:]
-        var contentTopMatchesBar: [String: Bool] = [:]
-        var prevBarHeight = tileView.chromeBarHeight
-        // When the floored bar height does NOT change between zooms (the common
-        // zoomed-IN regime), the content view must NOT be relaid out — that is
-        // the world-bounds guarantee that AppKit's frame transform, not a manual
-        // reflow, scales the body. The content only re-frames when the bar height
-        // genuinely changes (the title-bar zoom-floor coupling).
+        var observedContentTops: [String: Double] = [:]
+        var barMeetsContent: [String: Bool] = [:]
+        // The content inset is zoom-independent, so a camera zoom must NEVER
+        // re-frame the body. This used to hold only while the floored bar height
+        // happened to sit still (the zoomed-IN regime) because the inset was
+        // aliased to that floor; decoupling them makes the guarantee
+        // unconditional, which is what keeps a zoom step off the document's
+        // layout path entirely.
         for zoom in zooms {
             canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: zoom))
             tileView.probe.setFrameSizeCalls = 0
             tileView.layoutSubtreeIfNeeded()
-            let barHeight = tileView.chromeBarHeight
-            if barHeight == prevBarHeight {
-                try expect(tileView.probe.setFrameSizeCalls == 0, "content setFrameSize calls during zoom \(zoom) (bar height unchanged at \(barHeight)) should be zero, got \(tileView.probe.setFrameSizeCalls) sizes=\(tileView.probe.observedSizes)")
-            }
-            prevBarHeight = barHeight
-            // Content top must track the floored bar height (no overlap/gap).
+            try expect(tileView.probe.setFrameSizeCalls == 0, "content setFrameSize calls during zoom \(zoom) should be zero, got \(tileView.probe.setFrameSizeCalls) sizes=\(tileView.probe.observedSizes)")
+            // Both sides are read from the LAID-OUT views, not re-derived from the
+            // same properties production lays them out with.
             let contentTop = tileView.contentView?.frame.minY ?? -1
-            contentTopMatchesBar[String(zoom)] = abs(contentTop - barHeight) < 0.001
-            try expect(contentTopMatchesBar[String(zoom)] == true, "content top \(contentTop) must equal floored bar height \(barHeight) at zoom \(zoom)")
+            observedContentTops[String(zoom)] = Double(contentTop)
+            // The bar may now overlap the body at low zoom, but it must still reach
+            // it: a bar that stopped short would leave an unpainted strip.
+            let barBottom = tileView.qaTitleBarFrame.maxY
+            barMeetsContent[String(zoom)] = barBottom >= contentTop - 0.001
+            try expect(barMeetsContent[String(zoom)] == true, "title bar bottom \(barBottom) must meet or overlap content top \(contentTop) at zoom \(zoom)")
             frames[String(zoom)] = ["width": tileView.frame.width, "height": tileView.frame.height]
             bounds[String(zoom)] = ["width": tileView.bounds.width, "height": tileView.bounds.height]
             // Bands mirror TileNSView.resizeEdge: edge band `m` is a constant
@@ -4204,7 +4206,12 @@ final class CanvasNSView: NSView, TokenThemed {
 
         try expect(edgePasses.values.allSatisfy { $0 }, "resize-edge hit tests failed: \(edgePasses)")
         try expect(cornerPasses.values.allSatisfy { $0 }, "resize-corner hit tests failed: \(cornerPasses)")
-        try expect(contentTopMatchesBar.values.allSatisfy { $0 }, "content top must track floored bar height: \(contentTopMatchesBar)")
+        try expect(barMeetsContent.values.allSatisfy { $0 }, "title bar must meet or overlap the body at every zoom: \(barMeetsContent)")
+        // The invariance itself, measured across the sweep rather than compared to
+        // the property production lays the body out with. Re-aliasing the inset to
+        // the bar floor makes these three values diverge and fails here.
+        let distinctContentTops = Set(observedContentTops.values.map { ($0 * 1000).rounded() })
+        try expect(distinctContentTops.count == 1, "content top must not vary with zoom: \(observedContentTops)")
 
         let manifest: [String: Any] = [
             "check": "tile-world-bounds",
@@ -4215,7 +4222,8 @@ final class CanvasNSView: NSView, TokenThemed {
             "contentSetFrameSizeCallsAfterInstall": callsAfterInstall,
             "resizeEdgePasses": edgePasses,
             "resizeCornerPasses": cornerPasses,
-            "contentTopMatchesBar": contentTopMatchesBar
+            "contentTopsByZoom": observedContentTops,
+            "barMeetsContent": barMeetsContent
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -4626,7 +4634,7 @@ final class CanvasNSView: NSView, TokenThemed {
         var closeScreenSizes: [String: Double] = [:]
         var titleScreenSizes: [String: Double] = [:]
         var contentTopWorld: [String: Double] = [:]
-        var contentTopMatchesBar: [String: Bool] = [:]
+        var barMeetsContent: [String: Bool] = [:]
         // The title text scales with the bar, so it must stay legible on screen
         // (>= this) instead of shrinking with zoom.
         let minTitleScreenPx: CGFloat = 11
@@ -4646,15 +4654,18 @@ final class CanvasNSView: NSView, TokenThemed {
             let titleScreen = tileView.qaTitleFontWorldSize * CGFloat(zoom)
             titleScreenSizes[String(zoom)] = titleScreen
 
-            // Content offset must track the SAME floored bar height — no overlap,
-            // no gap. Read the laid-out content view's top edge (world units).
+            // The content offset is deliberately NOT the floored bar height: it is
+            // zoom-independent, so the bar overlaps the body when the floor inflates
+            // it rather than reflowing the document. Read the laid-out content
+            // view's top edge (world units); the invariance is asserted after the
+            // sweep, and the bar must still reach the body at every zoom.
             let contentTop = tileView.contentView?.frame.minY ?? -1
             contentTopWorld[String(zoom)] = contentTop
-            contentTopMatchesBar[String(zoom)] = abs(contentTop - barWorldHeight) < 0.001
+            barMeetsContent[String(zoom)] = barWorldHeight >= contentTop - 0.001
 
             try expect(barScreenH >= minUsableScreenPx, "zoom \(zoom): title bar on-screen height \(barScreenH)px must be >= \(minUsableScreenPx)px")
             try expect(closeScreenW >= minUsableScreenPx && closeScreenH >= minUsableScreenPx, "zoom \(zoom): close button on-screen hit size \(closeScreenW)x\(closeScreenH)px must be >= \(minUsableScreenPx)px")
-            try expect(contentTopMatchesBar[String(zoom)] == true, "zoom \(zoom): content top \(contentTop) must equal floored bar height \(barWorldHeight)")
+            try expect(barMeetsContent[String(zoom)] == true, "zoom \(zoom): title bar height \(barWorldHeight) must meet or overlap content top \(contentTop) — a bar that stops short leaves an unpainted strip")
             // The close button must fit inside the bar at every zoom (otherwise
             // it clips and the × becomes partially unclickable).
             try expect(closeWorld.maxY <= barWorldHeight + 0.001, "zoom \(zoom): close button bottom \(closeWorld.maxY) must fit inside bar height \(barWorldHeight)")
@@ -4668,6 +4679,12 @@ final class CanvasNSView: NSView, TokenThemed {
         // is intentionally aliased to the grab strip, so it never drops below it).
         try expect(abs((barScreenHeights["3.0"] ?? 0) - Double(TileNSView.titleBarHeight) * 3) < 0.5, "zoom 3: zoomed-in bar should be the natural titleBarHeight*3 on screen (floor inert), got \(barScreenHeights["3.0"] ?? 0)")
         try expect(abs((barScreenHeights["1.0"] ?? 0) - Double(TileNSView.minScreenGrabPx)) < 0.5, "zoom 1: bar should floor to minScreenGrabPx (aliased to grab strip), got \(barScreenHeights["1.0"] ?? 0)")
+        // The bar's world height therefore VARIES across this sweep (that is the
+        // point of the two assertions above) while the body's top must not move at
+        // all. Re-aliasing the inset to the floor makes these values diverge and
+        // fails here — which is the teeth for the decoupling.
+        let distinctContentTops = Set(contentTopWorld.values.map { ($0 * 1000).rounded() })
+        try expect(distinctContentTops.count == 1, "content top must not vary with zoom while the bar floor does: \(contentTopWorld)")
 
         let manifest: [String: Any] = [
             "check": "tile-chrome-scale",
@@ -4682,7 +4699,7 @@ final class CanvasNSView: NSView, TokenThemed {
             "titleScreenSizes": titleScreenSizes,
             "minTitleScreenPx": minTitleScreenPx,
             "contentTopWorld": contentTopWorld,
-            "contentTopMatchesBar": contentTopMatchesBar
+            "barMeetsContent": barMeetsContent
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)

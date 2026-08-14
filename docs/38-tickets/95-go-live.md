@@ -50,15 +50,19 @@ Status as of 2026-08-09 (end of day):
      the pre-`65d420a` doc taxonomy, one of which demands "Continuum Revived" in
      the user-facing README and so contradicts the identity rule).
 
-     **It is 8 entries now.** The one addition is `--perf-budget-zoom-check`.
+     **It is back to those 7.** `--perf-budget-zoom-check` joined the list after
+     the retained world plane (`.plans/22` Slice 3) and has now left it again.
      Its original cause — a zoom step resizing every tile view — was fixed by the
-     retained world plane (`.plans/22` Slice 3), which also retired the
-     `--perf-budget-camera-slope-check` entry that briefly sat beside it. What
-     keeps `canvas.zoom` red is a second defect the plane exposed: a tile's chrome
-     floors are `max(world, screenPx/zoom)`, so below the floor threshold the
-     title bar's world height changes every zoom step and reflows tile content.
-     Both candidate fixes are product-visible and await a decision. Measured
-     numbers in [performance-budgets.md](../internals/performance-budgets.md).
+     plane, which also retired the `--perf-budget-camera-slope-check` entry that
+     briefly sat beside it. The plane then exposed a second, narrower defect: the
+     tile's content inset was aliased to the chrome floor
+     (`max(world, screenPx/zoom)`), and because `minScreenGrabPx` (28) exceeds
+     `titleBarHeight` (24) that floor moves on **every** step below zoom 1.167, so
+     each step reflowed the document. Decoupling the inset from the floor — the
+     enlarged low-zoom grab strip now overlays the top of the body instead of
+     pushing it down — took `canvas.zoom` from 49.1 ms/step and 14,490 prose
+     measurements to 4.7 ms and 0. Measured numbers in
+     [performance-budgets.md](../internals/performance-budgets.md).
 
   Red but **outside the gate entirely**, so no matrix run covers them:
   `--terminal-default-readability-check`, `--previous-focus-navigation-check`,

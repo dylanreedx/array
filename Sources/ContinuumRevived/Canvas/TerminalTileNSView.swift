@@ -23,8 +23,6 @@ final class TerminalTileNSView: TileNSView {
         fatalError("init(coder:) is not supported")
     }
 
-    override var contentTopInsetWorldHeight: CGFloat { chromeBarHeight }
-
     /// P1.9: the terminal owns this tile's body colour (it comes from the Ghostty
     /// theme, not from the tile default), so it has to re-assert it after the base
     /// class re-applies — otherwise an appearance change repaints a themed terminal
