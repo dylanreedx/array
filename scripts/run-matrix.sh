@@ -92,6 +92,15 @@ MATRIX_KNOWN_RED=(
   # tracked in docs/internals/performance-budgets.md; do NOT bisect it as a
   # regression, and remove this entry when the camera stops resizing tiles.
   --perf-budget-zoom-check
+  # canvas.camera-slope is the same architectural defect measured as a SLOPE
+  # rather than a single canvas: installed tiles sweep 16→128 with the visible
+  # count held fixed, and camera work grows with tiles the user cannot see
+  # (measured 15 → 124 geometry writes per step). It also reports zero
+  # cameraMutations, because today no single place applies the camera at all.
+  # Both this entry and --perf-budget-zoom-check leave this list in the commit
+  # that lands the retained world plane (.plans/22 Slice 3) — they share one
+  # cause, so they retire together.
+  --perf-budget-camera-slope-check
   # Inherited reds, not independent ones. `ContinuumRevivedPaletteChecks` prints
   # its own model assertions and THEN shells out to the app's
   # --palette-first-responder-restore-check, so it cannot be green while that
@@ -538,6 +547,13 @@ run_app_check .build/debug/Array --perf-budget-zoom-check
 # The zoom-1 pan leg above is structurally blind to that defect; this leg pans
 # the same fixture at zoom 0.35 and must stay at zero bounds writes.
 run_app_check .build/debug/Array --perf-budget-check --scenario canvas.fractional-pan
+# The camera COMPLEXITY witness, KNOWN-RED on purpose and for the same
+# architectural reason as the zoom leg: it sweeps installed tiles 16→128 with the
+# visible count held fixed, and today every installed tile takes a frame write on
+# every camera step, so the work grows with tiles the user cannot see. It goes
+# green with the retained world plane (.plans/22 Slice 3), which is also when both
+# it and --perf-budget-zoom-check leave MATRIX_KNOWN_RED.
+run_app_check .build/debug/Array --perf-budget-camera-slope-check
 run_app_check .build/debug/Array --workspace-profile-check
 run_app_check .build/debug/Array --add-zone-check
 run_app_check .build/debug/Array --browser-lru-budget-check

@@ -69,6 +69,7 @@ check --palette-duplicate-root-check
 check --palette-first-responder-restore-check
 check --palette-jump-check
 check --palette-zone-check
+check --perf-budget-camera-slope-check
 check --perf-budget-check
 check --perf-budget-zoom-check
 check --persistence-crash-safe-check
@@ -220,6 +221,7 @@ leg run_app_check .build/debug/Array --palette-duplicate-root-check
 leg run_app_check .build/debug/Array --palette-first-responder-restore-check
 leg run_app_check .build/debug/Array --palette-jump-check
 leg run_app_check .build/debug/Array --palette-zone-check
+leg run_app_check .build/debug/Array --perf-budget-camera-slope-check
 leg run_app_check .build/debug/Array --perf-budget-check --scenario canvas.fractional-pan
 leg run_app_check .build/debug/Array --perf-budget-check --scenario canvas.pan
 leg run_app_check .build/debug/Array --perf-budget-zoom-check

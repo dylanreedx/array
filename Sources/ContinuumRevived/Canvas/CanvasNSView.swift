@@ -229,6 +229,15 @@ final class CanvasNSView: NSView, TokenThemed {
         var modelWrites = 0
         var chromeRepaints = 0
         var terminalSurfaceWrites = 0
+        /// Writes of the CAMERA's own geometry — the one ancestor mutation a
+        /// camera step is supposed to cost. It is deliberately **zero today**:
+        /// there is no single place the camera is applied, because
+        /// `layoutAllTiles` re-derives a screen frame per tile instead. That
+        /// zero is the red half of `canvas.camera-slope`, and it is also its own
+        /// anti-teeth — a canvas that stopped moving anything would report zero
+        /// here too, which is why the scenario pairs it with a screen-frame
+        /// invariant rather than trusting the count alone.
+        var cameraMutations = 0
     }
     private(set) var qaCameraLayoutStats = CameraLayoutStats()
     func qaResetCameraLayoutStats() { qaCameraLayoutStats = CameraLayoutStats() }
@@ -243,6 +252,45 @@ final class CanvasNSView: NSView, TokenThemed {
     /// `layoutTile`). A camera step pays for all of them.
     var qaTotalInstalledTileCount: Int {
         tileViews.count + zoneLayers.reduce(0) { $0 + $1.tileViews.count }
+    }
+
+    /// QA: how many installed tile views are NOT where the camera says they
+    /// should be — each view's ACTUAL rect in canvas coordinates, converted
+    /// through whatever view tree currently hosts it, against
+    /// `CanvasEngine.tileScreenFrame`.
+    ///
+    /// Zero is the camera's correctness invariant, and it is deliberately
+    /// phrased so it survives the retained-world-plane migration: today a
+    /// tile's own frame IS its screen rect, and afterwards an ancestor's
+    /// transform produces the same rect from an unchanged tile frame. That
+    /// makes it the anti-teeth the write counters cannot be: a canvas that
+    /// stopped moving tiles reports zero writes AND a nonzero mismatch here.
+    /// Hidden (collapsed) tiles are skipped — they are deliberately not
+    /// presented, so their geometry is not a camera claim.
+    var qaTileScreenFrameMismatchCount: Int {
+        var mismatches = 0
+        func check(_ view: TileNSView, worldFrame: TileFrame) {
+            guard !view.isHidden else { return }
+            let expected = CanvasEngine.tileScreenFrame(worldFrame, viewport: canvasState.viewport)
+            let actual = view.convert(view.bounds, to: self)
+            if !Self.geometryNearlyEqual(actual.origin.x, expected.origin.x)
+                || !Self.geometryNearlyEqual(actual.origin.y, expected.origin.y)
+                || !Self.geometryNearlyEqual(actual.size.width, expected.size.width)
+                || !Self.geometryNearlyEqual(actual.size.height, expected.size.height) {
+                mismatches += 1
+            }
+        }
+        for tile in canvasState.tiles {
+            if let view = tileViews[tile.id] { check(view, worldFrame: tile.frame) }
+        }
+        for layer in zoneLayers {
+            for tile in layer.tiles {
+                if let view = layer.tileViews[tile.id] {
+                    check(view, worldFrame: CanvasEngine.worldFrame(tile: tile, in: layer.placement))
+                }
+            }
+        }
+        return mismatches
     }
 
     /// QA: how many installed tiles actually intersect the visible canvas at the

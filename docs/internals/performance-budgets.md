@@ -148,6 +148,48 @@ today—not a patch. The alternatives and escalation criteria are in
 every run without masking a `canvas.pan` regression. Remove that entry when the
 camera stops resizing tiles.
 
+### `canvas.camera-slope` — KNOWN-RED, published
+
+```sh
+.build/debug/Array --perf-budget-camera-slope-check
+```
+
+The camera's **complexity** witness. The three scenarios above each measure one
+fixed canvas, so all three can be green while the camera is still
+O(installed tiles) — they never change that number. This one sweeps **installed**
+tiles `16 → 128` while holding the **visible** count fixed at 12 (a cluster near
+the origin stays on screen; filler tiles sit far outside the viewport at both
+zooms), at zoom 1.0 and 0.35, 40 pan steps each.
+
+| metric | budget | measured |
+|---|---|---|
+| `camera-slope.cameraMutations` | == 320 | **0** |
+| `camera-slope.tileGeometryWrites` | == 0 | **18,720** |
+| `camera-slope.writeSlope` | == 0 | **218.4** |
+| `camera-slope.screenFrameMismatches` | == 0 (teeth) | 0 |
+| `camera-slope.worstStepDuration` | ≤ 8.3 ms | 0.40 ms |
+
+Geometry writes per step track installed count exactly — **15 / 31 / 62 / 124**
+for 16 / 32 / 64 / 128 tiles — which is the defect stated as a slope rather than a
+single number. `cameraMutations` is 0 because today there is no single place that
+applies the camera at all: `layoutAllTiles` re-derives a screen frame per tile
+instead of moving one ancestor.
+
+`screenFrameMismatches` is the budget with teeth, and it is green today. It
+compares every visible tile's ACTUAL rect — converted through whatever view tree
+hosts it — against `CanvasEngine.tileScreenFrame`. Without it the three zeroes
+above would also be satisfiable by a canvas that stopped moving tiles entirely.
+It is deliberately phrased to survive the migration: today a tile's frame IS its
+screen rect, afterwards an ancestor's transform produces the same rect from an
+unchanged tile frame.
+
+Duration here is a coarse alarm only, **not** the scaling signal: the fixture uses
+cheap `DescriptorTileNSView`s so 128 tiles × 8 configurations stays affordable in
+the matrix. `canvas.stress` owns the real-content cost curve.
+
+This and `canvas.zoom` are **one cause**, so they retire together in the commit
+that lands the retained world plane.
+
 ### `canvas.stress` — OPT-IN, not in the matrix
 
 ```sh
