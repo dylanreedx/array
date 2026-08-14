@@ -215,6 +215,36 @@ final class CanvasNSView: NSView, TokenThemed {
     /// field editor's lifecycle in headless checks).
     private(set) var qaZoneRenameBeginCount: Int = 0
 
+    /// QA: what a single camera step actually costs, counted rather than timed.
+    /// A count is deterministic; a wall-clock assertion on a laptop is a flake
+    /// generator (see docs/internals/performance.md, "Witnessing performance").
+    /// Every field here is a WRITE that reached AppKit — an assignment skipped
+    /// because the value was unchanged deliberately does not count, which is
+    /// what makes "a pan writes bounds zero times" a meaningful assertion.
+    struct CameraLayoutStats: Equatable {
+        var tilesVisited = 0
+        var tilesLaidOut = 0
+        var frameWrites = 0
+        var boundsWrites = 0
+        var modelWrites = 0
+        var chromeRepaints = 0
+        var terminalSurfaceWrites = 0
+    }
+    private(set) var qaCameraLayoutStats = CameraLayoutStats()
+    func qaResetCameraLayoutStats() { qaCameraLayoutStats = CameraLayoutStats() }
+
+    /// Live frame-time recorder for gestures. Nil unless `CONTINUUM_FRAME_STATS=1`,
+    /// so it costs nothing (and prints nothing) in a normal run.
+    private(set) lazy var frameRecorder: CanvasFrameRecorder? =
+        CanvasFrameRecorder.isEnabled ? CanvasFrameRecorder(view: self) : nil
+
+    /// QA: every installed tile view, across BOTH models the canvas keeps —
+    /// the flat collection and each `ZoneLayer` (see the zone-unify note on
+    /// `layoutTile`). A camera step pays for all of them.
+    var qaTotalInstalledTileCount: Int {
+        tileViews.count + zoneLayers.reduce(0) { $0 + $1.tileViews.count }
+    }
+
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
@@ -315,6 +345,7 @@ final class CanvasNSView: NSView, TokenThemed {
         for placement in liveZones {
             guard let view = zoneChromeViews[placement.zoneId] else { continue }
             view.frame = CanvasEngine.tileScreenFrame(CanvasEngine.zoneWorldFrame(placement), viewport: canvasState.viewport)
+            qaCameraLayoutStats.chromeRepaints += 1
             view.needsDisplay = true
         }
     }
@@ -1042,6 +1073,7 @@ final class CanvasNSView: NSView, TokenThemed {
 
     func setViewport(_ viewport: CanvasViewport) {
         canvasState.viewport = viewport
+        frameRecorder?.noteCameraStep()
         // Camera movement should reposition/scale existing tile layers, not mark
         // every tile's content dirty. Terminal/browser redraw work during a
         // trackpad pan or programmatic zoom is product-visible jank.
@@ -1681,10 +1713,53 @@ final class CanvasNSView: NSView, TokenThemed {
             }
             if let chrome = layer.chrome {
                 chrome.frame = _zoneLayerChromeScreenFrame(layer)
+                qaCameraLayoutStats.chromeRepaints += 1
                 chrome.needsDisplay = true
             }
         }
+        if navModeOverlayView != nil { qaCameraLayoutStats.chromeRepaints += 1 }
         navModeOverlayView?.needsDisplay = true
+    }
+
+    /// Position and scale one tile view for the current camera, writing only what
+    /// actually changed.
+    ///
+    /// The geometry contract: `bounds` stays at the tile's LOGICAL size while
+    /// `frame` carries the scaled screen rect, so AppKit does the zoom scaling
+    /// and the tile's content is always laid out at its own size (which is what
+    /// keeps the width-keyed measurement caches hitting).
+    ///
+    /// The reason this is not three plain assignments: writing a frame that did
+    /// not change still marks the view — and its whole subtree — as needing
+    /// layout, and for a text view costs a TextKit glyph-bounds pass. That is
+    /// trap 3 in docs/internals/performance.md and it is exactly what 0.4.17
+    /// fixed one level down in `AssistantProseView`. Here it is multiplied by
+    /// every tile on the canvas and by every step of a gesture.
+    ///
+    /// Origin and size are moved separately on purpose. A PAN changes only the
+    /// origin, and `setFrameOrigin` does not resize the subtree or disturb
+    /// `bounds` — so a pan now costs no subtree layout at all. Only a ZOOM
+    /// changes the frame size, and only then does `bounds` need restoring to the
+    /// logical size that `setFrameSize` scales away.
+    private func applyTileGeometry(_ view: TileNSView, screenFrame rect: CGRect, logicalSize: TileFrame) {
+        if view.frame.origin != rect.origin {
+            qaCameraLayoutStats.frameWrites += 1
+            view.setFrameOrigin(rect.origin)
+        }
+        if view.frame.size != rect.size {
+            qaCameraLayoutStats.frameWrites += 1
+            view.setFrameSize(rect.size)
+        }
+        // `setFrameSize` scales `bounds` along with the frame, so a ZOOM step
+        // always lands here to restore the logical size; a PAN never does.
+        // Removing this second write needs the camera to stop resizing tile
+        // views at all (scale the canvas's own coordinate system instead) —
+        // that is the open architectural item, not something this guard can fix.
+        let logical = NSRect(x: 0, y: 0, width: logicalSize.width, height: logicalSize.height)
+        if view.bounds != logical {
+            qaCameraLayoutStats.boundsWrites += 1
+            view.bounds = logical
+        }
     }
 
     private func layoutTile(_ tile: Tile, invalidateTileDisplay: Bool = true) {
@@ -1694,10 +1769,15 @@ final class CanvasNSView: NSView, TokenThemed {
         // translates its members' world frames explicitly. A member is hidden
         // only when its zone is collapsed.
         let rect = CanvasEngine.tileScreenFrame(tile.frame, viewport: canvasState.viewport)
-        view.isHidden = membershipPlacement(of: tile.id)?.collapsed == true
-        view.frame = rect
-        view.bounds = NSRect(x: 0, y: 0, width: tile.frame.width, height: tile.frame.height)
-        view.tile = tile
+        let hidden = membershipPlacement(of: tile.id)?.collapsed == true
+        if view.isHidden != hidden { view.isHidden = hidden }
+        qaCameraLayoutStats.tilesVisited += 1
+        qaCameraLayoutStats.tilesLaidOut += 1
+        applyTileGeometry(view, screenFrame: rect, logicalSize: tile.frame)
+        if view.tile != tile {
+            qaCameraLayoutStats.modelWrites += 1
+            view.tile = tile
+        }
         if invalidateTileDisplay {
             view.invalidateForCanvasLayout()
         }
@@ -1714,6 +1794,7 @@ final class CanvasNSView: NSView, TokenThemed {
             let backing = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
             let contentWorldWidth = max(0, tile.frame.width)
             let contentWorldHeight = max(0, tile.frame.height - Double(terminalTile.contentTopInsetWorldHeight))
+            qaCameraLayoutStats.terminalSurfaceWrites += 1
             terminalTile.runtime.setSurfacePixelSize(
                 CGSize(width: contentWorldWidth * backing, height: contentWorldHeight * backing)
             )
@@ -2333,10 +2414,14 @@ final class CanvasNSView: NSView, TokenThemed {
         guard let view = layer.tileViews[tile.id] else { return }
         let worldFrame = CanvasEngine.worldFrame(tile: tile, in: layer.placement)
         let rect = CanvasEngine.tileScreenFrame(worldFrame, viewport: canvasState.viewport)
-        view.isHidden = layer.placement.collapsed
-        view.frame = rect
-        view.bounds = NSRect(x: 0, y: 0, width: tile.frame.width, height: tile.frame.height)
-        view.tile = tile
+        if view.isHidden != layer.placement.collapsed { view.isHidden = layer.placement.collapsed }
+        qaCameraLayoutStats.tilesVisited += 1
+        qaCameraLayoutStats.tilesLaidOut += 1
+        applyTileGeometry(view, screenFrame: rect, logicalSize: tile.frame)
+        if view.tile != tile {
+            qaCameraLayoutStats.modelWrites += 1
+            view.tile = tile
+        }
         if invalidateTileDisplay {
             view.invalidateForCanvasLayout()
         }

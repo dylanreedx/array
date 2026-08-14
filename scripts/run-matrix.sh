@@ -83,6 +83,15 @@ MATRIX_KNOWN_RED=(
   --agent-supervisor-check
   --nav-mode-check
   --palette-first-responder-restore-check
+  # canvas.zoom is over budget by ~4x and the cause is architectural, not a bug
+  # to bisect: a zoom step changes every tile view's frame SIZE, which scales
+  # `bounds` away, forces the logical size to be written back, and re-lays out
+  # every tile subtree (re-measuring every Markdown/prose row) at a width it
+  # never renders. Removing it means the camera must stop resizing tile views —
+  # scaling the canvas's own coordinate system instead. Measured, published and
+  # tracked in docs/internals/performance-budgets.md; do NOT bisect it as a
+  # regression, and remove this entry when the camera stops resizing tiles.
+  --perf-budget-zoom-check
   # Inherited reds, not independent ones. `ContinuumRevivedPaletteChecks` prints
   # its own model assertions and THEN shells out to the app's
   # --palette-first-responder-restore-check, so it cannot be green while that
@@ -515,6 +524,13 @@ run_app_check .build/debug/Array --agent-local-file-link-check
 # of Markdown built 12,000 TextKit stacks, 1.39 GB resident, and the process died.
 # Preview is budgeted and says where it stopped, and a relayout re-measures nothing.
 run_app_check .build/debug/Array --file-markdown-perf-check
+# Standing performance budgets (docs/internals/performance-budgets.md). The pan
+# leg gates: a camera pan must cost no bounds write, no tile-model write and no
+# text re-measurement, over a canvas of large Markdown tiles. The zoom leg is
+# KNOWN-RED on purpose — its number is published every run so the gap stays
+# visible while the camera still resizes tile views.
+run_app_check .build/debug/Array --perf-budget-check --scenario canvas.pan
+run_app_check .build/debug/Array --perf-budget-zoom-check
 run_app_check .build/debug/Array --workspace-profile-check
 run_app_check .build/debug/Array --add-zone-check
 run_app_check .build/debug/Array --browser-lru-budget-check

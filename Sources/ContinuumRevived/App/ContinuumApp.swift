@@ -1004,6 +1004,35 @@ enum ContinuumApp {
             }
         }
 
+        // `--perf-budget-zoom-check` is the zoom scenario under its OWN leg name.
+        // The matrix matches KNOWN-RED by leg name, and canvas.zoom is a
+        // documented open target (see docs/internals/performance-budgets.md)
+        // while canvas.pan must gate — one shared flag name would have forced
+        // both to be known-red together and masked a pan regression.
+        if CommandLine.arguments.contains("--perf-budget-check")
+            || CommandLine.arguments.contains("--perf-budget-zoom-check") {
+            do {
+                _ = NSApplication.shared
+                func value(after flag: String) -> String? {
+                    guard let index = CommandLine.arguments.firstIndex(of: flag),
+                          index + 1 < CommandLine.arguments.count else { return nil }
+                    return CommandLine.arguments[index + 1]
+                }
+                let filter = CommandLine.arguments.contains("--perf-budget-zoom-check")
+                    ? "canvas.zoom"
+                    : value(after: "--scenario")
+                try PerfScenarios.run(
+                    scenarioFilter: filter,
+                    jsonPath: value(after: "--perf-json")
+                )
+                print("ContinuumRevivedPerfBudgetChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--file-markdown-perf-check") {
             do {
                 _ = NSApplication.shared
