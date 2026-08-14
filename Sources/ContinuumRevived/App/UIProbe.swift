@@ -136,7 +136,15 @@ struct UIProbe {
     // would gate antialiasing no user sees.
     nonisolated static let renderScale: CGFloat = 2.0
 
-    private static func bitmap(of view: NSView, id: String, scale: CGFloat = renderScale) throws -> NSBitmapImageRep {
+    /// Internal rather than private since program 96/P0.2: the sidebar screenshot
+    /// harness cannot go through `render(_:make:)` — that re-parents the view it is
+    /// handed and places it centred at a fixed frame, and its `make` closure runs
+    /// before the view is in a window, so an `NSTableView` would never materialize a
+    /// cell. It builds its own sized host in a window (as `makeSidebarProbeHost`
+    /// does) and needs THIS step: the six font-smoothing knobs below and the declared
+    /// `renderScale` are the display-independence the ENV-BLOCKER notes above bought,
+    /// and duplicating them elsewhere is how they drift.
+    static func bitmap(of view: NSView, id: String, scale: CGFloat = renderScale) throws -> NSBitmapImageRep {
         guard view.bounds.width > 0, view.bounds.height > 0 else {
             throw fail("\(id): view laid out to \(view.bounds.width)x\(view.bounds.height)")
         }

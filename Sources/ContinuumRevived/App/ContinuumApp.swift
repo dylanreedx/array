@@ -1576,6 +1576,22 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        // Program 96/P0.2: the offscreen screenshot set + density proposals. Async
+        // because it drives the corpus, whose events hop `DispatchQueue.main.async`.
+        if CommandLine.arguments.contains(SidebarScreenshotChecks.flag) {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await SidebarScreenshotChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--sidebar-ux-check") {
             do {
                 _ = NSApplication.shared
