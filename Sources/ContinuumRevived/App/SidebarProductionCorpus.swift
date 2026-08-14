@@ -58,6 +58,10 @@ enum SidebarProductionCorpus {
         case nestedChild
         case headless
         case exactPlacement
+        case ambiguousPlacement
+        case piAnthropic
+        case piOpenAI
+        case restoredPendingRequest
         case fiftyActiveWithHistory
     }
 
@@ -127,6 +131,8 @@ enum SidebarProductionCorpus {
     @MainActor
     final class World {
         let tempRoot: URL
+        let appSupport: URL
+        let agentsSupport: URL
         let projectRoot: URL
         let projectId: UUID
         let workspaceId: UUID
@@ -148,6 +154,8 @@ enum SidebarProductionCorpus {
 
         init(
             tempRoot: URL,
+            appSupport: URL,
+            agentsSupport: URL,
             projectRoot: URL,
             projectId: UUID,
             workspaceId: UUID,
@@ -162,6 +170,8 @@ enum SidebarProductionCorpus {
             restoreDefaults: @escaping @MainActor () -> Void
         ) {
             self.tempRoot = tempRoot
+            self.appSupport = appSupport
+            self.agentsSupport = agentsSupport
             self.projectRoot = projectRoot
             self.projectId = projectId
             self.workspaceId = workspaceId
@@ -375,7 +385,11 @@ enum SidebarProductionCorpus {
     /// `AgentSupervisor.spawn(role: nil, prompt: nil, …)`, which persists a durable
     /// record before the user has expressed any intent (design §2.4). This flow
     /// drives that same supervisor entry point with the same arguments.
-    static func runFlows(in world: World) async throws -> [FlowResult] {
+    /// Runs every flow that lives in ONE world, and hands back the agent whose name
+    /// generation is deliberately left in flight so the relaunch world can observe it.
+    static func runFlows(in world: World) async throws
+        -> (results: [FlowResult], pendingNameAgent: AgentID)
+    {
         var results: [FlowResult] = []
 
         // ── Titles and draft materialization ──────────────────────────────────
@@ -564,6 +578,27 @@ enum SidebarProductionCorpus {
         _ = world.supervisor.rename(agentID: placed, to: "Agent with a real tile")
         results.append(world.result(.exactPlacement, placed))
 
+        // A second agent whose tile really exists, but in the OTHER zone of the SAME
+        // project. §5.3's ambiguity: `projectId` plus a first-match placement lookup
+        // cannot say which Zone an agent lives in, and §8.1 requires two same-project
+        // agents in different zones to "remain distinct".
+        let ambiguous = try world.spawnPlaced(title: "other zone agent", zoneOffset: 850)
+        _ = world.supervisor.rename(agentID: ambiguous, to: "Agent in the other zone")
+        results.append(world.result(.ambiguousPlacement, ambiguous))
+
+        // Pi cross-provider. §4.5 keeps harness and provider separate facts, and Pi is
+        // the case where BOTH marks carry real information — a Pi harness can serve an
+        // Anthropic or an OpenAI model, and one glyph cannot say which.
+        let piAnthropicAgent = world.spawn(
+            model: "anthropic/claude-opus-5", harness: .pi)
+        _ = world.supervisor.rename(agentID: piAnthropicAgent, to: "Pi running Opus")
+        results.append(world.result(.piAnthropic, piAnthropicAgent))
+
+        let piOpenAIAgent = world.spawn(
+            model: "openai/gpt-5.6-sol", harness: .pi)
+        _ = world.supervisor.rename(agentID: piOpenAIAgent, to: "Pi running GPT")
+        results.append(world.result(.piOpenAI, piOpenAIAgent))
+
         // ── Scale ─────────────────────────────────────────────────────────────
         // 50 more active agents. §8.4 requires History to stay reachable under this
         // load; P0.2 measures that at real sidebar heights. Here it establishes that
@@ -578,7 +613,16 @@ enum SidebarProductionCorpus {
             results.append(world.result(.fiftyActiveWithHistory, lastBulk))
         }
 
-        return results
+        // Left in flight ON PURPOSE and never applied: this agent carries a live
+        // `namingRequest` across the relaunch the caller performs next. §4.2/9 says a
+        // restored pending generation must be resumed or explicitly consumed and must
+        // never strand the title gate.
+        let pendingName = world.spawn()
+        await world.send(AgentPrompt("work whose name generation is still in flight"),
+                         to: pendingName)
+        _ = world.supervisor.beginNameGeneration(agentID: pendingName)
+
+        return (results, pendingName)
     }
 
     // MARK: - Runner
@@ -591,7 +635,15 @@ enum SidebarProductionCorpus {
         let now = Date(timeIntervalSince1970: 1_900_600_000)
         let world = try AppDelegate.makeSidebarCorpusWorld(now: now)
         defer { world.tearDown() }
-        let results = try await runFlows(in: world)
+        let (flowResults, pendingNameAgent) = try await runFlows(in: world)
+        var results = flowResults
+
+        // WORLD B — the relaunch. A second app over the SAME directories, so this
+        // supervisor's `restore()` adopts exactly what world A persisted. Everything
+        // above observed a live process; this observes what survives a restart.
+        let relaunched = try AppDelegate.makeSidebarCorpusWorld(now: now, reusing: world)
+        defer { relaunched.tearDown() }
+        results.append(relaunched.result(.restoredPendingRequest, pendingNameAgent))
 
         // OBSERVED, not asserted-then-described: print what the product produced so
         // the packet's witness is a record of real output.

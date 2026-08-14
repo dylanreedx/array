@@ -23712,25 +23712,48 @@ extension AppDelegate {
     /// program source-scan, so widening it is not an option. The corpus keeps every
     /// flow, expectation, and the inventory gate; this function keeps only the wiring,
     /// which is the same sequence `runAgentInboxChecks`' section B performs.
-    static func makeSidebarCorpusWorld(now: Date) throws -> SidebarProductionCorpus.World {
+    /// `reusing` builds a SECOND app over the SAME directories and ids — the relaunch
+    /// world. Nothing on disk is rewritten, so the new supervisor's `restore()` adopts
+    /// exactly the records the previous world persisted, which is the only way to
+    /// witness the relaunch truths (a pending `namingRequest` surviving,
+    /// `migrateDisplayNameIfNeeded`, `restoredIDs` → `.restored` → `InboxState.ready`).
+    static func makeSidebarCorpusWorld(
+        now: Date,
+        reusing previous: SidebarProductionCorpus.World? = nil
+    ) throws -> SidebarProductionCorpus.World {
         let fm = FileManager.default
-        let tempRoot = fm.temporaryDirectory.appendingPathComponent(
+        let tempRoot = previous?.tempRoot ?? fm.temporaryDirectory.appendingPathComponent(
             "sidebar-96-corpus-\(UUID().uuidString)", isDirectory: true)
-        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
-        let agentsSupport = tempRoot.appendingPathComponent("Agents", isDirectory: true)
+        let appSupport = previous?.appSupport
+            ?? tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        let agentsSupport = previous?.agentsSupport
+            ?? tempRoot.appendingPathComponent("Agents", isDirectory: true)
         // Named for the owner screenshot's placement band.
-        let projectRoot = tempRoot.appendingPathComponent("array-scratch", isDirectory: true)
-        for dir in [appSupport, agentsSupport, projectRoot] {
-            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let projectRoot = previous?.projectRoot
+            ?? tempRoot.appendingPathComponent("array-scratch", isDirectory: true)
+        if previous == nil {
+            for dir in [appSupport, agentsSupport, projectRoot] {
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            }
         }
 
-        let workspaceId = UUID()
-        let projectId = UUID()
+        let workspaceId = previous?.workspaceId ?? UUID()
+        let projectId = previous?.projectId ?? UUID()
         let zoneId = UUID()
         let placement = ZonePlacement(
             zoneId: zoneId, projectId: projectId,
             origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 600, height: 400),
             color: "blue", collapsed: false, hydrationPolicy: .automatic)
+        // A SECOND zone backed by the SAME project. §5.3's ambiguity: `projectID`
+        // plus a later first-match lookup cannot say which Zone an agent lives in
+        // when one project appears twice. Non-overlapping, so a tile's centre lands
+        // in exactly one of them and the ambiguity is about PRESENTATION, not about
+        // the geometry being undecidable.
+        let secondZoneId = UUID()
+        let secondPlacement = ZonePlacement(
+            zoneId: secondZoneId, projectId: projectId,
+            origin: ZonePoint(x: 800, y: 0), size: ZoneSize(width: 600, height: 400),
+            color: "green", collapsed: false, hydrationPolicy: .automatic)
 
         var registry = Registry.empty()
         registry.lastActiveWorkspaceId = workspaceId
@@ -23740,19 +23763,27 @@ extension AppDelegate {
         registry.projects = [ProjectEntry(
             id: projectId, name: "array-scratch", rootPath: projectRoot.path,
             workspaceId: workspaceId, lastOpenedAt: now, pinned: false, missing: false)]
+        // The registry VALUE is rebuilt either way (the reused ids make it identical to
+        // what is on disk) because `reconcile` below needs it — but on a relaunch
+        // nothing is written back, so tiles a previous world placed survive.
         let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
-        try registryStore.save(registry)
-        try WorkspaceStore(
-            workspaceId: workspaceId, applicationSupportDirectory: appSupport
-        ).save(WorkspaceDocument(
-            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
-            zones: [placement], zoneZOrder: [zoneId], lastActiveZoneId: zoneId))
-
         let projectStore = ProjectStore(projectRoot: projectRoot)
-        let canvasState = CanvasState(
-            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
-            tiles: [], groups: [], lastActiveTileId: nil)
-        try projectStore.saveCanvas(canvasState)
+        let canvasState: CanvasState
+        if previous == nil {
+            try registryStore.save(registry)
+            try WorkspaceStore(
+                workspaceId: workspaceId, applicationSupportDirectory: appSupport
+            ).save(WorkspaceDocument(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                zones: [placement, secondPlacement],
+                zoneZOrder: [zoneId, secondZoneId], lastActiveZoneId: zoneId))
+            canvasState = CanvasState(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                tiles: [], groups: [], lastActiveTileId: nil)
+            try projectStore.saveCanvas(canvasState)
+        } else {
+            canvasState = try projectStore.loadCanvas()
+        }
 
         let agentStore = AgentStore(applicationSupportDirectory: agentsSupport)
         // Image-bearing prompts are refused by the unchecked direct send, so the
@@ -23810,6 +23841,8 @@ extension AppDelegate {
 
         return SidebarProductionCorpus.World(
             tempRoot: tempRoot,
+            appSupport: appSupport,
+            agentsSupport: agentsSupport,
             projectRoot: projectRoot,
             projectId: projectId,
             workspaceId: workspaceId,
