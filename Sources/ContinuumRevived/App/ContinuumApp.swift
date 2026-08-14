@@ -1559,6 +1559,23 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        // Program 96/P0.1: the production-frequency corpus. Async for the same
+        // reason as `--agent-inbox-check` above — flows deliver runtime events
+        // through `AgentSupervisor.deliver`, which hops `DispatchQueue.main.async`.
+        if CommandLine.arguments.contains("--sidebar-production-corpus-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await SidebarProductionCorpus.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--sidebar-ux-check") {
             do {
                 _ = NSApplication.shared
@@ -23686,6 +23703,138 @@ private final class AgentInboxCheckHarnessState {
 }
 
 extension AppDelegate {
+    /// Program 96/P0.1: wires a real app against real on-disk stores and hands back
+    /// the narrow handle `SidebarProductionCorpus` drives.
+    ///
+    /// This lives HERE rather than beside the corpus because the members it sets are
+    /// `private` to `AppDelegate` — Swift grants that access to same-file extensions
+    /// only — and `configureWorkspaceSidebar`'s declaration is pinned verbatim by a
+    /// program source-scan, so widening it is not an option. The corpus keeps every
+    /// flow, expectation, and the inventory gate; this function keeps only the wiring,
+    /// which is the same sequence `runAgentInboxChecks`' section B performs.
+    static func makeSidebarCorpusWorld(now: Date) throws -> SidebarProductionCorpus.World {
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent(
+            "sidebar-96-corpus-\(UUID().uuidString)", isDirectory: true)
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        let agentsSupport = tempRoot.appendingPathComponent("Agents", isDirectory: true)
+        // Named for the owner screenshot's placement band.
+        let projectRoot = tempRoot.appendingPathComponent("array-scratch", isDirectory: true)
+        for dir in [appSupport, agentsSupport, projectRoot] {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+
+        let workspaceId = UUID()
+        let projectId = UUID()
+        let zoneId = UUID()
+        let placement = ZonePlacement(
+            zoneId: zoneId, projectId: projectId,
+            origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 600, height: 400),
+            color: "blue", collapsed: false, hydrationPolicy: .automatic)
+
+        var registry = Registry.empty()
+        registry.lastActiveWorkspaceId = workspaceId
+        registry.workspaces = [WorkspaceEntry(
+            id: workspaceId, name: "Default", projectIds: [projectId],
+            createdAt: now, updatedAt: now)]
+        registry.projects = [ProjectEntry(
+            id: projectId, name: "array-scratch", rootPath: projectRoot.path,
+            workspaceId: workspaceId, lastOpenedAt: now, pinned: false, missing: false)]
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        try registryStore.save(registry)
+        try WorkspaceStore(
+            workspaceId: workspaceId, applicationSupportDirectory: appSupport
+        ).save(WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [placement], zoneZOrder: [zoneId], lastActiveZoneId: zoneId))
+
+        let projectStore = ProjectStore(projectRoot: projectRoot)
+        let canvasState = CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [], groups: [], lastActiveTileId: nil)
+        try projectStore.saveCanvas(canvasState)
+
+        let agentStore = AgentStore(applicationSupportDirectory: agentsSupport)
+        // Image-bearing prompts are refused by the unchecked direct send, so the
+        // corpus needs the real composer attachment store to transport one.
+        let attachmentStore = AgentComposerAttachmentStore(
+            applicationSupportDirectory: agentsSupport)
+
+        let app = AppDelegate()
+        app.registryStore = registryStore
+        try app.reconciledManagedSessionSource.reconcile(
+            registry: registry, reason: .continuumRestarted, now: now)
+        // The scripted runner answers a send without spawning a CLI. Row STATE comes
+        // from `deliver`/`updateTurnFacts`, which the corpus drives directly, so no
+        // flow depends on this runner's own timing.
+        let supervisor = AgentSupervisor(
+            store: agentStore,
+            makeRunner: { _ in ScriptedAgentRunner(script: []) },
+            attachmentStore: attachmentStore)
+        app.agentSupervisor = supervisor
+        supervisor.restore()
+
+        let canvas = CanvasNSView(
+            canvasState: canvasState, activeZone: placement,
+            zoneRenderModels: [CanvasNSView.ZoneRenderModel(
+                placement: placement, displayName: "array-scratch")])
+        app.canvasView = canvas
+
+        // Tall on purpose. Cells materialize only for rows inside the table's
+        // viewport, and this corpus deliberately builds more rows than a real 640 pt
+        // sidebar shows; a short host would silently observe nothing for most flows.
+        // Height is free offscreen. Row-count-sensitive facts (History reachability
+        // under 50 rows) are P0.2's business at real heights, not this harness's.
+        let sidebarHeight: CGFloat = 640
+        let sidebar = WorkspaceSidebarView(frame: NSRect(
+            x: 0, y: 0, width: WorkspaceSidebarConfig.defaultWidth, height: sidebarHeight))
+        app.workspaceSidebarView = sidebar
+
+        // `configureWorkspaceSidebar` reads and writes the STANDARD defaults domain,
+        // so the stored scope is saved and put back — the courtesy
+        // `--agent-inbox-check` already pays. Scope `.all` so nothing this corpus
+        // spawns is filtered out for a reason unrelated to its flow.
+        let standardDefaults = UserDefaults.standard
+        let storedScope = standardDefaults.object(forKey: WorkspaceSidebarConfig.scopeKey)
+        WorkspaceSidebarConfig.setScope(.all, defaults: standardDefaults)
+        app.configureWorkspaceSidebar(sidebar)
+
+        // A real window, so the offscreen table has a viewport in which to
+        // materialize cells — without one, every rendered-cell read is vacuous.
+        let window = NSWindow(
+            contentRect: NSRect(
+                x: 0, y: 0,
+                width: WorkspaceSidebarConfig.defaultWidth, height: sidebarHeight),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = sidebar
+
+        return SidebarProductionCorpus.World(
+            tempRoot: tempRoot,
+            projectRoot: projectRoot,
+            projectId: projectId,
+            workspaceId: workspaceId,
+            supervisor: supervisor,
+            sidebar: sidebar,
+            attachmentStore: attachmentStore,
+            now: now,
+            // Captured STRONGLY on purpose: the world is the only owner of this
+            // AppDelegate, and a weak capture would let it deallocate and make every
+            // later observation silently empty.
+            refreshSurfaces: { app.refreshAgentSurfaces(notify: false) },
+            pushSurfaces: { app.pushAgentSurfaces(notify: false) },
+            recordActivity: { agentId, tileId, event, status in
+                app.recordManagedActivity(
+                    agentId: agentId, tileId: tileId, event: event, status: status)
+            },
+            restoreDefaults: {
+                if let storedScope {
+                    standardDefaults.set(storedScope, forKey: WorkspaceSidebarConfig.scopeKey)
+                } else {
+                    standardDefaults.removeObject(forKey: WorkspaceSidebarConfig.scopeKey)
+                }
+            })
+    }
+
     static func runAgentInboxChecks() async throws {
     enum CheckError: Error, CustomStringConvertible {
         case failed(String)

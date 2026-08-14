@@ -3522,6 +3522,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     var qaMaterializedRowCellCount: Int { qaMaterializedRowCells.count }
 
+    /// The table's own geometry. A host can give this view a viewport while leaving
+    /// the table inside it unsized or column-less, and in that state
+    /// `view(atColumn:row:makeIfNecessary:)` returns nil without ever consulting the
+    /// delegate — so every rendered-cell read comes back vacuously empty.
+    var qaTableGeometryForQA: (frame: NSRect, visible: NSRect, columns: Int) {
+        (tableView.frame, tableView.visibleRect, tableView.numberOfColumns)
+    }
+
     /// Per-cell geometry and paint, in live-tree order. Every entry comes from a
     /// materialized row cell; no row model or expected token is substituted here.
     var qaRowGeometriesForQA: [AgentInboxRowGeometryForQA] {
@@ -3529,6 +3537,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     var rowIdsForQA: [UUID] { rows.map(\.id) }
+    /// Every row the last push handed this view, before scope/search/fold shaping.
+    /// Program 96/P0.1 reads these so a corpus can prove what the PRODUCTION join
+    /// produced, then render those exact values in a deterministic probe host.
+    var qaAllRowsForQA: [AgentInboxRow] { allRows }
     /// The live table index for an agent id, including the section rows that
     /// precede it. Native virtual AX children expose this same index even when
     /// the corresponding cell is outside the viewport.
@@ -3852,6 +3864,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         tableRowByAgentId[id].map { tableView.rect(ofRow: $0) }
     }
     var glyphsForQA: [String] { cells().map(\.qaGlyph) }
+    /// Program 96/P0.1: the provider marks the rows actually painted.
+    var providerGlyphsForQA: [String] { cells().map(\.qaProviderGlyph) }
+    /// Program 96/P0.1: the placement band the rows actually painted.
+    var projectLinesForQA: [String] { cells().map(\.qaProject) }
     /// A card's elapsed turn time, a parked row's "12m ago" — one accessor,
     /// because it is one column: how long this row has been the way it is.
     var relativeTimesForQA: [String] { cells().map(\.qaElapsed) }
@@ -4395,6 +4411,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// did hold two). `reloadData(forRowIndexes:)` over every row rather than
     /// `reloadData()`, because the second one EMPTIES the selection and the
     /// selection is half of what is under test.
+    /// Re-render the rows this view is ALREADY holding through the full
+    /// `reload(rows:)` path, then realise every cell.
+    ///
+    /// Program 96/P0.1. The shipped push (`apply(rows:changed:)`) is incremental, and
+    /// an offscreen window defers that reload indefinitely — so a harness that drives
+    /// the real app and then reads rendered cells sees none, however many rows the
+    /// table reports. This changes only the reload STRATEGY; the row values are the
+    /// ones production's own join produced and stored in `allRows`.
+    func fullReloadForQA() {
+        reload(rows: allRows)
+        layoutForQA()
+    }
+
     func rebuildRowsForQA() {
         guard tableView.numberOfRows > 0 else { return }
         cellsByRow.removeAll()
@@ -4881,6 +4910,13 @@ protocol AgentInboxRowCell: NSTableCellView {
     var qaBranch: String { get }
     var qaElapsed: String { get }
     var qaGlyph: String { get }
+    /// The PROVIDER mark as rendered, distinct from `qaGlyph` (which is the status
+    /// glyph). Read off the label so a witness cannot pass by re-deriving
+    /// `AgentProviderGlyph` while the row paints something else. Program 96/P0.1.
+    var qaProviderGlyph: String { get }
+    /// The PLACEMENT band as rendered. Distinct from `qaMeta`, which composes
+    /// isolation and child rollup rather than where the agent lives. Program 96/P0.1.
+    var qaProject: String { get }
     var qaTextAlpha: Double { get }
     var qaAccentAlpha: Double { get }
     var qaGlyphAlpha: Double { get }
@@ -6884,6 +6920,10 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     /// the glyph is the collapsed row's way of saying the same thing in the room it
     /// has. Empty here is the fact, not a missing accessor.
     var qaGlyph: String { "" }
+    var qaProviderGlyph: String {
+        providerGlyphLabel.isHidden ? "" : providerGlyphLabel.stringValue
+    }
+    var qaProject: String { projectLabel.isHidden ? "" : projectLabel.stringValue }
     var qaTextAlpha: Double { Double(titleLabel.alphaValue) }
     var qaAccentAlpha: Double { Double(stateLabel.alphaValue) }
     var qaGlyphAlpha: Double { Opacity.full }
@@ -7474,6 +7514,12 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     var qaBranch: String { branchLabel.isHidden ? "" : branchLabel.stringValue }
     var qaElapsed: String { timeLabel.isHidden ? "" : timeLabel.stringValue }
     var qaGlyph: String { glyphLabel.stringValue }
+    /// A slim row draws no provider mark — its one glyph is the status glyph above.
+    var qaProviderGlyph: String { "" }
+    /// A slim row has no project child at all; the fact is relocated to its
+    /// accessibility aggregate (see `accessibilityAggregate(for:)`). Empty here is
+    /// the fact, not a missing accessor.
+    var qaProject: String { "" }
     var qaTextAlpha: Double { Double(titleLabel.alphaValue) }
     /// The glyph IS this row's accent — the same number as `qaGlyphAlpha`, and
     /// deliberately not `Opacity.full`: see the divergence note on the class.
