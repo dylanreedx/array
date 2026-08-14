@@ -1382,6 +1382,11 @@ final class SidebarInbox96PlaygroundView: NSView {
     private let rowsControl = NSSegmentedControl(
         labels: ["96 rules", "Queue 94"],
         trackingMode: .selectOne, target: nil, action: nil)
+    /// The header is shipped chrome, so it gets its own A/B rather than riding on
+    /// the row switch: the point is to compare the two headers, not to see one
+    /// header only when a redesigned row happens to be on.
+    private let headerButton = NSButton(
+        checkboxWithTitle: "96 header", target: nil, action: nil)
     private let readout = NSTextField(labelWithString: "")
     private let inbox: AgentInboxView
     /// Pinned. Rule 2 is an AGE comparison, so a wall clock would have the fixture's
@@ -1421,12 +1426,15 @@ final class SidebarInbox96PlaygroundView: NSView {
         borderControl.action = #selector(controlChanged)
         modelTextButton.target = self
         modelTextButton.action = #selector(controlChanged)
+        headerButton.state = .on
+        headerButton.target = self
+        headerButton.action = #selector(controlChanged)
 
         readout.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         readout.maximumNumberOfLines = 2
         readout.lineBreakMode = .byWordWrapping
 
-        let topRow = NSStackView(views: [styleControl, rowsControl, pitchControl])
+        let topRow = NSStackView(views: [styleControl, rowsControl, pitchControl, headerButton])
         topRow.orientation = .horizontal
         topRow.spacing = CGFloat(Space.m)
         let secondRow = NSStackView(views: [borderControl, iconControl, modelTextButton])
@@ -1506,6 +1514,12 @@ final class SidebarInbox96PlaygroundView: NSView {
     }
 
     private func applyStyle() {
+        // Search on its own full-width row above the scope control, and painted so
+        // it reads as a field rather than as a label — nil puts the shipped
+        // one-row band back, which is the comparison this switch exists for.
+        inbox.headerStyleOverride =
+            headerButton.state == .on ? AgentInboxHeaderStyleOverride() : nil
+
         // "Today's row" clears the override, which puts the list back to exactly
         // what ships — the A/B this section exists for.
         let uses96 = styleControl.selectedSegment == 0

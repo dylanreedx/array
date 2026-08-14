@@ -306,6 +306,72 @@ struct AgentInboxCardStyleOverride {
     let cardHeight: (AgentInboxRow) -> Double
 }
 
+/// An alternative HEADER presentation, injected the same way and for the same
+/// reason as `AgentInboxCardStyleOverride`.
+///
+/// The scope control and the search field are shipped chrome — unlike the row,
+/// they are not behind any seam, so a redesign of them would move the committed
+/// `chrome.agentInbox` baselines and change what every user sees, while the design
+/// is still being argued about. This is that seam.
+///
+/// nil is the default and the only value production or any existing gate sees.
+struct AgentInboxHeaderStyleOverride {
+    /// Search takes a full-width row of its own, above the scope control, rather
+    /// than sharing one row with it.
+    var stacked = true
+    /// Search paints a recessed field with a leading magnifier, so it reads as
+    /// something you can type into. Bare placeholder text over the panel reads as
+    /// a label — which is exactly what it looked like.
+    var fieldChrome = true
+}
+
+/// An `NSTextFieldCell` that reserves room on its leading edge.
+///
+/// The search field paints its own background and carries the magnifier inside
+/// it, so the string has to start after the glyph. `NSTextField` has no text
+/// inset of its own — the cell decides where the string draws, and it has to be
+/// told the same number in three places. Miss `edit` or `select` and the
+/// placeholder sits in one position while the caret and the selection land in
+/// another, which looks like the field jumping when you click it.
+@MainActor
+final class InsetTextFieldCell: NSTextFieldCell {
+    var leadingInset: CGFloat = 0
+
+    /// Leading, not left: in an RTL layout the glyph is on the other side, so
+    /// insetting `origin.x` would reserve the space away from the icon.
+    private func inset(_ rect: NSRect) -> NSRect {
+        guard leadingInset > 0 else { return rect }
+        var result = rect
+        result.size.width -= leadingInset
+        if userInterfaceLayoutDirection != .rightToLeft {
+            result.origin.x += leadingInset
+        }
+        return result
+    }
+
+    override func drawingRect(forBounds rect: NSRect) -> NSRect {
+        inset(super.drawingRect(forBounds: rect))
+    }
+
+    override func edit(
+        withFrame rect: NSRect, in controlView: NSView, editor: NSText,
+        delegate: Any?, event: NSEvent?
+    ) {
+        super.edit(
+            withFrame: inset(rect), in: controlView, editor: editor,
+            delegate: delegate, event: event)
+    }
+
+    override func select(
+        withFrame rect: NSRect, in controlView: NSView, editor: NSText,
+        delegate: Any?, start: Int, length: Int
+    ) {
+        super.select(
+            withFrame: inset(rect), in: controlView, editor: editor,
+            delegate: delegate, start: start, length: length)
+    }
+}
+
 final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                             NSTextFieldDelegate, TokenThemed {
     /// Set to preview a redesigned card row in this real list. See
@@ -316,6 +382,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             tableView.noteHeightOfRows(
                 withIndexesChanged: IndexSet(integersIn: 0..<tableView.numberOfRows))
         }
+    }
+
+    /// Set to preview a redesigned header in this real sidebar. See
+    /// `AgentInboxHeaderStyleOverride`; nil everywhere but the Component Lab.
+    var headerStyleOverride: AgentInboxHeaderStyleOverride? {
+        didSet { applyHeaderStyle() }
     }
 
     /// The tallest card height: three lines (metadata, name, detail), the two
@@ -467,6 +539,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     private let scopeButton: ChoiceButton
     private let searchField: NSTextField
+    /// The leading magnifier, drawn only when a header override asks for field
+    /// chrome. An `NSImageView` rather than another `TokenThemed` view: its tint
+    /// is set from this view's `applyTokens`, which already owns the field's text
+    /// colour, so the header adds no new owner to the token census.
+    private let searchIcon = NSImageView(frame: .zero)
+    /// The one-row header queue 94 ships, and the stacked one program 96 is
+    /// trying. Exactly one set is active at a time; `defaultHeader` is what
+    /// production and every existing gate see.
+    private var defaultHeaderConstraints: [NSLayoutConstraint] = []
+    private var stackedHeaderConstraints: [NSLayoutConstraint] = []
     private let scrollView: NSScrollView
     private let tableView: NSTableView
     private let column: NSTableColumn
@@ -967,6 +1049,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         scopeButton.preferredPopoverWidth = 124
         scopeButton.setAccessibilityLabel("Agent scope")
         searchField = NSTextField(frame: .zero)
+        // Before any other configuration: the field forwards isEditable, the font
+        // and the placeholder to its cell, so a cell swapped in afterwards would
+        // arrive blank.
+        searchField.cell = InsetTextFieldCell()
         searchField.translatesAutoresizingMaskIntoConstraints = false
         searchField.isEditable = true
         searchField.isSelectable = true
@@ -1074,6 +1160,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
         addSubview(scopeButton)
         addSubview(searchField)
+        searchIcon.translatesAutoresizingMaskIntoConstraints = false
+        searchIcon.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)
+        searchIcon.imageScaling = .scaleProportionallyDown
+        searchIcon.isHidden = true
+        // Decoration: the click belongs to the field behind it, or the caret would
+        // refuse to land whenever you aimed at the icon.
+        searchIcon.setAccessibilityElement(false)
+        addSubview(searchIcon)
         addSubview(scrollView)
         addSubview(emptyLabel)
         // P3.11: added LAST, so it draws over the bottom of the list.
@@ -1108,7 +1202,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         undoToast.onUndo = { [weak self] in self?.performUndo() }
         undoToast.setAccessibilityIdentifier("ContinuumAgentInboxUndoToast")
 
-        NSLayoutConstraint.activate([
+        // The shipped one-row header: scope on the left at a fixed 124pt, search
+        // sharing the row to its right. Held in a stored set rather than activated
+        // inline so a header override can swap it without touching production's
+        // numbers — see `AgentInboxHeaderStyleOverride`.
+        defaultHeaderConstraints = [
             scopeButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
             scopeButton.topAnchor.constraint(equalTo: topAnchor, constant: Space.s),
             scopeButton.widthAnchor.constraint(equalToConstant: 124),
@@ -1117,10 +1215,33 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             searchField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.m),
             searchField.centerYAnchor.constraint(equalTo: scopeButton.centerYAnchor),
             searchField.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
+            scrollView.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
+        ]
+
+        // Program 96's stacked header: search owns the top row at full width, the
+        // scope control sits under it at its own intrinsic width. Costs one extra
+        // control height plus a gap — about a third of an agent row — which is the
+        // trade the S0 density ruling has to weigh.
+        stackedHeaderConstraints = [
+            searchField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
+            searchField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.m),
+            searchField.topAnchor.constraint(equalTo: topAnchor, constant: Space.s),
+            searchField.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
+            scopeButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
+            scopeButton.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: Space.s),
+            scopeButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
+            scrollView.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
+        ]
+        NSLayoutConstraint.activate(defaultHeaderConstraints)
+
+        NSLayoutConstraint.activate([
+            searchIcon.leadingAnchor.constraint(equalTo: searchField.leadingAnchor, constant: CGFloat(Space.s)),
+            searchIcon.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
+            searchIcon.widthAnchor.constraint(equalToConstant: Self.searchIconSide),
+            searchIcon.heightAnchor.constraint(equalToConstant: Self.searchIconSide),
 
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
 
             emptyLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.l),
@@ -1169,6 +1290,50 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         layer?.backgroundColor = SurfaceToken.panel.color.cgColor(in: self)
         emptyLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         searchField.textColor = TextToken.textPrimary.color.nsColor(in: self)
+        applySearchFieldChrome()
+    }
+
+    /// Paint the search field to match `ChoiceButton` — same fill role, same
+    /// radius, same height — so the two header controls read as one family
+    /// instead of a solid chip sitting next to loose text.
+    ///
+    /// Painted from HERE rather than from a new view class. This view already owns
+    /// the field's text colour, so borrowing its layer adds no owner to the token
+    /// census (hazard 8) and no surface for the appearance sweep to hunt.
+    private func applySearchFieldChrome() {
+        guard headerStyleOverride?.fieldChrome == true else {
+            searchField.layer?.backgroundColor = nil
+            searchField.layer?.borderWidth = 0
+            searchIcon.isHidden = true
+            return
+        }
+        searchField.wantsLayer = true
+        searchField.layer?.cornerRadius = CGFloat(Radius.card)
+        searchField.layer?.backgroundColor =
+            AgentSurfaceRole.composer.color.cgColor(in: self)
+        let focused = window?.firstResponder === searchField.currentEditor()
+        searchField.layer?.borderWidth = focused ? ChoiceButton.focusBorderWidth : 0
+        searchField.layer?.borderColor = AgentLineRole.focusRing.color.cgColor(in: self)
+        searchIcon.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
+        searchIcon.isHidden = false
+    }
+
+    /// The magnifier's box. Matches `ChoiceButton`'s chevron so the two header
+    /// controls carry glyphs of the same weight.
+    private static let searchIconSide: CGFloat = 12
+
+    private func applyHeaderStyle() {
+        let stacked = headerStyleOverride?.stacked == true
+        NSLayoutConstraint.deactivate(stacked ? defaultHeaderConstraints : stackedHeaderConstraints)
+        NSLayoutConstraint.activate(stacked ? stackedHeaderConstraints : defaultHeaderConstraints)
+        // The glyph steals the field's leading edge, so the text has to start
+        // after it — otherwise the placeholder sits underneath the magnifier.
+        (searchField.cell as? InsetTextFieldCell)?.leadingInset =
+            headerStyleOverride?.fieldChrome == true
+            ? Self.searchIconSide + CGFloat(Space.s) * 2
+            : 0
+        applyTokens()
+        needsLayout = true
     }
 
     override func viewDidChangeEffectiveAppearance() {
