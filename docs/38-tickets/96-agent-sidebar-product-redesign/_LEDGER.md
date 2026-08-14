@@ -538,7 +538,7 @@ allowlisted, 0 new). `ComponentLab.swift` still 0 lines against `d334f01`.
 
 ## Feedback round 4 — the icon set collapses to three (2026-08-14)
 
-Mock-only. Artifact: `qa-runs/2026-08-14T200632Z/sidebar-96/`, 42 images, gate PASS.
+Mock-only. Artifact: `qa-runs/2026-08-14T201842Z/sidebar-96/`, 42 images, gate PASS.
 
 Ruled: keep the left-aligned column; cut the glyph set to hand (approval AND input),
 throbber (working), error mark (failed). Done, Stopped and Cancelled draw nothing.
@@ -573,6 +573,24 @@ was right and the reasoning behind the lane was wrong. A reserved lane was suppo
 the column straight; the column is made of the ICONS, which are pinned to one x and
 ink-aligned to each other, so it is straight either way. All the lane did was indent band 1
 away from the title and branch beneath it on seven rows out of ten.
+
+### The fallback badge failed its first reader, who was its author
+
+The mock carried a `Gemini 3 Pro` row specifically to expose what "mark only" costs a
+provider with no bundled asset. It rendered §4.5's two-character badge, `GE`, and Dylan
+asked what it was supposed to be — which is the finding, arrived at the only way this kind
+of thing can be: by someone looking at it cold.
+
+The badge is not a degraded identity on that row, it is the ONLY identity, because the
+model name has already been removed. The mock now falls back to the model's name instead.
+Mark or name, never a cipher. **Needs a §4.5 amendment** — recorded in
+`brand-marks/PROVENANCE.md` and in the review, not changed quietly.
+
+`providerInitials` and `drawProviderChip` deleted with it — code added earlier the same day
+and now unreachable.
+
+Noted, not acted on: **the xAI mark does not survive at 14 pt**; Grok's logo reduces to
+roughly a slashed circle. Needs a bigger slot or a vendor small-size variant. P3.1.
 
 ### Removed
 

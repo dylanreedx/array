@@ -1073,15 +1073,6 @@ final class SidebarDensityProposalView: NSView {
     /// Parsed once, not once per row per image.
     private static var markCache: [String: NSImage?] = [:]
 
-    /// The two-character badge §4.5 specifies when a provider has no asset — still the
-    /// truth for Google, Mistral, Groq, Cerebras, OpenRouter and every harness mark.
-    private static func providerInitials(_ model: String) -> String {
-        if model.hasPrefix("GPT") { return "AI" }
-        if model.hasPrefix("Opus") || model.hasPrefix("Sonnet") { return "AN" }
-        let letters = model.filter(\.isLetter).prefix(2).uppercased()
-        return letters.count == 2 ? letters : "??"
-    }
-
     private static let rows: [(placement: String, state: String, title: String,
                                branch: String, model: String)] = [
         ("Array › Sidebar", "Done · 4m", "Replace sidebar identity and completion UX",
@@ -1266,13 +1257,22 @@ final class SidebarDensityProposalView: NSView {
             // Dylan's ask after the T3 Code reference, and the consequence is deliberately
             // visible in the last row: a provider with no bundled mark falls back to a
             // two-letter badge and the agent's model becomes unreadable on the surface.
+            //
+            // When there is NO mark, the row falls back to the model's NAME rather than
+            // to §4.5's two-character badge. The badge was in the mock and Dylan's
+            // reaction to it was "what is this supposed to be" — which is the answer.
+            // `GE` identifies nothing; a monogram only works once you already know the
+            // set it is drawn from, and a person meeting a new provider does not. Mark or
+            // name, never a cipher. See the review for what this asks of §4.5.
+            let mark = Self.providerMark(row.model)
             let chipSide: CGFloat = 14
             let chipGap: CGFloat = 6
-            let modelTextWidth = anatomy.showsModelText
+            let showsName = anatomy.showsModelText || mark == nil
+            let modelTextWidth = showsName
                 ? min(contentWidth * 0.45, measure(row.model, size: 11).width + 2)
                 : 0
-            let trailingWidth = chipSide
-                + (anatomy.showsModelText ? modelTextWidth + chipGap : 0)
+            let trailingWidth = (mark == nil ? 0 : chipSide)
+                + (showsName ? modelTextWidth + (mark == nil ? 0 : chipGap) : 0)
             let branchGlyph: CGFloat = 11
             let branchGlyphGap: CGFloat = 4
             drawSymbol("arrow.triangle.branch", in: NSRect(
@@ -1288,15 +1288,12 @@ final class SidebarDensityProposalView: NSView {
                 x: textRight - trailingWidth,
                 y: bandY + (proposal.bandDetail - chipSide) / 2,
                 width: chipSide, height: chipSide)
-            if let mark = Self.providerMark(row.model) {
+            if let mark {
                 // Flat, in the theme's colour — see `providerMark`, and the §4.5 caveat
                 // that makes this a mock choice rather than a shipping one.
                 drawImage(mark, in: chipRect, tint: primary.withAlphaComponent(0.72))
-            } else {
-                drawProviderChip(
-                    Self.providerInitials(row.model), in: chipRect, color: secondary)
             }
-            if anatomy.showsModelText {
+            if showsName {
                 draw(row.model, at: NSRect(
                     x: textRight - modelTextWidth, y: bandY,
                     width: modelTextWidth, height: proposal.bandDetail),
@@ -1570,23 +1567,6 @@ final class SidebarDensityProposalView: NSView {
         let image = NSImage(size: rect.size)
         image.addRepresentation(rep)
         drawImage(image, in: rect, tint: nil)
-    }
-
-    /// The labelled two-character badge §4.5 specifies as the fallback when a provider
-    /// asset is missing.
-    private func drawProviderChip(_ initials: String, in rect: NSRect, color: NSColor) {
-        let path = NSBezierPath(roundedRect: rect, xRadius: 3, yRadius: 3)
-        color.withAlphaComponent(0.22).setStroke()
-        path.lineWidth = 1
-        path.stroke()
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 8, weight: .semibold),
-            .foregroundColor: color,
-        ]
-        let size = (initials as NSString).size(withAttributes: attributes)
-        (initials as NSString).draw(
-            at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2),
-            withAttributes: attributes)
     }
 
     private func measure(_ text: String, size: CGFloat) -> NSSize {

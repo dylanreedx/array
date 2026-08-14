@@ -64,6 +64,21 @@ Until that review happens, treat every image in `qa-runs/**/status/` and
    from Claude Code or Codex.
 3. **The resource pipeline and its witness** — build the real `.app`, enumerate
    `Contents/Resources`, resolve every semantic key offline, render both appearance
-   variants, prove the unknown-provider initials fallback, and prove a missing known asset
-   fails visibly in QA rather than rendering blank.
+   variants, prove the unknown-provider fallback (now the model NAME, not initials — see below),
+   and prove a missing known asset fails visibly in QA rather than rendering blank.
 4. **A licence/attribution decision** — whether Array must display attribution anywhere.
+
+## The two-character fallback is being replaced by the model name (2026-08-14)
+
+§4.5 specifies a two-character badge when a provider has no asset. The mock rendered one —
+`GE`, for `Gemini 3 Pro` — and Dylan, looking at his own review artifact, asked what it was
+supposed to be. A monogram only reads once you know the set it is drawn from.
+
+It matters more than it looks, because the mark-only anatomy has already taken the model
+name off that row: the badge is not a degraded identity, it is the only one. The mock now
+prints the model's name instead. **This needs a §4.5 amendment**, and it makes bundling the
+missing marks (item 2 above) the difference between a rare fallback and a routine one.
+
+Also observed and not acted on: **the xAI mark does not survive at 14 pt** — Grok's logo
+reduces to roughly a slashed circle. It needs either a larger slot or a vendor small-size
+variant. P3.1.

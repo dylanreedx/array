@@ -150,7 +150,7 @@ PASS, 42 images:
 | `offscreen/` | 36 images — corpus sweeps, the 662 pt density fixtures, one interaction reference, and `proposals/` |
 
 **The offscreen half has since been re-rendered** with the new row anatomy and the status
-sweep: `qa-runs/2026-08-14T200632Z/sidebar-96/`, 42 images, gate PASS. The live half is
+sweep: `qa-runs/2026-08-14T201842Z/sidebar-96/`, 42 images, gate PASS. The live half is
 unchanged and does not need re-capturing — those images are the *shipped* sidebar, and no
 product behaviour has changed. Regenerate the offscreen set alone with
 `.build/debug/Array --sidebar-screenshot-check`.
@@ -406,6 +406,34 @@ Two glyphs remain in the alignment witness, and it now reads the set **off the m
 rows** rather than a list of its own — so it cannot end up measuring a glyph that was cut,
 or skip one that was added. Centring these two would still scatter their left edges by
 1.19 pt of a 16 pt slot; ink-left alignment puts both at 0.00.
+
+### The two-character fallback badge does not work, and its own author proved it
+
+The mock carried one row on a provider with no bundled mark — `Gemini 3 Pro` — rendering
+§4.5's specified **two-character badge**, `GE`. Dylan's reaction, unprompted and with the
+row cropped out of context: *"what is this provider icon supposed to be"*.
+
+That is the answer. A monogram only reads once you already know the set it is drawn from,
+and the person meeting a new provider in their sidebar does not. Worse, this is the row
+where the mark-only anatomy has already removed the model name — so the badge is not a
+degraded identity, it is the **only** identity, and it is unreadable.
+
+**The mock now falls back to the model's NAME when there is no mark.** Mark or name, never
+a cipher. Concretely: `⎇ agent/ack-watermark … Gemini 3 Pro`, in place of `⎇
+agent/ack-watermark … GE`.
+
+Two things this asks for:
+
+1. **A §4.5 amendment.** The design specifies the badge; this proposes replacing it with
+   the model name. Recorded here rather than changed quietly — `_DESIGN.md` is yours.
+2. **It raises the stakes on the missing marks.** With this fallback the row is never
+   unreadable, but a Google/OpenRouter/Mistral/Groq/Cerebras agent is the only kind that
+   still spends width on text. Bundling those marks (P3.1) is what makes the fallback rare
+   rather than routine.
+
+Related, and visible in the same image: **the xAI mark does not survive at 14 pt.** Grok's
+logo reduces to something close to a slashed circle at that size. Not acted on — it needs
+either a larger mark slot or a vendor-supplied small-size variant, and both are P3.1.
 
 ## Dylan's ruling — does the card still need a border?
 
