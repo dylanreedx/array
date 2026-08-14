@@ -1370,6 +1370,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--canvas-zoom-invalidation-probe-check") {
+            do {
+                _ = NSApplication.shared
+                try CanvasZoomInvalidationProbeChecks.run()
+                print("ContinuumRevivedCanvasZoomInvalidationProbeChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--transcript-delta-index-oracle-check") {
             do {
                 _ = NSApplication.shared

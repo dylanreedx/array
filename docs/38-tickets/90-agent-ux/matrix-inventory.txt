@@ -33,6 +33,7 @@ check --browser-ui-delegate-check
 check --browser-url-focus-check
 check --camera-chrome-redraw-check
 check --canvas-camera-hit-oracle-check
+check --canvas-zoom-invalidation-probe-check
 check --companion-sync-health-check
 check --component-lab-check
 check --composer-image-components-check
@@ -188,6 +189,7 @@ leg run_app_check .build/debug/Array --browser-ui-delegate-check
 leg run_app_check .build/debug/Array --browser-url-focus-check
 leg run_app_check .build/debug/Array --camera-chrome-redraw-check
 leg run_app_check .build/debug/Array --canvas-camera-hit-oracle-check
+leg run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
 leg run_app_check .build/debug/Array --companion-sync-health-check
 leg run_app_check .build/debug/Array --component-lab-check
 leg run_app_check .build/debug/Array --composer-image-components-check

@@ -1004,7 +1004,13 @@ final class AgentTranscriptListView: NSView {
         jumpToLatestButton.isHidden = !scrollController.showsJumpToLatest
     }
 
+    /// QA: layout passes this transcript has been put through. The profile of a
+    /// real zoom names this method directly (~960 samples), so the tile body owns
+    /// a real share of the traversal, not just AppKit's recursion around it.
+    private(set) var qaLayoutPassCount = 0
+
     override func layout() {
+        qaLayoutPassCount += 1
         super.layout()
         let clipSize = scrollView.contentView.bounds.size
         if abs(collectionView.frame.width - clipSize.width) > 0.5 {
