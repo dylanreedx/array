@@ -742,9 +742,37 @@ final class SidebarDensityProposalView: NSView {
     /// Content chosen so the comparison is honest at 220 pt: a long title, a bidi
     /// title, a middle-truncating branch, and the terminal outcomes §4.6 wants
     /// distinguished.
+    /// §8.2 forbids state read by colour alone, so every state carries a symbol as
+    /// well as its word. SF Symbols here rather than bundled art: these are Apple's
+    /// own glyphs, they need no provenance review, and the mock's job is to show the
+    /// SHAPE of the row. Vendor provider logos are a different problem — see P3.1.
+    private static func stateSymbol(_ state: String) -> String? {
+        // The icon carries the tick, so the word stays a plain word — a symbol AND a
+        // ✓ glyph AND a colour is three ways of saying one thing.
+        if state.hasPrefix("Done") { return "checkmark.circle.fill" }
+        if state.hasPrefix("Working") { return "arrow.triangle.2.circlepath" }
+        if state.hasPrefix("Approval") { return "hand.raised.fill" }
+        if state.hasPrefix("Input") { return "questionmark.circle.fill" }
+        if state.hasPrefix("Failed") { return "exclamationmark.octagon.fill" }
+        if state.hasPrefix("Stopped") { return "stop.circle.fill" }
+        if state.hasPrefix("Cancelled") { return "slash.circle.fill" }
+        return nil
+    }
+
+    /// A placeholder provider mark. Deliberately NOT a vendor logo: §4.5 requires
+    /// bundled, provenance-tracked, trademark-reviewed assets, and §10 forbids
+    /// fetching them at runtime. This is the labelled two-character fallback the design
+    /// specifies for a provider whose asset is missing, so the row can be judged with
+    /// the mark SLOT filled without shipping an unreviewed logo.
+    private static func providerInitials(_ model: String) -> String {
+        if model.hasPrefix("GPT") { return "AI" }
+        if model.hasPrefix("Opus") || model.hasPrefix("Sonnet") { return "AN" }
+        return "??"
+    }
+
     private static let rows: [(placement: String, state: String, title: String,
                                branch: String, model: String)] = [
-        ("Array › Sidebar", "✓ Done · 4m", "Replace sidebar identity and completion UX",
+        ("Array › Sidebar", "Done · 4m", "Replace sidebar identity and completion UX",
          "agent/sidebar-redesign", "GPT-5.6 Sol"),
         ("Array › Canvas", "Working · 1m 24s", "Stop the camera resizing every tile view",
          "agent/retained-world-plane", "Opus"),
@@ -816,15 +844,27 @@ final class SidebarDensityProposalView: NSView {
             var bandY = cardRect.minY + proposal.insetV
 
             // Band 1 — placement on the left, state and time on the right.
-            let stateWidth = min(contentWidth * 0.5, measure(row.state, size: 11).width + 2)
+            let accent = stateColor(row.state, primary: primary)
+            let iconSide: CGFloat = 11
+            let iconGap: CGFloat = 3
+            let hasIcon = Self.stateSymbol(row.state) != nil
+            let stateTextWidth = min(
+                contentWidth * 0.5, measure(row.state, size: 11).width + 2)
+            let stateWidth = stateTextWidth + (hasIcon ? iconSide + iconGap : 0)
             draw(row.placement, at: NSRect(
                 x: cardRect.minX + insetH, y: bandY,
                 width: contentWidth - stateWidth - 6, height: proposal.bandTop),
                  size: 11, color: secondary, alignment: .left)
+            if let symbol = Self.stateSymbol(row.state) {
+                drawSymbol(symbol, in: NSRect(
+                    x: cardRect.maxX - insetH - stateWidth,
+                    y: bandY + (proposal.bandTop - iconSide) / 2,
+                    width: iconSide, height: iconSide), color: accent)
+            }
             draw(row.state, at: NSRect(
-                x: cardRect.maxX - insetH - stateWidth, y: bandY,
-                width: stateWidth, height: proposal.bandTop),
-                 size: 11, color: stateColor(row.state, primary: primary), alignment: .right)
+                x: cardRect.maxX - insetH - stateTextWidth, y: bandY,
+                width: stateTextWidth, height: proposal.bandTop),
+                 size: 11, color: accent, alignment: .right)
             bandY += proposal.bandTop + proposal.gapTop
 
             // Band 2 — the subject, on its own line, never sacrificed.
@@ -835,14 +875,25 @@ final class SidebarDensityProposalView: NSView {
             bandY += proposal.bandTitle + proposal.gapBottom
 
             // Band 3 — branch left (middle-truncating), model right.
-            let modelWidth = min(contentWidth * 0.45, measure(row.model, size: 11).width + 2)
+            let modelTextWidth = min(
+                contentWidth * 0.45, measure(row.model, size: 11).width + 2)
+            let chipSide: CGFloat = 14
+            let chipGap: CGFloat = 4
+            let modelWidth = modelTextWidth + chipSide + chipGap
             draw(row.branch, at: NSRect(
                 x: cardRect.minX + insetH, y: bandY,
                 width: contentWidth - modelWidth - 6, height: proposal.bandDetail),
                  size: 11, color: secondary, alignment: .left, middleTruncating: true)
+            drawProviderChip(
+                Self.providerInitials(row.model),
+                in: NSRect(
+                    x: cardRect.maxX - insetH - modelWidth,
+                    y: bandY + (proposal.bandDetail - chipSide) / 2,
+                    width: chipSide, height: chipSide),
+                color: secondary)
             draw(row.model, at: NSRect(
-                x: cardRect.maxX - insetH - modelWidth, y: bandY,
-                width: modelWidth, height: proposal.bandDetail),
+                x: cardRect.maxX - insetH - modelTextWidth, y: bandY,
+                width: modelTextWidth, height: proposal.bandDetail),
                  size: 11, color: secondary, alignment: .right)
 
             drawnRowCount += 1
@@ -862,7 +913,7 @@ final class SidebarDensityProposalView: NSView {
     }
 
     private func stateColor(_ state: String, primary: NSColor) -> NSColor {
-        if state.hasPrefix("✓") || state.hasPrefix("Done") {
+        if state.hasPrefix("Done") {
             return isDark ? NSColor(calibratedRed: 0.42, green: 0.78, blue: 0.52, alpha: 1)
                           : NSColor(calibratedRed: 0.13, green: 0.51, blue: 0.27, alpha: 1)
         }
@@ -875,6 +926,39 @@ final class SidebarDensityProposalView: NSView {
                           : NSColor(calibratedRed: 0.58, green: 0.40, blue: 0.05, alpha: 1)
         }
         return primary.withAlphaComponent(0.62)
+    }
+
+    private func drawSymbol(_ name: String, in rect: NSRect, color: NSColor) {
+        let config = NSImage.SymbolConfiguration(pointSize: rect.height, weight: .semibold)
+        guard let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(config) else { return }
+        image.isTemplate = true
+        color.set()
+        let tinted = NSImage(size: rect.size, flipped: true) { bounds in
+            image.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1)
+            color.set()
+            bounds.fill(using: .sourceAtop)
+            return true
+        }
+        tinted.draw(in: rect)
+    }
+
+    /// The labelled two-character badge §4.5 specifies as the fallback when a provider
+    /// asset is missing — which is every provider today, because no vendor art is
+    /// bundled yet.
+    private func drawProviderChip(_ initials: String, in rect: NSRect, color: NSColor) {
+        let path = NSBezierPath(roundedRect: rect, xRadius: 3, yRadius: 3)
+        color.withAlphaComponent(0.22).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 8, weight: .semibold),
+            .foregroundColor: color,
+        ]
+        let size = (initials as NSString).size(withAttributes: attributes)
+        (initials as NSString).draw(
+            at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2),
+            withAttributes: attributes)
     }
 
     private func measure(_ text: String, size: CGFloat) -> NSSize {
