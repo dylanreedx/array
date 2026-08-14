@@ -1808,12 +1808,16 @@ final class TileSpawner {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
         let noteId = UUID()
         let tileId = UUID()
-        let frame = makePlacement(
+        // Through the ACTIVE project's model (hazard 9), like the file-open route: at
+        // boot this is the flat canvas and behaves exactly as before, but once
+        // `setZones` has installed layers the flat collection belongs to the DEPARTED
+        // project and a note appended to it lands in a zone that is no longer on screen.
+        let frame = makeProjectTilePlacement(
             worldPoint: worldPoint,
             size: CanvasEngine.defaultFrame(for: .note),
             in: canvasView
         )
-        let nextZ = CanvasEngine.zPositionAbove(canvasView.canvasState.tiles)
+        let nextZ = CanvasEngine.zPositionAbove(canvasView.projectTiles())
         let tile = Tile(
             id: tileId,
             kind: .note,
@@ -1831,9 +1835,9 @@ final class TileSpawner {
         }
         let view = NoteTileNSView(tile: tile, noteId: noteId, initialBody: "")
         view.onTextChange = { [weak self] in self?.notePersistenceHandler?() }
-        canvasView.install(tileView: view, for: tile)
+        let target = canvasView.installProjectTile(tileView: view, for: tile)
         do {
-            try projectStore.saveCanvas(canvasView.canvasState)
+            try persistProjectCanvas(after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -3452,6 +3456,25 @@ final class TileSpawner {
         return artifact
     }
 
+    /// Spawn placement witness (.plans/18).
+    ///
+    /// Four fixtures, every one an 1800x900 canvas at zoom 1 with the 640x400 note
+    /// default (`TileGeometry`) and the 8pt default gap (`TileGapResolver`):
+    ///
+    ///  1. flat canvas, active zone at origin (0,0)      — attention-centred placement
+    ///  2. flat canvas, active zone at origin (1000,500) — attention-centred placement in
+    ///     WORLD space, then anchor docking right / left / below, then explicit point
+    ///  3. flat canvas, first-fit route (file tree)      — the repaired world-space scan
+    ///     window; still first-fit, but no longer computed in zone-local space and
+    ///     rendered as world (which put the tile off screen entirely)
+    ///  4. ZoneLayer canvas — the ACTIVE project's model owns the tile, the persisted
+    ///     frame is zone-local, and the explicit anchor route is unaffected
+    ///
+    /// Every expected frame below is written out by hand from the fixture geometry.
+    /// None of them is obtained by calling the placement policy: a witness that
+    /// re-derives what production derives stays green while production is broken.
+    /// The assertions are on RESULTING GEOMETRY — the persisted frame and the tile
+    /// view's rendered screen frame — never on the shape of the call site.
     static func runSpawnPlacementSelfCheck() throws -> URL {
         enum CheckError: Error, CustomStringConvertible {
             case failed(String)
@@ -3464,66 +3487,285 @@ final class TileSpawner {
         func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
             if !condition() { throw CheckError.failed(message) }
         }
+        func describe(_ frame: TileFrame) -> String {
+            "(x:\(frame.x), y:\(frame.y), \(frame.width)x\(frame.height))"
+        }
+        func expectFrame(_ actual: TileFrame, _ expected: TileFrame, _ label: String) throws {
+            let matches = abs(actual.x - expected.x) < 0.5
+                && abs(actual.y - expected.y) < 0.5
+                && abs(actual.width - expected.width) < 0.5
+                && abs(actual.height - expected.height) < 0.5
+            try expect(matches, "\(label): expected \(describe(expected)), got \(describe(actual))")
+        }
+        /// The tile the user actually sees: the installed view's frame is set by
+        /// `layoutTile`/`_layoutLayerTile` from whichever model owns the tile, so this
+        /// catches a frame that is numerically plausible in the wrong coordinate space.
+        func expectRenderedCentre(_ canvas: CanvasNSView, _ tileId: UUID, _ label: String) throws {
+            guard let view = canvas.tileView(for: tileId) else {
+                throw CheckError.failed("\(label): no installed view for the spawned tile")
+            }
+            let centre = CGPoint(x: view.frame.midX, y: view.frame.midY)
+            let wanted = CGPoint(x: canvas.bounds.midX, y: canvas.bounds.midY)
+            try expect(abs(centre.x - wanted.x) < 0.5 && abs(centre.y - wanted.y) < 0.5,
+                       "\(label): the spawned tile should render centred on the viewport; view centre \(centre) vs canvas centre \(wanted), view frame \(view.frame)")
+        }
 
         let fileManager = FileManager.default
-        let tempRoot = fileManager.temporaryDirectory
-            .appendingPathComponent("continuum-spawn-placement-\(UUID().uuidString)", isDirectory: true)
-        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
-        let project = Project(
-            id: UUID(),
-            name: "spawn-placement-check",
-            rootPath: tempRoot.path,
-            createdAt: Date(),
-            updatedAt: Date(),
-            defaultLaunchProfileId: "shell",
-            editorPreference: .auto,
-            settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning)
-        )
-        let store = ProjectStore(projectRoot: tempRoot)
-        try store.saveProject(project)
-        let activeZone = ZonePlacement(
-            zoneId: UUID(),
-            projectId: project.id,
-            origin: ZonePoint(x: 1000, y: 500),
-            size: ZoneSize(width: 1800, height: 900),
+        let browserEngine = BrowserEngineContext()
+        defer { browserEngine.shutdown() }
+
+        struct Fixture {
+            let root: URL
+            let project: Project
+            let store: ProjectStore
+            let canvas: CanvasNSView
+            let spawner: TileSpawner
+            let zone: ZonePlacement
+        }
+        // `TileSpawner.canvasView` is weak; the fixtures are held for the whole check.
+        var fixtures: [Fixture] = []
+        func makeFixture(name: String, zoneOrigin: ZonePoint, viewport: CanvasViewport) throws -> Fixture {
+            let root = fileManager.temporaryDirectory
+                .appendingPathComponent("continuum-spawn-placement-\(name)-\(UUID().uuidString)", isDirectory: true)
+            try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+            let project = Project(
+                id: UUID(),
+                name: "spawn-placement-\(name)",
+                rootPath: root.path,
+                createdAt: Date(),
+                updatedAt: Date(),
+                defaultLaunchProfileId: "shell",
+                editorPreference: .auto,
+                settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning)
+            )
+            let store = ProjectStore(projectRoot: root)
+            try store.saveProject(project)
+            let zone = ZonePlacement(
+                zoneId: UUID(),
+                projectId: project.id,
+                origin: zoneOrigin,
+                size: ZoneSize(width: 1800, height: 900),
+                color: "#6E8BFF",
+                collapsed: false,
+                hydrationPolicy: .automatic
+            )
+            try store.saveCanvas(CanvasState(viewport: viewport, tiles: [], groups: [], lastActiveTileId: nil))
+            let canvas = CanvasNSView(canvasState: try store.loadCanvas(), activeZone: zone)
+            canvas.setFrameSize(CGSize(width: 1800, height: 900))
+            let spawner = TileSpawner(canvasView: canvas, ghostty: nil, browserEngine: browserEngine, projectStore: store, project: project)
+            let fixture = Fixture(root: root, project: project, store: store, canvas: canvas, spawner: spawner, zone: zone)
+            fixtures.append(fixture)
+            return fixture
+        }
+        func spawnNote(_ fixture: Fixture, _ title: String, at worldPoint: CGPoint? = nil) throws -> UUID {
+            switch fixture.spawner.spawnNote(title: title, at: worldPoint) {
+            case let .spawned(_, tileId): return tileId
+            case let .failure(error): throw CheckError.failed("spawnNote \(title) failed: \(error)")
+            }
+        }
+        func placedFrame(_ fixture: Fixture, _ tileId: UUID) throws -> TileFrame {
+            guard let tile = fixture.canvas.projectTiles().first(where: { $0.id == tileId }) else {
+                throw CheckError.failed("spawned tile \(tileId) is missing from the active project's tiles")
+            }
+            return tile.frame
+        }
+
+        // MARK: Fixture 1 — flat canvas, zone at the world origin
+        //
+        // Viewport (0,0) over an 1800x900 canvas: the world centre is (900,450), so a
+        // 640x400 note centred on it starts at (900-320, 450-200).
+        let originFixture = try makeFixture(name: "origin", zoneOrigin: ZonePoint(x: 0, y: 0), viewport: CanvasViewport(x: 0, y: 0, zoom: 1))
+        let originViewportBefore = originFixture.canvas.viewport
+        let originNoteId = try spawnNote(originFixture, "Centred at origin")
+        try expectFrame(try placedFrame(originFixture, originNoteId),
+                        TileFrame(x: 580, y: 250, width: 640, height: 400),
+                        "empty viewport at the world origin centres the new note on the viewport centre")
+        try expectRenderedCentre(originFixture.canvas, originNoteId, "origin fixture")
+
+        // MARK: Fixture 2 — flat canvas, zone at a NON-ZERO origin
+        //
+        // Flat `canvasState.tiles` frames are WORLD frames (`CanvasNSView.layoutTile`),
+        // so the zone origin must not enter the arithmetic at all. Viewport (900,400)
+        // over 1800x900 puts the world centre at (1800,850); the note centred there is
+        // (1480,650,640x400) and renders at screen (580,250) — dead centre.
+        let offsetFixture = try makeFixture(name: "offset", zoneOrigin: ZonePoint(x: 1000, y: 500), viewport: CanvasViewport(x: 900, y: 400, zoom: 1))
+        let offsetViewportBefore = offsetFixture.canvas.viewport
+        let anchorNoteId = try spawnNote(offsetFixture, "Placed 1")
+        let anchorFrame = try placedFrame(offsetFixture, anchorNoteId)
+        try expectFrame(anchorFrame,
+                        TileFrame(x: 1480, y: 650, width: 640, height: 400),
+                        "a non-zero active-zone origin must not offset a flat WORLD frame")
+        try expectRenderedCentre(offsetFixture.canvas, anchorNoteId, "offset fixture")
+
+        // The centre is now inside note 1, so it becomes the anchor. All four sides are
+        // generated gap-adjacent and perpendicular-centre aligned; right and left are
+        // equally visible here (572 of 640 points each), so the documented direction
+        // order right > left > below > above decides, and right wins.
+        let rightNoteId = try spawnNote(offsetFixture, "Placed 2")
+        try expectFrame(try placedFrame(offsetFixture, rightNoteId),
+                        TileFrame(x: 2128, y: 650, width: 640, height: 400),
+                        "an occupied centre docks the new note gap-adjacent to the RIGHT of the anchor")
+
+        // Right is now taken. Left is the only collision-free horizontal side.
+        let leftNoteId = try spawnNote(offsetFixture, "Placed 3")
+        try expectFrame(try placedFrame(offsetFixture, leftNoteId),
+                        TileFrame(x: 832, y: 650, width: 640, height: 400),
+                        "a blocked right side docks the new note to the LEFT of the anchor")
+
+        // Both horizontal sides are taken; below and above are equally visible, so the
+        // direction order picks below.
+        let belowNoteId = try spawnNote(offsetFixture, "Placed 4")
+        try expectFrame(try placedFrame(offsetFixture, belowNoteId),
+                        TileFrame(x: 1480, y: 1058, width: 640, height: 400),
+                        "blocked horizontal sides dock the new note BELOW the anchor")
+
+        let dockedIds = [anchorNoteId, rightNoteId, leftNoteId, belowNoteId]
+        let dockedRects = try dockedIds.map { id -> CGRect in
+            let frame = try placedFrame(offsetFixture, id)
+            return CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
+        }
+        for i in dockedRects.indices {
+            for j in dockedRects.indices where j > i {
+                try expect(!dockedRects[i].intersects(dockedRects[j]),
+                           "docked tile frames should not intersect: \(dockedRects[i]) vs \(dockedRects[j])")
+            }
+        }
+
+        // An explicit world point is spatial intent and outranks the centre policy.
+        let pointNoteId = try spawnNote(offsetFixture, "Dropped", at: CGPoint(x: 1234, y: 567))
+        try expectFrame(try placedFrame(offsetFixture, pointNoteId),
+                        TileFrame(x: 914, y: 367, width: 640, height: 400),
+                        "a caller-supplied world point stays centred on that point")
+
+        // Spawning is a placement change, not a camera effect.
+        try expect(originFixture.canvas.viewport == originViewportBefore,
+                   "spawning must not pan or zoom the viewport; \(originViewportBefore) -> \(originFixture.canvas.viewport)")
+        try expect(offsetFixture.canvas.viewport == offsetViewportBefore,
+                   "spawning must not pan or zoom the viewport; \(offsetViewportBefore) -> \(offsetFixture.canvas.viewport)")
+
+        // MARK: Fixture 3 — the first-fit routes, in world space
+        //
+        // File tree, terminal, browser and managed agents still scan first-fit. They
+        // must scan the WORLD rect the user is looking at, intersected with the active
+        // zone: viewport 900..2700 x 400..1300 against zone 1000..2800 x 500..1400
+        // leaves 1000..2700 x 500..1300, so an empty canvas places at (1000,500) —
+        // screen (100,100). Computing that window in zone-local space and storing the
+        // result as a world frame put the tile at world (0,0), off screen entirely.
+        let firstFitFixture = try makeFixture(name: "firstfit", zoneOrigin: ZonePoint(x: 1000, y: 500), viewport: CanvasViewport(x: 900, y: 400, zoom: 1))
+        let treeTileId: UUID
+        switch firstFitFixture.spawner.spawnFileTree(rootPath: firstFitFixture.root.path) {
+        case let .spawned(tileId, _): treeTileId = tileId
+        case let .failure(error): throw CheckError.failed("spawnFileTree failed: \(error)")
+        case .invalidPath: throw CheckError.failed("spawnFileTree rejected a valid path")
+        }
+        let treeFrame = try placedFrame(firstFitFixture, treeTileId)
+        try expectFrame(treeFrame,
+                        TileFrame(x: 1000, y: 500, width: 360, height: 520),
+                        "a first-fit route must scan the visible WORLD window, not zone-local coordinates")
+        guard let treeView = firstFitFixture.canvas.tileView(for: treeTileId) else {
+            throw CheckError.failed("no installed view for the spawned file tree")
+        }
+        try expect(firstFitFixture.canvas.bounds.contains(treeView.frame),
+                   "a first-fit spawn must render inside the visible canvas; got \(treeView.frame) in \(firstFitFixture.canvas.bounds)")
+
+        // MARK: Fixture 4 — a ZoneLayer owns the active project
+        //
+        // This is the shape left behind by an in-process workspace switch. The tile
+        // belongs to the layer, not the stale flat `canvasState`, and its frame is
+        // ZONE-LOCAL — `_layoutLayerTile` adds the placement origin back. Zone at
+        // (4000,2000), viewport (4100,2050): world centre (5000,2500) is zone-local
+        // (1000,500), so the note is local (680,300) and world (4680,2300).
+        let layerFixture = try makeFixture(name: "layer", zoneOrigin: ZonePoint(x: 4000, y: 2000), viewport: CanvasViewport(x: 4100, y: 2050, zoom: 1))
+        let layerPlacement = ZonePlacement(
+            zoneId: layerFixture.zone.zoneId,
+            projectId: layerFixture.project.id,
+            origin: ZonePoint(x: 4000, y: 2000),
+            size: ZoneSize(width: 2000, height: 1200),
             color: "#6E8BFF",
             collapsed: false,
             hydrationPolicy: .automatic
         )
-        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 900, y: 400, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
-        let canvas = CanvasNSView(canvasState: try store.loadCanvas(), activeZone: activeZone)
-        canvas.setFrameSize(CGSize(width: 1800, height: 900))
-        let browserEngine = BrowserEngineContext()
-        defer { browserEngine.shutdown() }
-        let spawner = TileSpawner(canvasView: canvas, ghostty: nil, browserEngine: browserEngine, projectStore: store, project: project)
+        let layer = CanvasNSView.ZoneLayer(
+            placement: layerPlacement,
+            renderModel: CanvasNSView.ZoneRenderModel(placement: layerPlacement, displayName: "Layer"),
+            tiles: []
+        )
+        layerFixture.canvas.upsertZoneLayer(layer)
+        layerFixture.canvas.setActiveProjectZone(layerPlacement.zoneId)
+        try expect(layerFixture.canvas.activeProjectZoneId == layerPlacement.zoneId,
+                   "precondition: the installed layer must be the canvas spawn target")
 
-        var spawnedIds: [UUID] = []
-        for index in 1...4 {
-            switch spawner.spawnNote(title: "Placed \(index)") {
-            case let .spawned(_, tileId): spawnedIds.append(tileId)
-            case let .failure(error): throw CheckError.failed("spawnNote \(index) failed: \(error)")
-            }
+        let layerNoteId = try spawnNote(layerFixture, "In the layer")
+        try expect(layerFixture.canvas.tiles(inZone: layerPlacement.zoneId)?.contains(where: { $0.id == layerNoteId }) == true,
+                   "a note spawned after setZones must belong to the ACTIVE project's layer")
+        try expect(!layerFixture.canvas.canvasState.tiles.contains(where: { $0.id == layerNoteId }),
+                   "a note spawned after setZones must NOT be appended to the stale flat canvasState")
+        let layerLocalFrame = try placedFrame(layerFixture, layerNoteId)
+        try expectFrame(layerLocalFrame,
+                        TileFrame(x: 680, y: 300, width: 640, height: 400),
+                        "a layer-owned note is framed and persisted in ZONE-LOCAL coordinates")
+        try expectFrame(CanvasEngine.worldFrame(frame: layerLocalFrame, in: layerPlacement),
+                        TileFrame(x: 4680, y: 2300, width: 640, height: 400),
+                        "the layer-owned note's WORLD frame is centred on the viewport centre")
+        try expectRenderedCentre(layerFixture.canvas, layerNoteId, "layer fixture")
+
+        guard let persistedLayerCanvas = try layerFixture.store.tryLoadCanvas(),
+              let persistedLayerNote = persistedLayerCanvas.tiles.first(where: { $0.id == layerNoteId })
+        else {
+            throw CheckError.failed("the layer-owned note must be persisted through the ACTIVE project's store")
         }
-        let tiles = canvas.canvasState.tiles.filter { spawnedIds.contains($0.id) }
-        try expect(tiles.count == 4, "spawn-placement check should find all 4 spawned tiles in canvas state, got \(tiles.count)")
-        let rects = tiles.map { CGRect(x: $0.frame.x, y: $0.frame.y, width: $0.frame.width, height: $0.frame.height) }
-        for rect in rects {
-            try expect(rect.minX >= 0 && rect.minY >= 0, "spawned tile frame should be zone-local, not world-offset: \(rect)")
-            try expect(rect.maxX <= activeZone.size.width && rect.maxY <= activeZone.size.height, "spawned tile frame should fit inside active zone bounds: \(rect)")
-            let worldRect = rect.offsetBy(dx: activeZone.origin.x, dy: activeZone.origin.y)
-            try expect(worldRect.minX >= activeZone.origin.x && worldRect.minY >= activeZone.origin.y, "rendered world frame should land inside active zone: \(worldRect)")
+        try expectFrame(persistedLayerNote.frame,
+                        TileFrame(x: 680, y: 300, width: 640, height: 400),
+                        "the persisted frame must be the zone-local one, so a relaunch reproduces the same world position")
+
+        // An explicit anchor keeps its relationship, in the layer's own space, and is
+        // untouched by the centre policy: exactly `anchoredFileGap` to the right of the
+        // anchor, top-aligned. File default size is 320x480.
+        let anchoredFilePath = layerFixture.root.appendingPathComponent("anchored.txt")
+        try Data("anchored".utf8).write(to: anchoredFilePath)
+        let anchoredFileId: UUID
+        switch layerFixture.spawner.spawnFile(path: anchoredFilePath.path, beside: layerNoteId) {
+        case let .spawned(tileId): anchoredFileId = tileId
+        case let .alreadyOpen(tileId): anchoredFileId = tileId
+        case .invalidPath: throw CheckError.failed("spawnFile rejected a valid anchored path")
+        case let .failure(error): throw CheckError.failed("spawnFile beside anchor failed: \(error)")
         }
-        for i in rects.indices {
-            for j in rects.indices where j > i {
-                try expect(!rects[i].intersects(rects[j]), "spawned tile frames should not intersect: \(rects[i]) vs \(rects[j])")
-            }
+        try expectFrame(try placedFrame(layerFixture, anchoredFileId),
+                        TileFrame(x: 1344, y: 300, width: 320, height: 480),
+                        "an explicitly anchored file stays gap-adjacent to its anchor")
+
+        // A file opened with no anchor and no point is an automatic spawn: it takes the
+        // centre policy. The centre is inside the note, so the note anchors it — and the
+        // right side is now blocked by the anchored file, so the fully visible left
+        // candidate wins on visibility over below/above (which are half off screen) and
+        // over the outward right ring. Anchor 680..1320 x 300..700 -> left candidate
+        // x = 680-8-320, y = 500-240.
+        let autoFilePath = layerFixture.root.appendingPathComponent("automatic.txt")
+        try Data("automatic".utf8).write(to: autoFilePath)
+        let autoFileId: UUID
+        switch layerFixture.spawner.spawnFile(path: autoFilePath.path) {
+        case let .spawned(tileId): autoFileId = tileId
+        case let .alreadyOpen(tileId): autoFileId = tileId
+        case .invalidPath: throw CheckError.failed("spawnFile rejected a valid automatic path")
+        case let .failure(error): throw CheckError.failed("spawnFile automatic failed: \(error)")
         }
+        try expectFrame(try placedFrame(layerFixture, autoFileId),
+                        TileFrame(x: 352, y: 260, width: 320, height: 480),
+                        "an anchorless file open docks beside the tile under the viewport centre")
 
         let manifest: [String: Any] = [
             "check": "spawn-placement",
-            "tempProjectRoot": tempRoot.path,
-            "activeZone": ["originX": activeZone.origin.x, "originY": activeZone.origin.y, "width": activeZone.size.width, "height": activeZone.size.height],
-            "frames": tiles.map { ["id": $0.id.uuidString, "x": $0.frame.x, "y": $0.frame.y, "width": $0.frame.width, "height": $0.frame.height] }
+            "fixtures": fixtures.map { fixture -> [String: Any] in
+                [
+                    "project": fixture.project.name,
+                    "root": fixture.root.path,
+                    "zoneOrigin": ["x": fixture.zone.origin.x, "y": fixture.zone.origin.y],
+                    "viewport": ["x": fixture.canvas.viewport.x, "y": fixture.canvas.viewport.y, "zoom": fixture.canvas.viewport.zoom],
+                    "tiles": fixture.canvas.projectTiles().map {
+                        ["id": $0.id.uuidString, "kind": $0.kind.rawValue, "title": $0.title, "x": $0.frame.x, "y": $0.frame.y, "width": $0.frame.width, "height": $0.frame.height]
+                    }
+                ]
+            }
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
@@ -7022,13 +7264,38 @@ final class TileSpawner {
     /// Placement for a tile that will be installed through `installProjectTile`.
     ///
     /// A ZoneLayer stores ZONE-LOCAL frames (`_layoutLayerTile` adds the zone origin
-    /// back); the flat single-zone path stores world frames. Only the file-open route
-    /// installs layer-aware today, so only it may place in local space — the other
-    /// spawn paths still call `install`/`saveCanvas` directly and must keep the
-    /// existing world-frame behaviour until they migrate too.
+    /// back); the flat single-zone path stores WORLD frames (`layoutTile` renders them
+    /// straight against the viewport). Both models are handled here, and the placement
+    /// policy runs entirely inside whichever one owns the active project — a frame
+    /// computed in one space and persisted in the other looks right until the next
+    /// workspace switch or relaunch.
+    ///
+    /// Automatic placement is centre-aware (.plans/18): the new tile lands where the
+    /// user is looking. An explicit `worldPoint` is spatial intent and outranks it.
+    ///
+    /// The routes that still call `makePlacement` — terminal, browser, inspector, file
+    /// tree, diff, managed agent — remain first-fit until they migrate to
+    /// `installProjectTile`; placing them centre-aware without migrating their install
+    /// and persistence would put a correct frame in the wrong model.
     private func makeProjectTilePlacement(worldPoint: CGPoint?, size: CGSize, in canvasView: CanvasNSView) -> TileFrame {
+        let zoom = canvasView.viewport.zoom.isFinite && canvasView.viewport.zoom > 0 ? canvasView.viewport.zoom : 1
         guard let zone = canvasView.activeProjectZonePlacement else {
-            return makePlacement(worldPoint: worldPoint, size: size, in: canvasView)
+            // Flat model: world frames, so the viewport and siblings are used as they are.
+            if let worldPoint {
+                return TileFrame(
+                    x: Double(worldPoint.x) - Double(size.width) / 2,
+                    y: Double(worldPoint.y) - Double(size.height) / 2,
+                    width: Double(size.width),
+                    height: Double(size.height)
+                )
+            }
+            return TileSpawnPlacement.automatic(TileSpawnPlacement.Context(
+                newSize: size,
+                viewport: CanvasViewport(x: canvasView.viewport.x, y: canvasView.viewport.y, zoom: zoom),
+                visibleSize: canvasView.bounds.size,
+                siblings: canvasView.canvasState.tiles,
+                gap: TileGapResolver.resolvedGap()
+            ))
         }
         if let worldPoint {
             let local = CanvasEngine.zoneLocalPoint(world: worldPoint, zone: zone)
@@ -7039,19 +7306,19 @@ final class TileSpawner {
                 height: Double(size.height)
             )
         }
-        let zoom = canvasView.viewport.zoom.isFinite && canvasView.viewport.zoom > 0 ? canvasView.viewport.zoom : 1
-        let visibleWidth = max(Double(canvasView.bounds.width) / zoom, Double(size.width))
-        let visibleHeight = max(Double(canvasView.bounds.height) / zoom, Double(size.height))
-        return CanvasEngine.placementFrame(
-            size: size,
+        // Layer model: zone-local frames, so the viewport is translated into that space
+        // and the result stays there.
+        return TileSpawnPlacement.automatic(TileSpawnPlacement.Context(
+            newSize: size,
             viewport: CanvasViewport(
                 x: canvasView.viewport.x - zone.origin.x,
                 y: canvasView.viewport.y - zone.origin.y,
                 zoom: zoom
             ),
-            visibleSize: CGSize(width: visibleWidth * zoom, height: visibleHeight * zoom),
-            existing: canvasView.projectTiles().map(\.frame)
-        )
+            visibleSize: canvasView.bounds.size,
+            siblings: canvasView.projectTiles(),
+            gap: TileGapResolver.resolvedGap()
+        ))
     }
 
     private func makePlacement(worldPoint: CGPoint?, size: CGSize, in canvasView: CanvasNSView) -> TileFrame {
@@ -7066,19 +7333,39 @@ final class TileSpawner {
         var placementViewport = canvasView.viewport
         var placementVisibleSize = canvasView.bounds.size
         if let activeZone = canvasView.activeZone {
+            // Flat `canvasState.tiles` frames are WORLD frames — `layoutTile` renders
+            // them straight against the viewport, with zone membership only an overlay
+            // tag. So the scan window is computed in WORLD space too: the part of the
+            // viewport that lies inside the active zone. This used to convert to
+            // zone-local and clamp to the zone box, then store the result as a world
+            // frame, which put every automatic spawn at world = zone-local — with a
+            // zone origin of (1000,500) and the viewport over it, the new tile landed
+            // 1000pt left and 500pt above the visible canvas.
             let zoom = canvasView.viewport.zoom.isFinite && canvasView.viewport.zoom > 0 ? canvasView.viewport.zoom : 1
-            let localX = canvasView.viewport.x - activeZone.origin.x
-            let localY = canvasView.viewport.y - activeZone.origin.y
-            let maxOriginX = max(0, activeZone.size.width - Double(size.width))
-            let maxOriginY = max(0, activeZone.size.height - Double(size.height))
-            let clampedX = min(max(localX, 0), maxOriginX)
-            let clampedY = min(max(localY, 0), maxOriginY)
             let visibleWidth = max(Double(canvasView.bounds.width) / zoom, Double(size.width))
             let visibleHeight = max(Double(canvasView.bounds.height) / zoom, Double(size.height))
-            let boundedVisibleWidth = min(visibleWidth, max(Double(size.width), activeZone.size.width - clampedX))
-            let boundedVisibleHeight = min(visibleHeight, max(Double(size.height), activeZone.size.height - clampedY))
-            placementViewport = CanvasViewport(x: clampedX, y: clampedY, zoom: zoom)
-            placementVisibleSize = CGSize(width: boundedVisibleWidth * zoom, height: boundedVisibleHeight * zoom)
+            let viewportWorld = CGRect(
+                x: canvasView.viewport.x,
+                y: canvasView.viewport.y,
+                width: visibleWidth,
+                height: visibleHeight
+            )
+            let zoneWorld = CGRect(
+                x: activeZone.origin.x,
+                y: activeZone.origin.y,
+                width: activeZone.size.width,
+                height: activeZone.size.height
+            )
+            let window = viewportWorld.intersection(zoneWorld)
+            // Panned clean off the zone: place where the user is actually looking
+            // rather than teleporting the tile back into a zone off screen.
+            if !window.isNull, window.width > 0, window.height > 0 {
+                placementViewport = CanvasViewport(x: Double(window.minX), y: Double(window.minY), zoom: zoom)
+                placementVisibleSize = CGSize(
+                    width: max(Double(window.width), Double(size.width)) * zoom,
+                    height: max(Double(window.height), Double(size.height)) * zoom
+                )
+            }
         }
         return CanvasEngine.placementFrame(
             size: size,
