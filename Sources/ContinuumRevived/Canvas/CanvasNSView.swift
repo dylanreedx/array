@@ -254,6 +254,19 @@ final class CanvasNSView: NSView, TokenThemed {
         tileViews.count + zoneLayers.reduce(0) { $0 + $1.tileViews.count }
     }
 
+    /// Every installed tile view in BACK-TO-FRONT paint order, read from the view
+    /// tree rather than the model — the visual order `reorderTileSubviewsByZIndex`
+    /// produces.
+    ///
+    /// It exists so callers stop reaching into `subviews` directly: tile views are
+    /// direct children of this view today, but the retained world plane
+    /// (.plans/22 Slice 3) reparents them, and every direct `subviews` read would
+    /// silently start returning nothing. Changing this one accessor is how that
+    /// migration keeps its witnesses honest.
+    var tileViewsInVisualOrder: [TileNSView] {
+        subviews.compactMap { $0 as? TileNSView }
+    }
+
     /// QA: how many installed tile views are NOT where the camera says they
     /// should be — each view's ACTUAL rect in canvas coordinates, converted
     /// through whatever view tree currently hosts it, against
@@ -2576,6 +2589,200 @@ final class CanvasNSView: NSView, TokenThemed {
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// The camera's correctness oracle, swept across pan and zoom.
+    ///
+    /// Two independent mechanisms answer "which tile is under this point": the
+    /// MODEL (`CanvasEngine.hitTest(screenPoint:viewport:tiles:)`, pure geometry
+    /// over world rects) and the VIEW TREE (`tileId(at:)` plus AppKit's own paint
+    /// order). They must agree at every point and every camera, and today they do.
+    ///
+    /// This is recorded BEFORE the retained world plane exists, deliberately. The
+    /// plane reparents every tile view and makes an ancestor's transform produce
+    /// the screen rects that tile frames produce today. That is exactly the class
+    /// of change that can leave the model right and the presentation wrong — a
+    /// misconfigured bounds scale, a missing `isFlipped`, an unclipped plane — so
+    /// the oracle has to exist first, green, in order to mean anything afterwards.
+    ///
+    /// `--zindex-relaunch-hit-test-check` covers one point at one camera; this
+    /// covers a grid across a pan/zoom sweep and adds the paint-order agreement.
+    static func runCameraHitOracleSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        // Deliberately overlapping tiles at known z, so paint order is decidable
+        // and a z-order regression cannot hide behind disjoint rects.
+        var seeded: [Tile] = []
+        for index in 0..<9 {
+            seeded.append(Tile(
+                id: UUID(uuidString: String(format: "00000000-0000-0000-0000-0000000009%02d", index))!,
+                kind: .note, title: "oracle-\(index)",
+                frame: TileFrame(x: Double(index % 3) * 200 + 60,
+                                 y: Double(index / 3) * 150 + 40,
+                                 width: 320, height: 240),
+                zPosition: .fromLegacyRank(index + 1), runtimeRef: nil, metadata: TileMetadata()
+            ))
+        }
+        let canvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: seeded,
+            groups: [], lastActiveTileId: nil))
+        canvas.frame = CGRect(x: 0, y: 0, width: 1_200, height: 800)
+        // A real window host, because AppKit's `hitTest` is only meaningful for a
+        // view that is actually in a hierarchy — this mirrors the production path,
+        // which hit-tests through the window's `contentView`.
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless],
+                              backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+        }
+        for tile in seeded {
+            canvas.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
+        }
+
+        // Non-integral zooms are in the sweep on purpose: the camera's last
+        // regression was invisible at zoom 1 (docs/internals/performance-budgets.md,
+        // "The float-tolerance trap").
+        let cameras: [CanvasViewport] = [
+            CanvasViewport(x: 0, y: 0, zoom: 1),
+            CanvasViewport(x: 137, y: 91, zoom: 1),
+            CanvasViewport(x: 0, y: 0, zoom: 0.35),
+            CanvasViewport(x: 137, y: 91, zoom: 0.35),
+            CanvasViewport(x: -220, y: -160, zoom: 0.7),
+            CanvasViewport(x: 480, y: 310, zoom: 1.85)
+        ]
+
+        // The point of the exercise. `tileId(at:)` and
+        // `CanvasEngine.hitTest(screenPoint:…)` are BOTH pure model derivations
+        // from `canvasState`, so agreeing with each other proves nothing about
+        // presentation — that is the "a witness that re-derives what production
+        // derives" trap in AGENTS.md. AppKit's own `hitTest` is the independent
+        // third mechanism: it walks the real view tree and answers from actual
+        // view geometry, which is what a misconfigured world plane would break.
+        /// Which tile view actually covers this canvas point, decided from the
+        /// INSTALLED view geometry in real paint order (front to back) using
+        /// AppKit's own coordinate conversion. It never consults
+        /// `canvasState.viewport` or `tile.frame`, which is what makes it an
+        /// independent answer; and because `convert(_:from:)` walks the whole
+        /// ancestor chain, it keeps working when the world plane adds a level and
+        /// carries the zoom as a bounds scale.
+        ///
+        /// Deliberately NOT `canvas.hitTest(_:)`: that takes a point in the
+        /// canvas's SUPERVIEW space, and the canvas is flipped while a window's
+        /// frame view is not, so feeding it canvas coordinates silently probes a
+        /// vertically mirrored location.
+        func viewTreeTileId(at point: CGPoint, in canvas: CanvasNSView) -> UUID? {
+            for view in canvas.tileViewsInVisualOrder.reversed() {
+                guard !view.isHidden else { continue }
+                if view.bounds.contains(view.convert(point, from: canvas)) { return view.tile.id }
+            }
+            return nil
+        }
+
+        var comparisons = 0
+        var agreements = 0
+        var zOrderChecks = 0
+        var presentationComparisons = 0
+        for camera in cameras {
+            canvas.setViewport(camera)
+            canvas.layoutSubtreeIfNeeded()
+
+            // Paint order must match the model's (zPosition, id) order at every
+            // camera — the camera must never reorder anything.
+            let visual = canvas.tileViewsInVisualOrder.map(\.tile.id)
+            let expectedOrder = canvas.canvasState.tiles
+                .sorted { lhs, rhs in
+                    lhs.zPosition.value == rhs.zPosition.value
+                        ? lhs.id.uuidString < rhs.id.uuidString
+                        : lhs.zPosition.value < rhs.zPosition.value
+                }
+                .map(\.id)
+            try expect(visual == expectedOrder,
+                       "paint order must follow the model's z-order at camera \(camera); got \(visual.count) views")
+            zOrderChecks += 1
+
+            for screenY in stride(from: 10.0, through: 760.0, by: 50.0) {
+                for screenX in stride(from: 10.0, through: 1_160.0, by: 50.0) {
+                    let point = CGPoint(x: screenX, y: screenY)
+                    let model = CanvasEngine.hitTest(
+                        screenPoint: point, viewport: camera, tiles: canvas.canvasState.tiles)?.id
+                    let tree = canvas.tileId(at: point)
+                    comparisons += 1
+                    if model == tree { agreements += 1 }
+                    try expect(model == tree,
+                               "hit disagreement at \(point) camera \(camera): model \(model?.uuidString ?? "nil") vs canvas \(tree?.uuidString ?? "nil")")
+                }
+            }
+
+            // The non-vacuous half: interior points, chosen 6 pt inside each
+            // tile's EXPECTED screen rect so no answer depends on edge rounding,
+            // compared against what AppKit's view tree actually reports. This is
+            // the assertion the world plane has to satisfy with a transform
+            // instead of per-tile frames.
+            for tile in canvas.canvasState.tiles {
+                let rect = CanvasEngine.tileScreenFrame(tile.frame, viewport: camera)
+                let interior = rect.insetBy(dx: 6, dy: 6)
+                guard interior.width > 0, interior.height > 0 else { continue }
+                for probe in [CGPoint(x: interior.midX, y: interior.midY),
+                              CGPoint(x: interior.minX + 1, y: interior.minY + 1),
+                              CGPoint(x: interior.maxX - 1, y: interior.maxY - 1)] {
+                    guard canvas.bounds.insetBy(dx: 2, dy: 2).contains(probe) else { continue }
+                    let model = CanvasEngine.hitTest(
+                        screenPoint: probe, viewport: camera, tiles: canvas.canvasState.tiles)?.id
+                    let presented = viewTreeTileId(at: probe, in: canvas)
+                    presentationComparisons += 1
+                    try expect(model == presented,
+                               "presentation disagrees with the model at \(probe) camera \(camera): model \(model?.uuidString ?? "nil") vs view tree \(presented?.uuidString ?? "nil")")
+                }
+            }
+        }
+
+        try expect(comparisons > 1_000, "oracle must sweep a meaningful grid; got \(comparisons) comparisons")
+        try expect(agreements == comparisons, "every comparison must agree; \(agreements)/\(comparisons)")
+        // Teeth in the other direction: a grid that never lands on a tile would
+        // agree trivially at nil == nil.
+        let hitsOnTiles = cameras.reduce(0) { partial, camera in
+            partial + stride(from: 10.0, through: 760.0, by: 50.0).reduce(0) { inner, y in
+                inner + stride(from: 10.0, through: 1_160.0, by: 50.0).reduce(0) { count, x in
+                    count + (CanvasEngine.hitTest(screenPoint: CGPoint(x: x, y: y),
+                                                  viewport: camera,
+                                                  tiles: canvas.canvasState.tiles) == nil ? 0 : 1)
+                }
+            }
+        }
+        try expect(hitsOnTiles > 200,
+                   "the sweep must actually land on tiles, or nil == nil agrees for free; got \(hitsOnTiles)")
+        try expect(presentationComparisons > 60,
+                   "the model-vs-view-tree comparison is the only non-vacuous half; got \(presentationComparisons)")
+
+        let manifest: [String: Any] = [
+            "check": "canvas-camera-hit-oracle",
+            "cameras": cameras.map { ["x": $0.x, "y": $0.y, "zoom": $0.zoom] },
+            "comparisons": comparisons,
+            "agreements": agreements,
+            "hitsOnTiles": hitsOnTiles,
+            "presentationComparisons": presentationComparisons,
+            "zOrderChecks": zOrderChecks,
+            "tiles": seeded.count
+        ]
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent("canvas-camera-hit-oracle-\(Int(Date().timeIntervalSince1970))", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+            .write(to: artifact, options: .atomic)
         return artifact
     }
 

@@ -554,6 +554,14 @@ run_app_check .build/debug/Array --perf-budget-check --scenario canvas.fractiona
 # green with the retained world plane (.plans/22 Slice 3), which is also when both
 # it and --perf-budget-zoom-check leave MATRIX_KNOWN_RED.
 run_app_check .build/debug/Array --perf-budget-camera-slope-check
+# The camera's correctness oracle, recorded BEFORE the retained world plane so it
+# can mean something afterwards: two independent mechanisms — the model
+# (CanvasEngine over world rects) and the installed view geometry (front-to-back,
+# through AppKit's own conversion) — must name the same tile at every point of a
+# pan/zoom sweep, and paint order must follow the model's z-order. This is the
+# gate that catches a plane whose transform is subtly wrong while the model stays
+# right. GREEN today and must stay green.
+run_app_check .build/debug/Array --canvas-camera-hit-oracle-check
 run_app_check .build/debug/Array --workspace-profile-check
 run_app_check .build/debug/Array --add-zone-check
 run_app_check .build/debug/Array --browser-lru-budget-check
