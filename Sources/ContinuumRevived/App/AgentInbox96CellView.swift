@@ -403,14 +403,12 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         statusGlyph.symbol = Self.attentionSymbol(row, now: now)
         statusGlyph.alignment =
             anatomy.iconPlacement == .leading ? .leadingEdge : .centred
-        // The pulse is the escalation, and it is the ONLY motion on a resting row.
-        //
-        // Under Reduce Motion it drops, and unlike the two-word version this design
-        // replaced, the escalation is then carried entirely by the AGE beside the
-        // word: `Unseen · 2m` and `Unseen · 3h` are the same sentence at different
-        // volumes. A cue that exists only as movement is a cue some people never
-        // receive, so the number has to be the one that does the work.
-        statusGlyph.setPulsing(Self.hasEscalated(row, now: now) && !prefersReducedMotion())
+        // Nothing on a resting row moves. An earlier design pulsed the mark on a
+        // finished row nobody had read; that motion is gone, because the thing it
+        // was worried about is not an unread row (which is already coloured and
+        // marked) but a row you read and then left lying there forever. That one is
+        // the settle nudge's job, and it is a different row entirely.
+        statusGlyph.setPulsing(false)
         decorations.isWorking = row.state == .working
         decorations.drawsBranchGlyph = !branchLabel.stringValue.isEmpty
 
@@ -424,14 +422,14 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         decorations.needsDisplay = true
     }
 
-    /// How long a finished, unlooked-at row stays quiet before it starts asking.
+    /// How long a finished row you have ALREADY READ sits before it asks to be put
+    /// away. The settle nudge's threshold, not a status change.
     ///
-    /// Dylan's reasoning, and it is the right one: the failure this prevents has not
-    /// happened yet. With enough tiles you forget an agent finished, and the row that
-    /// says `Done` in grey is indistinguishable from the forty other rows that say
-    /// `Done` in grey. Ten minutes is long enough that a turn you watched land never
-    /// escalates, and short enough that one you walked away from does.
-    static let escalationDelay: TimeInterval = 10 * 60
+    /// The row this protects against is not the unread one — that one is already
+    /// coloured, marked, and sorted where you will see it. It is the one you read
+    /// two hours ago, said "yep", and never closed. Forty of those and the list is
+    /// a graveyard you have to read past to find live work.
+    static let settleNudgeDelay: TimeInterval = 10 * 60
 
     /// Work that finished and nobody has looked at it.
     ///
@@ -441,27 +439,23 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// doc comment already says the thing this design needs: *"Unread is a MARK,
     /// not a word."*
     ///
-    /// This is ONE state, not two. An earlier version split it into `Landed` and
-    /// `Waiting` at the ten-minute mark, which made the row change its vocabulary
-    /// while its meaning stayed identical — the reader had to learn that two words
-    /// were the same fact. The age beside the word already says everything the
-    /// second word was trying to: `Unseen · 2m` and `Unseen · 3h` differ by the
-    /// number, which is the part that is actually true.
+    /// The whole lifecycle of a finished row is three steps and no vocabulary to
+    /// learn: it says `Done` in mint with a check, you look at it and it goes
+    /// silent, and if you leave it silent for long enough it asks to be settled.
+    /// Earlier drafts spent two words (`Landed`, `Waiting`) and a pulsing mark on
+    /// the first step alone, which was effort spent on the row that needed it
+    /// least.
     static func isUnseen(_ row: AgentInboxRow) -> Bool {
         row.state == .ready && row.attention == .unread && !row.isUnconfirmed
     }
 
-    /// How long an unseen row has been sitting, or nil when it is not unseen or its
-    /// age is unknown. An unseen row with no `lastActiveAt` is still unseen; it just
-    /// cannot escalate, because escalating on an unknown age would be a guess.
-    static func unseenAge(_ row: AgentInboxRow, now: Date) -> TimeInterval? {
-        guard isUnseen(row), let since = row.lastActiveAt else { return nil }
-        return max(0, now.timeIntervalSince(since))
-    }
-
-    /// An unseen row ignored past `escalationDelay`. Its mark pulses.
-    static func hasEscalated(_ row: AgentInboxRow, now: Date) -> Bool {
-        (unseenAge(row, now: now) ?? 0) >= escalationDelay
+    /// A finished row you have read and left sitting. What the settle nudge asks
+    /// about — see `settleNudgeDelay`.
+    static func isSettleCandidate(_ row: AgentInboxRow, now: Date) -> Bool {
+        guard row.state == .ready, !isUnseen(row), !row.isUnconfirmed,
+              case .active = row.lifecycle, let since = row.lastActiveAt
+        else { return false }
+        return now.timeIntervalSince(since) >= settleNudgeDelay
     }
 
     /// The word this row's state gets, or nil for a state that says nothing.
@@ -471,9 +465,15 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// three of five terminal outcomes rendering NO state at all. A finished agent
     /// should say it finished, and one nobody has looked at should say more than that.
     static func stateWord(_ row: AgentInboxRow, now: Date) -> String? {
-        if isUnseen(row) { return "Unseen" }
         if let label = row.state.label { return label }
-        return row.isUnconfirmed ? nil : "Done"
+        guard !row.isUnconfirmed else { return nil }
+        // `.ready` says `Done` until you look at it, and then says nothing at all.
+        //
+        // Looking IS the acknowledgement, and the reward for it is a row that stops
+        // talking — a settled row keeps its age, because "when did this land" is a
+        // fair question, but it has no status left to report. What eventually gets
+        // it off the list is the nudge to settle, not another word here.
+        return isUnseen(row) ? "Done" : nil
     }
 
     /// The number beside the word.
@@ -504,13 +504,12 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// of the two sharing a word — the icon says "you are needed" and the word still
     /// says which kind.
     ///
-    /// `eye.circle.fill` rather than a bare eye because the column scales each symbol
-    /// by its LARGEST dimension: a bare `eye.fill` is roughly 2:1, so it would be
-    /// sized by its width and land at about half the height of the triangle beside
-    /// it. The disc is square, like every other glyph in the column, and it pulses
-    /// cleanly — one shape fading, not an outline shimmering.
+    /// A finished row takes `checkmark.circle.fill` — it states the outcome, and it
+    /// is square, which matters more than it sounds: the column scales each symbol
+    /// by its LARGEST dimension, so a wide symbol lands visually smaller than its
+    /// neighbours. Every glyph in this column is square for that reason.
     static func attentionSymbol(_ row: AgentInboxRow, now: Date) -> String? {
-        if isUnseen(row) { return "eye.circle.fill" }
+        if isUnseen(row) { return "checkmark.circle.fill" }
         switch row.state {
         case .working: return nil   // the throbber, not a symbol
         case .approval, .input: return "hand.raised.fill"

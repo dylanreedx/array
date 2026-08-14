@@ -918,7 +918,7 @@ enum AgentInbox96Fixtures {
                 lastActiveAt: lastActive.map { now.addingTimeInterval(-$0) },
                 createdAt: now.addingTimeInterval(-Double(index) * 600))
         }
-        let escalation = AgentInbox96CellView.escalationDelay
+        let nudgeDelay = AgentInbox96CellView.settleNudgeDelay
         return [
             row(1, "Stop the camera resizing every tile view", state: .working,
                 branch: "agent/retained-world-plane", model: "openai-codex/gpt-5.6-sol",
@@ -930,22 +930,23 @@ enum AgentInbox96Fixtures {
             row(4, "Persist an honest terminal event", state: .failed,
                 attention: .unread, branch: "agent/terminal-outcomes",
                 model: "xai/grok-4-2", elapsed: 720),
-            // RULE 2, both rungs. Same state, same attention, same WORD — only the
-            // age differs, and the age is what decides whether the row pulses. Two
-            // words used to live here; the number says it better.
+            // A finished row's whole life, in four rows. Step one, twice: DONE and
+            // unread. Same word, same mint, same check — only the number differs,
+            // which is the only thing that actually differs.
             row(5, "Write the S0 density review", state: .ready, attention: .unread,
                 branch: "agent/s0-review", model: "mistralai/mistral-large-3",
                 lastActive: 90),
             row(6, "Budget chrome repaints per camera step", state: .ready,
                 attention: .unread, branch: "agent/perf-budgets",
-                lastActive: escalation + 3600),
-            // The control: finished, and you have seen it. Says its word in plain
-            // grey, carries no mark, and takes no colour — a settled row is the one
-            // row asking for nothing. It still carries its age, because "how long
-            // ago did this land" is a fair question about a row you HAVE read.
+                lastActive: nudgeDelay + 3600),
+            // Step two: you looked at it. No word, no mark, no colour — looking is
+            // the acknowledgement and silence is the reward. It keeps its age,
+            // because "when did this land" is still a fair question.
             row(7, "Bound restore concurrency", state: .ready,
                 branch: "agent/restore-bounds", model: "openai/gpt-5.6-sol",
                 lastActive: 1_320),
+            // Step three: read, silent, and left lying there. This is the row the
+            // settle nudge is for — the graveyard you read past to find live work.
             row(8, "تحديث الشريط الجانبي · סוכן עם שם ארוך", state: .ready,
                 branch: "agent/rtl-truncation", model: "xai/grok-4-2",
                 lastActive: 9_600),
