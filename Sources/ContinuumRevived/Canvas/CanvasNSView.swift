@@ -1206,6 +1206,35 @@ final class CanvasNSView: NSView, TokenThemed {
         delegate?.canvasDidChange(self)
     }
 
+    // MARK: - Zoom experiments (env-gated; deliberately NOT merged)
+    //
+    // Two levers for the cost a real pinch actually pays, so it can be felt before
+    // it is designed. `ARRAY_EXP_CHROME_BUCKETS=1` quantises the chrome floor into
+    // 1/8 scale buckets (measured: zoom.chromeRedraws 1,392 -> 132).
+    // `ARRAY_EXP_ZOOM_CACHE=1` stops layer-backed tile content re-rasterizing at
+    // every intermediate scale and refines once at settle — aimed at the ~2,600
+    // CA::Layer::display_if_needed samples a real gesture spends.
+    static let expChromeBuckets = ProcessInfo.processInfo.environment["ARRAY_EXP_CHROME_BUCKETS"] == "1"
+    static let expZoomCache = ProcessInfo.processInfo.environment["ARRAY_EXP_ZOOM_CACHE"] == "1"
+    private var zoomSettleTimer: Timer?
+
+    private func scheduleZoomSettle() {
+        zoomSettleTimer?.invalidate()
+        zoomSettleTimer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.applyZoomSettle() }
+        }
+    }
+
+    private func applyZoomSettle() {
+        zoomSettleTimer = nil
+        for view in tileViewsInVisualOrder {
+            view.refreshZoomDependentChrome()
+            view.layerContentsRedrawPolicy = .duringViewResize
+            view.setNeedsDisplay(view.bounds)
+            for descendant in view.subviews { descendant.setNeedsDisplay(descendant.bounds) }
+        }
+    }
+
     func setViewport(_ viewport: CanvasViewport) {
         let previousZoom = canvasState.viewport.zoom
         canvasState.viewport = viewport
@@ -1224,7 +1253,18 @@ final class CanvasNSView: NSView, TokenThemed {
         // at zero tile work — the property `--camera-chrome-redraw-check` asserts
         // in both directions.
         if !Self.geometryNearlyEqual(CGFloat(previousZoom), CGFloat(viewport.zoom)) {
-            for view in tileViewsInVisualOrder { view.refreshZoomDependentChrome() }
+            if Self.expZoomCache {
+                // EXPERIMENT (env-gated, not for merge): let the compositor SCALE
+                // already-rendered content through the gesture instead of asking
+                // every layer to re-rasterize at each intermediate scale, and defer
+                // the chrome repaint too. Both are redone once the zoom settles.
+                for view in tileViewsInVisualOrder where view.layerContentsRedrawPolicy != .onSetNeedsDisplay {
+                    view.layerContentsRedrawPolicy = .onSetNeedsDisplay
+                }
+                scheduleZoomSettle()
+            } else {
+                for view in tileViewsInVisualOrder { view.refreshZoomDependentChrome() }
+            }
         }
         // Screen-fixed overlays are outside the plane, so they do not inherit the
         // camera and still have to be re-aimed at the tiles they track.

@@ -603,7 +603,10 @@ class TileNSView: NSView, TokenThemed {
     /// Mirrors `resizeMarginInLocalCoordinates`'s screen-px-in-world pattern.
     var grabHeightInLocalCoordinates: CGFloat {
         guard let zoom = canvas?.viewport.zoom, zoom.isFinite, zoom > 0 else { return Self.titleBarHeight }
-        return max(Self.titleBarHeight, Self.minScreenGrabPx / CGFloat(zoom))
+        // EXPERIMENT (env-gated, not for merge): quantise the scale before applying
+        // the floor so the chrome height holds steady through a pinch.
+        let effective = CanvasNSView.expChromeBuckets ? max(0.001, (zoom * 8).rounded() / 8) : zoom
+        return max(Self.titleBarHeight, Self.minScreenGrabPx / CGFloat(effective))
     }
 
     /// World height the drawn title bar is laid out to. Aliased to the move-grab
