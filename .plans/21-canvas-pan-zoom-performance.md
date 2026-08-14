@@ -174,6 +174,12 @@ is published on every run without masking a pan regression.
 recorder works end-to-end on a real pan; synthetic Cmd+scroll does not drive the
 zoom branch, so that number needs a human hand on the trackpad.
 
+**Hands-on, 2026-08-14:** Dylan drove a real trackpad zoom in a dev bundle built
+from `ccf3811` and reported it "feels way better already". That closes the
+qualitative gap the merge commit left open — it is the only evidence the counts
+could never supply — but it is NOT the frame trace above, which remains
+unmeasured. Do not cite it as one.
+
 ## Stress testing changed the answer (same day)
 
 The above was measured at 12 tiles in one zone at zoom 1.0, and that scenario was
