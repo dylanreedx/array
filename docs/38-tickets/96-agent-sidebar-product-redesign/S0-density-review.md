@@ -150,7 +150,7 @@ PASS, 42 images:
 | `offscreen/` | 36 images — corpus sweeps, the 662 pt density fixtures, one interaction reference, and `proposals/` |
 
 **The offscreen half has since been re-rendered** with the new row anatomy and the status
-sweep: `qa-runs/2026-08-14T193650Z/sidebar-96/`, 42 images, gate PASS. The live half is
+sweep: `qa-runs/2026-08-14T195203Z/sidebar-96/`, 52 images, gate PASS. The live half is
 unchanged and does not need re-capturing — those images are the *shipped* sidebar, and no
 product behaviour has changed. Regenerate the offscreen set alone with
 `.build/debug/Array --sidebar-screenshot-check`.
@@ -308,13 +308,89 @@ They are rendered at **proposal A's pitch**, the tightest on the table, delibera
 treatment chosen at C's roomier 83 pt could break under whatever pitch S0 rules; one that
 survives A cannot.
 
+### Round three — borders, and the alignment defect measured
+
+Ruled on 2026-08-14: **the pitch proposals and the row anatomy are green**, and the
+**flat theme-coloured provider marks are locked in** (no brand colours). Status emphasis
+stays open, with three new instructions: try a thinner side border, try other kinds of
+border — the canvas's dashed focused-tile border was named — and the pill is out.
+
+`status/status-{rail,railThin,outline,dashed,bracket,leadingIcon,leadingEnclosed,combo}`,
+each at proposal A's pitch and 280 pt, in both appearances. Control unchanged:
+`proposals/proposalA-280x662-*`.
+
+#### The leading-column alignment was a real defect, and the fix is not the obvious one
+
+*"They seem all a little off… too different to look properly aligned because of the
+various shapes."* Correct, and the measurement says precisely why — every number below is
+printed by the check:
+
+| glyph | ink width | ink height |
+|---|---:|---:|
+| `checkmark.circle.fill` | 86% | 86% |
+| `questionmark.circle.fill` | 86% | 86% |
+| `slash.circle` | 86% | 86% |
+| `exclamationmark.triangle.fill` | 83% | 84% |
+| `stop.fill` | 77% | 83% |
+| `hand.raised.fill` | **68%** | 88% |
+
+My first attempt equalised each glyph's **largest** dimension — and the check refused it,
+because SF Symbols already agree there to within 5%. It is **width** that varies, so a
+centred glyph's *left edge* moves: centring this set scatters left edges over **1.44 pt of
+a 16 pt slot**, which in a column is a ragged margin.
+
+The leading column therefore aligns **ink left edges**, not bounding boxes. Measured after
+the fix: every glyph starts at 0.00 pt, sits on the same centre line, and reaches the same
+extent. That is asserted by painting each glyph through the real draw path and
+re-measuring the pixels, not by re-running the arithmetic that placed it.
+
+**`leadingEnclosed` is the other answer to the same complaint**: stop varying the shape.
+Every glyph becomes the same disc with a different mark inside, so the column has one
+silhouette and one optical mass. The cost is that `Failed` loses the triangle an earlier
+round bought it, and Failed/Stopped/Cancelled differ only by their inner mark — at 11 pt
+that was too little, at 16 pt it may be enough. Compare `leadingIcon` and
+`leadingEnclosed` directly; that is the whole question.
+
+#### The borders
+
+| | reads as |
+|---|---|
+| `rail` (3 pt) | round two, kept for comparison |
+| `railThin` (2 pt) | the same idea, quieter — the direct ask |
+| `outline` (1 pt, whole card) | strong; four outlined cards in view is a lot of enclosure |
+| `dashed` (1.5 pt, `[6,4]`) | the canvas's focused-tile language, quoted exactly |
+| `bracket` | the outline's leading third, corners included |
+
+One objection worth raising before you pick `dashed`: on the canvas that exact dash **means
+focused tile**. Reusing it in the sidebar for "needs you" makes one visual language carry
+two unrelated meanings, and the two surfaces are on screen together. `bracket` gets most of
+the same shaping — rounded corners, an edge that feels deliberate rather than a slab —
+without borrowing a word that is already taken.
+
+My reading, having rendered them: **`bracket` or `railThin`, with the `combo`'s disc
+column.** `combo` is `railThin` + `leadingEnclosed` and is the strongest single image in
+the set. Its one flaw is that the Working row's throbber is not a disc, so it breaks the
+column it sits in — fixable by giving the throbber a disc-sized track, which would be new
+art and is not in this round.
+
 ## Dylan's second ruling — status emphasis
 
-- [ ] **rail** (recommended)
-- [ ] **leadingIcon**
-- [ ] **pill**
-- [ ] none — the control (icon + word, right of band 1) is enough
-- [ ] something else:
+Edge treatment:
+
+- [ ] `railThin` (2 pt)
+- [ ] `bracket` (recommended)
+- [ ] `rail` (3 pt)
+- [ ] `outline`
+- [ ] `dashed` — see the objection above
+- [ ] none
+
+Status glyph:
+
+- [ ] leading column, one common disc (`leadingEnclosed`) (recommended)
+- [ ] leading column, distinct shapes (`leadingIcon`)
+- [ ] leave it trailing, beside the word
+
+Or `combo` for both, which is `railThin` + the disc column.
 
 And two sub-questions the images raise:
 

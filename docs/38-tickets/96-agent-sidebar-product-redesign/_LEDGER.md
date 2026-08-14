@@ -468,3 +468,68 @@ two images of nothing.
 `scripts/check-color-hygiene.sh` (27 allowlisted, 0 new). `ComponentLab.swift` still
 shows 0 lines against `d334f01`. No matrix run this round — nothing outside the mock
 changed, and the live app is in use.
+
+---
+
+## Feedback round 3 — borders, and an alignment defect measured (2026-08-14)
+
+Mock-only again; nothing outside `SidebarScreenshotChecks.swift` and the ticket docs.
+Artifact: `qa-runs/2026-08-14T195203Z/sidebar-96/`, **52 images**, gate PASS.
+
+Dylan ruled the pitch proposals and the row anatomy green, **locked the flat
+theme-coloured provider marks**, cut the pill, and asked for a thinner side border and
+for other border kinds — naming the canvas's dashed focused-tile border.
+
+### The witness caught me building a fix that fixed nothing
+
+The leading-icon column looked misaligned. My first correction normalised each glyph's
+**largest** dimension and re-centred it. The new alignment check refused it:
+
+> the raw status glyphs differ by only 0.047 of their box — ink normalisation is
+> correcting nothing
+
+That is right, and it is the interesting finding. SF Symbols already agree on their
+largest dimension to within 5%. What varies is **width** — 68% of the box for
+`hand.raised.fill` against 86% for the circles — so what moves when you centre them is the
+**left edge**: 1.44 pt of scatter in a 16 pt slot, which in a column reads as a ragged
+margin. That is what Dylan was seeing.
+
+The leading column now aligns ink **left edges**. Measured after the fix, through the real
+draw path: every glyph starts at 0.00 pt, on one centre line, at one extent.
+
+Two things about this witness are worth keeping:
+
+1. **It re-measures pixels rather than re-running the arithmetic.** It paints each glyph
+   through the same `alignedRect` the mock uses, into a bitmap, and finds the alpha extent.
+   Re-deriving the placement formula would have passed no matter which formula was wrong.
+2. **It has a floor that asserts the fix is doing work** — if centring would scatter the
+   left edges by less than the tolerance, the check fails as theatre. That floor is what
+   fired above, and the guess it killed was mine.
+
+### What is in the sweep
+
+Eight anatomies at proposal A's pitch: `rail` (3 pt), `railThin` (2 pt), `outline`,
+`dashed`, `bracket`, `leadingIcon` (distinct shapes, ink-aligned), `leadingEnclosed` (one
+common disc), `combo` (`railThin` + disc column). The pill is gone.
+
+`dashed` quotes `FocusBorderOverlayView.lineWidth` (1.5) and `dashPattern` ([6,4]) from
+`CanvasNSView.swift:5891-5892` rather than inventing a dash — and that is also the
+argument against it, recorded in the review: on the canvas that dash **means focused
+tile**, and the two surfaces are on screen together.
+
+### Recorded, not fixed
+
+- **The Working row breaks the disc column.** In `leadingEnclosed` and `combo` every
+  status glyph is the same disc except the throbber, which is orbiting dots. Giving it a
+  disc-sized track would be new art; out of scope for a mock round.
+- **`leadingEnclosed` costs `Failed` its triangle.** An earlier round bought that
+  silhouette specifically because three filled circles at 11 pt read as one shape. At 16 pt
+  in a column the inner marks may carry it. That is the trade the two images exist to
+  settle, and it is not settled here.
+
+### Verified
+
+`--sidebar-screenshot-check` (52 images, PASS, incl. the new alignment witness),
+`--sidebar-production-corpus-check` (30/30), `--sidebar-ux-check`, `--agent-inbox-check`,
+`swift run ContinuumRevivedAgentUIChecks`, `scripts/check-color-hygiene.sh` (27
+allowlisted, 0 new). `ComponentLab.swift` still 0 lines against `d334f01`.

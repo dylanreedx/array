@@ -660,6 +660,103 @@ enum SidebarScreenshotChecks {
                        + "row-count arithmetic every proposal reports is wrong")
         }
 
+        // TEETH: the leading-icon column claims its glyphs are optically aligned. Prove
+        // it by painting each one through the real draw path and re-measuring the ink,
+        // rather than by re-deriving the same arithmetic that placed it.
+        //
+        // Dylan's report was "they are too different to look properly aligned because of
+        // the various shapes", and the raw numbers below say why: SF Symbols share a
+        // bounding box, not an optical size.
+        let statusSymbols = ["checkmark.circle.fill", "hand.raised.fill",
+                             "questionmark.circle.fill", "exclamationmark.triangle.fill",
+                             "stop.fill", "slash.circle"]
+        let slot = NSRect(x: 0, y: 0, width: 16, height: 16)
+        var alignedInk: [(name: String, raw: NSRect, painted: NSRect)] = []
+        try drawing(NSAppearance(named: .darkAqua) ?? NSAppearance.currentDrawing()) {
+            for name in statusSymbols {
+                guard let raw = SidebarDensityProposalView.symbolInk(name),
+                      let image = SidebarDensityProposalView.symbolImage(name) else {
+                    throw Failure(description:
+                        "\(checkName): no SF Symbol '\(name)' — the mock's status glyph "
+                        + "set cannot be measured, so the alignment claim is unwitnessed")
+                }
+                // Paint into a slot-sized canvas exactly as the row does, then measure.
+                let side = 64
+                let scale = CGFloat(side) / slot.width
+                guard let rep = NSBitmapImageRep(
+                    bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side,
+                    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+                      let context = NSGraphicsContext(bitmapImageRep: rep) else {
+                    throw Failure(description: "\(checkName): no alignment probe bitmap")
+                }
+                let placed = SidebarDensityProposalView.alignedRect(
+                    slot: slot, ink: raw, alignment: .leadingEdge)
+                NSGraphicsContext.saveGraphicsState()
+                NSGraphicsContext.current = context
+                NSColor.black.setFill()
+                image.draw(
+                    in: NSRect(x: placed.minX * scale, y: placed.minY * scale,
+                               width: placed.width * scale, height: placed.height * scale),
+                    from: .zero, operation: .sourceOver, fraction: 1)
+                NSGraphicsContext.restoreGraphicsState()
+                guard let painted = SidebarDensityProposalView.inkBounds(of: rep) else {
+                    throw Failure(description:
+                        "\(checkName): '\(name)' painted no ink into its slot")
+                }
+                alignedInk.append((name, raw, NSRect(
+                    x: painted.minX * slot.width, y: painted.minY * slot.height,
+                    width: painted.width * slot.width, height: painted.height * slot.height)))
+            }
+        }
+        for entry in alignedInk {
+            print(String(
+                format: "SidebarScreenshotChecks: %@ — raw ink %.0f%% wide x %.0f%% tall, "
+                    + "raw left edge %.1f%%; painted %.2fx%.2fpt, left edge %.2fpt, "
+                    + "vertical centre %.2fpt",
+                entry.name, entry.raw.width * 100, entry.raw.height * 100,
+                entry.raw.minX * 100, entry.painted.width, entry.painted.height,
+                entry.painted.minX, entry.painted.midY))
+        }
+        // The claim being witnessed: in a leading column every glyph starts on ONE line,
+        // sits on ONE centre line, and reaches ONE extent.
+        let target = slot.width * SidebarDensityProposalView.inkTargetFraction
+        for entry in alignedInk {
+            let extent = max(entry.painted.width, entry.painted.height)
+            try expect(abs(extent - target) <= 0.75,
+                       "'\(entry.name)' paints \(String(format: "%.2f", extent))pt of ink "
+                       + "in a \(Int(slot.width))pt slot, not the \(target)pt every other "
+                       + "status glyph paints")
+            try expect(abs(entry.painted.minX - slot.minX) <= 0.75,
+                       "'\(entry.name)' starts its ink at "
+                       + String(format: "%.2f", entry.painted.minX)
+                       + "pt, not the slot's leading edge — a leading column with a ragged "
+                       + "left margin is the defect this alignment exists to fix")
+            try expect(abs(entry.painted.midY - slot.midY) <= 0.75,
+                       "'\(entry.name)' sits on centre line "
+                       + String(format: "%.2f", entry.painted.midY)
+                       + "pt rather than \(slot.midY)pt")
+        }
+        // A floor under the fix itself, and one that has already earned its place: the
+        // FIRST version of this normalisation equalised each glyph's largest dimension,
+        // and this check proved that corrects essentially nothing — SF Symbols agree on
+        // that dimension to within 5%. What actually varies is width, and therefore the
+        // left edge of a centred glyph. If that spread ever collapses, the alignment is
+        // no longer doing work and this witness would be theatre.
+        let rawLeftEdges = alignedInk.map { (1 - $0.raw.width) / 2 }
+        if let low = rawLeftEdges.min(), let high = rawLeftEdges.max() {
+            let spreadPt = (high - low) * slot.width
+            print(String(
+                format: "SidebarScreenshotChecks: centring these glyphs instead would "
+                    + "scatter their left edges over %.2fpt of a %.0fpt slot",
+                spreadPt, slot.width))
+            try expect(spreadPt > 0.75,
+                       "centring would scatter the glyphs' left edges by only "
+                       + String(format: "%.2f", spreadPt)
+                       + "pt — below the tolerance this check asserts, so the alignment "
+                       + "is correcting nothing and the glyph set must have changed")
+        }
+
         try writeManifest(verdict: "PASS")
 
         if !skipped.isEmpty {
@@ -768,32 +865,63 @@ struct SidebarDensityProposal: Sendable {
 /// aid for the status"), so the two now vary independently: the S0 pitch images all use
 /// the same anatomy, and the status sweep all uses the same pitch.
 struct SidebarRowAnatomy: Sendable {
-    enum StatusTreatment: String, Sendable {
-        /// Icon + word at the right of band 1. What the first mock did.
-        case trailingText
-        /// A coloured rail down the card's leading edge — painted only for the states
-        /// that want you.
-        case leadingRail
-        /// The status icon moves to the FRONT of band 1 and grows, forming a column you
-        /// can scan without reading.
-        case leadingIcon
-        /// Icon + word inside a tinted capsule, again only for states that want you.
-        case pill
+    /// How the card's own edge marks a state. All of these paint ONLY for the states
+    /// that want a person — see `isAttention`.
+    enum Border: String, Sendable {
+        case none
+        /// A 3 pt bar down the leading edge.
+        case rail
+        /// The same, at 2 pt.
+        case railThin
+        /// A hairline outline around the whole card.
+        case outline
+        /// The canvas's own focused-tile language, brought inside the sidebar:
+        /// `FocusBorderOverlayView.lineWidth` 1.5 and `dashPattern` [6, 4] at radius 6,
+        /// quoted from `CanvasNSView.swift:5891-5892` rather than invented, so a marked
+        /// row and a focused tile say the same thing in the same accent.
+        case dashed
+        /// The leading third of that outline only — a `[` around the card's leading edge,
+        /// corners included.
+        case bracket
     }
+
+    /// Where the status glyph sits.
+    enum IconPlacement: String, Sendable {
+        /// Beside the state word at the right of band 1. What the mock has always done.
+        case trailing
+        /// At the FRONT of band 1 on every row, forming a column you can scan without
+        /// reading. Requires the ink alignment below or the shapes do not line up.
+        case leading
+    }
+
+    /// Distinct silhouettes, or one common disc.
+    enum GlyphStyle: String, Sendable { case silhouette, enclosed }
 
     let id: String
     let label: String
-    let status: StatusTreatment
+    let border: Border
+    let iconPlacement: IconPlacement
     /// §4.3's width-sacrifice ladder *ends* by dropping model text and keeping the mark.
     /// Dylan asked to start there — T3 Code carries no model name at all. The exact
     /// model id must still be reachable in tooltip and accessibility detail (§4.3); a
     /// static mock cannot show that, so it is called out in the review instead.
     let showsModelText: Bool
+    var glyphStyle: GlyphStyle = .silhouette
 
     /// The first mock drew the status icon at 11 pt, at which Array's own gyro throbber
     /// reduces to a couple of dots — Dylan said so. 14 pt is the smallest size at which
     /// the two planes are separable.
-    var statusIconSide: CGFloat { status == .leadingIcon ? 16 : 14 }
+    var statusIconSide: CGFloat { iconPlacement == .leading ? 16 : 14 }
+
+    var borderWidth: CGFloat {
+        switch border {
+        case .none: return 0
+        case .rail: return 3
+        case .railThin: return 2
+        case .outline: return 1
+        case .dashed, .bracket: return 1.5
+        }
+    }
     /// The throbber gets its OWN slot, at the size it was drawn for.
     /// `DualPlaneGyroTiltedThinkingIndicatorView.Metrics.side` is 18 pt, its guide rings
     /// are `side * 0.036` wide at 30% alpha, and its orbit radius is `side * 0.296`. At
@@ -801,30 +929,57 @@ struct SidebarRowAnatomy: Sendable {
     /// which is why Dylan saw a couple of dots. Shrinking it further is not a size
     /// choice, it is a different glyph.
     var workingIconSide: CGFloat { 18 }
-    /// The rail's lane is reserved on EVERY row, not only the ones that paint it, or the
-    /// text would jitter row to row. That reserved width is a real cost of the treatment
-    /// and should be visible in the image.
-    var leadingGutter: CGFloat { status == .leadingRail ? 6 : 0 }
+    /// A leading edge treatment reserves its lane on EVERY row, not only the ones that
+    /// paint it, or the text jitters row to row. That reserved width is a real cost and
+    /// should be visible in the image. An outline or a dash sits on the card's own edge,
+    /// inside the 10 pt inset, and costs nothing.
+    var leadingGutter: CGFloat {
+        switch border {
+        case .rail, .railThin, .bracket: return borderWidth + 3
+        case .none, .outline, .dashed: return 0
+        }
+    }
 
     /// The anatomy every S0 pitch image uses: provider mark alone, no model text.
     static let markOnly = SidebarRowAnatomy(
         id: "markOnly", label: "mark only, state at the right",
-        status: .trailingText, showsModelText: false)
+        border: .none, iconPlacement: .trailing, showsModelText: false)
 
-    /// The status experiments. `trailingText` is deliberately absent: it is `markOnly`,
-    /// so the proposal images at the same pitch and width already ARE the control, and
-    /// re-emitting it here would put a byte-identical image in the artifact under a
-    /// second name — the exact trap the duplicate-digest gate exists to catch.
+    /// Round three. The pill is gone — Dylan didn't like it. What is left is a sweep of
+    /// EDGE treatments, which is what he asked for after the 3 pt rail ("a thinner side
+    /// border… different borders in general"), and a second look at the leading-icon
+    /// column now that the glyphs are optically aligned.
+    ///
+    /// The control is still `proposals/proposalA-280x662-*` — same pitch, same width, no
+    /// edge treatment, icon trailing. It is deliberately not re-emitted here; a
+    /// byte-identical image under a second name is the relabelled-duplicate trap.
     static let statusExperiments: [SidebarRowAnatomy] = [
         SidebarRowAnatomy(
-            id: "rail", label: "coloured rail on states that want you",
-            status: .leadingRail, showsModelText: false),
+            id: "rail", label: "3 pt rail — the round-two version, for comparison",
+            border: .rail, iconPlacement: .trailing, showsModelText: false),
         SidebarRowAnatomy(
-            id: "leadingIcon", label: "16 pt status icon leading every row",
-            status: .leadingIcon, showsModelText: false),
+            id: "railThin", label: "2 pt rail",
+            border: .railThin, iconPlacement: .trailing, showsModelText: false),
         SidebarRowAnatomy(
-            id: "pill", label: "tinted pill on states that want you",
-            status: .pill, showsModelText: false),
+            id: "outline", label: "1 pt outline around the whole card",
+            border: .outline, iconPlacement: .trailing, showsModelText: false),
+        SidebarRowAnatomy(
+            id: "dashed", label: "the focused-tile dash, 1.5 pt / [6,4]",
+            border: .dashed, iconPlacement: .trailing, showsModelText: false),
+        SidebarRowAnatomy(
+            id: "bracket", label: "leading bracket — the outline's first third",
+            border: .bracket, iconPlacement: .trailing, showsModelText: false),
+        SidebarRowAnatomy(
+            id: "leadingIcon", label: "leading column, distinct shapes, ink-aligned",
+            border: .none, iconPlacement: .leading, showsModelText: false),
+        SidebarRowAnatomy(
+            id: "leadingEnclosed", label: "leading column, one common disc",
+            border: .none, iconPlacement: .leading, showsModelText: false,
+            glyphStyle: .enclosed),
+        SidebarRowAnatomy(
+            id: "combo", label: "2 pt rail + leading disc column",
+            border: .railThin, iconPlacement: .leading, showsModelText: false,
+            glyphStyle: .enclosed),
     ]
 }
 
@@ -856,6 +1011,25 @@ final class SidebarDensityProposalView: NSView {
     /// well as its word. SF Symbols here rather than bundled art: these are Apple's
     /// own glyphs, they need no provenance review, and the mock's job is to show the
     /// SHAPE of the row. Vendor provider logos are a different problem — see P3.1.
+    /// The other answer to "the various shapes don't look aligned": stop varying the
+    /// shape. Every glyph becomes the same disc and the state is carried by the mark
+    /// inside it, so the column has one silhouette and one optical mass.
+    ///
+    /// The cost is the thing an earlier round bought: `Failed` loses its triangle, and
+    /// `Failed` / `Stopped` / `Cancelled` differ only by their inner mark. At 11 pt that
+    /// was too little — three filled circles read as one shape. At the 16 pt of a leading
+    /// column it may be enough. That is the trade to look at, not to reason about.
+    private static func enclosedStateSymbol(_ state: String) -> String? {
+        if state.hasPrefix("Done") { return "checkmark.circle.fill" }
+        if state.hasPrefix("Working") { return nil }
+        if state.hasPrefix("Approval") { return "hand.raised.circle.fill" }
+        if state.hasPrefix("Input") { return "questionmark.circle.fill" }
+        if state.hasPrefix("Failed") { return "exclamationmark.circle.fill" }
+        if state.hasPrefix("Stopped") { return "stop.circle.fill" }
+        if state.hasPrefix("Cancelled") { return "slash.circle.fill" }
+        return nil
+    }
+
     private static func stateSymbol(_ state: String) -> String? {
         // The icon carries the tick, so the word stays a plain word — a symbol AND a
         // ✓ glyph AND a colour is three ways of saying one thing.
@@ -1010,12 +1184,9 @@ final class SidebarDensityProposalView: NSView {
             var bandY = cardRect.minY + proposal.insetV
 
             let accent = stateColor(row.state, primary: primary)
-            if anatomy.status == .leadingRail, Self.isAttention(row.state) {
-                let rail = NSRect(
-                    x: cardRect.minX + 3, y: cardRect.minY + 6,
-                    width: 3, height: cardRect.height - 12)
-                accent.setFill()
-                NSBezierPath(roundedRect: rail, xRadius: 1.5, yRadius: 1.5).fill()
+            if Self.isAttention(row.state) {
+                drawBorder(anatomy.border, in: cardRect, width: anatomy.borderWidth,
+                           color: accent)
             }
 
             // Band 1 — placement on the left, state and time on the right (or leading,
@@ -1023,15 +1194,23 @@ final class SidebarDensityProposalView: NSView {
             let isWorking = row.state.hasPrefix("Working")
             let iconSide = isWorking ? anatomy.workingIconSide : anatomy.statusIconSide
             let iconGap: CGFloat = 4
-            let hasIcon = Self.stateSymbol(row.state) != nil || isWorking
+            let symbol = anatomy.glyphStyle == .enclosed
+                ? Self.enclosedStateSymbol(row.state)
+                : Self.stateSymbol(row.state)
+            let hasIcon = symbol != nil || isWorking
             let stateTextWidth = min(
                 contentWidth * 0.55, measure(row.state, size: 11).width + 2)
             let bandTop = proposal.bandTop
+            // A leading column lines up left EDGES; a glyph sitting beside its own word
+            // centres. See `InkAlignment`.
+            let inkAlignment: SidebarDensityProposalView.InkAlignment =
+                anatomy.iconPlacement == .leading ? .leadingEdge : .centred
             func paintStatusIcon(in rect: NSRect) {
                 if isWorking {
                     drawWorkingIndicator(in: rect)
-                } else if let symbol = Self.stateSymbol(row.state) {
-                    drawSymbol(symbol, in: rect, color: accent)
+                } else if let symbol {
+                    drawAlignedSymbol(
+                        symbol, in: rect, color: accent, alignment: inkAlignment)
                 }
             }
             func drawPlacement(from left: CGFloat, to right: CGFloat) {
@@ -1046,36 +1225,18 @@ final class SidebarDensityProposalView: NSView {
                      size: 11, color: accent, alignment: .right)
             }
 
-            switch anatomy.status {
-            case .leadingIcon:
-                if hasIcon {
-                    paintStatusIcon(in: NSRect(
-                        x: textLeft, y: bandY + (bandTop - iconSide) / 2,
-                        width: iconSide, height: iconSide))
-                }
-                let after = textLeft + (hasIcon ? iconSide + iconGap : 0)
+            switch anatomy.iconPlacement {
+            case .leading:
+                // The slot is reserved on EVERY row, painted or not, so the placement
+                // text starts on one line down the whole list.
+                paintStatusIcon(in: NSRect(
+                    x: textLeft, y: bandY + (bandTop - iconSide) / 2,
+                    width: iconSide, height: iconSide))
+                let after = textLeft + iconSide + iconGap
                 drawPlacement(from: after, to: textRight - stateTextWidth - 6)
                 drawStateText(rightEdge: textRight)
 
-            case .pill where Self.isAttention(row.state):
-                let padH: CGFloat = 6
-                let pillIcon = min(iconSide, bandTop - 2)
-                let pillWidth = padH * 2 + stateTextWidth
-                    + (hasIcon ? pillIcon + iconGap : 0)
-                let pillRect = NSRect(
-                    x: textRight - pillWidth, y: bandY, width: pillWidth, height: bandTop)
-                accent.withAlphaComponent(isDark ? 0.20 : 0.14).setFill()
-                NSBezierPath(
-                    roundedRect: pillRect, xRadius: bandTop / 2, yRadius: bandTop / 2).fill()
-                if hasIcon {
-                    paintStatusIcon(in: NSRect(
-                        x: pillRect.minX + padH, y: bandY + (bandTop - pillIcon) / 2,
-                        width: pillIcon, height: pillIcon))
-                }
-                drawStateText(rightEdge: pillRect.maxX - padH)
-                drawPlacement(from: textLeft, to: pillRect.minX - 6)
-
-            case .trailingText, .leadingRail, .pill:
+            case .trailing:
                 let stateWidth = stateTextWidth + (hasIcon ? iconSide + iconGap : 0)
                 drawPlacement(from: textLeft, to: textRight - stateWidth - 6)
                 if hasIcon {
@@ -1142,7 +1303,7 @@ final class SidebarDensityProposalView: NSView {
 
         // Label the variant in the image itself, so a screenshot cannot be mistaken
         // for another proposal once it is pasted into a review.
-        let caption = anatomy.status == .trailingText
+        let caption = anatomy.id == SidebarRowAnatomy.markOnly.id
             ? "\(proposal.id) · \(proposal.title)"
             : "\(proposal.id) pitch · \(anatomy.label)"
         let captionHeight: CGFloat = 16
@@ -1152,6 +1313,53 @@ final class SidebarDensityProposalView: NSView {
         background.withAlphaComponent(0.92).setFill()
         captionRect.fill()
         draw(caption, at: captionRect, size: 10, color: primary, alignment: .left)
+    }
+
+    /// The card-edge treatments. `FocusBorderOverlayView` supplies the dash language and
+    /// the 6 pt radius so a marked row and a focused tile are recognisably the same idea.
+    private func drawBorder(
+        _ border: SidebarRowAnatomy.Border, in cardRect: NSRect, width: CGFloat,
+        color: NSColor
+    ) {
+        let radius: CGFloat = 6
+        switch border {
+        case .none:
+            return
+
+        case .rail, .railThin:
+            let rail = NSRect(
+                x: cardRect.minX + 3, y: cardRect.minY + 6,
+                width: width, height: cardRect.height - 12)
+            color.setFill()
+            NSBezierPath(roundedRect: rail, xRadius: width / 2, yRadius: width / 2).fill()
+
+        case .outline, .dashed:
+            // Stroke on the pixel centre, or half the line falls outside the card.
+            let rect = cardRect.insetBy(dx: width / 2, dy: width / 2)
+            let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
+            path.lineWidth = width
+            if border == .dashed {
+                var pattern = FocusBorderOverlayView.dashPattern.map { CGFloat($0.doubleValue) }
+                path.setLineDash(&pattern, count: pattern.count, phase: 0)
+            }
+            color.setStroke()
+            path.stroke()
+
+        case .bracket:
+            // The leading third of the same outline: clip to a strip at the leading edge
+            // and stroke the whole rounded rect through it, so the two corners curve
+            // exactly as the outline's do.
+            let rect = cardRect.insetBy(dx: width / 2, dy: width / 2)
+            let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
+            path.lineWidth = width
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(rect: NSRect(
+                x: cardRect.minX - width, y: cardRect.minY - width,
+                width: radius + 8, height: cardRect.height + width * 2)).setClip()
+            color.setStroke()
+            path.stroke()
+            NSGraphicsContext.restoreGraphicsState()
+        }
     }
 
     private func stateColor(_ state: String, primary: NSColor) -> NSColor {
@@ -1215,11 +1423,128 @@ final class SidebarDensityProposalView: NSView {
     }
 
     private func drawSymbol(_ name: String, in rect: NSRect, color: NSColor) {
-        let config = NSImage.SymbolConfiguration(pointSize: rect.height, weight: .semibold)
-        guard let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
-            .withSymbolConfiguration(config) else { return }
-        image.isTemplate = true
+        guard let image = Self.symbolImage(name) else { return }
         drawImage(image, in: rect, tint: color)
+    }
+
+    /// The same glyph, placed by its INK rather than by its bounding box.
+    ///
+    /// SF Symbols do not share an optical size. `exclamationmark.triangle.fill` is short
+    /// and wide and sits low in its box; `stop.fill` fills nearly all of it;
+    /// `slash.circle` is a thin ring with a large margin. Dropped into one fixed rect
+    /// they land at visibly different sizes on visibly different centre lines — which is
+    /// exactly what Dylan saw in the leading-icon column: "they are too different to look
+    /// properly aligned because of the various shapes."
+    ///
+    /// So the placement is computed from each glyph's measured ink extent: scale the ink
+    /// to one common target, then centre the ink — not the box — on the slot. The
+    /// measurements are printed by the gate and the result is verified end-to-end by
+    /// re-measuring what this method actually paints.
+    private func drawAlignedSymbol(
+        _ name: String, in slot: NSRect, color: NSColor,
+        alignment: SidebarDensityProposalView.InkAlignment = .centred
+    ) {
+        guard let image = Self.symbolImage(name), let ink = Self.symbolInk(name) else {
+            drawSymbol(name, in: slot, color: color)
+            return
+        }
+        drawImage(
+            image, in: Self.alignedRect(slot: slot, ink: ink, alignment: alignment),
+            tint: color)
+    }
+
+    /// Which edge of the ink to line up.
+    ///
+    /// Measuring the glyph set answered a question I had guessed at wrongly. Their
+    /// LARGEST dimensions already agree to within 5% — SF Symbols are normalised on that.
+    /// What differs is **width**: 68% of the box for `hand.raised.fill` against 86% for
+    /// the circles. Centre those in one slot and their left edges land ~1.4 pt apart at
+    /// 16 pt, which in a left-aligned column reads as a ragged margin — Dylan's "they
+    /// seem all a little off". A leading column therefore aligns LEFT EDGES; a trailing
+    /// glyph beside its word still centres.
+    enum InkAlignment { case centred, leadingEdge }
+
+    /// Where to draw the unit-square glyph image so its ink lands correctly on `slot` at
+    /// a common extent. Pure arithmetic, so the gate can drive it directly.
+    static func alignedRect(
+        slot: NSRect, ink: NSRect, alignment: InkAlignment = .centred
+    ) -> NSRect {
+        let target = slot.width * Self.inkTargetFraction
+        let side = target / max(max(ink.width, ink.height), 0.0001)
+        let x = alignment == .leadingEdge
+            ? slot.minX - (ink.minX * side)
+            : slot.midX - (ink.midX * side)
+        return NSRect(x: x, y: slot.midY - (ink.midY * side), width: side, height: side)
+    }
+
+    /// How much of the slot the ink fills. 0.82 leaves the glyph room to breathe beside
+    /// 11 pt text without the slot itself changing size.
+    static let inkTargetFraction: CGFloat = 0.82
+
+    private static var symbolImageCache: [String: NSImage?] = [:]
+
+    static func symbolImage(_ name: String) -> NSImage? {
+        if let cached = symbolImageCache[name] { return cached }
+        let config = NSImage.SymbolConfiguration(pointSize: 96, weight: .semibold)
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(config)
+        image?.isTemplate = true
+        symbolImageCache[name] = image
+        return image
+    }
+
+    private static var symbolInkCache: [String: NSRect?] = [:]
+
+    /// The glyph's ink extent as a fraction of a unit square, measured top-down so it
+    /// composes with `respectFlipped:` drawing without a second flip.
+    static func symbolInk(_ name: String) -> NSRect? {
+        if let cached = symbolInkCache[name] { return cached }
+        let ink = symbolImage(name).flatMap { measureInk(of: $0) }
+        symbolInkCache[name] = ink
+        return ink
+    }
+
+    /// Render into a square bitmap and find the alpha extent.
+    static func measureInk(of image: NSImage, side: Int = 128) -> NSRect? {
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+              let context = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        let box = NSRect(x: 0, y: 0, width: CGFloat(side), height: CGFloat(side))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        // A template image draws in the current fill colour; force an opaque one so the
+        // alpha scan measures the glyph and not a stroke's antialiased ghost.
+        NSColor.black.setFill()
+        image.draw(in: box, from: .zero, operation: .sourceOver, fraction: 1)
+        NSGraphicsContext.restoreGraphicsState()
+        return inkBounds(of: rep)
+    }
+
+    /// Alpha extent of a bitmap, normalised to its own size, measured top-down.
+    static func inkBounds(of rep: NSBitmapImageRep, threshold: Int = 24) -> NSRect? {
+        guard let data = rep.bitmapData else { return nil }
+        let width = rep.pixelsWide, height = rep.pixelsHigh
+        let rowBytes = rep.bytesPerRow, pixelBytes = rep.bitsPerPixel / 8
+        // Alpha is the last sample of each pixel in the RGBA reps built above and in the
+        // premultiplied reps `bitmapImageRepForCachingDisplay` hands back.
+        let alphaOffset = pixelBytes - 1
+        var minX = width, minY = height, maxX = -1, maxY = -1
+        for y in 0..<height {
+            let row = y * rowBytes
+            for x in 0..<width where Int(data[row + x * pixelBytes + alphaOffset]) > threshold {
+                if x < minX { minX = x }
+                if x > maxX { maxX = x }
+                if y < minY { minY = y }
+                if y > maxY { maxY = y }
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return nil }
+        return NSRect(
+            x: CGFloat(minX) / CGFloat(width), y: CGFloat(minY) / CGFloat(height),
+            width: CGFloat(maxX - minX + 1) / CGFloat(width),
+            height: CGFloat(maxY - minY + 1) / CGFloat(height))
     }
 
     /// Array's OWN thinking indicator, posed at a fixed phase rather than imitated. The
