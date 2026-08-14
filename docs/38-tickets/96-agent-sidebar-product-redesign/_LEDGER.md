@@ -391,3 +391,80 @@ inventory check pass); a capture mislabelled `live-window`; a second owner of
 state/title/location in production; width not applied offscreen; un-gated UI at boot; any
 tmux contact; any risk to Dylan's state; and the inventory's observed-row column, which it
 verified verbatim against a fresh run.
+
+---
+
+## Feedback round 2 — anatomy, and the status experiments (2026-08-14)
+
+Mock-only. **No production code touched**; the whole round lives in
+`SidebarScreenshotChecks.swift`, whose `Checks.swift` suffix keeps it out of the
+ui-probe census and the colour-hygiene scan. Artifact:
+`qa-runs/2026-08-14T193650Z/sidebar-96/`, 42 images, gate PASS.
+
+### Structural: pitch and anatomy are now separate types
+
+`SidebarDensityProposal` is pitch. `SidebarRowAnatomy` is content and status emphasis.
+One mock view is driven twice — across pitches at a fixed anatomy, across anatomies at a
+fixed pitch. Before this, every proposal image varied both, which is why the first
+round's feedback about *the provider text* arrived tangled with the ruling about *row
+height*.
+
+### What the images now show, and what each change was driven by
+
+| change | driven by |
+|---|---|
+| model text dropped, provider mark alone | Dylan, after the T3 Code reference |
+| marks drawn flat in the theme's colour | Dylan — **conflicts with §4.5, see below** |
+| leading branch glyph on band 3 | T3's band 3; offered for veto |
+| throbber at 18 pt | measured, see below |
+| Working given its own (blue) accent | fell out of building the rail |
+| unknown-provider row moved to position 5 | it was clipped by the caption at position 10 |
+
+### Numbers, not impressions
+
+- **The throbber was drawn below the size it exists at.**
+  `DualPlaneGyroTiltedThinkingIndicatorView.Metrics.side` is **18**; guide rings are
+  `side × 0.036` at 30% alpha; orbit radius is `side × 0.296`. At the first mock's 11 pt
+  that is a 0.55 pt ring around a 3.3 pt orbit — Dylan's "couple of dots", explained.
+  Production agrees on 18: `AgentTranscriptListView` installs it at its intrinsic size.
+  It now renders at 18. **It still reads as dots in a still, and that is not a size
+  problem** — it is a motion glyph and a fixed-phase snapshot has no motion. Two
+  consequences recorded rather than guessed at: it can only be judged live, and a full
+  sidebar would animate up to nine of them where the transcript tail animates one.
+- **A translucent `sourceAtop` tint blends rather than replaces.** Anthropic's `#D97757`
+  under a 72%-black fill rendered *maroon* in Aqua, not grey. Caught by looking at the
+  Aqua image, not by the gate — no mechanical check can see it. Fixed by flattening with
+  an opaque fill and applying opacity at draw time. The same bug was silently affecting
+  every SF Symbol drawn with a translucent colour.
+- **Tinted copies were being built at the source's size** — 1024×1024 for the xAI mark —
+  and thrown into a 14 pt slot. Now built at 3× the destination.
+
+### The one thing here that contradicts the design
+
+**§4.5 forbids tinting vendor marks** without explicit per-vendor permission for template
+treatment, and this round tints all of them. Done at Dylan's direction, for a local mock,
+and recorded as an OPEN question in `brand-marks/PROVENANCE.md` rather than as a settled
+one — it adds "is monochrome permitted, per vendor" to P3.1's trademark review, plus the
+follow-on question of what a row looks like if some vendors permit it and others do not.
+Nothing here ships.
+
+### Why there is no fourth status image
+
+`trailingText` at proposal A's pitch and 280 pt would be byte-identical to
+`proposals/proposalA-280x662-*.png`. That control already exists; emitting it again under
+a second name is precisely the relabelled-duplicate trap of round 1, so the sweep is three
+images and the doc names the control.
+
+The duplicate-digest gate also earns its keep here as **teeth**: `leadingRail` and `pill`
+are conditional treatments, so if the attention predicate ever returned false for every
+row, both would collapse onto that same control and the gate would fail rather than ship
+two images of nothing.
+
+### Verified
+
+`--sidebar-screenshot-check` (42 images, PASS), `--sidebar-production-corpus-check`
+(30/30), `--sidebar-ux-check`, `--agent-inbox-check`,
+`swift run ContinuumRevivedAgentUIChecks` (incl. the queue-94 corpus gate),
+`scripts/check-color-hygiene.sh` (27 allowlisted, 0 new). `ComponentLab.swift` still
+shows 0 lines against `d334f01`. No matrix run this round — nothing outside the mock
+changed, and the live app is in use.

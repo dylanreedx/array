@@ -149,6 +149,12 @@ PASS, 42 images:
 | `live-w220/`, `live-w280/`, `live-w360/` | the shipped app, real window, 2 captures each |
 | `offscreen/` | 36 images — corpus sweeps, the 662 pt density fixtures, one interaction reference, and `proposals/` |
 
+**The offscreen half has since been re-rendered** with the new row anatomy and the status
+sweep: `qa-runs/2026-08-14T193650Z/sidebar-96/`, 42 images, gate PASS. The live half is
+unchanged and does not need re-capturing — those images are the *shipped* sidebar, and no
+product behaviour has changed. Regenerate the offscreen set alone with
+`.build/debug/Array --sidebar-screenshot-check`.
+
 The two worth opening first: `live-w280/live-window-280pt.png` (the baseline) and
 `offscreen/proposals/proposalC-280x662-darkAqua.png` (today's pitch with the design's
 content — the image that reframes the question).
@@ -217,6 +223,104 @@ Still open, and they change the row anatomy rather than its pitch:
   likely needs a ~14 pt slot to read as the gyro it is.
 
 These are cheap to try in the mock and do not block the pitch ruling below.
+
+### Both are now built — `status/`, and a second ruling below
+
+`status/status-{rail,leadingIcon,pill}-280x662-{aqua,darkAqua}.png`, plus the control,
+which is `proposals/proposalA-280x662-darkAqua.png` — same pitch, same width, same
+content, so the only thing that differs is the treatment. There is deliberately no
+fourth "trailing text" image: it would have been byte-identical to that control, which
+is exactly the relabelled-duplicate trap the gate catches.
+
+**Anatomy and pitch are now separate variables in the code.** `SidebarDensityProposal`
+is pitch only; `SidebarRowAnatomy` is content and emphasis. Every proposal image uses
+one anatomy and every status image uses one pitch, so no image changes two things at
+once. The first mock did, and that is why "the provider text" and "the row height" got
+argued about together.
+
+#### What changed in every image, including the pitch proposals
+
+- **The model name is gone.** The provider mark now sits alone at the right of the branch
+  line. §4.3's ladder *ends* here; this starts here.
+- **The marks are flat, in the theme's colour**, at your direction — one muted monochrome
+  trailing column, as T3 has. This is the one change in this round that §4.5 currently
+  forbids (*"do not tint vendor marks unless the brand rules explicitly permit template
+  treatment"*), so it is fine in a local mock and **not yet established for shipping**.
+  It adds a question to P3.1's per-vendor trademark review: is a one-colour treatment
+  permitted, by whom, and what does the row look like if some vendors allow it and others
+  do not? Recorded in `brand-marks/PROVENANCE.md`.
+- **The branch line has a leading branch glyph**, as T3's does. Veto it freely — it was
+  added because band 3 is otherwise a bare string with a logo floating at the far right.
+- **The throbber is at 18 pt, its real size.** See below.
+- **Working has its own colour** (blue). It had none, so a rail or a pill on a *running*
+  agent came out grey — the shape said "notable", the colour said "idle".
+- **Row 5 is now a provider with no bundled mark** (`Gemini 3 Pro` → a `GE` badge), moved
+  up from row 10 because the last row is clipped by the caption. That row is the cost of
+  "mark only" made visible: with the model text gone, an agent on any provider Array has
+  no asset for is identified by two letters and nothing else. §4.5's initial set leaves
+  Google, OpenRouter, Mistral, Groq and Cerebras in exactly that position today.
+
+#### The throbber: 18 pt is its real size, and a still will always look like dots
+
+`DualPlaneGyroTiltedThinkingIndicatorView.Metrics.side` is **18**, its guide rings are
+`side × 0.036` wide at 30% alpha, and its orbit radius is `side × 0.296`. At the 11 pt of
+the first mock that is a 0.55 pt invisible ring around a 3.3 pt orbit — which is exactly
+the couple of dots you saw. It is now drawn at 18 pt, and production agrees: the agent
+transcript tail installs it at its intrinsic size and never resizes it.
+
+At 18 pt in a still it is **still a few dots**, and that is not a size problem. It is a
+motion glyph: what makes it read is the orbit, and a fixed-phase snapshot has no orbit.
+In the shipped sidebar it would animate. Two things follow, and neither is a mock
+question:
+
+1. **Judge it in the live app, not here.** No static image can settle it.
+2. **Up to nine of them would animate at once** in a full sidebar, which the transcript
+   tail never has to do. That is a performance question for whichever phase adopts it.
+
+#### The three treatments
+
+All three use one predicate for *when* to emphasise — Working, Approval, Input, Failed —
+so the sweep varies only *how*. Done, Stopped and Cancelled stay quiet. That single
+property is the loudest thing about the T3 reference: most rows carry nothing, so the few
+that carry something are impossible to miss.
+
+| | what it does | costs |
+|---|---|---|
+| **rail** | 3 pt coloured bar down the card's leading edge | 6 pt of row width, reserved on every row so text never jitters |
+| **leadingIcon** | the status icon moves to the front of band 1 and grows to 16 pt, on **every** row | ~20 pt off the placement band; see below |
+| **pill** | icon + word in a tinted capsule at the right of band 1 | width on precisely the rows likeliest to have long placement |
+
+Having rendered them:
+
+- **rail** is the one I would pick. Attention rows are unmissable at a glance, quiet rows
+  are calmer than the control, and the icon and word are untouched so nothing is read by
+  colour alone (§8.2).
+- **leadingIcon** builds a clean scan column, but it is unconditional, so six green ticks
+  march down the left edge and the *quiet* rows get as much emphasis as the loud ones —
+  the opposite of what the reference achieves. Making it conditional would leave holes in
+  the column, which is worse.
+- **pill** is the most attractive single row and the worst list. The capsule competes with
+  the title for weight, and it is the only treatment that **cannot** show the throbber at
+  18 pt: a capsule tall enough to hold it collides with the title band at proposal A's
+  pitch. It is clamped to 12 pt in that image.
+
+They are rendered at **proposal A's pitch**, the tightest on the table, deliberately. A
+treatment chosen at C's roomier 83 pt could break under whatever pitch S0 rules; one that
+survives A cannot.
+
+## Dylan's second ruling — status emphasis
+
+- [ ] **rail** (recommended)
+- [ ] **leadingIcon**
+- [ ] **pill**
+- [ ] none — the control (icon + word, right of band 1) is enough
+- [ ] something else:
+
+And two sub-questions the images raise:
+
+- **Keep the branch glyph?**
+- **Is "quiet rows show no emphasis" right**, or should every row carry its state equally?
+  This is a §4.6 semantics call, not a visual one.
 
 ## Dylan's ruling
 

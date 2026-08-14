@@ -452,42 +452,71 @@ enum SidebarScreenshotChecks {
                 }
             }
 
-            // The three density proposals S0 rules on.
+            // One mock renderer, driven twice: once across PITCHES with a fixed anatomy,
+            // once across ANATOMIES at a fixed pitch. Two sweeps, one variable each.
+            func renderMock(
+                proposal: SidebarDensityProposal, anatomy: SidebarRowAnatomy,
+                width: CGFloat, subdirectory: String, name: String, fixture: String
+            ) throws {
+                try drawing(appearance) {
+                    let view = SidebarDensityProposalView(
+                        proposal: proposal, anatomy: anatomy,
+                        frame: NSRect(x: 0, y: 0, width: width, height: denseViewportHeight))
+                    let window = NSWindow(
+                        contentRect: view.frame, styleMask: [.borderless],
+                        backing: .buffered, defer: false)
+                    window.appearance = appearance
+                    window.contentView = view
+                    view.layoutSubtreeIfNeeded()
+                    let rep = try UIProbe.bitmap(of: view, id: fixture)
+                    let subdir = directory.appendingPathComponent(
+                        subdirectory, isDirectory: true)
+                    try FileManager.default.createDirectory(
+                        at: subdir, withIntermediateDirectories: true)
+                    try writePNG(rep, to: subdir.appendingPathComponent(name))
+                    entries.append(Entry(
+                        png: "\(subdirectory)/\(name)", fixture: fixture,
+                        widthRequestedPt: Double(width),
+                        widthMeasuredPt: Double(view.bounds.width),
+                        heightPt: Double(denseViewportHeight),
+                        appearance: shortName(appearanceName),
+                        reduceMotion: "n/a (static mock)",
+                        increaseContrast: "n/a (static mock)",
+                        scale: Double(UIProbe.renderScale),
+                        captureType: "offscreen-probe", checkFlag: flag,
+                        digest: UIProbe.digest(of: rep),
+                        rowsRendered: view.drawnRowCount,
+                        completeRowsIn662pt: proposal.completeRows(in: denseViewportHeight),
+                        cardHeightPt: Double(proposal.cardHeight),
+                        pitchPt: Double(proposal.pitch)))
+                }
+            }
+
+            // The three density proposals S0 rules on — all at the same anatomy, so the
+            // only thing that differs between them is pitch.
             for proposal in SidebarDensityProposal.all {
                 for width in [CGFloat(220), 280, 360] {
-                    try drawing(appearance) {
-                        let view = SidebarDensityProposalView(
-                            proposal: proposal,
-                            frame: NSRect(x: 0, y: 0, width: width, height: denseViewportHeight))
-                        let window = NSWindow(
-                            contentRect: view.frame, styleMask: [.borderless],
-                            backing: .buffered, defer: false)
-                        window.appearance = appearance
-                        window.contentView = view
-                        view.layoutSubtreeIfNeeded()
-                        let rep = try UIProbe.bitmap(of: view, id: "proposal-\(proposal.id)")
-                        let name = "proposal\(proposal.id)-\(Int(width))x\(Int(denseViewportHeight))-\(shortName(appearanceName)).png"
-                        let proposalsDir = directory.appendingPathComponent("proposals", isDirectory: true)
-                        try FileManager.default.createDirectory(
-                            at: proposalsDir, withIntermediateDirectories: true)
-                        try writePNG(rep, to: proposalsDir.appendingPathComponent(name))
-                        entries.append(Entry(
-                            png: "proposals/\(name)", fixture: "proposal-\(proposal.id)",
-                            widthRequestedPt: Double(width),
-                            widthMeasuredPt: Double(view.bounds.width),
-                            heightPt: Double(denseViewportHeight),
-                            appearance: shortName(appearanceName),
-                            reduceMotion: "n/a (static mock)",
-                            increaseContrast: "n/a (static mock)",
-                            scale: Double(UIProbe.renderScale),
-                            captureType: "offscreen-probe", checkFlag: flag,
-                            digest: UIProbe.digest(of: rep),
-                            rowsRendered: view.drawnRowCount,
-                            completeRowsIn662pt: proposal.completeRows(in: denseViewportHeight),
-                            cardHeightPt: Double(proposal.cardHeight),
-                            pitchPt: Double(proposal.pitch)))
-                    }
+                    try renderMock(
+                        proposal: proposal, anatomy: .markOnly, width: width,
+                        subdirectory: "proposals",
+                        name: "proposal\(proposal.id)-\(Int(width))x\(Int(denseViewportHeight))-\(shortName(appearanceName)).png",
+                        fixture: "proposal-\(proposal.id)")
                 }
+            }
+
+            // The status-emphasis sweep, all at proposal A's pitch and 280 pt.
+            //
+            // A deliberately, not the roomiest option: a treatment that only works at C's
+            // 83 pt pitch would be chosen here and then break under whatever S0 rules.
+            // Judging it at the TIGHTEST proposed pitch cannot make that mistake.
+            // The control is `proposals/proposalA-280x662-*.png` — same pitch, same
+            // width, same content, `trailingText`.
+            for anatomy in SidebarRowAnatomy.statusExperiments {
+                try renderMock(
+                    proposal: .a, anatomy: anatomy, width: 280,
+                    subdirectory: "status",
+                    name: "status-\(anatomy.id)-280x\(Int(denseViewportHeight))-\(shortName(appearanceName)).png",
+                    fixture: "status-\(anatomy.id)")
             }
         }
 
@@ -730,6 +759,75 @@ struct SidebarDensityProposal: Sendable {
     static let all: [SidebarDensityProposal] = [a, b, c]
 }
 
+/// What a row CONTAINS and how its state is emphasised — deliberately separate from
+/// `SidebarDensityProposal`, which is only about PITCH.
+///
+/// They were one thing in the first mock, and that made every image change two variables
+/// at once. Dylan's feedback after seeing it was about anatomy, not height ("not the
+/// biggest fan of the provider text… maybe we can experiment with slightly more visual
+/// aid for the status"), so the two now vary independently: the S0 pitch images all use
+/// the same anatomy, and the status sweep all uses the same pitch.
+struct SidebarRowAnatomy: Sendable {
+    enum StatusTreatment: String, Sendable {
+        /// Icon + word at the right of band 1. What the first mock did.
+        case trailingText
+        /// A coloured rail down the card's leading edge — painted only for the states
+        /// that want you.
+        case leadingRail
+        /// The status icon moves to the FRONT of band 1 and grows, forming a column you
+        /// can scan without reading.
+        case leadingIcon
+        /// Icon + word inside a tinted capsule, again only for states that want you.
+        case pill
+    }
+
+    let id: String
+    let label: String
+    let status: StatusTreatment
+    /// §4.3's width-sacrifice ladder *ends* by dropping model text and keeping the mark.
+    /// Dylan asked to start there — T3 Code carries no model name at all. The exact
+    /// model id must still be reachable in tooltip and accessibility detail (§4.3); a
+    /// static mock cannot show that, so it is called out in the review instead.
+    let showsModelText: Bool
+
+    /// The first mock drew the status icon at 11 pt, at which Array's own gyro throbber
+    /// reduces to a couple of dots — Dylan said so. 14 pt is the smallest size at which
+    /// the two planes are separable.
+    var statusIconSide: CGFloat { status == .leadingIcon ? 16 : 14 }
+    /// The throbber gets its OWN slot, at the size it was drawn for.
+    /// `DualPlaneGyroTiltedThinkingIndicatorView.Metrics.side` is 18 pt, its guide rings
+    /// are `side * 0.036` wide at 30% alpha, and its orbit radius is `side * 0.296`. At
+    /// 11 pt — the first mock — that is a 0.55 pt invisible ring around a 3.3 pt orbit,
+    /// which is why Dylan saw a couple of dots. Shrinking it further is not a size
+    /// choice, it is a different glyph.
+    var workingIconSide: CGFloat { 18 }
+    /// The rail's lane is reserved on EVERY row, not only the ones that paint it, or the
+    /// text would jitter row to row. That reserved width is a real cost of the treatment
+    /// and should be visible in the image.
+    var leadingGutter: CGFloat { status == .leadingRail ? 6 : 0 }
+
+    /// The anatomy every S0 pitch image uses: provider mark alone, no model text.
+    static let markOnly = SidebarRowAnatomy(
+        id: "markOnly", label: "mark only, state at the right",
+        status: .trailingText, showsModelText: false)
+
+    /// The status experiments. `trailingText` is deliberately absent: it is `markOnly`,
+    /// so the proposal images at the same pitch and width already ARE the control, and
+    /// re-emitting it here would put a byte-identical image in the artifact under a
+    /// second name — the exact trap the duplicate-digest gate exists to catch.
+    static let statusExperiments: [SidebarRowAnatomy] = [
+        SidebarRowAnatomy(
+            id: "rail", label: "coloured rail on states that want you",
+            status: .leadingRail, showsModelText: false),
+        SidebarRowAnatomy(
+            id: "leadingIcon", label: "16 pt status icon leading every row",
+            status: .leadingIcon, showsModelText: false),
+        SidebarRowAnatomy(
+            id: "pill", label: "tinted pill on states that want you",
+            status: .pill, showsModelText: false),
+    ]
+}
+
 /// A throwaway mock of the §1 intended row anatomy at one proposed density.
 ///
 /// Deliberately a plain `NSView` and NOT `TokenThemed`: it is not production, it must
@@ -737,7 +835,19 @@ struct SidebarDensityProposal: Sendable {
 @MainActor
 final class SidebarDensityProposalView: NSView {
     private let proposal: SidebarDensityProposal
+    private let anatomy: SidebarRowAnatomy
     private(set) var drawnRowCount = 0
+
+    /// The states that are asking for a person, as opposed to reporting one.
+    ///
+    /// The single loudest thing about the T3 Code reference is that most rows carry no
+    /// state at all, so the few that do are impossible to miss. Both conditional
+    /// treatments below use this one predicate, so the sweep varies only HOW attention
+    /// is drawn, never WHEN.
+    private static func isAttention(_ state: String) -> Bool {
+        state.hasPrefix("Working") || state.hasPrefix("Approval")
+            || state.hasPrefix("Input") || state.hasPrefix("Failed")
+    }
 
     /// Content chosen so the comparison is honest at 220 pt: a long title, a bidi
     /// title, a middle-truncating branch, and the terminal outcomes §4.6 wants
@@ -770,14 +880,27 @@ final class SidebarDensityProposalView: NSView {
     /// P3.1. §10 forbids runtime fetching and nothing here fetches; the files are on
     /// disk with a provenance manifest beside them.
     ///
-    /// Marks are NEVER tinted (§4.5). The light/dark files exist because each vendor
-    /// ships both, and Anthropic's carries its own `#D97757`.
-    private static func providerMark(_ model: String, isDark: Bool) -> NSImage? {
+    /// **These are drawn as flat template marks in the theme's own colour**, at Dylan's
+    /// direction after the T3 Code reference, whose trailing icons are all one muted
+    /// monochrome. Only the mark's alpha coverage is used; the file's own colours are
+    /// discarded.
+    ///
+    /// §4.5 says the opposite — *"do not tint vendor marks unless the brand rules
+    /// explicitly permit template treatment"* — so this is a **design-time mock choice,
+    /// not a settled one**. Anthropic's file carries its own `#D97757` and several
+    /// vendors publish monochrome rules that a blanket recolour may or may not satisfy.
+    /// Resolving it is the first gate of P3.1, per-vendor, and `brand-marks/PROVENANCE.md`
+    /// records it as open.
+    ///
+    /// Because the colour now comes from the theme, the per-appearance *files* no longer
+    /// carry information: one canonical file per vendor is loaded for its silhouette.
+    private static func providerMark(_ model: String) -> NSImage? {
         let key: String
-        if model.hasPrefix("GPT") { key = isDark ? "openai-dark" : "openai-light" }
+        if model.hasPrefix("GPT") { key = "openai-light" }
         else if model.hasPrefix("Opus") || model.hasPrefix("Sonnet") { key = "anthropic" }
-        else if model.hasPrefix("Grok") { key = isDark ? "xai-dark" : "xai-light" }
+        else if model.hasPrefix("Grok") { key = "xai-light" }
         else { return nil }
+        if let cached = markCache[key] { return cached }
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()   // App
             .deletingLastPathComponent()   // ContinuumRevived
@@ -785,15 +908,21 @@ final class SidebarDensityProposalView: NSView {
             .deletingLastPathComponent()   // repo root
             .appendingPathComponent(
                 "docs/38-tickets/96-agent-sidebar-product-redesign/brand-marks/\(key).svg")
-        return NSImage(contentsOf: url)
+        let image = NSImage(contentsOf: url)
+        markCache[key] = image
+        return image
     }
+
+    /// Parsed once, not once per row per image.
+    private static var markCache: [String: NSImage?] = [:]
 
     /// The two-character badge §4.5 specifies when a provider has no asset — still the
     /// truth for Google, Mistral, Groq, Cerebras, OpenRouter and every harness mark.
     private static func providerInitials(_ model: String) -> String {
         if model.hasPrefix("GPT") { return "AI" }
         if model.hasPrefix("Opus") || model.hasPrefix("Sonnet") { return "AN" }
-        return "??"
+        let letters = model.filter(\.isLetter).prefix(2).uppercased()
+        return letters.count == 2 ? letters : "??"
     }
 
     private static let rows: [(placement: String, state: String, title: String,
@@ -806,10 +935,16 @@ final class SidebarDensityProposalView: NSView {
          "agent/measured-fit", "GPT-5.6 Sol"),
         ("Array › Agents", "Failed · 12m", "Persist an honest terminal event",
          "agent/terminal-outcomes", "Opus"),
+        // Fifth row, not tenth: the last row is clipped by the caption at 662 pt, and
+        // this is the row the "mark only" decision has to be judged on.
         ("Array › Agents", "Stopped · 30m", "Wire acknowledgement to effective focus",
-         "agent/ack-watermark", "Sonnet"),
+         "agent/ack-watermark", "Gemini 3 Pro"),
+        // A vendor whose mark exists but whose name never appears, and one whose mark
+        // does NOT exist. With the model text dropped, that second row is the whole
+        // tradeoff in one line: the agent becomes anonymous except for a two-letter
+        // badge. Keep both in view so the cost of "mark only" is looked at, not assumed.
         ("array-scratch", "Cancelled · 1h", "تحديث الشريط الجانبي · סוכן עם שם ארוך",
-         "agent/rtl-truncation", "GPT-5.6 Sol"),
+         "agent/rtl-truncation", "Grok 4.2"),
         ("Array › Sidebar", "Input", "Choose the provider mark set",
          "agent/brand-marks", "Opus"),
         ("Array › Docs", "Done · 3h", "Write the S0 density review",
@@ -820,8 +955,9 @@ final class SidebarDensityProposalView: NSView {
          "agent/restore-bounds", "Sonnet"),
     ]
 
-    init(proposal: SidebarDensityProposal, frame: NSRect) {
+    init(proposal: SidebarDensityProposal, anatomy: SidebarRowAnatomy, frame: NSRect) {
         self.proposal = proposal
+        self.anatomy = anatomy
         super.init(frame: frame)
         wantsLayer = true
     }
@@ -866,68 +1002,139 @@ final class SidebarDensityProposalView: NSView {
                 NSBezierPath(roundedRect: cardRect, xRadius: 6, yRadius: 6).fill()
             }
 
-            let contentWidth = cardRect.width - insetH * 2
+            // The rail's lane is reserved on every row so text never jitters; only
+            // attention rows paint into it.
+            let textLeft = cardRect.minX + insetH + anatomy.leadingGutter
+            let textRight = cardRect.maxX - insetH
+            let contentWidth = textRight - textLeft
             var bandY = cardRect.minY + proposal.insetV
 
-            // Band 1 — placement on the left, state and time on the right.
             let accent = stateColor(row.state, primary: primary)
-            let iconSide: CGFloat = 11
-            let iconGap: CGFloat = 3
-            let hasIcon = Self.stateSymbol(row.state) != nil || row.state.hasPrefix("Working")
-            let stateTextWidth = min(
-                contentWidth * 0.5, measure(row.state, size: 11).width + 2)
-            let stateWidth = stateTextWidth + (hasIcon ? iconSide + iconGap : 0)
-            draw(row.placement, at: NSRect(
-                x: cardRect.minX + insetH, y: bandY,
-                width: contentWidth - stateWidth - 6, height: proposal.bandTop),
-                 size: 11, color: secondary, alignment: .left)
-            let iconRect = NSRect(
-                x: cardRect.maxX - insetH - stateWidth,
-                y: bandY + (proposal.bandTop - iconSide) / 2,
-                width: iconSide, height: iconSide)
-            if row.state.hasPrefix("Working") {
-                drawWorkingIndicator(in: iconRect)
-            } else if let symbol = Self.stateSymbol(row.state) {
-                drawSymbol(symbol, in: iconRect, color: accent)
+            if anatomy.status == .leadingRail, Self.isAttention(row.state) {
+                let rail = NSRect(
+                    x: cardRect.minX + 3, y: cardRect.minY + 6,
+                    width: 3, height: cardRect.height - 12)
+                accent.setFill()
+                NSBezierPath(roundedRect: rail, xRadius: 1.5, yRadius: 1.5).fill()
             }
-            draw(row.state, at: NSRect(
-                x: cardRect.maxX - insetH - stateTextWidth, y: bandY,
-                width: stateTextWidth, height: proposal.bandTop),
-                 size: 11, color: accent, alignment: .right)
+
+            // Band 1 — placement on the left, state and time on the right (or leading,
+            // depending on the treatment under review).
+            let isWorking = row.state.hasPrefix("Working")
+            let iconSide = isWorking ? anatomy.workingIconSide : anatomy.statusIconSide
+            let iconGap: CGFloat = 4
+            let hasIcon = Self.stateSymbol(row.state) != nil || isWorking
+            let stateTextWidth = min(
+                contentWidth * 0.55, measure(row.state, size: 11).width + 2)
+            let bandTop = proposal.bandTop
+            func paintStatusIcon(in rect: NSRect) {
+                if isWorking {
+                    drawWorkingIndicator(in: rect)
+                } else if let symbol = Self.stateSymbol(row.state) {
+                    drawSymbol(symbol, in: rect, color: accent)
+                }
+            }
+            func drawPlacement(from left: CGFloat, to right: CGFloat) {
+                draw(row.placement, at: NSRect(
+                    x: left, y: bandY, width: max(0, right - left), height: bandTop),
+                     size: 11, color: secondary, alignment: .left)
+            }
+            func drawStateText(rightEdge: CGFloat) {
+                draw(row.state, at: NSRect(
+                    x: rightEdge - stateTextWidth, y: bandY,
+                    width: stateTextWidth, height: bandTop),
+                     size: 11, color: accent, alignment: .right)
+            }
+
+            switch anatomy.status {
+            case .leadingIcon:
+                if hasIcon {
+                    paintStatusIcon(in: NSRect(
+                        x: textLeft, y: bandY + (bandTop - iconSide) / 2,
+                        width: iconSide, height: iconSide))
+                }
+                let after = textLeft + (hasIcon ? iconSide + iconGap : 0)
+                drawPlacement(from: after, to: textRight - stateTextWidth - 6)
+                drawStateText(rightEdge: textRight)
+
+            case .pill where Self.isAttention(row.state):
+                let padH: CGFloat = 6
+                let pillIcon = min(iconSide, bandTop - 2)
+                let pillWidth = padH * 2 + stateTextWidth
+                    + (hasIcon ? pillIcon + iconGap : 0)
+                let pillRect = NSRect(
+                    x: textRight - pillWidth, y: bandY, width: pillWidth, height: bandTop)
+                accent.withAlphaComponent(isDark ? 0.20 : 0.14).setFill()
+                NSBezierPath(
+                    roundedRect: pillRect, xRadius: bandTop / 2, yRadius: bandTop / 2).fill()
+                if hasIcon {
+                    paintStatusIcon(in: NSRect(
+                        x: pillRect.minX + padH, y: bandY + (bandTop - pillIcon) / 2,
+                        width: pillIcon, height: pillIcon))
+                }
+                drawStateText(rightEdge: pillRect.maxX - padH)
+                drawPlacement(from: textLeft, to: pillRect.minX - 6)
+
+            case .trailingText, .leadingRail, .pill:
+                let stateWidth = stateTextWidth + (hasIcon ? iconSide + iconGap : 0)
+                drawPlacement(from: textLeft, to: textRight - stateWidth - 6)
+                if hasIcon {
+                    paintStatusIcon(in: NSRect(
+                        x: textRight - stateWidth, y: bandY + (bandTop - iconSide) / 2,
+                        width: iconSide, height: iconSide))
+                }
+                drawStateText(rightEdge: textRight)
+            }
             bandY += proposal.bandTop + proposal.gapTop
 
             // Band 2 — the subject, on its own line, never sacrificed.
             draw(row.title, at: NSRect(
-                x: cardRect.minX + insetH, y: bandY,
-                width: contentWidth, height: proposal.bandTitle),
+                x: textLeft, y: bandY, width: contentWidth, height: proposal.bandTitle),
                  size: 13, color: primary, alignment: .left, semibold: true)
             bandY += proposal.bandTitle + proposal.gapBottom
 
-            // Band 3 — branch left (middle-truncating), model right.
-            let modelTextWidth = min(
-                contentWidth * 0.45, measure(row.model, size: 11).width + 2)
+            // Band 3 — branch left (middle-truncating), provider mark right.
+            //
+            // The model NAME is drawn only when the anatomy asks for it. Dropping it is
+            // Dylan's ask after the T3 Code reference, and the consequence is deliberately
+            // visible in the last row: a provider with no bundled mark falls back to a
+            // two-letter badge and the agent's model becomes unreadable on the surface.
             let chipSide: CGFloat = 14
-            let chipGap: CGFloat = 4
-            let modelWidth = modelTextWidth + chipSide + chipGap
+            let chipGap: CGFloat = 6
+            let modelTextWidth = anatomy.showsModelText
+                ? min(contentWidth * 0.45, measure(row.model, size: 11).width + 2)
+                : 0
+            let trailingWidth = chipSide
+                + (anatomy.showsModelText ? modelTextWidth + chipGap : 0)
+            let branchGlyph: CGFloat = 11
+            let branchGlyphGap: CGFloat = 4
+            drawSymbol("arrow.triangle.branch", in: NSRect(
+                x: textLeft, y: bandY + (proposal.bandDetail - branchGlyph) / 2,
+                width: branchGlyph, height: branchGlyph), color: secondary)
+            let branchLeft = textLeft + branchGlyph + branchGlyphGap
             draw(row.branch, at: NSRect(
-                x: cardRect.minX + insetH, y: bandY,
-                width: contentWidth - modelWidth - 6, height: proposal.bandDetail),
+                x: branchLeft, y: bandY,
+                width: max(0, textRight - trailingWidth - 6 - branchLeft),
+                height: proposal.bandDetail),
                  size: 11, color: secondary, alignment: .left, middleTruncating: true)
             let chipRect = NSRect(
-                x: cardRect.maxX - insetH - modelWidth,
+                x: textRight - trailingWidth,
                 y: bandY + (proposal.bandDetail - chipSide) / 2,
                 width: chipSide, height: chipSide)
-            if let mark = Self.providerMark(row.model, isDark: isDark) {
-                // Untinted, per §4.5.
-                drawImage(mark, in: chipRect, tint: nil)
+            if let mark = Self.providerMark(row.model) {
+                // Flat, in the theme's colour — see `providerMark`, and the §4.5 caveat
+                // that makes this a mock choice rather than a shipping one.
+                drawImage(mark, in: chipRect, tint: primary.withAlphaComponent(0.72))
             } else {
                 drawProviderChip(
                     Self.providerInitials(row.model), in: chipRect, color: secondary)
             }
-            draw(row.model, at: NSRect(
-                x: cardRect.maxX - insetH - modelTextWidth, y: bandY,
-                width: modelTextWidth, height: proposal.bandDetail),
-                 size: 11, color: secondary, alignment: .right)
+            if anatomy.showsModelText {
+                draw(row.model, at: NSRect(
+                    x: textRight - modelTextWidth, y: bandY,
+                    width: modelTextWidth, height: proposal.bandDetail),
+                     size: 11, color: secondary, alignment: .right)
+            }
 
             drawnRowCount += 1
             y += proposal.pitch
@@ -935,7 +1142,9 @@ final class SidebarDensityProposalView: NSView {
 
         // Label the variant in the image itself, so a screenshot cannot be mistaken
         // for another proposal once it is pasted into a review.
-        let caption = "\(proposal.id) · \(proposal.title)"
+        let caption = anatomy.status == .trailingText
+            ? "\(proposal.id) · \(proposal.title)"
+            : "\(proposal.id) pitch · \(anatomy.label)"
         let captionHeight: CGFloat = 16
         let captionRect = NSRect(
             x: gutter, y: bounds.height - captionHeight - 2,
@@ -954,6 +1163,14 @@ final class SidebarDensityProposalView: NSView {
             return isDark ? NSColor(calibratedRed: 0.94, green: 0.48, blue: 0.44, alpha: 1)
                           : NSColor(calibratedRed: 0.66, green: 0.15, blue: 0.11, alpha: 1)
         }
+        // Working had no colour of its own in the first mock, so a rail or a pill on a
+        // running agent came out grey — the treatment said "this row is notable" and the
+        // colour said "this row is idle". Running is its own thing: not finished, not
+        // blocked, not broken.
+        if state.hasPrefix("Working") {
+            return isDark ? NSColor(calibratedRed: 0.40, green: 0.68, blue: 0.96, alpha: 1)
+                          : NSColor(calibratedRed: 0.10, green: 0.40, blue: 0.72, alpha: 1)
+        }
         if state.hasPrefix("Approval") || state.hasPrefix("Input") {
             return isDark ? NSColor(calibratedRed: 0.96, green: 0.76, blue: 0.36, alpha: 1)
                           : NSColor(calibratedRed: 0.58, green: 0.40, blue: 0.05, alpha: 1)
@@ -969,19 +1186,31 @@ final class SidebarDensityProposalView: NSView {
     /// `respectFlipped: true`, which is the one place the flip belongs.
     private func drawImage(_ image: NSImage, in rect: NSRect, tint: NSColor?) {
         let drawable: NSImage
-        if let tint {
-            let copy = NSImage(size: image.size)
+        // A translucent `sourceAtop` fill BLENDS with the source's own colour instead of
+        // replacing it: Anthropic's `#D97757` under a 72%-black tint came out maroon in
+        // Aqua rather than grey. Flatten with an opaque fill and apply the opacity at
+        // draw time, so a mark's own palette can never leak through.
+        let fraction = tint?.alphaComponent ?? 1
+        if let tint = tint?.withAlphaComponent(1) {
+            // Build the tinted copy at the DESTINATION size (×3 for crispness), not at
+            // the source's own size: the vendor SVGs report 256 and 1024 pt, and a
+            // 1024×1024 locked-focus bitmap per mark per row per image is a lot of
+            // pixels to throw away on the way into a 14 pt slot.
+            let scale: CGFloat = 3
+            let size = NSSize(
+                width: max(1, rect.width * scale), height: max(1, rect.height * scale))
+            let copy = NSImage(size: size)
             copy.lockFocus()
-            image.draw(in: NSRect(origin: .zero, size: image.size))
+            image.draw(in: NSRect(origin: .zero, size: size))
             tint.set()
-            NSRect(origin: .zero, size: image.size).fill(using: .sourceAtop)
+            NSRect(origin: .zero, size: size).fill(using: .sourceAtop)
             copy.unlockFocus()
             drawable = copy
         } else {
             drawable = image
         }
         drawable.draw(
-            in: rect, from: .zero, operation: .sourceOver, fraction: 1,
+            in: rect, from: .zero, operation: .sourceOver, fraction: fraction,
             respectFlipped: true, hints: nil)
     }
 
