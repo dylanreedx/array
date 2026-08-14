@@ -114,46 +114,48 @@ reverted to exact equality it fails at 1440 writes while `canvas.pan` stays
 green. Metrics and budgets otherwise mirror `canvas.pan` (measured 0.78 ms/step,
 9% of budget).
 
-### `canvas.zoom` — KNOWN-RED, published, for a NEW reason
+### `canvas.zoom` — gating, green (was KNOWN-RED through two distinct causes)
 
 Same canvas, 120 zoom steps walking the scale continuously.
 
-| metric | budget | before the plane | after |
-|---|---|---|---|
-| `zoom.stepDuration` | ≤ 8.3 ms | 48.4 ms (584%) | **48.1 ms** |
-| `zoom.boundsWrites` | == 0 | 1,440 | **0** |
-| `zoom.modelWrites` | == 0 | 0 | 0 |
-| `zoom.proseMeasurements` | == 0 | 15,134 | **14,490** |
-| `zoom.cameraMutations` | ≥ 1 (teeth) | — | 240 |
-| `zoom.screenFrameMismatches` | == 0 (teeth) | — | 0 |
+| metric | budget | originally | after the plane | after the inset fix |
+|---|---|---|---|---|
+| `zoom.stepDuration` | ≤ 8.3 ms | 48.4 ms (584%) | 49.1 ms (592%) | **4.7 ms (57%)** |
+| `zoom.boundsWrites` | == 0 | 1,440 | **0** | 0 |
+| `zoom.modelWrites` | == 0 | 0 | 0 | 0 |
+| `zoom.proseMeasurements` | == 0 | 15,134 | 14,490 | **0** |
+| `zoom.cameraMutations` | ≥ 1 (teeth) | — | 240 | 240 |
+| `zoom.screenFrameMismatches` | == 0 (teeth) | — | 0 | 0 |
 
-**The original cause is fixed and a second one was underneath it.** A zoom step
-used to change every tile view's frame SIZE, which scaled `bounds` away, forced a
-write-back, and re-laid out every tile subtree at a width it never rendered. The
-retained world plane removed that completely: `boundsWrites` is 0, and
-`canvas.camera-slope` proves the camera writes no tile geometry at any tile count.
+**This leg took two independent fixes, and the middle column is why the second one
+was worth measuring rather than assuming.** The plane removed the original cause
+completely — `boundsWrites` 1,440 → 0, and `canvas.camera-slope` proves the camera
+writes no tile geometry at any tile count — and the wall clock did not move at all.
+A second defect had been sitting underneath, fully masked.
 
-What remains is a different defect the plane exposed. A tile's chrome floors —
-`grabHeightInLocalCoordinates`, `closeButtonWorldSize`, the resize margin — are
-`max(worldConstant, screenPx / zoom)`, so the move-grab strip stays usable when
-zoomed out. Below the floor threshold that world height changes on **every** zoom
-step, and because `contentTopInsetWorldHeight` is aliased to it, the tile's
-content region moves too and every prose row re-measures.
+That defect: a tile's chrome floors are `max(worldConstant, screenPx / zoom)` so
+the move-grab strip stays usable when zoomed out, and
+`contentTopInsetWorldHeight` was aliased to that floor. Because `minScreenGrabPx`
+(28) is larger than `titleBarHeight` (24), the floor is active for every zoom below
+**1.167** — so on this 0.4–1.0 sweep the body was re-framed on literally every
+step, and the document reflowed each time.
 
-Removing the chrome refresh makes this leg green at **1.5 ms/step and zero prose
-measurements** — but then the grab strip and the drawn bar go stale at low zoom,
-which `--camera-chrome-redraw-check` correctly fails. Both real fixes are
-product-visible and need a decision rather than a silent change:
+The fix decouples the inset from the floor: it is now the unfloored
+`titleBarHeight`, so a camera move never re-frames a tile body. The visible
+consequence is that at low zoom the enlarged grab strip **overlays** the top of the
+body instead of pushing it down. Chrome geometry itself is untouched — the strip,
+close button and drawn bar keep their screen-px floors, which
+`--tile-chrome-scale-check` and `--camera-chrome-redraw-check` still assert.
 
-1. **Quantise the floor** into discrete zoom buckets with hysteresis, so chrome is
-   stable during a pinch and refines at settle. This is what
-   [infinite-canvas-rendering-research.md](./infinite-canvas-rendering-research.md)
-   prescribes for zoom-dependent detail generally.
-2. **Stop aliasing the content inset to the floor**, so an enlarged grab strip
-   overlays content instead of reflowing it.
-
-Until one is chosen, `--perf-budget-zoom-check` stays in `MATRIX_KNOWN_RED` with
-the number printed every run.
+Two witnesses changed with it, for the same reason the camera anti-teeth changed in
+Slice 3: `--tile-chrome-scale-check` and `--tile-world-bounds-check` both asserted
+`contentTop == flooredBarHeight`, which encoded the aliasing rather than a property.
+They now assert what is actually required — the body's top does not vary across a
+zoom sweep (measured from the laid-out views, not re-derived from the property
+production lays them out with), the title bar always reaches the body so no
+unpainted strip can open, and a zoom never calls `setFrameSize` on the body at all.
+That last one is unconditional now; it previously held only while the floor
+happened to sit still.
 
 ### `canvas.camera-slope` — gating, green
 

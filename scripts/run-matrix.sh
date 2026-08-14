@@ -83,19 +83,6 @@ MATRIX_KNOWN_RED=(
   --agent-supervisor-check
   --nav-mode-check
   --palette-first-responder-restore-check
-  # canvas.zoom is still over budget, but NOT for the reason it used to be. The
-  # retained world plane (.plans/22 Slice 3) removed the camera's per-tile cost
-  # entirely — zoom.boundsWrites is 0 and canvas.camera-slope is green — and that
-  # exposed a SECOND, independent cause underneath: a tile's chrome floors
-  # (`grabHeightInLocalCoordinates` and friends) are `max(world, screenPx/zoom)`,
-  # so below the floor threshold the title bar's world height changes on every
-  # zoom step, which reflows tile content and re-measures every prose row.
-  # Measured at 48 ms/step and 14,490 prose measurements. Fixing it means making
-  # the chrome floor stable during a zoom (quantise it, or stop aliasing the
-  # content inset to it) — both product-visible, so both need a decision rather
-  # than a silent change. Published in docs/internals/performance-budgets.md; do
-  # NOT bisect it as a regression.
-  --perf-budget-zoom-check
   # Inherited reds, not independent ones. `ContinuumRevivedPaletteChecks` prints
   # its own model assertions and THEN shells out to the app's
   # --palette-first-responder-restore-check, so it cannot be green while that

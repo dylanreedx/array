@@ -164,6 +164,12 @@ camera must stop resizing tile views and scale the canvas's own coordinate
 system instead. `--perf-budget-zoom-check` is in `MATRIX_KNOWN_RED` so the number
 is published on every run without masking a pan regression.
 
+> **Resolved 2026-08-14 (`.plans/22`).** Candidate 6 landed as the retained world
+> plane, which took `boundsWrites` to 0 — and zoom's wall clock did not move,
+> because a second cause was masked underneath: the content inset was aliased to
+> the chrome floor, so the body re-framed on every step. Decoupling them took the
+> leg to 4.7 ms/step and 0 prose measurements, and it has left `MATRIX_KNOWN_RED`.
+
 **Not measured:** a live 120 Hz frame trace of a real ZOOM gesture. The frame
 recorder works end-to-end on a real pan; synthetic Cmd+scroll does not drive the
 zoom branch, so that number needs a human hand on the trackpad.
