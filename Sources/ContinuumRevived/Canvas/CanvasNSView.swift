@@ -1306,6 +1306,25 @@ final class CanvasNSView: NSView, TokenThemed {
         repositionTrackingOverlaysForCamera()
         if navModeOverlayView != nil { qaCameraLayoutStats.chromeRepaints += 1 }
         navModeOverlayView?.needsDisplay = true
+        if !cameraDriver.isApplying {
+            // One-shot writers (navigation snaps, pointer drags, restores,
+            // checks) keep the synchronous housekeeping. Driver commits defer
+            // it to the gesture's settle: cursor rects are stale for at most
+            // the settle window, and the delegate's save/hydration debounces
+            // stop being re-armed per event only to detonate — a main-thread
+            // double-fsync and a zone re-plan — in the gap where the NEXT
+            // gesture begins. That gap was the zoom→pan transition lag.
+            discardCursorRects()
+            window?.invalidateCursorRects(for: self)
+            delegate?.canvasDidChange(self)
+        }
+    }
+
+    /// Once per gesture burst, when the driver's camera goes quiet: the
+    /// housekeeping its commits deferred. Cursor rects rebuild against the
+    /// resting camera; the delegate arms its persistence/hydration debounces
+    /// exactly once.
+    private func cameraGestureDidSettle() {
         discardCursorRects()
         window?.invalidateCursorRects(for: self)
         delegate?.canvasDidChange(self)
@@ -2106,16 +2125,20 @@ final class CanvasNSView: NSView, TokenThemed {
     /// display interval and carries the pinch glide. Pointer-pan drags stay
     /// direct — AppKit already coalesces `mouseDragged`, and the drag oracles
     /// assert the synchronous apply.
-    private(set) lazy var cameraDriver = CanvasCameraDriver(
-        tuning: .fromEnvironment(),
-        currentViewport: { [weak self] in
-            self?.canvasState.viewport ?? CanvasViewport(x: 0, y: 0, zoom: 1)
-        },
-        applyViewport: { [weak self] viewport in self?.setViewport(viewport) },
-        makeDisplayLink: { [weak self] target, selector in
-            self?.displayLink(target: target, selector: selector)
-        }
-    )
+    private(set) lazy var cameraDriver: CanvasCameraDriver = {
+        let driver = CanvasCameraDriver(
+            tuning: .fromEnvironment(),
+            currentViewport: { [weak self] in
+                self?.canvasState.viewport ?? CanvasViewport(x: 0, y: 0, zoom: 1)
+            },
+            applyViewport: { [weak self] viewport in self?.setViewport(viewport) },
+            makeDisplayLink: { [weak self] target, selector in
+                self?.displayLink(target: target, selector: selector)
+            }
+        )
+        driver.onSettle = { [weak self] in self?.cameraGestureDidSettle() }
+        return driver
+    }()
 
     override func scrollWheel(with event: NSEvent) {
         let cursor = convert(event.locationInWindow, from: nil)
@@ -6434,17 +6457,31 @@ final class FocusBorderOverlayView: NSView {
     /// `NSColor` and applies alpha). Safe to call before each `show`.
     func configure(color: NSColor, gap: CGFloat, animationDuration: CFTimeInterval) {
         self.gap = gap
+        if animationDuration != self.animationDuration {
+            // A running loop keeps its old duration; drop it so the next `show`
+            // re-attaches at the configured speed.
+            shape.removeAnimation(forKey: Self.animationKey)
+        }
         self.animationDuration = animationDuration
         shape.strokeColor = color.cgColor
     }
 
     /// Position the overlay around `tileScreenFrame` (the focused tile's frame),
-    /// outset by `gap`, show it, and (re)attach the marching animation.
+    /// outset by `gap`, show it, and make sure the marching animation is attached.
     func show(around tileScreenFrame: CGRect) {
-        frame = tileScreenFrame.insetBy(dx: -gap, dy: -gap)
+        let next = tileScreenFrame.insetBy(dx: -gap, dy: -gap)
+        if frame != next {
+            frame = next
+            layoutShape()
+        }
         isHidden = false
-        layoutShape()
-        startMarchingAnts()
+        // Attach-if-missing, never re-add: this runs on every camera commit
+        // while a focused tile is on screen, and re-adding the infinite loop
+        // restarted the dash phase each time — ants frozen mid-gesture, plus a
+        // CA animation mutation per step.
+        if shape.animation(forKey: Self.animationKey) == nil {
+            startMarchingAnts()
+        }
     }
 
     func hide() {

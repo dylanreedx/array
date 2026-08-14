@@ -602,7 +602,30 @@ final class ZoneRuntimeController {
         isCanvasDirty = true
         saveTimer?.invalidate()
         saveTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: false) { [weak self] _ in
-            Task { @MainActor in self?.flushCanvasSave() }
+            Task { @MainActor in self?.flushCanvasSaveOffMain() }
+        }
+    }
+
+    /// One serial queue for every controller's canvas writes, so debounced and
+    /// synchronous saves to a file can never interleave.
+    private static let canvasSaveQueue = DispatchQueue(label: "dev.arrayapp.canvas-save", qos: .utility)
+
+    /// The debounced save path: snapshot on main, persist on the save queue.
+    /// The atomic write is a JSON encode, a decode-validation round trip, a
+    /// backup copy and TWO fsyncs — tens of milliseconds that used to land on
+    /// the main thread ~200 ms after the last camera step, which is exactly
+    /// when the user's next gesture begins. Deliberate writers (project
+    /// switch, close, checks) still use the synchronous `flushCanvasSave`.
+    private func flushCanvasSaveOffMain() {
+        saveTimer?.invalidate()
+        saveTimer = nil
+        guard isCanvasDirty, let canvasView else { return }
+        let snapshot = canvasView.canvasState
+        let store = projectStore
+        isCanvasDirty = false
+        Self.canvasSaveQueue.async { [weak self] in
+            try? store.saveCanvas(snapshot)
+            Task { @MainActor [weak self] in self?.onCanvasStatePersisted?() }
         }
     }
 
@@ -642,7 +665,12 @@ final class ZoneRuntimeController {
         saveTimer?.invalidate()
         saveTimer = nil
         guard isCanvasDirty, let canvasView else { return }
-        try? projectStore.saveCanvas(canvasView.canvasState)
+        let snapshot = canvasView.canvasState
+        // Serialize behind any in-flight debounced write so the durable copy
+        // on disk is the newest state — project switch and close rely on it.
+        Self.canvasSaveQueue.sync {
+            try? projectStore.saveCanvas(snapshot)
+        }
         isCanvasDirty = false
         onCanvasStatePersisted?()
     }
