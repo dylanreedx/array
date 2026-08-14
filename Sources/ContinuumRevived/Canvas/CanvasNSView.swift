@@ -1258,7 +1258,19 @@ final class CanvasNSView: NSView, TokenThemed {
         delegate?.canvasDidChange(self)
     }
 
+    /// QA: every camera apply, whoever asked. With the driver in place, N input
+    /// events inside one display interval must produce a BOUNDED number of
+    /// these — the N-inputs-one-commit witness counts this, and it is the
+    /// number that used to equal the raw event rate.
+    private(set) var qaViewportApplyCount = 0
+
     func setViewport(_ viewport: CanvasViewport) {
+        qaViewportApplyCount += 1
+        // Any writer other than the driver — a navigation snap, a pointer-pan
+        // drag, a restore, a self-check — owns the camera now: gesture state
+        // still in flight (a glide, accumulated scroll) must not keep steering
+        // it. Field writes only; this sits on the perf scenarios' hot path.
+        if !cameraDriver.isApplying { cameraDriver.noteExternalViewportChange() }
         canvasState.viewport = viewport
         frameRecorder?.noteCameraStep()
         // The camera is ONE view's geometry. Tiles and zone chrome hold world
@@ -2089,27 +2101,35 @@ final class CanvasNSView: NSView, TokenThemed {
 
     // MARK: - Pan / zoom gestures
 
+    /// The one gesture pipeline: scroll pan, Cmd+scroll zoom and pinch all feed
+    /// the driver, which composes them into at most one `setViewport` per
+    /// display interval and carries the pinch glide. Pointer-pan drags stay
+    /// direct — AppKit already coalesces `mouseDragged`, and the drag oracles
+    /// assert the synchronous apply.
+    private(set) lazy var cameraDriver = CanvasCameraDriver(
+        tuning: .fromEnvironment(),
+        currentViewport: { [weak self] in
+            self?.canvasState.viewport ?? CanvasViewport(x: 0, y: 0, zoom: 1)
+        },
+        applyViewport: { [weak self] viewport in self?.setViewport(viewport) },
+        makeDisplayLink: { [weak self] target, selector in
+            self?.displayLink(target: target, selector: selector)
+        }
+    )
+
     override func scrollWheel(with event: NSEvent) {
+        let cursor = convert(event.locationInWindow, from: nil)
         if event.modifierFlags.contains(.command) {
-            let cursor = convert(event.locationInWindow, from: nil)
             // Roughly +/- 10% per logical line of scroll. Smooth, non-linear.
-            let factor = exp(event.scrollingDeltaY * 0.02)
-            let next = CanvasEngine.zoom(canvasState.viewport, by: factor, anchorScreen: cursor)
-            setViewport(next)
+            cameraDriver.noteScrollZoom(deltaY: Double(event.scrollingDeltaY), location: cursor)
         } else {
             var dx = event.scrollingDeltaX
             var dy = event.scrollingDeltaY
-            if event.hasPreciseScrollingDeltas {
-                dx *= 1
-                dy *= 1
-            } else {
+            if !event.hasPreciseScrollingDeltas {
                 dx *= 16
                 dy *= 16
             }
-            var v = canvasState.viewport
-            v.x -= Double(dx) / v.zoom
-            v.y -= Double(dy) / v.zoom
-            setViewport(v)
+            cameraDriver.noteScrollPan(dx: dx, dy: dy, location: cursor)
         }
     }
 
@@ -2118,9 +2138,12 @@ final class CanvasNSView: NSView, TokenThemed {
     /// canvas (the tile content has no zoom of its own to compete with).
     func handlePinch(_ event: NSEvent) {
         let cursor = convert(event.locationInWindow, from: nil)
-        let factor = 1.0 + Double(event.magnification)
-        guard factor > 0 else { return }
-        setViewport(CanvasEngine.zoom(canvasState.viewport, by: factor, anchorScreen: cursor))
+        cameraDriver.notePinch(
+            magnification: Double(event.magnification),
+            phase: event.phase,
+            location: cursor,
+            timestamp: event.timestamp
+        )
     }
 
     /// Whether this press should enter the shared camera-pan lifecycle. Tile

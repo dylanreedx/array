@@ -1382,6 +1382,30 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--canvas-camera-coalesce-check") {
+            do {
+                _ = NSApplication.shared
+                try CanvasCameraDriverChecks.runCoalesce()
+                print("ContinuumRevivedCanvasCameraCoalesceChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--canvas-zoom-momentum-check") {
+            do {
+                _ = NSApplication.shared
+                try CanvasCameraDriverChecks.runMomentum()
+                print("ContinuumRevivedCanvasZoomMomentumChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--transcript-delta-index-oracle-check") {
             do {
                 _ = NSApplication.shared
@@ -5958,7 +5982,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let self, let canvas = self.canvasView else { return event }
             guard let window = canvas.window, event.window === window else { return event }
             guard event.hasPreciseScrollingDeltas else { return event }
-            if self.eventTargetsScrollableTileContent(event, in: window) {
+            // While a camera zoom session is live (pinch in progress, glide
+            // running, or just after zoom input), the follow-through pan keeps
+            // steering the CAMERA even over tile content. Without this, a
+            // pinch over a terminal zooms the canvas and the pan that follows
+            // scrolls the terminal — the canvas stops dead mid-gesture, which
+            // is exactly the "lags when I start panning" handoff. Checking the
+            // session first also skips the full-window hit test on every event
+            // of an active camera gesture.
+            if !canvas.cameraDriver.isCameraSessionActive,
+               self.eventTargetsScrollableTileContent(event, in: window) {
                 return event
             }
             canvas.scrollWheel(with: event)
