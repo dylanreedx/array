@@ -72,6 +72,7 @@ check --palette-jump-check
 check --palette-zone-check
 check --perf-budget-camera-slope-check
 check --perf-budget-check
+check --perf-budget-transcript-delta-check
 check --perf-budget-zoom-check
 check --persistence-crash-safe-check
 check --project-lock-check
@@ -104,6 +105,7 @@ check --terminal-tmux-observer-check
 check --terminal-tmux-observer-wiring-check
 check --terminal-tmux-persistence-check
 check --ticket-queue-tile-check
+check --transcript-delta-index-oracle-check
 check --tile-action-check
 check --tile-chrome-scale-check
 check --tile-drag-grab-check
@@ -226,6 +228,7 @@ leg run_app_check .build/debug/Array --palette-zone-check
 leg run_app_check .build/debug/Array --perf-budget-camera-slope-check
 leg run_app_check .build/debug/Array --perf-budget-check --scenario canvas.fractional-pan
 leg run_app_check .build/debug/Array --perf-budget-check --scenario canvas.pan
+leg run_app_check .build/debug/Array --perf-budget-transcript-delta-check
 leg run_app_check .build/debug/Array --perf-budget-zoom-check
 leg run_app_check .build/debug/Array --persistence-crash-safe-check
 leg run_app_check .build/debug/Array --project-lock-check
@@ -258,6 +261,7 @@ leg run_app_check .build/debug/Array --terminal-tmux-observer-check
 leg run_app_check .build/debug/Array --terminal-tmux-observer-wiring-check
 leg run_app_check .build/debug/Array --terminal-tmux-persistence-check
 leg run_app_check .build/debug/Array --ticket-queue-tile-check
+leg run_app_check .build/debug/Array --transcript-delta-index-oracle-check
 leg run_app_check .build/debug/Array --tile-action-check
 leg run_app_check .build/debug/Array --tile-chrome-scale-check
 leg run_app_check .build/debug/Array --tile-drag-grab-check

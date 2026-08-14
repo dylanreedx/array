@@ -205,6 +205,40 @@ final class AgentTranscriptListView: NSView {
     private var rows: [Row] = []
     private var rowsByID: [AgentNodeID: Row] = [:]
     private var topLevelIDsByNodeID: [AgentNodeID: Set<AgentNodeID>] = [:]
+
+    /// Where a presented row lives in the applied document, so a delta that names
+    /// its changed nodes can fetch their new content in O(1) instead of walking
+    /// the conversation.
+    ///
+    /// Every position is VERIFIED against the incoming document before it is
+    /// trusted — a position that no longer holds the same id makes the delta fall
+    /// back to a full rebuild rather than silently presenting a neighbouring
+    /// block's content under this row's identity.
+    private struct RowPosition: Equatable {
+        let entryID: AgentNodeID
+        let entryIndex: Int
+        /// `nil` for a `completedReasoning` row, whose content IS the entry.
+        let blockIndex: Int?
+        /// Index into `rows`. Carried here rather than rebuilt per delta: deriving
+        /// it by walking `rows` would reintroduce the O(history) pass this index
+        /// exists to remove, which a profile caught it doing.
+        let slot: Int
+    }
+
+    private var rowPositions: [AgentNodeID: RowPosition] = [:]
+    private var entryIndexByID: [AgentNodeID: Int] = [:]
+    /// The document the caches above describe. Held so a delta can compare an
+    /// entry's old role/lifecycle against the incoming one without a walk.
+    private var appliedDocument: AgentDocument?
+
+    private typealias RowIndex = (
+        rows: [Row],
+        topLevelIDsByNodeID: [AgentNodeID: Set<AgentNodeID>],
+        toolDetailIDByBlockID: [AgentNodeID: AgentToolDetailKey],
+        positions: [AgentNodeID: RowPosition],
+        entryIndexByID: [AgentNodeID: Int]
+    )
+
     private var appliedVersion: UInt64?
     private var latestEnqueuedVersion: UInt64?
     private var renderingError: Error?
@@ -433,6 +467,79 @@ final class AgentTranscriptListView: NSView {
     var qaLastInvalidatedTopLevelCount: Int { lastInvalidatedTopLevelCount }
     var qaRenderingErrorDescription: String? { renderingError.map(String.init(describing:)) }
 
+    /// QA: how much work the row index cost. `qaFlattenNodeVisits` counts every
+    /// block node walked including nested children, `qaFlattenedRowCount` the rows
+    /// emitted, and `qaFullFlattenCount` the number of whole-document rebuilds.
+    /// The streaming contract is that a one-row delta scales with the change and
+    /// the visible rows, never with total history, so all three must stay flat as
+    /// the transcript grows. Drives `--perf-budget-transcript-delta-check`.
+    private(set) var qaFlattenNodeVisits = 0
+    private(set) var qaFlattenedRowCount = 0
+    private(set) var qaFullFlattenCount = 0
+
+    func qaResetFlattenStats() {
+        qaFlattenNodeVisits = 0
+        qaFlattenedRowCount = 0
+        qaFullFlattenCount = 0
+    }
+
+    /// QA: is the live index indistinguishable from a FROM-SCRATCH walk of the
+    /// same document? Returns a description of the first difference, or nil.
+    ///
+    /// This is the oracle that lets the incremental path be trusted at all. Every
+    /// count budget in `transcript.delta` would still pass if the fast path
+    /// produced the WRONG rows — cheap and wrong is the failure mode a cost
+    /// witness cannot see — so correctness is asserted against the full walk,
+    /// which stays the reference implementation.
+    ///
+    /// The perf counters are saved and restored: the reference walk is the
+    /// oracle's own work, not the production path's, and must not be reported as
+    /// though a delta had paid for it.
+    func qaIndexEquivalenceMismatch(for document: AgentDocument) -> String? {
+        let savedVisits = qaFlattenNodeVisits
+        let savedRows = qaFlattenedRowCount
+        let savedFlattens = qaFullFlattenCount
+        defer {
+            qaFlattenNodeVisits = savedVisits
+            qaFlattenedRowCount = savedRows
+            qaFullFlattenCount = savedFlattens
+        }
+        let reference: RowIndex
+        do { reference = try flatten(document) } catch { return "reference walk threw: \(error)" }
+
+        guard reference.rows.count == rows.count else {
+            return "row count \(rows.count) != reference \(reference.rows.count)"
+        }
+        for (index, expected) in reference.rows.enumerated() {
+            let actual = rows[index]
+            guard actual.id == expected.id else {
+                return "row \(index) id \(actual.id.rawValue) != reference \(expected.id.rawValue)"
+            }
+            guard actual.role == expected.role else {
+                return "row \(index) (\(actual.id.rawValue)) role \(actual.role) != reference \(expected.role)"
+            }
+            guard actual.content == expected.content else {
+                return "row \(index) (\(actual.id.rawValue)) content differs from reference"
+            }
+        }
+        guard rowsByID.count == rows.count else {
+            return "rowsByID holds \(rowsByID.count) for \(rows.count) rows"
+        }
+        guard topLevelIDsByNodeID == reference.topLevelIDsByNodeID else {
+            return "topLevelIDsByNodeID differs from reference"
+        }
+        guard toolDetailIDByBlockID == reference.toolDetailIDByBlockID else {
+            return "toolDetailIDByBlockID differs from reference"
+        }
+        guard rowPositions == reference.positions else {
+            return "row positions differ from reference"
+        }
+        guard entryIndexByID == reference.entryIndexByID else {
+            return "entry index differs from reference"
+        }
+        return nil
+    }
+
     override func accessibilityChildren() -> [Any]? {
         // Expose the actual virtualized semantic hosts in collection/document
         // order instead of trusting AppKit's reuse-pool traversal order. Each
@@ -544,6 +651,8 @@ final class AgentTranscriptListView: NSView {
     /// There is intentionally no reloadData path after (or before) initial load.
     private func applyCoalesced(document: AgentDocument) throws {
         prepareToolDetailLifecycle(for: document)
+        // No patch here: this path derives its own changed set by comparing against
+        // the cached rows, so the full walk is the only correct option.
         let flattened = try flatten(document)
         let oldIndexes = Dictionary(uniqueKeysWithValues: rows.enumerated().map { ($0.element.id, $0.offset) })
         let changedNodeIDs = Set(flattened.rows.compactMap { row -> AgentNodeID? in
@@ -565,7 +674,11 @@ final class AgentTranscriptListView: NSView {
             throw UpdateError.versionMismatch(expected: appliedVersion, actual: patch.fromVersion)
         }
         prepareToolDetailLifecycle(for: document)
-        let flattened = try flatten(document)
+        // The patch already names the nodes that changed, so a local delta rebuilds
+        // only those rows. The full walk is the FALLBACK, not the default: it runs
+        // whenever `incrementallyIndexed` declines, which it does for anything
+        // structural or anything it cannot verify against the incoming document.
+        let flattened = try incrementallyIndexed(document: document, patch: patch) ?? flatten(document)
         try applyWithScroll(
             document: document,
             flattened: flattened,
@@ -576,7 +689,7 @@ final class AgentTranscriptListView: NSView {
 
     private func applyWithScroll(
         document: AgentDocument,
-        flattened: (rows: [Row], topLevelIDsByNodeID: [AgentNodeID: Set<AgentNodeID>], toolDetailIDByBlockID: [AgentNodeID: AgentToolDetailKey]),
+        flattened: RowIndex,
         changedNodeIDs: Set<AgentNodeID>
     ) throws {
         try scrollController.apply(
@@ -598,7 +711,7 @@ final class AgentTranscriptListView: NSView {
 
     private func applyUnscrolled(
         document: AgentDocument,
-        flattened: (rows: [Row], topLevelIDsByNodeID: [AgentNodeID: Set<AgentNodeID>], toolDetailIDByBlockID: [AgentNodeID: AgentToolDetailKey]),
+        flattened: RowIndex,
         changedNodeIDs: Set<AgentNodeID>
     ) throws {
         let oldIDs = rows.map(\.id)
@@ -636,6 +749,11 @@ final class AgentTranscriptListView: NSView {
         rowsByID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
         topLevelIDsByNodeID = flattened.topLevelIDsByNodeID
         toolDetailIDByBlockID = flattened.toolDetailIDByBlockID
+        // One commit point for the caches AND the document they describe, so a
+        // position can never outlive the document it indexes.
+        rowPositions = flattened.positions
+        entryIndexByID = flattened.entryIndexByID
+        appliedDocument = document
         renderingError = nil
         scheduleToolDetailRefresh()
 
@@ -1059,33 +1177,45 @@ final class AgentTranscriptListView: NSView {
         }
     }
 
-    private func flatten(
-        _ document: AgentDocument
-    ) throws -> (
-        rows: [Row],
-        topLevelIDsByNodeID: [AgentNodeID: Set<AgentNodeID>],
-        toolDetailIDByBlockID: [AgentNodeID: AgentToolDetailKey]
-    ) {
+    /// The provider tool-detail identity an entry's blocks inherit. Factored out of
+    /// `flatten` so the incremental path computes it from the same rules verbatim —
+    /// a second copy here is exactly how the two paths would drift apart, which the
+    /// equivalence oracle in `--transcript-delta-index-oracle-check` would then
+    /// have to catch after the fact.
+    private func toolDetailKey(for entry: AgentEntry) -> AgentToolDetailKey? {
+        guard case let .providerItem(provider, itemID?) = entry.provenance,
+              let itemID = AgentToolDetailID(itemID),
+              let candidate = toolDetailIdentityByEntryID[entry.id],
+              candidate.providerItemID == itemID,
+              (toolDetailAgentID == nil || candidate.scope.agentID == toolDetailAgentID?.rawValue.uuidString),
+              candidate.scope.provider == provider
+        else { return nil }
+        return candidate
+    }
+
+    private func flatten(_ document: AgentDocument) throws -> RowIndex {
         var rows: [Row] = []
         var owners: [AgentNodeID: Set<AgentNodeID>] = [:]
         var toolDetailIDs: [AgentNodeID: AgentToolDetailKey] = [:]
         var topLevelIDs: Set<AgentNodeID> = []
+        var positions: [AgentNodeID: RowPosition] = [:]
+        var entryIndexes: [AgentNodeID: Int] = [:]
+        qaFullFlattenCount += 1
+        var nodeVisits = 0
+        defer {
+            qaFlattenNodeVisits += nodeVisits
+            qaFlattenedRowCount += rows.count
+        }
 
         func index(_ block: AgentBlock, owner: AgentNodeID, detailID: AgentToolDetailKey?) {
+            nodeVisits += 1
             owners[block.id] = [owner]
             if let detailID { toolDetailIDs[block.id] = detailID }
             block.children.forEach { index($0, owner: owner, detailID: detailID) }
         }
-        for entry in document.entries {
-            var detailID: AgentToolDetailKey?
-            if case let .providerItem(provider, itemID?) = entry.provenance,
-               let itemID = AgentToolDetailID(itemID),
-               let candidate = toolDetailIdentityByEntryID[entry.id],
-               candidate.providerItemID == itemID,
-               (toolDetailAgentID == nil || candidate.scope.agentID == toolDetailAgentID?.rawValue.uuidString),
-               candidate.scope.provider == provider {
-                detailID = candidate
-            }
+        for (entryIndex, entry) in document.entries.enumerated() {
+            entryIndexes[entry.id] = entryIndex
+            let detailID = toolDetailKey(for: entry)
             if entry.role == .reasoning {
                 // Open reasoning is represented by the surrounding activity/status
                 // owner, not by a second transcript row. Finished reasoning is one
@@ -1097,6 +1227,7 @@ final class AgentTranscriptListView: NSView {
                 guard topLevelIDs.insert(entry.id).inserted else {
                     throw UpdateError.duplicateTopLevelBlock(entry.id)
                 }
+                positions[entry.id] = RowPosition(entryID: entry.id, entryIndex: entryIndex, blockIndex: nil, slot: rows.count)
                 rows.append(Row(content: .completedReasoning(entry), role: .reasoning))
                 owners[entry.id] = [entry.id]
                 for block in entry.blocks {
@@ -1105,16 +1236,111 @@ final class AgentTranscriptListView: NSView {
                 continue
             }
 
-            for block in entry.blocks {
+            for (blockIndex, block) in entry.blocks.enumerated() {
                 guard topLevelIDs.insert(block.id).inserted else {
                     throw UpdateError.duplicateTopLevelBlock(block.id)
                 }
+                positions[block.id] = RowPosition(entryID: entry.id, entryIndex: entryIndex, blockIndex: blockIndex, slot: rows.count)
                 rows.append(Row(content: .block(block), role: entry.role))
                 index(block, owner: block.id, detailID: detailID)
             }
             owners[entry.id] = []
         }
-        return (rows, owners, toolDetailIDs)
+        return (rows, owners, toolDetailIDs, positions, entryIndexes)
+    }
+
+    /// Rebuild ONLY the rows a patch names, using the cached position index.
+    ///
+    /// Returns `nil` whenever the patch or the document makes that unsafe, and nil
+    /// is always a CORRECT answer — it costs one full rebuild and nothing else, so
+    /// every guard below can be conservative without risking wrong content. The
+    /// structural cases are refused deliberately: an insert, a removal or a move
+    /// changes row ORDER, and establishing order is precisely what the full walk
+    /// is for.
+    private func incrementallyIndexed(document: AgentDocument, patch: AgentDocumentPatch) -> RowIndex? {
+        guard patch.inserted.isEmpty, patch.removed.isEmpty, patch.moved.isEmpty else { return nil }
+        guard let applied = appliedDocument, !rows.isEmpty else { return nil }
+        guard applied.entries.count == document.entries.count else { return nil }
+
+        var owners = topLevelIDsByNodeID
+        var toolDetails = toolDetailIDByBlockID
+        var rowIDsToRebuild: Set<AgentNodeID> = []
+
+        for id in patch.updated {
+            guard let owning = owners[id] else { return nil }
+            guard owning.isEmpty else {
+                rowIDsToRebuild.formUnion(owning)
+                continue
+            }
+            // An entry owns no row of its own, but its role and lifecycle decide
+            // whether and how its blocks present at all, so skipping it is only
+            // safe while both are unchanged. A change to either is structural and
+            // belongs to the full walk.
+            guard let entryIndex = entryIndexByID[id],
+                  applied.entries.indices.contains(entryIndex),
+                  document.entries.indices.contains(entryIndex)
+            else { return nil }
+            let old = applied.entries[entryIndex]
+            let new = document.entries[entryIndex]
+            guard old.id == id, new.id == id,
+                  old.role == new.role,
+                  old.lifecycle == new.lifecycle,
+                  old.blocks.count == new.blocks.count
+            else { return nil }
+        }
+
+        guard !rowIDsToRebuild.isEmpty else {
+            // A bookkeeping-only revision: nothing presented changed.
+            return (rows, owners, toolDetails, rowPositions, entryIndexByID)
+        }
+
+        var newRows = rows
+
+        // Counted into the SAME witness the full walk reports to. A cheaper path
+        // that stopped counting its own work would look free instead of local.
+        var nodeVisits = 0
+        func reindex(_ block: AgentBlock, owner: AgentNodeID, detailID: AgentToolDetailKey?) {
+            nodeVisits += 1
+            owners[block.id] = [owner]
+            // `flatten` builds this map from empty and only ever inserts, so the
+            // incremental path has to REMOVE a key it would not have written —
+            // otherwise a block that lost its provider identity keeps a stale one.
+            if let detailID { toolDetails[block.id] = detailID } else { toolDetails.removeValue(forKey: block.id) }
+            block.children.forEach { reindex($0, owner: owner, detailID: detailID) }
+        }
+
+        for rowID in rowIDsToRebuild {
+            guard let position = rowPositions[rowID],
+                  newRows.indices.contains(position.slot),
+                  newRows[position.slot].id == rowID,
+                  document.entries.indices.contains(position.entryIndex)
+            else { return nil }
+            let slot = position.slot
+            let entry = document.entries[position.entryIndex]
+            guard entry.id == position.entryID else { return nil }
+            let detailID = toolDetailKey(for: entry)
+            if let blockIndex = position.blockIndex {
+                guard entry.blocks.indices.contains(blockIndex) else { return nil }
+                let block = entry.blocks[blockIndex]
+                guard block.id == rowID else { return nil }
+                newRows[slot] = Row(content: .block(block), role: entry.role)
+                reindex(block, owner: block.id, detailID: detailID)
+            } else {
+                // A completedReasoning row's content IS the entry, and it stops
+                // being a row at all if it is no longer finished or loses its
+                // blocks — structural, so refuse rather than present a stale row.
+                guard entry.id == rowID, entry.role == .reasoning,
+                      entry.lifecycle == .finished, !entry.blocks.isEmpty
+                else { return nil }
+                newRows[slot] = Row(content: .completedReasoning(entry), role: .reasoning)
+                owners[entry.id] = [entry.id]
+                for block in entry.blocks { reindex(block, owner: entry.id, detailID: detailID) }
+            }
+        }
+
+        qaFlattenNodeVisits += nodeVisits
+        qaFlattenedRowCount += rowIDsToRebuild.count
+        return (newRows, owners, toolDetails, rowPositions, entryIndexByID)
     }
 
     /// Applies only a sanitized compact summary to a terminal tool block. Active

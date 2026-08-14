@@ -198,6 +198,65 @@ the matrix. `canvas.stress` owns the real-content cost curve.
 This leg left `MATRIX_KNOWN_RED` when the plane landed. `canvas.zoom` did not —
 see below, because its remaining cost turned out to be a different defect.
 
+### `transcript.delta` — KNOWN-RED on duration, green on every count
+
+```sh
+.build/debug/Array --perf-budget-transcript-delta-check
+```
+
+The streaming axis. 20 tail-revision deltas — the shape a streaming answer
+actually produces, where the open block's revision advances while its id and
+position stay put — over histories of 10 / 100 / 1,000 / 10,000 rows, one entry
+per turn with one block in each.
+
+| metric | budget | before | after the row index |
+|---|---|---|---|
+| `transcript-delta.worstVisitsPerDelta` | ≤ 64 | 10,000 | **1** |
+| `transcript-delta.visitSlope` | == 0 | 9,990 | **0** |
+| `transcript-delta.fullFlattens` | == 0 | 80 | **0** |
+| `transcript-delta.rowsLost` | == 0 (teeth) | 0 | 0 |
+| `transcript-delta.deltasWithoutInvalidation` | == 0 (teeth) | 0 | 0 |
+| `transcript-delta.worstInvalidatedTopLevel` | ≤ 2 | 1 | 1 |
+| `transcript-delta.worstDeltaDuration` | ≤ 8.3 ms | 43.7 ms | **36.3 ms** |
+
+**The fixture's SHAPE is load-bearing, and the first version got it wrong.** It
+originally held one entry with `history` blocks, which exercises the row walk but
+is structurally blind to any per-delta pass over `document.entries` — and
+`prepareToolDetailLifecycle` builds a dictionary over every entry on every delta.
+A real transcript is the opposite shape. Switching to one entry per turn made the
+measured cost *worse* (36.0 → 43.7 ms), which is the only reason that second pass
+was ever visible. A fix validated against the original fixture would have read
+greener than the truth.
+
+**Why it is still RED, and why that is the useful part.**
+`apply(document:patch:)` took a patch naming its changed nodes and called
+`flatten(document)` anyway. The row index fixed that completely — 10,000 block
+visits per delta became 1 — and **the wall clock did not move**. This is the same
+pattern `canvas.zoom` hit one axis over: an architectural defect masking a second
+cost underneath it. A profile of 1,598 main-thread samples at 10,000 rows:
+
+| cost | share | what |
+|---|---|---|
+| `applyUnscrolled` presentation passes | ~56% | `rowsByID` rebuild, snapshot append, role-change scan, diffable apply |
+| `prepareToolDetailLifecycle` | ~35% | a dictionary over every entry, plus block-id sets |
+| the incremental path itself | ~8% | **a slot lookup rebuilt over every row — introduced by the fix and removed after the profile named it** |
+
+Both remaining costs are named in `.plans/22` Slice 4 and neither is started.
+That last row is worth keeping: the count witness did not watch the new code's own
+work, so only the duration alarm caught it. This is exactly the split the two-gate
+rule exists for — counts name the defect, duration notices what the counts do not
+watch.
+
+**Correctness is a separate leg, deliberately.**
+`--transcript-delta-index-oracle-check` exists because every count budget above
+still passes if the cheap path rebuilds the WRONG row. It drives the real
+`apply(document:patch:)` funnel through ten mutations (tail revision, middle
+revision, nested child, entry role change, insert, removal, open reasoning,
+reasoning finishing, finished reasoning revising, an unknown id) and after each
+asserts the live index is indistinguishable from a from-scratch walk — and
+asserts WHICH path ran, so it fails rather than passing perfectly the day the
+fast path declines everything.
+
 ### `canvas.stress` — OPT-IN, not in the matrix
 
 ```sh

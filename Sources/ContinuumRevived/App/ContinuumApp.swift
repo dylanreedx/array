@@ -1004,15 +1004,17 @@ enum ContinuumApp {
             }
         }
 
-        // `--perf-budget-zoom-check` and `--perf-budget-camera-slope-check` are
-        // single scenarios under their OWN leg names. The matrix matches
-        // KNOWN-RED by leg name, and both canvas.zoom and canvas.camera-slope are
-        // documented open targets (see docs/internals/performance-budgets.md)
-        // while canvas.pan must gate — one shared flag name would have forced
-        // them to be known-red together and masked a pan regression.
+        // `--perf-budget-zoom-check`, `--perf-budget-camera-slope-check` and
+        // `--perf-budget-transcript-delta-check` are single scenarios under their
+        // OWN leg names. The matrix matches KNOWN-RED by leg name, and a scenario
+        // that is a documented open target (see
+        // docs/internals/performance-budgets.md) must be able to be known-red
+        // WITHOUT dragging the gating scenarios with it — one shared flag name
+        // would have forced them red together and masked a pan regression.
         if CommandLine.arguments.contains("--perf-budget-check")
             || CommandLine.arguments.contains("--perf-budget-zoom-check")
-            || CommandLine.arguments.contains("--perf-budget-camera-slope-check") {
+            || CommandLine.arguments.contains("--perf-budget-camera-slope-check")
+            || CommandLine.arguments.contains("--perf-budget-transcript-delta-check") {
             do {
                 _ = NSApplication.shared
                 func value(after flag: String) -> String? {
@@ -1025,6 +1027,8 @@ enum ContinuumApp {
                     filter = "canvas.zoom"
                 } else if CommandLine.arguments.contains("--perf-budget-camera-slope-check") {
                     filter = "canvas.camera-slope"
+                } else if CommandLine.arguments.contains("--perf-budget-transcript-delta-check") {
+                    filter = "transcript.delta"
                 } else {
                     filter = value(after: "--scenario")
                 }
@@ -1359,6 +1363,18 @@ enum ContinuumApp {
                 _ = NSApplication.shared
                 try AppDelegate.runAgentInventoryWiringChecks()
                 print("ContinuumRevivedAgentInventoryWiringChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--transcript-delta-index-oracle-check") {
+            do {
+                _ = NSApplication.shared
+                try TranscriptIndexOracleChecks.run()
+                print("ContinuumRevivedTranscriptIndexOracleChecks passed")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)

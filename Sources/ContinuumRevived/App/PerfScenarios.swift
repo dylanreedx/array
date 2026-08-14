@@ -122,6 +122,11 @@ enum PerfScenarios {
             // tiles exist somewhere, whether or not the user can see them?
             // Known-red against the product target today, by construction.
             Scenario(name: "canvas.camera-slope", run: { try canvasCameraSlope() }),
+            // The streaming axis, and the same slope argument as camera-slope one
+            // line up: the cost driver is HISTORY LENGTH, so a fixture that never
+            // varies it can be green while a delta is linear in the conversation.
+            // The name shares no prefix with canvas.* — the filter is prefix-matched.
+            Scenario(name: "transcript.delta", run: { try transcriptDelta() }),
             Scenario(name: "canvas.stress", isStress: true, run: { try canvasStress() })
         ]
     }
@@ -318,6 +323,212 @@ enum PerfScenarios {
                 + "\($0.geometryWrites / steps) writes/step, \(String(format: "%.2f", $0.perStepMs)) ms"
             }.joined(separator: " | ")
         return PerfScenarioResult(name: "canvas.camera-slope", detail: detail, measurements: measurements)
+    }
+
+    // MARK: - Scenario: transcript delta cost against history length
+
+    /// Does applying ONE row's delta cost more simply because the conversation is
+    /// longer?
+    ///
+    /// This is the streaming axis of the contract in
+    /// [scalability-tdd.md](../../../docs/internals/scalability-tdd.md): a delta
+    /// must cost `O(changed + visible rows)` and never `O(history)`. Today
+    /// `AgentTranscriptListView.apply(document:patch:)` takes a real
+    /// `AgentDocumentPatch` and then ignores its locality entirely, calling
+    /// `flatten(document)` — which walks every entry, every top-level block, and
+    /// recursively every child. So one revised token at the tail re-indexes the
+    /// whole conversation.
+    ///
+    /// The fixture sweeps history length and reports the SLOPE for the same reason
+    /// `canvas.camera-slope` does: a single-size fixture can sit green while the
+    /// cost is linear, because it never changes the number that drives the cost.
+    /// The delta shape is a tail revision, which is what a streaming answer
+    /// actually produces on every chunk.
+    ///
+    /// Lands KNOWN-RED by construction.
+    static func transcriptDelta() throws -> PerfScenarioResult {
+        let historyCounts = [10, 100, 1_000, 10_000]
+        let deltas = 20
+
+        func nodeID(_ value: String) -> AgentNodeID { AgentNodeID(rawValue: value)! }
+        func fixtureBlock(_ index: Int, revision: UInt64 = 1) -> AgentBlock {
+            AgentBlock(
+                id: nodeID("delta-block-\(index)"), revision: revision,
+                kind: AgentBlockKind(rawValue: "fixture-opaque")!,
+                payload: .opaque(AgentOpaquePayload(debugLabel: "row-\(index)", value: .null))
+            )
+        }
+
+        struct Sample {
+            let history: Int
+            let visitsPerDelta: Double
+            let rowsPerDelta: Double
+            let fullFlattens: Int
+            let deltasWithoutInvalidation: Int
+            let worstInvalidated: Int
+            let rowsHeld: Int
+            let perDeltaMs: Double
+        }
+        var samples: [Sample] = []
+
+        for history in historyCounts {
+            // ONE ENTRY PER TURN, one block in each. This is the shape a real
+            // conversation has, and the shape matters: a single entry holding
+            // `history` blocks exercises the row walk but is structurally blind to
+            // any per-delta pass over `document.entries`, and
+            // `prepareToolDetailLifecycle` builds a dictionary over every entry on
+            // every delta. Measuring the realistic shape catches both.
+            var entries = (0..<history).map { index in
+                AgentEntry(
+                    id: nodeID("delta-entry-\(index)"), revision: 1, role: .assistant,
+                    provenance: .localNotice(reason: "transcript delta fixture"),
+                    blocks: [fixtureBlock(index)]
+                )
+            }
+            let list = AgentTranscriptListView()
+            list.frame = NSRect(x: 0, y: 0, width: 320, height: 240)
+            let host = NSView(frame: list.frame)
+            host.addSubview(list)
+            list.autoresizingMask = [.width, .height]
+
+            // Setup is deliberately OUTSIDE the measurement: the first render of a
+            // 10,000-row document is a full index by definition, and this scenario
+            // is about the cost of the next delta, not the first paint.
+            try list.apply(
+                document: AgentDocument(version: 1, entries: entries),
+                patch: try AgentDocumentPatch(
+                    fromVersion: 0, toVersion: 1,
+                    inserted: entries.flatMap { $0.blocks.map(\.id) }
+                )
+            )
+            host.layoutSubtreeIfNeeded()
+            list.collectionView.layoutSubtreeIfNeeded()
+
+            guard list.qaSemanticRowCount == history else {
+                throw Failure(message: "transcript-delta harness must hold \(history) rows; got \(list.qaSemanticRowCount)")
+            }
+
+            let tailIndex = history - 1
+            let tailEntryID = entries[tailIndex].id
+            let tailID = entries[tailIndex].blocks[0].id
+            var deltasWithoutInvalidation = 0
+            var worstInvalidated = 0
+            list.qaResetFlattenStats()
+            let start = ProcessInfo.processInfo.systemUptime
+            for step in 0..<deltas {
+                // A streaming answer revises its OPEN tail block on every chunk, so
+                // the revision advances while the id and the position stay put.
+                let version = UInt64(step + 2)
+                entries[tailIndex] = AgentEntry(
+                    id: tailEntryID, revision: version, role: .assistant,
+                    provenance: .localNotice(reason: "transcript delta fixture"),
+                    blocks: [fixtureBlock(tailIndex, revision: version)]
+                )
+                try list.apply(
+                    document: AgentDocument(version: version, entries: entries),
+                    patch: try AgentDocumentPatch(
+                        fromVersion: version - 1, toVersion: version,
+                        updated: [tailID, tailEntryID]
+                    )
+                )
+                // `apply(document:patch:)` is the SYNCHRONOUS seam — the 30 Hz
+                // visual scheduler sits on the enqueue path, not this one — so the
+                // invalidation count below is already final for this delta.
+                let invalidated = list.qaLastInvalidatedTopLevelCount
+                if invalidated == 0 { deltasWithoutInvalidation += 1 }
+                worstInvalidated = max(worstInvalidated, invalidated)
+            }
+            let seconds = ProcessInfo.processInfo.systemUptime - start
+
+            samples.append(Sample(
+                history: history,
+                visitsPerDelta: Double(list.qaFlattenNodeVisits) / Double(deltas),
+                rowsPerDelta: Double(list.qaFlattenedRowCount) / Double(deltas),
+                fullFlattens: list.qaFullFlattenCount,
+                deltasWithoutInvalidation: deltasWithoutInvalidation,
+                worstInvalidated: worstInvalidated,
+                rowsHeld: list.qaSemanticRowCount,
+                perDeltaMs: seconds / Double(deltas) * 1_000
+            ))
+            list.removeFromSuperview()
+        }
+
+        guard let smallest = samples.first(where: { $0.history == historyCounts.first }),
+              let largest = samples.first(where: { $0.history == historyCounts.last })
+        else { throw Failure(message: "transcript-delta is missing a sweep endpoint") }
+
+        let visitSlope = largest.visitsPerDelta - smallest.visitsPerDelta
+        let worstVisits = samples.map(\.visitsPerDelta).max() ?? 0
+        let totalFullFlattens = samples.reduce(0) { $0 + $1.fullFlattens }
+        let totalDeltasWithoutInvalidation = samples.reduce(0) { $0 + $1.deltasWithoutInvalidation }
+        let worstInvalidated = samples.map(\.worstInvalidated).max() ?? 0
+        let rowsLost = samples.reduce(0) { $0 + ($1.history - $1.rowsHeld) }
+        let worstDeltaMs = samples.map(\.perDeltaMs).max() ?? 0
+
+        // The bound is "the change plus what is on screen". The fixture's viewport
+        // holds well under a hundred rows and the changed subtree is one block, so
+        // any correct implementation lands far below this; 10,000 does not.
+        let localityBound = 64.0
+
+        var measurements: [PerfMeasurement] = []
+
+        measurements.append(PerfBudget(
+            metric: "transcript-delta.visitSlope",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "extra block nodes walked per delta when the history grows from \(historyCounts.first ?? 0) to \(historyCounts.last ?? 0) rows; the streaming contract makes this zero"
+        ).evaluate(visitSlope))
+
+        measurements.append(PerfBudget(
+            metric: "transcript-delta.worstVisitsPerDelta",
+            limit: .atMost(localityBound),
+            unit: .count,
+            rationale: "one revised tail row must re-index the changed subtree and the visible rows, not the conversation"
+        ).evaluate(worstVisits))
+
+        measurements.append(PerfBudget(
+            metric: "transcript-delta.fullFlattens",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "a patch that names its changed nodes must not trigger a whole-document rebuild"
+        ).evaluate(Double(totalFullFlattens)))
+
+        measurements.append(PerfBudget(
+            metric: "transcript-delta.rowsLost",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "teeth: every row must still be present after the sweep, so the zeroes above cannot be met by a transcript that dropped its history"
+        ).evaluate(Double(rowsLost)))
+
+        measurements.append(PerfBudget(
+            metric: "transcript-delta.deltasWithoutInvalidation",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "teeth: every delta must invalidate the top-level row it changed — a delta that invalidates nothing did not get cheap, it stopped working"
+        ).evaluate(Double(totalDeltasWithoutInvalidation)))
+
+        measurements.append(PerfBudget(
+            metric: "transcript-delta.worstInvalidatedTopLevel",
+            limit: .atMost(2),
+            unit: .count,
+            rationale: "the CHANGED half of changed+visible: revising one tail block must invalidate that row, not fan out across the entry's siblings"
+        ).evaluate(Double(worstInvalidated)))
+
+        measurements.append(PerfBudget(
+            metric: "transcript-delta.worstDeltaDuration",
+            limit: .atMost(frameBudgetMs),
+            unit: .milliseconds,
+            rationale: "a streaming chunk arrives many times a second; applying one must fit inside a frame"
+        ).evaluate(worstDeltaMs))
+
+        let detail = "\(deltas) tail-revision deltas per configuration, one block per entry, history "
+            + historyCounts.map(String.init).joined(separator: "/")
+            + "; " + samples.map {
+                "\($0.history): \(String(format: "%.0f", $0.visitsPerDelta)) nodes/delta, "
+                + "\(String(format: "%.0f", $0.rowsPerDelta)) rows/delta, "
+                + "\(String(format: "%.3f", $0.perDeltaMs)) ms"
+            }.joined(separator: " | ")
+        return PerfScenarioResult(name: "transcript.delta", detail: detail, measurements: measurements)
     }
 
     // MARK: - Scenario: many tiles across many zones

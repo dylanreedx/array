@@ -83,6 +83,18 @@ MATRIX_KNOWN_RED=(
   --agent-supervisor-check
   --nav-mode-check
   --palette-first-responder-restore-check
+  # The streaming axis's product target. Still RED, but NOT for the reason it was
+  # published: the incremental row index (.plans/22 Slice 4) took the delta from
+  # 10,000 block visits to 1, with fullFlattens 0 and slope 0, and the wall clock
+  # did not move — exactly the pattern the retained world plane hit one axis over.
+  # Every COUNT budget is green; only worstDeltaDuration is over. A profile puts
+  # the remaining 36 ms in two other per-delta O(history) passes that the row
+  # index never touched: prepareToolDetailLifecycle rebuilding a dictionary over
+  # every entry (~35%), and applyUnscrolled's presentation passes — the rowsByID
+  # rebuild, the snapshot append, the role-change scan (~56%). Both are named in
+  # Slice 4 and neither is started. Published in
+  # docs/internals/performance-budgets.md; do NOT bisect it as a regression.
+  --perf-budget-transcript-delta-check
   # Inherited reds, not independent ones. `ContinuumRevivedPaletteChecks` prints
   # its own model assertions and THEN shells out to the app's
   # --palette-first-responder-restore-check, so it cannot be green while that
@@ -536,6 +548,25 @@ run_app_check .build/debug/Array --perf-budget-check --scenario canvas.fractiona
 # green with the retained world plane (.plans/22 Slice 3), which is also when both
 # it and --perf-budget-zoom-check leave MATRIX_KNOWN_RED.
 run_app_check .build/debug/Array --perf-budget-camera-slope-check
+# The STREAMING axis of the scalability contract, KNOWN-RED on purpose and for
+# the same shape of reason as the camera legs: the cost driver is history length,
+# so a fixture that never varies it can sit green while a delta is linear in the
+# conversation. apply(document:patch:) receives a real AgentDocumentPatch naming
+# the changed nodes and then calls flatten(document) anyway, walking every entry
+# and every block — measured at 10,000 nodes and 36 ms for ONE revised tail row
+# on a 10,000-row transcript, while the same run reports it invalidated exactly
+# 1 top-level row. The locality is already known and thrown away. Goes green with
+# .plans/22 Slice 4, which is also when it leaves MATRIX_KNOWN_RED.
+run_app_check .build/debug/Array --perf-budget-transcript-delta-check
+# The correctness oracle for the incremental row index, and the reason the cheap
+# path is allowed to exist. transcript.delta measures what a delta COSTS and is
+# structurally blind to a fast path that is cheap and WRONG — every count budget
+# in it passes if the wrong row is rebuilt. This drives the real
+# apply(document:patch:) funnel through local and structural mutations and, after
+# each one, asserts the live index is indistinguishable from a from-scratch walk.
+# It also asserts WHICH path ran, so the day the fast path declines everything the
+# oracle fails instead of passing perfectly with the feature gone.
+run_app_check .build/debug/Array --transcript-delta-index-oracle-check
 # The camera's correctness oracle, recorded BEFORE the retained world plane so it
 # can mean something afterwards: two independent mechanisms — the model
 # (CanvasEngine over world rects) and the installed view geometry (front-to-back,
