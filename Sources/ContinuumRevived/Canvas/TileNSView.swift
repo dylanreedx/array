@@ -278,7 +278,20 @@ class TileNSView: NSView, TokenThemed {
         layoutContentView()
     }
 
+    /// QA: how many times AppKit has actually laid this tile out.
+    ///
+    /// Distinct from `qaCanvasLayoutInvalidationCount`, which counts the canvas
+    /// ASKING for a relayout. This counts the traversal ARRIVING, whoever sent it —
+    /// and during a zoom most of it arrives from the window's own display-cycle
+    /// layout pass, not from any call of ours. A 30-second sample of a real pinch
+    /// (2026-08-14) put its largest single block in
+    /// `NSWindow _layoutViewTree -> layoutSubtreeIfNeeded`, recursing through every
+    /// mounted tile; nothing counted that, which is why `canvas.zoom` could report
+    /// a fixed canvas as cheap while a real one was choppy.
+    private(set) var qaLayoutPassCount = 0
+
     override func layout() {
+        qaLayoutPassCount += 1
         super.layout()
         layoutChrome()
         layoutContentView()

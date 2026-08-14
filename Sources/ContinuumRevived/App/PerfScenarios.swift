@@ -738,6 +738,8 @@ enum PerfScenarios {
         let proseBefore = AssistantProseView.qaMeasurementCount
         let chromeRedrawsBefore = canvas.qaTotalTileChromeRedrawCount
         let layoutInvalidationsBefore = canvas.qaTotalTileLayoutInvalidationCount
+        let layoutPassesBefore = canvas.qaTotalTileLayoutPassCount
+        let transcriptPassesBefore = canvas.qaTotalTranscriptLayoutPassCount
         let start = ProcessInfo.processInfo.systemUptime
         for step in 0..<steps {
             switch gesture {
@@ -756,6 +758,8 @@ enum PerfScenarios {
         let prose = AssistantProseView.qaMeasurementCount - proseBefore
         let chromeRedraws = canvas.qaTotalTileChromeRedrawCount - chromeRedrawsBefore
         let layoutInvalidations = canvas.qaTotalTileLayoutInvalidationCount - layoutInvalidationsBefore
+        let layoutPasses = canvas.qaTotalTileLayoutPassCount - layoutPassesBefore
+        let transcriptPasses = canvas.qaTotalTranscriptLayoutPassCount - transcriptPassesBefore
         let perStepMs = seconds / Double(steps) * 1_000
 
         var measurements: [PerfMeasurement] = []
@@ -830,6 +834,34 @@ enum PerfScenarios {
             unit: .count,
             rationale: "a camera step must not mark a tile body for relayout; that is what drags a whole subtree into the rasterization pass"
         ).evaluate(Double(layoutInvalidations)))
+
+        // The LAYOUT-PASS budget, and the largest cost no budget was watching.
+        //
+        // `tileLayoutInvalidations` above counts the canvas ASKING for a relayout,
+        // and reads 0 for both gestures — nothing on the camera path calls
+        // `invalidateForCanvasLayout`. But a 30-second sample of a real pinch put
+        // its biggest single block in the WINDOW's own display-cycle layout pass
+        // (`NSWindow _layoutViewTree` -> `layoutSubtreeIfNeeded`, ~3,355 samples),
+        // recursing through every mounted tile. Nobody asked for that; AppKit did
+        // it because the plane's bounds SIZE changed, which is a resize. So the
+        // question this budget answers is not "did we ask" but "did it arrive".
+        //
+        // A pan changes the plane's bounds ORIGIN — a translation — and is
+        // expected at 0. A zoom changes bounds SIZE and is expected at roughly one
+        // pass per tile per step. The contrast is the whole assertion.
+        measurements.append(PerfBudget(
+            metric: "\(label).tileLayoutPasses",
+            limit: .atMost(Double(tileCount)),
+            unit: .count,
+            rationale: "a camera gesture may cost each visible tile about one settling layout, not one per step — per-step layout is \(tileCount * steps) here"
+        ).evaluate(Double(layoutPasses)))
+
+        measurements.append(PerfBudget(
+            metric: "\(label).transcriptLayoutPasses",
+            limit: .atMost(Double(tileCount)),
+            unit: .count,
+            rationale: "the same for the heaviest body we own; 0 here means the fixture holds no agent tile and cannot speak for a canvas that does"
+        ).evaluate(Double(transcriptPasses)))
 
         // Teeth in the other direction: the assertions above must not be
         // satisfiable by a canvas that quietly stopped presenting anything.

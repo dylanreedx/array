@@ -360,6 +360,29 @@ final class CanvasNSView: NSView, TokenThemed {
         tileViewsInVisualOrder.reduce(0) { $0 + $1.qaCanvasLayoutInvalidationCount }
     }
 
+    /// QA: layout passes that actually REACHED the tiles, whoever sent them.
+    ///
+    /// The invalidation counter above only sees the canvas asking. This sees the
+    /// traversal arriving — including the window's own display-cycle layout pass,
+    /// which is where a real zoom spends its largest single block and which no
+    /// budget was watching. `pan` is expected to score 0 here and `zoom` roughly
+    /// one per tile per step; that contrast is the measurement.
+    var qaTotalTileLayoutPassCount: Int {
+        tileViewsInVisualOrder.reduce(0) { $0 + $1.qaLayoutPassCount }
+    }
+
+    /// QA: the same, for the heaviest tile body we own. Zero on fixtures that hold
+    /// no agent tile, which is itself worth seeing — it says the fixture cannot
+    /// speak for a canvas that has one.
+    var qaTotalTranscriptLayoutPassCount: Int {
+        func walk(_ view: NSView) -> Int {
+            var total = (view as? AgentTranscriptListView)?.qaLayoutPassCount ?? 0
+            for subview in view.subviews { total += walk(subview) }
+            return total
+        }
+        return tileViewsInVisualOrder.reduce(0) { $0 + walk($1) }
+    }
+
     /// QA: how many installed tiles actually intersect the visible canvas at the
     /// current camera. The gap between this and `qaTotalInstalledTileCount` is
     /// the work a camera step spends on tiles the user cannot see.

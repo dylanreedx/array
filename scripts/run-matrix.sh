@@ -99,6 +99,13 @@ MATRIX_KNOWN_RED=(
   # is Slice 5's semantic-zoom work. Published in
   # docs/internals/performance-budgets.md; do NOT bisect it as a regression.
   --perf-budget-zoom-check
+  # The diagnosis behind the zoom leg above, published RED as its own product
+  # target: a camera gesture may cost each tile about one settling layout, never
+  # one per step. Its OTHER conditions are green and are the attribution — a
+  # bounds-origin step, a bounds-size step, and the whole production camera path
+  # minus the zoom branch all cost zero tile layouts. Goes green when the chrome
+  # floor stops changing on every zoom step.
+  --canvas-zoom-invalidation-probe-check
   # The streaming axis's product target. Still RED, but NOT for the reason it was
   # published: the incremental row index (.plans/22 Slice 4) took the delta from
   # 10,000 block visits to 1, with fullFlattens 0 and slope 0, and the wall clock
@@ -574,6 +581,16 @@ run_app_check .build/debug/Array --perf-budget-camera-slope-check
 # 1 top-level row. The locality is already known and thrown away. Goes green with
 # .plans/22 Slice 4, which is also when it leaves MATRIX_KNOWN_RED.
 run_app_check .build/debug/Array --perf-budget-transcript-delta-check
+# WHY a zoom lays out every tile when a pan lays out none. Both gestures move the
+# same single ancestor through the same setViewport funnel, so the difference had
+# to be isolated rather than assumed — and the standing hypothesis, that AppKit
+# treats the plane's bounds-SIZE change as a resize and propagates needsLayout,
+# turned out to be wrong. Measured: bounds-origin 0 passes, bounds-SIZE 0 passes,
+# the whole production camera path minus the zoom branch 0 passes, the production
+# ZOOM 696 over 60 steps on 12 tiles. The cost is entirely refreshZoomDependentChrome,
+# which is our own per-tile-per-step call, not the camera mechanism. KNOWN-RED
+# against that product target until the chrome floor stops moving every step.
+run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
 # The correctness oracle for the incremental row index, and the reason the cheap
 # path is allowed to exist. transcript.delta measures what a delta COSTS and is
 # structurally blind to a fast path that is cheap and WRONG — every count budget
