@@ -616,7 +616,36 @@ class TileNSView: NSView, TokenThemed {
     /// Mirrors `resizeMarginInLocalCoordinates`'s screen-px-in-world pattern.
     var grabHeightInLocalCoordinates: CGFloat {
         guard let zoom = canvas?.viewport.zoom, zoom.isFinite, zoom > 0 else { return Self.titleBarHeight }
-        return max(Self.titleBarHeight, Self.minScreenGrabPx / CGFloat(zoom))
+        // The floor is quantised into scale BUCKETS before it is applied. Without
+        // this the bar's world height changes on every zoom step, which re-frames
+        // the title bar, which lays the whole tile out — measured at one layout
+        // pass per tile per step, and the largest single cost of a real pinch.
+        // Bucketing makes the bar hold still through a gesture and step only when
+        // the bucket changes.
+        return max(Self.titleBarHeight, Self.minScreenGrabPx / CGFloat(Self.chromeScaleBucket(for: zoom)))
+    }
+
+    /// Steps per octave for the chrome floor's scale bucket. Higher is
+    /// finer-grained chrome and more layout passes; lower is steadier and fewer.
+    static let chromeScaleStepsPerOctave: Double =
+        Double(ProcessInfo.processInfo.environment["ARRAY_CHROME_BUCKETS"] ?? "") ?? 4
+
+    /// Quantise the scale for chrome purposes, GEOMETRICALLY and always DOWNWARD.
+    ///
+    /// Downward is the load-bearing half. The floor exists so the move-grab strip
+    /// is never smaller than `minScreenGrabPx` on screen; bucketing to the NEAREST
+    /// step can round the scale UP, which makes the strip smaller than the floor
+    /// promised and silently breaks the affordance. `--tile-drag-grab-check`
+    /// catches exactly that at zoom 0.1. Rounding down can only make the strip
+    /// larger than strictly needed, which is safe.
+    ///
+    /// Geometric rather than linear so the relative step is constant across the
+    /// zoom range: a fixed 1/8 step is invisible at zoom 3 and enormous at 0.1.
+    static func chromeScaleBucket(for zoom: Double) -> Double {
+        guard zoom.isFinite, zoom > 0 else { return 1 }
+        let steps = max(1, chromeScaleStepsPerOctave)
+        let bucketed = pow(2, ((log2(zoom) * steps).rounded(.down)) / steps)
+        return bucketed.isFinite && bucketed > 0 ? min(zoom, bucketed) : zoom
     }
 
     /// World height the drawn title bar is laid out to. Aliased to the move-grab

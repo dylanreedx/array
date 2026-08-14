@@ -122,6 +122,12 @@ enum PerfScenarios {
             // tiles exist somewhere, whether or not the user can see them?
             // Known-red against the product target today, by construction.
             Scenario(name: "canvas.camera-slope", run: { try canvasCameraSlope() }),
+            // The same complexity question for ZOOM, which camera-slope does not
+            // ask. "O(1) in tiles" is the contract for both gestures, and only one
+            // of them had a witness. The name shares no prefix with canvas.zoom —
+            // the filter is prefix-matched, so `--scenario canvas.zoom` would
+            // otherwise sweep this in too.
+            Scenario(name: "canvas.magnify-slope", run: { try canvasZoomSlope() }),
             // The streaming axis, and the same slope argument as camera-slope one
             // line up: the cost driver is HISTORY LENGTH, so a fixture that never
             // varies it can be green while a delta is linear in the conversation.
@@ -323,6 +329,174 @@ enum PerfScenarios {
                 + "\($0.geometryWrites / steps) writes/step, \(String(format: "%.2f", $0.perStepMs)) ms"
             }.joined(separator: " | ")
         return PerfScenarioResult(name: "canvas.camera-slope", detail: detail, measurements: measurements)
+    }
+
+    // MARK: - Scenario: ZOOM cost against installed tile count
+
+    /// Is a zoom step O(1) in tiles?
+    ///
+    /// `canvas.camera-slope` proves that for a PAN and nothing proves it for a
+    /// zoom, which is the gap this fills. The distinction is not academic: a pan
+    /// moves the plane's bounds origin and touches no tile, while a zoom step also
+    /// refreshes every tile's zoom-dependent chrome — and it does so over
+    /// `tileViewsInVisualOrder`, which is every INSTALLED tile, not just the ones
+    /// on screen. So the suspected shape is worse than O(visible): it is
+    /// O(installed), and a tile parked far off-screen costs a real canvas exactly
+    /// as much as one the user is looking at.
+    ///
+    /// Same construction as the pan slope: sweep installed 16 -> 128 with the
+    /// VISIBLE count pinned, and report the slope. Zero is the contract.
+    ///
+    /// Cheap `DescriptorTileNSView`s keep 128 tiles affordable. That deliberately
+    /// understates the per-tile cost of a real agent tile — this scenario answers
+    /// "does the work grow with tile count", not "what does one tile cost".
+    static func canvasZoomSlope() throws -> PerfScenarioResult {
+        let installedCounts = [16, 32, 64, 128]
+        let steps = 40
+        let visibleClusterCount = 12
+
+        struct Sample {
+            let installed: Int
+            let onScreen: Int
+            let chromeRedraws: Int
+            let layoutPasses: Int
+            let mutations: Int
+            let mismatches: Int
+            let perStepMs: Double
+        }
+        var samples: [Sample] = []
+
+        for installed in installedCounts {
+            let canvas = CanvasNSView(
+                canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                                         tiles: [], groups: [], lastActiveTileId: nil),
+                activeZone: nil, zoneRenderModels: [], showsZoneChrome: false
+            )
+            canvas.frame = CGRect(x: 0, y: 0, width: 1_600, height: 1_000)
+            let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless],
+                                  backing: .buffered, defer: false)
+            window.contentView = canvas
+            window.orderFrontRegardless()
+
+            for index in 0..<installed {
+                // The visible cluster sits near the origin; filler is parked far
+                // enough out to stay off-screen across the whole 0.4–1.0 sweep
+                // (at zoom 0.4 the viewport covers ~4000 x 2500 world units).
+                let frame: TileFrame
+                if index < visibleClusterCount {
+                    frame = TileFrame(x: Double(index % 4) * 380 + 40,
+                                      y: Double(index / 4) * 300 + 60,
+                                      width: 340, height: 240)
+                } else {
+                    let filler = index - visibleClusterCount
+                    frame = TileFrame(x: 9_000 + Double(filler % 16) * 500,
+                                      y: 7_000 + Double(filler / 16) * 400,
+                                      width: 340, height: 240)
+                }
+                let tile = Tile(
+                    id: UUID(), kind: .note, title: "zoom-slope-\(index)",
+                    frame: frame, zPosition: .fromLegacyRank(index + 1),
+                    runtimeRef: nil, metadata: TileMetadata()
+                )
+                canvas.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
+            }
+            canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+            canvas.layoutSubtreeIfNeeded()
+
+            guard canvas.qaTotalInstalledTileCount == installed else {
+                throw Failure(message: "zoom-slope harness must install \(installed) tiles; got \(canvas.qaTotalInstalledTileCount)")
+            }
+
+            let onScreen = canvas.qaTilesIntersectingViewport
+            canvas.qaResetCameraLayoutStats()
+            let chromeBefore = canvas.qaTotalTileChromeRedrawCount
+            let passesBefore = canvas.qaTotalTileLayoutPassCount
+            let start = ProcessInfo.processInfo.systemUptime
+            for step in 0..<steps {
+                let zoom = 0.4 + 0.6 * (1 + sin(Double(step) / 6.0)) / 2
+                canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: zoom))
+                canvas.layoutSubtreeIfNeeded()
+            }
+            let seconds = ProcessInfo.processInfo.systemUptime - start
+            samples.append(Sample(
+                installed: installed,
+                onScreen: onScreen,
+                chromeRedraws: canvas.qaTotalTileChromeRedrawCount - chromeBefore,
+                layoutPasses: canvas.qaTotalTileLayoutPassCount - passesBefore,
+                mutations: canvas.qaCameraLayoutStats.cameraMutations,
+                mismatches: canvas.qaTileScreenFrameMismatchCount,
+                perStepMs: seconds / Double(steps) * 1_000
+            ))
+            window.orderOut(nil)
+            window.contentView = nil
+        }
+
+        // The visible count must be constant, or the slope conflates "more
+        // installed" with "more visible" and proves nothing.
+        let onScreenCounts = Set(samples.map(\.onScreen))
+        guard onScreenCounts.count == 1 else {
+            throw Failure(message: "zoom-slope must hold the visible count fixed; saw \(onScreenCounts.sorted())")
+        }
+
+        guard let smallest = samples.first, let largest = samples.last else {
+            throw Failure(message: "zoom-slope is missing a sweep endpoint")
+        }
+        let chromeSlope = Double(largest.chromeRedraws - smallest.chromeRedraws) / Double(steps)
+        let passSlope = Double(largest.layoutPasses - smallest.layoutPasses) / Double(steps)
+        let durationSlope = largest.perStepMs - smallest.perStepMs
+
+        var measurements: [PerfMeasurement] = []
+
+        measurements.append(PerfBudget(
+            metric: "magnify-slope.chromeRedrawSlope",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "per-step chrome work must not grow with tiles the user cannot see: work(128) - work(16), per step"
+        ).evaluate(chromeSlope))
+
+        measurements.append(PerfBudget(
+            metric: "magnify-slope.layoutPassSlope",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "the same for tile layout: a zoom step must lay out no more tiles because more exist off-screen"
+        ).evaluate(passSlope))
+
+        measurements.append(PerfBudget(
+            metric: "magnify-slope.durationSlope",
+            limit: .atMost(0.5),
+            unit: .milliseconds,
+            rationale: "the wall-clock consequence: going from 16 to 128 installed tiles must not measurably slow a zoom step"
+        ).evaluate(durationSlope))
+
+        measurements.append(PerfBudget(
+            metric: "magnify-slope.worstStepDuration",
+            limit: .atMost(frameBudgetMs),
+            unit: .milliseconds,
+            rationale: "coarse alarm; cheap descriptor tiles understate a real agent tile, which canvas.stress owns"
+        ).evaluate(samples.map(\.perStepMs).max() ?? 0))
+
+        measurements.append(PerfBudget(
+            metric: "magnify-slope.cameraMutations",
+            limit: .atLeast(1),
+            unit: .count,
+            rationale: "teeth: the camera must actually have zoomed — zero means the gesture did nothing, not that it got cheap"
+        ).evaluate(Double(samples.reduce(0) { $0 + $1.mutations })))
+
+        measurements.append(PerfBudget(
+            metric: "magnify-slope.screenFrameMismatches",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "teeth: every visible tile must sit where CanvasEngine says, so the zeroes above cannot be met by a canvas that stopped presenting"
+        ).evaluate(Double(samples.reduce(0) { $0 + $1.mismatches })))
+
+        let detail = "\(steps) zoom steps per configuration, installed "
+            + installedCounts.map(String.init).joined(separator: "/")
+            + "; " + samples.map {
+                "\($0.installed): \($0.onScreen) on screen, "
+                + "\($0.chromeRedraws / steps) chrome/step, \($0.layoutPasses / steps) layouts/step, "
+                + String(format: "%.2f ms", $0.perStepMs)
+            }.joined(separator: " | ")
+        return PerfScenarioResult(name: "canvas.magnify-slope", detail: detail, measurements: measurements)
     }
 
     // MARK: - Scenario: transcript delta cost against history length
