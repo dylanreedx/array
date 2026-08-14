@@ -750,20 +750,46 @@ final class SidebarDensityProposalView: NSView {
         // The icon carries the tick, so the word stays a plain word — a symbol AND a
         // ✓ glyph AND a colour is three ways of saying one thing.
         if state.hasPrefix("Done") { return "checkmark.circle.fill" }
-        if state.hasPrefix("Working") { return "arrow.triangle.2.circlepath" }
+        // Working draws the app's OWN throbber, not a symbol — see `workingIndicator`.
+        if state.hasPrefix("Working") { return nil }
         if state.hasPrefix("Approval") { return "hand.raised.fill" }
         if state.hasPrefix("Input") { return "questionmark.circle.fill" }
-        if state.hasPrefix("Failed") { return "exclamationmark.octagon.fill" }
-        if state.hasPrefix("Stopped") { return "stop.circle.fill" }
-        if state.hasPrefix("Cancelled") { return "slash.circle.fill" }
+        // Failed, Stopped and Cancelled must differ by SILHOUETTE, not only by colour —
+        // at 11 pt three filled circles read as one shape, which is what made Stopped
+        // and Failed confusable. Triangle = something went wrong; plain square = you
+        // halted it; outlined slash = it was cancelled.
+        if state.hasPrefix("Failed") { return "exclamationmark.triangle.fill" }
+        if state.hasPrefix("Stopped") { return "stop.fill" }
+        if state.hasPrefix("Cancelled") { return "slash.circle" }
         return nil
     }
 
-    /// A placeholder provider mark. Deliberately NOT a vendor logo: §4.5 requires
-    /// bundled, provenance-tracked, trademark-reviewed assets, and §10 forbids
-    /// fetching them at runtime. This is the labelled two-character fallback the design
-    /// specifies for a provider whose asset is missing, so the row can be judged with
-    /// the mark SLOT filled without shipping an unreviewed logo.
+    /// The real vendor marks, read from the ticket's `brand-marks/` directory at render
+    /// time. DESIGN-TIME ONLY: nothing here is bundled into the `.app` and the shipped
+    /// sidebar does not read them — that pipeline, with its offline bundle witness, is
+    /// P3.1. §10 forbids runtime fetching and nothing here fetches; the files are on
+    /// disk with a provenance manifest beside them.
+    ///
+    /// Marks are NEVER tinted (§4.5). The light/dark files exist because each vendor
+    /// ships both, and Anthropic's carries its own `#D97757`.
+    private static func providerMark(_ model: String, isDark: Bool) -> NSImage? {
+        let key: String
+        if model.hasPrefix("GPT") { key = isDark ? "openai-dark" : "openai-light" }
+        else if model.hasPrefix("Opus") || model.hasPrefix("Sonnet") { key = "anthropic" }
+        else if model.hasPrefix("Grok") { key = isDark ? "xai-dark" : "xai-light" }
+        else { return nil }
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // App
+            .deletingLastPathComponent()   // ContinuumRevived
+            .deletingLastPathComponent()   // Sources
+            .deletingLastPathComponent()   // repo root
+            .appendingPathComponent(
+                "docs/38-tickets/96-agent-sidebar-product-redesign/brand-marks/\(key).svg")
+        return NSImage(contentsOf: url)
+    }
+
+    /// The two-character badge §4.5 specifies when a provider has no asset — still the
+    /// truth for Google, Mistral, Groq, Cerebras, OpenRouter and every harness mark.
     private static func providerInitials(_ model: String) -> String {
         if model.hasPrefix("GPT") { return "AI" }
         if model.hasPrefix("Opus") || model.hasPrefix("Sonnet") { return "AN" }
@@ -847,7 +873,7 @@ final class SidebarDensityProposalView: NSView {
             let accent = stateColor(row.state, primary: primary)
             let iconSide: CGFloat = 11
             let iconGap: CGFloat = 3
-            let hasIcon = Self.stateSymbol(row.state) != nil
+            let hasIcon = Self.stateSymbol(row.state) != nil || row.state.hasPrefix("Working")
             let stateTextWidth = min(
                 contentWidth * 0.5, measure(row.state, size: 11).width + 2)
             let stateWidth = stateTextWidth + (hasIcon ? iconSide + iconGap : 0)
@@ -855,11 +881,14 @@ final class SidebarDensityProposalView: NSView {
                 x: cardRect.minX + insetH, y: bandY,
                 width: contentWidth - stateWidth - 6, height: proposal.bandTop),
                  size: 11, color: secondary, alignment: .left)
-            if let symbol = Self.stateSymbol(row.state) {
-                drawSymbol(symbol, in: NSRect(
-                    x: cardRect.maxX - insetH - stateWidth,
-                    y: bandY + (proposal.bandTop - iconSide) / 2,
-                    width: iconSide, height: iconSide), color: accent)
+            let iconRect = NSRect(
+                x: cardRect.maxX - insetH - stateWidth,
+                y: bandY + (proposal.bandTop - iconSide) / 2,
+                width: iconSide, height: iconSide)
+            if row.state.hasPrefix("Working") {
+                drawWorkingIndicator(in: iconRect)
+            } else if let symbol = Self.stateSymbol(row.state) {
+                drawSymbol(symbol, in: iconRect, color: accent)
             }
             draw(row.state, at: NSRect(
                 x: cardRect.maxX - insetH - stateTextWidth, y: bandY,
@@ -884,13 +913,17 @@ final class SidebarDensityProposalView: NSView {
                 x: cardRect.minX + insetH, y: bandY,
                 width: contentWidth - modelWidth - 6, height: proposal.bandDetail),
                  size: 11, color: secondary, alignment: .left, middleTruncating: true)
-            drawProviderChip(
-                Self.providerInitials(row.model),
-                in: NSRect(
-                    x: cardRect.maxX - insetH - modelWidth,
-                    y: bandY + (proposal.bandDetail - chipSide) / 2,
-                    width: chipSide, height: chipSide),
-                color: secondary)
+            let chipRect = NSRect(
+                x: cardRect.maxX - insetH - modelWidth,
+                y: bandY + (proposal.bandDetail - chipSide) / 2,
+                width: chipSide, height: chipSide)
+            if let mark = Self.providerMark(row.model, isDark: isDark) {
+                // Untinted, per §4.5.
+                drawImage(mark, in: chipRect, tint: nil)
+            } else {
+                drawProviderChip(
+                    Self.providerInitials(row.model), in: chipRect, color: secondary)
+            }
             draw(row.model, at: NSRect(
                 x: cardRect.maxX - insetH - modelTextWidth, y: bandY,
                 width: modelTextWidth, height: proposal.bandDetail),
@@ -928,24 +961,59 @@ final class SidebarDensityProposalView: NSView {
         return primary.withAlphaComponent(0.62)
     }
 
+    /// Draw an image the right way up inside a FLIPPED view.
+    ///
+    /// The first version built its tinted copy with `NSImage(size:flipped: true)` and
+    /// then drew it into this view, which is itself flipped — two flips, so every icon
+    /// came out upside down. The tinted copy is now built unflipped and drawn with
+    /// `respectFlipped: true`, which is the one place the flip belongs.
+    private func drawImage(_ image: NSImage, in rect: NSRect, tint: NSColor?) {
+        let drawable: NSImage
+        if let tint {
+            let copy = NSImage(size: image.size)
+            copy.lockFocus()
+            image.draw(in: NSRect(origin: .zero, size: image.size))
+            tint.set()
+            NSRect(origin: .zero, size: image.size).fill(using: .sourceAtop)
+            copy.unlockFocus()
+            drawable = copy
+        } else {
+            drawable = image
+        }
+        drawable.draw(
+            in: rect, from: .zero, operation: .sourceOver, fraction: 1,
+            respectFlipped: true, hints: nil)
+    }
+
     private func drawSymbol(_ name: String, in rect: NSRect, color: NSColor) {
         let config = NSImage.SymbolConfiguration(pointSize: rect.height, weight: .semibold)
         guard let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
             .withSymbolConfiguration(config) else { return }
         image.isTemplate = true
-        color.set()
-        let tinted = NSImage(size: rect.size, flipped: true) { bounds in
-            image.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1)
-            color.set()
-            bounds.fill(using: .sourceAtop)
-            return true
-        }
-        tinted.draw(in: rect)
+        drawImage(image, in: rect, tint: color)
+    }
+
+    /// Array's OWN thinking indicator, posed at a fixed phase rather than imitated. The
+    /// working row should show the glyph the app already uses while an agent responds,
+    /// and `AgentThinkingIndicatorAnimating.setSnapshotPhase` exists precisely so a
+    /// still can be taken of it.
+    private func drawWorkingIndicator(in rect: NSRect) {
+        let indicator = DualPlaneGyroTiltedThinkingIndicatorView(
+            frame: NSRect(origin: .zero, size: rect.size))
+        indicator.appearance = effectiveAppearance
+        indicator.setReducedMotion(true)
+        indicator.setSnapshotPhase(0.32)
+        indicator.layoutSubtreeIfNeeded()
+        guard let rep = indicator.bitmapImageRepForCachingDisplay(in: indicator.bounds)
+        else { return }
+        indicator.cacheDisplay(in: indicator.bounds, to: rep)
+        let image = NSImage(size: rect.size)
+        image.addRepresentation(rep)
+        drawImage(image, in: rect, tint: nil)
     }
 
     /// The labelled two-character badge §4.5 specifies as the fallback when a provider
-    /// asset is missing — which is every provider today, because no vendor art is
-    /// bundled yet.
+    /// asset is missing.
     private func drawProviderChip(_ initials: String, in rect: NSRect, color: NSColor) {
         let path = NSBezierPath(roundedRect: rect, xRadius: 3, yRadius: 3)
         color.withAlphaComponent(0.22).setStroke()
