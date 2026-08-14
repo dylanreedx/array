@@ -161,6 +161,77 @@ rasterization are Slice 5's semantic-zoom work.
 `invalidateForCanvasLayout`. It is a standing regression guard, not a live
 finding, and it is recorded as such rather than presented as a win.
 
+#### The larger cost, and the hypothesis it refuted
+
+Counting chrome redraws still missed the biggest block. The sample's largest
+single item was the window's own display-cycle layout pass recursing through every
+mounted tile, and *nothing asked for it*, so an invalidation counter could not see
+it. `tileLayoutPasses` counts the traversal ARRIVING instead:
+
+| metric | budget | pan | fractional-pan | zoom |
+|---|---|---|---|---|
+| `tileLayoutPasses` | ≤ 1 per tile | **0** | **0** | **1,380** |
+
+The standing hypothesis was that this is inherent to the Slice 3 mechanism — that
+a pan moves the plane's bounds ORIGIN (a translation) while a zoom changes its
+bounds SIZE, which AppKit treats as a resize and propagates through every subtree.
+**That is wrong**, and `--canvas-zoom-invalidation-probe-check` is what refuted it.
+Over 60 steps on 12 tiles:
+
+| condition | passes | ms/step |
+|---|---|---|
+| A — bounds origin only (pan shape) | 0 | 0.003 |
+| B — bounds **size** only (zoom shape) | **0** | 0.036 |
+| E — production `setViewport`, pan (everything but the zoom branch) | **0** | 0.048 |
+| C — production `setViewport`, zoom | **696** | 3.075 |
+| D — bounds size only, Auto Layout body | 0 | 0.055 |
+
+B and E are the attribution and both are green: changing bounds size costs no tile
+layout at all, and neither does the rest of the camera path. `C − E = 696` is
+therefore entirely `refreshZoomDependentChrome`, which this program added in
+Slice 3 to stop the grab strip going stale and which calls `layoutChrome()` on
+every tile on every zoom step. **It is our own invalidation, not the mechanism** —
+so the fix is contained, and needs neither `NSScrollView.magnification` (which
+would mean re-hosting the canvas) nor semantic-zoom LOD.
+
+Auto Layout is not the trigger but amplifies each pass ~1.5×, which only matters
+once the passes are gone.
+
+The two env-gated experiments on `array/zoom-exp` confirm the chain, and show
+chrome redraws and layout passes moving 1:1:
+
+| configuration | `chromeRedraws` | `tileLayoutPasses` | `stepDuration` |
+|---|---|---|---|
+| baseline | 1,392 | 1,380 | 4.99 ms |
+| `ARRAY_EXP_CHROME_BUCKETS=1` | 132 | 132 | 5.00 ms |
+| `ARRAY_EXP_ZOOM_CACHE=1` | 0 | 0 | 1.68 ms |
+| both | 0 | 0 | 1.62 ms |
+
+The zeroes under `ZOOM_CACHE` are partly a fixture artifact — it defers the chrome
+refresh to a settle timer that never fires inside the fixture's synchronous loop —
+but the 1:1 movement of the first two columns is the causal evidence.
+
+#### What "always render live" costs, as a number
+
+Dylan has ruled out semantic-zoom LOD: tiles must show real content at every zoom.
+That is a constraint on the fix, so the ceiling it implies is published here rather
+than argued about in the abstract.
+
+- **With the chrome defect present:** 12 tiles cost 3.075 ms/step, i.e. ~0.26 ms
+  per mounted tile per zoom step. A 120 Hz frame is 8.3 ms, so zoom saturates at
+  roughly **32 tiles** — and that is with the probe's deliberately simple bodies.
+- **With the mechanism alone (condition B):** 12 tiles cost 0.036 ms/step, ~0.003
+  ms per tile — essentially flat. Extrapolated, the plane itself would not
+  saturate a frame until thousands of tiles.
+
+So the constraint looks affordable **once the chrome defect is fixed**, and LOD is
+not obviously required to honour it. Two honest caveats: the probe's tiles are
+`ManualBody`/`ConstraintBody` stand-ins, not live agent transcripts or WebKit
+surfaces; and `canvas.stress` already shows 48 real tiles at 7.9 ms/step for a
+**pan**, which is the real upper bound on what "always live" costs today and is a
+separate problem from zoom. Revisit the LOD decision against these numbers, not
+against the principle.
+
 #### The two real fixes that came before, and still hold
 
 

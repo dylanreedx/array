@@ -50,7 +50,13 @@ Status as of 2026-08-09 (end of day):
      the pre-`65d420a` doc taxonomy, one of which demands "Continuum Revived" in
      the user-facing README and so contradicts the identity rule).
 
-     **It is 9 now** — those 7 plus `--perf-budget-transcript-delta-check` (the
+     **It is 10 now.** The tenth is `--canvas-zoom-invalidation-probe-check`, the
+     diagnosis behind the zoom leg: it isolates why a zoom lays out every tile
+     while a pan lays out none, and its answer is that the cost is
+     `refreshZoomDependentChrome`, not the camera mechanism. Its other three
+     conditions are green and are the attribution.
+
+     Before that it was 9 — those 7 plus `--perf-budget-transcript-delta-check` (the
      streaming axis's product target, published RED with its counts since turned
      green and only its duration outstanding) and `--perf-budget-zoom-check`,
      which went green and then came back when its witness was corrected. The

@@ -297,6 +297,19 @@ run in parallel. **Exit:** delta cost bounded by changed+visible rows at
 
 ## Slice 5 — Presentation lifecycle and semantic-zoom LOD (L3)
 
+> **DEMOTED again, 2026-08-14, on better evidence.** The promotion below was
+> based on a hypothesis that has since been refuted by
+> `--canvas-zoom-invalidation-probe-check`: zoom's per-tile layout cost is NOT
+> inherent to the retained plane's bounds-size mechanism (a bounds-size step costs
+> zero tile layouts) and is NOT content rasterization alone. It is
+> `refreshZoomDependentChrome`, a per-tile-per-step call this program added in
+> Slice 3. That is a contained fix in Slice 3's own code, so semantic-zoom LOD is
+> not required to make zoom smooth — which matters, because Dylan has ruled LOD
+> out: tiles must always render live. Slice 5's presentation-lifecycle half still
+> depends on Slice 4 and stays where it was.
+>
+> The superseded reasoning is kept below, because the sequence is the lesson.
+
 > **Promoted 2026-08-14, on real-gesture evidence.** This slice was scheduled
 > after Slice 4 and behind the perf framework. A profile of a real pinch over 9
 > live tiles moved it up: zoom's dominant cost is re-rasterizing layer-backed
