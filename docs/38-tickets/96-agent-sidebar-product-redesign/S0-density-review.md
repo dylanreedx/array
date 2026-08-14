@@ -150,7 +150,7 @@ PASS, 42 images:
 | `offscreen/` | 36 images — corpus sweeps, the 662 pt density fixtures, one interaction reference, and `proposals/` |
 
 **The offscreen half has since been re-rendered** with the new row anatomy and the status
-sweep: `qa-runs/2026-08-14T201842Z/sidebar-96/`, 42 images, gate PASS. The live half is
+sweep: `qa-runs/2026-08-14T203752Z/sidebar-96/`, 42 images, gate PASS. The live half is
 unchanged and does not need re-capturing — those images are the *shipped* sidebar, and no
 product behaviour has changed. Regenerate the offscreen set alone with
 `.build/debug/Array --sidebar-screenshot-check`.
@@ -419,8 +419,12 @@ where the mark-only anatomy has already removed the model name — so the badge 
 degraded identity, it is the **only** identity, and it is unreadable.
 
 **The mock now falls back to the model's NAME when there is no mark.** Mark or name, never
-a cipher. Concretely: `⎇ agent/ack-watermark … Gemini 3 Pro`, in place of `⎇
-agent/ack-watermark … GE`.
+a cipher.
+
+Dylan then supplied `gemini.svg`, so that row draws Gemini's spark and the fallback moved
+to a `Mistral Large 3` row rather than leaving the artifact — as marks arrive, the review
+has to keep showing what an *unbundled* provider looks like, or the fallback stops being
+looked at long before it stops being reachable.
 
 Two things this asks for:
 

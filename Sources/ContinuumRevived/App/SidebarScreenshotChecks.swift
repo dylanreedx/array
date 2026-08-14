@@ -1056,6 +1056,7 @@ final class SidebarDensityProposalView: NSView {
         if model.hasPrefix("GPT") { key = "openai-light" }
         else if model.hasPrefix("Opus") || model.hasPrefix("Sonnet") { key = "anthropic" }
         else if model.hasPrefix("Grok") { key = "xai-light" }
+        else if model.hasPrefix("Gemini") { key = "gemini" }
         else { return nil }
         if let cached = markCache[key] { return cached }
         let url = URL(fileURLWithPath: #filePath)
@@ -1095,8 +1096,12 @@ final class SidebarDensityProposalView: NSView {
          "agent/rtl-truncation", "Grok 4.2"),
         ("Array › Sidebar", "Input", "Choose the provider mark set",
          "agent/brand-marks", "Opus"),
+        // Gemini has a mark now, so the no-mark fallback moves here rather than
+        // disappearing from the artifact. §4.5's list still leaves OpenRouter, Mistral,
+        // Groq and Cerebras unbundled, and the review has to keep showing what one of
+        // those rows looks like.
         ("Array › Docs", "Done · 3h", "Write the S0 density review",
-         "agent/s0-review", "Sonnet"),
+         "agent/s0-review", "Mistral Large 3"),
         ("Array › Canvas", "Done · 5h", "Budget chrome repaints per camera step",
          "agent/perf-budgets", "Opus"),
         ("Array › Agents", "Done · 1d", "Bound restore concurrency",

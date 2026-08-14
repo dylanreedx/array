@@ -11,7 +11,7 @@ shipped sidebar reads them. Promoting them to real resources — a `BrandMarkCat
 `Package.swift` resource declarations, `make-app-bundle.sh` handling, and the offline
 bundle witness §5.5 demands — is P3.1's job.
 
-Supplied by Dylan on 2026-08-14 (`~/Downloads`), sourced from svgl.app, which §4.5 permits
+Supplied by Dylan on 2026-08-14 (`~/Downloads`) — the first four with the batch, `gemini.svg` after seeing what its absence did to a row — sourced from svgl.app, which §4.5 permits
 as a **design-time discovery** source. §10 forbids fetching provider logos at runtime, and
 nothing here does.
 
@@ -22,6 +22,7 @@ nothing here does.
 | `openai-dark.svg` | OpenAI | dark | `db81a822…c59840c8` | none — renamed only |
 | `xai-light.svg` | xAI / Grok | light | `46e9e816…107f3566` | none — renamed only |
 | `xai-dark.svg` | xAI / Grok | dark | `a2d3a91c…132c4128` | none — renamed only |
+| `gemini.svg` | Google / Gemini | single (masked, own gradient) | `9433d6ef…edc36760` | none — renamed only |
 
 No file has been edited. Renaming to a semantic key is the only change.
 
@@ -58,10 +59,12 @@ Until that review happens, treat every image in `qa-runs/**/status/` and
    treatment is permitted** (see Tinting above). **Not yet done; Dylan's call.** These
    marks are in a local review artifact today, which is a materially lower bar than
    shipping them in a distributed `.app`.
-2. **Missing coverage** — §4.5's initial set also names Google/Gemini, OpenRouter,
-   Mistral, Groq, Cerebras, and the three harness marks (Codex, Claude Code, Pi). Pi
-   matters most: today a Pi agent renders as its provider's glyph and is indistinguishable
-   from Claude Code or Codex.
+2. **Missing coverage** — Google/Gemini has landed. §4.5's initial set still names
+   OpenRouter, Mistral, Groq, Cerebras, and the three harness marks (Codex, Claude Code,
+   Pi). Pi matters most: today a Pi agent renders as its provider's glyph and is
+   indistinguishable from Claude Code or Codex. The mock keeps one unbundled provider on
+   screen (`Mistral Large 3`) so the name fallback stays visible in the artifact instead
+   of quietly disappearing as marks arrive.
 3. **The resource pipeline and its witness** — build the real `.app`, enumerate
    `Contents/Resources`, resolve every semantic key offline, render both appearance
    variants, prove the unknown-provider fallback (now the model NAME, not initials — see below),

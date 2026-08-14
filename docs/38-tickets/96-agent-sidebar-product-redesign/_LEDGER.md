@@ -538,7 +538,7 @@ allowlisted, 0 new). `ComponentLab.swift` still 0 lines against `d334f01`.
 
 ## Feedback round 4 — the icon set collapses to three (2026-08-14)
 
-Mock-only. Artifact: `qa-runs/2026-08-14T201842Z/sidebar-96/`, 42 images, gate PASS.
+Mock-only. Artifact: `qa-runs/2026-08-14T203752Z/sidebar-96/`, 42 images, gate PASS.
 
 Ruled: keep the left-aligned column; cut the glyph set to hand (approval AND input),
 throbber (working), error mark (failed). Done, Stopped and Cancelled draw nothing.
