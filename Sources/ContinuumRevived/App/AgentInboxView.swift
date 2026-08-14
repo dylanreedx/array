@@ -767,6 +767,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     // test may observe the same production dispatch without relying on the global
     // accessibility server; nil uses the real NSAccessibility notification path.
     var accessibilityAnnouncementSink: ((NSView, String) -> Void)?
+    /// QA-only recording of announcements into `qaStatusAnnouncements`. OFF in
+    /// production: an inbox lives as long as the app, a busy workspace
+    /// transitions status constantly, and each recorded entry retains an NSView —
+    /// unbounded history that nothing outside a probe ever reads. A probe that
+    /// wants the recording turns this on next to installing its sink.
+    var qaRecordsStatusAnnouncements = false
     private var accessibilityStatusByAgent: [UUID: String] = [:]
     /// Offscreen rows have no materialized status label to post from. These
     /// dedicated announcement targets carry no row facts and are never inserted
@@ -1215,7 +1221,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             owner.setAccessibilityLabel("Status: \(summary)")
             owner.setAccessibilityValue(summary)
             let message = "\(row.displayTitle): \(summary)"
-            qaStatusAnnouncements.append((owner: owner, message: message))
+            if qaRecordsStatusAnnouncements {
+                qaStatusAnnouncements.append((owner: owner, message: message))
+            }
             if let accessibilityAnnouncementSink {
                 accessibilityAnnouncementSink(owner, message)
             } else {

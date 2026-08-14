@@ -531,6 +531,13 @@ run_app_check .build/debug/Array --file-markdown-perf-check
 # visible while the camera still resizes tile views.
 run_app_check .build/debug/Array --perf-budget-check --scenario canvas.pan
 run_app_check .build/debug/Array --perf-budget-zoom-check
+# The fractional-pan leg gates the float-tolerance trap: AppKit keeps the
+# bounds/frame SCALE and recomputes bounds from it, so at any zoom != 1 an
+# exact "skip unchanged writes" compare reads 420 back as 420.00000000000006
+# and rewrites every tile's bounds on every step — worse than no guard at all.
+# The zoom-1 pan leg above is structurally blind to that defect; this leg pans
+# the same fixture at zoom 0.35 and must stay at zero bounds writes.
+run_app_check .build/debug/Array --perf-budget-check --scenario canvas.fractional-pan
 run_app_check .build/debug/Array --workspace-profile-check
 run_app_check .build/debug/Array --add-zone-check
 run_app_check .build/debug/Array --browser-lru-budget-check

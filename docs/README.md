@@ -14,6 +14,13 @@ hard rules are the same file — `CLAUDE.md` symlinks to it.
 - [QA: the matrix, self-checks, witnesses](./internals/qa.md)
 - [Performance on the canvas](./internals/performance.md) — the traps that froze
   the Markdown tile, and how to get evidence instead of theories
+- [Performance budgets](./internals/performance-budgets.md) — deterministic work
+  counters, synthetic stress scenarios, and real-gesture frame statistics
+- [Scalability TDD](./internals/scalability-tdd.md) — regression ratchets,
+  complexity witnesses, hardware validation, and the staged canvas/agent plan
+- [Infinite-canvas rendering research](./internals/infinite-canvas-rendering-research.md)
+  — transferable Figma/game/map/Apple techniques and the AppKit-to-hybrid
+  escalation ladder
 
 ### Runbooks
 

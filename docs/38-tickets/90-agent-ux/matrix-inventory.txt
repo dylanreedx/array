@@ -11,9 +11,6 @@ check --agent-observer-independence-check
 check --agent-restore-check
 check --agent-status-check
 check --agent-supervisor-check
-check --perf-budget-check
-check --perf-budget-zoom-check
-check --strict-agent-harness-check
 check --agent-tile-click-focus-check
 check --app-support-channel-check
 check --bring-to-front-focus-check
@@ -72,6 +69,8 @@ check --palette-duplicate-root-check
 check --palette-first-responder-restore-check
 check --palette-jump-check
 check --palette-zone-check
+check --perf-budget-check
+check --perf-budget-zoom-check
 check --persistence-crash-safe-check
 check --project-lock-check
 check --project-picker-resolution-check
@@ -91,6 +90,7 @@ check --spawn-focus-policy-check
 check --spawn-placement-check
 check --spawn-rate-limit-check
 check --stray-window-audit-check
+check --strict-agent-harness-check
 check --terminal-fills-tile-check
 check --terminal-snapshot-tier-check
 check --terminal-theme-fidelity-check
@@ -206,9 +206,6 @@ leg run_app_check .build/debug/Array --leader-jump-check
 leg run_app_check .build/debug/Array --leader-snap-check
 leg run_app_check .build/debug/Array --leader-zone-jump-check
 leg run_app_check .build/debug/Array --location-action-surface-check
-leg run_app_check .build/debug/Array --perf-budget-check --scenario canvas.pan
-leg run_app_check .build/debug/Array --perf-budget-zoom-check
-leg run_app_check .build/debug/Array --strict-agent-harness-check
 leg run_app_check .build/debug/Array --managed-agent-model-spawn-check
 leg run_app_check .build/debug/Array --multi-zone-render-check
 leg run_app_check .build/debug/Array --nav-mode-check
@@ -223,6 +220,9 @@ leg run_app_check .build/debug/Array --palette-duplicate-root-check
 leg run_app_check .build/debug/Array --palette-first-responder-restore-check
 leg run_app_check .build/debug/Array --palette-jump-check
 leg run_app_check .build/debug/Array --palette-zone-check
+leg run_app_check .build/debug/Array --perf-budget-check --scenario canvas.fractional-pan
+leg run_app_check .build/debug/Array --perf-budget-check --scenario canvas.pan
+leg run_app_check .build/debug/Array --perf-budget-zoom-check
 leg run_app_check .build/debug/Array --persistence-crash-safe-check
 leg run_app_check .build/debug/Array --project-lock-check
 leg run_app_check .build/debug/Array --project-picker-resolution-check
@@ -242,6 +242,7 @@ leg run_app_check .build/debug/Array --spawn-focus-policy-check
 leg run_app_check .build/debug/Array --spawn-placement-check
 leg run_app_check .build/debug/Array --spawn-rate-limit-check
 leg run_app_check .build/debug/Array --stray-window-audit-check
+leg run_app_check .build/debug/Array --strict-agent-harness-check
 leg run_app_check .build/debug/Array --terminal-fills-tile-check
 leg run_app_check .build/debug/Array --terminal-snapshot-tier-check
 leg run_app_check .build/debug/Array --terminal-theme-fidelity-check
