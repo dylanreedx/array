@@ -251,6 +251,37 @@ real-gesture frame stats on the M2 Air improve or hold.
   `StreamingMarkupBuffer`/`MarkdownAgentMarkupParser` seam: reparse new bytes
   plus the open block, not the accumulated answer.
 
+### Status 2026-08-14: the row index landed; the duration target did not
+
+The witness Slice 1 never built now exists as `transcript.delta`, published RED
+and then half turned green:
+
+| witness | before | after |
+|---|---|---|
+| `worstVisitsPerDelta` | 10,000 | **1** |
+| `visitSlope` (10 → 10,000 rows) | 9,990 | **0** |
+| `fullFlattens` | 80 | **0** |
+| `worstDeltaDuration` | 43.7 ms | 36.3 ms (budget 8.3) |
+
+`apply(document:patch:)` now rebuilds only the rows its patch names, via a
+position index verified against the incoming document, with the full walk as the
+fallback for anything structural or unverifiable.
+`--transcript-delta-index-oracle-check` proves the fast path is indistinguishable
+from the full walk across ten mutations and asserts which path ran.
+
+**The leg stays KNOWN-RED on duration, for a new and narrower reason** — the same
+shape as Slice 3, where fixing the architecture revealed a second cost beneath it.
+A profile at 10,000 rows puts the remaining time in `applyUnscrolled`'s
+presentation passes (~56%) and `prepareToolDetailLifecycle` (~35%), both listed in
+this slice and neither started. Finishing them means going into the diffable
+snapshot path, which is a larger and riskier change than the index was, and part
+of the cost may be `NSDiffableDataSourceSnapshot`'s own O(rows) diffing rather
+than ours. **Awaiting a decision before starting.**
+
+Also recorded: the first fixture held one entry with `history` blocks and was
+structurally blind to the per-entry pass; the realistic one-entry-per-turn shape
+measured *worse* and is what made that second cost visible at all.
+
 **RED first:** Slice 1's transcript fixture (rows flattened per one-row delta
 at 10 vs 10,000-row history; Markdown bytes reparsed per appended byte) is
 already KNOWN-RED; this slice turns it green.
