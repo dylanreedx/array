@@ -14,8 +14,8 @@ actually renders) and `S0-density-review.md` (the open ruling).
 |---|---|
 | worktree | `~/array-worktrees/sidebar-96` |
 | branch | `array/sidebar-96`, base `d334f01` |
-| HEAD | `8e81ecd`, **clean tree**, 11 commits |
-| latest artifact | `qa-runs/2026-08-14T191207Z/sidebar-96/` (gitignored) |
+| HEAD | `fa0cc83`, **clean tree**, 14 commits |
+| latest artifact | `qa-runs/2026-08-14T193650Z/sidebar-96/` (gitignored) |
 | scratch bundle | `~/Desktop/Array Dev 96.app` on `~/array-scratch-96` |
 
 `_DESIGN.md` is **untracked in Dylan's main checkout** and therefore absent from this
@@ -135,23 +135,29 @@ sixth are **open**.
    red triangle (failed), plain square (stopped), outlined slash (cancelled).
 5. ✅ "im not seeing the provider icons" — the placeholder chips were too faint. Real
    vendor SVGs now render (`NSImage` loads SVG natively, no conversion pipeline).
-6. ⬜ **"not the biggest fan of the provider text — maybe we just have icon like T3
-   Code"**. T3's rows carry project icon + repo + time, title, then branch + small mono
-   icons on the right, **no model name**. Proposed change to the mock: drop
-   `GPT-5.6 Sol` / `Opus` / `Sonnet` text, keep the mark alone on the right of the branch
-   line. Note this interacts with §4.3's sacrifice order, which currently says *shorten
-   model text, then remove it while keeping mark(s)* — Dylan is asking to start where that
-   ladder ends. Worth confirming whether the model name should be reachable in
-   tooltip/AX only (§4.3 requires exact model ID to remain in tooltip and accessibility
-   detail either way).
-7. ⬜ **"maybe we can experiment with slightly more visual aid for the status"**.
-   Unspecified; the T3 reference shows a coloured `✓ Done` plus small trailing glyphs.
-   Options not yet tried: a leading status rail/stripe on the card, a larger status icon,
-   a coloured left edge, or an unread dot distinct from the outcome mark (§4.7 wants an
-   optional small static leading attention mark).
+6. ✅ **"not the biggest fan of the provider text — maybe we just have icon like T3
+   Code"** — the model name is gone from every mock image; the mark stands alone at the
+   right of the branch line, which now leads with a branch glyph as T3's does. §4.3 still
+   requires the exact model id to survive in tooltip and accessibility detail, which a
+   static mock cannot show — that obligation moves to Phase 3.
+7. ✅ **"maybe we can experiment with slightly more visual aid for the status"** — three
+   variants built (`status/status-{rail,leadingIcon,pill}`), all at proposal A's pitch,
+   with `proposals/proposalA-280x662-*` as the control. **Awaiting a second ruling**, now
+   in `S0-density-review.md`. Recommendation: rail.
+8. ✅ **"let's make the provider icons flat colour based on the theme"** — done, and it is
+   the one change that contradicts the design: §4.5 forbids tinting vendor marks without
+   per-vendor permission. Recorded as OPEN in `brand-marks/PROVENANCE.md`, added to
+   P3.1's trademark review. Nothing ships.
+
+The throbber caveat from item 3 is resolved as far as a still image can resolve it: it
+is now at 18 pt, its real size, and it *still* reads as dots because it is a motion glyph.
+Judge it in the live app.
 
 ## Open rulings (S0) — still needed
 
+0. **Status emphasis**: rail / leadingIcon / pill / none. Plus: keep the branch glyph?
+   And should quiet rows (Done, Stopped, Cancelled) carry no emphasis at all, which is a
+   §4.6 semantics call rather than a visual one?
 1. **Pitch**: A (66/68), B (72/75), or keep 79/83 and fix only content?
 2. **Collapse the hidden management label?** ~18 pt; the difference between A meeting
    §8.1 and missing it.
