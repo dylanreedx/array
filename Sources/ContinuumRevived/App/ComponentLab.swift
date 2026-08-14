@@ -1163,6 +1163,345 @@ final class AgentComposerReviewSurface: NSView {
     }
 }
 
+// MARK: - Program 96 row playground
+
+/// The gate-S0 row mock, with its knobs exposed so the decisions can be made by
+/// moving them instead of by re-rendering a directory of PNGs.
+///
+/// It drives exactly the drawing code the screenshot artifact does —
+/// `SidebarDensityProposalView`, from `SidebarScreenshotChecks.swift` — so what you see
+/// here and what the review images show cannot drift. Nothing is duplicated: this view
+/// only builds controls, sizes a stage, and reports arithmetic.
+///
+/// **This is a mock, not the sidebar.** No production row renders through it, and the
+/// live `AgentInboxView` still paints what P0.1 measured: two facts and a diamond. The
+/// Lab's other sidebar cards render the queue-94 *capability* corpus, which is why they
+/// have always looked better than the shipping product — do not read either as evidence
+/// of what Array does today.
+///
+/// Deliberately a `.reviewSurface` entry, not a `.staticCard`: every baseline, contrast
+/// and probe sweep guards on `.staticCard` and skips the rest, so a knob-turning surface
+/// owes no committed baseline and cannot move anyone else's.
+@MainActor
+final class SidebarRowPlaygroundView: NSView {
+    private let pitchControl = NSSegmentedControl(
+        labels: ["A · 66/68", "B · 72/75", "C · 79/83"],
+        trackingMode: .selectOne, target: nil, action: nil)
+    private let borderControl = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let iconControl = NSSegmentedControl(
+        labels: ["Icon leading", "Icon trailing"],
+        trackingMode: .selectOne, target: nil, action: nil)
+    private let appearanceControl = NSSegmentedControl(
+        labels: ["Dark", "Light"], trackingMode: .selectOne, target: nil, action: nil)
+    private let modelTextButton = NSButton(
+        checkboxWithTitle: "Model name", target: nil, action: nil)
+    private let widthSlider = NSSlider(value: 280, minValue: 200, maxValue: 420,
+                                       target: nil, action: nil)
+    private let widthLabel = NSTextField(labelWithString: "280 pt")
+    private let readout = NSTextField(labelWithString: "")
+    private let stage = NSView()
+    private var mock: SidebarDensityProposalView?
+
+    /// The sidebar height every row-count claim in the S0 review is made against.
+    private static let referenceSidebarHeight: CGFloat = 662
+
+    private static let borders: [(title: String, border: SidebarRowAnatomy.Border)] = [
+        ("No card border", .none),
+        ("Rail · 3 pt", .rail),
+        ("Rail · 2 pt", .railThin),
+        ("Outline · 1 pt", .outline),
+        ("Dashed (focused-tile language)", .dashed),
+        ("Bracket", .bracket),
+    ]
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+
+        borderControl.addItems(withTitles: Self.borders.map(\.title))
+        // Where round four left the argument, so the surface opens on the current
+        // proposal rather than on an arbitrary default.
+        pitchControl.selectedSegment = 0
+        borderControl.selectItem(at: 0)
+        iconControl.selectedSegment = 0
+        appearanceControl.selectedSegment = 0
+        modelTextButton.state = .off
+
+        for control in [pitchControl, iconControl, appearanceControl] {
+            control.target = self
+            control.action = #selector(controlChanged)
+        }
+        borderControl.target = self
+        borderControl.action = #selector(controlChanged)
+        modelTextButton.target = self
+        modelTextButton.action = #selector(controlChanged)
+        widthSlider.target = self
+        widthSlider.action = #selector(controlChanged)
+        widthSlider.isContinuous = true
+
+        readout.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        readout.lineBreakMode = .byWordWrapping
+        readout.maximumNumberOfLines = 2
+        widthLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        widthLabel.alignment = .right
+
+        let widthRow = NSStackView(views: [
+            NSTextField(labelWithString: "Width"), widthSlider, widthLabel,
+        ])
+        widthRow.orientation = .horizontal
+        widthRow.spacing = CGFloat(Space.s)
+        widthSlider.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        widthLabel.widthAnchor.constraint(equalToConstant: 52).isActive = true
+
+        let topRow = NSStackView(views: [pitchControl, iconControl, modelTextButton])
+        topRow.orientation = .horizontal
+        topRow.spacing = CGFloat(Space.m)
+
+        let secondRow = NSStackView(views: [borderControl, appearanceControl])
+        secondRow.orientation = .horizontal
+        secondRow.spacing = CGFloat(Space.m)
+
+        let controls = NSStackView(views: [topRow, secondRow, widthRow, readout])
+        controls.orientation = .vertical
+        controls.alignment = .leading
+        controls.spacing = CGFloat(Space.s)
+        controls.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(controls)
+
+        let scroller = NSScrollView()
+        scroller.hasVerticalScroller = true
+        scroller.drawsBackground = false
+        scroller.translatesAutoresizingMaskIntoConstraints = false
+        stage.frame = NSRect(x: 0, y: 0, width: 420, height: Self.referenceSidebarHeight)
+        scroller.documentView = stage
+        addSubview(scroller)
+
+        let inset = CGFloat(Space.l)
+        NSLayoutConstraint.activate([
+            controls.topAnchor.constraint(equalTo: topAnchor, constant: inset),
+            controls.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset),
+            controls.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -inset),
+            scroller.topAnchor.constraint(
+                equalTo: controls.bottomAnchor, constant: CGFloat(Space.m)),
+            scroller.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset),
+            scroller.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -inset),
+            scroller.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -inset),
+        ])
+
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("Program 96 sidebar row playground")
+        rebuild()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var isFlipped: Bool { true }
+
+    @objc private func controlChanged() { rebuild() }
+
+    private var proposal: SidebarDensityProposal {
+        SidebarDensityProposal.all[
+            min(max(pitchControl.selectedSegment, 0), SidebarDensityProposal.all.count - 1)]
+    }
+
+    private var anatomy: SidebarRowAnatomy {
+        let border = Self.borders[max(borderControl.indexOfSelectedItem, 0)].border
+        return SidebarRowAnatomy(
+            id: "playground", label: "playground",
+            border: border,
+            iconPlacement: iconControl.selectedSegment == 0 ? .leading : .trailing,
+            showsModelText: modelTextButton.state == .on)
+    }
+
+    private func rebuild() {
+        let width = (widthSlider.doubleValue / 2).rounded() * 2   // even points, no half-pixels
+        widthLabel.stringValue = "\(Int(width)) pt"
+        let appearance = NSAppearance(
+            named: appearanceControl.selectedSegment == 0 ? .darkAqua : .aqua)
+
+        mock?.removeFromSuperview()
+        let proposal = self.proposal
+        let view = SidebarDensityProposalView(
+            proposal: proposal, anatomy: anatomy,
+            frame: NSRect(x: 0, y: 0, width: width, height: Self.referenceSidebarHeight))
+        view.appearance = appearance
+        stage.frame = NSRect(
+            x: 0, y: 0, width: max(width, 1), height: Self.referenceSidebarHeight)
+        stage.addSubview(view)
+        mock = view
+
+        // The two numbers S0 actually turns on, live. The bare figure is what a probe
+        // measures; the second is what a person sees, because the shipped sidebar spends
+        // part of its height on its own header — measured off `WorkspaceSidebarView`, not
+        // assumed. An earlier draft of the review quoted only the first and overstated
+        // the densest proposal by a whole row.
+        let chrome = SidebarScreenshotChecks.measureSidebarInboxHeight(
+            sidebarHeight: Self.referenceSidebarHeight, width: width,
+            appearance: appearance ?? NSAppearance.currentDrawing())
+        readout.stringValue = String(
+            format: "card %.0f pt · pitch %.0f pt — %d rows in a bare %.0f pt inbox, "
+                + "%d inside a real %.0f pt sidebar (%.0f pt of chrome). §8.1 asks for 9.",
+            proposal.cardHeight, proposal.pitch,
+            proposal.completeRows(in: Self.referenceSidebarHeight),
+            Self.referenceSidebarHeight,
+            proposal.completeRows(in: chrome.inbox), Self.referenceSidebarHeight,
+            chrome.chrome)
+    }
+}
+
+/// The program-96 row inside the REAL inbox — scrollable, hoverable, selectable,
+/// right-clickable — with the same knobs as the static playground above it.
+///
+/// It is a live `AgentInboxView` with `cardStyleOverride` set. Nothing about the
+/// list is reimplemented: hover, multi-selection, the context menu, disclosure,
+/// jump pills, rename and the scope popup are queue 94's, and what is swapped is
+/// the card. That is also the honest scope of program 96 — the list's *behaviour*
+/// was never the complaint.
+///
+/// **The rows are the queue-94 CAPABILITY fixtures, not production output.** They
+/// carry a project, a branch, a model and a real state on every row. Production
+/// does not: P0.1 measured `meta` and `branch` empty in all 30 production flows.
+/// So this shows what the design does with good data, and the live sidebar is
+/// still the thing to look at for what Array renders today.
+@MainActor
+final class SidebarInbox96PlaygroundView: NSView {
+    private let pitchControl = NSSegmentedControl(
+        labels: ["A · 66/68", "B · 72/75", "C · 79/83"],
+        trackingMode: .selectOne, target: nil, action: nil)
+    private let borderControl = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let iconControl = NSSegmentedControl(
+        labels: ["Icon leading", "Icon trailing"],
+        trackingMode: .selectOne, target: nil, action: nil)
+    private let styleControl = NSSegmentedControl(
+        labels: ["96 row", "Today's row"],
+        trackingMode: .selectOne, target: nil, action: nil)
+    private let modelTextButton = NSButton(
+        checkboxWithTitle: "Model name", target: nil, action: nil)
+    private let readout = NSTextField(labelWithString: "")
+    private let inbox: AgentInboxView
+
+    private static let borders: [(title: String, border: SidebarRowAnatomy.Border)] = [
+        ("No card border", .none),
+        ("Rail · 3 pt", .rail),
+        ("Rail · 2 pt", .railThin),
+        ("Outline · 1 pt", .outline),
+        ("Dashed (focused-tile language)", .dashed),
+        ("Bracket", .bracket),
+    ]
+
+    override init(frame frameRect: NSRect) {
+        inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+        super.init(frame: frameRect)
+        wantsLayer = true
+
+        // Pinned, not live: a parked row's "12m ago" is read off this clock and a
+        // wall clock would make the row flap while you are looking at it.
+        inbox.clock = { LabFixtures.inboxNow }
+        inbox.reload(rows: LabFixtures.inboxRows())
+
+        borderControl.addItems(withTitles: Self.borders.map(\.title))
+        pitchControl.selectedSegment = 0
+        borderControl.selectItem(at: 0)
+        iconControl.selectedSegment = 0
+        styleControl.selectedSegment = 0
+        modelTextButton.state = .off
+        for control in [pitchControl, iconControl, styleControl] {
+            control.target = self
+            control.action = #selector(controlChanged)
+        }
+        borderControl.target = self
+        borderControl.action = #selector(controlChanged)
+        modelTextButton.target = self
+        modelTextButton.action = #selector(controlChanged)
+
+        readout.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        readout.maximumNumberOfLines = 2
+        readout.lineBreakMode = .byWordWrapping
+
+        let topRow = NSStackView(views: [styleControl, pitchControl])
+        topRow.orientation = .horizontal
+        topRow.spacing = CGFloat(Space.m)
+        let secondRow = NSStackView(views: [borderControl, iconControl, modelTextButton])
+        secondRow.orientation = .horizontal
+        secondRow.spacing = CGFloat(Space.m)
+        let controls = NSStackView(views: [topRow, secondRow, readout])
+        controls.orientation = .vertical
+        controls.alignment = .leading
+        controls.spacing = CGFloat(Space.s)
+        controls.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(controls)
+
+        inbox.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(inbox)
+
+        let pad = CGFloat(Space.l)
+        NSLayoutConstraint.activate([
+            controls.topAnchor.constraint(equalTo: topAnchor, constant: pad),
+            controls.leadingAnchor.constraint(equalTo: leadingAnchor, constant: pad),
+            controls.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -pad),
+            inbox.topAnchor.constraint(
+                equalTo: controls.bottomAnchor, constant: CGFloat(Space.m)),
+            inbox.leadingAnchor.constraint(equalTo: leadingAnchor, constant: pad),
+            inbox.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -pad),
+            inbox.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -pad),
+        ])
+
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("Program 96 live sidebar")
+        applyStyle()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var isFlipped: Bool { true }
+
+    @objc private func controlChanged() { applyStyle() }
+
+    private var proposal: SidebarDensityProposal {
+        SidebarDensityProposal.all[
+            min(max(pitchControl.selectedSegment, 0), SidebarDensityProposal.all.count - 1)]
+    }
+
+    private var anatomy: SidebarRowAnatomy {
+        SidebarRowAnatomy(
+            id: "live", label: "live",
+            border: Self.borders[max(borderControl.indexOfSelectedItem, 0)].border,
+            iconPlacement: iconControl.selectedSegment == 0 ? .leading : .trailing,
+            showsModelText: modelTextButton.state == .on)
+    }
+
+    private func applyStyle() {
+        // "Today's row" clears the override, which puts the list back to exactly
+        // what ships — the A/B this section exists for.
+        let uses96 = styleControl.selectedSegment == 0
+        for control in [pitchControl, iconControl] { control.isEnabled = uses96 }
+        borderControl.isEnabled = uses96
+        modelTextButton.isEnabled = uses96
+
+        guard uses96 else {
+            inbox.cardStyleOverride = nil
+            readout.stringValue = "Today's shipping row — queue 94, content-derived height."
+            return
+        }
+        let proposal = self.proposal
+        let anatomy = self.anatomy
+        inbox.cardStyleOverride = AgentInboxCardStyleOverride(
+            makeCell: { AgentInbox96CellView(proposal: proposal, anatomy: anatomy) },
+            cardHeight: { _ in AgentInbox96CellView.rowHeight(for: proposal) })
+        let chrome = SidebarScreenshotChecks.measureSidebarInboxHeight(
+            sidebarHeight: 662, width: 280, appearance: effectiveAppearance)
+        readout.stringValue = String(
+            format: "card %.0f pt · pitch %.0f pt — %d rows in a bare 662 pt inbox, "
+                + "%d inside a real one. Scroll, hover, click, ⌘-click, right-click.",
+            proposal.cardHeight, proposal.pitch,
+            proposal.completeRows(in: 662), proposal.completeRows(in: chrome.inbox))
+    }
+}
+
 // MARK: - Catalog
 
 @MainActor
@@ -1186,8 +1525,42 @@ enum LabCatalog {
             // MARK: 90-agent-ux cards
             branchChipCard, agentInboxCard, agentInboxSelectedCard, agentInboxParkedCard,
             agentInboxShelfCard, agentInboxJumpHintsCard, agentInboxBulkCard,
-            managedAgentProviderCard
+            managedAgentProviderCard,
+
+            // MARK: 96-agent-sidebar-product-redesign
+            sidebarLive96Card, sidebarRowPlaygroundCard
         ]
+    }
+
+    /// The redesigned row in the REAL list, with a switch back to today's row.
+    static var sidebarLive96Card: LabEntry {
+        LabEntry(
+            id: "sidebar96.live", category: "Sidebar 96",
+            title: "Live Sidebar",
+            summary: "The 96 row inside the shipped AgentInboxView — scroll it, hover it, "
+                + "select it, right-click it — with a switch back to today's row for "
+                + "comparison. Rows are queue 94's capability fixtures, which carry more "
+                + "than production actually renders.",
+            content: .reviewSurface(preferredSize: NSSize(width: 420, height: 860)) {
+                SidebarInbox96PlaygroundView(
+                    frame: NSRect(x: 0, y: 0, width: 420, height: 860))
+            })
+    }
+
+    /// Gate S0's row mock, with its knobs live. See `SidebarRowPlaygroundView` — and note
+    /// that it is a MOCK: no production row renders through it.
+    static var sidebarRowPlaygroundCard: LabEntry {
+        LabEntry(
+            id: "sidebar.rowPlayground", category: "Sidebar 96",
+            title: "Row Playground (static)",
+            summary: "Gate S0's row mock with pitch, card border, glyph placement, model "
+                + "name, width and appearance as controls. Reports rows-per-662pt for a "
+                + "bare inbox and for a real sidebar. A mock — production still paints "
+                + "two facts and a diamond.",
+            content: .reviewSurface(preferredSize: NSSize(width: 560, height: 820)) {
+                SidebarRowPlaygroundView(
+                    frame: NSRect(x: 0, y: 0, width: 560, height: 820))
+            })
     }
 
     /// Muted body/metadata text on a lab card (P1.6).

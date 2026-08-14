@@ -215,8 +215,11 @@ enum SlimRowFitTier: String, CaseIterable {
     var drawsTime: Bool { self != .timeHidden }
 }
 
+/// Internal, not private: program 96's card (`AgentInbox96CellView`) reports its
+/// label geometry through the same helper, so the two cells cannot describe
+/// themselves to a gate in two different ways.
 @MainActor
-private func inboxLabelGeometryForQA(
+func inboxLabelGeometryForQA(
     _ element: String, label: NSTextField, in cell: NSView
 ) -> AgentInboxLabelGeometryForQA {
     let font = label.font
@@ -287,8 +290,34 @@ private final class AgentInboxTableView: NSTableView {
 }
 
 @MainActor
+/// An alternative CARD presentation for the inbox, injected from outside.
+///
+/// Program 96 redesigns the row. It needs to be operated — scrolled, hovered,
+/// selected, right-clicked — long before the S0 pitch ruling lets it become the
+/// default, and reimplementing this list to do that would mean a second sidebar
+/// with its own bugs. So the list stays exactly as queue 94 built it and the two
+/// things that differ are handed in: how a card row is built, and how tall it is.
+///
+/// nil is the default and the only value production or any existing gate sees.
+struct AgentInboxCardStyleOverride {
+    let makeCell: () -> AgentInboxRowCell
+    /// A 96 card's height is fixed by its pitch rather than derived from which
+    /// bands have content, because every band always has content.
+    let cardHeight: (AgentInboxRow) -> Double
+}
+
 final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                             NSTextFieldDelegate, TokenThemed {
+    /// Set to preview a redesigned card row in this real list. See
+    /// `AgentInboxCardStyleOverride`; nil everywhere but the Component Lab.
+    var cardStyleOverride: AgentInboxCardStyleOverride? {
+        didSet {
+            rebuildRowsForQA()
+            tableView.noteHeightOfRows(
+                withIndexesChanged: IndexSet(integersIn: 0..<tableView.numberOfRows))
+        }
+    }
+
     /// The tallest card height: three lines (metadata, name, detail), the two
     /// inter-band gaps, and the card's own padding. It remains a useful ceiling
     /// for offscreen probes, while individual cards use `height(for:)` below so
@@ -1985,6 +2014,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             case .agent: return AgentInboxView.shelfHeaderHeight
             }
         }
+        // A 96 card is a FIXED three-band pitch — every band is always drawn, which
+        // is the point of the redesign — so its height cannot come from the
+        // content-derived ladder below. Cards only: a slim row is queue-94's and
+        // stays queue-94's.
+        if let override = cardStyleOverride, model.variant == .card {
+            return CGFloat(override.cardHeight(model))
+        }
         let indent = Double(max(0, model.depth)) * AgentInboxView.indentPerLevel
         let available = max(
             0,
@@ -2063,7 +2099,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let interacting = isInteracting(row: row)
         let cell: AgentInboxRowCell
         switch model.variant {
-        case .card: cell = AgentInboxCellView()
+        // Program 96's redesigned card, when something has injected one. nil is the
+        // default and the only thing production or any queue-94 gate ever sees.
+        case .card: cell = cardStyleOverride?.makeCell() ?? AgentInboxCellView()
         case .slim: cell = AgentInboxSlimCellView()
         }
         needsHeightRevalidation = true

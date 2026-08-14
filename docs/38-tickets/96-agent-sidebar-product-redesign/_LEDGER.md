@@ -604,3 +604,83 @@ re-rendered, with the reason recorded in the review and the old images still on 
 (30/30), `--sidebar-ux-check`, `--agent-inbox-check`,
 `swift run ContinuumRevivedAgentUIChecks`, `scripts/check-color-hygiene.sh`.
 `ComponentLab.swift` still 0 lines against `d334f01`.
+
+---
+
+## Round 5 — the row becomes a real cell (2026-08-14)
+
+Dylan: *"we need to replace the sidebar we have now… the Row Playground (96) option
+has a non interactable sidebar."* Correct — everything before this was a painting.
+`SidebarDensityProposalView` draws chosen strings into a bitmap; you cannot click it.
+
+**`AgentInbox96CellView` is a real `AgentInboxRowCell`, rendered by the shipped
+`AgentInboxView`.** Scroll, hover, multi-select, right-click, disclosure, jump pills,
+rename and accessibility are queue 94's and are not reimplemented — the list's
+*behaviour* was never program 96's complaint. What is swapped is the card.
+
+### The seam, and why it is this small
+
+`AgentInboxView.cardStyleOverride` — nil by default and nil everywhere except the Lab
+section that sets it. Two things are handed in: how a card row is built, and how tall it
+is (a 96 card's height is fixed by its pitch, because every band always has content,
+where queue-94's is derived from which bands are populated).
+
+Three lines of production behaviour change, all guarded by that nil. Rebuilding the list
+instead would have meant a second sidebar with its own bugs; making 96 the DEFAULT is
+Phase 1–3 and needs the S0 ruling, because the pitch is still a proposal.
+
+`inboxLabelGeometryForQA` went `private` → internal so both cells describe themselves to
+a gate through one helper.
+
+### No second owner
+
+`InkAlignedSymbol` and `BrandMark96` moved into the cell's file and
+`SidebarScreenshotChecks` now calls them. The review images, the live cell and the
+alignment witness are one implementation — a witness measuring a copy of the alignment
+would have proved nothing about the thing you click on.
+
+### Rendering it found three bugs the mock could not
+
+The live render went into the artifact (`live96-A-280x662-*.png`) precisely so this
+would be caught by looking:
+
+1. **The bands came out upside down.** `AgentInboxCardView` is not flipped; the anatomy
+   is specified top-down. The model name drew above the title and the placement below it.
+2. **`Done` rendered as `Do…`.** `NSAttributedString.size()` is not a label's width — an
+   `NSTextField` spends part of its frame on its own inset. Measured at 30.0 pt for a
+   word needing 32. This codebase already knew: `minimumTextWidth` adds
+   `Metrics.cellTextInset` and says why. Fixed by reusing that constant, not a new fudge.
+3. **No production row ever matched a brand mark.** The mock used display names
+   (`GPT-5.6 Sol`), so `hasPrefix("GPT")` worked. Real ids are fully qualified
+   `provider/model` — `openai-codex/gpt-5.6-sol` — exactly as non-negotiable #5 requires.
+   Every production row fell through to printing its whole model id across band 3.
+   Marks are now keyed off the PROVIDER segment, and the name fallback prints the model's
+   trailing segment with the exact id kept in tooltip and AX (§4.3).
+
+All three were invisible in every mock image and obvious in the first live one. That is
+the argument for the live fixture existing.
+
+### What the live image shows, which is the point
+
+Production rows in the new anatomy: **band 3 is empty but for the provider mark** on
+almost every row, one row carries a state word, none carries a time. The redesign does
+not fix that by itself — Phases 1–3 do. The mock's good data is not evidence that they
+have.
+
+### Verified
+
+`--sidebar-ux-check`, `--agent-inbox-check`, `--sidebar-production-corpus-check`,
+`--ui-probe-check`, `--ui-contrast-check`, `ContinuumRevivedAgentUIChecks` (incl. the
+queue-94 corpus gate), `scripts/check-color-hygiene.sh` — all PASS, with the override nil.
+`--sidebar-screenshot-check` 44 images. `--component-lab-check` and `--ui-baseline-check`
+remain red and remain in `MATRIX_KNOWN_RED`: the first fails on the composer provider
+footer, the second on a provider-controls pixel diff plus 12 `chrome.agentInbox`
+baselines orphaned by a size change. Neither mentions anything added here.
+
+### ComponentLab.swift is no longer at zero diff, deliberately
+
+It could not be: a Lab entry lives in that file. The gate's actual contract was checked
+first — `runSidebarDefectCorpusChecks` scans only between the two
+`P0.3 SIDEBAR DEFECT CORPUS` markers (lines 415–607), and every added line is past 1165.
+Both new entries are `.reviewSurface`, not `.staticCard`, so the baseline, contrast and
+probe sweeps skip them — verified: `--ui-baseline-check` mentions the new ids zero times.

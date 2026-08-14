@@ -387,6 +387,76 @@ enum SidebarScreenshotChecks {
                 }
             }
 
+            // The REAL list rendering the REAL rows through the redesigned cell.
+            //
+            // Every other 96 image is a mock: `SidebarDensityProposalView` paints
+            // chosen strings, so it can only ever show the design at its best. This
+            // one is `AgentInboxView` — the shipped list, the shipped join, the
+            // production corpus — with `cardStyleOverride` set. It is therefore the
+            // only image in the set that answers the question that matters: what
+            // does the new row look like carrying what the app ACTUALLY produces?
+            //
+            // The answer is worth looking at: production rows have no branch and no
+            // model, so band 3 is empty on almost every one. The redesign does not
+            // fix that by itself — Phases 1–3 do — and this image is what stops the
+            // mock's good data from being mistaken for evidence that they have.
+            for proposal in [SidebarDensityProposal.a] {
+                try drawing(appearance) {
+                    let host = try makeHost(
+                        width: 280, height: denseViewportHeight, appearance: appearance,
+                        reduceMotion: false, increaseContrast: false)
+                    host.inbox.cardStyleOverride = AgentInboxCardStyleOverride(
+                        makeCell: {
+                            AgentInbox96CellView(
+                                proposal: proposal,
+                                anatomy: SidebarRowAnatomy(
+                                    id: "live", label: "live", border: .none,
+                                    iconPlacement: .leading, showsModelText: false))
+                        },
+                        cardHeight: { _ in AgentInbox96CellView.rowHeight(for: proposal) })
+                    host.inbox.reload(rows: denseRows)
+                    host.inbox.layoutForQA()
+                    // An offscreen table defers its incremental reload indefinitely,
+                    // and setting the override goes through exactly that path.
+                    host.inbox.rebuildRowsForQA()
+                    host.inbox.layoutForQA()
+                    let geometry = measuredGeometry(in: host)
+                    // What the redesigned cell actually gave each band, read off the
+                    // live cells. A row whose state column is narrower than the word
+                    // it holds is a truncation nobody would spot in a thumbnail.
+                    if appearanceName == .darkAqua {
+                        for cell in host.inbox.qaMaterializedRowCells.prefix(4)
+                        where cell.qaAgentID != nil {
+                            let frames = cell.qaGeometry.elementFrames
+                            print(String(
+                                format: "SidebarScreenshotChecks: live96 '%@' — state '%@' "
+                                    + "in %.1fpt, title in %.1fpt, glyph '%@', provider '%@'",
+                                cell.qaTitle.prefix(24).description, cell.qaStateLabel,
+                                frames["state"]?.width ?? -1, frames["title"]?.width ?? -1,
+                                cell.qaGlyph, cell.qaProviderGlyph))
+                        }
+                    }
+                    let rep = try UIProbe.bitmap(of: host.container, id: "live96")
+                    let name = "live96-\(proposal.id)-280x\(Int(denseViewportHeight))-\(shortName(appearanceName)).png"
+                    try writePNG(rep, to: directory.appendingPathComponent(name))
+                    entries.append(Entry(
+                        png: name, fixture: "live96-\(proposal.id)",
+                        widthRequestedPt: 280,
+                        widthMeasuredPt: Double(host.inbox.bounds.width),
+                        heightPt: Double(denseViewportHeight),
+                        appearance: shortName(appearanceName),
+                        reduceMotion: "forced-off", increaseContrast: "forced-off",
+                        scale: Double(UIProbe.renderScale),
+                        captureType: "offscreen-probe", checkFlag: flag,
+                        digest: UIProbe.digest(of: rep),
+                        rowsRendered: host.inbox.qaMaterializedRowCells.count,
+                        completeRowsIn662pt: completeRows(
+                            in: host, viewportHeight: denseViewportHeight),
+                        cardHeightPt: geometry.map { Double($0.card) },
+                        pitchPt: geometry.map { Double($0.pitch) }))
+                }
+            }
+
             // ONE interaction reference: a selected row, so the review can see the fill
             // and gutter §4.4 talks about.
             //
