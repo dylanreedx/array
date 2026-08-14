@@ -180,6 +180,20 @@ qualitative gap the merge commit left open — it is the only evidence the count
 could never supply — but it is NOT the frame trace above, which remains
 unmeasured. Do not cite it as one.
 
+**And on the next build, with 9 tiles open, he was more specific: panning "feels
+fine, great even", zooming "almost the same, very choppy".** That split is the
+whole finding. Panning translates at a fixed scale and can reuse rendered
+content; zooming changes scale, so every layer-backed subtree re-rasterizes. The
+30-second sample of that real gesture — the trace this section had marked
+"not measured" since the beginning — put ~2,600 samples in
+`CA::Layer::display_if_needed`, ~960 in the forced `layoutSubtreeIfNeeded`
+beneath it, ~380 in the chrome floors, and ~380 in the camera. **The camera was
+the third-largest cost**, and `canvas.zoom` could only see the camera, which is
+why it read green. The scenario now counts chrome redraws and is KNOWN-RED again.
+The lesson is not that the camera work was wasted — pan proves it was not — but
+that a witness which never rasterizes cannot score a gesture whose cost IS
+rasterization.
+
 ## Stress testing changed the answer (same day)
 
 The above was measured at 12 tiles in one zone at zoom 1.0, and that scenario was

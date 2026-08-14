@@ -334,6 +334,32 @@ final class CanvasNSView: NSView, TokenThemed {
         return mismatches
     }
 
+    /// QA: redraw invalidations every installed tile's chrome has asked for.
+    ///
+    /// This is the counter the camera budgets were MISSING, and its absence made
+    /// `canvas.zoom` report a fixed canvas as green while a real one stayed
+    /// choppy. The budgets measured layout work and wall time on a harness that
+    /// never rasterizes — but a zoom changes SCALE, so the cost that dominates a
+    /// real gesture is re-rasterizing layer-backed content at the new scale, and
+    /// forced layout underneath it. A 30-second `sample` of a real pinch over 9
+    /// live tiles (2026-08-14) put ~2,600 samples in `CA::Layer::display_if_needed`
+    /// and only ~380 in the camera itself.
+    ///
+    /// Counting INVALIDATIONS rather than timing AppKit's rasterization keeps the
+    /// witness deterministic and headless, for the same reason the camera budgets
+    /// count bounds writes instead of timing `layoutSubtree`: the invalidation is
+    /// the decision we control, and the redraw is its consequence.
+    var qaTotalTileChromeRedrawCount: Int {
+        tileViewsInVisualOrder.reduce(0) { $0 + $1.qaTitleBarRedrawCount }
+    }
+
+    /// QA: canvas-driven layout invalidations across every installed tile. A
+    /// camera step must not mark tile bodies for relayout — that is what makes a
+    /// rasterization pass drag the whole subtree with it.
+    var qaTotalTileLayoutInvalidationCount: Int {
+        tileViewsInVisualOrder.reduce(0) { $0 + $1.qaCanvasLayoutInvalidationCount }
+    }
+
     /// QA: how many installed tiles actually intersect the visible canvas at the
     /// current camera. The gap between this and `qaTotalInstalledTileCount` is
     /// the work a camera step spends on tiles the user cannot see.

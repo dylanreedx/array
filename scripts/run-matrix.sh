@@ -83,6 +83,22 @@ MATRIX_KNOWN_RED=(
   --agent-supervisor-check
   --nav-mode-check
   --palette-first-responder-restore-check
+  # RE-RED on 2026-08-14, and it is the witness that changed, not the code. This
+  # leg went green when the content inset stopped reflowing tile bodies, and Dylan
+  # then reported that a real pinch over 9 live tiles still felt choppy while
+  # panning felt great. He was right and the scenario was wrong: it drives
+  # setViewport + layoutSubtreeIfNeeded on a headless harness, so it measures
+  # LAYOUT and never rasterizes — but a zoom changes SCALE, and re-rendering
+  # layer-backed content at the new scale is the cost that dominates. A 30-second
+  # sample of the real gesture put ~2,600 samples in CA::Layer::display_if_needed
+  # and ~960 in the forced subtree layout beneath it, against ~380 in the camera.
+  # The scenario now counts chrome redraw invalidations, which pan scores 0 on and
+  # zoom scores 1,392 on against a bucket-shaped bound of 192. Quantising the
+  # chrome floor into 1/8 scale buckets takes it to 132 (measured, not committed —
+  # it is product-visible). That only addresses chrome; the content rasterization
+  # is Slice 5's semantic-zoom work. Published in
+  # docs/internals/performance-budgets.md; do NOT bisect it as a regression.
+  --perf-budget-zoom-check
   # The streaming axis's product target. Still RED, but NOT for the reason it was
   # published: the incremental row index (.plans/22 Slice 4) took the delta from
   # 10,000 block visits to 1, with fullFlattens 0 and slope 0, and the wall clock
