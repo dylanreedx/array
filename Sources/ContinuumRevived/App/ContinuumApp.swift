@@ -1370,6 +1370,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--transcript-delta-index-oracle-check") {
+            do {
+                _ = NSApplication.shared
+                try TranscriptIndexOracleChecks.run()
+                print("ContinuumRevivedTranscriptIndexOracleChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--agent-incremental-refresh-check") {
             do {
                 _ = NSApplication.shared
