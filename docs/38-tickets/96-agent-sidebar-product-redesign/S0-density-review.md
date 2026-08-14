@@ -138,16 +138,20 @@ bands, which Phases 1–3 do anyway.
 
 ## The artifact
 
-`~/array-worktrees/sidebar-96/qa-runs/2026-08-14T165622Z/sidebar-96/`
+`~/array-worktrees/sidebar-96/qa-runs/2026-08-14T171935Z/sidebar-96/`
 
-Captured from a **clean tree** at commit `5e47eb5`, bundle
-`~/Desktop/Array Dev 96.app` (binary SHA-256 `4007389c…f334f3d`, build 1) over
-`~/array-scratch-96`. Four legs, all PASS, 44 images:
+Captured from a **clean tree** at commit `b9d3768`, bundle `~/Desktop/Array Dev 96.app`
+(binary SHA-256 `69a7fc9b…e00b9097`, build 1) over `~/array-scratch-96`. Four legs, all
+PASS, 42 images:
 
 | leg | what |
 |---|---|
 | `live-w220/`, `live-w280/`, `live-w360/` | the shipped app, real window, 2 captures each |
-| `offscreen/` | 38 images — corpus sweeps, the 662 pt density fixtures, accessibility variants, and `proposals/` |
+| `offscreen/` | 36 images — corpus sweeps, the 662 pt density fixtures, one interaction reference, and `proposals/` |
+
+The two worth opening first: `live-w280/live-window-280pt.png` (the baseline) and
+`offscreen/proposals/proposalC-280x662-darkAqua.png` (today's pitch with the design's
+content — the image that reframes the question).
 
 `qa-runs/` is gitignored, so the images live outside the repo; the manifest records
 everything needed to regenerate them.
