@@ -115,8 +115,209 @@ enum PerfScenarios {
             // writes. The name deliberately shares no prefix with canvas.pan /
             // canvas.zoom — the scenario filter is prefix-matched.
             Scenario(name: "canvas.fractional-pan", run: { try canvasCamera(.pan, zoom: 0.35, label: "fractional-pan") }),
+            // The camera's COMPLEXITY witness, as opposed to the three scenarios
+            // above which measure one fixed canvas. It sweeps the number of
+            // INSTALLED tiles while holding the visible count fixed, so what it
+            // reports is the slope: does a camera step cost more because more
+            // tiles exist somewhere, whether or not the user can see them?
+            // Known-red against the product target today, by construction.
+            Scenario(name: "canvas.camera-slope", run: { try canvasCameraSlope() }),
             Scenario(name: "canvas.stress", isStress: true, run: { try canvasStress() })
         ]
+    }
+
+    // MARK: - Scenario: camera cost against INSTALLED tile count
+
+    /// Does a camera step cost more simply because more tiles exist?
+    ///
+    /// The three fixed-canvas scenarios can all be green while the camera is
+    /// still O(installed tiles) — they just never change that number. This one
+    /// sweeps installed tiles `16 → 128` while holding the VISIBLE count fixed
+    /// (a small cluster near the origin stays on screen; the filler tiles sit far
+    /// outside the viewport at every zoom used), and reports the slope.
+    ///
+    /// What it asserts, and why each budget exists:
+    ///
+    /// - `cameraMutations` — the camera should write ONE ancestor's geometry per
+    ///   step. Today nothing does, so this reads 0 and is RED. It turns green
+    ///   when the retained world plane lands (.plans/22 Slice 3).
+    /// - `tileGeometryWrites` / `writeSlope` — a camera step must not touch tile
+    ///   geometry at all, so growing the installed count must not grow the work.
+    ///   Today every installed tile takes a frame-origin write every step, so
+    ///   both are RED and the slope is exactly the tile-count delta.
+    /// - `screenFrameMismatches` — the correctness invariant, GREEN today and
+    ///   required to stay green: every visible tile sits where
+    ///   `CanvasEngine.tileScreenFrame` says. This is what makes the zeroes above
+    ///   trustworthy; a canvas that stopped moving tiles would report zero writes
+    ///   and zero mutations too, and only this budget would catch it.
+    ///
+    /// Duration here is a coarse alarm and NOT the scaling signal: the fixture
+    /// deliberately uses cheap `DescriptorTileNSView`s so 128 tiles × 8
+    /// configurations stays affordable in the matrix. `canvas.stress` owns the
+    /// real-content cost curve.
+    static func canvasCameraSlope() throws -> PerfScenarioResult {
+        let installedCounts = [16, 32, 64, 128]
+        let zooms: [Double] = [1.0, 0.35]
+        let steps = 40
+        let visibleClusterCount = 12
+
+        struct Sample {
+            let installed: Int
+            let zoom: Double
+            let onScreen: Int
+            let mutations: Int
+            let geometryWrites: Int
+            let mismatches: Int
+            let perStepMs: Double
+        }
+        var samples: [Sample] = []
+
+        for zoom in zooms {
+            for installed in installedCounts {
+                let canvas = CanvasNSView(
+                    canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: zoom),
+                                             tiles: [], groups: [], lastActiveTileId: nil),
+                    activeZone: nil, zoneRenderModels: [], showsZoneChrome: false
+                )
+                canvas.frame = CGRect(x: 0, y: 0, width: 1_600, height: 1_000)
+                let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless],
+                                      backing: .buffered, defer: false)
+                window.contentView = canvas
+                window.orderFrontRegardless()
+
+                var tiles: [Tile] = []
+                for index in 0..<installed {
+                    // The first `visibleClusterCount` tiles form the on-screen
+                    // cluster; everything after sits far enough out to be
+                    // off-screen at zoom 1.0 AND at 0.35 (where the viewport
+                    // covers ~4571 x 2857 world units), and stays off-screen
+                    // across the pan below.
+                    let frame: TileFrame
+                    if index < visibleClusterCount {
+                        frame = TileFrame(x: Double(index % 4) * 380 + 40,
+                                          y: Double(index / 4) * 300 + 60,
+                                          width: 340, height: 240)
+                    } else {
+                        let filler = index - visibleClusterCount
+                        frame = TileFrame(x: 9_000 + Double(filler % 16) * 500,
+                                          y: 7_000 + Double(filler / 16) * 400,
+                                          width: 340, height: 240)
+                    }
+                    tiles.append(Tile(
+                        id: UUID(), kind: .note, title: "slope-\(index)",
+                        frame: frame, zPosition: .fromLegacyRank(index + 1),
+                        runtimeRef: nil, metadata: TileMetadata()
+                    ))
+                }
+                // `install` is what appends to the flat model, so the harness
+                // does not (and cannot) write `canvasState` itself.
+                for tile in tiles {
+                    canvas.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
+                }
+                canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: zoom))
+                canvas.layoutSubtreeIfNeeded()
+
+                guard canvas.qaTotalInstalledTileCount == installed else {
+                    throw Failure(message: "camera-slope harness must install \(installed) tiles; got \(canvas.qaTotalInstalledTileCount)")
+                }
+
+                let onScreen = canvas.qaTilesIntersectingViewport
+                canvas.qaResetCameraLayoutStats()
+                let start = ProcessInfo.processInfo.systemUptime
+                for step in 0..<steps {
+                    // Start at 1, not 0: the settle above already put the camera at
+                    // the origin, so a step-0 pan to (0,0) moves nothing and is
+                    // correctly skipped by the camera's own unchanged-value guard.
+                    // Counting it as a step would make "one mutation per step" an
+                    // off-by-one instead of an invariant.
+                    let t = Double(step + 1)
+                    canvas.setViewport(CanvasViewport(x: t * 12, y: t * 8, zoom: zoom))
+                    canvas.layoutSubtreeIfNeeded()
+                }
+                let seconds = ProcessInfo.processInfo.systemUptime - start
+                let stats = canvas.qaCameraLayoutStats
+                samples.append(Sample(
+                    installed: installed, zoom: zoom, onScreen: onScreen,
+                    mutations: stats.cameraMutations,
+                    geometryWrites: stats.frameWrites + stats.boundsWrites,
+                    mismatches: canvas.qaTileScreenFrameMismatchCount,
+                    perStepMs: seconds / Double(steps) * 1_000
+                ))
+                window.orderOut(nil)
+                window.contentView = nil
+            }
+        }
+
+        // The visible count must be constant across a zoom's sweep, or the slope
+        // conflates "more installed" with "more visible" and proves nothing.
+        for zoom in zooms {
+            let onScreenCounts = Set(samples.filter { $0.zoom == zoom }.map(\.onScreen))
+            guard onScreenCounts.count == 1 else {
+                throw Failure(message: "camera-slope must hold the visible count fixed at zoom \(zoom); saw \(onScreenCounts.sorted())")
+            }
+        }
+
+        // Slope = the per-step work added by going from the smallest installed
+        // count to the largest, summed over both zooms. Zero is the contract.
+        var writeSlope = 0.0
+        for zoom in zooms {
+            let atZoom = samples.filter { $0.zoom == zoom }
+            guard let smallest = atZoom.first(where: { $0.installed == installedCounts.first }),
+                  let largest = atZoom.first(where: { $0.installed == installedCounts.last })
+            else { throw Failure(message: "camera-slope is missing an endpoint at zoom \(zoom)") }
+            writeSlope += Double(largest.geometryWrites - smallest.geometryWrites) / Double(steps)
+        }
+
+        let totalMutations = samples.reduce(0) { $0 + $1.mutations }
+        let totalWrites = samples.reduce(0) { $0 + $1.geometryWrites }
+        let totalMismatches = samples.reduce(0) { $0 + $1.mismatches }
+        let worstStepMs = samples.map(\.perStepMs).max() ?? 0
+        let expectedMutations = Double(steps * samples.count)
+
+        var measurements: [PerfMeasurement] = []
+        measurements.append(PerfBudget(
+            metric: "camera-slope.cameraMutations",
+            limit: .exactly(expectedMutations),
+            unit: .count,
+            rationale: "a camera step should move ONE ancestor; today no single place applies the camera, so this is zero until the retained world plane lands"
+        ).evaluate(Double(totalMutations)))
+
+        measurements.append(PerfBudget(
+            metric: "camera-slope.tileGeometryWrites",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "moving the camera must not write any tile's geometry, at any installed count"
+        ).evaluate(Double(totalWrites)))
+
+        measurements.append(PerfBudget(
+            metric: "camera-slope.writeSlope",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "per-step camera work must not grow with tiles the user cannot see: work(128 tiles) - work(16 tiles) per step"
+        ).evaluate(writeSlope))
+
+        measurements.append(PerfBudget(
+            metric: "camera-slope.screenFrameMismatches",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "teeth: every visible tile must sit exactly where CanvasEngine says, so the zero counts above cannot be satisfied by a canvas that stopped moving tiles"
+        ).evaluate(Double(totalMismatches)))
+
+        measurements.append(PerfBudget(
+            metric: "camera-slope.worstStepDuration",
+            limit: .atMost(frameBudgetMs),
+            unit: .milliseconds,
+            rationale: "coarse alarm only — cheap descriptor tiles understate real content cost, which canvas.stress owns"
+        ).evaluate(worstStepMs))
+
+        let detail = "\(steps) pan steps per configuration, installed "
+            + installedCounts.map(String.init).joined(separator: "/")
+            + " at zoom " + zooms.map { String(format: "%.2f", $0) }.joined(separator: "/")
+            + "; " + samples.map {
+                "\($0.installed)@\(String(format: "%.2f", $0.zoom)): \($0.onScreen) on screen, "
+                + "\($0.geometryWrites / steps) writes/step, \(String(format: "%.2f", $0.perStepMs)) ms"
+            }.joined(separator: " | ")
+        return PerfScenarioResult(name: "canvas.camera-slope", detail: detail, measurements: measurements)
     }
 
     // MARK: - Scenario: many tiles across many zones
@@ -244,12 +445,22 @@ enum PerfScenarios {
             rationale: "a camera step should lay out what is visible, not the whole workspace; off-screen tiles cost a frame and change nothing on screen"
         ).evaluate(Double(stats.tilesLaidOut) / Double(steps)))
 
+        // Same replacement as the camera scenarios: tile frame writes are the old
+        // architecture's proof of life, and the retained world plane makes them
+        // legitimately zero. The camera moved, and the presentation followed.
         measurements.append(PerfBudget(
-            metric: "stress.frameWrites",
+            metric: "stress.cameraMutations",
             limit: .atLeast(1),
             unit: .count,
-            rationale: "teeth: the camera must still reposition tiles"
-        ).evaluate(Double(stats.frameWrites)))
+            rationale: "teeth: the camera must actually have moved"
+        ).evaluate(Double(stats.cameraMutations)))
+
+        measurements.append(PerfBudget(
+            metric: "stress.screenFrameMismatches",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "teeth: every visible tile must end up where the camera says"
+        ).evaluate(Double(canvas.qaTileScreenFrameMismatchCount)))
 
         let detail = "\(steps) pan steps over \(tileCount) tiles in \(zoneCount) zones "
             + "(\(onScreen) on screen, \(Int(offScreenShare * 100))% off screen), "
@@ -373,15 +584,32 @@ enum PerfScenarios {
         ).evaluate(Double(prose)))
 
         // Teeth in the other direction: the assertions above must not be
-        // satisfiable by a canvas that quietly stopped laying anything out.
-        // A zoom changes every visible tile's screen frame; a pan changes its
-        // origin. Either way frames must still be written.
+        // satisfiable by a canvas that quietly stopped presenting anything.
+        //
+        // This used to assert `frameWrites >= 1` — "the camera must still
+        // reposition tiles". That encoded the OLD architecture, in which the only
+        // way a camera could move anything was to write every tile's frame. The
+        // retained world plane moves one ancestor instead, so tile frame writes
+        // are now correctly zero and the old budget would fail a working canvas.
+        // Replaced, deliberately and with a strictly stronger pair rather than a
+        // deletion: the camera must have moved, AND the presentation must have
+        // followed it. `screenFrameMismatches` compares each visible tile's actual
+        // rect — converted through the real view tree — against
+        // CanvasEngine.tileScreenFrame, so a canvas that stopped presenting fails
+        // here no matter which architecture is underneath.
         measurements.append(PerfBudget(
-            metric: "\(label).frameWrites",
+            metric: "\(label).cameraMutations",
             limit: .atLeast(1),
             unit: .count,
-            rationale: "teeth: the camera must still reposition tiles — a zero here means the canvas stopped working, not that it got fast"
-        ).evaluate(Double(stats.frameWrites)))
+            rationale: "teeth: the camera must actually have moved — a zero means the gesture did nothing, not that it got fast"
+        ).evaluate(Double(stats.cameraMutations)))
+
+        measurements.append(PerfBudget(
+            metric: "\(label).screenFrameMismatches",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "teeth: every visible tile must end up where the camera says, so the zero-write budgets above cannot be satisfied by a canvas that stopped presenting"
+        ).evaluate(Double(canvas.qaTileScreenFrameMismatchCount)))
 
         let detail = "\(steps) \(label) steps over \(tileCount) tiles "
             + "(3 large Markdown documents + 9 notes), \(String(format: "%.3f", seconds))s total"

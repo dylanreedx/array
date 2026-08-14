@@ -805,7 +805,7 @@ final class LabSandboxContext: NSObject {
     /// Apply the current toggle to every tile (used after runtime spawns, whose
     /// views the spawner installs directly, and when the toggle flips).
     private func applyAffordances() {
-        for tileView in canvas.subviews.compactMap({ $0 as? TileNSView }) {
+        for tileView in canvas.tileViewsInVisualOrder {
             tileView.showsInteractionAffordances = affordancesOn
         }
     }
@@ -4838,7 +4838,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         sandboxWindow.contentView = sandbox.containerView
         sandbox.containerView.layoutSubtreeIfNeeded()
         sandbox.canvas.layoutSubtreeIfNeeded()
-        let tileViews = sandbox.canvas.subviews.compactMap { $0 as? TileNSView }
+        let tileViews = sandbox.canvas.tileViewsInVisualOrder
         guard tileViews.count == 5 else { throw fail("sandbox canvas has \(tileViews.count) tile views, expected 5") }
         for tileView in tileViews {
             tileView.layoutSubtreeIfNeeded()
@@ -4912,7 +4912,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             guard surviving == [ids[0], ids[2]] else {
                 throw fail("delete gate: survivors must be exactly {first, last}, got \(surviving)")
             }
-            let survivingViews = closeCanvas.subviews.compactMap { ($0 as? TileNSView)?.tile.id }
+            let survivingViews = closeCanvas.tileViewsInVisualOrder.map(\.tile.id)
             guard Set(survivingViews) == [ids[0], ids[2]] else {
                 throw fail("delete gate: rendered tile views must match survivors, got \(survivingViews)")
             }

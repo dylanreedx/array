@@ -1004,13 +1004,15 @@ enum ContinuumApp {
             }
         }
 
-        // `--perf-budget-zoom-check` is the zoom scenario under its OWN leg name.
-        // The matrix matches KNOWN-RED by leg name, and canvas.zoom is a
-        // documented open target (see docs/internals/performance-budgets.md)
+        // `--perf-budget-zoom-check` and `--perf-budget-camera-slope-check` are
+        // single scenarios under their OWN leg names. The matrix matches
+        // KNOWN-RED by leg name, and both canvas.zoom and canvas.camera-slope are
+        // documented open targets (see docs/internals/performance-budgets.md)
         // while canvas.pan must gate — one shared flag name would have forced
-        // both to be known-red together and masked a pan regression.
+        // them to be known-red together and masked a pan regression.
         if CommandLine.arguments.contains("--perf-budget-check")
-            || CommandLine.arguments.contains("--perf-budget-zoom-check") {
+            || CommandLine.arguments.contains("--perf-budget-zoom-check")
+            || CommandLine.arguments.contains("--perf-budget-camera-slope-check") {
             do {
                 _ = NSApplication.shared
                 func value(after flag: String) -> String? {
@@ -1018,9 +1020,14 @@ enum ContinuumApp {
                           index + 1 < CommandLine.arguments.count else { return nil }
                     return CommandLine.arguments[index + 1]
                 }
-                let filter = CommandLine.arguments.contains("--perf-budget-zoom-check")
-                    ? "canvas.zoom"
-                    : value(after: "--scenario")
+                let filter: String?
+                if CommandLine.arguments.contains("--perf-budget-zoom-check") {
+                    filter = "canvas.zoom"
+                } else if CommandLine.arguments.contains("--perf-budget-camera-slope-check") {
+                    filter = "canvas.camera-slope"
+                } else {
+                    filter = value(after: "--scenario")
+                }
                 try PerfScenarios.run(
                     scenarioFilter: filter,
                     jsonPath: value(after: "--perf-json")
@@ -1931,6 +1938,18 @@ enum ContinuumApp {
                 _ = NSApplication.shared
                 let artifact = try CanvasNSView.runZIndexRelaunchHitTestSelfCheck()
                 print("ContinuumRevivedZIndexRelaunchHitTestChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--canvas-camera-hit-oracle-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try CanvasNSView.runCameraHitOracleSelfCheck()
+                print("ContinuumRevivedCanvasCameraHitOracleChecks passed: \(artifact.path)")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)

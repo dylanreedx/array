@@ -32,6 +32,7 @@ check --browser-target-blank-check
 check --browser-ui-delegate-check
 check --browser-url-focus-check
 check --camera-chrome-redraw-check
+check --canvas-camera-hit-oracle-check
 check --companion-sync-health-check
 check --component-lab-check
 check --composer-image-components-check
@@ -69,6 +70,7 @@ check --palette-duplicate-root-check
 check --palette-first-responder-restore-check
 check --palette-jump-check
 check --palette-zone-check
+check --perf-budget-camera-slope-check
 check --perf-budget-check
 check --perf-budget-zoom-check
 check --persistence-crash-safe-check
@@ -183,6 +185,7 @@ leg run_app_check .build/debug/Array --browser-target-blank-check
 leg run_app_check .build/debug/Array --browser-ui-delegate-check
 leg run_app_check .build/debug/Array --browser-url-focus-check
 leg run_app_check .build/debug/Array --camera-chrome-redraw-check
+leg run_app_check .build/debug/Array --canvas-camera-hit-oracle-check
 leg run_app_check .build/debug/Array --companion-sync-health-check
 leg run_app_check .build/debug/Array --component-lab-check
 leg run_app_check .build/debug/Array --composer-image-components-check
@@ -220,6 +223,7 @@ leg run_app_check .build/debug/Array --palette-duplicate-root-check
 leg run_app_check .build/debug/Array --palette-first-responder-restore-check
 leg run_app_check .build/debug/Array --palette-jump-check
 leg run_app_check .build/debug/Array --palette-zone-check
+leg run_app_check .build/debug/Array --perf-budget-camera-slope-check
 leg run_app_check .build/debug/Array --perf-budget-check --scenario canvas.fractional-pan
 leg run_app_check .build/debug/Array --perf-budget-check --scenario canvas.pan
 leg run_app_check .build/debug/Array --perf-budget-zoom-check

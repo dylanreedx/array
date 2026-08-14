@@ -83,14 +83,18 @@ MATRIX_KNOWN_RED=(
   --agent-supervisor-check
   --nav-mode-check
   --palette-first-responder-restore-check
-  # canvas.zoom is over budget by ~4x and the cause is architectural, not a bug
-  # to bisect: a zoom step changes every tile view's frame SIZE, which scales
-  # `bounds` away, forces the logical size to be written back, and re-lays out
-  # every tile subtree (re-measuring every Markdown/prose row) at a width it
-  # never renders. Removing it means the camera must stop resizing tile views —
-  # scaling the canvas's own coordinate system instead. Measured, published and
-  # tracked in docs/internals/performance-budgets.md; do NOT bisect it as a
-  # regression, and remove this entry when the camera stops resizing tiles.
+  # canvas.zoom is still over budget, but NOT for the reason it used to be. The
+  # retained world plane (.plans/22 Slice 3) removed the camera's per-tile cost
+  # entirely — zoom.boundsWrites is 0 and canvas.camera-slope is green — and that
+  # exposed a SECOND, independent cause underneath: a tile's chrome floors
+  # (`grabHeightInLocalCoordinates` and friends) are `max(world, screenPx/zoom)`,
+  # so below the floor threshold the title bar's world height changes on every
+  # zoom step, which reflows tile content and re-measures every prose row.
+  # Measured at 48 ms/step and 14,490 prose measurements. Fixing it means making
+  # the chrome floor stable during a zoom (quantise it, or stop aliasing the
+  # content inset to it) — both product-visible, so both need a decision rather
+  # than a silent change. Published in docs/internals/performance-budgets.md; do
+  # NOT bisect it as a regression.
   --perf-budget-zoom-check
   # Inherited reds, not independent ones. `ContinuumRevivedPaletteChecks` prints
   # its own model assertions and THEN shells out to the app's
@@ -538,6 +542,21 @@ run_app_check .build/debug/Array --perf-budget-zoom-check
 # The zoom-1 pan leg above is structurally blind to that defect; this leg pans
 # the same fixture at zoom 0.35 and must stay at zero bounds writes.
 run_app_check .build/debug/Array --perf-budget-check --scenario canvas.fractional-pan
+# The camera COMPLEXITY witness, KNOWN-RED on purpose and for the same
+# architectural reason as the zoom leg: it sweeps installed tiles 16→128 with the
+# visible count held fixed, and today every installed tile takes a frame write on
+# every camera step, so the work grows with tiles the user cannot see. It goes
+# green with the retained world plane (.plans/22 Slice 3), which is also when both
+# it and --perf-budget-zoom-check leave MATRIX_KNOWN_RED.
+run_app_check .build/debug/Array --perf-budget-camera-slope-check
+# The camera's correctness oracle, recorded BEFORE the retained world plane so it
+# can mean something afterwards: two independent mechanisms — the model
+# (CanvasEngine over world rects) and the installed view geometry (front-to-back,
+# through AppKit's own conversion) — must name the same tile at every point of a
+# pan/zoom sweep, and paint order must follow the model's z-order. This is the
+# gate that catches a plane whose transform is subtly wrong while the model stays
+# right. GREEN today and must stay green.
+run_app_check .build/debug/Array --canvas-camera-hit-oracle-check
 run_app_check .build/debug/Array --workspace-profile-check
 run_app_check .build/debug/Array --add-zone-check
 run_app_check .build/debug/Array --browser-lru-budget-check

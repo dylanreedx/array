@@ -109,7 +109,23 @@ Separately vary the visible count. That leg measures unavoidable compositor and
 visible-presentation scaling; do not combine it with the installed-count claim.
 
 The current exact-floating-point regression needs a permanent non-1.0 zoom
-witness. A zoom-1.0-only fixture cannot detect it.
+witness. A zoom-1.0-only fixture cannot detect it. `canvas.fractional-pan` is
+that witness; `canvas.camera-slope` adds the installed-count slope.
+
+**A camera witness must compare presentation against the model, not the model
+against itself.** Both `CanvasNSView.tileId(at:)` and
+`CanvasEngine.hitTest(screenPoint:…)` derive from `canvasState`, so asserting
+they agree proves nothing about what is on screen — it is the "re-derives what
+production derives" trap. The independent answer comes from the INSTALLED view
+geometry: front-to-back over the real tile views, converting the probe point with
+`convert(_:from:)` so the whole ancestor chain participates. Two witnesses use
+it — `camera-slope.screenFrameMismatches` and `--canvas-camera-hit-oracle-check`
+— and both were teeth-verified by removing the camera's frame-origin write, which
+takes the first from 0 to 480 mismatches and makes the second report a concrete
+model-vs-view-tree disagreement. Note also that `canvas.hitTest(_:)` is the wrong
+tool here: it takes a point in the canvas's SUPERVIEW space, and the canvas is
+flipped while a window's frame view is not, so passing canvas coordinates probes a
+vertically mirrored location and silently returns nil.
 
 ### Transcript streaming
 

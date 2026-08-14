@@ -65,9 +65,16 @@ Two rules, both learned expensively:
    ratchet the regression ceiling downward after review; it is never regenerated
    automatically from the latest run.
 
-Include an `atLeast` budget as teeth in the other direction. `canvas.pan` asserts
-zero bounds writes AND at least one frame write, so the zero cannot be satisfied
-by a canvas that quietly stopped laying anything out.
+Include teeth in the other direction, and make them **architecture-independent**.
+Every camera scenario asserts its zero-work budgets alongside
+`cameraMutations >= 1` (the camera actually moved) and
+`screenFrameMismatches == 0` (every visible tile ended up where
+`CanvasEngine.tileScreenFrame` says, measured by converting the tile's real rect
+through the view tree). These replaced an earlier `frameWrites >= 1`, which
+encoded the assumption that the only way a camera can move anything is to write
+every tile's frame — true before the retained world plane, and false after it.
+A teeth budget that describes today's implementation rather than the property
+will fail a working canvas the moment the implementation changes.
 
 Add a scenario in `PerfScenarios.all`; the types are in
 `Sources/ContinuumRevivedCore/PerfBudget.swift`. Register the leg in
@@ -88,7 +95,8 @@ over 12 tiles including three large Markdown documents.
 | `pan.boundsWrites` | == 0 | **0** |
 | `pan.modelWrites` | == 0 | **0** |
 | `pan.proseMeasurements` | == 0 | **0** |
-| `pan.frameWrites` | ≥ 1 (teeth) | 1428 |
+| `pan.cameraMutations` | ≥ 1 (teeth) | 120 |
+| `pan.screenFrameMismatches` | == 0 (teeth) | 0 |
 
 Before the 0.4.19 fix this was 1440 bounds writes and 1440 model writes — every
 tile, every step, assigned a value it already had. Writing an unchanged frame or
@@ -106,47 +114,87 @@ reverted to exact equality it fails at 1440 writes while `canvas.pan` stays
 green. Metrics and budgets otherwise mirror `canvas.pan` (measured 0.78 ms/step,
 9% of budget).
 
-### `canvas.zoom` — KNOWN-RED, published
+### `canvas.zoom` — KNOWN-RED, published, for a NEW reason
 
 Same canvas, 120 zoom steps walking the scale continuously.
 
-| metric | budget | measured |
-|---|---|---|
-| `zoom.stepDuration` | ≤ 8.3 ms | **32.1 ms** (387%) |
-| `zoom.boundsWrites` | == 0 | **1440** |
-| `zoom.modelWrites` | == 0 | 0 |
-| `zoom.proseMeasurements` | == 0 | **5474** |
-| `zoom.frameWrites` | ≥ 1 (teeth) | 2880 |
+| metric | budget | before the plane | after |
+|---|---|---|---|
+| `zoom.stepDuration` | ≤ 8.3 ms | 48.4 ms (584%) | **48.1 ms** |
+| `zoom.boundsWrites` | == 0 | 1,440 | **0** |
+| `zoom.modelWrites` | == 0 | 0 | 0 |
+| `zoom.proseMeasurements` | == 0 | 15,134 | **14,490** |
+| `zoom.cameraMutations` | ≥ 1 (teeth) | — | 240 |
+| `zoom.screenFrameMismatches` | == 0 (teeth) | — | 0 |
 
-These values are a recorded diagnostic run, not a stable Debug/Release
-comparison. The fixture currently waits for one layout pass rather than a
-semantic "all rows rendered" barrier, so asynchronous transcript work can change
-how much prose exists when timing begins.
+**The original cause is fixed and a second one was underneath it.** A zoom step
+used to change every tile view's frame SIZE, which scaled `bounds` away, forced a
+write-back, and re-laid out every tile subtree at a width it never rendered. The
+retained world plane removed that completely: `boundsWrites` is 0, and
+`canvas.camera-slope` proves the camera writes no tile geometry at any tile count.
 
-**Why it is red, and why that is not a bug to bisect.** A zoom step changes every
-tile view's frame SIZE. `setFrameSize` scales `bounds` along with the frame, so
-the logical size has to be written back — two geometry writes per tile per step.
-AppKit re-lays out each tile's entire subtree, and every Markdown/prose row
-re-measures at an intermediate width the tile never renders at. A profile of the
-zoom loop puts 11,454 of ~11,965 main-thread samples inside
-`-[NSView _layoutSubtreeWithOldSize:]`.
+What remains is a different defect the plane exposed. A tile's chrome floors —
+`grabHeightInLocalCoordinates`, `closeButtonWorldSize`, the resize margin — are
+`max(worldConstant, screenPx / zoom)`, so the move-grab strip stays usable when
+zoomed out. Below the floor threshold that world height changes on **every** zoom
+step, and because `contentTopInsetWorldHeight` is aliased to it, the tile's
+content region moves too and every prose row re-measures.
 
-Guarding the assignments does not remove this: the bounds write is genuinely
-needed after a size change. Suppressing `autoresizesSubviews` across the pair was
-tried and made it **worse** (61.7 ms/step, 12,075 measurements).
+Removing the chrome refresh makes this leg green at **1.5 ms/step and zero prose
+measurements** — but then the grab strip and the drawn bar go stale at low zoom,
+which `--camera-chrome-redraw-check` correctly fails. Both real fixes are
+product-visible and need a decision rather than a silent change:
 
-The fix is architectural: the camera must stop resizing tile views at all. The
-first prototype should keep `CanvasNSView` as a fixed viewport, put world content
-inside a clipped document/clip view, and keep screen overlays as a sibling, so
-logical tile frames remain stable and the camera changes one ancestor. Do not
-directly transform an AppKit-owned backing layer. This is a scoped project—hit
-testing, cursor rects, zone chrome and chrome-scale floors read screen coordinates
-today—not a patch. The alternatives and escalation criteria are in
-[infinite-canvas-rendering-research.md](./infinite-canvas-rendering-research.md).
+1. **Quantise the floor** into discrete zoom buckets with hysteresis, so chrome is
+   stable during a pinch and refines at settle. This is what
+   [infinite-canvas-rendering-research.md](./infinite-canvas-rendering-research.md)
+   prescribes for zoom-dependent detail generally.
+2. **Stop aliasing the content inset to the floor**, so an enlarged grab strip
+   overlays content instead of reflowing it.
 
-`--perf-budget-zoom-check` is in `MATRIX_KNOWN_RED` so the number is printed on
-every run without masking a `canvas.pan` regression. Remove that entry when the
-camera stops resizing tiles.
+Until one is chosen, `--perf-budget-zoom-check` stays in `MATRIX_KNOWN_RED` with
+the number printed every run.
+
+### `canvas.camera-slope` — gating, green
+
+```sh
+.build/debug/Array --perf-budget-camera-slope-check
+```
+
+The camera's **complexity** witness. The three scenarios above each measure one
+fixed canvas, so all three can be green while the camera is still
+O(installed tiles) — they never change that number. This one sweeps **installed**
+tiles `16 → 128` while holding the **visible** count fixed at 12 (a cluster near
+the origin stays on screen; filler tiles sit far outside the viewport at both
+zooms), at zoom 1.0 and 0.35, 40 pan steps each.
+
+| metric | budget | before the plane | after |
+|---|---|---|---|
+| `camera-slope.cameraMutations` | == 320 | 0 | **320** |
+| `camera-slope.tileGeometryWrites` | == 0 | 18,720 | **0** |
+| `camera-slope.writeSlope` | == 0 | 218.4 | **0** |
+| `camera-slope.screenFrameMismatches` | == 0 (teeth) | 0 | 0 |
+| `camera-slope.worstStepDuration` | ≤ 8.3 ms | 0.40 ms | **0.004 ms** |
+
+Before the retained world plane, geometry writes per step tracked installed count
+exactly — 15 / 31 / 62 / 124 for 16 / 32 / 64 / 128 tiles — and `cameraMutations`
+was 0 because nothing applied the camera in one place. Both are now flat: the
+camera writes one view's bounds and no tile geometry at all, at any tile count.
+
+`screenFrameMismatches` is the budget with teeth, and it is green today. It
+compares every visible tile's ACTUAL rect — converted through whatever view tree
+hosts it — against `CanvasEngine.tileScreenFrame`. Without it the three zeroes
+above would also be satisfiable by a canvas that stopped moving tiles entirely.
+It is deliberately phrased to survive the migration: today a tile's frame IS its
+screen rect, afterwards an ancestor's transform produces the same rect from an
+unchanged tile frame.
+
+Duration here is a coarse alarm only, **not** the scaling signal: the fixture uses
+cheap `DescriptorTileNSView`s so 128 tiles × 8 configurations stays affordable in
+the matrix. `canvas.stress` owns the real-content cost curve.
+
+This leg left `MATRIX_KNOWN_RED` when the plane landed. `canvas.zoom` did not —
+see below, because its remaining cost turned out to be a different defect.
 
 ### `canvas.stress` — OPT-IN, not in the matrix
 
@@ -163,12 +211,22 @@ deliberately rather than on every commit.
 Knobs (all optional): `PERF_STRESS_ZONES`, `PERF_STRESS_TILES_PER_ZONE`,
 `PERF_STRESS_TURNS`, `PERF_STRESS_ZOOM`, `PERF_STRESS_STEPS`.
 
-**`stress.tilesLaidOutPerStep` is known-red on purpose.** At the default size
-the camera lays out all 48 tiles per step against a visible-set budget of 37
-(22 on screen × 1.5 + 4). That is the missing presentation-working-set bound —
-the architectural item in [scalability-tdd.md](./scalability-tdd.md), kept
-visible as a product target, not a regression to bisect. `stress.boundsWrites`
-and `stress.stepDuration` are the regression gates and are green.
+**`stress.tilesLaidOutPerStep` went 48 → 0 with the retained world plane.** It
+was the missing presentation-working-set bound stated as a count, and the plane
+retired it: a camera step lays out no tiles at all.
+
+**The duration moved the other way, and that is a real tradeoff.** On this
+machine the stress pan was ~5.4–6.0 ms/step before the plane and is ~7.4–9.3
+ms/step after (median ~7.7, noisy enough that repeated runs matter). All work
+counts are zero, so the remaining time is not Array's: a `sample` of the loop
+puts **131 of 5,588 samples (2.3%) in the camera** and the rest in AppKit
+recursing `_layoutSubtreeWithOldSize:` through 48 deep agent-tile trees, with no
+Array frames at the leaves. Any camera write on an ancestor triggers that
+traversal — measured at 0.001 ms/step with the write removed entirely, 7.2 ms via
+`setBoundsOrigin`, 8.2 ms with a nested content view, and 8.8 ms translating by
+frame origin instead. Reducing it is a property of how many and how deep the tile
+view trees are, which is Slice 5's bounded presentation working set, not the
+camera's.
 
 ## The scaling curve
 

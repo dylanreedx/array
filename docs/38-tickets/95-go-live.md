@@ -40,7 +40,7 @@ Status as of 2026-08-09 (end of day):
   2. **The KNOWN-RED set is larger than two**, and `run-matrix.sh` no longer
      halts on any of them (see `865b0d3`; before that a real run reached 4 of 135
      app legs). The allowlist lives in `MATRIX_KNOWN_RED` in that script and is
-     the authoritative list; as of 0.4.13 it is 7 entries: the two above, plus
+     the authoritative list; as of 0.4.13 it was 7 entries: the two above, plus
      `--ui-baseline-check`; `--palette-first-responder-restore-check` and
      `--nav-mode-check` (**one defect** — ⌘K's default row selection ranks on
      text alone, so "Create Zone…" outranks a zone named Alpha for the query
@@ -49,6 +49,16 @@ Status as of 2026-08-09 (end of day):
      first-responder leg itself) and `scripts/check-root-docs.sh` (9 markers from
      the pre-`65d420a` doc taxonomy, one of which demands "Continuum Revived" in
      the user-facing README and so contradicts the identity rule).
+
+     **It is 8 entries now.** The one addition is `--perf-budget-zoom-check`.
+     Its original cause — a zoom step resizing every tile view — was fixed by the
+     retained world plane (`.plans/22` Slice 3), which also retired the
+     `--perf-budget-camera-slope-check` entry that briefly sat beside it. What
+     keeps `canvas.zoom` red is a second defect the plane exposed: a tile's chrome
+     floors are `max(world, screenPx/zoom)`, so below the floor threshold the
+     title bar's world height changes every zoom step and reflows tile content.
+     Both candidate fixes are product-visible and await a decision. Measured
+     numbers in [performance-budgets.md](../internals/performance-budgets.md).
 
   Red but **outside the gate entirely**, so no matrix run covers them:
   `--terminal-default-readability-check`, `--previous-focus-navigation-check`,
