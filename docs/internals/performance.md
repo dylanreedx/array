@@ -163,6 +163,11 @@ comment which of the two has the teeth.
 Register the leg in `scripts/run-matrix.sh` and confirm it prints in a real run —
 see [qa.md](./qa.md).
 
+For work whose risk grows with installed tiles, transcript history, visibility,
+or restore size, use the axis-isolated fixtures and accepted-baseline ratchet in
+[scalability-tdd.md](./scalability-tdd.md). A green single-point stopwatch does
+not prove that the scaling slope stayed flat.
+
 ## Array is not alone on the machine
 
 A canvas of live tiles competes with everything else the user is running, and the
@@ -205,8 +210,10 @@ Recorded so nobody re-discovers them as bugs:
   Markdown file happens on the main thread. Bounded by the 1 MB cap.
 - **Tables render as a monospace fallback**, which means a wide table is one
   large fenced block measured at unbounded width.
-- **Every canvas layout pass lays out every tile subtree.** Individual tiles must
-  therefore be cheap to lay out; that is not the canvas's problem to solve.
+- **Every current canvas layout pass lays out every installed tile subtree.**
+  Cheap individual tiles reduce the coefficient, but the canvas must ultimately
+  bound its presentation working set and move the retained world once. See
+  [infinite-canvas-rendering-research.md](./infinite-canvas-rendering-research.md).
 
 ## Case study: the Markdown tile, 0.4.15 → 0.4.17
 
