@@ -533,3 +533,56 @@ tile**, and the two surfaces are on screen together.
 `--sidebar-production-corpus-check` (30/30), `--sidebar-ux-check`, `--agent-inbox-check`,
 `swift run ContinuumRevivedAgentUIChecks`, `scripts/check-color-hygiene.sh` (27
 allowlisted, 0 new). `ComponentLab.swift` still 0 lines against `d334f01`.
+
+---
+
+## Feedback round 4 — the icon set collapses to three (2026-08-14)
+
+Mock-only. Artifact: `qa-runs/2026-08-14T200632Z/sidebar-96/`, 42 images, gate PASS.
+
+Ruled: keep the left-aligned column; cut the glyph set to hand (approval AND input),
+throbber (working), error mark (failed). Done, Stopped and Cancelled draw nothing.
+
+**This overturned my round-three recommendation, and it was right to.** I argued against a
+leading column because it was unconditional — a solid line of ticks weights finished rows
+as heavily as broken ones. The fix is not to abandon the column but to make it
+conditional: the glyph answers "does this concern me", not "what state is this", because
+the word beside it already answers the second question. A hole in the column is
+information.
+
+Approval and input now share one glyph. Recorded explicitly because it *looks* like the
+P0.1 defect and is not: that defect was the two sharing a **word**, so the row could not
+tell you which. Icon = "you are needed", word = which kind. Two layers, each carrying
+something.
+
+### The witness now reads the glyph set off the product
+
+`statusSymbolsInUse` is derived from the mock's own rows, so the alignment check can never
+measure a glyph that was cut or skip one that was added — the set went six → two in this
+round and the check followed it without being edited. It also refuses to run on fewer than
+two symbols, because with one there is no column to align and the assertions would pass
+vacuously.
+
+Measured after the cut: centring the two remaining glyphs would scatter their left edges
+by 1.19 pt of a 16 pt slot; ink-left alignment puts both at 0.00.
+
+### The reserved icon lane came out too
+
+Dylan: *"we have an indent we dont need"*, pointing at band 1 on a row with no glyph. He
+was right and the reasoning behind the lane was wrong. A reserved lane was supposed to keep
+the column straight; the column is made of the ICONS, which are pinned to one x and
+ink-aligned to each other, so it is straight either way. All the lane did was indent band 1
+away from the title and branch beneath it on seven rows out of ten.
+
+### Removed
+
+`GlyphStyle` / `enclosedStateSymbol` and the five-way border sweep, all added earlier the
+same day and superseded by this ruling. `outline` and `dashed` were dropped rather than
+re-rendered, with the reason recorded in the review and the old images still on disk.
+
+### Verified
+
+`--sidebar-screenshot-check` (42 images, PASS), `--sidebar-production-corpus-check`
+(30/30), `--sidebar-ux-check`, `--agent-inbox-check`,
+`swift run ContinuumRevivedAgentUIChecks`, `scripts/check-color-hygiene.sh`.
+`ComponentLab.swift` still 0 lines against `d334f01`.

@@ -667,9 +667,11 @@ enum SidebarScreenshotChecks {
         // Dylan's report was "they are too different to look properly aligned because of
         // the various shapes", and the raw numbers below say why: SF Symbols share a
         // bounding box, not an optical size.
-        let statusSymbols = ["checkmark.circle.fill", "hand.raised.fill",
-                             "questionmark.circle.fill", "exclamationmark.triangle.fill",
-                             "stop.fill", "slash.circle"]
+        let statusSymbols = SidebarDensityProposalView.statusSymbolsInUse
+        try expect(statusSymbols.count >= 2,
+                   "the mock draws \(statusSymbols.count) distinct status symbols; with "
+                   + "fewer than two there is no column to align and this witness is "
+                   + "measuring nothing")
         let slot = NSRect(x: 0, y: 0, width: 16, height: 16)
         var alignedInk: [(name: String, raw: NSRect, painted: NSRect)] = []
         try drawing(NSAppearance(named: .darkAqua) ?? NSAppearance.currentDrawing()) {
@@ -894,9 +896,6 @@ struct SidebarRowAnatomy: Sendable {
         case leading
     }
 
-    /// Distinct silhouettes, or one common disc.
-    enum GlyphStyle: String, Sendable { case silhouette, enclosed }
-
     let id: String
     let label: String
     let border: Border
@@ -906,7 +905,6 @@ struct SidebarRowAnatomy: Sendable {
     /// model id must still be reachable in tooltip and accessibility detail (§4.3); a
     /// static mock cannot show that, so it is called out in the review instead.
     let showsModelText: Bool
-    var glyphStyle: GlyphStyle = .silhouette
 
     /// The first mock drew the status icon at 11 pt, at which Array's own gyro throbber
     /// reduces to a couple of dots — Dylan said so. 14 pt is the smallest size at which
@@ -945,41 +943,33 @@ struct SidebarRowAnatomy: Sendable {
         id: "markOnly", label: "mark only, state at the right",
         border: .none, iconPlacement: .trailing, showsModelText: false)
 
-    /// Round three. The pill is gone — Dylan didn't like it. What is left is a sweep of
-    /// EDGE treatments, which is what he asked for after the 3 pt rail ("a thinner side
-    /// border… different borders in general"), and a second look at the leading-icon
-    /// column now that the glyphs are optically aligned.
+    /// Round four, and the sweep gets smaller because the decisions got made.
     ///
-    /// The control is still `proposals/proposalA-280x662-*` — same pitch, same width, no
-    /// edge treatment, icon trailing. It is deliberately not re-emitted here; a
-    /// byte-identical image under a second name is the relabelled-duplicate trap.
+    /// Settled: the leading column stays, the glyph set is down to three, and the pill is
+    /// gone. What is left open is whether the card still needs an EDGE treatment now that
+    /// the column already marks the rows that matter — so all three carry the identical
+    /// row content and differ only in what they draw at the card's leading edge.
+    ///
+    /// `outline` and `dashed` are dropped rather than re-rendered: `outline` was the
+    /// heaviest of the five and its job is done better by `bracket`, and `dashed` reuses
+    /// the canvas's focused-tile language, which already means something else on a screen
+    /// where both surfaces are visible at once. Both remain in
+    /// `qa-runs/2026-08-14T195203Z/` if they want another look.
+    ///
+    /// The control is still `proposals/proposalA-280x662-*`: same pitch, same width, no
+    /// edge treatment, glyph beside its word instead of leading. It is deliberately not
+    /// re-emitted here; a byte-identical image under a second name is the
+    /// relabelled-duplicate trap.
     static let statusExperiments: [SidebarRowAnatomy] = [
         SidebarRowAnatomy(
-            id: "rail", label: "3 pt rail — the round-two version, for comparison",
-            border: .rail, iconPlacement: .trailing, showsModelText: false),
-        SidebarRowAnatomy(
-            id: "railThin", label: "2 pt rail",
-            border: .railThin, iconPlacement: .trailing, showsModelText: false),
-        SidebarRowAnatomy(
-            id: "outline", label: "1 pt outline around the whole card",
-            border: .outline, iconPlacement: .trailing, showsModelText: false),
-        SidebarRowAnatomy(
-            id: "dashed", label: "the focused-tile dash, 1.5 pt / [6,4]",
-            border: .dashed, iconPlacement: .trailing, showsModelText: false),
-        SidebarRowAnatomy(
-            id: "bracket", label: "leading bracket — the outline's first third",
-            border: .bracket, iconPlacement: .trailing, showsModelText: false),
-        SidebarRowAnatomy(
-            id: "leadingIcon", label: "leading column, distinct shapes, ink-aligned",
+            id: "attentionColumn", label: "attention column only, no card border",
             border: .none, iconPlacement: .leading, showsModelText: false),
         SidebarRowAnatomy(
-            id: "leadingEnclosed", label: "leading column, one common disc",
-            border: .none, iconPlacement: .leading, showsModelText: false,
-            glyphStyle: .enclosed),
+            id: "attentionRail", label: "attention column + 2 pt rail",
+            border: .railThin, iconPlacement: .leading, showsModelText: false),
         SidebarRowAnatomy(
-            id: "combo", label: "2 pt rail + leading disc column",
-            border: .railThin, iconPlacement: .leading, showsModelText: false,
-            glyphStyle: .enclosed),
+            id: "attentionBracket", label: "attention column + leading bracket",
+            border: .bracket, iconPlacement: .leading, showsModelText: false),
     ]
 }
 
@@ -1011,40 +1001,33 @@ final class SidebarDensityProposalView: NSView {
     /// well as its word. SF Symbols here rather than bundled art: these are Apple's
     /// own glyphs, they need no provenance review, and the mock's job is to show the
     /// SHAPE of the row. Vendor provider logos are a different problem — see P3.1.
-    /// The other answer to "the various shapes don't look aligned": stop varying the
-    /// shape. Every glyph becomes the same disc and the state is carried by the mark
-    /// inside it, so the column has one silhouette and one optical mass.
+    /// Three glyphs, and most rows get none.
     ///
-    /// The cost is the thing an earlier round bought: `Failed` loses its triangle, and
-    /// `Failed` / `Stopped` / `Cancelled` differ only by their inner mark. At 11 pt that
-    /// was too little — three filled circles read as one shape. At the 16 pt of a leading
-    /// column it may be enough. That is the trade to look at, not to reason about.
-    private static func enclosedStateSymbol(_ state: String) -> String? {
-        if state.hasPrefix("Done") { return "checkmark.circle.fill" }
-        if state.hasPrefix("Working") { return nil }
-        if state.hasPrefix("Approval") { return "hand.raised.circle.fill" }
-        if state.hasPrefix("Input") { return "questionmark.circle.fill" }
-        if state.hasPrefix("Failed") { return "exclamationmark.circle.fill" }
-        if state.hasPrefix("Stopped") { return "stop.circle.fill" }
-        if state.hasPrefix("Cancelled") { return "slash.circle.fill" }
-        return nil
-    }
-
+    /// Ruled 2026-08-14, and it is a better rule than the one it replaced. Earlier rounds
+    /// gave every state its own icon; the leading column then ran a solid line of ticks
+    /// down the list, so the rows that were *finished* drew as much of the eye as the rows
+    /// that were *broken*. The icon's job is not to name the state — the word beside it
+    /// already does that — it is to answer one question at a glance: **is anything
+    /// happening here that concerns me?**
+    ///
+    /// So the set collapses to the three answers worth interrupting for:
+    ///
+    /// - **running** — the app's own throbber, drawn by `drawWorkingIndicator`
+    /// - **wants you** — one raised hand, for BOTH approval and input
+    /// - **broke** — the error triangle
+    ///
+    /// Done, Stopped and Cancelled draw nothing. The state word and its colour still
+    /// carry them, for the glance that comes after the first one.
+    ///
+    /// **Approval and input deliberately share this glyph, and that is not the defect
+    /// P0.1 found.** That defect was the two sharing a *word* — the row said "Blocked" and
+    /// you could not tell which. Here the icon says "you are needed" and the word still
+    /// says which kind, so the two layers each carry something.
     private static func stateSymbol(_ state: String) -> String? {
-        // The icon carries the tick, so the word stays a plain word — a symbol AND a
-        // ✓ glyph AND a colour is three ways of saying one thing.
-        if state.hasPrefix("Done") { return "checkmark.circle.fill" }
-        // Working draws the app's OWN throbber, not a symbol — see `workingIndicator`.
+        // Working draws the app's OWN throbber, not a symbol — see `drawWorkingIndicator`.
         if state.hasPrefix("Working") { return nil }
-        if state.hasPrefix("Approval") { return "hand.raised.fill" }
-        if state.hasPrefix("Input") { return "questionmark.circle.fill" }
-        // Failed, Stopped and Cancelled must differ by SILHOUETTE, not only by colour —
-        // at 11 pt three filled circles read as one shape, which is what made Stopped
-        // and Failed confusable. Triangle = something went wrong; plain square = you
-        // halted it; outlined slash = it was cancelled.
+        if state.hasPrefix("Approval") || state.hasPrefix("Input") { return "hand.raised.fill" }
         if state.hasPrefix("Failed") { return "exclamationmark.triangle.fill" }
-        if state.hasPrefix("Stopped") { return "stop.fill" }
-        if state.hasPrefix("Cancelled") { return "slash.circle" }
         return nil
     }
 
@@ -1129,6 +1112,21 @@ final class SidebarDensityProposalView: NSView {
          "agent/restore-bounds", "Sonnet"),
     ]
 
+    /// Every distinct status symbol the mock actually draws, derived from its own rows.
+    ///
+    /// The alignment witness reads this rather than a list of its own, so it can never
+    /// end up measuring a glyph the mock stopped drawing — or, worse, silently skip one
+    /// it started drawing. The set shrank from six to two the moment Dylan cut the icon
+    /// list, and this is what keeps the check honest about that.
+    static var statusSymbolsInUse: [String] {
+        var seen: [String] = []
+        for row in rows {
+            guard let symbol = stateSymbol(row.state), !seen.contains(symbol) else { continue }
+            seen.append(symbol)
+        }
+        return seen
+    }
+
     init(proposal: SidebarDensityProposal, anatomy: SidebarRowAnatomy, frame: NSRect) {
         self.proposal = proposal
         self.anatomy = anatomy
@@ -1194,9 +1192,7 @@ final class SidebarDensityProposalView: NSView {
             let isWorking = row.state.hasPrefix("Working")
             let iconSide = isWorking ? anatomy.workingIconSide : anatomy.statusIconSide
             let iconGap: CGFloat = 4
-            let symbol = anatomy.glyphStyle == .enclosed
-                ? Self.enclosedStateSymbol(row.state)
-                : Self.stateSymbol(row.state)
+            let symbol = Self.stateSymbol(row.state)
             let hasIcon = symbol != nil || isWorking
             let stateTextWidth = min(
                 contentWidth * 0.55, measure(row.state, size: 11).width + 2)
@@ -1227,12 +1223,22 @@ final class SidebarDensityProposalView: NSView {
 
             switch anatomy.iconPlacement {
             case .leading:
-                // The slot is reserved on EVERY row, painted or not, so the placement
-                // text starts on one line down the whole list.
-                paintStatusIcon(in: NSRect(
-                    x: textLeft, y: bandY + (bandTop - iconSide) / 2,
-                    width: iconSide, height: iconSide))
-                let after = textLeft + iconSide + iconGap
+                // The slot is NOT reserved when nothing is drawn in it.
+                //
+                // It was, on the theory that a reserved lane keeps the column straight.
+                // It does not need to: the ICONS are the column, and they are pinned to
+                // `textLeft` and ink-aligned to each other, so the column is straight
+                // whether or not the text beside them moves. Reserving the lane only
+                // indented band 1 away from the title and branch below it — on seven rows
+                // out of ten, for nothing. A row with no icon now runs all three bands
+                // flush; a row with one indents band 1 by exactly the space the icon
+                // fills, which reads as the icon occupying it rather than as a margin.
+                if hasIcon {
+                    paintStatusIcon(in: NSRect(
+                        x: textLeft, y: bandY + (bandTop - iconSide) / 2,
+                        width: iconSide, height: iconSide))
+                }
+                let after = textLeft + (hasIcon ? iconSide + iconGap : 0)
                 drawPlacement(from: after, to: textRight - stateTextWidth - 6)
                 drawStateText(rightEdge: textRight)
 

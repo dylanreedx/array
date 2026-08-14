@@ -150,7 +150,7 @@ PASS, 42 images:
 | `offscreen/` | 36 images — corpus sweeps, the 662 pt density fixtures, one interaction reference, and `proposals/` |
 
 **The offscreen half has since been re-rendered** with the new row anatomy and the status
-sweep: `qa-runs/2026-08-14T195203Z/sidebar-96/`, 52 images, gate PASS. The live half is
+sweep: `qa-runs/2026-08-14T200632Z/sidebar-96/`, 42 images, gate PASS. The live half is
 unchanged and does not need re-capturing — those images are the *shipped* sidebar, and no
 product behaviour has changed. Regenerate the offscreen set alone with
 `.build/debug/Array --sidebar-screenshot-check`.
@@ -373,30 +373,63 @@ the set. Its one flaw is that the Working row's throbber is not a disc, so it br
 column it sits in — fixable by giving the throbber a disc-sized track, which would be new
 art and is not in this round.
 
-## Dylan's second ruling — status emphasis
+### Round four — the icon set collapses to three
 
-Edge treatment:
+Ruled 2026-08-14: **keep the left-aligned column**, and cut the icons down to the ones
+worth interrupting for — the hand for approval *and* input, the throbber for working, the
+error mark for failed. Done, Stopped and Cancelled draw nothing.
 
-- [ ] `railThin` (2 pt)
-- [ ] `bracket` (recommended)
-- [ ] `rail` (3 pt)
-- [ ] `outline`
-- [ ] `dashed` — see the objection above
-- [ ] none
+`status/status-attention{Column,Rail,Bracket}-280x662-{aqua,darkAqua}.png`.
 
-Status glyph:
+This is a better rule than the one I recommended, and worth writing down why. Round three
+argued against a leading column because it was unconditional: a solid line of green ticks
+gave the *finished* rows as much of the eye as the *broken* ones, which is the opposite of
+what the T3 reference achieves. Making the column conditional fixes that at the root. The
+glyph stops trying to name the state — the word beside it already does — and answers one
+question instead: **is anything here that concerns me?** Three answers are worth a mark:
+it's running, it wants you, it broke. Everything else is a hole in the column, and a hole
+is information.
 
-- [ ] leading column, one common disc (`leadingEnclosed`) (recommended)
-- [ ] leading column, distinct shapes (`leadingIcon`)
-- [ ] leave it trailing, beside the word
+**Approval and input share the hand deliberately, and that is not the defect P0.1 found.**
+That defect was the two sharing a *word*, so the row said "Blocked" and you could not tell
+which. Here the icon says "you are needed" and the word still says which kind — two
+layers, each carrying something.
 
-Or `combo` for both, which is `railThin` + the disc column.
+**The slot is not reserved on rows that draw nothing.** It was, on the theory that a
+reserved lane keeps the column straight — but the column is made of the *icons*, which are
+pinned to one x and ink-aligned to each other, so it stays straight whether or not the text
+beside them moves. Reserving the lane only indented band 1 away from the title and branch
+below it, on seven rows out of ten, for nothing. Now a row with no icon runs all three
+bands flush, and a row with one indents band 1 by exactly the space the icon fills.
 
-And two sub-questions the images raise:
+Two glyphs remain in the alignment witness, and it now reads the set **off the mock's own
+rows** rather than a list of its own — so it cannot end up measuring a glyph that was cut,
+or skip one that was added. Centring these two would still scatter their left edges by
+1.19 pt of a 16 pt slot; ink-left alignment puts both at 0.00.
+
+## Dylan's ruling — does the card still need a border?
+
+With the column already marking the rows that matter, an edge treatment may now be
+redundant. All three images carry identical content and differ only at the card's leading
+edge.
+
+- [ ] **`attentionColumn`** — no border (recommended: the column is doing the work)
+- [ ] `attentionRail` — + 2 pt rail
+- [ ] `attentionBracket` — + leading bracket
+- [ ] something else
+
+`outline` and `dashed` were dropped rather than re-rendered — `outline` was the heaviest
+of the five and `bracket` does its job better, and `dashed` borrows the canvas's
+focused-tile language on a screen where both surfaces are visible at once. Both are still
+in `qa-runs/2026-08-14T195203Z/` if they deserve another look.
+
+And two sub-questions still open:
 
 - **Keep the branch glyph?**
-- **Is "quiet rows show no emphasis" right**, or should every row carry its state equally?
-  This is a §4.6 semantics call, not a visual one.
+- **Should Done keep its green?** The word and its colour are all that mark a finished row
+  now. That reads fine here, but it is the one place where state is carried by colour plus
+  a word and no shape — §8.2 is satisfied (the word is the non-colour cue), but it is worth
+  looking at deliberately rather than by default.
 
 ## Dylan's ruling
 
