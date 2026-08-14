@@ -400,11 +400,31 @@ enum SidebarScreenshotChecks {
             // model, so band 3 is empty on almost every one. The redesign does not
             // fix that by itself — Phases 1–3 do — and this image is what stops the
             // mock's good data from being mistaken for evidence that they have.
-            for proposal in [SidebarDensityProposal.a] {
+            // TWO row sets through the same live cell, and the pair is the point.
+            //
+            // `production` is what the app makes. `capability` is queue-94's fixture
+            // set — a branch, a model and a real state on every row — which is also
+            // what the Component Lab's live sidebar shows and therefore what Dylan
+            // is looking at when he compares it against the mock. Rendering only one
+            // of them cannot separate "the cell draws the design badly" from "the
+            // data is impoverished", and those need completely different fixes.
+            let liveRowSets: [(id: String, rows: [AgentInboxRow])] = [
+                ("production", denseRows),
+                ("capability", LabFixtures.inboxRows()),
+                ("rules", AgentInbox96Fixtures.rows(now: now)),
+            ]
+            for (rowSetID, liveRows) in liveRowSets {
+                let proposal = SidebarDensityProposal.a
                 try drawing(appearance) {
                     let host = try makeHost(
                         width: 280, height: denseViewportHeight, appearance: appearance,
                         reduceMotion: false, increaseContrast: false)
+                    // The list hands `now` to every cell from its OWN clock, which
+                    // defaults to the wall clock. Rule 2 is an age comparison, so a
+                    // fixture dated against `now` while the cell is told the real time
+                    // measures nothing — both escalation rungs came out `Landed`
+                    // because the fixture's timestamps were in 2030.
+                    host.inbox.clock = { now }
                     host.inbox.cardStyleOverride = AgentInboxCardStyleOverride(
                         makeCell: {
                             AgentInbox96CellView(
@@ -414,7 +434,7 @@ enum SidebarScreenshotChecks {
                                     iconPlacement: .leading, showsModelText: false))
                         },
                         cardHeight: { _ in AgentInbox96CellView.rowHeight(for: proposal) })
-                    host.inbox.reload(rows: denseRows)
+                    host.inbox.reload(rows: liveRows)
                     host.inbox.layoutForQA()
                     // An offscreen table defers its incremental reload indefinitely,
                     // and setting the override goes through exactly that path.
@@ -424,23 +444,27 @@ enum SidebarScreenshotChecks {
                     // What the redesigned cell actually gave each band, read off the
                     // live cells. A row whose state column is narrower than the word
                     // it holds is a truncation nobody would spot in a thumbnail.
-                    if appearanceName == .darkAqua {
-                        for cell in host.inbox.qaMaterializedRowCells.prefix(4)
+                    if appearanceName == .darkAqua, rowSetID == "rules" {
+                        for cell in host.inbox.qaMaterializedRowCells.prefix(8)
                         where cell.qaAgentID != nil {
                             let frames = cell.qaGeometry.elementFrames
                             print(String(
                                 format: "SidebarScreenshotChecks: live96 '%@' — state '%@' "
-                                    + "in %.1fpt, title in %.1fpt, glyph '%@', provider '%@'",
-                                cell.qaTitle.prefix(24).description, cell.qaStateLabel,
-                                frames["state"]?.width ?? -1, frames["title"]?.width ?? -1,
-                                cell.qaGlyph, cell.qaProviderGlyph))
+                                    + "in %.1fpt, glyph '%@', pulsing %@, provider '%@'",
+                                cell.qaTitle.prefix(28).description, cell.qaStateLabel,
+                                frames["state"]?.width ?? -1,
+                                cell.qaGlyph,
+                                ((cell as? AgentInbox96CellView)?.qaIsPulsingForQA ?? false)
+                                    ? "YES" : "no",
+                                cell.qaProviderGlyph))
                         }
                     }
-                    let rep = try UIProbe.bitmap(of: host.container, id: "live96")
-                    let name = "live96-\(proposal.id)-280x\(Int(denseViewportHeight))-\(shortName(appearanceName)).png"
+                    let rep = try UIProbe.bitmap(
+                        of: host.container, id: "live96-\(rowSetID)")
+                    let name = "live96-\(rowSetID)-280x\(Int(denseViewportHeight))-\(shortName(appearanceName)).png"
                     try writePNG(rep, to: directory.appendingPathComponent(name))
                     entries.append(Entry(
-                        png: name, fixture: "live96-\(proposal.id)",
+                        png: name, fixture: "live96-\(rowSetID)",
                         widthRequestedPt: 280,
                         widthMeasuredPt: Double(host.inbox.bounds.width),
                         heightPt: Double(denseViewportHeight),
@@ -863,6 +887,64 @@ enum SidebarScreenshotChecks {
         print("SidebarScreenshotChecks passed: \(entries.count) images, "
               + "\(widths.count) widths x \(appearances.count) appearances, "
               + "manifest at \(directory.appendingPathComponent("manifest.json").path)")
+    }
+}
+
+// MARK: - Program 96 fixtures
+
+/// Rows that exercise what program 96 ADDS, which neither existing corpus can.
+///
+/// The production corpus shows what the app makes — impoverished, on purpose. The
+/// queue-94 capability corpus shows every state queue 94 knows about. Neither has a
+/// finished-and-unlooked-at row, because until rule 2 there was no such thing: a
+/// completed turn and a completed turn you walked away from rendered identically,
+/// which is the whole problem.
+///
+/// A FIXTURE, and named one. Nothing here is evidence about the product — it is the
+/// set of rows the new design has to have an answer for.
+@MainActor
+enum AgentInbox96Fixtures {
+    static func rows(now: Date) -> [AgentInboxRow] {
+        func row(
+            _ index: Int, _ title: String, state: InboxState,
+            attention: InboxAttention = .none, branch: String? = nil,
+            model: String? = "anthropic/claude-opus-4-6", elapsed: TimeInterval? = nil,
+            lastActive: TimeInterval? = nil
+        ) -> AgentInboxRow {
+            AgentInboxRow(
+                id: UUID(uuidString: String(format: "00000096-0000-0000-0000-%012d", index))!,
+                title: title, projectName: "Array", state: state, attention: attention,
+                model: model, branch: branch, elapsed: elapsed,
+                lastActiveAt: lastActive.map { now.addingTimeInterval(-$0) },
+                createdAt: now.addingTimeInterval(-Double(index) * 600))
+        }
+        let escalation = AgentInbox96CellView.escalationDelay
+        return [
+            row(1, "Stop the camera resizing every tile view", state: .working,
+                branch: "agent/retained-world-plane", model: "openai-codex/gpt-5.6-sol",
+                elapsed: 84),
+            row(2, "Apply the measured-fit sacrifice order", state: .approval,
+                branch: "agent/measured-fit"),
+            row(3, "Choose the provider mark set", state: .input,
+                branch: "agent/brand-marks", model: "google/gemini-3-pro"),
+            row(4, "Persist an honest terminal event", state: .failed,
+                attention: .unread, branch: "agent/terminal-outcomes",
+                model: "xai/grok-4-2", elapsed: 720),
+            // RULE 2, both rungs. Same state, same attention — only the age differs,
+            // and the age is what decides whether the row asks twice.
+            row(5, "Write the S0 density review", state: .ready, attention: .unread,
+                branch: "agent/s0-review", model: "mistralai/mistral-large-3",
+                lastActive: 90),
+            row(6, "Budget chrome repaints per camera step", state: .ready,
+                attention: .unread, branch: "agent/perf-budgets",
+                lastActive: escalation + 3600),
+            // The control: finished, and you have seen it. Says its word, quietly,
+            // and carries no mark at all.
+            row(7, "Bound restore concurrency", state: .ready,
+                branch: "agent/restore-bounds", model: "openai/gpt-5.6-sol"),
+            row(8, "تحديث الشريط الجانبي · סוכן עם שם ארוך", state: .ready,
+                branch: "agent/rtl-truncation", model: "xai/grok-4-2"),
+        ]
     }
 }
 

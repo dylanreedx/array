@@ -1379,8 +1379,14 @@ final class SidebarInbox96PlaygroundView: NSView {
         trackingMode: .selectOne, target: nil, action: nil)
     private let modelTextButton = NSButton(
         checkboxWithTitle: "Model name", target: nil, action: nil)
+    private let rowsControl = NSSegmentedControl(
+        labels: ["96 rules", "Queue 94"],
+        trackingMode: .selectOne, target: nil, action: nil)
     private let readout = NSTextField(labelWithString: "")
     private let inbox: AgentInboxView
+    /// Pinned. Rule 2 is an AGE comparison, so a wall clock would have the fixture's
+    /// escalated row quietly de-escalate while you looked at it.
+    private static let now = Date(timeIntervalSince1970: 1_900_600_000)
 
     private static let borders: [(title: String, border: SidebarRowAnatomy.Border)] = [
         ("No card border", .none),
@@ -1398,8 +1404,7 @@ final class SidebarInbox96PlaygroundView: NSView {
 
         // Pinned, not live: a parked row's "12m ago" is read off this clock and a
         // wall clock would make the row flap while you are looking at it.
-        inbox.clock = { LabFixtures.inboxNow }
-        inbox.reload(rows: LabFixtures.inboxRows())
+        inbox.clock = { Self.now }
 
         borderControl.addItems(withTitles: Self.borders.map(\.title))
         pitchControl.selectedSegment = 0
@@ -1407,7 +1412,8 @@ final class SidebarInbox96PlaygroundView: NSView {
         iconControl.selectedSegment = 0
         styleControl.selectedSegment = 0
         modelTextButton.state = .off
-        for control in [pitchControl, iconControl, styleControl] {
+        rowsControl.selectedSegment = 0
+        for control in [pitchControl, iconControl, styleControl, rowsControl] {
             control.target = self
             control.action = #selector(controlChanged)
         }
@@ -1420,7 +1426,7 @@ final class SidebarInbox96PlaygroundView: NSView {
         readout.maximumNumberOfLines = 2
         readout.lineBreakMode = .byWordWrapping
 
-        let topRow = NSStackView(views: [styleControl, pitchControl])
+        let topRow = NSStackView(views: [styleControl, rowsControl, pitchControl])
         topRow.orientation = .horizontal
         topRow.spacing = CGFloat(Space.m)
         let secondRow = NSStackView(views: [borderControl, iconControl, modelTextButton])
@@ -1451,6 +1457,7 @@ final class SidebarInbox96PlaygroundView: NSView {
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel("Program 96 live sidebar")
+        applyRows()
         applyStyle()
     }
 
@@ -1459,7 +1466,31 @@ final class SidebarInbox96PlaygroundView: NSView {
 
     override var isFlipped: Bool { true }
 
-    @objc private func controlChanged() { applyStyle() }
+    @objc private func controlChanged() {
+        applyRows()
+        applyStyle()
+    }
+
+    /// Which row set the list is showing.
+    ///
+    /// `96 rules` is the fixture that exercises what this program ADDS — both rungs
+    /// of the finished-but-unseen escalation, which neither existing corpus contains
+    /// because until now there was no such state. `Queue 94` is the capability
+    /// corpus the Lab's other sidebar cards use.
+    ///
+    /// NEITHER IS PRODUCTION. The live sidebar still renders two facts and a diamond;
+    /// see `live96-production-*.png` in the screenshot artifact for what the app
+    /// actually makes.
+    private func applyRows() {
+        let rows = rowsControl.selectedSegment == 0
+            ? AgentInbox96Fixtures.rows(now: Self.now)
+            : LabFixtures.inboxRows()
+        guard rows.map(\.id) != shownRowIDs else { return }
+        shownRowIDs = rows.map(\.id)
+        inbox.reload(rows: rows)
+    }
+
+    private var shownRowIDs: [UUID] = []
 
     private var proposal: SidebarDensityProposal {
         SidebarDensityProposal.all[
@@ -1490,7 +1521,16 @@ final class SidebarInbox96PlaygroundView: NSView {
         let proposal = self.proposal
         let anatomy = self.anatomy
         inbox.cardStyleOverride = AgentInboxCardStyleOverride(
-            makeCell: { AgentInbox96CellView(proposal: proposal, anatomy: anatomy) },
+            makeCell: {
+                // Motion ON in the Lab unless the system says otherwise: the throbber
+                // has to actually spin and the escalated row has to actually pulse,
+                // or the two things this section exists to show are stills.
+                AgentInbox96CellView(
+                    proposal: proposal, anatomy: anatomy,
+                    prefersReducedMotion: {
+                        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                    })
+            },
             cardHeight: { _ in AgentInbox96CellView.rowHeight(for: proposal) })
         let chrome = SidebarScreenshotChecks.measureSidebarInboxHeight(
             sidebarHeight: 662, width: 280, appearance: effectiveAppearance)

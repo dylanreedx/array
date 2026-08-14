@@ -684,3 +684,107 @@ first — `runSidebarDefectCorpusChecks` scans only between the two
 `P0.3 SIDEBAR DEFECT CORPUS` markers (lines 415–607), and every added line is past 1165.
 Both new entries are `.reviewSurface`, not `.staticCard`, so the baseline, contrast and
 probe sweeps skip them — verified: `--ui-baseline-check` mentions the new ids zero times.
+
+---
+
+## Round 6 — three UX rules, and why the live row was worse than the mock (2026-08-14)
+
+Dylan: *"im kinda disappointed… our static one looks so much better."* He was right, and
+the cause was not the cell. Rendering the SAME live cell over two row sets separated it:
+
+- `live96-production-*` — what the app makes. Sparse because production is sparse.
+- `live96-capability-*` — queue-94's fixtures, which is what the Lab shows and therefore
+  what he was comparing. **This is where the problem was.**
+
+The capability render showed the actual defect: `Needs attention` in amber directly above
+`Needs attention` in violet — same words, same glyph, different colour, no difference in
+meaning — plus blue Working, red Failed, grey Done, and a right-hand column where some
+rows carried a mark and others carried text. Five hues and two right-hand treatments for
+one question. The mock looked better because it had one consistent trailing element and a
+tighter colour story, not because the mock's geometry was better.
+
+### Rule 1 — one colour, one meaning
+
+Approval, input, failed and finished-but-unseen all take `accentApproval` (`#FFB347`
+dark / `#845000` light), which is already token-legal at 4.5:1 on every surface in both
+themes — no new token. WHICH kind of attention is carried by the glyph and the word,
+which is where §8.2 wants it anyway.
+
+**Working is deliberately uncoloured.** A running agent is not asking for anything, and
+it already owns the loudest thing on the row: a moving glyph.
+
+This diverges from `InboxState.accent`, queue-94's four-accent mapping. Recorded as a
+deliberate program-96 divergence, not a drift.
+
+### Rule 2 — finished, and nobody looked
+
+Both halves come off the existing model; nothing is invented or stored.
+`InboxState.ready` + `InboxAttention.unread`, whose own doc comment already says the
+thing this design needed: *"Unread is a MARK, not a word."*
+
+Two rungs, separated only by AGE:
+
+| | when | shows |
+|---|---|---|
+| `landed` | finished, unseen | orange dot, word `Landed` |
+| `waiting` | unseen past 10 min | the same dot, **pulsing**, word `Waiting` |
+
+Dylan's reasoning, and it is the right one: the failure this prevents has not happened
+yet. With enough tiles you forget an agent finished, and a grey `Done` is
+indistinguishable from the forty other grey `Done`s.
+
+**The pulse is 0.5 Hz and bottoms out at 0.4 opacity** — far below the 3 Hz seizure
+threshold, and never to zero, because a glyph that vanishes reads as a rendering fault
+rather than as insistence. Under Reduce Motion it does not run, and **nothing is lost**:
+the word changes `Landed` → `Waiting` either way, so the escalation is legible without a
+frame of animation. A cue that exists only as movement is a cue some people never get.
+
+The names are provisional and Dylan said he does not have one yet — `ReviewState` is one
+enum, so renaming is one line.
+
+### Rule 3 — glanceable
+
+Confirmed: the leading column stays, conditional, ink-left-aligned. The unread dot draws
+at ink fraction 0.42 rather than the shared 0.82, or a filled circle is a blob the size
+of the error triangle — "finished" would shout louder than "broken".
+
+### The throbber was never started
+
+`DualPlaneGyroTiltedThinkingIndicatorView.startAnimating()` exists and the first version
+of this cell never called it, so the sidebar showed a frozen gyro — three dots that read
+as a rendering bug rather than a running agent. Now started, and posed at a fixed phase
+under Reduce Motion instead.
+
+### Two more bugs the new fixture caught
+
+- **Marks matched no lab row.** The provider lookup keyed off the `provider/` segment
+  after the last round, but fixtures carry bare model names (`gpt-5.6-sol`). Both forms
+  match now — a right-hand column where some rows show a logo and others show text has no
+  rhythm at all.
+- **Both escalation rungs rendered `Landed`.** `AgentInboxView` hands every cell `now`
+  from its OWN `clock`, which defaults to the wall clock, while the fixture dated its
+  rows against a pinned instant in 2030 — so every age came out negative. Rule 2 is an
+  age comparison and cannot be witnessed without pinning the list's clock too.
+
+### New fixture, named as one
+
+`AgentInbox96Fixtures` — the rows this program ADDS answers for. Neither existing corpus
+has a finished-and-unlooked-at row, because until rule 2 there was no such thing: a
+completed turn and a completed turn you walked away from rendered identically. That is
+the problem, stated as a fixture.
+
+### Verified
+
+All seven gates green (`--sidebar-ux-check`, `--agent-inbox-check`,
+`--sidebar-production-corpus-check`, `--ui-probe-check`, `--ui-contrast-check`,
+`ContinuumRevivedAgentUIChecks`, colour hygiene). `--sidebar-screenshot-check` 48 images,
+and it now prints the escalation per row including whether the mark is actually
+animating — `Landed … pulsing no` / `Waiting … pulsing YES`, which is the one fact about
+rule 2 no still image can carry.
+
+### Still open
+
+The right-click menu. Array's row menu today is Open / Rename / Settle / Snooze › /
+Mark Unread / Archive / Delete, with unavailable actions hidden rather than greyed
+(P3.14's rule). Dylan asked how T3 Code's looks — **I cannot see T3's app and did not
+guess**; waiting on a screenshot.

@@ -70,8 +70,11 @@ enum InkAlignedSymbol {
 
     /// Where to draw the unit-square glyph image so its ink lands correctly on
     /// `slot` at a common extent. Pure arithmetic, so a gate can drive it directly.
-    static func rect(slot: NSRect, ink: NSRect, alignment: Alignment = .centred) -> NSRect {
-        let target = slot.width * inkTargetFraction
+    static func rect(
+        slot: NSRect, ink: NSRect, alignment: Alignment = .centred,
+        fraction: CGFloat = inkTargetFraction
+    ) -> NSRect {
+        let target = slot.width * fraction
         let side = target / max(max(ink.width, ink.height), 0.0001)
         let x = alignment == .leadingEdge
             ? slot.minX - (ink.minX * side)
@@ -121,12 +124,17 @@ enum InkAlignedSymbol {
     }
 
     /// Draw `name` so its ink lands on `slot`, in `colour`.
+    ///
+    /// `fraction` overrides how much of the slot the ink fills. A dot needs a much
+    /// smaller one than a triangle: `circle.fill` at the default 0.82 is a blob, and
+    /// the whole point of an unread dot is that it is small.
     static func draw(
         _ name: String, in slot: NSRect, colour: NSColor, alignment: Alignment,
-        flipped: Bool
+        flipped: Bool, fraction: CGFloat = inkTargetFraction
     ) {
         guard let image = image(name), let ink = ink(name) else { return }
-        drawTinted(image, in: rect(slot: slot, ink: ink, alignment: alignment),
+        drawTinted(image, in: rect(slot: slot, ink: ink, alignment: alignment,
+                                   fraction: fraction),
                    colour: colour, flipped: flipped)
     }
 
@@ -191,10 +199,14 @@ enum BrandMark96 {
     /// Still a mock's affordance, though: a row's provider should come off the
     /// agent record, not be parsed out of a string. P3.1.
     static func mark(forModel model: String) -> NSImage? {
-        let provider = model.split(separator: "/").first.map(String.init)?.lowercased()
-            ?? model.lowercased()
+        // Match the provider segment when there is one, and the bare name when
+        // there is not: production ids are `provider/model`, but a fixture or a
+        // legacy record can carry `gpt-5.6-sol` alone, and a row that shows a mark
+        // beside rows that show text is a right-hand column with no rhythm at all.
+        let qualified = model.split(separator: "/").first.map(String.init)?.lowercased()
+        let bare = model.lowercased()
         let key: String
-        switch provider {
+        switch qualified ?? bare {
         case let p where p.hasPrefix("openai"): key = "openai-light"   // incl. openai-codex
         case let p where p.hasPrefix("anthropic"), let p where p.hasPrefix("claude"):
             key = "anthropic"
@@ -202,6 +214,11 @@ enum BrandMark96 {
             key = "xai-light"
         case let p where p.hasPrefix("google"), let p where p.hasPrefix("gemini"):
             key = "gemini"
+        case let p where p.hasPrefix("gpt") || p.hasPrefix("o1") || p.hasPrefix("o3"):
+            key = "openai-light"
+        case let p where p.hasPrefix("opus") || p.hasPrefix("sonnet")
+                        || p.hasPrefix("haiku"):
+            key = "anthropic"
         default: return nil
         }
         return load(key)
@@ -277,7 +294,14 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
     private var shown: (row: AgentInboxRow, emphasis: RowEmphasis, indent: Double,
                         disclosure: RowDisclosure, rollup: ChildRollup?,
-                        isSelected: Bool)?
+                        isSelected: Bool, now: Date)?
+    /// Whether motion is allowed. Injected rather than read from the system here so
+    /// the QA seam the list already owns (`AgentInboxView.prefersReducedMotion`) can
+    /// drive it, and so a check can render both branches.
+    private let prefersReducedMotion: () -> Bool
+    /// The leading status glyph. A VIEW, not a painted decoration, for one reason:
+    /// it is the only thing on the row that can animate.
+    private let statusGlyph = StatusGlyphView()
     private var layoutColumnWidth: Double?
     private var indent: Double = 0
 
@@ -288,15 +312,22 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         Double(proposal.pitch)
     }
 
-    init(proposal: SidebarDensityProposal, anatomy: SidebarRowAnatomy) {
+    init(
+        proposal: SidebarDensityProposal, anatomy: SidebarRowAnatomy,
+        prefersReducedMotion: @escaping () -> Bool = {
+            NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        }
+    ) {
         self.proposal = proposal
         self.anatomy = anatomy
+        self.prefersReducedMotion = prefersReducedMotion
         super.init(frame: NSRect(x: 0, y: 0, width: 280,
                                  height: Self.rowHeight(for: proposal)))
         wantsLayer = true
 
         addSubview(card)
         card.addSubview(decorations)
+        card.addSubview(statusGlyph)
 
         placementLabel.font = .token(.caption)
         stateLabel.font = .token(.label)
@@ -340,7 +371,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     func apply(_ row: AgentInboxRow, emphasis: RowEmphasis, indent: Double,
                disclosure: RowDisclosure, rollup: ChildRollup?, isSelected: Bool,
                isInteracting: Bool, now: Date) {
-        shown = (row, emphasis, indent, disclosure, rollup, isSelected)
+        shown = (row, emphasis, indent, disclosure, rollup, isSelected, now)
         self.indent = indent
         card.isSelected = isSelected
 
@@ -352,7 +383,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // read: `Done · 4m`. The elapsed half comes from the shipped formatter, not
         // a second one — `AgentInboxCellView.elapsedText` already decides what a
         // duration looks like on this surface.
-        let word = Self.stateWord(row)
+        let word = Self.stateWord(row, now: now)
         let elapsed = AgentInboxCellView.elapsedText(row.elapsed)
         stateLabel.stringValue = [word, elapsed].compactMap { $0 }.joined(separator: " · ")
         stateLabel.isHidden = stateLabel.stringValue.isEmpty
@@ -368,7 +399,19 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         modelLabel.toolTip = model.isEmpty ? nil : model
         decorations.toolTip = model.isEmpty ? nil : model
 
-        decorations.statusSymbol = Self.attentionSymbol(row)
+        let symbol = Self.attentionSymbol(row, now: now)
+        statusGlyph.symbol = symbol
+        statusGlyph.inkFraction = symbol.map(Self.inkFraction(forSymbol:))
+            ?? InkAlignedSymbol.inkTargetFraction
+        statusGlyph.alignment =
+            anatomy.iconPlacement == .leading ? .leadingEdge : .centred
+        // The pulse is the escalation, and it is the ONLY motion on a resting row.
+        // Reduce Motion drops it with nothing lost: the word changes from `Landed` to
+        // `Waiting` either way, so the escalation is legible without a single frame
+        // of animation. A cue that only exists as movement is a cue some people never
+        // receive.
+        statusGlyph.setPulsing(
+            Self.reviewState(row, now: now) == .waiting && !prefersReducedMotion())
         decorations.isWorking = row.state == .working
         decorations.drawsBranchGlyph = !branchLabel.stringValue.isEmpty
 
@@ -382,30 +425,70 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         decorations.needsDisplay = true
     }
 
+    /// How long a finished, unlooked-at row stays quiet before it starts asking.
+    ///
+    /// Dylan's reasoning, and it is the right one: the failure this prevents has not
+    /// happened yet. With enough tiles you forget an agent finished, and the row that
+    /// says `Done` in grey is indistinguishable from the forty other rows that say
+    /// `Done` in grey. Ten minutes is long enough that a turn you watched land never
+    /// escalates, and short enough that one you walked away from does.
+    static let escalationDelay: TimeInterval = 10 * 60
+
+    /// Work that finished and nobody has looked at it.
+    ///
+    /// Both halves come off the existing model — nothing new is invented and nothing
+    /// new is stored. `InboxState.ready` is a row with no live turn, and
+    /// `InboxAttention.unread` is queue-94's own "you have not seen this", whose
+    /// doc comment already says the thing this design needs: *"Unread is a MARK,
+    /// not a word."*
+    enum ReviewState {
+        /// Finished, unseen, recently. A quiet mark.
+        case landed
+        /// Finished, unseen, and ignored past `escalationDelay`. The mark pulses.
+        case waiting
+
+        var word: String {
+            switch self {
+            case .landed: return "Landed"
+            case .waiting: return "Waiting"
+            }
+        }
+    }
+
+    /// Whether this row is finished-and-unseen, and how insistent it has earned the
+    /// right to be. nil for everything else.
+    static func reviewState(_ row: AgentInboxRow, now: Date) -> ReviewState? {
+        guard row.state == .ready, row.attention == .unread, !row.isUnconfirmed else {
+            return nil
+        }
+        guard let since = row.lastActiveAt else { return .landed }
+        return now.timeIntervalSince(since) >= escalationDelay ? .waiting : .landed
+    }
+
     /// The word this row's state gets, or nil for a state that says nothing.
     ///
-    /// `InboxState.label` is the shipped vocabulary and is reused verbatim rather
-    /// than re-spelled here. What 96 adds is the `ready` case: queue-94 leaves a
-    /// resting row unlabelled, and the whole finding of P0.1 was that three of five
-    /// terminal outcomes therefore render NO state at all. A finished agent should
-    /// say it finished.
-    static func stateWord(_ row: AgentInboxRow) -> String? {
+    /// `InboxState.label` is the shipped vocabulary, reused verbatim. What 96 adds is
+    /// the resting case: queue-94 leaves `.ready` unlabelled, which is why P0.1 found
+    /// three of five terminal outcomes rendering NO state at all. A finished agent
+    /// should say it finished, and one nobody has looked at should say more than that.
+    static func stateWord(_ row: AgentInboxRow, now: Date) -> String? {
+        if let review = reviewState(row, now: now) { return review.word }
         if let label = row.state.label { return label }
-        // Ready with nothing else to say is a finished turn nobody has acknowledged.
         return row.isUnconfirmed ? nil : "Done"
     }
 
     /// Three glyphs, and most rows get none.
     ///
     /// The icon does not name the state — the word beside it does. It answers one
-    /// question: is anything here that concerns me? Running, wants-you, and broke
-    /// are the three answers worth a mark; done, stopped and cancelled draw
-    /// nothing, and the hole is information.
+    /// question: is anything here that concerns me? Running, wants-you, broke, and
+    /// (rule 2) finished-but-unseen. Everything else draws nothing, and the hole is
+    /// information.
     ///
     /// Approval and input deliberately share the hand. That is NOT the P0.1 defect
-    /// of the two sharing a word — the icon says "you are needed" and the word
-    /// still says which kind.
-    static func attentionSymbol(_ row: AgentInboxRow) -> String? {
+    /// of the two sharing a word — the icon says "you are needed" and the word still
+    /// says which kind.
+    static func attentionSymbol(_ row: AgentInboxRow, now: Date) -> String? {
+        if reviewState(row, now: now) != nil { return "circle.fill" }
         switch row.state {
         case .working: return nil   // the throbber, not a symbol
         case .approval, .input: return "hand.raised.fill"
@@ -414,16 +497,38 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         }
     }
 
+    /// The unread dot is a DOT. At the shared 0.82 ink fraction a filled circle is a
+    /// blob the size of the error triangle, which would make "finished" shout louder
+    /// than "broken".
+    static func inkFraction(forSymbol symbol: String) -> CGFloat {
+        symbol == "circle.fill" ? 0.42 : InkAlignedSymbol.inkTargetFraction
+    }
+
+    /// The app's own throbber, added only while a row is working.
+    ///
+    /// It has to be told to run. The first version of this cell added the view and
+    /// never called `startAnimating()`, so the sidebar showed a frozen gyro — three
+    /// dots that looked like a rendering bug rather than a running agent. Under
+    /// Reduce Motion it is posed at a fixed phase instead, which is what
+    /// `setSnapshotPhase` exists for.
     private func applyThrobber(isWorking: Bool) {
         guard isWorking else {
+            throbber?.stopAnimating()
             throbber?.removeFromSuperview()
             throbber = nil
             return
         }
-        guard throbber == nil else { return }
-        let indicator = DualPlaneGyroTiltedThinkingIndicatorView()
-        card.addSubview(indicator)
-        throbber = indicator
+        if throbber == nil {
+            let indicator = DualPlaneGyroTiltedThinkingIndicatorView(
+                reducedMotion: prefersReducedMotion())
+            card.addSubview(indicator)
+            throbber = indicator
+        }
+        if prefersReducedMotion() {
+            throbber?.setSnapshotPhase(0.32)
+        } else {
+            throbber?.startAnimating()
+        }
     }
 
     private func applyColours() {
@@ -433,8 +538,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         titleLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
         branchLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         modelLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
-        stateLabel.textColor = Self.accentColour(row, in: self)
-        decorations.accent = Self.accentColour(row, in: self)
+        let accent = Self.accentColour(row, now: shown.now, in: self)
+        stateLabel.textColor = accent
+        decorations.accent = accent
+        statusGlyph.colour = accent
         decorations.muted = TextToken.textSecondary.color.nsColor(in: self)
 
         // Recession is the row's words, never its accent: `accentOpacity` paints the
@@ -448,18 +555,30 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         decorations.alphaValue = CGFloat(shown.emphasis.accentOpacity)
     }
 
-    /// The row's accent, from the shipped token vocabulary.
+    /// **One colour, for one meaning: this row wants you.**
     ///
-    /// `InboxState.accent` returns nil for `ready` — colour is reserved for
-    /// meaning. 96 keeps that: a done row's word is secondary text, not green,
-    /// because a list where every finished row is coloured has spent its colour
-    /// budget on the rows that need nothing.
-    static func accentColour(_ row: AgentInboxRow, in view: NSView) -> NSColor {
-        if row.isUnconfirmed { return TextToken.textSecondary.color.nsColor(in: view) }
-        guard let accent = row.state.accent else {
+    /// Ruled 2026-08-14. The four-accent palette queue 94 uses — blue working, amber
+    /// approval, violet input, red failed — put four hues in a list where the reader
+    /// has one question, and it produced a row that said `Needs attention` in amber
+    /// directly above another saying `Needs attention` in violet. Same words, same
+    /// glyph, different colour, no difference in meaning: that is not a palette, it
+    /// is noise with a token behind it.
+    ///
+    /// So colour becomes binary. Approval, input, failed and finished-but-unseen all
+    /// take `accentApproval` — the amber that is already token-legal at 4.5:1 on
+    /// every surface in both themes. WHICH kind of attention is carried by the glyph
+    /// and the word, which is where §8.2 wants it anyway: never by colour alone.
+    ///
+    /// Working is deliberately NOT coloured. A running agent is not asking for
+    /// anything, and it already has the loudest thing on the row — a moving glyph.
+    static func accentColour(_ row: AgentInboxRow, now: Date, in view: NSView) -> NSColor {
+        guard !row.isUnconfirmed, isAttention(row, now: now) else {
             return TextToken.textSecondary.color.nsColor(in: view)
         }
-        return accent.color.nsColor(in: view)
+        if row.state == .working {
+            return TextToken.textSecondary.color.nsColor(in: view)
+        }
+        return AccentToken.accentApproval.color.nsColor(in: view)
     }
 
     private func applyAccessibility() {
@@ -530,9 +649,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         }
 
         var bandY = proposal.insetV
+        var statusSlot: NSRect?
         let iconSide = decorations.isWorking
             ? anatomy.workingIconSide : anatomy.statusIconSide
-        let hasIcon = decorations.statusSymbol != nil || decorations.isWorking
+        let hasIcon = statusGlyph.symbol != nil || decorations.isWorking
         let leadsWithIcon = anatomy.iconPlacement == .leading
 
         // Band 1 — placement left, state and time right.
@@ -541,7 +661,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         var placementLeft = textLeft
         var trailingIconWidth: CGFloat = 0
         if leadsWithIcon {
-            decorations.statusSlot = hasIcon
+            statusSlot = hasIcon
                 ? NSRect(x: textLeft, y: bandY + (proposal.bandTop - iconSide) / 2,
                          width: iconSide, height: iconSide)
                 : nil
@@ -552,15 +672,20 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             if hasIcon { placementLeft = textLeft + iconSide + 4 }
         } else if hasIcon {
             trailingIconWidth = iconSide + 4
-            decorations.statusSlot = NSRect(
+            statusSlot = NSRect(
                 x: textRight - stateWidth - trailingIconWidth,
                 y: bandY + (proposal.bandTop - iconSide) / 2,
                 width: iconSide, height: iconSide)
         } else {
-            decorations.statusSlot = nil
+            statusSlot = nil
         }
-        if let slot = decorations.statusSlot, decorations.isWorking {
-            throbber?.frame = inCard(slot)
+        statusGlyph.isHidden = statusSlot == nil || decorations.isWorking
+        if let slot = statusSlot {
+            if decorations.isWorking {
+                throbber?.frame = inCard(slot)
+            } else {
+                statusGlyph.frame = inCard(slot)
+            }
         }
         placementLabel.frame = inCard(NSRect(
             x: placementLeft, y: bandY,
@@ -605,7 +730,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
         decorations.border = anatomy.border
         decorations.borderWidth = anatomy.borderWidth
-        decorations.paintsBorder = Self.isAttention(shown?.row)
+        decorations.paintsBorder = Self.isAttention(shown?.row, now: shown?.now ?? Date())
         decorations.needsDisplay = true
 
         jumpHint.frame = NSRect(
@@ -618,8 +743,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// The states that are asking for a person, as opposed to reporting one. The
     /// card border and the attention glyph use ONE predicate, so a row can never
     /// have an edge treatment saying "look here" and no glyph, or the reverse.
-    static func isAttention(_ row: AgentInboxRow?) -> Bool {
+    static func isAttention(_ row: AgentInboxRow?, now: Date) -> Bool {
         guard let row else { return false }
+        if reviewState(row, now: now) != nil { return true }
         switch row.state {
         case .working, .approval, .input, .failed: return true
         case .ready: return false
@@ -675,8 +801,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                 "model": labels[4].frame,
                 // Painted, so their frames come off the decoration layer rather
                 // than off a view that does not exist.
-                "statusGlyph": decorations.statusSlot.map { decorations.convert($0, to: self) }
-                    ?? .zero,
+                "statusGlyph": statusGlyph.isHidden
+                    ? (throbber.map { $0.convert($0.bounds, to: self) } ?? .zero)
+                    : statusGlyph.convert(statusGlyph.bounds, to: self),
                 "providerMark": decorations.markSlot.map { decorations.convert($0, to: self) }
                     ?? .zero,
             ],
@@ -708,7 +835,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     var qaElapsed: String { AgentInboxCellView.elapsedText(shown?.row.elapsed) ?? "" }
     /// The status is a PAINTED glyph here, not a text label, so it is reported by
     /// its symbol name — the honest answer for a row that draws rather than writes.
-    var qaGlyph: String { decorations.isWorking ? "throbber" : (decorations.statusSymbol ?? "") }
+    var qaGlyph: String { decorations.isWorking ? "throbber" : (statusGlyph.symbol ?? "") }
+    /// Whether the escalated review mark is actually animating right now — the one
+    /// fact about rule 2 that a still image cannot carry.
+    var qaIsPulsingForQA: Bool { statusGlyph.isPulsing }
     var qaProviderGlyph: String {
         if decorations.mark != nil { return "mark" }
         return modelLabel.isHidden ? "" : modelLabel.stringValue
@@ -716,7 +846,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     var qaProject: String { placementLabel.stringValue }
     var qaTextAlpha: Double { Double(titleLabel.alphaValue) }
     var qaAccentAlpha: Double { Double(stateLabel.alphaValue) }
-    var qaGlyphAlpha: Double { Double(decorations.alphaValue) }
+    var qaGlyphAlpha: Double { Double(statusGlyph.alphaValue) }
     var qaIndent: Double { indent }
     var qaDisclosureGlyph: String { disclosureButton.qaGlyph }
     var qaJumpHint: String { jumpHint.qaChord }
@@ -747,6 +877,80 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     }
 }
 
+// MARK: - The status glyph
+
+/// The leading attention mark, and the only thing on a resting row that can move.
+///
+/// A view rather than another painted decoration for exactly one reason: rule 2's
+/// escalation is a pulse, and you cannot animate a rectangle inside somebody else's
+/// `draw(_:)`. Everything else the row decorates with — the branch glyph, the
+/// provider mark, the card edge — stays painted.
+///
+/// THE PULSE IS DELIBERATELY SLOW. 2.0 s per cycle is about 0.5 Hz, far below the
+/// 3 Hz where flashing becomes a seizure risk, and it bottoms out at 0.4 rather
+/// than 0 so the mark never disappears — a glyph that vanishes reads as a
+/// rendering fault, not as insistence. It is also rare by construction: only a
+/// finished row nobody has looked at for ten minutes gets one.
+@MainActor
+final class StatusGlyphView: NSView {
+    var symbol: String? { didSet { needsDisplay = true } }
+    var colour: NSColor = .labelColor { didSet { needsDisplay = true } }
+    var inkFraction: CGFloat = InkAlignedSymbol.inkTargetFraction {
+        didSet { needsDisplay = true }
+    }
+    var alignment: InkAlignedSymbol.Alignment = .leadingEdge {
+        didSet { needsDisplay = true }
+    }
+    private(set) var isPulsing = false
+
+    private static let animationKey = "reviewPulse"
+    private static let period: CFTimeInterval = 2.0
+    private static let floorOpacity: Float = 0.4
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var isFlipped: Bool { true }
+    /// Decoration only — the click belongs to the row.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func setPulsing(_ pulsing: Bool) {
+        guard pulsing != isPulsing else { return }
+        isPulsing = pulsing
+        guard pulsing else {
+            layer?.removeAnimation(forKey: Self.animationKey)
+            layer?.opacity = 1
+            return
+        }
+        let pulse = CABasicAnimation(keyPath: "opacity")
+        pulse.fromValue = 1.0
+        pulse.toValue = Self.floorOpacity
+        pulse.duration = Self.period / 2
+        pulse.autoreverses = true
+        pulse.repeatCount = .infinity
+        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        layer?.add(pulse, forKey: Self.animationKey)
+    }
+
+    /// A recycled cell must not inherit the previous row's pulse.
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        setPulsing(false)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let symbol else { return }
+        InkAlignedSymbol.draw(
+            symbol, in: bounds, colour: colour, alignment: alignment,
+            flipped: isFlipped, fraction: inkFraction)
+    }
+}
+
 // MARK: - Painted decorations
 
 /// The row's three small images and its card border, in one drawing pass.
@@ -758,8 +962,6 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 /// Markdown tile freezing the app for three releases.
 @MainActor
 private final class Decorations: NSView {
-    var statusSlot: NSRect?
-    var statusSymbol: String?
     var isWorking = false
     var branchSlot: NSRect?
     var drawsBranchGlyph = false
@@ -777,13 +979,6 @@ private final class Decorations: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         if paintsBorder { drawBorder() }
-        // The throbber is a real subview of the card, so `isWorking` draws nothing
-        // here — the slot is reserved for it and left empty.
-        if let slot = statusSlot, let symbol = statusSymbol, !isWorking {
-            InkAlignedSymbol.draw(
-                symbol, in: slot, colour: accent,
-                alignment: .leadingEdge, flipped: isFlipped)
-        }
         if let slot = branchSlot, drawsBranchGlyph {
             InkAlignedSymbol.draw(
                 "arrow.triangle.branch", in: slot, colour: muted,
