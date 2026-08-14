@@ -196,6 +196,28 @@ with the density you pick.
 
 ---
 
+## Feedback taken on the mock (2026-08-14)
+
+Applied and visible in the current images: icons were upside down (a double flip);
+`Done` was showing an icon *and* a `✓` *and* a colour; Working now poses Array's own
+`DualPlaneGyroTiltedThinkingIndicatorView` instead of a generic refresh symbol; Stopped
+and Failed were confusable and now differ by silhouette (triangle / square / slash); and
+the provider slot draws the real vendor marks.
+
+Still open, and they change the row anatomy rather than its pitch:
+
+- **Drop the model text, keep the mark alone** (T3 does this: repo + time, title, branch +
+  small trailing icons, no model name). §4.3's sacrifice order currently *ends* by removing
+  model text while keeping the mark — this asks to start there. The exact model ID must
+  still be reachable in tooltip and accessibility detail either way.
+- **More visual aid for status.** Untried options: a leading status rail on the card, a
+  larger status icon, a coloured left edge, or a small static attention mark distinct from
+  the outcome glyph (§4.7 allows exactly that).
+- **The Working throbber is too small at 11 pt** — it reduces to a couple of dots. It
+  likely needs a ~14 pt slot to read as the gyro it is.
+
+These are cheap to try in the mock and do not block the pitch ruling below.
+
 ## Dylan's ruling
 
 Pick one, or say what you want instead:
