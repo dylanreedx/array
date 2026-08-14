@@ -4879,7 +4879,39 @@ enum UIProbeGeometry {
                     .contains("Needs attention") else {
                     throw fail("\(label): recycled row retained stale status-owner wording")
                 }
-                assertions += 7
+
+                // The QA recording itself is opt-in. In production the inbox
+                // must not retain announcement history: it lives as long as the
+                // app, a busy workspace transitions status constantly, and every
+                // recorded entry retains an NSView owner. Before the flag
+                // existed the array grew by one entry per transition, forever —
+                // that production leak is what the second guard is teeth
+                // against; the first guard keeps the opt-in recording honest so
+                // zero cannot mean "recording stopped working".
+                let settledRows = statusRows.map { $0.id == confirmedVisible.id ? confirmedTransition : $0 }
+                statusProbe.inbox.accessibilityAnnouncementSink = nil
+                statusProbe.inbox.qaRecordsStatusAnnouncements = true
+                statusProbe.inbox.resetAccessibilityAnnouncementsForQA()
+                let recordedTransition = replacing(settledRows[1], state: .failed, elapsed: 95)
+                let recordedRows = settledRows.map { $0.id == recordedTransition.id ? recordedTransition : $0 }
+                statusProbe.inbox.apply(
+                    rows: recordedRows,
+                    changed: AgentsBoardChangeSet(added: [], updated: [recordedTransition.id], removed: []))
+                statusProbe.inbox.layoutViewportForQA()
+                guard statusProbe.inbox.accessibilityStatusAnnouncementMessagesForQA.count == 1 else {
+                    throw fail("\(label): opted-in QA recording missed a status transition")
+                }
+                statusProbe.inbox.qaRecordsStatusAnnouncements = false
+                statusProbe.inbox.resetAccessibilityAnnouncementsForQA()
+                let productionTransition = replacing(settledRows[2], state: .approval, elapsed: 96)
+                statusProbe.inbox.apply(
+                    rows: recordedRows.map { $0.id == productionTransition.id ? productionTransition : $0 },
+                    changed: AgentsBoardChangeSet(added: [], updated: [productionTransition.id], removed: []))
+                statusProbe.inbox.layoutViewportForQA()
+                guard statusProbe.inbox.accessibilityStatusAnnouncementMessagesForQA.isEmpty else {
+                    throw fail("\(label): production configuration retained \(statusProbe.inbox.accessibilityStatusAnnouncementMessagesForQA.count) status announcement record(s) — the recording must be QA-opt-in, not a leak")
+                }
+                assertions += 9
             }
         }
 
