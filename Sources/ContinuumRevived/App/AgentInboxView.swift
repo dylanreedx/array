@@ -3522,13 +3522,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     var qaMaterializedRowCellCount: Int { qaMaterializedRowCells.count }
 
-    /// The table's own geometry. A host can give this view a viewport while leaving
-    /// the table inside it unsized or column-less, and in that state
-    /// `view(atColumn:row:makeIfNecessary:)` returns nil without ever consulting the
-    /// delegate — so every rendered-cell read comes back vacuously empty.
-    var qaTableGeometryForQA: (frame: NSRect, visible: NSRect, columns: Int) {
-        (tableView.frame, tableView.visibleRect, tableView.numberOfColumns)
-    }
 
     /// Per-cell geometry and paint, in live-tree order. Every entry comes from a
     /// materialized row cell; no row model or expected token is substituted here.
@@ -3864,10 +3857,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         tableRowByAgentId[id].map { tableView.rect(ofRow: $0) }
     }
     var glyphsForQA: [String] { cells().map(\.qaGlyph) }
-    /// Program 96/P0.1: the provider marks the rows actually painted.
-    var providerGlyphsForQA: [String] { cells().map(\.qaProviderGlyph) }
-    /// Program 96/P0.1: the placement band the rows actually painted.
-    var projectLinesForQA: [String] { cells().map(\.qaProject) }
     /// A card's elapsed turn time, a parked row's "12m ago" — one accessor,
     /// because it is one column: how long this row has been the way it is.
     var relativeTimesForQA: [String] { cells().map(\.qaElapsed) }
@@ -4411,18 +4400,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// did hold two). `reloadData(forRowIndexes:)` over every row rather than
     /// `reloadData()`, because the second one EMPTIES the selection and the
     /// selection is half of what is under test.
-    /// Re-render the rows this view is ALREADY holding through the full
-    /// `reload(rows:)` path, then realise every cell.
-    ///
-    /// Program 96/P0.1. The shipped push (`apply(rows:changed:)`) is incremental, and
-    /// an offscreen window defers that reload indefinitely — so a harness that drives
-    /// the real app and then reads rendered cells sees none, however many rows the
-    /// table reports. This changes only the reload STRATEGY; the row values are the
-    /// ones production's own join produced and stored in `allRows`.
-    func fullReloadForQA() {
-        reload(rows: allRows)
-        layoutForQA()
-    }
 
     func rebuildRowsForQA() {
         guard tableView.numberOfRows > 0 else { return }

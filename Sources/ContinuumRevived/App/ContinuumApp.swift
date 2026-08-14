@@ -1578,7 +1578,7 @@ enum ContinuumApp {
 
         // Program 96/P0.2: the offscreen screenshot set + density proposals. Async
         // because it drives the corpus, whose events hop `DispatchQueue.main.async`.
-        if CommandLine.arguments.contains(SidebarScreenshotChecks.flag) {
+        if CommandLine.arguments.contains("--sidebar-screenshot-check") {
             _ = NSApplication.shared
             Task { @MainActor in
                 do {
@@ -3854,7 +3854,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 }
             }
 
-            if CommandLine.arguments.contains(SidebarScreenshotChecks.liveFlag) {
+            if CommandLine.arguments.contains("--sidebar-live-capture-check") {
                 runSidebarLiveCaptureCheck(window: window)
             } else if CommandLine.arguments.contains("--agent-location-live-check") {
                 runAgentLocationLiveCheck(window: window)
@@ -3910,6 +3910,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         let directory = URL(fileURLWithPath: output, isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // This check MINTS five durable `AgentRecord`s and never deletes them, so it
+        // must be impossible to point at real state. A project-root check alone was not
+        // enough: run from the prod bundle against any other root it would have written
+        // junk agents into Dylan's own agent store (AGENTS.md non-negotiable #1).
+        guard ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"] != nil else {
+            report("FAIL: refusing to run without CONTINUUM_APP_SUPPORT — this check "
+                   + "creates durable agent records and must never write a real store")
+            Foundation.exit(2)
+        }
+        guard Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier else {
+            report("FAIL: refusing to run from the PROD bundle "
+                   + "(\(AppChannel.prodBundleIdentifier)) — dev channel only")
+            Foundation.exit(2)
+        }
         guard let projectRoot = activeProject?.rootPath else {
             report("FAIL: no active project — refusing to capture an unknown root")
             Foundation.exit(2)
@@ -4039,6 +4053,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 .null, .optionIncludingWindow, CGWindowID(window.windowNumber),
                 [.boundsIgnoreFraming]) {
                 let rep = NSBitmapImageRep(cgImage: image)
+                // The offscreen leg applies a non-blank floor to every image; this one
+                // used to apply none, so a valid-but-empty WindowServer image would have
+                // been written and PASSed. `CGWindowListCreateImage` returning non-nil is
+                // not evidence that anything was composited.
+                let metrics = VisualSnapshot.metrics(of: rep)
+                if metrics.isBlank {
+                    report("FAIL: the window capture is blank "
+                           + "(\(metrics.distinctSampledColors) distinct colours) — "
+                           + "refusing to file an empty image as a baseline")
+                    Foundation.exit(1)
+                }
                 if let data = rep.representation(using: .png, properties: [:]) {
                     try? data.write(
                         to: directory.appendingPathComponent(windowName), options: .atomic)
@@ -4063,7 +4088,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 }
             }
 
-            let verdict = entries.contains { $0.captureType == "live-window" } ? "PASS" : "FAIL"
+            // A width recorded is not a width applied: `constrainedWidth` vetoes growth
+            // against a 640 pt content floor, so a 360 pt request in a narrow window is
+            // silently clamped. Without this the manifest would say 360 requested / 280
+            // measured and still call itself PASS.
+            let widthApplied = abs(measuredWidth - Double(requestedWidth)) <= 0.5
+            if !widthApplied {
+                report("FAIL: requested \(requestedWidth)pt but the sidebar measured "
+                       + "\(measuredWidth)pt — the width was clamped, so this capture is "
+                       + "not the width it claims")
+            }
+            let verdict = (widthApplied && entries.contains { $0.captureType == "live-window" })
+                ? "PASS" : "FAIL"
             let payload: [String: Any] = [
                 "check": SidebarScreenshotChecks.liveCheckName,
                 "verdict": verdict,

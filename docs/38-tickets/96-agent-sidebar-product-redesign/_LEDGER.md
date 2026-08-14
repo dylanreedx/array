@@ -293,3 +293,101 @@ frame, and its `make` closure runs before the view is in a window, so an offscre
 `NSTableView` would never materialize a cell. Reusing the bitmap step keeps the six
 font-smoothing knobs and the declared 2.0 scale — the display-independence the
 ENV-BLOCKER notes bought — in one place instead of a copy that drifts.
+
+---
+
+## Adversarial review (§7.4) — 2026-08-14
+
+An independent reviewer was asked to falsify Phase 0's claims. It confirmed 18 findings.
+The two it would have blocked Phase 1 on were both real, and both are fixed:
+
+### Blocker 1 — the P0.1 witness had no teeth
+
+The gate asserted only that 30 flows ran and that the inventory had 30 rows. **No
+assertion touched a rendered value.** Every product fact this packet "establishes" — the
+diamond, the missing Zone, three outcomes with no state word — was a `print`. A regression
+that blanked every row would have stayed green, and the file's own claim to be "the
+ratchet that proves those fixes landed" was false.
+
+Fixed: `expectation(for:)` now pins today's rendered values per flow (state word, provider
+mark, and whether each band is empty), plus two cross-flow assertions — that
+`exactPlacement` and `ambiguousPlacement` are identical, and that success/interrupted/
+cancelled are all blank. Each failure message names the design section a packet must come
+back and flip. **Teeth-tested**: claiming `succeeded` shows `Done` produces
+`FAIL: flow 'succeeded' state must be 'Done' today — got ''`, and restoring it is green.
+
+### Blocker 2 — proposal A's nine-row claim did not survive the real sidebar
+
+Both sides of "only A meets the nine-row floor" measured a bare `AgentInboxView` given
+the whole 662 pt. The shipped `WorkspaceSidebarView` pins the inbox below its title and
+management message. Now measured: **a 662 pt sidebar gives the inbox 610 pt** (52 pt of
+chrome), at which A yields **8** rows, not 9 — so **no proposal meets §8.1's floor**, which
+is a materially different question. Also found: `managementMessageLabel` is `isHidden` with
+an empty string and **still reserves ~18 pt**, and reclaiming it would put A back at 9.
+
+The S0 doc has been corrected, reports both columns, and offers the reclaim option.
+
+### Other confirmed findings, all fixed
+
+- **`settle` was being REFUSED on every run** (a send installs a runner; `canSettle`
+  refuses while one exists) while the inventory claimed the row reached the Settled
+  surface. It now settles without a send and **asserts the verb returned true** — which
+  changed the observed row, because a settled row is SLIM and a slim cell draws no
+  placement and no provider mark. The inventory row was wrong and is corrected.
+- **The four accessibility images were byte-identical** to the baseline and to each other.
+  Root cause was two-layered: interaction fills are layer background colours that
+  `displayIgnoringOpacity` does not composite (so `cacheDisplay` is required for them),
+  and Reduce Motion cannot appear in a still at all. The harness now ships ONE interaction
+  reference and states plainly that both accessibility settings have better numeric
+  witnesses in `--sidebar-ux-check`. A **duplicate-digest gate** now refuses any two
+  byte-identical images outright.
+- **The offscreen manifest hard-coded `verdict: "PASS"` and was written before the gate
+  ran**, so a failing run left a manifest claiming success — which is the field
+  `QARunManifestReader` reads. The manifest is now written after the gate, and a failing
+  assertion writes `FAIL` before propagating.
+- **The density fixture was seven rows of `Bulk agent` filler** (50 bulk agents sort
+  newest-first and filled the viewport). It now uses the 29 product rows; the bulk agents
+  remain in the taller corpus sweep, where scale is the point.
+- **The live check had no state fence.** It mints five durable `AgentRecord`s and never
+  deletes them, and only refused a `~/Documents/personal` root — so from the prod bundle
+  against any other root it would have written junk agents into Dylan's real store. It now
+  requires `CONTINUUM_APP_SUPPORT` and refuses the prod bundle identifier.
+- **The live capture never checked its own PNG was non-blank**, and **never verified the
+  requested width was applied** (`constrainedWidth` clamps against a 640 pt content
+  floor). Both are now asserted, and the verdict depends on them.
+- **Two of the three new flags were invisible** to the flag enumeration AGENTS.md
+  prescribes for hazard 7, because they were referenced through constants. The `contains`
+  calls now use the literal strings; all four sidebar flags appear in the documented grep.
+- **Four QA accessors were dead code** in a production file. Removed
+  (`fullReloadForQA`, `providerGlyphsForQA`, `projectLinesForQA`, `qaTableGeometryForQA`).
+- `isInRowModel` read the DISPLAYED collection, not the row model; renamed
+  `isInDisplayedList` so the name matches the source.
+
+### Confirmed and NOT fixed, recorded instead
+
+- **The S0 proposal mocks are richer than production can render** (they show Zone,
+  completion times, model text, distinct outcome words — none of which the app paints
+  today). This is §2.3's failure mode pointed at the decision artifact. It is *deliberate*
+  — they are proposals about pitch — but it means an A-vs-baseline comparison differs in
+  content and chrome as well as pitch. Mitigated by proposal C, which is today's pitch with
+  the design's content, isolating the pitch variable; and the S0 doc now leads with the
+  conclusion that content is the larger problem. Left as a stated limitation.
+- **`bundleVersion` is `"n/a (cli binary)"`** in the offscreen manifest, which the
+  no-empty-field gate accepts. The offscreen leg never runs from a bundle; the real bundle
+  version comes from the live leg and the wrapper's merged manifest.
+- **The probe never exercises cell reuse or the incremental push.** Every observation is a
+  first-load render into a fresh view. The values are production's, but nothing here can
+  see a staleness bug in the incremental `apply`/recycling path. Recorded as the honest
+  boundary of this instrument.
+- The reviewer noted the corpus calls `recordManagedActivity` **before** `qaDeliver` while
+  production is the reverse. It could not show this changes any observed value (the push is
+  synchronous and follows both), so the ordering is left alone and the docstring's "exactly
+  as production does" is now the only overstatement remaining in that comment.
+
+### What the reviewer tried to falsify and could not
+
+Queue-94's gate weakened (`ComponentLab.swift` diff is empty; both program checks and the
+inventory check pass); a capture mislabelled `live-window`; a second owner of
+state/title/location in production; width not applied offscreen; un-gated UI at boot; any
+tmux contact; any risk to Dylan's state; and the inventory's observed-row column, which it
+verified verbatim against a fresh run.

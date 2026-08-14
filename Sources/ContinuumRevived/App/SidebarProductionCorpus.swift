@@ -65,6 +65,158 @@ enum SidebarProductionCorpus {
         case fiftyActiveWithHistory
     }
 
+    /// What today's product does with a flow, as a structural claim rather than a
+    /// sentence. This is the RATCHET: the check asserts these, so a later packet that
+    /// fixes a defect must come here and flip the expectation, and a regression that
+    /// blanks a band turns this leg red.
+    ///
+    /// Titles are matched loosely (`titleContains`) because a 60-char cap and a
+    /// generated label are not stable strings; every other field is exact, because
+    /// "the band is empty" is precisely the fact under review.
+    struct Expectation {
+        var rendersRow = true
+        var titleContains: String?
+        var stateLabel: String?
+        var projectIsEmpty = false
+        /// Both detail bands are empty in every flow today. Named individually so a
+        /// packet that fills one does not get to keep a stale expectation on the other.
+        var metaIsEmpty = true
+        var branchIsEmpty = true
+        var elapsedIsEmpty = true
+        var providerGlyph: String?
+    }
+
+    /// One expectation per flow, pinning TODAY. Deliberately verbose: a table is the
+    /// artifact a later packet edits, and a loop that asserted "everything is empty"
+    /// would hide which flow changed.
+    static func expectation(for flow: Flow) -> Expectation {
+        var expected = Expectation()
+        switch flow {
+        case .blankCmdKDraft:
+            // §4.1: a draft must not exist as durable work at all.
+            expected.titleContains = AgentRecord.defaultAgentName
+            expected.stateLabel = "Unconfirmed"
+            expected.providerGlyph = "◈"
+        case .firstSendTitleFallback:
+            expected.titleContains = "Replace the sidebar identity"
+            expected.stateLabel = ""
+            expected.projectIsEmpty = true      // long title displaces placement
+            expected.providerGlyph = "◈"
+        case .imageOnlyFirstPrompt:
+            // §4.2/5 wants a contextual label; today the sentinel survives.
+            expected.titleContains = AgentRecord.defaultAgentName
+            expected.stateLabel = ""
+            expected.providerGlyph = "◈"
+        case .generatedTitleLanded:
+            expected.titleContains = "Investigate zoom budget"
+            expected.stateLabel = ""
+            expected.projectIsEmpty = true
+            expected.providerGlyph = "◈"
+        case .manualRenameDuringGeneration:
+            expected.titleContains = "Human chosen title"
+            expected.stateLabel = ""
+            expected.providerGlyph = "◈"
+        case .generationFailed:
+            expected.titleContains = "check the release appcast"
+            expected.stateLabel = ""
+            expected.providerGlyph = "◈"
+        case .working:
+            expected.titleContains = "run the matrix"
+            expected.stateLabel = "Working"
+            expected.elapsedIsEmpty = false     // the ONLY flow that paints elapsed
+            expected.providerGlyph = "◈"
+        case .approval, .input:
+            // §4.6 wants the distinct words `Approval` and `Input`.
+            expected.titleContains = flow == .approval ? "apply the patch" : "pick a provider"
+            expected.stateLabel = "Needs attention"
+            expected.providerGlyph = "◈"
+        case .succeeded, .interrupted, .cancelled:
+            // The indictment: three different outcomes, no state word at all.
+            expected.titleContains = "work that ends"
+            expected.stateLabel = ""
+            expected.providerGlyph = "◈"
+        case .failed:
+            expected.titleContains = "work that ends failed"
+            expected.stateLabel = "Failed"
+            expected.providerGlyph = "◈"
+        case .runtimeError:
+            expected.titleContains = "touch a missing binary"
+            expected.stateLabel = "Failed"      // indistinguishable from a failed turn
+            expected.providerGlyph = "◈"
+        case .neverVisitedCompletion:
+            expected.titleContains = "finish while nobody is looking"
+            expected.stateLabel = ""
+            expected.providerGlyph = "◈"
+        case .codexOpenAI:
+            expected.titleContains = "Codex on an OpenAI model"
+            expected.stateLabel = "Unconfirmed"
+            expected.providerGlyph = "◈"
+        case .claudeAnthropic:
+            expected.titleContains = "Claude Code on Opus"
+            expected.stateLabel = "Unconfirmed"
+            expected.providerGlyph = "✦"
+        case .unknownProvider:
+            expected.titleContains = "Unknown provider row"
+            expected.stateLabel = "Unconfirmed"
+            expected.providerGlyph = "◇"        // §4.5 wants initials, not a diamond
+        case .longUnicodeRTL:
+            expected.titleContains = "تحديث"
+            expected.stateLabel = ""
+            expected.projectIsEmpty = true
+            expected.providerGlyph = "◈"
+        case .piAnthropic:
+            // Pi is invisible: the row shows the PROVIDER glyph, so a Pi agent cannot
+            // be told from Claude Code.
+            expected.titleContains = "Pi running Opus"
+            expected.stateLabel = "Unconfirmed"
+            expected.providerGlyph = "✦"
+        case .piOpenAI:
+            expected.titleContains = "Pi running GPT"
+            expected.stateLabel = "Unconfirmed"
+            expected.providerGlyph = "◈"
+        case .snoozed, .archived:
+            // Both leave the displayed list entirely.
+            expected.rendersRow = false
+        case .settled:
+            // A settled row is SLIM (`RowVariant.forLifecycle`), and a slim cell draws
+            // no placement and no provider mark at all — its one glyph is the status
+            // glyph. Worth pinning: while `settle` was silently being refused this flow
+            // rendered a full card, and the inventory described that as the settled
+            // surface.
+            expected.titleContains = "file this one"
+            expected.stateLabel = ""
+            expected.projectIsEmpty = true
+            expected.providerGlyph = ""
+        case .nestedChild:
+            expected.titleContains = "agent 1"      // parent-derived ordinal, not a task
+            expected.stateLabel = ""
+            expected.providerGlyph = "◈"
+        case .headless:
+            expected.titleContains = "headless work"
+            expected.stateLabel = ""
+            expected.providerGlyph = "◈"
+        case .exactPlacement:
+            expected.titleContains = "Agent with a real tile"
+            expected.stateLabel = "Unconfirmed"
+            expected.providerGlyph = "◈"
+        case .ambiguousPlacement:
+            // Byte-identical to exactPlacement above — §8.1 wants them distinct.
+            expected.titleContains = "Agent in the other zone"
+            expected.stateLabel = "Unconfirmed"
+            expected.providerGlyph = "◈"
+        case .restoredPendingRequest:
+            expected.titleContains = "name generation is still in flight"
+            expected.stateLabel = "Unconfirmed"
+            expected.projectIsEmpty = true
+            expected.providerGlyph = "◈"
+        case .fiftyActiveWithHistory:
+            expected.titleContains = "Bulk agent 50"
+            expected.stateLabel = "Unconfirmed"
+            expected.providerGlyph = "◈"
+        }
+        return expected
+    }
+
     /// The facts a row actually PAINTED, read off the cell.
     struct ObservedRow: Equatable {
         let id: UUID
@@ -98,7 +250,10 @@ enum SidebarProductionCorpus {
         /// not being in the list at all.
         let agentID: AgentID
         let row: ObservedRow?
-        let isInRowModel: Bool
+        /// Whether the agent survived scope/search/fold shaping into the DISPLAYED
+        /// collection (`rowIdsForQA`). Not the row model — `allRows` is that, and the
+        /// two differ for a filtered row, which is why this is not named for it.
+        let isInDisplayedList: Bool
         /// Whether the flow's Send was actually admitted. A refused send leaves the
         /// record a blank draft, so a flow that reported a sentinel title without
         /// recording this would look like a naming defect when it was a refusal.
@@ -106,9 +261,9 @@ enum SidebarProductionCorpus {
 
         var summary: String {
             guard let row else {
-                return isInRowModel
-                    ? "(in row model, no cell rendered — collapsed surface)"
-                    : "(not in the list)"
+                return isInDisplayedList
+                    ? "(displayed but no cell rendered)"
+                    : "(not in the displayed list)"
             }
             var text = row.summary
             if let acceptance, acceptance != .accepted {
@@ -306,7 +461,7 @@ enum SidebarProductionCorpus {
                 flow: flow,
                 agentID: id,
                 row: rows.first { $0.id == id.rawValue },
-                isInRowModel: sidebar.inboxForQA.rowIdsForQA.contains(id.rawValue),
+                isInDisplayedList: sidebar.inboxForQA.rowIdsForQA.contains(id.rawValue),
                 acceptance: acceptance)
         }
 
@@ -543,13 +698,22 @@ enum SidebarProductionCorpus {
             until: world.now.addingTimeInterval(3_600), now: world.now)
         results.append(world.result(.snoozed, snoozedAgent))
 
+        // No send: `canSettle` refuses while a live runner exists, and a send installs
+        // one. An earlier version sent first, so `settle` was REFUSED on every run
+        // (the supervisor logged it) while the inventory still claimed the row reached
+        // the Settled surface. The verb's result is now asserted rather than discarded.
         let settledAgent = world.spawn()
-        await world.send(AgentPrompt("file this one"), to: settledAgent)
+        _ = world.supervisor.rename(agentID: settledAgent, to: "file this one")
         world.completeTurn(
-            settledAgent, outcome: .completed, status: .idle,
+            settledAgent, outcome: .completed, status: .done,
             thread: "settle", turn: "settle-1")
         world.supervisor.focus(agentID: settledAgent, now: world.now)
-        _ = world.supervisor.settle(agentID: settledAgent, now: world.now)
+        let didSettle = world.supervisor.settle(agentID: settledAgent, now: world.now)
+        guard didSettle else {
+            throw Failure(description:
+                "flow 'settled': AgentSupervisor.settle REFUSED the agent, so this flow "
+                + "never reached the Settled surface the inventory claims for it")
+        }
         results.append(world.result(.settled, settledAgent))
 
         let archivedAgent = world.spawn()
@@ -659,6 +823,79 @@ enum SidebarProductionCorpus {
         for flow in Flow.allCases {
             try expect(ranFlows.contains(flow), "flow '\(flow.rawValue)' declared but never run")
         }
+
+        // THE RATCHET. Without these the leg would prove only that 30 flows ran, and a
+        // regression that blanked every row — or a later packet that FIXED one — would
+        // leave it green. Each assertion names the design section that wants the value
+        // changed, so the failure message tells the next packet what it just earned.
+        for result in results {
+            let flow = result.flow
+            let expected = expectation(for: flow)
+            let label = "flow '\(flow.rawValue)'"
+
+            guard expected.rendersRow else {
+                try expect(result.row == nil,
+                           "\(label) must not render a row today (it leaves the displayed "
+                           + "list) — got \(result.summary)")
+                continue
+            }
+            guard let row = result.row else {
+                throw Failure(description:
+                    "\(label) rendered NO row. Either the flow stopped reaching the list "
+                    + "or the harness stopped observing it; both make this leg vacuous.")
+            }
+            if let fragment = expected.titleContains {
+                try expect(row.title.contains(fragment),
+                           "\(label) title must contain '\(fragment)' — got '\(row.title)'")
+            }
+            if let state = expected.stateLabel {
+                try expect(row.stateLabel == state,
+                           "\(label) state must be '\(state)' today — got "
+                           + "'\(row.stateLabel)'. If a packet just made an outcome "
+                           + "visible (§4.6), flip this expectation.")
+            }
+            try expect(row.project.isEmpty == expected.projectIsEmpty,
+                       "\(label) placement band: expected "
+                       + "\(expected.projectIsEmpty ? "EMPTY" : "non-empty") — got "
+                       + "'\(row.project)'. §4.3 wants `Project › Zone` here and wants it "
+                       + "to survive a long title.")
+            try expect(row.meta.isEmpty == expected.metaIsEmpty,
+                       "\(label) meta band: expected "
+                       + "\(expected.metaIsEmpty ? "EMPTY" : "non-empty") — got '\(row.meta)'")
+            try expect(row.branch.isEmpty == expected.branchIsEmpty,
+                       "\(label) branch band: expected "
+                       + "\(expected.branchIsEmpty ? "EMPTY" : "non-empty") — got "
+                       + "'\(row.branch)'. §4.3 puts a middle-truncated branch here.")
+            try expect(row.elapsed.isEmpty == expected.elapsedIsEmpty,
+                       "\(label) elapsed: expected "
+                       + "\(expected.elapsedIsEmpty ? "EMPTY" : "non-empty") — got "
+                       + "'\(row.elapsed)'. §4.6 wants a time beside every terminal "
+                       + "outcome.")
+            if let glyph = expected.providerGlyph {
+                try expect(row.providerGlyph == glyph,
+                           "\(label) provider mark must be '\(glyph)' today — got "
+                           + "'\(row.providerGlyph)'. §4.5 replaces these glyphs with real "
+                           + "marks plus model text; when that lands, flip this.")
+            }
+        }
+
+        // Cross-flow claims the per-row loop cannot make.
+        let placed = results.first { $0.flow == .exactPlacement }?.row
+        let ambiguous = results.first { $0.flow == .ambiguousPlacement }?.row
+        if let placed, let ambiguous {
+            try expect(placed.project == ambiguous.project,
+                       "§8.1 wants two same-project agents in different zones to remain "
+                       + "DISTINCT. Today they are identical, which is the defect this "
+                       + "corpus pins: '\(placed.project)' vs '\(ambiguous.project)'. If a "
+                       + "packet made them distinct, flip this.")
+        }
+        let outcomeStates = [Flow.succeeded, .interrupted, .cancelled].compactMap { flow in
+            results.first { $0.flow == flow }?.row?.stateLabel
+        }
+        try expect(outcomeStates.count == 3 && Set(outcomeStates) == [""],
+                   "§4.6: success, interruption and cancellation are pixel-identical today "
+                   + "(all blank). Got \(outcomeStates). When outcomes become honest, flip "
+                   + "this.")
 
         // The gate §6/P0.1 names: a declared inventory mapping each production flow
         // to its resulting row and surface. A corpus nobody has written down is a

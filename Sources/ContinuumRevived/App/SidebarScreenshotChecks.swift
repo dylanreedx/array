@@ -191,6 +191,28 @@ enum SidebarScreenshotChecks {
         return Host(window: window, container: container, inbox: inbox)
     }
 
+    /// How much of a 662 pt SIDEBAR the inbox actually gets.
+    ///
+    /// The shipped `WorkspaceSidebarView` pins the inbox below an "Agents" title and a
+    /// (hidden but still constrained) management message: `10 + titleH + 4 + msgH + 8`.
+    /// A row-count claim measured on a bare inbox handed the whole 662 pt therefore
+    /// over-counts, and it over-counts most for the tightest pitch — i.e. in the
+    /// direction that flatters the densest proposal. Measured, not derived.
+    static func measureSidebarInboxHeight(
+        sidebarHeight: CGFloat, width: CGFloat, appearance: NSAppearance
+    ) -> (inbox: CGFloat, chrome: CGFloat) {
+        let size = NSSize(width: width, height: sidebarHeight)
+        let sidebar = WorkspaceSidebarView(frame: NSRect(origin: .zero, size: size))
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        window.appearance = appearance
+        window.contentView = sidebar
+        sidebar.layoutSubtreeIfNeeded()
+        let inbox = sidebar.inboxForQA.bounds.height
+        return (inbox, sidebarHeight - inbox)
+    }
+
     /// Rows whose painted frame sits entirely inside the first 662 pt of the list.
     /// Read off the cells rather than divided out of a pitch constant, so a row that
     /// changes height changes this number.
@@ -205,12 +227,21 @@ enum SidebarScreenshotChecks {
     /// The measured card height and pitch of the rendered list: the first two agent
     /// rows' painted frames. This is how S0's proposal C anchor stays measured.
     private static func measuredGeometry(in host: Host) -> (card: CGFloat, pitch: CGFloat)? {
+        // FULL CARDS only, and two ADJACENT ones. A settled row is slim (35 pt), so
+        // sampling the first two painted rows of a mixed list reported a 35 pt card on a
+        // 78 pt pitch — which the proposal-C teeth check caught. Card pitch is a claim
+        // about card rows.
         let frames = host.inbox.qaMaterializedRowCells
-            .filter { $0.qaAgentID != nil }
+            .filter { $0.qaAgentID != nil && $0.qaVariant == .card }
             .map { $0.convert($0.bounds, to: host.inbox) }
             .sorted { $0.minY < $1.minY }
         guard frames.count >= 2 else { return nil }
-        return (frames[0].height, frames[1].minY - frames[0].minY)
+        for (first, second) in zip(frames, frames.dropFirst()) {
+            let pitch = second.minY - first.minY
+            // Adjacent means the gap is a row gap, not a slim row wedged between.
+            if pitch > 0, pitch < first.height * 1.5 { return (first.height, pitch) }
+        }
+        return nil
     }
 
     private static func writePNG(_ rep: NSBitmapImageRep, to url: URL) throws {
@@ -255,6 +286,22 @@ enum SidebarScreenshotChecks {
                 + "fixture needs at least nine to say anything about a 662 pt viewport")
         }
 
+        // The 50 `fiftyActiveWithHistory` agents are created last and sort newest-first,
+        // so they filled the entire 662 pt fixture and the "dense baseline" showed one
+        // row shape repeated seven times. The density artifact uses the
+        // product-interesting rows; the bulk agents still exist in the taller `corpus`
+        // sweep, where scale is the point.
+        let bulkPrefix = "Bulk agent"
+        let denseRows = rows.filter { !$0.displayTitle.hasPrefix(bulkPrefix) }
+        guard denseRows.count >= 9 else {
+            throw Failure(description:
+                "\(checkName): only \(denseRows.count) non-bulk rows; §8.1's density "
+                + "fixture needs nine or it cannot speak to a 662 pt viewport")
+        }
+        print("SidebarScreenshotChecks: density fixture uses \(denseRows.count) "
+              + "product rows (\(rows.count - denseRows.count) bulk rows kept for the "
+              + "corpus sweep only)")
+
         var entries: [Entry] = []
         let previousAppAppearance = NSApp?.appearance
         defer { NSApp?.appearance = previousAppAppearance }
@@ -263,10 +310,13 @@ enum SidebarScreenshotChecks {
         // dropped: accessibility variants are swept at 280 pt only, because the
         // question they answer (does the cue survive) is not width-dependent, while
         // density and truncation are.
-        var skipped: [String] = []
+        var skipped: [String] = [
+            "reduceMotion and increaseContrast as still images — both have numeric "
+                + "witnesses in --sidebar-ux-check (crossfade count; resolved fill and "
+                + "contrast ratio per role), which a PNG diff cannot improve on",
+        ]
         for width in widths where width != 280 {
-            skipped.append("reduceMotion@\(Int(width))pt")
-            skipped.append("increaseContrast@\(Int(width))pt")
+            skipped.append("interaction fills@\(Int(width))pt")
         }
 
         for appearanceName in appearances {
@@ -314,7 +364,7 @@ enum SidebarScreenshotChecks {
                     let host = try makeHost(
                         width: width, height: denseViewportHeight, appearance: appearance,
                         reduceMotion: false, increaseContrast: false)
-                    host.inbox.reload(rows: rows)
+                    host.inbox.reload(rows: denseRows)
                     host.inbox.layoutForQA()
                     let geometry = measuredGeometry(in: host)
                     let rep = try UIProbe.bitmap(of: host.container, id: "dense-\(Int(width))")
@@ -337,29 +387,64 @@ enum SidebarScreenshotChecks {
                 }
             }
 
-            // Accessibility variants, 280 pt only (see `skipped`).
-            for variant in ["reduceMotion", "increaseContrast"] {
+            // ONE interaction reference: a selected row, so the review can see the fill
+            // and gutter §4.4 talks about.
+            //
+            // Neither accessibility setting gets a still image, and that is deliberate
+            // rather than an omission. Reduce Motion gates the crossfade, so two stills
+            // of a settled list are the same picture. Increase Contrast is a ≤1.5%
+            // alpha step on an interaction fill (`interactionFill`), which a PNG diff is
+            // a poor instrument for. Both already have BETTER, numeric witnesses in
+            // `--sidebar-ux-check`: it drives `prefersReducedMotion` both ways and
+            // asserts `crossfadingRowCountForQA` 0 vs 1, and it drives
+            // `prefersIncreasedContrast` both ways and asserts the resolved fill and its
+            // measured contrast ratio per interaction role. Shipping a relabelled
+            // duplicate here would claim coverage those checks actually provide.
+            for variant in ["interaction"] {
                 try drawing(appearance) {
                     let host = try makeHost(
                         width: 280, height: denseViewportHeight, appearance: appearance,
-                        reduceMotion: variant == "reduceMotion",
-                        increaseContrast: variant == "increaseContrast")
-                    host.inbox.reload(rows: rows)
+                        reduceMotion: false,
+                        increaseContrast: false)
+                    host.inbox.reload(rows: denseRows)
                     host.inbox.layoutForQA()
-                    let rep = try UIProbe.bitmap(of: host.container, id: "a11y-\(variant)")
-                    let suffix = variant == "reduceMotion" ? "rm" : "ic"
-                    let name = "a11y-280x\(Int(denseViewportHeight))-\(shortName(appearanceName))-\(suffix).png"
+                    // Increase Contrast strengthens INTERACTION fills, so a resting list
+                    // paints nothing different and the variant image came out
+                    // byte-identical to the baseline. Select a row so the setting has a
+                    // surface to act on — the same thing the geometry probe's contrast
+                    // sweep does.
+                    if let first = denseRows.first {
+                        _ = host.inbox.selectRowForQA(id: first.id)
+                        // `rebuildRowsForQA`, not `layoutForQA`: selection re-applies
+                        // through an incremental reload, and an offscreen window defers
+                        // that indefinitely — the cells would read back as resting rows.
+                        // That is the trap written on `rebuildRowsForQA` itself.
+                        host.inbox.rebuildRowsForQA()
+                    }
+                    // `cacheDisplay`, not `UIProbe.bitmap`: interaction fills are LAYER
+                    // background colours that Core Animation composites, and
+                    // `displayIgnoringOpacity` drives AppKit's draw path, so a selected
+                    // row came out byte-identical to a resting one. The geometry fixtures
+                    // keep the display-independent path; these interaction fixtures
+                    // need the compositing one, and say so in `captureType`.
+                    guard let rep = host.container
+                        .bitmapImageRepForCachingDisplay(in: host.container.bounds) else {
+                        throw Failure(description: "\(checkName): no cache rep for a11y")
+                    }
+                    host.container.cacheDisplay(in: host.container.bounds, to: rep)
+                    let suffix = "selected"
+                    let name = "interaction-280x\(Int(denseViewportHeight))-\(shortName(appearanceName))-\(suffix).png"
                     try writePNG(rep, to: directory.appendingPathComponent(name))
                     entries.append(Entry(
-                        png: name, fixture: "a11y-\(variant)",
+                        png: name, fixture: variant,
                         widthRequestedPt: 280,
                         widthMeasuredPt: Double(host.inbox.bounds.width),
                         heightPt: Double(denseViewportHeight),
                         appearance: shortName(appearanceName),
-                        reduceMotion: variant == "reduceMotion" ? "forced-on" : "forced-off",
-                        increaseContrast: variant == "increaseContrast" ? "forced-on" : "forced-off",
-                        scale: Double(UIProbe.renderScale),
-                        captureType: "offscreen-probe", checkFlag: flag,
+                        reduceMotion: "forced-off",
+                        increaseContrast: "forced-off (numeric witness in --sidebar-ux-check)",
+                        scale: Double(rep.pixelsWide) / max(Double(host.container.bounds.width), 1),
+                        captureType: "offscreen-view-cache", checkFlag: flag,
                         digest: UIProbe.digest(of: rep),
                         rowsRendered: host.inbox.qaMaterializedRowCells.count,
                         completeRowsIn662pt: completeRows(in: host, viewportHeight: denseViewportHeight),
@@ -414,9 +499,12 @@ enum SidebarScreenshotChecks {
             ? "unavailable"
             : (shell("/usr/bin/shasum", ["-a", "256", executable])
                 .components(separatedBy: " ").first ?? "unavailable")
-        let manifest = Manifest(
+        // Written AFTER the gate, with the real outcome. An earlier version wrote
+        // `verdict: "PASS"` before asserting anything, so a failing run left a manifest
+        // on disk claiming success — and `QARunManifestReader` reads exactly that field.
+        func makeManifest(verdict: String) -> Manifest { Manifest(
             check: checkName,
-            verdict: "PASS",
+            verdict: verdict,
             program: "96-P0.2",
             generatedAt: Date(),
             commit: shell("/usr/bin/git", ["rev-parse", "HEAD"]),
@@ -431,18 +519,26 @@ enum SidebarScreenshotChecks {
                 bundleIdentifier: Bundle.main.bundleIdentifier),
             scratchProjectRoot: world.projectRoot.path,
             appSupportRoot: world.appSupport.path,
-            entries: entries)
+            entries: entries) }
 
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode(manifest)
-            .write(to: directory.appendingPathComponent("manifest.json"), options: .atomic)
+        func writeManifest(verdict: String) throws {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+            try encoder.encode(makeManifest(verdict: verdict))
+                .write(to: directory.appendingPathComponent("manifest.json"), options: .atomic)
+        }
+        let manifest = makeManifest(verdict: "PASS")
 
         // MARK: Gate — mechanics only
 
+        // Any assertion below that throws records the failure in the manifest before
+        // propagating, so what is on disk always matches what happened.
         func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
-            if !condition() { throw Failure(description: "\(checkName): \(message)") }
+            if !condition() {
+                try? writeManifest(verdict: "FAIL")
+                throw Failure(description: "\(checkName): \(message)")
+            }
         }
 
         for field in [
@@ -482,6 +578,21 @@ enum SidebarScreenshotChecks {
                        + "distinct colours) — the harness wrote an image of nothing")
         }
 
+        // No two images may be byte-identical. The four accessibility variants were
+        // relabelled copies of the baseline and of each other, and the gate could not
+        // see it: `isBlank` passes on a fully-painted list and the appearance check only
+        // compares within one fixture. A manifest listing 38 images of which 4 are
+        // duplicates claims coverage it does not have.
+        var digestOwners: [String: [String]] = [:]
+        for entry in entries { digestOwners[entry.digest, default: []].append(entry.png) }
+        let duplicates = digestOwners.filter { $0.value.count > 1 }
+        try expect(duplicates.isEmpty,
+                   "byte-identical images under different names: "
+                   + duplicates.values.map { $0.sorted().joined(separator: " == ") }
+                       .sorted().joined(separator: "; ")
+                   + " — a variant that renders the same as its baseline is not a variant "
+                   + "shown, and §6/P0.2 requires the accessibility variants to be shown")
+
         // Aqua and Dark Aqua must actually differ per fixture+width, or the appearance
         // sweep is decoration.
         var byFixture: [String: [String: String]] = [:]
@@ -520,6 +631,8 @@ enum SidebarScreenshotChecks {
                        + "row-count arithmetic every proposal reports is wrong")
         }
 
+        try writeManifest(verdict: "PASS")
+
         if !skipped.isEmpty {
             print("SidebarScreenshotChecks: NOT rendered (deliberate): \(skipped.joined(separator: ", "))")
         }
@@ -531,12 +644,23 @@ enum SidebarScreenshotChecks {
                 entry.widthRequestedPt, entry.cardHeightPt ?? 0, entry.pitchPt ?? 0,
                 entry.completeRowsIn662pt ?? 0, entry.heightPt))
         }
+        // Report BOTH numbers. The bare-inbox figure is what a probe measures; the
+        // in-sidebar figure is what a person sees, because the shipped sidebar spends
+        // part of the viewport on its own header.
+        let chrome = measureSidebarInboxHeight(
+            sidebarHeight: denseViewportHeight, width: 280,
+            appearance: NSAppearance(named: .darkAqua) ?? NSAppearance.currentDrawing())
+        print(String(
+            format: "SidebarScreenshotChecks: a %.0fpt sidebar gives the inbox %.1fpt "
+                + "(%.1fpt of chrome)",
+            denseViewportHeight, chrome.inbox, chrome.chrome))
         for proposal in SidebarDensityProposal.all {
             print(String(
                 format: "SidebarScreenshotChecks: proposal %@ — card %.0fpt, pitch %.0fpt, "
-                    + "%d complete rows in %.0fpt",
+                    + "%d rows in a bare %.0fpt inbox, %d rows inside a %.0fpt SIDEBAR",
                 proposal.id, proposal.cardHeight, proposal.pitch,
-                proposal.completeRows(in: denseViewportHeight), denseViewportHeight))
+                proposal.completeRows(in: denseViewportHeight), denseViewportHeight,
+                proposal.completeRows(in: chrome.inbox), denseViewportHeight))
         }
         print("SidebarScreenshotChecks passed: \(entries.count) images, "
               + "\(widths.count) widths x \(appearances.count) appearances, "

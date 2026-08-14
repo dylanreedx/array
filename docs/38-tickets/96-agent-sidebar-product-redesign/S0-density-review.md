@@ -11,25 +11,50 @@ documented target is the default proposal, not approval inferred in advance."*
 
 ## The question, in one number
 
-How many complete agent rows fit in a 662 pt sidebar viewport?
+How many complete agent rows fit in a 662 pt sidebar?
 
-| | card | pitch | complete rows in 662 pt |
-|---|---:|---:|---:|
-| **Today (shipping)** | **79.0 pt** | **83.0 pt** | **7** |
-| **A — documented target** | 66 pt | 68 pt | **9** |
-| B — comfort midpoint | 72 pt | 75 pt | 8 |
-| C — today, redrawn with the intended anatomy | 79 pt | 83 pt | 7 |
+| | card | pitch | rows in a **bare inbox** | rows inside a **real sidebar** |
+|---|---:|---:|---:|---:|
+| **Today (shipping)** | **79.0** | **83.0** | 7 | **7** |
+| **A — documented target** | 66 | 68 | 9 | **8** |
+| B — comfort midpoint | 72 | 75 | 8 | **8** |
+| C — today, redrawn | 79 | 83 | 7 | **7** |
 
-§8.1 requires *"at least nine complete active rows in 662 pt"*. **Only proposal A
-meets that floor.**
+**Read the right-hand column.** §8.1 asks for *"at least nine complete active rows in
+662 pt"*, and **no proposal reaches it** — including the documented 66/68 target.
 
-Today's numbers are **measured, not divided out**: the harness counts cells whose
-painted frame lies wholly inside 662 pt, at all four widths. Proposal C exists to keep
-that arithmetic honest — C *is* today's geometry, so a teeth check requires C's computed
-card, pitch and row count to equal what the shipped sidebar paints. The first version of
-the formula added the row gap instead of accounting for the leading gutter and claimed
-8 rows where the real list draws 7; it now agrees, which is the only reason A's 9 and
-B's 8 are worth anything.
+An earlier draft of this document said "only proposal A meets that floor". That was
+wrong, and an adversarial review caught it. Both sides of that comparison measured a bare
+`AgentInboxView` handed the whole 662 pt. The shipped `WorkspaceSidebarView` never does
+that: it pins the inbox below an "Agents" title and a management message, and the harness
+now measures the result — **a 662 pt sidebar gives its inbox 610 pt**, 52 pt of chrome. At
+610 pt, A's 68 pt pitch yields 8 rows, not 9. It misses its own floor by 0.2 pt of pitch.
+
+Today's 7 is robust either way; A's 9 was the one number that moved, and it moved in the
+direction that flattered the densest proposal.
+
+### There is 18 pt of reclaimable chrome, and it decides whether A works
+
+The 52 pt is `10 + titleH + 4 + msgH + 8` from the sidebar's own constraints
+(`WorkspaceSidebarView.swift:346-365`). `managementMessageLabel` is `isHidden = true` with
+an empty string — **and still reserves its height**, because a hidden view with active
+constraints keeps its intrinsic size. Collapsing it reclaims that label plus its 4 pt gap:
+roughly 18 pt, giving the inbox ~628 pt, at which A's 68 pt pitch yields **9** rows.
+
+So the real options are:
+
+1. **A (66/68) plus collapsing the hidden label** → 9 rows, meets §8.1.
+2. **A alone** → 8 rows, misses the floor by a hair.
+3. **B or C** → 8 or 7 rows; the floor is not met and is not pretended to be.
+4. **Change the floor** — nine rows in 662 pt may simply be the wrong requirement now
+   that the chrome is measured rather than assumed.
+
+Every number above is measured off painted cells, not divided out of a constant. Proposal
+C exists to keep that honest: C *is* today's geometry, so a teeth check requires C's
+computed card, pitch and row count to equal what the shipped sidebar paints. That check
+has now caught two wrong formulas — an early `(viewport + gap)/pitch` that claimed 8 rows
+for today's 7, and a card measurement that sampled a slim settled row and reported a 35 pt
+card on a 78 pt pitch.
 
 ---
 
@@ -59,7 +84,16 @@ row actually carries:
 real writers — so the images show what the app produces, not a fixture. The offscreen
 set matches the live window, which is what makes it usable as a geometry gate.
 
-Accessibility variants at 280 pt: `a11y-280x662-{aqua,darkAqua}-{rm,ic}.png`.
+One interaction reference at 280 pt: `interaction-280x662-{aqua,darkAqua}-selected.png`,
+a selected row so the fill and the 4 pt gutter §4.4 describes are visible.
+
+**Neither accessibility setting ships as a still image, deliberately.** Reduce Motion
+gates the crossfade, so two stills of a settled list are the same picture; Increase
+Contrast is a ≤1.5% alpha step on an interaction fill. Both already have better, numeric
+witnesses in `--sidebar-ux-check` (crossfade count 0 vs 1; resolved fill and measured
+contrast ratio per interaction role). An earlier version of this harness shipped four
+images for them that were **byte-identical** to the baseline and to each other; the gate
+now refuses duplicate images outright.
 
 **Aqua is offscreen-only, by your earlier ruling.** The app hard-pins `.darkAqua` at
 boot (`ContinuumApp.swift:3479`), so a live Aqua window is not reachable without a
@@ -78,11 +112,11 @@ They are proposals about **pitch**, not about content. The content is there so t
 density judgement is made against real information rather than grey boxes.
 
 - **A — 66 pt card / 68 pt pitch.** `8 + 14 + 3 + 17 + 2 + 14 + 8 = 66`, §4.3 as
-  written. Nine rows. Every band carries text.
+  written. 8 rows in a real sidebar (9 if the hidden label is collapsed).
 - **B — 72 pt / 75 pt.** The same anatomy with 10 pt insets and 3 pt band gaps, if A
-  reads cramped at 220 pt. Eight rows.
+  reads cramped at 220 pt. 8 rows.
 - **C — 79 pt / 83 pt.** Today's pitch with the intended bands filled in — the control
-  that separates "the rows are too tall" from "the rows are empty". Seven rows.
+  that separates "the rows are too tall" from "the rows are empty". 7 rows.
 
 **C is the one worth looking at hardest, and it changes the framing.** Having rendered
 it: at today's 79/83 pitch, with the bands carrying real information, the row reads
@@ -90,9 +124,10 @@ it: at today's 79/83 pitch, with the bands carrying real information, the row re
 
 So the honest reading of this evidence is that **the sparseness is mostly a content
 problem, not a height problem.** The baseline looks bad because two of three bands are
-empty and the third holds a diamond, not because 83 pt is too tall. Proposal A buys two
-more rows per screen on top of that; it is a real gain, and it is the only option meeting
-§8.1's nine-row floor, but C shows the floor is not what makes today's sidebar unusable.
+empty and the third holds a diamond, not because 83 pt is too tall. Proposal A buys one
+extra row in a real sidebar (7 → 8) on top of that. That is a real gain, but it is one
+row — and combined with the corrected floor arithmetic above, it means **density is the
+smaller half of this problem.**
 
 That distinction matters for what you approve: picking A commits the program to a
 sidebar-specific geometry change (§4.3 is explicit that global `Inset.card` and title
@@ -161,10 +196,11 @@ with the density you pick.
 
 Pick one, or say what you want instead:
 
-- [ ] **A — 66 pt / 68 pt** (the documented target; the only option meeting §8.1's
-      nine-row floor)
-- [ ] **B — 72 pt / 75 pt**
-- [ ] **C — keep 79 pt / 83 pt** and fix only the band content
+- [ ] **A — 66 pt / 68 pt, and collapse the hidden management label** → 9 rows, meets §8.1
+- [ ] **A — 66 pt / 68 pt alone** → 8 rows, accepting that the floor is missed
+- [ ] **B — 72 pt / 75 pt** → 8 rows
+- [ ] **C — keep 79 pt / 83 pt** and fix only the band content → 7 rows
+- [ ] **Revisit the nine-row floor itself**, now that the 52 pt of chrome is measured
 - [ ] something else:
 
 Notes:
