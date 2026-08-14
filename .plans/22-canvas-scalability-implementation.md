@@ -1,10 +1,68 @@
 # 22 — Canvas scalability implementation plan
 
-Status: **SLICE 1 NARROWED AND DELIVERED AS SLICE 1′. SLICE 3 APPROVED AND IN
-PROGRESS.** Stage 0 (the tolerant camera guard with its fractional-zoom witness,
+Status: **SLICE 1′ AND SLICE 3 LANDED, FULL MATRIX GREEN (159 legs, the expected
+8 KNOWN-RED, no failures).** `canvas.zoom` remains known-red for a NEW and
+narrower reason, written up below and awaiting a product decision. Stage 0 (the tolerant camera guard with its fractional-zoom witness,
 the opt-in `canvas.stress` scenario, and the two ownership-leak fixes) landed
 ahead of this plan. Slices 4–8 still reshape transcript streaming or the
 presentation lifecycle and do not begin until Dylan approves each one.
+
+## Slice 3 landed (2026-08-14) — and split canvas.zoom's cause in two
+
+`CanvasNSView` is now a fixed viewport over a clipped `CanvasWorldPlaneView`
+whose bounds carry the camera, with screen-fixed overlays as siblings. Tiles and
+zone chrome hold world frames a camera step never touches.
+
+**Delivered against the exit criteria:**
+
+| criterion | result |
+|---|---|
+| camera work flat vs installed tiles | `camera-slope.writeSlope` 218.4 → **0** |
+| one camera mutation per step | `cameraMutations` 0 → **320/320** |
+| zero per-tile geometry writes | 18,720 → **0** |
+| `canvas.zoom` boundsWrites | 1,440 → **0** |
+| `stress.tilesLaidOutPerStep` | 48 → **0** |
+| hit-test / z-order / focus / spawn oracles | all green |
+| `--perf-budget-camera-slope-check` off KNOWN-RED | done |
+| `--perf-budget-zoom-check` off KNOWN-RED | **NOT done — see below** |
+
+**The one exit criterion missed, and why it is still a good result.** Removing
+the camera's per-tile cost exposed a second, independent cause of zoom expense
+that was hidden underneath it: a tile's chrome floors are
+`max(worldConstant, screenPx / zoom)`, so below the floor threshold the title
+bar's world height changes on every zoom step, and because
+`contentTopInsetWorldHeight` is aliased to it the tile's content reflows and
+every prose row re-measures. That is 48 ms/step and 14,490 measurements, with
+`boundsWrites` at zero — the same symptom, a different disease.
+
+Dropping the chrome refresh makes `canvas.zoom` green at 1.5 ms/step and zero
+prose measurements, but leaves the grab strip and drawn bar stale at low zoom,
+which `--camera-chrome-redraw-check` correctly fails. So the two candidate fixes
+are both **product-visible** and are left for a decision rather than taken
+silently:
+
+1. **Quantise the chrome floor** into discrete zoom buckets with hysteresis —
+   chrome holds steady during a pinch and refines once at settle. This is what
+   the research doc already prescribes for zoom-dependent detail, and it would
+   generalise to preview/LOD buckets later. Cost: the bar height visibly steps
+   rather than sliding while zooming out.
+2. **Stop aliasing `contentTopInsetWorldHeight` to the floor**, so an enlarged
+   grab strip overlays the top of the content instead of reflowing it. Cheaper
+   and more surgical. Cost: at low zoom the bar covers a sliver of content.
+
+Recommendation: (2) first — it is a two-line change with an obvious witness
+(`zoom.proseMeasurements == 0` while `--camera-chrome-redraw-check` stays green)
+and it does not alter chrome geometry at all, only what the chrome overlaps.
+Take (1) later as part of Slice 5's LOD work, where hysteresis belongs anyway.
+
+**A second measured tradeoff, recorded not smoothed.** The `canvas.stress` pan
+duration regressed from ~5.4–6.0 to ~7.4–9.3 ms/step even though every work
+count went to zero. A `sample` puts 131 of 5,588 samples in the camera and the
+rest in AppKit recursing `_layoutSubtreeWithOldSize:` through 48 deep agent-tile
+trees, with no Array frames at the leaves. Any camera write on an ancestor
+triggers that traversal: 0.001 ms/step with the write removed entirely, 7.2 ms
+via `setBoundsOrigin`, 8.2 ms with a nested content view, 8.8 ms translating by
+frame origin. Reducing it means fewer and shallower mounted tile trees — Slice 5.
 
 ## Slice 1 was deliberately narrowed (2026-08-14)
 
