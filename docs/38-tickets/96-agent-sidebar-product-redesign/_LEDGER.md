@@ -97,8 +97,8 @@ else entirely. No behaviour changed; no existing accessor changed meaning.
 `.build/debug/Array --sidebar-production-corpus-check`, **exit 0**:
 
 ```
-SidebarProductionCorpus checks passed: 26 production flows drove real writers and were
-read off rendered cells, 26 inventory rows in two-way parity
+SidebarProductionCorpus checks passed: 30 production flows drove real writers and were
+read off rendered cells, 30 inventory rows in two-way parity
 ```
 
 Focused legs re-run after the change, all still green: `--sidebar-ux-check`,
@@ -111,7 +111,7 @@ The observed rows are tabulated in `P0.1-fixture-inventory.md`. The product fact
 establish, each from a rendered cell rather than a fixture:
 
 1. **The row carries two facts and a glyph.** Of six painted bands, `meta` and `branch`
-   are empty in **every one of 26 flows**, and the placement band never holds more than a
+   are empty in **every one of 30 flows**, and the placement band never holds more than a
    project name. "Too sparse" is now a measurement.
 2. **`Project › Zone` never renders.** Not even for `exactPlacement`, whose tile really is
    on the project canvas and geometrically inside the zone (`SidebarTree.tiles(for:)`
@@ -198,3 +198,98 @@ extensions) and `configureWorkspaceSidebar`'s declaration is pinned verbatim by 
 program source-scan at ContinuumApp.swift:26751 — widening it would break that gate.
 Every flow, expectation, and the inventory gate stay in
 `SidebarProductionCorpus.swift`.
+
+---
+
+## P0.2 — entry witness, RED — 2026-08-14
+
+No capture artifact in the repo was §3.3-traceable. `QACapture.Manifest` carries only
+`flow`, `generatedAt`, and per entry `step`/`tSec`/`png`/`canvasState`/`notes`;
+`UITourCheck` writes a Markdown index with surface/state/size/appearance. Neither
+records a commit, a bundle hash, a fixture id, or — the one that matters most — a
+`captureType` distinguishing a live-window capture from an offscreen render. §3.3 says
+an offscreen probe is a geometry gate, not proof of the live product, and nothing on
+disk could tell the two apart.
+
+## P0.2 — GREEN — 2026-08-14
+
+`--sidebar-screenshot-check` (offscreen): **38 images**, 4 widths × 2 appearances plus
+accessibility variants and the three density proposals, with a machine-readable
+`manifest.json` carrying every §3.3 field. Gate asserts mechanics only: every planned
+PNG on disk, manifest ↔ directory parity in both directions, no empty provenance field,
+no blank image (`VisualSnapshot.metrics.isBlank`), and Aqua ≠ Dark Aqua per fixture.
+
+`--sidebar-live-capture-check` + `scripts/capture-sidebar-96.sh` (live): PASS at 220,
+280 and 360 pt on `~/Desktop/Array Dev 96.app` over `~/array-scratch-96`, each width
+capturing both `live-window` (CGWindowListCreateImage) and `live-view-cache`
+(cacheDisplay), with requested width == measured width.
+
+### The number that answers S0
+
+Counted off painted cells, not divided out of a constant:
+
+| | card | pitch | complete rows in 662 pt |
+|---|---:|---:|---:|
+| today, shipping | 79.0 pt | 83.0 pt | **7** |
+| proposal A | 66 pt | 68 pt | **9** |
+| proposal B | 72 pt | 75 pt | 8 |
+| proposal C (= today, redrawn) | 79 pt | 83 pt | 7 |
+
+§8.1's floor is nine. Only A meets it. **But proposal C — today's pitch with the intended
+bands filled in — reads perfectly well**, so the sparseness is mostly a content problem
+rather than a height problem. That is in the S0 doc, because it changes what Dylan is
+being asked to approve.
+
+### A false green caught in the live check
+
+The first version of `runSidebarLiveCaptureCheck` reported **PASS over a screenshot
+reading "No agents yet"**. Two independent causes, both the exact failure mode this
+program exists to prevent:
+
+1. it waited a fixed 1.0 s, and the app's own boot reloaded the sidebar after the push;
+2. it counted rows by walking the view tree, which also finds cells AppKit has not yet
+   removed — so five stale views were reported as "5 rows" over a picture of the empty
+   state.
+
+It now polls until the rows are in the model AND painted as agent cells AND the empty
+state is gone, re-pushing each tick, and **exits nonzero if that never happens**. A
+capture indistinguishable from an empty sidebar is worse than no capture.
+
+### A false number caught in the density arithmetic
+
+`SidebarDensityProposal.completeRows(in:)` first computed `(viewport + gap) / pitch` and
+claimed **8** rows for proposal C, where the real sidebar paints **7**. Since C *is*
+today's geometry, a teeth check now requires C's computed card, pitch and row count to
+equal the measured values; the formula became `(viewport − outerGutter) / pitch` and
+agrees. Without that check the 9 reported for A would have been unfalsifiable.
+
+### Matrix
+
+Registered `--sidebar-production-corpus-check` and `--sidebar-screenshot-check` after the
+`--sidebar-ux-check` line. Confirmed in a real run under an isolated tmux namespace
+(disposable `TMUX_TMPDIR`, `TMUX`/`TMUX_PANE` unset, socket path resolved with `pwd -P`
+and verified inside it before starting — the naive string compare failed only because
+`/tmp` is a symlink to `/private/tmp`):
+
+```
+---- Matrix: 156 leg(s) run ----
+KNOWN-RED, expected (6): swift run ContinuumRevivedPaletteChecks
+  --palette-first-responder-restore-check --agent-supervisor-check --nav-mode-check
+  --perf-budget-zoom-check scripts/check-root-docs.sh
+Matrix passed.
+```
+
+Both new legs printed and passed inside that run. `MATRIX_KNOWN_RED` untouched. Inventory
+323 → 327 records; the three lines that appear to move are alphabetical re-sorting of
+`--perf-budget-check`, `--perf-budget-zoom-check` and `--strict-agent-harness-check`,
+proven by an empty old-minus-new set difference. `ComponentLab.swift` has **zero** lines
+in `git diff d334f01..HEAD`, so the queue-94 corpus gate is intact.
+
+### Additional declared fence deviation
+
+`UIProbe.bitmap(of:id:scale:)` `private` → internal. The harness cannot use
+`UIProbe.render`: it re-parents the view it is handed and places it centred at a fixed
+frame, and its `make` closure runs before the view is in a window, so an offscreen
+`NSTableView` would never materialize a cell. Reusing the bitmap step keeps the six
+font-smoothing knobs and the declared 2.0 scale — the display-independence the
+ENV-BLOCKER notes bought — in one place instead of a copy that drifts.
