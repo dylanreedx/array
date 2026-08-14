@@ -83,6 +83,15 @@ final class TileSpawner {
     /// so the AppDelegate can schedule a debounced BrowserState save.
     var browserPersistenceHandler: (() -> Void)?
 
+    /// Called when a browser runtime is created OUTSIDE the `spawnBrowser`
+    /// return path — today that is only a target=_blank popup, where WebKit
+    /// receives the WKWebView directly and no caller ever sees the runtime.
+    /// The app wires this to the same registration every other live browser
+    /// gets (content-process termination handler, `browserRuntimes`, the
+    /// live-browser registry, budget enforcement); a runtime that skips it is
+    /// invisible to the browser cap and to teardown.
+    var browserRuntimeSpawnedHandler: ((WKWebViewBrowserRuntime) -> Void)?
+
     /// Called after every note text change so the AppDelegate can schedule a
     /// debounced note body + index save.
     var notePersistenceHandler: (() -> Void)?
@@ -953,6 +962,7 @@ final class TileSpawner {
             canvasView.removeTile(id: tile.id)
             return nil
         }
+        browserRuntimeSpawnedHandler?(runtime)
         return webView
     }
 
@@ -2398,6 +2408,14 @@ final class TileSpawner {
             browserProfiles: [profile]
         )
 
+        // The popup runtime is created inside the spawner and its WKWebView is
+        // handed straight back to WebKit — this handler is the ONLY route by
+        // which the app can register it (browserRuntimes, live-browser
+        // registry, budget, teardown). An unsurfaced runtime is a live WebKit
+        // process the browser cap cannot see and terminateAll cannot reach.
+        var surfacedRuntimes: [WKWebViewBrowserRuntime] = []
+        spawner.browserRuntimeSpawnedHandler = { surfacedRuntimes.append($0) }
+
         let opener: WKWebViewBrowserRuntime
         switch spawner.spawnBrowser(url: "data:text/html;charset=utf-8,opener") {
         case let .spawned(runtime): opener = runtime
@@ -2405,10 +2423,13 @@ final class TileSpawner {
         case let .failure(error): throw error
         }
         try expect(canvas.canvasState.tiles.count == 1, "opener spawn should create one browser tile")
+        try expect(surfacedRuntimes.isEmpty, "the normal spawn path surfaces its runtime through its return value; the handler is only for runtimes with no other route out")
         let request = URLRequest(url: URL(string: "data:text/html;charset=utf-8,target-blank-child")!)
         let returned = opener.onNewWindowRequest?(request, WKWebViewConfiguration(), WKNavigationAction(), WKWindowFeatures())
         try expect(returned != nil, "target blank seam should return the spawned child WKWebView")
         try expect(canvas.canvasState.tiles.count == 2, "target blank should create a second browser tile")
+        try expect(surfacedRuntimes.count == 1, "target blank child runtime must be surfaced for registration — unregistered, it is invisible to the browser budget and to teardown")
+        try expect(surfacedRuntimes.first?.webView === returned, "the surfaced runtime must own the WKWebView handed back to WebKit")
         let childTile = canvas.canvasState.tiles.first { $0.id != opener.tileId }
         try expect(childTile?.kind == .browser, "target blank child should be a browser tile")
         try expect(childTile?.metadata.browserProfileId == profile.id, "target blank child should inherit opener profile metadata")
@@ -2417,6 +2438,7 @@ final class TileSpawner {
         try expect(childBrowserState?.profileId == profile.id, "target blank child should persist opener profile id")
         try expect(childBrowserState?.storageGroupId == profile.dataStoreIdentifier, "target blank child should persist opener storage group")
         try expect(childBrowserState?.url.contains("target-blank-child") == true, "target blank child should persist requested URL")
+        try expect(surfacedRuntimes.first?.tileId == childTile?.id, "the surfaced runtime must belong to the child tile")
 
         let artifactDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("qa-runs/browser-target-blank-\(Int(Date().timeIntervalSince1970))", isDirectory: true)

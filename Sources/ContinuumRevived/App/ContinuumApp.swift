@@ -3696,8 +3696,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             self.bootTileSpawner = spawner
             configureFileOpenRoute(on: spawner)
+            wireBrowserRuntimeRegistration(on: spawner)
             workspaceRuntime?.onSpawnerCreated = { [weak self] arriving in
                 self?.configureFileOpenRoute(on: arriving)
+                self?.wireBrowserRuntimeRegistration(on: arriving)
             }
             installSettingsChangeObserver()
             workspaceRuntime?.activeController?.onBrowserRuntimeHydrated = { [weak self] runtime in
@@ -4663,6 +4665,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func wireContentProcessTerminationHandler(_ runtime: WKWebViewBrowserRuntime) {
         runtime.onContentProcessTerminated = { [weak self] runtimeId in
             self?.handleBrowserContentProcessTerminated(runtimeId: runtimeId)
+        }
+    }
+
+    /// A target=_blank popup creates its runtime inside TileSpawner and hands
+    /// the WKWebView straight back to WebKit — no caller ever sees the runtime,
+    /// so without this seam it skipped `browserRuntimes`, the live-browser
+    /// registry, budget enforcement, and every teardown path. Same registration
+    /// the hydration seam (`onBrowserRuntimeHydrated`) performs.
+    private func wireBrowserRuntimeRegistration(on spawner: TileSpawner) {
+        spawner.browserRuntimeSpawnedHandler = { [weak self] runtime in
+            guard let self else { return }
+            self.wireContentProcessTerminationHandler(runtime)
+            self.browserRuntimes.append(runtime)
+            self.workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
+            self.workspaceRuntime?.enforceBrowserRuntimeBudget()
         }
     }
 
