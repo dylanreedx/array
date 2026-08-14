@@ -245,6 +245,24 @@ final class CanvasNSView: NSView, TokenThemed {
         tileViews.count + zoneLayers.reduce(0) { $0 + $1.tileViews.count }
     }
 
+    /// QA: how many installed tiles actually intersect the visible canvas at the
+    /// current camera. The gap between this and `qaTotalInstalledTileCount` is
+    /// the work a camera step spends on tiles the user cannot see.
+    var qaTilesIntersectingViewport: Int {
+        let visible = bounds
+        var count = 0
+        for tile in canvasState.tiles where tileViews[tile.id] != nil {
+            if CanvasEngine.tileScreenFrame(tile.frame, viewport: canvasState.viewport).intersects(visible) { count += 1 }
+        }
+        for layer in zoneLayers {
+            for tile in layer.tiles where layer.tileViews[tile.id] != nil {
+                let world = CanvasEngine.worldFrame(tile: tile, in: layer.placement)
+                if CanvasEngine.tileScreenFrame(world, viewport: canvasState.viewport).intersects(visible) { count += 1 }
+            }
+        }
+        return count
+    }
+
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
