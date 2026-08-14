@@ -83,24 +83,19 @@ MATRIX_KNOWN_RED=(
   --agent-supervisor-check
   --nav-mode-check
   --palette-first-responder-restore-check
-  # canvas.zoom is over budget by ~4x and the cause is architectural, not a bug
-  # to bisect: a zoom step changes every tile view's frame SIZE, which scales
-  # `bounds` away, forces the logical size to be written back, and re-lays out
-  # every tile subtree (re-measuring every Markdown/prose row) at a width it
-  # never renders. Removing it means the camera must stop resizing tile views —
-  # scaling the canvas's own coordinate system instead. Measured, published and
-  # tracked in docs/internals/performance-budgets.md; do NOT bisect it as a
-  # regression, and remove this entry when the camera stops resizing tiles.
+  # canvas.zoom is still over budget, but NOT for the reason it used to be. The
+  # retained world plane (.plans/22 Slice 3) removed the camera's per-tile cost
+  # entirely — zoom.boundsWrites is 0 and canvas.camera-slope is green — and that
+  # exposed a SECOND, independent cause underneath: a tile's chrome floors
+  # (`grabHeightInLocalCoordinates` and friends) are `max(world, screenPx/zoom)`,
+  # so below the floor threshold the title bar's world height changes on every
+  # zoom step, which reflows tile content and re-measures every prose row.
+  # Measured at 48 ms/step and 14,490 prose measurements. Fixing it means making
+  # the chrome floor stable during a zoom (quantise it, or stop aliasing the
+  # content inset to it) — both product-visible, so both need a decision rather
+  # than a silent change. Published in docs/internals/performance-budgets.md; do
+  # NOT bisect it as a regression.
   --perf-budget-zoom-check
-  # canvas.camera-slope is the same architectural defect measured as a SLOPE
-  # rather than a single canvas: installed tiles sweep 16→128 with the visible
-  # count held fixed, and camera work grows with tiles the user cannot see
-  # (measured 15 → 124 geometry writes per step). It also reports zero
-  # cameraMutations, because today no single place applies the camera at all.
-  # Both this entry and --perf-budget-zoom-check leave this list in the commit
-  # that lands the retained world plane (.plans/22 Slice 3) — they share one
-  # cause, so they retire together.
-  --perf-budget-camera-slope-check
   # Inherited reds, not independent ones. `ContinuumRevivedPaletteChecks` prints
   # its own model assertions and THEN shells out to the app's
   # --palette-first-responder-restore-check, so it cannot be green while that

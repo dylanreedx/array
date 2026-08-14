@@ -225,7 +225,12 @@ enum PerfScenarios {
                 canvas.qaResetCameraLayoutStats()
                 let start = ProcessInfo.processInfo.systemUptime
                 for step in 0..<steps {
-                    let t = Double(step)
+                    // Start at 1, not 0: the settle above already put the camera at
+                    // the origin, so a step-0 pan to (0,0) moves nothing and is
+                    // correctly skipped by the camera's own unchanged-value guard.
+                    // Counting it as a step would make "one mutation per step" an
+                    // off-by-one instead of an invariant.
+                    let t = Double(step + 1)
                     canvas.setViewport(CanvasViewport(x: t * 12, y: t * 8, zoom: zoom))
                     canvas.layoutSubtreeIfNeeded()
                 }
@@ -440,12 +445,22 @@ enum PerfScenarios {
             rationale: "a camera step should lay out what is visible, not the whole workspace; off-screen tiles cost a frame and change nothing on screen"
         ).evaluate(Double(stats.tilesLaidOut) / Double(steps)))
 
+        // Same replacement as the camera scenarios: tile frame writes are the old
+        // architecture's proof of life, and the retained world plane makes them
+        // legitimately zero. The camera moved, and the presentation followed.
         measurements.append(PerfBudget(
-            metric: "stress.frameWrites",
+            metric: "stress.cameraMutations",
             limit: .atLeast(1),
             unit: .count,
-            rationale: "teeth: the camera must still reposition tiles"
-        ).evaluate(Double(stats.frameWrites)))
+            rationale: "teeth: the camera must actually have moved"
+        ).evaluate(Double(stats.cameraMutations)))
+
+        measurements.append(PerfBudget(
+            metric: "stress.screenFrameMismatches",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "teeth: every visible tile must end up where the camera says"
+        ).evaluate(Double(canvas.qaTileScreenFrameMismatchCount)))
 
         let detail = "\(steps) pan steps over \(tileCount) tiles in \(zoneCount) zones "
             + "(\(onScreen) on screen, \(Int(offScreenShare * 100))% off screen), "
@@ -569,15 +584,32 @@ enum PerfScenarios {
         ).evaluate(Double(prose)))
 
         // Teeth in the other direction: the assertions above must not be
-        // satisfiable by a canvas that quietly stopped laying anything out.
-        // A zoom changes every visible tile's screen frame; a pan changes its
-        // origin. Either way frames must still be written.
+        // satisfiable by a canvas that quietly stopped presenting anything.
+        //
+        // This used to assert `frameWrites >= 1` — "the camera must still
+        // reposition tiles". That encoded the OLD architecture, in which the only
+        // way a camera could move anything was to write every tile's frame. The
+        // retained world plane moves one ancestor instead, so tile frame writes
+        // are now correctly zero and the old budget would fail a working canvas.
+        // Replaced, deliberately and with a strictly stronger pair rather than a
+        // deletion: the camera must have moved, AND the presentation must have
+        // followed it. `screenFrameMismatches` compares each visible tile's actual
+        // rect — converted through the real view tree — against
+        // CanvasEngine.tileScreenFrame, so a canvas that stopped presenting fails
+        // here no matter which architecture is underneath.
         measurements.append(PerfBudget(
-            metric: "\(label).frameWrites",
+            metric: "\(label).cameraMutations",
             limit: .atLeast(1),
             unit: .count,
-            rationale: "teeth: the camera must still reposition tiles — a zero here means the canvas stopped working, not that it got fast"
-        ).evaluate(Double(stats.frameWrites)))
+            rationale: "teeth: the camera must actually have moved — a zero means the gesture did nothing, not that it got fast"
+        ).evaluate(Double(stats.cameraMutations)))
+
+        measurements.append(PerfBudget(
+            metric: "\(label).screenFrameMismatches",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "teeth: every visible tile must end up where the camera says, so the zero-write budgets above cannot be satisfied by a canvas that stopped presenting"
+        ).evaluate(Double(canvas.qaTileScreenFrameMismatchCount)))
 
         let detail = "\(steps) \(label) steps over \(tileCount) tiles "
             + "(3 large Markdown documents + 9 notes), \(String(format: "%.3f", seconds))s total"

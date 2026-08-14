@@ -254,6 +254,31 @@ final class CanvasNSView: NSView, TokenThemed {
         tileViews.count + zoneLayers.reduce(0) { $0 + $1.tileViews.count }
     }
 
+    /// The single view whose geometry carries the camera. Tiles and zone chrome
+    /// are its children at WORLD frames; screen-fixed overlays stay direct
+    /// children of the canvas. See `CanvasWorldPlaneView`.
+    let worldPlane = CanvasWorldPlaneView()
+
+    /// Point the world plane at `canvasState.viewport`. This is the whole camera
+    /// application — one view's bounds — and it replaces the per-tile screen-frame
+    /// pass `layoutAllTiles` used to run on every step.
+    private func syncWorldPlaneToCamera() {
+        if !Self.geometryNearlyEqual(worldPlane.frame.width, bounds.width)
+            || !Self.geometryNearlyEqual(worldPlane.frame.height, bounds.height)
+            || !Self.geometryNearlyEqual(worldPlane.frame.origin.x, 0)
+            || !Self.geometryNearlyEqual(worldPlane.frame.origin.y, 0) {
+            // Only when the canvas itself resizes, never per camera step.
+            worldPlane.frame = bounds
+        }
+        let viewport = canvasState.viewport
+        let writes = worldPlane.applyCamera(
+            viewportSize: bounds.size,
+            worldOrigin: CGPoint(x: viewport.x, y: viewport.y),
+            zoom: viewport.zoom
+        )
+        qaCameraLayoutStats.cameraMutations += writes
+    }
+
     /// Every installed tile view in BACK-TO-FRONT paint order, read from the view
     /// tree rather than the model — the visual order `reorderTileSubviewsByZIndex`
     /// produces.
@@ -264,7 +289,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// silently start returning nothing. Changing this one accessor is how that
     /// migration keeps its witnesses honest.
     var tileViewsInVisualOrder: [TileNSView] {
-        subviews.compactMap { $0 as? TileNSView }
+        worldPlane.subviews.compactMap { $0 as? TileNSView }
     }
 
     /// QA: how many installed tile views are NOT where the camera says they
@@ -343,6 +368,12 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         super.init(frame: NSRect(x: 0, y: 0, width: 1000, height: 700))
         wantsLayer = true
+        // The world plane goes in FIRST and stays the bottom-most subview, so
+        // every screen-fixed overlay added later with `positioned: .above` sits
+        // above all world content without any further ordering work.
+        worldPlane.frame = bounds
+        addSubview(worldPlane, positioned: .below, relativeTo: nil)
+        syncWorldPlaneToCamera()
         applyTokens()
         registerForDraggedTypes([.fileURL])
         // zone-unify P0: seed the unified live model from the boot zone set.
@@ -409,7 +440,7 @@ final class CanvasNSView: NSView, TokenThemed {
             let view = ZoneChromeNSView(model: model)
             zoneChromeViews[placement.zoneId] = view
             // Chrome is the zone background — keep it BELOW every tile subview.
-            addSubview(view, positioned: .below, relativeTo: nil)
+            worldPlane.addSubview(view, positioned: .below, relativeTo: nil)
         }
         layoutZoneChromeViews()
     }
@@ -423,7 +454,9 @@ final class CanvasNSView: NSView, TokenThemed {
         // The frame only changes via create / move / grow-on-tile-resize.
         for placement in liveZones {
             guard let view = zoneChromeViews[placement.zoneId] else { continue }
-            view.frame = CanvasEngine.tileScreenFrame(CanvasEngine.zoneWorldFrame(placement), viewport: canvasState.viewport)
+            // A WORLD frame: zone chrome is a child of the world plane, so the
+            // camera reaches it through the plane's bounds, not through this write.
+            view.frame = Self.worldRect(CanvasEngine.zoneWorldFrame(placement))
             qaCameraLayoutStats.chromeRepaints += 1
             view.needsDisplay = true
         }
@@ -532,17 +565,11 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Returns nil when the zone has no chrome view or the canvas has no viewport zoom.
     func qaZoneDrawnWorldBounds(for zoneId: UUID) -> TileFrame? {
         guard let view = zoneChromeViews[zoneId] else { return nil }
-        let vp = canvasState.viewport
-        guard vp.zoom > 0 else { return nil }
-        let sx = view.frame.origin.x
-        let sy = view.frame.origin.y
-        let sw = view.frame.width
-        let sh = view.frame.height
-        let wx = Double(sx) / vp.zoom + vp.x
-        let wy = Double(sy) / vp.zoom + vp.y
-        let ww = Double(sw) / vp.zoom
-        let wh = Double(sh) / vp.zoom
-        return TileFrame(x: wx, y: wy, width: ww, height: wh)
+        // Zone chrome now lives in the world plane, so its frame already IS world
+        // coordinates: the screen->world inversion this used to perform is gone,
+        // and with it any chance of getting the camera term wrong here.
+        return TileFrame(x: Double(view.frame.origin.x), y: Double(view.frame.origin.y),
+                         width: Double(view.frame.width), height: Double(view.frame.height))
     }
 
     // MARK: - Tile management
@@ -580,7 +607,7 @@ final class CanvasNSView: NSView, TokenThemed {
         tileView.onStopRun = { [weak self] in
             self?.onTileStopRunRequested?(tileId)
         }
-        addSubview(tileView)
+        worldPlane.addSubview(tileView)
         focusBroker?.register(tileView)
         layoutTile(tile)
         if let idx = canvasState.tiles.firstIndex(where: { $0.id == tile.id }) {
@@ -963,7 +990,7 @@ final class CanvasNSView: NSView, TokenThemed {
             gap: CGFloat(config.gap),
             animationDuration: config.speed
         )
-        overlay.show(around: view.frame)
+        overlay.show(around: tileRectInCanvasSpace(view))
         // Keep the overlay topmost — tile installs/reorders can otherwise leave
         // it under later-added tile subviews.
         overlay.removeFromSuperview()
@@ -1045,7 +1072,7 @@ final class CanvasNSView: NSView, TokenThemed {
             let overlay = attentionBorderOverlays[tileId] ?? FocusBorderOverlayView(frame: .zero)
             attentionBorderOverlays[tileId] = overlay
             overlay.configure(color: color, gap: gap, animationDuration: FocusBorderConfig.attentionSpeed)
-            overlay.show(around: view.frame)
+            overlay.show(around: tileRectInCanvasSpace(view))
             overlay.removeFromSuperview()
             addSubview(overlay, positioned: .above, relativeTo: nil)
         }
@@ -1074,14 +1101,14 @@ final class CanvasNSView: NSView, TokenThemed {
     /// on pan/zoom/move/resize. No-op when `tileId` is not bordered.
     private func repositionFocusBorderIfNeeded(for tileId: UUID) {
         guard tileId == borderedTileId, let view = tileViews[tileId] else { return }
-        focusBorderOverlayView().show(around: view.frame)
+        focusBorderOverlayView().show(around: tileRectInCanvasSpace(view))
     }
 
     private func repositionAttentionBorderIfNeeded(for tileId: UUID) {
         guard attentionTileIds.contains(tileId),
               let view = tileViews[tileId],
               let overlay = attentionBorderOverlays[tileId] else { return }
-        overlay.show(around: view.frame)
+        overlay.show(around: tileRectInCanvasSpace(view))
     }
 
     /// Clear the focus border when scope leaves all tiles (scope→canvas/modal).
@@ -1097,7 +1124,7 @@ final class CanvasNSView: NSView, TokenThemed {
               let view = tileViews[targetId],
               let overlay = focusBorderOverlay,
               overlay.qaIsAnimating else { return false }
-        return overlay.frame == view.frame.insetBy(dx: -overlay.gap, dy: -overlay.gap)
+        return overlay.frame == tileRectInCanvasSpace(view).insetBy(dx: -overlay.gap, dy: -overlay.gap)
     }
 
     /// QA: the frame the overlay is ACTUALLY painting, or nil if it is not on screen.
@@ -1124,7 +1151,7 @@ final class CanvasNSView: NSView, TokenThemed {
               let view = tileViews[tileId],
               let overlay = attentionBorderOverlays[tileId],
               overlay.qaIsAnimating else { return false }
-        return overlay.frame == view.frame.insetBy(dx: -overlay.gap, dy: -overlay.gap)
+        return overlay.frame == tileRectInCanvasSpace(view).insetBy(dx: -overlay.gap, dy: -overlay.gap)
     }
 
     func bringToFront(tileId: UUID) {
@@ -1151,15 +1178,52 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     func setViewport(_ viewport: CanvasViewport) {
+        let previousZoom = canvasState.viewport.zoom
         canvasState.viewport = viewport
         frameRecorder?.noteCameraStep()
-        // Camera movement should reposition/scale existing tile layers, not mark
-        // every tile's content dirty. Terminal/browser redraw work during a
-        // trackpad pan or programmatic zoom is product-visible jank.
-        layoutAllTiles(invalidateTileDisplay: false)
+        // The camera is ONE view's geometry. Tiles and zone chrome hold world
+        // frames that a camera step does not touch, so there is no per-tile pass
+        // here any more — that pass was the 48 ms/step zoom cost.
+        syncWorldPlaneToCamera()
+        // A tile's chrome has screen-space FLOORS expressed in world units —
+        // `grabHeightInLocalCoordinates`, `closeButtonWorldSize` and the resize
+        // margin are all `max(worldConstant, screenPx / zoom)`, so the move-grab
+        // strip stays grabbable when zoomed out. Those values change with zoom
+        // and nothing else. The old per-tile camera pass repainted them as a side
+        // effect of resizing every tile; the plane does not, so a zoom has to say
+        // so explicitly. Guarded on the zoom actually changing, which keeps a pan
+        // at zero tile work — the property `--camera-chrome-redraw-check` asserts
+        // in both directions.
+        if !Self.geometryNearlyEqual(CGFloat(previousZoom), CGFloat(viewport.zoom)) {
+            for view in tileViewsInVisualOrder { view.refreshZoomDependentChrome() }
+        }
+        // Screen-fixed overlays are outside the plane, so they do not inherit the
+        // camera and still have to be re-aimed at the tiles they track.
+        repositionTrackingOverlaysForCamera()
+        if navModeOverlayView != nil { qaCameraLayoutStats.chromeRepaints += 1 }
+        navModeOverlayView?.needsDisplay = true
         discardCursorRects()
         window?.invalidateCursorRects(for: self)
         delegate?.canvasDidChange(self)
+    }
+
+    /// Re-aim the overlays that live in SCREEN space but track a world tile —
+    /// the focus border and the attention borders. They are deliberately not in
+    /// the world plane: their stroke widths and corner radii are screen-space
+    /// affordances that must not shrink with zoom.
+    private func repositionTrackingOverlaysForCamera() {
+        if let tileId = borderedTileId { repositionFocusBorderIfNeeded(for: tileId) }
+        for tileId in attentionTileIds { repositionAttentionBorderIfNeeded(for: tileId) }
+    }
+
+    /// A tile view's rect in CANVAS (screen) coordinates.
+    ///
+    /// Screen-fixed overlays live outside the world plane, so they cannot be
+    /// positioned from `tileView.frame` any more: that frame is now a WORLD rect
+    /// inside the plane. Converting through the view tree is both correct and
+    /// plane-agnostic — it produced the same answer before the plane existed.
+    private func tileRectInCanvasSpace(_ view: TileNSView) -> CGRect {
+        view.convert(view.bounds, to: self)
     }
 
     func restoreTileSubviewOrder() {
@@ -1736,7 +1800,10 @@ final class CanvasNSView: NSView, TokenThemed {
                 ordering[tile.id.uuidString] = [zoneIdx, tile.zPosition.value]
             }
         }
-        sortSubviews({ lhs, rhs, context in
+        // Sort the WORLD PLANE's children: that is where tile views and zone
+        // chrome live now. Sorting the canvas would order the plane against the
+        // screen overlays and leave tile z-order untouched.
+        worldPlane.sortSubviews({ lhs, rhs, context in
             guard
                 let ordering = context.map({ Unmanaged<NSMutableDictionary>.fromOpaque($0).takeUnretainedValue() }),
                 let lhs = lhs as? TileNSView,
@@ -1761,7 +1828,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // background (while staying visually "in" the zone).
         for chrome in zoneChromeViews.values {
             chrome.removeFromSuperview()
-            addSubview(chrome, positioned: .below, relativeTo: nil)
+            worldPlane.addSubview(chrome, positioned: .below, relativeTo: nil)
         }
         // Keep the focus-border overlay above everything so a brought-to-front
         // tile (or the chrome reordering above) never buries it.
@@ -1776,7 +1843,11 @@ final class CanvasNSView: NSView, TokenThemed {
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        layoutAllTiles()
+        // The plane is the viewport, so it tracks the canvas's own size. Its
+        // bounds SIZE also depends on the viewport size (viewportSize / zoom), so
+        // the camera has to be re-applied — a window resize genuinely changes how
+        // much world is visible. Tiles still hold world frames and are untouched.
+        syncWorldPlaneToCamera()
         layoutNavModeOverlay()
     }
 
@@ -1791,7 +1862,7 @@ final class CanvasNSView: NSView, TokenThemed {
                 _layoutLayerTile(tile, in: layer, invalidateTileDisplay: invalidateTileDisplay)
             }
             if let chrome = layer.chrome {
-                chrome.frame = _zoneLayerChromeScreenFrame(layer)
+                chrome.frame = _zoneLayerChromeWorldFrame(layer)
                 qaCameraLayoutStats.chromeRepaints += 1
                 chrome.needsDisplay = true
             }
@@ -1858,13 +1929,23 @@ final class CanvasNSView: NSView, TokenThemed {
         abs(lhs - rhs) < 0.001
     }
 
+    /// A `TileFrame`'s world rect, which is also its frame inside the world plane.
+    /// The plane's bounds are world coordinates, so no camera term appears here —
+    /// that is the entire point of the retained plane.
+    private static func worldRect(_ frame: TileFrame) -> CGRect {
+        CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
+    }
+
     private func layoutTile(_ tile: Tile, invalidateTileDisplay: Bool = true) {
         guard let view = tileViews[tile.id] else { return }
         // zone-unify: tiles store WORLD frames (the project canvas stays
         // self-consistent). Zone membership is a pure overlay tag; a moved zone
         // translates its members' world frames explicitly. A member is hidden
         // only when its zone is collapsed.
-        let rect = CanvasEngine.tileScreenFrame(tile.frame, viewport: canvasState.viewport)
+        // A WORLD rect, not a screen rect: the tile lives in the world plane, and
+        // the plane's bounds carry the camera. This is what makes a camera step
+        // cost nothing per tile — the value below does not depend on the viewport.
+        let rect = Self.worldRect(tile.frame)
         let hidden = membershipPlacement(of: tile.id)?.collapsed == true
         if view.isHidden != hidden { view.isHidden = hidden }
         qaCameraLayoutStats.tilesVisited += 1
@@ -2352,14 +2433,14 @@ final class CanvasNSView: NSView, TokenThemed {
             _layoutLayerTile(tile, in: layer)
         }
         if let chrome = layer.chrome {
-            chrome.frame = _zoneLayerChromeScreenFrame(layer)
+            chrome.frame = _zoneLayerChromeWorldFrame(layer)
             chrome.needsDisplay = true
         }
     }
 
     /// Shared chrome-layout helper for ZoneLayer chrome: adaptive bounds derived
     /// from member world frames (mirrors `layoutZoneChromeViews` for T05 layers).
-    private func _zoneLayerChromeScreenFrame(_ layer: ZoneLayer) -> CGRect {
+    private func _zoneLayerChromeWorldFrame(_ layer: ZoneLayer) -> CGRect {
         let memberFrames = layer.tiles.map { CanvasEngine.worldFrame(tile: $0, in: layer.placement) }
         var adaptiveBounds = CanvasEngine.zoneBounds(
             memberFrames: memberFrames,
@@ -2376,7 +2457,7 @@ final class CanvasNSView: NSView, TokenThemed {
                 height: adaptiveBounds.height
             )
         }
-        return CanvasEngine.tileScreenFrame(adaptiveBounds, viewport: canvasState.viewport)
+        return Self.worldRect(adaptiveBounds)
     }
 
     /// Test introspection: screen frame of a ZoneLayer's chrome view.
@@ -2470,11 +2551,11 @@ final class CanvasNSView: NSView, TokenThemed {
         let tileId = tile.id
         tileView.onClose = { [weak self] in self?.onTileCloseRequested?(tileId) }
         tileView.onStopRun = { [weak self] in self?.onTileStopRunRequested?(tileId) }
-        addSubview(tileView)
+        worldPlane.addSubview(tileView)
         focusBroker?.register(tileView)
         _layoutLayerTile(installed, in: layer)
         if let chrome = layer.chrome {
-            chrome.frame = _zoneLayerChromeScreenFrame(layer)
+            chrome.frame = _zoneLayerChromeWorldFrame(layer)
             chrome.needsDisplay = true
         }
         reorderTileSubviewsByZIndex()
@@ -2495,13 +2576,13 @@ final class CanvasNSView: NSView, TokenThemed {
             zoneLayerOrder.append(zoneId)
         }
         for (_, view) in layer.tileViews {
-            addSubview(view)
+            worldPlane.addSubview(view)
             focusBroker?.register(view)
         }
         if showsZoneChrome {
             let chromeView = ZoneChromeNSView(model: layer.renderModel)
             layer.chrome = chromeView
-            addSubview(chromeView)
+            worldPlane.addSubview(chromeView)
         }
     }
 
@@ -2509,7 +2590,8 @@ final class CanvasNSView: NSView, TokenThemed {
     private func _layoutLayerTile(_ tile: Tile, in layer: ZoneLayer, invalidateTileDisplay: Bool = true) {
         guard let view = layer.tileViews[tile.id] else { return }
         let worldFrame = CanvasEngine.worldFrame(tile: tile, in: layer.placement)
-        let rect = CanvasEngine.tileScreenFrame(worldFrame, viewport: canvasState.viewport)
+        // WORLD rect — see layoutTile. The plane carries the camera.
+        let rect = Self.worldRect(worldFrame)
         if view.isHidden != layer.placement.collapsed { view.isHidden = layer.placement.collapsed }
         qaCameraLayoutStats.tilesVisited += 1
         qaCameraLayoutStats.tilesLaidOut += 1
@@ -2558,7 +2640,7 @@ final class CanvasNSView: NSView, TokenThemed {
         canvas.install(tileView: DescriptorTileNSView(tile: seededTiles[2]), for: seededTiles[2])
 
         let modelOrder = canvas.canvasState.tiles.map(\.id)
-        let visualOrder = canvas.subviews.compactMap { ($0 as? TileNSView)?.tile.id }
+        let visualOrder = canvas.tileViewsInVisualOrder.map(\.tile.id)
         let visualTopId = visualOrder.last
         let hitPoint = CGPoint(x: 150, y: 150)
         let semanticHitId = CanvasEngine.hitTest(screenPoint: hitPoint, viewport: viewport, tiles: canvas.canvasState.tiles)?.id
@@ -3694,7 +3776,7 @@ final class CanvasNSView: NSView, TokenThemed {
         try expect(layerCanvas.tileId(at: CGPoint(x: 40, y: 560)) == tGId, "assertion 8: (40,560) should hit tG (world 20,530,160,100)")
 
         // Assertion 9: cross-layer z-order paint — AppKit subview order tA < tB < tG
-        let subviewTileIds = layerCanvas.subviews.compactMap { ($0 as? TileNSView)?.tile.id }
+        let subviewTileIds = layerCanvas.tileViewsInVisualOrder.map(\.tile.id)
         try expect(subviewTileIds.contains(tAId) && subviewTileIds.contains(tBId) && subviewTileIds.contains(tGId), "assertion 9: all three tile subviews must be present")
         let posA = subviewTileIds.firstIndex(of: tAId)!
         let posB = subviewTileIds.firstIndex(of: tBId)!
@@ -4951,7 +5033,7 @@ final class CanvasNSView: NSView, TokenThemed {
         try dispatchMouse(.leftMouseDown, at: lowerFocusWindowPoint, in: window)
         try dispatchMouse(.leftMouseUp, at: lowerFocusWindowPoint, in: window)
 
-        let beforeVisualOrder = canvas.subviews.compactMap { ($0 as? TileNSView)?.tile.id }
+        let beforeVisualOrder = canvas.tileViewsInVisualOrder.map(\.tile.id)
         let semanticHitBefore = canvas.tileId(at: overlappedHitPoint)
         try expect(beforeVisualOrder.last == upperId, "precondition: upper tile should start visually top")
         try expect(semanticHitBefore == upperId, "precondition: upper tile should start semantic top at overlap")
@@ -4965,7 +5047,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // runtime/probe focus repair after this point; that would mask BUG-004.
         canvas.bringToFront(tileId: lowerId)
 
-        let afterVisualOrder = canvas.subviews.compactMap { ($0 as? TileNSView)?.tile.id }
+        let afterVisualOrder = canvas.tileViewsInVisualOrder.map(\.tile.id)
         let afterZ = Dictionary(uniqueKeysWithValues: canvas.canvasState.tiles.map { ($0.id.uuidString, $0.zPosition.value) })
         let afterResponderOwner = owner(of: window.firstResponder)
         let semanticHitAfter = canvas.tileId(at: overlappedHitPoint)

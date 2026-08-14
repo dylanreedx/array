@@ -3526,10 +3526,14 @@ final class TileSpawner {
             guard let view = canvas.tileView(for: tileId) else {
                 throw CheckError.failed("\(label): no installed view for the spawned tile")
             }
-            let centre = CGPoint(x: view.frame.midX, y: view.frame.midY)
+            // The tile's own frame is a WORLD rect since the retained world
+            // plane landed, and this assertion is about where it RENDERS, so it
+            // reads the presented rect in canvas coordinates.
+            let presented = view.convert(view.bounds, to: canvas)
+            let centre = CGPoint(x: presented.midX, y: presented.midY)
             let wanted = CGPoint(x: canvas.bounds.midX, y: canvas.bounds.midY)
             try expect(abs(centre.x - wanted.x) < 0.5 && abs(centre.y - wanted.y) < 0.5,
-                       "\(label): the spawned tile should render centred on the viewport; view centre \(centre) vs canvas centre \(wanted), view frame \(view.frame)")
+                       "\(label): the spawned tile should render centred on the viewport; view centre \(centre) vs canvas centre \(wanted), view frame \(presented)")
         }
 
         let fileManager = FileManager.default
@@ -3687,8 +3691,12 @@ final class TileSpawner {
         guard let treeView = firstFitFixture.canvas.tileView(for: treeTileId) else {
             throw CheckError.failed("no installed view for the spawned file tree")
         }
-        try expect(firstFitFixture.canvas.bounds.contains(treeView.frame),
-                   "a first-fit spawn must render inside the visible canvas; got \(treeView.frame) in \(firstFitFixture.canvas.bounds)")
+        // The tile's own frame is a WORLD rect since the retained world plane
+        // landed; "renders inside the visible canvas" is a claim about the
+        // PRESENTED rect, so convert through the view tree.
+        let treePresented = treeView.convert(treeView.bounds, to: firstFitFixture.canvas)
+        try expect(firstFitFixture.canvas.bounds.contains(treePresented),
+                   "a first-fit spawn must render inside the visible canvas; got \(treePresented) in \(firstFitFixture.canvas.bounds)")
 
         // MARK: Fixture 4 — a ZoneLayer owns the active project
         //

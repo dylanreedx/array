@@ -50,16 +50,15 @@ Status as of 2026-08-09 (end of day):
      the pre-`65d420a` doc taxonomy, one of which demands "Continuum Revived" in
      the user-facing README and so contradicts the identity rule).
 
-     **It is 9 entries now**, the two additions being the canvas-camera pair —
-     `--perf-budget-zoom-check` and `--perf-budget-camera-slope-check`. They are
-     **one architectural cause**, not two defects: a camera step re-derives and
-     writes a screen frame per tile, so a zoom resizes every tile view (scaling
-     `bounds` away, forcing a write-back, re-laying out every subtree at a width
-     it never renders) and the cost grows with tiles the user cannot see. Both
-     leave this list in the single commit that lands the retained world plane
-     (`.plans/22` Slice 3), which is the fix for both. Measured numbers and the
-     two-gate reasoning are in
-     [performance-budgets.md](../internals/performance-budgets.md).
+     **It is 8 entries now.** The one addition is `--perf-budget-zoom-check`.
+     Its original cause — a zoom step resizing every tile view — was fixed by the
+     retained world plane (`.plans/22` Slice 3), which also retired the
+     `--perf-budget-camera-slope-check` entry that briefly sat beside it. What
+     keeps `canvas.zoom` red is a second defect the plane exposed: a tile's chrome
+     floors are `max(world, screenPx/zoom)`, so below the floor threshold the
+     title bar's world height changes every zoom step and reflows tile content.
+     Both candidate fixes are product-visible and await a decision. Measured
+     numbers in [performance-budgets.md](../internals/performance-budgets.md).
 
   Red but **outside the gate entirely**, so no matrix run covers them:
   `--terminal-default-readability-check`, `--previous-focus-navigation-check`,

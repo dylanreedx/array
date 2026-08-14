@@ -624,6 +624,21 @@ class TileNSView: NSView, TokenThemed {
         updateAffordanceOverlay()  // zoom-dependent metrics refresh with the camera
     }
 
+    /// Re-apply ONLY the zoom-dependent chrome floors — the move-grab strip, the
+    /// close button and the title bar's world height, each of which is
+    /// `max(worldConstant, screenPx / zoom)` so it stays usable when zoomed out.
+    ///
+    /// The camera used to resize every tile view, which ran the tile's whole
+    /// layout as a side effect and refreshed these floors by accident. The
+    /// retained world plane deliberately does not, so the canvas calls this on a
+    /// zoom change. It is deliberately narrower than `invalidateForCanvasLayout`:
+    /// that also marks the tile for display and refreshes the affordance overlay,
+    /// which on a 12-tile canvas costs 14,490 prose re-measurements per zoom
+    /// sweep — the exact cost the plane exists to remove.
+    func refreshZoomDependentChrome() {
+        layoutChrome()
+    }
+
     /// World edge length for the close button, floored so its on-screen size
     /// stays `>= minScreenCloseButtonPx`. Mirrors the grab-strip floor pattern.
     var closeButtonWorldSize: CGFloat {
