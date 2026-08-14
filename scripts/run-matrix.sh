@@ -494,6 +494,12 @@ run_app_check .build/debug/Array --agent-inbox-check
 # Queue 94 P0.2: offscreen sidebar probe — per-label drawable-vs-needed width at
 # 220/280/320 pt in both appearances, materialized before rows are applied.
 run_app_check .build/debug/Array --sidebar-ux-check
+# Program 96 P0.1/P0.2. The corpus drives real writers and reads rendered cells; the
+# screenshot leg asserts only mechanics (files written, manifest parity, nothing blank,
+# appearances differ) and never on taste. The LIVE capture is deliberately absent — it
+# needs a WindowServer and Screen Recording permission; run scripts/capture-sidebar-96.sh.
+run_app_check .build/debug/Array --sidebar-production-corpus-check
+run_app_check .build/debug/Array --sidebar-screenshot-check
 run_app_check .build/debug/Array --workspace-sidebar-shell-check
 run_app_check .build/debug/Array --workspace-sidebar-default-visible-check
 run_app_check .build/debug/Array --workspace-sidebar-actions-check
