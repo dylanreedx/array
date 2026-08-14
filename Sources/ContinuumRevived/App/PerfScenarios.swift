@@ -372,8 +372,19 @@ enum PerfScenarios {
         var samples: [Sample] = []
 
         for history in historyCounts {
-            var blocks = (0..<history).map { fixtureBlock($0) }
-            let entryID = nodeID("delta-entry")
+            // ONE ENTRY PER TURN, one block in each. This is the shape a real
+            // conversation has, and the shape matters: a single entry holding
+            // `history` blocks exercises the row walk but is structurally blind to
+            // any per-delta pass over `document.entries`, and
+            // `prepareToolDetailLifecycle` builds a dictionary over every entry on
+            // every delta. Measuring the realistic shape catches both.
+            var entries = (0..<history).map { index in
+                AgentEntry(
+                    id: nodeID("delta-entry-\(index)"), revision: 1, role: .assistant,
+                    provenance: .localNotice(reason: "transcript delta fixture"),
+                    blocks: [fixtureBlock(index)]
+                )
+            }
             let list = AgentTranscriptListView()
             list.frame = NSRect(x: 0, y: 0, width: 320, height: 240)
             let host = NSView(frame: list.frame)
@@ -384,11 +395,11 @@ enum PerfScenarios {
             // 10,000-row document is a full index by definition, and this scenario
             // is about the cost of the next delta, not the first paint.
             try list.apply(
-                document: AgentDocument(version: 1, entries: [AgentEntry(
-                    id: entryID, revision: 1, role: .assistant,
-                    provenance: .localNotice(reason: "transcript delta fixture"), blocks: blocks
-                )]),
-                patch: try AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: blocks.map(\.id))
+                document: AgentDocument(version: 1, entries: entries),
+                patch: try AgentDocumentPatch(
+                    fromVersion: 0, toVersion: 1,
+                    inserted: entries.flatMap { $0.blocks.map(\.id) }
+                )
             )
             host.layoutSubtreeIfNeeded()
             list.collectionView.layoutSubtreeIfNeeded()
@@ -398,7 +409,8 @@ enum PerfScenarios {
             }
 
             let tailIndex = history - 1
-            let tailID = blocks[tailIndex].id
+            let tailEntryID = entries[tailIndex].id
+            let tailID = entries[tailIndex].blocks[0].id
             var deltasWithoutInvalidation = 0
             var worstInvalidated = 0
             list.qaResetFlattenStats()
@@ -406,16 +418,17 @@ enum PerfScenarios {
             for step in 0..<deltas {
                 // A streaming answer revises its OPEN tail block on every chunk, so
                 // the revision advances while the id and the position stay put.
-                blocks[tailIndex] = fixtureBlock(tailIndex, revision: UInt64(step + 2))
                 let version = UInt64(step + 2)
+                entries[tailIndex] = AgentEntry(
+                    id: tailEntryID, revision: version, role: .assistant,
+                    provenance: .localNotice(reason: "transcript delta fixture"),
+                    blocks: [fixtureBlock(tailIndex, revision: version)]
+                )
                 try list.apply(
-                    document: AgentDocument(version: version, entries: [AgentEntry(
-                        id: entryID, revision: version, role: .assistant,
-                        provenance: .localNotice(reason: "transcript delta fixture"), blocks: blocks
-                    )]),
+                    document: AgentDocument(version: version, entries: entries),
                     patch: try AgentDocumentPatch(
                         fromVersion: version - 1, toVersion: version,
-                        updated: [tailID, entryID]
+                        updated: [tailID, tailEntryID]
                     )
                 )
                 // `apply(document:patch:)` is the SYNCHRONOUS seam — the 30 Hz
@@ -508,7 +521,7 @@ enum PerfScenarios {
             rationale: "a streaming chunk arrives many times a second; applying one must fit inside a frame"
         ).evaluate(worstDeltaMs))
 
-        let detail = "\(deltas) tail-revision deltas per configuration, history "
+        let detail = "\(deltas) tail-revision deltas per configuration, one block per entry, history "
             + historyCounts.map(String.init).joined(separator: "/")
             + "; " + samples.map {
                 "\($0.history): \(String(format: "%.0f", $0.visitsPerDelta)) nodes/delta, "
