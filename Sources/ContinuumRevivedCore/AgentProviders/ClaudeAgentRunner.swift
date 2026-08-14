@@ -290,10 +290,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         // doesn't, but augmenting is harmless there.) HOME and
         // CLAUDE_CONFIG_DIR stay untouched — overriding HOME relocates the
         // keychain lookup and the CLI stops finding its own login.
-        var environment = ProcessInfo.processInfo.environment
-        environment["PATH"] = PiAgentRunner.augmentedPath(
-            basePath: environment["PATH"] ?? "", extraDirs: PiAgentRunner.liveExtraDirs())
-        process.environment = environment
+        process.environment = PiAgentRunner.childEnvironment()
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()

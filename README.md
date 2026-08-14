@@ -30,6 +30,14 @@ swift run ContinuumRevivedCoreChecks   # fast core leg
 scripts/check-app-bundle.sh            # bundle harness (dev channel)
 ```
 
+When these commands run inside an Array-managed Pi, Claude, or Codex agent,
+the runner marks the environment so CoreChecks defers only its intentional
+crashing subprocess witnesses; macOS otherwise attributes those crashes to the
+GUI host and can terminate the self-hosting app. Real tmux checks still require
+the disposable namespace supplied by `run-matrix.sh` and
+`qa/run-autonomous.sh`. Run the complete crash-witness gate from an external
+terminal or CI. See `AGENTS.md` under **Verifying**.
+
 Two documented KNOWN-RED legs exist — see
 [docs/38-tickets/95-go-live.md](docs/38-tickets/95-go-live.md) before assuming
 a regression.

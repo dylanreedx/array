@@ -177,6 +177,25 @@ public final class PiAgentRunner: @unchecked Sendable {
         )
     }
 
+    /// Descendants of a managed runner remain attributable to the GUI host on
+    /// macOS. Mark that boundary so repositories which deliberately spawn
+    /// crashing negative witnesses can defer only those witnesses while they are
+    /// being worked on from inside Array. Ordinary external matrix/CI runs do not
+    /// carry this marker and retain the full crash-witness coverage.
+    public static let arrayHostedEnvironmentKey = "CONTINUUM_ARRAY_MANAGED_AGENT"
+
+    public static func childEnvironment(
+        base: [String: String] = ProcessInfo.processInfo.environment,
+        extraDirs: [String]? = nil
+    ) -> [String: String] {
+        var environment = base
+        environment["PATH"] = augmentedPath(
+            basePath: environment["PATH"] ?? "",
+            extraDirs: extraDirs ?? liveExtraDirs())
+        environment[arrayHostedEnvironmentKey] = "1"
+        return environment
+    }
+
     /// Readable so a check can assert what the PRODUCTION runner was configured
     /// with — P2C.2 needs `cwd` to be the agent's worktree, and an injected fake
     /// runner cannot witness that (from the cross-review).
@@ -213,9 +232,7 @@ public final class PiAgentRunner: @unchecked Sendable {
 
         // Augment PATH so the child finds both `pi` and the `node` its shebang
         // re-invokes — a GUI launch inherits a thin PATH missing the nvm bin.
-        var environment = ProcessInfo.processInfo.environment
-        environment["PATH"] = Self.augmentedPath(basePath: environment["PATH"] ?? "", extraDirs: Self.liveExtraDirs())
-        process.environment = environment
+        process.environment = Self.childEnvironment()
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()

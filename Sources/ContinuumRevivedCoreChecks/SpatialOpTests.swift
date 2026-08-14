@@ -1,6 +1,12 @@
 import ContinuumRevivedCore
 import Foundation
 
+func coreCheckCrashWitnessesEnabled(
+    environment: [String: String] = ProcessInfo.processInfo.environment
+) -> Bool {
+    environment[PiAgentRunner.arrayHostedEnvironmentKey] != "1"
+}
+
 // Ticket: docs/38-tickets/02-op-enum-logged-op-envelope.md
 // Logic (pure Core) checks for OpId, Op, LoggedOp, FracIndex, and
 // JSONCodec.makeOpLogEncoder(). All in-process, no daemon, no network,
@@ -206,7 +212,7 @@ func runSpatialOpTests() {
     // silently return .first. A Swift `precondition` isn't catchable
     // in-process, so re-exec this same executable with a hook env var and
     // assert the child crashes (abnormal termination), not a clean exit.
-    do {
+    if coreCheckCrashWitnessesEnabled() {
         let executablePath = CommandLine.arguments[0]
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executablePath)
@@ -217,6 +223,8 @@ func runSpatialOpTests() {
         process.waitUntilExit()
         let crashed = process.terminationStatus != 0 || process.terminationReason == .uncaughtSignal
         expect(crashed, "between(.first, .first) must trap (precondition) instead of returning a value")
+    } else {
+        print("SKIP crash witness: FracIndex.between.equal (CoreChecks is hosted by a live Array managed agent)")
     }
 
     let fracEncoded = try! JSONCodec.makeEncoder().encode(FracIndex(value: 0.3))

@@ -57,7 +57,22 @@ func runPiExecutableResolutionChecks() {
     expect(Runner.augmentedPath(basePath: "", extraDirs: [nvmBin]) == nvmBin,
            "augmentedPath: empty base yields just the extra dir")
 
-    print("PiAgentRunner executable-resolution checks passed: GUI absolute resolve, PATH precedence, env fallback, PATH augmentation (pi+node)")
+    // 5. Every managed provider uses this shared environment constructor. The
+    // marker lets self-hosted repositories defer only deliberate crash
+    // subprocesses without weakening an ordinary external matrix run.
+    let childEnvironment = Runner.childEnvironment(
+        base: ["PATH": thin, "PRESERVE": "yes"],
+        extraDirs: [nvmBin])
+    expect(childEnvironment[Runner.arrayHostedEnvironmentKey] == "1",
+           "childEnvironment: managed descendants must be marked as Array-hosted")
+    expect(childEnvironment["PATH"] == "\(nvmBin):\(thin)" && childEnvironment["PRESERVE"] == "yes",
+           "childEnvironment: PATH augmentation must preserve unrelated inherited values")
+    expect(!coreCheckCrashWitnessesEnabled(environment: childEnvironment),
+           "CoreChecks must suppress deliberate crash witnesses under an Array-managed agent")
+    expect(coreCheckCrashWitnessesEnabled(environment: [:]),
+           "ordinary external CoreChecks must retain deliberate crash witnesses")
+
+    print("PiAgentRunner executable-resolution checks passed: GUI absolute resolve, PATH precedence, env fallback, PATH augmentation, self-host marker")
 }
 
 // 88.5: a stable sessionId makes prompts continue the same conversation

@@ -4,6 +4,14 @@ set -u -o pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# CoreChecks contains real-tmux coverage. Never let an autonomous run inherit
+# Array's live/default socket: give every invocation a disposable namespace and
+# remove only that namespace when the run ends.
+QA_TMUX_TMPDIR=$(mktemp -d /tmp/array-autonomous-tmux.XXXXXX)
+export TMUX_TMPDIR="$QA_TMUX_TMPDIR"
+unset TMUX TMUX_PANE
+trap 'rm -rf "$QA_TMUX_TMPDIR"' EXIT
+
 SCOPE="changed"
 FLOW=""
 while [[ $# -gt 0 ]]; do

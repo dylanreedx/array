@@ -961,12 +961,18 @@ remoteReachBackend: do {
     expect(decodedV2Project == v2Project, "Project v2 remoteEnvironment round-trips")
     expect(Project.currentSchemaVersion == 2, "Project schema version is bumped for remoteEnvironment")
 
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
-    process.environment = ProcessInfo.processInfo.environment.merging(["CRCC_TRAP_TEST": "RemoteReach.tunnel.wrap"]) { _, new in new }
-    try process.run()
-    process.waitUntilExit()
-    expect(process.terminationStatus != 0, "RemoteReach tunnel wrap must trap instead of silently falling back")
+    var tunnelTrapStatus: Int32 = -1
+    if coreCheckCrashWitnessesEnabled() {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        process.environment = ProcessInfo.processInfo.environment.merging(["CRCC_TRAP_TEST": "RemoteReach.tunnel.wrap"]) { _, new in new }
+        try process.run()
+        process.waitUntilExit()
+        tunnelTrapStatus = process.terminationStatus
+        expect(process.terminationStatus != 0, "RemoteReach tunnel wrap must trap instead of silently falling back")
+    } else {
+        print("SKIP crash witness: RemoteReach.tunnel.wrap (CoreChecks is hosted by a live Array managed agent)")
+    }
 
     func runProcess(
         _ command: String,
@@ -1225,26 +1231,33 @@ remoteReachBackend: do {
     )
     let persistedTunnelURL = backendRoot.appendingPathComponent("persisted-tunnel-project.json")
     try encoder.encode(persistedTunnelProject).write(to: persistedTunnelURL)
-    let persistedTunnelProcess = Process()
-    persistedTunnelProcess.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
-    persistedTunnelProcess.environment = ProcessInfo.processInfo.environment.merging([
-        "CRCC_PERSISTED_TUNNEL_PROJECT": persistedTunnelURL.path
-    ]) { _, new in new }
-    let persistedTunnelStderr = Pipe()
-    persistedTunnelProcess.standardError = persistedTunnelStderr
-    try persistedTunnelProcess.run()
-    persistedTunnelProcess.waitUntilExit()
-    let persistedTunnelError = String(
-        data: persistedTunnelStderr.fileHandleForReading.readDataToEndOfFile(),
-        encoding: .utf8
-    ) ?? ""
-    expect(persistedTunnelProcess.terminationStatus != 0, "persisted tunnel project must crash in child process")
-    // The tunnel path now throws `TmuxSession.ReachError.tunnelUnsupported` and the
-    // wrap seam traps on it, so the message names the transport AND the relay host
-    // instead of the old "not yet wired" placeholder. What must not change: it
-    // crashes loudly rather than silently launching something local.
-    expect(persistedTunnelError.contains("tunnel") && persistedTunnelError.contains("relay.example"),
-           "persisted tunnel crash must name the unsupported tunnel transport and its relay host, got \(persistedTunnelError)")
+    var persistedTunnelTrapStatus: Int32 = -1
+    var persistedTunnelError = ""
+    if coreCheckCrashWitnessesEnabled() {
+        let persistedTunnelProcess = Process()
+        persistedTunnelProcess.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        persistedTunnelProcess.environment = ProcessInfo.processInfo.environment.merging([
+            "CRCC_PERSISTED_TUNNEL_PROJECT": persistedTunnelURL.path
+        ]) { _, new in new }
+        let persistedTunnelStderr = Pipe()
+        persistedTunnelProcess.standardError = persistedTunnelStderr
+        try persistedTunnelProcess.run()
+        persistedTunnelProcess.waitUntilExit()
+        persistedTunnelError = String(
+            data: persistedTunnelStderr.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        ) ?? ""
+        persistedTunnelTrapStatus = persistedTunnelProcess.terminationStatus
+        expect(persistedTunnelProcess.terminationStatus != 0, "persisted tunnel project must crash in child process")
+        // The tunnel path now throws `TmuxSession.ReachError.tunnelUnsupported` and the
+        // wrap seam traps on it, so the message names the transport AND the relay host
+        // instead of the old "not yet wired" placeholder. What must not change: it
+        // crashes loudly rather than silently launching something local.
+        expect(persistedTunnelError.contains("tunnel") && persistedTunnelError.contains("relay.example"),
+               "persisted tunnel crash must name the unsupported tunnel transport and its relay host, got \(persistedTunnelError)")
+    } else {
+        print("SKIP crash witness: persisted RemoteReach.tunnel project (CoreChecks is hosted by a live Array managed agent)")
+    }
 
     let manifest = InvariantManifest(
         invariantId: "ticket48-remote-reach-model",
@@ -1260,13 +1273,13 @@ remoteReachBackend: do {
                 .string(RemoteReachConfig.serverAliveCountMaxKey),
                 .string(RemoteReachConfig.connectTimeoutKey)
             ]),
-            "tunnel_trap_status": .int(Int(process.terminationStatus)),
+            "tunnel_trap_status": .int(Int(tunnelTrapStatus)),
             "backend_loopback_ssh_port": .int(sshPort),
             "backend_loopback_tmux_session_created": .bool(hasSessionStatus == 0),
             "backend_keepalive_process_running_after_2s": .bool(remoteProcess.isRunning),
             "backend_loopback_tmux_session_killed": .bool(killedStatus != 0),
             "backend_localhost_tmux_session_created": .bool(localHasSessionStatus == 0),
-            "backend_persisted_tunnel_trap_status": .int(Int(persistedTunnelProcess.terminationStatus)),
+            "backend_persisted_tunnel_trap_status": .int(Int(persistedTunnelTrapStatus)),
             "backend_persisted_tunnel_trap_message_contains": .bool(persistedTunnelError.contains("tunnel reach path"))
         ],
         outcome: InvariantOutcome.pass.rawValue,

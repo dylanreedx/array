@@ -341,10 +341,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
         // codex is a node script whose shebang needs node on PATH. HOME and the
         // codex config dir stay untouched — overriding HOME relocates the login
         // lookup and the CLI stops finding its own auth.
-        var environment = ProcessInfo.processInfo.environment
-        environment["PATH"] = PiAgentRunner.augmentedPath(
-            basePath: environment["PATH"] ?? "", extraDirs: PiAgentRunner.liveExtraDirs())
-        process.environment = environment
+        process.environment = PiAgentRunner.childEnvironment()
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()

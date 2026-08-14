@@ -220,6 +220,14 @@ inspect, list, attach to, select in, or kill
 sessions on the default server. If a check cannot honor this isolation, leave
 it unverified rather than touching the live server.
 
+Managed Pi, Claude, and Codex runners mark their descendants with
+`CONTINUUM_ARRAY_MANAGED_AGENT=1`. CoreChecks uses that marker to defer only
+its deliberate crash subprocesses: macOS attributes those crash witnesses to
+the GUI host, and they have terminated a live self-hosting Array process.
+External terminal/CI runs do not carry the marker and retain the complete
+crash-witness gate. Never unset or override the marker from an Array-managed
+agent to force those witnesses; run them externally instead.
+
 - Full gate: `scripts/run-matrix.sh`. It runs every leg and ends with a report —
   legs run, expected KNOWN-RED (from `MATRIX_KNOWN_RED`), any KNOWN-RED that
   unexpectedly PASSED, and real failures. Judge a run by that summary. Builds
