@@ -23,8 +23,12 @@ import Foundation
 enum SidebarScreenshotChecks {
     struct Failure: Error, CustomStringConvertible { let description: String }
 
-    static let checkName = "sidebar-96-screenshots"
-    static let flag = "--sidebar-screenshot-check"
+    // `nonisolated` because the live check reads these from inside a @Sendable
+    // closure; they are immutable strings with no actor state behind them.
+    nonisolated static let checkName = "sidebar-96-screenshots"
+    nonisolated static let flag = "--sidebar-screenshot-check"
+    nonisolated static let liveCheckName = "sidebar-96-live"
+    nonisolated static let liveFlag = "--sidebar-live-capture-check"
     /// §8.1's required height: "at least nine complete active rows in 662 pt".
     static let denseViewportHeight: CGFloat = 662
     static let widths: [CGFloat] = [220, 280, 320, 360]

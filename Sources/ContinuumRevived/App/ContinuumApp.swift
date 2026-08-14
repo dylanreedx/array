@@ -3854,7 +3854,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 }
             }
 
-            if CommandLine.arguments.contains("--agent-location-live-check") {
+            if CommandLine.arguments.contains(SidebarScreenshotChecks.liveFlag) {
+                runSidebarLiveCaptureCheck(window: window)
+            } else if CommandLine.arguments.contains("--agent-location-live-check") {
                 runAgentLocationLiveCheck(window: window)
             } else if CommandLine.arguments.contains("--managed-agent-live-check") {
                 runManagedAgentLiveCheck(window: window)
@@ -3884,6 +3886,211 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// window captures plus a local JSON manifest. The fixture paths must be
     /// supplied by the isolated launch environment; this check never targets the
     /// owner's project or Application Support store.
+    /// Program 96/P0.2 — the LIVE half of the screenshot harness, and the source of
+    /// gate S0's red baseline.
+    ///
+    /// The offscreen leg is a geometry gate (§3.3); this is the shipped product, in a
+    /// real window, composited by the WindowServer. It drives the same production
+    /// writers the corpus does — so the rows are production rows and the
+    /// `reloadWorkspaceSidebar`-overwrite hazard never arises — then captures the
+    /// window twice: once through the WindowServer and once through the sidebar view's
+    /// own `cacheDisplay`. Both are recorded with distinct `captureType`s because a
+    /// view render is not evidence about the live window, and conflating them is
+    /// exactly what §3.3 forbids.
+    ///
+    /// Not a matrix leg: it needs a WindowServer and Screen Recording permission.
+    private func runSidebarLiveCaptureCheck(window: NSWindow) {
+        let report: @MainActor @Sendable (String) -> Void = { line in
+            FileHandle.standardError.write(Data("[sidebar-96-live] \(line)\n".utf8))
+        }
+        guard let output = ProcessInfo.processInfo.environment["CONTINUUM_QA_CAPTURE"],
+              !output.isEmpty else {
+            report("FAIL: CONTINUUM_QA_CAPTURE must name an output directory")
+            Foundation.exit(2)
+        }
+        let directory = URL(fileURLWithPath: output, isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        guard let projectRoot = activeProject?.rootPath else {
+            report("FAIL: no active project — refusing to capture an unknown root")
+            Foundation.exit(2)
+        }
+        // Never Dylan's workspace, whatever the caller passed.
+        guard !projectRoot.contains("/Documents/personal") else {
+            report("FAIL: refusing to run against \(projectRoot)")
+            Foundation.exit(2)
+        }
+        let requestedWidth = WorkspaceSidebarConfig.resolveWidth(defaults: .standard)
+
+        // A Task rather than a fixed delay: the app is still finishing its own boot at
+        // one second, and the FIRST version of this check captured a sidebar reading
+        // "No agents yet" while reporting PASS — the app's later mount reloaded the
+        // list out from under the push. Now the rows are waited for and their absence
+        // is a FAILURE, because a green check over an empty screenshot is the exact
+        // false evidence this program exists to prevent.
+        Task { @MainActor [weak self] in
+            guard let self else { Foundation.exit(3) }
+            let root = URL(fileURLWithPath: projectRoot, isDirectory: true)
+            // Let the workspace mount settle before driving anything.
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+
+            // The same writers P0.1 drives: three untouched ⌘K drafts, one renamed, and
+            // one that finished a turn. Enough for the owner-screenshot row shape and
+            // one completion to be visible in the same frame.
+            for _ in 0..<3 {
+                _ = self.agentSupervisor.spawn(
+                    role: nil, prompt: nil, cwd: root,
+                    model: "openai-codex/gpt-5.6-sol", thinking: "medium",
+                    projectId: self.activeProject?.id, tileId: UUID())
+            }
+            let named = self.agentSupervisor.spawn(
+                role: nil, prompt: nil, cwd: root,
+                model: "anthropic/claude-opus-5", thinking: "medium",
+                projectId: self.activeProject?.id, tileId: UUID())
+            _ = self.agentSupervisor.rename(
+                agentID: named, to: "Replace sidebar identity and completion UX")
+            let finished = self.agentSupervisor.spawn(
+                role: nil, prompt: nil, cwd: root,
+                model: "openai-codex/gpt-5.6-sol", thinking: "medium",
+                projectId: self.activeProject?.id, tileId: UUID())
+            _ = self.agentSupervisor.rename(agentID: finished, to: "Stop the camera resizing tiles")
+            let turnEvents: [AgentRuntimeEvent] = [
+                .turnStarted(threadId: "s0", turnId: "s0-1"),
+                .turnCompleted(threadId: "s0", turnId: "s0-1", outcome: .completed, errorMessage: nil),
+            ]
+            for (index, event) in turnEvents.enumerated() {
+                // Both owners, as production wires them: `deliver` updates the turn
+                // facts the row's state reads, the bridge records the activity draft.
+                self.recordManagedActivity(
+                    agentId: finished, tileId: nil, event: event,
+                    status: index == turnEvents.count - 1 ? .done : .working)
+                self.agentSupervisor.qaDeliver(event, to: finished)
+            }
+            self.refreshAgentSurfaces(notify: false)
+
+            guard let sidebar = self.workspaceSidebarView else {
+                report("FAIL: no workspace sidebar view")
+                Foundation.exit(1)
+            }
+
+            // Poll for the rows to actually be on screen. Re-push each tick, because
+            // the app's own boot can reload the list after ours.
+            let expectedRows = 5
+            var settled = false
+            for _ in 0..<40 {
+                self.refreshAgentSurfaces(notify: false)
+                sidebar.layoutSubtreeIfNeeded()
+                sidebar.inboxForQA.layoutForQA()
+                let modelRows = sidebar.inboxForQA.rowIdsForQA.count
+                let painted = sidebar.inboxForQA.qaMaterializedRowCells
+                    .filter { $0.qaAgentID != nil }.count
+                if modelRows >= expectedRows, painted >= expectedRows,
+                   !sidebar.inboxForQA.isEmptyMessageVisibleForQA {
+                    settled = true
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            guard settled else {
+                report("FAIL: the sidebar never showed \(expectedRows) rows "
+                       + "(model \(sidebar.inboxForQA.rowIdsForQA.count), painted "
+                       + "\(sidebar.inboxForQA.qaMaterializedRowCells.filter { $0.qaAgentID != nil }.count), "
+                       + "empty-state visible "
+                       + "\(sidebar.inboxForQA.isEmptyMessageVisibleForQA)) — refusing to "
+                       + "capture an empty sidebar and call it a baseline")
+                Foundation.exit(1)
+            }
+            window.display()
+            window.flush()
+            // One more beat so the WindowServer has the composited frame.
+            try? await Task.sleep(nanoseconds: 400_000_000)
+
+            var entries: [SidebarScreenshotChecks.Entry] = []
+            let measuredWidth = Double(sidebar.bounds.width)
+            let appearance = window.effectiveAppearance.name == .aqua ? "aqua" : "darkAqua"
+            let workspace = NSWorkspace.shared
+            let reduceMotion = workspace.accessibilityDisplayShouldReduceMotion
+                ? "system-on" : "system-off"
+            let increaseContrast = workspace.accessibilityDisplayShouldIncreaseContrast
+                ? "system-on" : "system-off"
+            // Painted AGENT cells only. A bare tree walk also finds views AppKit has
+            // not yet removed, which is how the first version reported five rows over a
+            // screenshot of the empty state.
+            let rowCount = sidebar.inboxForQA.qaMaterializedRowCells
+                .filter { $0.qaAgentID != nil }.count
+
+            func record(_ png: String, captureType: String, scale: Double) {
+                entries.append(SidebarScreenshotChecks.Entry(
+                    png: png, fixture: "s0-red-baseline",
+                    widthRequestedPt: Double(requestedWidth),
+                    widthMeasuredPt: measuredWidth,
+                    heightPt: Double(sidebar.bounds.height),
+                    appearance: appearance,
+                    reduceMotion: reduceMotion, increaseContrast: increaseContrast,
+                    scale: scale, captureType: captureType,
+                    checkFlag: SidebarScreenshotChecks.liveFlag,
+                    digest: "n/a (live capture)",
+                    rowsRendered: rowCount,
+                    completeRowsIn662pt: nil, cardHeightPt: nil, pitchPt: nil))
+            }
+
+            // 1 — the WindowServer's own picture of the live window.
+            let windowName = "live-window-\(Int(requestedWidth))pt.png"
+            if let image = CGWindowListCreateImage(
+                .null, .optionIncludingWindow, CGWindowID(window.windowNumber),
+                [.boundsIgnoreFraming]) {
+                let rep = NSBitmapImageRep(cgImage: image)
+                if let data = rep.representation(using: .png, properties: [:]) {
+                    try? data.write(
+                        to: directory.appendingPathComponent(windowName), options: .atomic)
+                    record(windowName, captureType: "live-window",
+                           scale: Double(image.width) / max(Double(window.frame.width), 1))
+                }
+            } else {
+                report("WARN: CGWindowListCreateImage returned nothing — Screen Recording "
+                       + "permission is probably not granted for this bundle")
+            }
+
+            // 2 — the sidebar view's own render. Not a substitute for the above; it is
+            // the exact subtree state at this instant, labelled as a view render.
+            let viewName = "live-view-cache-\(Int(requestedWidth))pt.png"
+            if let rep = sidebar.bitmapImageRepForCachingDisplay(in: sidebar.bounds) {
+                sidebar.cacheDisplay(in: sidebar.bounds, to: rep)
+                if let data = rep.representation(using: .png, properties: [:]) {
+                    try? data.write(
+                        to: directory.appendingPathComponent(viewName), options: .atomic)
+                    record(viewName, captureType: "live-view-cache",
+                           scale: Double(rep.pixelsWide) / max(measuredWidth, 1))
+                }
+            }
+
+            let verdict = entries.contains { $0.captureType == "live-window" } ? "PASS" : "FAIL"
+            let payload: [String: Any] = [
+                "check": SidebarScreenshotChecks.liveCheckName,
+                "verdict": verdict,
+                "program": "96-P0.2",
+                "appearance": appearance,
+                "widthRequestedPt": requestedWidth,
+                "widthMeasuredPt": measuredWidth,
+                "rowsRendered": rowCount,
+                "reduceMotion": reduceMotion,
+                "increaseContrast": increaseContrast,
+                "scratchProjectRoot": projectRoot,
+                "bundlePath": Bundle.main.bundlePath,
+                "bundleVersion": Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "",
+                "captures": entries.map {
+                    ["png": $0.png, "captureType": $0.captureType, "scale": $0.scale]
+                },
+            ]
+            try? JSONSerialization.data(
+                withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]
+            ).write(to: directory.appendingPathComponent("manifest.json"), options: .atomic)
+
+            report("\(verdict): \(entries.count) capture(s), \(rowCount) rows at "
+                   + "\(Int(requestedWidth))pt (\(appearance)) -> \(directory.path)")
+            Foundation.exit(verdict == "PASS" ? 0 : 1)
+        }
+    }
+
     private func runAgentLocationLiveCheck(window: NSWindow) {
         let report: @MainActor @Sendable (String) -> Void = { line in
             FileHandle.standardError.write(Data("[agent-location-live] \(line)\n".utf8))
