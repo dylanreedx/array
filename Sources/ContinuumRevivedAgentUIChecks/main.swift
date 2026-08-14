@@ -1140,7 +1140,9 @@ func runSidebarSurfaceChecks() {
     }
 
     // 8. Pair identity, derived here independently of `documentedPairs`:
-    //    3 fills x (2 text + 5 accents + controlBoundary + focusRing) = 27.
+    //    3 fills x (2 text + 6 accents + controlBoundary + focusRing) = 30.
+    //    Six accents since program 96's `accentReview`; an accent costs three
+    //    sidebar pairs, one per interaction fill, and each is measured.
     //    Resting is deliberately absent — it IS panel, which P1.3 gates.
     let pairs = SidebarTokens.documentedPairs
     var expectedPairs: Set<String> = []
@@ -1156,7 +1158,7 @@ func runSidebarSurfaceChecks() {
             expectedPairs.insert("\(role.rawValue)|\(surface.rawValue)|\(fmt(floor))")
         }
     }
-    expect(pairs.count == 27, "SidebarTokens: expected 27 documented sidebar pairs, got \(pairs.count)")
+    expect(pairs.count == 30, "SidebarTokens: expected 30 documented sidebar pairs, got \(pairs.count)")
     let actualKeys = pairs.map { "\($0.foreground)|\($0.background)|\(fmt($0.floor))" }
     expect(Set(actualKeys).count == actualKeys.count,
            "SidebarTokens: the sidebar pairs contain duplicates (\(actualKeys.count) pairs, \(Set(actualKeys).count) distinct) — a duplicated easy pair can hide a lost hard one")
@@ -1215,6 +1217,10 @@ func runSidebarSurfaceChecks() {
         ("accentInput", .light, 5.58), ("accentInput", .dark, 5.65),
         ("accentFailed", .light, 4.65), ("accentFailed", .dark, 6.18),
         ("accentDone", .light, 5.21), ("accentDone", .dark, 7.12),
+        // Program 96. 4.75 against the strongest fill is the tightest margin in
+        // this table — a quarter of a point of headroom, recorded rather than
+        // rounded away, so a future palette nudge to the rose goes red first.
+        ("accentReview", .light, 4.75), ("accentReview", .dark, 5.05),
         ("controlBoundary", .light, 3.11), ("controlBoundary", .dark, 3.63),
         ("focusRing", .light, 6.10), ("focusRing", .dark, 6.43)
     ]

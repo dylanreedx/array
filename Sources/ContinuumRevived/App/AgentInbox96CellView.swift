@@ -555,30 +555,48 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         decorations.alphaValue = CGFloat(shown.emphasis.accentOpacity)
     }
 
-    /// **One colour, for one meaning: this row wants you.**
+    /// One colour per meaning — with the two kinds of *asking* sharing one.
     ///
-    /// Ruled 2026-08-14. The four-accent palette queue 94 uses — blue working, amber
-    /// approval, violet input, red failed — put four hues in a list where the reader
-    /// has one question, and it produced a row that said `Needs attention` in amber
-    /// directly above another saying `Needs attention` in violet. Same words, same
-    /// glyph, different colour, no difference in meaning: that is not a palette, it
-    /// is noise with a token behind it.
+    /// Ruled 2026-08-14, after a first attempt collapsed the palette too far. The
+    /// defect was never "too many colours", it was **two colours for one meaning**:
+    /// the capability render showed `Needs attention` in amber directly above
+    /// `Needs attention` in violet, same words and same glyph. Approval and input
+    /// are one thing to a reader — a decision is wanted — so they take one colour.
+    /// Everything else stays distinguishable, because a list where failure and
+    /// success look alike is worse than one with five hues in it.
     ///
-    /// So colour becomes binary. Approval, input, failed and finished-but-unseen all
-    /// take `accentApproval` — the amber that is already token-legal at 4.5:1 on
-    /// every surface in both themes. WHICH kind of attention is carried by the glyph
-    /// and the word, which is where §8.2 wants it anyway: never by colour alone.
+    /// | state | colour | why |
+    /// |---|---|---|
+    /// | working | blue, plus the moving glyph | in flight, wants nothing |
+    /// | approval, input | amber | a decision is wanted — ONE colour for both |
+    /// | failed | red | it broke |
+    /// | done, and you saw it | green | it went well, and it is closed |
+    /// | landed / waiting | rose | finished, and nobody has looked |
     ///
-    /// Working is deliberately NOT coloured. A running agent is not asking for
-    /// anything, and it already has the loudest thing on the row — a moving glyph.
+    /// The rose is the one that had to be argued for: see `AccentToken.accentReview`.
+    /// It is a sixth accent because neither of its neighbours can carry it — green
+    /// loses it among the rows you already read, amber makes it look like something
+    /// is blocking when nothing is.
+    static func accentToken(_ row: AgentInboxRow, now: Date) -> AccentToken? {
+        if reviewState(row, now: now) != nil { return .accentReview }
+        switch row.state {
+        case .working: return .accentWorking
+        // ONE colour for the two kinds of asking. This deliberately drops
+        // `accentInput`'s violet on a ROW; the status chip keeps it, because a chip
+        // is read one at a time and a list is read as a column.
+        case .approval, .input: return .accentApproval
+        case .failed: return .accentFailed
+        case .ready: return .accentDone
+        }
+    }
+
     static func accentColour(_ row: AgentInboxRow, now: Date, in view: NSView) -> NSColor {
-        guard !row.isUnconfirmed, isAttention(row, now: now) else {
+        // An unconfirmed row is one whose state we are not sure of, and colour is a
+        // claim. Grey until it is known.
+        guard !row.isUnconfirmed, let token = accentToken(row, now: now) else {
             return TextToken.textSecondary.color.nsColor(in: view)
         }
-        if row.state == .working {
-            return TextToken.textSecondary.color.nsColor(in: view)
-        }
-        return AccentToken.accentApproval.color.nsColor(in: view)
+        return token.color.nsColor(in: view)
     }
 
     private func applyAccessibility() {

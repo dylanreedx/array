@@ -788,3 +788,70 @@ The right-click menu. Array's row menu today is Open / Rename / Settle / Snooze 
 Mark Unread / Archive / Delete, with unavailable actions hidden rather than greyed
 (P3.14's rule). Dylan asked how T3 Code's looks — **I cannot see T3's app and did not
 guess**; waiting on a screenshot.
+
+---
+
+## Round 7 — the palette, corrected (2026-08-14)
+
+Round 6 read "one colour for important things" as "one colour, full stop" and painted
+working, done, stopped and cancelled all grey. Wrong. The rule is **one colour per
+MEANING, with the two kinds of asking sharing one** — the original defect was never
+"too many colours", it was `Needs attention` in amber directly above `Needs attention`
+in violet.
+
+| state | colour | token |
+|---|---|---|
+| working | blue, plus the moving glyph | `accentWorking` |
+| approval **and** input | amber — one colour for both | `accentApproval` |
+| failed | red | `accentFailed` |
+| done, and you saw it | green | `accentDone` |
+| landed / waiting | rose | **`accentReview`, new** |
+
+### A sixth accent, and the gates made us earn it
+
+`accentReview` — light `#A83259`, dark `#E5799B` (Dylan's pick). Neither neighbour can
+carry this state: green loses it among the rows you already read, amber makes it look
+like something is blocking when nothing is.
+
+Adding it went red **five times in a row**, and every one of those was a pin doing its
+job rather than an obstacle:
+
+1. `expected 5 accents, got 6` — the count is pinned so an accent cannot arrive by drift.
+2. `expected 22 tokens in total, got 23`.
+3. `expected 104 documented pairs, got 116` — one accent costs twelve pairs.
+4. `the pinned-margin table must cover exactly the gated foregrounds` — a new token
+   cannot skip the provenance table.
+5. `expected 27 documented sidebar pairs, got 30` — plus its own margin table.
+
+**Nothing was guessed.** Every number written into those tables was read out of the
+check's own measurement, including one where a placeholder of `0.00` was committed
+specifically so the harness would report the real figure (`4.75:1`) rather than have it
+estimated.
+
+Measured, and recorded because the margins are thin:
+
+- Tightest across all 11 surfaces: **4.78:1** on `cardUserMessage` dark, floor 4.50.
+- Tightest against an interaction fill: **4.75:1** on `sidebarActive` light — a quarter
+  of a point of headroom, and now the tightest entry in that whole table.
+- `textOnAccent` on `accentReview` dark is 6.99:1, which **displaces `accentInput` as the
+  worst case** for that foreground; the pin moved with it.
+
+So `#E5799B` ships as chosen. It clears every floor, but it is the least forgiving colour
+in the palette, and a future nudge to it will go red before it goes out.
+
+### Still open
+
+The right-click menu. Dylan's latest T3 screenshot is of the LIST, not a menu, so the
+question is still unanswered — **and it was not guessed at.** What the list shot does
+show, and is worth taking:
+
+- **Quiet rows carry only a relative time**, no state word. Exactly one row in the shot
+  says anything (`Working`). Array now says `Done` in green on a finished row, which is
+  the opposite choice; it is survivable because a settled row collapses to a slim variant
+  quickly, so green never accumulates — but it is a choice, not an accident.
+- The settled section is visually demoted rather than hidden.
+- Scope is filter CHIPS across the top, where Array uses a popup.
+
+Array's row menu today, for the comparison when the screenshot arrives: Open / Rename /
+Settle / Snooze › / Mark Unread / Archive / Delete, unavailable actions hidden rather
+than greyed, and a multi-selection offering only what every member can take.

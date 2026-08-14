@@ -621,18 +621,36 @@ public enum AccentToken: String, CaseIterable, Sendable {
     case accentInput
     case accentFailed
     case accentDone
+    // Ticket: docs/38-tickets/96-agent-sidebar-product-redesign/_DESIGN.md
+    /// Work that FINISHED and nobody has looked at it.
+    ///
+    /// A sixth accent, and the argument for it is that the fifth cannot carry this.
+    /// `accentDone` green says "this went well"; `accentApproval` amber says "make a
+    /// decision". A finished turn nobody has read is neither — it wants your eyes,
+    /// not your judgement, and it is not a problem. Painting it amber makes it
+    /// indistinguishable from an approval that is actually blocking; painting it
+    /// green makes it indistinguishable from the forty finished rows you already
+    /// read, which is the exact failure program 96 added the state to prevent.
+    ///
+    /// Rose rather than another warm hue so it cannot be confused with the amber
+    /// beside it at a glance, which is the whole job. `0xE5799B` is Dylan's pick and
+    /// is the dark-theme value; the light one is the darkened variant that clears
+    /// the 4.5:1 text floor on a near-white surface, exactly as every accent above
+    /// is built.
+    case accentReview
 
     public var color: TokenColor {
         switch self {
         // Light values are the darkened (-600/-700) variants that clear 4.5:1 on
         // a near-white surface; dark values are the lighter (-300) ones. Both
         // ends hold the hue: 217/213 blue, 36/35 amber, 265/267 violet,
-        // 2/3 red, 139/140 green.
+        // 2/3 red, 139/140 green, 340/342 rose.
         case .accentWorking: return TokenColor(light: srgb(0x1257C7), dark: srgb(0x5FA8FF))
         case .accentApproval: return TokenColor(light: srgb(0x845000), dark: srgb(0xFFB347))
         case .accentInput: return TokenColor(light: srgb(0x6B2FBF), dark: srgb(0xC08CFF))
         case .accentFailed: return TokenColor(light: srgb(0xB92420), dark: srgb(0xFF8A85))
         case .accentDone: return TokenColor(light: srgb(0x186630), dark: srgb(0x4FD07A))
+        case .accentReview: return TokenColor(light: srgb(0xA83259), dark: srgb(0xE5799B))
         }
     }
 
