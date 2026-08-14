@@ -315,10 +315,27 @@ class TileNSView: NSView, TokenThemed {
             titleBar?.invalidateChrome()
         }
         titleBar?.applyCloseButtonSizing(buttonSize: closeButtonWorldSize, glyphPointSize: closeGlyphWorldPointSize)
-        if let titleBar, titleBar.superview === self {
+        // Repair the bar-above-body z-order only when it is actually wrong.
+        // `addSubview(_:positioned:)` is a remove+insert that reorders the
+        // backing sublayers even when the order is already correct, and this
+        // path runs per visible tile on every camera step — an unconditional
+        // reinsertion here put a sublayer reorder on every PAN event, which no
+        // layout or redraw counter could see.
+        if let titleBar, titleBar.superview === self,
+           let contentView, contentView.superview === self,
+           let barIndex = subviews.firstIndex(of: titleBar),
+           let contentIndex = subviews.firstIndex(of: contentView),
+           barIndex < contentIndex {
+            qaChromeZOrderRepairCount += 1
             addSubview(titleBar, positioned: .above, relativeTo: contentView)
         }
     }
+
+    /// Counts the times `layoutChrome` had to re-order the title bar above the
+    /// body. A camera step over a settled tile must never raise this — the
+    /// unconditional reinsertion it replaces was invisible to every other
+    /// counter.
+    private(set) var qaChromeZOrderRepairCount = 0
 
     private func layoutContentView() {
         // The inset is zoom-independent, so a camera move never re-frames the body:
@@ -687,17 +704,24 @@ class TileNSView: NSView, TokenThemed {
     }
 
     /// World edge length for the close button, floored so its on-screen size
-    /// stays `>= minScreenCloseButtonPx`. Mirrors the grab-strip floor pattern.
+    /// stays `>= minScreenCloseButtonPx`. Mirrors the grab-strip floor pattern,
+    /// including the scale bucket: on raw zoom this floor moved on every step
+    /// below zoom ~1.57, which re-framed the button per tile per step. The
+    /// bucket rounds DOWN, so the floor can only overshoot its screen-px
+    /// promise, never undercut it.
     var closeButtonWorldSize: CGFloat {
         guard let zoom = canvas?.viewport.zoom, zoom.isFinite, zoom > 0 else { return Self.closeButtonSize }
-        return max(Self.closeButtonSize, Self.minScreenCloseButtonPx / CGFloat(zoom))
+        return max(Self.closeButtonSize, Self.minScreenCloseButtonPx / CGFloat(Self.chromeScaleBucket(for: zoom)))
     }
 
     /// World point size for the × glyph, floored so it stays legible on screen
     /// (the glyph scales with the tile-view transform, hence the `/zoom` floor).
+    /// Bucketed like the button: on raw zoom this changed on every step below
+    /// zoom ~1.22, and each change rebuilt the button's SF Symbol NSImage — one
+    /// image mint per tile per zoom step, invisible to every layout counter.
     var closeGlyphWorldPointSize: CGFloat {
         guard let zoom = canvas?.viewport.zoom, zoom.isFinite, zoom > 0 else { return Self.closeGlyphPointSize }
-        return max(Self.closeGlyphPointSize, Self.minScreenCloseGlyphPx / CGFloat(zoom))
+        return max(Self.closeGlyphPointSize, Self.minScreenCloseGlyphPx / CGFloat(Self.chromeScaleBucket(for: zoom)))
     }
 
     func qaResizeEdge(at point: CGPoint) -> ResizeEdge? {
@@ -845,9 +869,7 @@ private final class TitleBarView: NSView, TokenThemed {
         // that respects contentTintColor — the filled multicolor variant
         // renders red regardless of tint, which read as "alert" inside a
         // dark, dense canvas.
-        let config = NSImage.SymbolConfiguration(pointSize: TileNSView.closeGlyphPointSize, weight: .semibold)
-        btn.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tile")?
-            .withSymbolConfiguration(config)
+        btn.image = Self.closeGlyphImage(pointSize: TileNSView.closeGlyphPointSize)
         btn.imageScaling = .scaleProportionallyDown
         btn.isBordered = false
         btn.bezelStyle = .smallSquare
@@ -889,6 +911,20 @@ private final class TitleBarView: NSView, TokenThemed {
         applyTokens()
     }
 
+    /// One × image per glyph point size, shared across every tile's bar. The
+    /// glyph size is bucketed upstream (`closeGlyphWorldPointSize`), so this
+    /// holds a handful of sizes for the whole zoom range — without it, every
+    /// tile minted its own SF Symbol image at each bucket crossing.
+    private static var closeGlyphImageCache: [CGFloat: NSImage] = [:]
+    static func closeGlyphImage(pointSize: CGFloat) -> NSImage? {
+        if let cached = closeGlyphImageCache[pointSize] { return cached }
+        let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold)
+        let image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tile")?
+            .withSymbolConfiguration(config)
+        if let image { closeGlyphImageCache[pointSize] = image }
+        return image
+    }
+
     /// Set the close button's edge length (world units) and glyph point size.
     /// Called from the tile's `layout()` so both track the current zoom; the
     /// button is then framed in `layout()`. The glyph is only re-imaged when its
@@ -900,9 +936,7 @@ private final class TitleBarView: NSView, TokenThemed {
         }
         if closeGlyphPointSize != glyphPointSize {
             closeGlyphPointSize = glyphPointSize
-            let config = NSImage.SymbolConfiguration(pointSize: glyphPointSize, weight: .semibold)
-            closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tile")?
-                .withSymbolConfiguration(config)
+            closeButton.image = Self.closeGlyphImage(pointSize: glyphPointSize)
         }
     }
 
