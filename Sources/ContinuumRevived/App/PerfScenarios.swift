@@ -84,7 +84,17 @@ enum PerfScenarios {
     static var all: [Scenario] {
         [
             Scenario(name: "canvas.pan", run: { try canvasCamera(.pan) }),
-            Scenario(name: "canvas.zoom", run: { try canvasCamera(.zoom) })
+            Scenario(name: "canvas.zoom", run: { try canvasCamera(.zoom) }),
+            // The float-tolerance trap witness. AppKit does not store `bounds`
+            // verbatim — it keeps the bounds/frame SCALE and recomputes the
+            // size — so at any zoom other than 1 a bounds set to 420 reads back
+            // as 420.00000000000006 and an exact "skip unchanged writes" compare
+            // rewrites every tile's bounds on every step, forever. The zoom-1
+            // pan scenario above is structurally blind to that defect; this leg
+            // pans the SAME fixture at zoom 0.35 and must stay at zero bounds
+            // writes. The name deliberately shares no prefix with canvas.pan /
+            // canvas.zoom — the scenario filter is prefix-matched.
+            Scenario(name: "canvas.fractional-pan", run: { try canvasCamera(.pan, zoom: 0.35, label: "fractional-pan") })
         ]
     }
 
@@ -99,9 +109,14 @@ enum PerfScenarios {
     /// point the trackpad scroll branch, the pinch branch and the pointer-pan
     /// drag all reach — over a canvas holding real tiles including large Markdown
     /// documents, and reports what one step costs.
-    static func canvasCamera(_ gesture: CameraGesture) throws -> PerfScenarioResult {
+    ///
+    /// `zoom` is the constant camera scale a PAN runs at (a zoom gesture walks
+    /// the scale itself and ignores it). `label` names the scenario and its
+    /// metrics when one gesture runs under more than one configuration.
+    static func canvasCamera(_ gesture: CameraGesture, zoom: Double = 1, label: String? = nil) throws -> PerfScenarioResult {
+        let label = label ?? gesture.rawValue
         let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("continuum-perf-\(gesture.rawValue)-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+            .appendingPathComponent("continuum-perf-\(label)-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: tempRoot) }
         let root = tempRoot.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -133,7 +148,7 @@ enum PerfScenarios {
 
         // Settle first, so the measured steps are steady-state and not paying for
         // the first render of three documents.
-        canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+        canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: zoom))
         canvas.layoutSubtreeIfNeeded()
 
         let steps = 120
@@ -144,7 +159,7 @@ enum PerfScenarios {
             switch gesture {
             case .pan:
                 let t = Double(step)
-                canvas.setViewport(CanvasViewport(x: t * 3, y: t * 2, zoom: 1))
+                canvas.setViewport(CanvasViewport(x: t * 3, y: t * 2, zoom: zoom))
             case .zoom:
                 // A real pinch walks the scale continuously; never repeat a value.
                 let zoom = 0.4 + 0.6 * (1 + sin(Double(step) / 18.0)) / 2
@@ -160,7 +175,7 @@ enum PerfScenarios {
         var measurements: [PerfMeasurement] = []
 
         measurements.append(PerfBudget(
-            metric: "\(gesture.rawValue).stepDuration",
+            metric: "\(label).stepDuration",
             limit: .atMost(frameBudgetMs),
             unit: .milliseconds,
             rationale: "a camera step runs once per display refresh; at 120 Hz the whole frame is 8.3 ms, and the canvas is not the only thing in it"
@@ -173,14 +188,14 @@ enum PerfScenarios {
         // costs a TextKit glyph-bounds pass: trap 3 in
         // docs/internals/performance.md, and the 0.4.17 fix one level down.
         measurements.append(PerfBudget(
-            metric: "\(gesture.rawValue).boundsWrites",
+            metric: "\(label).boundsWrites",
             limit: .exactly(0),
             unit: .count,
             rationale: "a tile's logical size does not change with the camera, so re-assigning bounds is pure waste that re-marks the whole subtree for layout"
         ).evaluate(Double(stats.boundsWrites)))
 
         measurements.append(PerfBudget(
-            metric: "\(gesture.rawValue).modelWrites",
+            metric: "\(label).modelWrites",
             limit: .exactly(0),
             unit: .count,
             rationale: "nothing about a tile's model changes when the camera moves"
@@ -191,7 +206,7 @@ enum PerfScenarios {
         // `--file-markdown-perf-check` asserts for a relayout, asserted here
         // through the real camera funnel instead.
         measurements.append(PerfBudget(
-            metric: "\(gesture.rawValue).proseMeasurements",
+            metric: "\(label).proseMeasurements",
             limit: .exactly(0),
             unit: .count,
             rationale: "moving the camera does not change any document's content or logical width, so no row may be re-measured"
@@ -202,15 +217,15 @@ enum PerfScenarios {
         // A zoom changes every visible tile's screen frame; a pan changes its
         // origin. Either way frames must still be written.
         measurements.append(PerfBudget(
-            metric: "\(gesture.rawValue).frameWrites",
+            metric: "\(label).frameWrites",
             limit: .atLeast(1),
             unit: .count,
             rationale: "teeth: the camera must still reposition tiles — a zero here means the canvas stopped working, not that it got fast"
         ).evaluate(Double(stats.frameWrites)))
 
-        let detail = "\(steps) \(gesture.rawValue) steps over \(tileCount) tiles "
+        let detail = "\(steps) \(label) steps over \(tileCount) tiles "
             + "(3 large Markdown documents + 9 notes), \(String(format: "%.3f", seconds))s total"
-        return PerfScenarioResult(name: "canvas.\(gesture.rawValue)", detail: detail, measurements: measurements)
+        return PerfScenarioResult(name: "canvas.\(label)", detail: detail, measurements: measurements)
     }
 
     /// A document big enough that re-measuring it is visible, in the shape a user
