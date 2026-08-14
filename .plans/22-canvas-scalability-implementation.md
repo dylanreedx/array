@@ -1,10 +1,34 @@
 # 22 — Canvas scalability implementation plan
 
-Status: **PLAN — AWAITING APPROVAL. No structural code exists.** Stage 0 (the
-tolerant camera guard with its fractional-zoom witness, the opt-in
-`canvas.stress` scenario, and the two ownership-leak fixes) landed ahead of
-this plan; everything below reshapes `CanvasNSView`, transcript streaming, or
-the presentation lifecycle and does not begin until Dylan approves the slice.
+Status: **SLICE 1 NARROWED AND DELIVERED AS SLICE 1′. SLICE 3 APPROVED AND IN
+PROGRESS.** Stage 0 (the tolerant camera guard with its fractional-zoom witness,
+the opt-in `canvas.stress` scenario, and the two ownership-leak fixes) landed
+ahead of this plan. Slices 4–8 still reshape transcript streaming or the
+presentation lifecycle and do not begin until Dylan approves each one.
+
+## Slice 1 was deliberately narrowed (2026-08-14)
+
+Dylan chose the canvas-zoom axis, so Slice 1 shipped as **Slice 1′: the camera
+witnesses only.** Recorded here rather than silently shrunk:
+
+- **Cut:** the transcript counters (rows visited, snapshots rebuilt, Markdown
+  bytes reparsed) and the 100/10,000-row delta fixtures. They duplicate the
+  parallel performance-framework program's Phase 7, which specifies them more
+  fully (fail-closed baseline records, `knownRedAgainstTarget` instead of a new
+  `MATRIX_KNOWN_RED` entry). Whichever program owns the harness owns them; this
+  one must not build them twice.
+- **Cut:** the offscreen-presentation fixtures. They belong to Slice 5, which is
+  not approved.
+- **Kept and landed:** `CameraLayoutStats.cameraMutations`; the gating
+  `canvas.camera-slope` scenario (installed 16→128, visible count held at 12,
+  zoom 1.0 and 0.35) under its own `--perf-budget-camera-slope-check` leg name so
+  it cannot mask a pan regression; and `--canvas-camera-hit-oracle-check`, the
+  model-vs-installed-geometry oracle recorded while the pre-plane code is still
+  the reference.
+- **Not adopted:** an accepted-baseline *record* mechanism. Slice 1 originally
+  implied one; the perf-framework program's Phase 2 specifies it properly, so
+  these two scenarios keep inline budgets and their reds live in
+  `MATRIX_KNOWN_RED` under the existing convention instead.
 
 The contract every slice is held to
 ([scalability-tdd.md](../docs/internals/scalability-tdd.md)):
@@ -36,6 +60,11 @@ L0–L4 evidence demands it.
 ---
 
 ## Slice 1 — Witness vocabulary and slope fixtures (L0, non-structural)
+
+> **DELIVERED, NARROWED — see the header.** The camera half landed as Slice 1′
+> (`cameraMutations`, `canvas.camera-slope`, `--canvas-camera-hit-oracle-check`).
+> The transcript and offscreen halves below are **not** this program's work; they
+> are recorded here as the original intent only.
 
 **What:** the counters and fixtures every later slice is judged by.
 
