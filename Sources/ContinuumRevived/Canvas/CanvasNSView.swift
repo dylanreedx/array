@@ -295,6 +295,27 @@ final class CanvasNSView: NSView, TokenThemed {
         worldPlane.subviews.compactMap { $0 as? TileNSView }
     }
 
+    /// Tile views the user can actually see.
+    ///
+    /// The plane's `bounds` IS the visible world region — that is what makes it
+    /// the camera — so visibility is one rect test per tile against a value
+    /// already to hand, with no `CanvasEngine` round trip and no screen-space
+    /// conversion.
+    ///
+    /// This exists because zoom's chrome refresh used to run over EVERY installed
+    /// tile, which made a zoom step O(installed) rather than O(1): a tile parked
+    /// far off-screen cost a step exactly what an on-screen one cost.
+    /// `canvas.magnify-slope` measured 4 chrome refreshes per step at 16 installed
+    /// and 38 at 128, with the visible count pinned at 12 throughout.
+    var visibleTileViews: [TileNSView] {
+        let visibleWorld = worldPlane.bounds
+        return worldPlane.subviews.compactMap { subview in
+            guard let tile = subview as? TileNSView,
+                  tile.frame.intersects(visibleWorld) else { return nil }
+            return tile
+        }
+    }
+
     /// QA: how many installed tile views are NOT where the camera says they
     /// should be — each view's ACTUAL rect in canvas coordinates, converted
     /// through whatever view tree currently hosts it, against
@@ -1229,6 +1250,27 @@ final class CanvasNSView: NSView, TokenThemed {
         delegate?.canvasDidChange(self)
     }
 
+    /// EXPERIMENT (env-gated; not a product decision yet).
+    static let expZoomCache = ProcessInfo.processInfo.environment["ARRAY_EXP_ZOOM_CACHE"] == "1"
+    private var zoomSettleTimer: Timer?
+
+    private func scheduleZoomSettle() {
+        zoomSettleTimer?.invalidate()
+        zoomSettleTimer = Timer.scheduledTimer(withTimeInterval: 0.10, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.applyZoomSettle() }
+        }
+    }
+
+    private func applyZoomSettle() {
+        zoomSettleTimer = nil
+        for view in visibleTileViews {
+            view.layerContentsRedrawPolicy = .duringViewResize
+            view.refreshZoomDependentChrome()
+            view.setNeedsDisplay(view.bounds)
+            for descendant in view.subviews { descendant.setNeedsDisplay(descendant.bounds) }
+        }
+    }
+
     func setViewport(_ viewport: CanvasViewport) {
         let previousZoom = canvasState.viewport.zoom
         canvasState.viewport = viewport
@@ -1246,9 +1288,34 @@ final class CanvasNSView: NSView, TokenThemed {
         // so explicitly. Guarded on the zoom actually changing, which keeps a pan
         // at zero tile work — the property `--camera-chrome-redraw-check` asserts
         // in both directions.
-        if !Self.geometryNearlyEqual(CGFloat(previousZoom), CGFloat(viewport.zoom)) {
-            for view in tileViewsInVisualOrder { view.refreshZoomDependentChrome() }
+        //
+        // VISIBLE tiles only, and unconditionally rather than guarded on the zoom
+        // having changed. Two reasons, and they replace an earlier version that
+        // was both narrower and wronger:
+        //
+        // - Iterating every INSTALLED tile made a zoom step O(installed) instead
+        //   of O(1). `canvas.magnify-slope` measured 4 chrome refreshes per step
+        //   at 16 installed and 38 at 128 with the visible count pinned at 12 —
+        //   a tile parked off-screen cost a step exactly what an on-screen one
+        //   cost.
+        // - Dropping the zoom-changed guard is what keeps that correct. A PAN can
+        //   bring a tile into view whose chrome was skipped while it was hidden,
+        //   and this is the only place that would notice. It costs a pan nothing:
+        //   `layoutChrome` compares the bar's frame before writing it, so at a
+        //   constant zoom every visible tile is a no-op and `pan.chromeRedraws`
+        //   and `pan.tileLayoutPasses` both stay at 0 — which the budgets assert.
+        if Self.expZoomCache, !Self.geometryNearlyEqual(CGFloat(previousZoom), CGFloat(viewport.zoom)) {
+            // EXPERIMENT (env-gated): let the compositor SCALE already-rendered
+            // content through the gesture instead of asking every visible layer to
+            // re-rasterize at each intermediate scale, and refine once at settle.
+            // Aimed at the ~1,388 NSViewBackingLayer display samples a real pinch
+            // still spends after the chrome fix.
+            for view in visibleTileViews where view.layerContentsRedrawPolicy != .onSetNeedsDisplay {
+                view.layerContentsRedrawPolicy = .onSetNeedsDisplay
+            }
+            scheduleZoomSettle()
         }
+        for view in visibleTileViews { view.refreshZoomDependentChrome() }
         // Screen-fixed overlays are outside the plane, so they do not inherit the
         // camera and still have to be re-aimed at the tiles they track.
         repositionTrackingOverlaysForCamera()
@@ -2081,7 +2148,83 @@ final class CanvasNSView: NSView, TokenThemed {
         let factor = 1.0 + Double(event.magnification)
         guard factor > 0 else { return }
         let next = CanvasEngine.zoom(canvasState.viewport, by: factor, anchorScreen: cursor)
+
+        if Self.expZoomMomentum {
+            // A pan glides after you let go and a zoom stops dead, and that is not
+            // a performance difference — it is a missing interaction. AppKit keeps
+            // DELIVERING scroll events after the fingers lift (the momentum phase),
+            // so `scrollWheel` inherits inertia for free. NSEvent magnification has
+            // a `phase` but no momentum phase: macOS never synthesises decaying
+            // magnify events, so the camera has to carry the zoom itself.
+            //
+            // Velocity is tracked in LOG space because zoom is multiplicative:
+            // 1.0 -> 2.0 and 2.0 -> 4.0 are the same gesture, and averaging raw
+            // factors would make the glide accelerate as you zoom in.
+            let now = ProcessInfo.processInfo.systemUptime
+            switch event.phase {
+            case .began:
+                stopZoomMomentum()
+                lastPinchTime = now
+                pinchLogVelocity = 0
+            case .ended, .cancelled:
+                startZoomMomentum(anchor: cursor)
+            default:
+                if let last = lastPinchTime, now > last {
+                    let dt = min(now - last, 0.05)
+                    let sample = log(factor) / dt
+                    // Exponential smoothing: one jittery final event should not
+                    // decide the whole glide.
+                    pinchLogVelocity = pinchLogVelocity * 0.6 + sample * 0.4
+                }
+                lastPinchTime = now
+                zoomMomentumAnchor = cursor
+            }
+        }
+
         setViewport(next)
+    }
+
+    // MARK: - Zoom momentum (EXPERIMENT, env-gated)
+
+    static let expZoomMomentum = ProcessInfo.processInfo.environment["ARRAY_EXP_ZOOM_MOMENTUM"] == "1"
+    private var lastPinchTime: TimeInterval?
+    private var pinchLogVelocity: Double = 0
+    private var zoomMomentumAnchor: CGPoint = .zero
+    private var zoomMomentumTimer: Timer?
+    private var zoomMomentumVelocity: Double = 0
+
+    private func stopZoomMomentum() {
+        zoomMomentumTimer?.invalidate()
+        zoomMomentumTimer = nil
+    }
+
+    private func startZoomMomentum(anchor: CGPoint) {
+        stopZoomMomentum()
+        lastPinchTime = nil
+        // Below this the gesture was a deliberate stop, not a flick, and adding
+        // glide would fight the user rather than help them.
+        guard abs(pinchLogVelocity) > 0.35 else { return }
+        zoomMomentumAnchor = anchor
+        zoomMomentumVelocity = pinchLogVelocity
+        zoomMomentumTimer = Timer.scheduledTimer(withTimeInterval: Self.zoomMomentumInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.stepZoomMomentum() }
+        }
+    }
+
+    private static let zoomMomentumInterval = 1.0 / 120.0
+
+    private func stepZoomMomentum() {
+        zoomMomentumVelocity *= 0.90
+        guard abs(zoomMomentumVelocity) > 0.02 else {
+            stopZoomMomentum()
+            return
+        }
+        let factor = exp(zoomMomentumVelocity * Self.zoomMomentumInterval)
+        guard factor > 0, factor.isFinite else {
+            stopZoomMomentum()
+            return
+        }
+        setViewport(CanvasEngine.zoom(canvasState.viewport, by: factor, anchorScreen: zoomMomentumAnchor))
     }
 
     /// Whether this press should enter the shared camera-pan lifecycle. Tile
