@@ -336,15 +336,21 @@ struct AgentInboxHeaderStyleOverride {
 @MainActor
 final class InsetTextFieldCell: NSTextFieldCell {
     var leadingInset: CGFloat = 0
+    /// Room for the clear button, reserved whether or not it is showing. Reserving
+    /// it only while visible would shift every character sideways the moment you
+    /// typed the first one.
+    var trailingInset: CGFloat = 0
 
     /// Leading, not left: in an RTL layout the glyph is on the other side, so
     /// insetting `origin.x` would reserve the space away from the icon.
     private func inset(_ rect: NSRect) -> NSRect {
-        guard leadingInset > 0 else { return rect }
+        guard leadingInset > 0 || trailingInset > 0 else { return rect }
         var result = rect
-        result.size.width -= leadingInset
+        result.size.width -= leadingInset + trailingInset
         if userInterfaceLayoutDirection != .rightToLeft {
             result.origin.x += leadingInset
+        } else {
+            result.origin.x += trailingInset
         }
         return result
     }
@@ -544,6 +550,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// is set from this view's `applyTokens`, which already owns the field's text
     /// colour, so the header adds no new owner to the token census.
     private let searchIcon = NSImageView(frame: .zero)
+    /// Shown only while the field holds text, the way T3's does. A search you can
+    /// see is a search you can get out of.
+    private let searchClearButton = NSButton(frame: .zero)
+    private var isSearchFieldHovered = false
     /// The one-row header queue 94 ships, and the stacked one program 96 is
     /// trying. Exactly one set is active at a time; `defaultHeader` is what
     /// production and every existing gate see.
@@ -1053,6 +1063,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // and the placeholder to its cell, so a cell swapped in afterwards would
         // arrive blank.
         searchField.cell = InsetTextFieldCell()
+        // A programmatically created cell arrives carrying AppKit's default title,
+        // and for a text cell that title is the literal string `Field`. It shipped
+        // to the preview looking like a deliberate placeholder: it never filters,
+        // because `controlTextDidChange` fires on edits and not on a value the
+        // field was born with, and the real placeholder stays hidden the whole time
+        // because a non-empty `stringValue` outranks it.
+        searchField.stringValue = ""
         searchField.translatesAutoresizingMaskIntoConstraints = false
         searchField.isEditable = true
         searchField.isSelectable = true
@@ -1168,6 +1185,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // refuse to land whenever you aimed at the icon.
         searchIcon.setAccessibilityElement(false)
         addSubview(searchIcon)
+        searchClearButton.translatesAutoresizingMaskIntoConstraints = false
+        searchClearButton.image = NSImage(
+            systemSymbolName: "xmark.circle.fill", accessibilityDescription: nil)
+        searchClearButton.imagePosition = .imageOnly
+        searchClearButton.isBordered = false
+        searchClearButton.bezelStyle = .inline
+        searchClearButton.isHidden = true
+        searchClearButton.target = self
+        searchClearButton.action = #selector(clearSearch)
+        searchClearButton.setAccessibilityLabel("Clear search")
+        addSubview(searchClearButton)
         addSubview(scrollView)
         addSubview(emptyLabel)
         // P3.11: added LAST, so it draws over the bottom of the list.
@@ -1240,6 +1268,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             searchIcon.widthAnchor.constraint(equalToConstant: Self.searchIconSide),
             searchIcon.heightAnchor.constraint(equalToConstant: Self.searchIconSide),
 
+            searchClearButton.trailingAnchor.constraint(
+                equalTo: searchField.trailingAnchor, constant: -CGFloat(Space.s)),
+            searchClearButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
+            searchClearButton.widthAnchor.constraint(equalToConstant: Self.searchIconSide),
+            searchClearButton.heightAnchor.constraint(equalToConstant: Self.searchIconSide),
+
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -1293,9 +1327,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         applySearchFieldChrome()
     }
 
-    /// Paint the search field to match `ChoiceButton` — same fill role, same
-    /// radius, same height — so the two header controls read as one family
-    /// instead of a solid chip sitting next to loose text.
+    /// Paint the search field: a magnifier, and NOTHING at rest.
+    ///
+    /// The first version of this gave the field a filled, rounded, outlined box to
+    /// match `ChoiceButton`. It was wrong twice over. The outline was a bug — see
+    /// `isSearchFieldEditing` — and even without it, the box was more chrome than a
+    /// search field in a sidebar has earned. T3, the reference this header is
+    /// modelled on, draws no border and no resting fill either: the input is
+    /// `unstyled` and the row it sits in only takes a fill on hover.
+    ///
+    /// So: glyph plus text at rest, a hover fill to say it is a target, and the
+    /// focus hairline only while a caret is actually in it.
     ///
     /// Painted from HERE rather than from a new view class. This view already owns
     /// the field's text colour, so borrowing its layer adds no owner to the token
@@ -1305,22 +1347,41 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             searchField.layer?.backgroundColor = nil
             searchField.layer?.borderWidth = 0
             searchIcon.isHidden = true
+            searchClearButton.isHidden = true
             return
         }
         searchField.wantsLayer = true
         searchField.layer?.cornerRadius = CGFloat(Radius.card)
-        searchField.layer?.backgroundColor =
-            AgentSurfaceRole.composer.color.cgColor(in: self)
-        let focused = window?.firstResponder === searchField.currentEditor()
-        searchField.layer?.borderWidth = focused ? ChoiceButton.focusBorderWidth : 0
+        // Resting paints NOTHING, not a transparent colour: a painted `.clear` is an
+        // unregistered literal as far as the appearance census is concerned.
+        searchField.layer?.backgroundColor = isSearchFieldHovered
+            ? AgentSurfaceRole.rowHover.color.cgColor(in: self)
+            : nil
+        let editing = isSearchFieldEditing
+        searchField.layer?.borderWidth = editing ? ChoiceButton.focusBorderWidth : 0
         searchField.layer?.borderColor = AgentLineRole.focusRing.color.cgColor(in: self)
         searchIcon.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
         searchIcon.isHidden = false
+        searchClearButton.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
+        searchClearButton.isHidden = searchField.stringValue.isEmpty
     }
 
-    /// The magnifier's box. Matches `ChoiceButton`'s chevron so the two header
-    /// controls carry glyphs of the same weight.
-    private static let searchIconSide: CGFloat = 12
+    /// Whether a caret is genuinely in the search field.
+    ///
+    /// NOT `window?.firstResponder === searchField.currentEditor()`. An unfocused
+    /// field has no field editor, so that expression compares nil to nil — which is
+    /// `true` — and during `init` there is no window either, so the border was
+    /// painted at construction and never cleared. The outline in the first preview
+    /// was not a focus ring; it was this.
+    private var isSearchFieldEditing: Bool {
+        guard let editor = searchField.currentEditor() else { return false }
+        return window?.firstResponder === editor
+    }
+
+    /// The magnifier's box. Bigger than `ChoiceButton`'s 12pt chevron because a
+    /// chevron is a hint attached to a word and this glyph has to carry the field's
+    /// whole identity at rest.
+    private static let searchIconSide: CGFloat = 14
 
     private func applyHeaderStyle() {
         let stacked = headerStyleOverride?.stacked == true
@@ -1328,10 +1389,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         NSLayoutConstraint.activate(stacked ? stackedHeaderConstraints : defaultHeaderConstraints)
         // The glyph steals the field's leading edge, so the text has to start
         // after it — otherwise the placeholder sits underneath the magnifier.
-        (searchField.cell as? InsetTextFieldCell)?.leadingInset =
-            headerStyleOverride?.fieldChrome == true
-            ? Self.searchIconSide + CGFloat(Space.s) * 2
-            : 0
+        let chrome = headerStyleOverride?.fieldChrome == true
+        let cell = searchField.cell as? InsetTextFieldCell
+        cell?.leadingInset = chrome ? Self.searchIconSide + CGFloat(Space.s) * 2 : 0
+        cell?.trailingInset = chrome ? Self.searchIconSide + CGFloat(Space.s) * 2 : 0
         applyTokens()
         needsLayout = true
     }
@@ -2061,7 +2122,31 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         selectedRowsForEmphasis = IndexSet()
         hoveredAgentId = nil
         keyboardFocusIntent = nil
+        // The clear button exists only while there is something to clear, so its
+        // visibility is a function of the text and has to be recomputed here —
+        // `setSearchForQA` routes through this same notification, which keeps the
+        // button honest under a check as well as under a keystroke.
+        applySearchFieldChrome()
         render(display(from: allRows))
+    }
+
+    /// The focus hairline is the only thing the field paints while you are in it,
+    /// so it has to be repainted when the caret arrives and when it leaves —
+    /// nothing else in this view is notified of either.
+    func controlTextDidBeginEditing(_ obj: Notification) {
+        guard (obj.object as? NSTextField) === searchField else { return }
+        applySearchFieldChrome()
+    }
+
+    /// Empty the search the way a person does, through the same notification a
+    /// keystroke raises, so the filter, the selection reset and the button's own
+    /// visibility all take one path.
+    @objc private func clearSearch() {
+        guard !searchField.stringValue.isEmpty else { return }
+        searchField.stringValue = ""
+        controlTextDidChange(
+            Notification(name: NSControl.textDidChangeNotification, object: searchField))
+        window?.makeFirstResponder(searchField)
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.14-preserve-workspace-management.md
@@ -2677,6 +2762,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     func controlTextDidEndEditing(_ obj: Notification) {
+        // The search field shares this delegate with the rename field. It only wants
+        // its focus hairline cleared; everything below is the rename's commit path.
+        if (obj.object as? NSTextField) === searchField {
+            applySearchFieldChrome()
+            return
+        }
         // Ignore the transient end `selectText(_:)` posts while the field is still
         // being installed (see `isOpeningRename`), and ignore any stale field after
         // Return/Escape has already finished the edit.
@@ -3431,11 +3522,22 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
         setHovered(agentId: agentId(atWindowPoint: event.locationInWindow))
+        setSearchFieldHovered(searchField.frame.contains(convert(event.locationInWindow, from: nil)))
     }
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
         setHovered(agentId: nil)
+        setSearchFieldHovered(false)
+    }
+
+    /// The search field's only resting affordance is that it lights up under the
+    /// pointer, so this rides the tracking area the list already owns rather than
+    /// adding a second one over the same pixels.
+    private func setSearchFieldHovered(_ hovered: Bool) {
+        guard hovered != isSearchFieldHovered else { return }
+        isSearchFieldHovered = hovered
+        applySearchFieldChrome()
     }
 
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.2-interaction-fill-ladder.md

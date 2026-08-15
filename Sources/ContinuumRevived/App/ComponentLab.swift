@@ -3367,11 +3367,25 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
 
     // MARK: Construction
 
+    static let navigatorWidth: CGFloat = 240
+    /// What a surface actually gets when the panel opens at its default size.
+    ///
+    /// Sized to the largest surface declared, rather than the surfaces being sized
+    /// to a panel nobody re-measured: the tilted gallery asks for 960 wide and the
+    /// sidebar playground for 860 tall, and the panel shipped at 960×640 — so the
+    /// gallery lost 120pt off each side and the playground 110pt off each end. Both
+    /// had been sheared for their whole lives. Declared here so the gate that checks
+    /// surfaces fit and the panel that has to hold them read one number.
+    static let defaultHostSize = NSSize(width: 960, height: 860)
+
     private func ensurePanel() -> NSPanel {
         if let panel { return panel }
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 960, height: 640),
+            contentRect: NSRect(
+                x: 0, y: 0,
+                width: Self.defaultHostSize.width + Self.navigatorWidth,
+                height: Self.defaultHostSize.height),
             styleMask: [.titled, .closable, .resizable, .utilityWindow],
             backing: .buffered,
             defer: false
@@ -3389,7 +3403,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         root.layer?.backgroundColor = NSColor.windowBackgroundColor.appResolvedCGColor
         panel.contentView = root
 
-        let navWidth: CGFloat = 240
+        let navWidth = Self.navigatorWidth
         let outlineScroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: navWidth, height: root.bounds.height))
         outlineScroll.autoresizingMask = [.height]
         outlineScroll.hasVerticalScroller = true
@@ -3504,13 +3518,28 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         host.addSubview(view)
         if let size = preferredSize {
             view.translatesAutoresizingMaskIntoConstraints = true
+            // CLAMP to the host. A preferred size larger than the host used to be
+            // centred anyway, which puts the origin NEGATIVE and shears equal slices
+            // off both ends — the sidebar playground asks for 860pt in a 640pt host,
+            // so its top 110pt (the controls, the readout, the top of the search
+            // field) was simply cut off, and had been since the surface was written.
+            //
+            // Probe-safe: `UIProbe.render` calls this with `host.frame == spec.size`,
+            // so both `min`s are no-ops there and every committed baseline renders
+            // byte-identically.
+            let width = min(size.width, host.bounds.width)
+            let height = min(size.height, host.bounds.height)
             view.frame = NSRect(
-                x: floor((host.bounds.width - size.width) / 2),
-                y: floor((host.bounds.height - size.height) / 2),
-                width: size.width,
-                height: size.height
+                x: floor((host.bounds.width - width) / 2),
+                y: floor((host.bounds.height - height) / 2),
+                width: width,
+                height: height
             )
-            view.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin, .maxYMargin]
+            // A surface that had to be shrunk must keep shrinking and growing with
+            // the panel; one that fits keeps its size and stays centred.
+            view.autoresizingMask = (width < size.width || height < size.height)
+                ? [.width, .height]
+                : [.minXMargin, .maxXMargin, .minYMargin, .maxYMargin]
         } else {
             view.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([
@@ -3647,6 +3676,44 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     ///   blank/uniform (1 colors at 560x1120)`
     /// - render count / "the check count did not shrink" — one card excluded from the
     ///   gated set: `only 44 static card/appearance render(s) gated, needs >= 46`
+    /// Does every surface actually fit where the Lab puts it?
+    ///
+    /// Every sweep in this file guards on `.staticCard` and skips review surfaces —
+    /// correct, since a review surface owes no baseline, and also exactly how two
+    /// surfaces came to be declared larger than the panel that shows them. The
+    /// sidebar playground asked for 860pt of height in a 640pt host and lost 110pt
+    /// off each end; the tilted gallery asked for 960pt of width in a 720pt host and
+    /// lost 120pt off each side. Both had been sheared for their whole lives, and
+    /// the reason nobody could tell is that nothing measured them.
+    ///
+    /// Deliberately FIRST, before anything that renders. `--component-lab-check` has
+    /// a pre-existing red leg partway down `runSelfCheck`, and a check placed after
+    /// it never executes at all — the exact way a broken gate once sat green for
+    /// months while every image pasted into a composer was silently discarded. This
+    /// one reads declarations only, so it is cheap enough to run before everything.
+    private static func expectEverySurfaceFitsTheHost(
+        entries: [LabEntry], fail: (String) -> Error
+    ) throws {
+        for entry in entries {
+            let declared: NSSize?
+            switch entry.content {
+            case let .reviewSurface(size, _): declared = size
+            case let .staticCard(size, _): declared = size
+            // A sandbox and a launcher declare no size; they fill the host and
+            // cannot overflow it.
+            default: declared = nil
+            }
+            guard let size = declared else { continue }
+            guard size.width <= defaultHostSize.width,
+                  size.height <= defaultHostSize.height else {
+                throw fail(
+                    "\(entry.id) asks for \(Int(size.width))x\(Int(size.height)) but the Lab host "
+                    + "is \(Int(defaultHostSize.width))x\(Int(defaultHostSize.height)) — it will be "
+                    + "shrunk to fit, and before the clamp in `place()` it was sheared")
+            }
+        }
+    }
+
     private static func runStaticCardGates(
         entries: [LabEntry], artifactDirectory directory: URL, fail: (String) -> Error
     ) throws -> [[String: Any]] {
@@ -4583,6 +4650,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         let entries = panel.qaEntries()
         panel.close()
         guard !entries.isEmpty else { throw fail("component lab catalog is empty") }
+        try expectEverySurfaceFitsTheHost(entries: entries, fail: fail)
         try runSlimVariantParityCheck(fail: fail)
         // Launcher entries are launch-only (they open real panels needing a run
         // loop), so just assert they're catalogued.
