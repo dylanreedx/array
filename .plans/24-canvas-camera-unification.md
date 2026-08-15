@@ -93,6 +93,40 @@ magnify-slope        work slopes 0 / 0; durationSlope ~1.9–2.3 ms (AppKit trav
   moved after every fix; sample the new build before believing anything.
 - `transcript.delta` duration RED — separate program, untouched.
 
+## The real-pinch profile on the driver build (2026-08-14, tripwire sample)
+
+Dylan on the unified build: "they feel unified! … but it is now distinctly the
+zooming still choppy BUT this is the best it has felt." Frame stats agree and
+sharpen it: zoom gestures run a PERFECT 8.33 ms median with **33–47% of frames
+stalling at 40–120 ms** (pans in the same log: 2–5% late). A CPU-tripwire
+`sample` during a real pinch (12 s, 8,963 main-thread samples, 10 managed-agent
+tiles) names the mechanism:
+
+- `CanvasNSView` zoom step → `setBoundsSize` on the world plane →
+  **`_NSViewHierarchyDidChangeBackingProperties`** — AppKit treats every
+  per-frame bounds-size change as a backing-properties change for the whole
+  descendant hierarchy.
+- Downstream, per frame, across 10 real agent subtrees: NSScrollView re-tiling
+  (`tile`/`setFrameSize`/`reflectScrolledClipView`), Auto Layout re-solve
+  (`NSISEngine`, `NSStackView updateConstraints`), full window layout
+  recursion, and **SF Symbol re-rasterization** (`_NSSimpleImageView
+  updateLayer` → `NSSymbolImageRep draw` → `CUINamedVectorGlyph
+  rasterizeImageUsingScaleFactor:` — vector glyphs re-render at each new
+  effective scale). ~52% of the main thread sits inside CA commits.
+- OUR work is gone from the profile: `refreshZoomDependentChrome` 8 samples,
+  TitleBarView 199, transcript 259, driver+funnel ~500, canvas-save queue 6.
+
+**The remaining lever, named:** stop changing the plane's bounds-size on every
+gesture frame. Hold real geometry during the pinch, present the zoom visually,
+bake bounds once at settle — one backing cascade per gesture instead of ~120/s.
+That is Slice-5-adjacent L2/L3 work with a real design question (the supported
+way to present the held zoom; a raw transform on the view-backing layer is the
+explicitly rejected shortcut), and it produces the scaled-not-relaid mid-pinch
+content Dylan pre-approved contingent on exactly this profile. A cheaper trim
+first: freeze chrome/status SF Symbols to bitmap images (template-preserving),
+killing the vector re-raster (~10–15% of the commit cost) with no architecture
+change.
+
 ## Traps this session added or re-confirmed
 
 - Do not edit Sources while a matrix run is in flight in the same worktree —
