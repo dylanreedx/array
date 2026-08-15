@@ -140,8 +140,9 @@ samples of 8,963; background save queue: 6).
    - *The presentation mechanism is a design decision.* A raw transform on the
      view-backing layer is the explicitly rejected shortcut
      (infinite-canvas-rendering-research.md, "not adopted by default").
-     Candidate shapes: a layer-hosting restructure so the scaled container
-     layer is ours, or an AppKit-sanctioned equivalent found by experiment.
+     The supported live-container and gesture-time snapshot candidates have now
+     failed (numbers below). The surviving shape is a bounded, precomputed
+     Array-owned bitmap/chunk presenter with explicit live-surface fallback.
      Mid-gesture hit-testing reads the HELD geometry while the user sees the
      PRESENTED zoom — reconcile or gate it; the camera-hit oracle defines rest
      correctness.
@@ -186,3 +187,25 @@ bundle shares `dev.arrayapp.macos.dev`. Rebuild:
   cliff never appears in a mid-gesture sample. (Now settle-deferred, but the
   lesson generalizes.)
 - The driver's env knobs are read once at canvas init — relaunch to apply.
+
+## Continuation update: presentation candidates measured (2026-08-14)
+
+- A layer-hosting container for native tiles is **not supported**: Apple says
+  not to add subviews to a layer-hosting view. It is not an ownership loophole
+  for transforming AppKit-created descendant layers.
+- `NSScrollView` magnification is **rejected by measurement**. It preserves its
+  anchor (0.000 px error) but runs at 32.62/43.25 ms p50/p95 on the 10-agent
+  fixture and produces exactly 1,200 transcript layouts across 120 ticks — the
+  same cascade through a sanctioned API.
+- A fresh whole-viewport snapshot is also **rejected as the mechanism**. Its
+  shallow proxy is excellent (0.04/0.07 ms p50/p95, zero native layouts), but
+  capture costs 22.07 ms and 24.4 MiB at 1600x1000 Retina, cannot generically
+  composite live terminal/browser pixels, and has no newly-exposed coverage on
+  zoom-out.
+- The next design is therefore narrower: a precomputed, bounded presentation
+  cache for capturable tile/zone working sets, plus explicit live-surface
+  fallback. Prove update cost, memory, zoom-out coverage, interaction gating,
+  and atomic one-bake settle before wiring it into `CanvasNSView`.
+- The opt-in `canvas.scroll-magnification-probe` preserves both rejected
+  candidate measurements. It is intentionally not a matrix leg and is red on
+  the failed live-presentation/capture-start budgets.

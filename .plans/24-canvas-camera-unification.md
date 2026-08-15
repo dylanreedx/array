@@ -152,6 +152,40 @@ The next work is now the presentation design itself. The A/B held arm draws
 nothing new by design, so it makes no claim about hit testing, softness, or the
 supported way to present pixels between the held geometry and the final bake.
 
+## Continuation: supported-presentation candidate probes (2026-08-14)
+
+Apple's layer-hosting contract closes one apparent loophole: a true
+layer-hosting `NSView` must not contain AppKit subviews. Therefore an owned
+host layer cannot legally carry the native managed-agent tree, and mutating an
+AppKit-created ancestor backing layer remains the explicitly rejected shortcut.
+
+`canvas.scroll-magnification-probe` tested the strongest supported live
+candidate on the same 10-agent x 6-turn shape. `NSScrollView` magnification
+kept its requested anchor exactly (`0.000 px` error), but reproduced the defect:
+
+- run 1: p50/p95 **36.48/44.43 ms**, 100% late;
+- run 2: p50/p95 **32.62/43.25 ms**, 100% late;
+- both runs: exactly **1,200 transcript layouts** across two 60-tick arms,
+  versus 0 for held controls.
+
+The sanctioned boundary preserves AppKit semantics but does not avoid its
+backing-properties cascade, so it is rejected for the shipping presenter.
+
+The second run also measured a shallow bitmap proxy on the already-rendered
+fixture. Once present, resizing the proxy costs **0.04/0.07 ms p50/p95** and
+causes 0 tile/transcript layouts. But fresh gesture-time capture costs
+**22.07 ms** and **24.4 MiB** for a 1600x1000 Retina viewport, before the known
+`cacheDisplay` blind spots for live terminal/browser pixels and missing coverage
+when zooming out. Capture-on-pinch is therefore rejected too.
+
+The remaining viable geometry-hold design is a bounded presentation cache
+prepared before the gesture (tile/zone chunks or another capturable working-set
+proxy), with an explicit fallback for live surfaces. It may use a shallow
+AppKit image view or a true layer-hosting bitmap tree because those pixels are
+Array-owned; it may not carry or reparent AppKit backing layers. Capture cost,
+bytes, exposed-world coverage, live-surface policy, interaction gating, and the
+one-bake settle are all part of the mechanism's acceptance contract.
+
 ## Traps this session added or re-confirmed
 
 - Do not edit Sources while a matrix run is in flight in the same worktree —

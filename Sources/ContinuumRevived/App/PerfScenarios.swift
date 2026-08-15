@@ -142,6 +142,12 @@ enum PerfScenarios {
             // variable (`setBoundsSize`) stepped versus held. Opt-in until its
             // first measurements establish the recoverable fraction.
             Scenario(name: "canvas.geometry-hold-probe", isStress: true, run: { try canvasGeometryHoldProbe() }),
+            // Supported-presentation experiment: AppKit owns an outer
+            // NSScrollView/NSClipView and magnifies a real managed-agent
+            // document tree. This stays opt-in until the real display pump says
+            // whether sanctioned magnification avoids or reproduces the backing
+            // cascade that geometry-hold-probe isolated.
+            Scenario(name: "canvas.scroll-magnification-probe", isStress: true, run: { try canvasScrollMagnificationProbe() }),
             // The RASTERIZATION witness — every scenario above counts asks
             // (invalidations, layout) and never renders, which is how
             // canvas.zoom lied. This one pumps window.displayIfNeeded per step
@@ -1311,6 +1317,270 @@ enum PerfScenarios {
             + "layouts stepped tile/transcript \(steppedTileLayouts)/\(steppedTranscriptLayouts), "
             + "held ticks \(heldTileLayouts)/\(heldTranscriptLayouts)"
         return PerfScenarioResult(name: "canvas.geometry-hold-probe", detail: detail, measurements: measurements)
+    }
+
+    // MARK: - Scenario: AppKit scroll-view magnification
+
+    /// Can AppKit's supported magnification boundary present a real native view
+    /// tree without recreating the per-frame backing/layout cascade?
+    ///
+    /// This is deliberately an isolated prototype, not production camera code.
+    /// The document contains the same ten real managed-agent transcript trees as
+    /// the geometry-hold probe. Every magnification tick includes the real display
+    /// and Core Animation commit where the profile's work landed.
+    static func canvasScrollMagnificationProbe() throws -> PerfScenarioResult {
+        let tileCount = 10
+        let turnsPerAgent = 6
+        let steps = 60
+        let baselineZoom: CGFloat = 1
+        let finalZoom: CGFloat = 0.45
+
+        let canvas = CanvasNSView(
+            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                                     tiles: [], groups: [], lastActiveTileId: nil),
+            activeZone: nil, zoneRenderModels: [], showsZoneChrome: true
+        )
+        canvas.frame = CGRect(x: 0, y: 0, width: 1_600, height: 1_000)
+
+        let zoneId = UUID()
+        let placement = ZonePlacement(
+            zoneId: zoneId, projectId: UUID(), origin: ZonePoint(x: 0, y: 0),
+            size: ZoneSize(width: 2_500, height: 900), color: "blue",
+            collapsed: false, hydrationPolicy: .automatic
+        )
+        var tiles: [Tile] = []
+        for index in 0..<tileCount {
+            tiles.append(Tile(
+                id: UUID(), kind: .managedAgent, title: "scroll-magnification-\(index)",
+                frame: TileFrame(x: Double(index % 5) * 480 + 40,
+                                 y: Double(index / 5) * 360 + 60,
+                                 width: 420, height: 300),
+                zPosition: .fromLegacyRank(index + 1), zoneId: zoneId,
+                runtimeRef: nil, metadata: TileMetadata()
+            ))
+        }
+        let layer = CanvasNSView.ZoneLayer(
+            placement: placement,
+            renderModel: CanvasNSView.ZoneRenderModel(placement: placement, displayName: "Scroll magnification probe"),
+            tiles: tiles
+        )
+        for (index, tile) in tiles.enumerated() {
+            let view = ManagedAgentTileNSView(tile: tile, threadId: "scroll-magnification-\(index)")
+            view.renderRehydratedPreviousSession(
+                transcriptFixture(threadId: "scroll-magnification-\(index)", turns: turnsPerAgent)
+            )
+            layer.tileViews[tile.id] = view
+        }
+        canvas.setZones([layer])
+
+        // Reuse CanvasNSView only as the real fixture builder/counter owner. The
+        // experiment itself gives AppKit a normal document view through its
+        // supported NSScrollView boundary; no production view hierarchy changes.
+        let document = canvas.worldPlane
+        document.removeFromSuperview()
+        document.frame = CGRect(x: 0, y: 0, width: 2_500, height: 1_000)
+        document.bounds = document.frame
+        document.clipsToBounds = false
+
+        let scrollView = NSScrollView(frame: CGRect(x: 0, y: 0, width: 1_600, height: 1_000))
+        scrollView.borderType = .noBorder
+        scrollView.hasHorizontalScroller = false
+        scrollView.hasVerticalScroller = false
+        scrollView.drawsBackground = false
+        scrollView.horizontalScrollElasticity = .none
+        scrollView.verticalScrollElasticity = .none
+        scrollView.allowsMagnification = false
+        scrollView.minMagnification = 0.1
+        scrollView.maxMagnification = 4
+        scrollView.documentView = document
+
+        let viewportHost = NSView(frame: scrollView.frame)
+        viewportHost.wantsLayer = true
+        viewportHost.addSubview(scrollView)
+        let window = NSWindow(contentRect: scrollView.frame, styleMask: [.borderless],
+                              backing: .buffered, defer: false)
+        window.contentView = viewportHost
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+            scrollView.documentView = nil
+        }
+
+        func pump() {
+            scrollView.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            CATransaction.flush()
+        }
+
+        func milliseconds(_ body: () -> Void) -> Double {
+            let start = ProcessInfo.processInfo.systemUptime
+            body()
+            return (ProcessInfo.processInfo.systemUptime - start) * 1_000
+        }
+
+        func percentile(_ values: [Double], _ fraction: Double) -> Double {
+            guard !values.isEmpty else { return 0 }
+            let sorted = values.sorted()
+            let index = Int((Double(sorted.count - 1) * fraction).rounded(.up))
+            return sorted[min(max(index, 0), sorted.count - 1)]
+        }
+
+        func reset() {
+            scrollView.setMagnification(baselineZoom, centeredAt: CGPoint(x: 800, y: 500))
+            scrollView.contentView.scroll(to: .zero)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            pump()
+        }
+
+        let targets = (1...steps).map { step in
+            baselineZoom + (finalZoom - baselineZoom) * CGFloat(step) / CGFloat(steps)
+        }
+
+        // Drain construction and warm the exact API before either clock starts.
+        reset()
+        for zoom in targets.prefix(4) {
+            scrollView.setMagnification(zoom, centeredAt: CGPoint(x: 800, y: 500))
+            pump()
+        }
+        reset()
+
+        var magnifiedFrames: [Double] = []
+        var heldFrames: [Double] = []
+        var magnifiedTileLayouts = 0
+        var magnifiedTranscriptLayouts = 0
+        var heldTileLayouts = 0
+        var heldTranscriptLayouts = 0
+        var worstAnchorError: CGFloat = 0
+
+        enum Arm { case magnified, held }
+        for arm in [Arm.magnified, .held, .held, .magnified] {
+            reset()
+            let tileLayoutsBefore = canvas.qaTotalTileLayoutPassCount
+            let transcriptLayoutsBefore = canvas.qaTotalTranscriptLayoutPassCount
+            switch arm {
+            case .magnified:
+                for zoom in targets {
+                    let anchor = CGPoint(x: 800, y: 500)
+                    let documentPoint = document.convert(anchor, from: scrollView.contentView)
+                    magnifiedFrames.append(milliseconds {
+                        scrollView.setMagnification(zoom, centeredAt: anchor)
+                        pump()
+                    })
+                    let resultingAnchor = scrollView.contentView.convert(documentPoint, from: document)
+                    worstAnchorError = max(worstAnchorError,
+                                           hypot(resultingAnchor.x - anchor.x, resultingAnchor.y - anchor.y))
+                }
+                magnifiedTileLayouts += canvas.qaTotalTileLayoutPassCount - tileLayoutsBefore
+                magnifiedTranscriptLayouts += canvas.qaTotalTranscriptLayoutPassCount - transcriptLayoutsBefore
+            case .held:
+                for _ in targets { heldFrames.append(milliseconds { pump() }) }
+                heldTileLayouts += canvas.qaTotalTileLayoutPassCount - tileLayoutsBefore
+                heldTranscriptLayouts += canvas.qaTotalTranscriptLayoutPassCount - transcriptLayoutsBefore
+            }
+        }
+
+        let magnifiedMedian = percentile(magnifiedFrames, 0.5)
+        let magnifiedP95 = percentile(magnifiedFrames, 0.95)
+        let heldMedian = percentile(heldFrames, 0.5)
+        let heldP95 = percentile(heldFrames, 0.95)
+        let ratio = magnifiedFrames.reduce(0, +) / max(heldFrames.reduce(0, +), 0.001)
+        let lateShare = Double(magnifiedFrames.filter { $0 > frameBudgetMs }.count)
+            / Double(max(magnifiedFrames.count, 1)) * 100
+
+        // If the supported live boundary fails, quantify the bounded fallback
+        // on the SAME rendered fixture: one settled bitmap capture, followed by
+        // shallow image-view transforms while the native document stays held.
+        // This does not establish terminal/browser fidelity or zoom-out coverage;
+        // those are explicit product blockers recorded by the probe detail.
+        reset()
+        var snapshotRep: NSBitmapImageRep?
+        let snapshotCaptureMs = milliseconds {
+            snapshotRep = scrollView.bitmapImageRepForCachingDisplay(in: scrollView.bounds)
+            if let snapshotRep { scrollView.cacheDisplay(in: scrollView.bounds, to: snapshotRep) }
+        }
+        guard let snapshotRep else {
+            throw Failure(message: "scroll magnification probe could not allocate its snapshot fallback")
+        }
+        let snapshotBytes = snapshotRep.pixelsWide * snapshotRep.pixelsHigh * 4
+        let snapshotImage = NSImage(size: scrollView.bounds.size)
+        snapshotImage.addRepresentation(snapshotRep)
+        let proxy = NSImageView(frame: scrollView.frame)
+        proxy.imageScaling = .scaleAxesIndependently
+        proxy.image = snapshotImage
+        viewportHost.addSubview(proxy, positioned: .above, relativeTo: scrollView)
+        scrollView.isHidden = true
+        pump()
+
+        let proxyTileLayoutsBefore = canvas.qaTotalTileLayoutPassCount
+        let proxyTranscriptLayoutsBefore = canvas.qaTotalTranscriptLayoutPassCount
+        var proxyFrames: [Double] = []
+        for zoom in targets + targets.reversed() {
+            let scale = zoom / baselineZoom
+            let size = CGSize(width: scrollView.bounds.width * scale,
+                              height: scrollView.bounds.height * scale)
+            let origin = CGPoint(x: 800 - 800 * scale, y: 500 - 500 * scale)
+            proxyFrames.append(milliseconds {
+                proxy.frame = CGRect(origin: origin, size: size)
+                pump()
+            })
+        }
+        let proxyTileLayouts = canvas.qaTotalTileLayoutPassCount - proxyTileLayoutsBefore
+        let proxyTranscriptLayouts = canvas.qaTotalTranscriptLayoutPassCount - proxyTranscriptLayoutsBefore
+        let proxyMedian = percentile(proxyFrames, 0.5)
+        let proxyP95 = percentile(proxyFrames, 0.95)
+
+        var measurements: [PerfMeasurement] = []
+        measurements.append(PerfBudget(
+            metric: "scroll-magnification.managedAgentTiles", limit: .exactly(Double(tileCount)), unit: .count,
+            rationale: "the supported-boundary probe must carry ten real managed-agent transcript subtrees"
+        ).evaluate(Double(canvas.qaTotalInstalledTileCount)))
+        measurements.append(PerfBudget(
+            metric: "scroll-magnification.heldTileLayouts", limit: .exactly(0), unit: .count,
+            rationale: "the no-op control must stay settled or the comparison contains unrelated work"
+        ).evaluate(Double(heldTileLayouts)))
+        measurements.append(PerfBudget(
+            metric: "scroll-magnification.heldTranscriptLayouts", limit: .exactly(0), unit: .count,
+            rationale: "the no-op control must not re-layout transcript content"
+        ).evaluate(Double(heldTranscriptLayouts)))
+        measurements.append(PerfBudget(
+            metric: "scroll-magnification.anchorError", limit: .atMost(0.5), unit: .count,
+            rationale: "AppKit's supported centered magnification must keep the same document point under the requested viewport pixel"
+        ).evaluate(Double(worstAnchorError)))
+        measurements.append(PerfBudget(
+            metric: "scroll-magnification.p95Duration", limit: .atMost(frameBudgetMs), unit: .milliseconds,
+            rationale: "a viable presentation boundary must fit the 120 Hz frame budget with real managed-agent descendants"
+        ).evaluate(magnifiedP95))
+        measurements.append(PerfBudget(
+            metric: "snapshot-proxy.captureDuration", limit: .atMost(16.7), unit: .milliseconds,
+            rationale: "a gesture-start proxy must be captured without a visible multi-frame hitch; transform-only speed cannot hide capture latency"
+        ).evaluate(snapshotCaptureMs))
+        measurements.append(PerfBudget(
+            metric: "snapshot-proxy.p95Duration", limit: .atMost(frameBudgetMs), unit: .milliseconds,
+            rationale: "after capture, the shallow bitmap presenter must fit a 120 Hz frame"
+        ).evaluate(proxyP95))
+        measurements.append(PerfBudget(
+            metric: "snapshot-proxy.tileLayouts", limit: .exactly(0), unit: .count,
+            rationale: "proxy presentation must leave the held native tile tree geometrically untouched"
+        ).evaluate(Double(proxyTileLayouts)))
+        measurements.append(PerfBudget(
+            metric: "snapshot-proxy.transcriptLayouts", limit: .exactly(0), unit: .count,
+            rationale: "proxy presentation must not reach the held transcript subtree"
+        ).evaluate(Double(proxyTranscriptLayouts)))
+
+        let detail = "ABBA, \(steps) ticks/arm over \(tileCount) real agent tiles x \(turnsPerAgent) turns; "
+            + String(format: "magnification p50 %.2f / p95 %.2f ms (%.0f%% late), ",
+                     magnifiedMedian, magnifiedP95, lateShare)
+            + String(format: "held p50 %.2f / p95 %.2f ms; ratio %.1fx; ", heldMedian, heldP95, ratio)
+            + "layouts magnified tile/transcript \(magnifiedTileLayouts)/\(magnifiedTranscriptLayouts), "
+            + "held \(heldTileLayouts)/\(heldTranscriptLayouts); "
+            + String(format: "worst anchor error %.3f px; ", worstAnchorError)
+            + String(format: "snapshot capture %.2f ms / %.1f MiB, proxy p50 %.2f / p95 %.2f ms, layouts %d/%d; ",
+                     snapshotCaptureMs, Double(snapshotBytes) / 1_048_576, proxyMedian, proxyP95,
+                     proxyTileLayouts, proxyTranscriptLayouts)
+            + "snapshot remains fidelity/zoom-out-coverage disqualified until separately proven"
+        return PerfScenarioResult(name: "canvas.scroll-magnification-probe", detail: detail,
+                                  measurements: measurements)
     }
 
     // MARK: - Scenario: many tiles across many zones
