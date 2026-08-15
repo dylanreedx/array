@@ -9,8 +9,9 @@ import ContinuumRevivedCore
 /// canvas does not do wasteful WORK; this proves what the display actually did
 /// on the user's machine, with their tiles, at their refresh rate.
 ///
-/// It is inert unless `CONTINUUM_FRAME_STATS=1`, because anything that can
-/// present or log at boot must stay quiet in QA runs and in front of users.
+/// It is inert unless frame logging or the opt-in frame HUD is enabled, because
+/// anything that can present or log at boot must stay quiet in QA runs and in
+/// front of users.
 ///
 /// A gesture is bracketed by camera activity rather than by AppKit gesture
 /// phases: every pan increment and zoom increment funnels through
@@ -19,8 +20,16 @@ import ContinuumRevivedCore
 /// the pointer-pan drag identically.
 @MainActor
 final class CanvasFrameRecorder {
-    static var isEnabled: Bool {
+    static var isLoggingEnabled: Bool {
         ProcessInfo.processInfo.environment["CONTINUUM_FRAME_STATS"] == "1"
+    }
+
+    static var isHUDEnabled: Bool {
+        ProcessInfo.processInfo.environment["CONTINUUM_FRAME_HUD"] == "1"
+    }
+
+    static var isEnabled: Bool {
+        isLoggingEnabled || isHUDEnabled
     }
 
     private weak var view: NSView?
@@ -33,6 +42,7 @@ final class CanvasFrameRecorder {
     private var gestureActive = false
     private var settleTimer: Timer?
     private let settleSeconds: CFTimeInterval = 0.25
+    private let onGestureStats: ((GestureStats) -> Void)?
 
     /// QA: the most recent completed gesture, so a check or a probe can read the
     /// numbers without scraping stdout.
@@ -53,8 +63,9 @@ final class CanvasFrameRecorder {
         var effectiveFps: Double { p50Ms > 0 ? 1_000 / p50Ms : 0 }
     }
 
-    init(view: NSView) {
+    init(view: NSView, onGestureStats: ((GestureStats) -> Void)? = nil) {
         self.view = view
+        self.onGestureStats = onGestureStats
     }
 
     /// Called from `setViewport` on every camera increment.
@@ -131,6 +142,11 @@ final class CanvasFrameRecorder {
             refreshHz: refreshHz
         )
         lastGesture = stats
+        // The HUD intentionally receives only completed-gesture statistics. It
+        // stays visually static while a gesture is being measured, so the act
+        // of displaying FPS cannot add redraw work to those measured frames.
+        onGestureStats?(stats)
+        guard Self.isLoggingEnabled else { return }
         let line = String(
                 format: "[frame-stats] gesture: %d frames, %d camera steps @ %.0f Hz (%.1f ms budget) — p50 %.2f ms (%.0f fps), p95 %.2f ms, worst %.2f ms, %d late (%.0f%%)\n",
                 stats.frames, stats.cameraSteps, refreshHz, budgetMs,

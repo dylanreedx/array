@@ -167,7 +167,10 @@ samples of 8,963; background save queue: 6).
 (reuse it — a fresh support dir mints duplicate agent records for the canvas's
 10 managed-agent tiles). Launch with `open --env …`, never the bare
 executable; add `CONTINUUM_FRAME_STATS=1` + `CONTINUUM_FRAME_STATS_FILE=<path>`
-to read gesture pacing. Kill old instances **by pid** — every Desktop dev
+to record gesture pacing, and `CONTINUUM_FRAME_HUD=1` to show the last completed
+gesture's effective FPS / late share / p95 directly on the canvas. The HUD adds
+no timer/display link and updates only after measurement. Kill old instances
+**by pid** — every Desktop dev
 bundle shares `dev.arrayapp.macos.dev`. Rebuild:
 `DEV_APP_PATH="$HOME/Desktop/Array Dev scalability.app" scripts/dev-app.sh
 --no-launch` from the worktree, then your own `open --env`.

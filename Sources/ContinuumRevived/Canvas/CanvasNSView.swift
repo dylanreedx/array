@@ -245,10 +245,18 @@ final class CanvasNSView: NSView, TokenThemed {
     private(set) var qaCameraLayoutStats = CameraLayoutStats()
     func qaResetCameraLayoutStats() { qaCameraLayoutStats = CameraLayoutStats() }
 
-    /// Live frame-time recorder for gestures. Nil unless `CONTINUUM_FRAME_STATS=1`,
-    /// so it costs nothing (and prints nothing) in a normal run.
+    /// Live frame-time recorder for gestures. Nil unless frame logging or the
+    /// frame HUD is explicitly enabled, so it costs nothing in a normal run.
     private(set) lazy var frameRecorder: CanvasFrameRecorder? =
-        CanvasFrameRecorder.isEnabled ? CanvasFrameRecorder(view: self) : nil
+        CanvasFrameRecorder.isEnabled
+            ? CanvasFrameRecorder(view: self) { [weak self] stats in
+                self?.frameHUD?.update(stats: stats)
+            }
+            : nil
+
+    /// Shallow, screen-space, click-through HUD. It is absent from the view tree
+    /// unless `CONTINUUM_FRAME_HUD=1`; it never participates in world geometry.
+    private var frameHUD: CanvasFrameHUDView?
 
     /// QA: every installed tile view, across BOTH models the canvas keeps —
     /// the flat collection and each `ZoneLayer` (see the zone-unify note on
@@ -467,6 +475,13 @@ final class CanvasNSView: NSView, TokenThemed {
         worldPlane.frame = bounds
         addSubview(worldPlane, positioned: .below, relativeTo: nil)
         syncWorldPlaneToCamera()
+        if CanvasFrameRecorder.isHUDEnabled {
+            let hud = CanvasFrameHUDView(frame: .zero)
+            hud.autoresizingMask = [.minXMargin, .maxYMargin]
+            frameHUD = hud
+            addSubview(hud, positioned: .above, relativeTo: nil)
+            layoutFrameHUD()
+        }
         applyTokens()
         registerForDraggedTypes([.fileURL])
         // zone-unify P0: seed the unified live model from the boot zone set.
@@ -1984,6 +1999,28 @@ final class CanvasNSView: NSView, TokenThemed {
         // much world is visible. Tiles still hold world frames and are untouched.
         syncWorldPlaneToCamera()
         layoutNavModeOverlay()
+        layoutFrameHUD()
+    }
+
+    private func layoutFrameHUD() {
+        guard let frameHUD else { return }
+        let width: CGFloat = 190
+        frameHUD.frame = CGRect(
+            x: max(8, bounds.maxX - width - 10),
+            y: 10,
+            width: width,
+            height: 24
+        )
+    }
+
+    // Deterministic QA seam: presence, text, event transparency and AX silence.
+    var qaFrameHUDSnapshot: (text: String, hitTransparent: Bool, accessibilityIgnored: Bool)? {
+        guard let frameHUD else { return nil }
+        return (
+            frameHUD.qaText,
+            frameHUD.hitTest(CGPoint(x: frameHUD.bounds.midX, y: frameHUD.bounds.midY)) == nil,
+            frameHUD.qaIgnoresAccessibility
+        )
     }
 
     private func layoutAllTiles(invalidateTileDisplay: Bool = true) {
