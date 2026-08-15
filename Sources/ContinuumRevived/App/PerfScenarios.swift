@@ -137,6 +137,11 @@ enum PerfScenarios {
             // costs more because a zoom preceded it" is a measured difference,
             // not a feeling. The name shares no prefix with canvas.pan/zoom.
             Scenario(name: "canvas.gesture-transition", run: { try canvasGestureTransition() }),
+            // A causal A/B probe, not the geometry-hold mechanism: real managed
+            // agent subtrees, real display commits, and the exact profiled
+            // variable (`setBoundsSize`) stepped versus held. Opt-in until its
+            // first measurements establish the recoverable fraction.
+            Scenario(name: "canvas.geometry-hold-probe", isStress: true, run: { try canvasGeometryHoldProbe() }),
             // The RASTERIZATION witness — every scenario above counts asks
             // (invalidations, layout) and never renders, which is how
             // canvas.zoom lied. This one pumps window.displayIfNeeded per step
@@ -1073,6 +1078,239 @@ enum PerfScenarios {
                 + "\(String(format: "%.3f", $0.perDeltaMs)) ms"
             }.joined(separator: " | ")
         return PerfScenarioResult(name: "transcript.delta", detail: detail, measurements: measurements)
+    }
+
+    // MARK: - Scenario: bounds-stepping versus held geometry
+
+    /// How much of a real managed-agent zoom frame is recoverable if the world
+    /// plane's bounds size stops changing on every tick?
+    ///
+    /// This deliberately does NOT present held zoom pixels. That mechanism is
+    /// the design decision this probe precedes. Instead it isolates the causal
+    /// AppKit write from the real-pinch profile: A steps the plane's bounds size
+    /// through every target; B pumps the same number of display frames with the
+    /// bounds held, then pays one final bake. The result is an upper bound on the
+    /// geometry/backing work a supported presentation mechanism may recover.
+    static func canvasGeometryHoldProbe() throws -> PerfScenarioResult {
+        let tileCount = 10
+        let turnsPerAgent = 6
+        let steps = 60
+        let baselineZoom = 1.0
+        let finalZoom = 0.45
+
+        let canvas = CanvasNSView(
+            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: baselineZoom),
+                                     tiles: [], groups: [], lastActiveTileId: nil),
+            activeZone: nil, zoneRenderModels: [], showsZoneChrome: true
+        )
+        canvas.frame = CGRect(x: 0, y: 0, width: 1_600, height: 1_000)
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless],
+                              backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+        }
+
+        let zoneId = UUID()
+        let placement = ZonePlacement(
+            zoneId: zoneId, projectId: UUID(), origin: ZonePoint(x: 0, y: 0),
+            size: ZoneSize(width: 2_500, height: 900), color: "blue",
+            collapsed: false, hydrationPolicy: .automatic
+        )
+        var tiles: [Tile] = []
+        for index in 0..<tileCount {
+            let x = Double(index % 5) * 480 + 40
+            let y = Double(index / 5) * 360 + 60
+            let frame = TileFrame(x: x, y: y, width: 420, height: 300)
+            tiles.append(Tile(
+                id: UUID(), kind: .managedAgent, title: "geometry-hold-\(index)", frame: frame,
+                zPosition: .fromLegacyRank(index + 1), zoneId: zoneId,
+                runtimeRef: nil, metadata: TileMetadata()
+            ))
+        }
+        let layer = CanvasNSView.ZoneLayer(
+            placement: placement,
+            renderModel: CanvasNSView.ZoneRenderModel(placement: placement, displayName: "Geometry hold probe"),
+            tiles: tiles
+        )
+        for (index, tile) in tiles.enumerated() {
+            let view = ManagedAgentTileNSView(tile: tile, threadId: "geometry-hold-\(index)")
+            view.renderRehydratedPreviousSession(
+                transcriptFixture(threadId: "geometry-hold-\(index)", turns: turnsPerAgent)
+            )
+            layer.tileViews[tile.id] = view
+        }
+        canvas.setZones([layer])
+
+        func pump() {
+            canvas.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            // The backing store commits here, not in `displayIfNeeded()`; without
+            // this flush the raster witness observed 144 invalidations and zero
+            // executed draws. Timing without it would recreate that blindness.
+            CATransaction.flush()
+        }
+
+        func milliseconds(_ body: () -> Void) -> Double {
+            let start = ProcessInfo.processInfo.systemUptime
+            body()
+            return (ProcessInfo.processInfo.systemUptime - start) * 1_000
+        }
+
+        func resetToBaseline() {
+            _ = canvas.worldPlane.applyCamera(
+                viewportSize: canvas.bounds.size, worldOrigin: .zero, zoom: baselineZoom
+            )
+            pump()
+            canvas.worldPlane.qaResetBoundsSizeWriteCount()
+        }
+
+        func percentile(_ values: [Double], _ fraction: Double) -> Double {
+            guard !values.isEmpty else { return 0 }
+            let sorted = values.sorted()
+            let index = Int((Double(sorted.count - 1) * fraction).rounded(.up))
+            return sorted[min(max(index, 0), sorted.count - 1)]
+        }
+
+        let targets = (1...steps).map { step in
+            baselineZoom + (finalZoom - baselineZoom) * Double(step) / Double(steps)
+        }
+
+        // Drain construction, first layout, transcript rasterization, and symbol
+        // cache population before either arm owns a clock.
+        resetToBaseline()
+        for zoom in targets.prefix(4) {
+            _ = canvas.worldPlane.applyCamera(
+                viewportSize: canvas.bounds.size, worldOrigin: .zero, zoom: zoom
+            )
+            pump()
+        }
+        resetToBaseline()
+
+        var steppedFrames: [Double] = []
+        var heldFrames: [Double] = []
+        var bakeFrames: [Double] = []
+        var steppedWrites = 0
+        var heldFrameWrites = 0
+        var bakeWrites = 0
+        var steppedTileLayouts = 0
+        var steppedTranscriptLayouts = 0
+        var heldTileLayouts = 0
+        var heldTranscriptLayouts = 0
+
+        enum Arm { case stepped, held }
+        // ABBA: the second observation of each arm sees the opposite order, so
+        // first-run caches and short thermal drift do not belong to one side.
+        for arm in [Arm.stepped, .held, .held, .stepped] {
+            resetToBaseline()
+            let tileLayoutsBefore = canvas.qaTotalTileLayoutPassCount
+            let transcriptLayoutsBefore = canvas.qaTotalTranscriptLayoutPassCount
+            switch arm {
+            case .stepped:
+                for zoom in targets {
+                    steppedFrames.append(milliseconds {
+                        _ = canvas.worldPlane.applyCamera(
+                            viewportSize: canvas.bounds.size, worldOrigin: .zero, zoom: zoom
+                        )
+                        pump()
+                    })
+                }
+                steppedWrites += canvas.worldPlane.qaBoundsSizeWriteCount
+                steppedTileLayouts += canvas.qaTotalTileLayoutPassCount - tileLayoutsBefore
+                steppedTranscriptLayouts += canvas.qaTotalTranscriptLayoutPassCount - transcriptLayoutsBefore
+            case .held:
+                for _ in targets {
+                    heldFrames.append(milliseconds { pump() })
+                }
+                heldFrameWrites += canvas.worldPlane.qaBoundsSizeWriteCount
+                heldTileLayouts += canvas.qaTotalTileLayoutPassCount - tileLayoutsBefore
+                heldTranscriptLayouts += canvas.qaTotalTranscriptLayoutPassCount - transcriptLayoutsBefore
+
+                canvas.worldPlane.qaResetBoundsSizeWriteCount()
+                bakeFrames.append(milliseconds {
+                    _ = canvas.worldPlane.applyCamera(
+                        viewportSize: canvas.bounds.size, worldOrigin: .zero, zoom: finalZoom
+                    )
+                    pump()
+                })
+                bakeWrites += canvas.worldPlane.qaBoundsSizeWriteCount
+            }
+        }
+
+        resetToBaseline()
+        let restoredMismatches = canvas.qaTileScreenFrameMismatchCount
+        let steppedTotal = steppedFrames.reduce(0, +)
+        let heldTicksTotal = heldFrames.reduce(0, +)
+        let bakeTotal = bakeFrames.reduce(0, +)
+        let heldGestureTotal = heldTicksTotal + bakeTotal
+        let gestureCostRatio = steppedTotal > 0 ? heldGestureTotal / steppedTotal : 1
+        let recoverablePercent = max(0, (1 - gestureCostRatio) * 100)
+        let cascadeOnlyDenominator = steppedTotal - heldTicksTotal
+        let cascadeOnlyRecoverablePercent = cascadeOnlyDenominator > 0
+            ? max(0, min(100, (steppedTotal - heldGestureTotal) / cascadeOnlyDenominator * 100))
+            : 0
+        let steppedMedian = percentile(steppedFrames, 0.5)
+        let steppedP95 = percentile(steppedFrames, 0.95)
+        let heldMedian = percentile(heldFrames, 0.5)
+        let heldP95 = percentile(heldFrames, 0.95)
+        let bakeMedian = percentile(bakeFrames, 0.5)
+        let steppedLateShare = Double(steppedFrames.filter { $0 > frameBudgetMs }.count)
+            / Double(max(steppedFrames.count, 1)) * 100
+        let heldLateShare = Double(heldFrames.filter { $0 > frameBudgetMs }.count)
+            / Double(max(heldFrames.count, 1)) * 100
+
+        var measurements: [PerfMeasurement] = []
+        measurements.append(PerfBudget(
+            metric: "geometry-hold.managedAgentTiles", limit: .exactly(Double(tileCount)), unit: .count,
+            rationale: "the probe must carry the profiled shape: ten real managed-agent subtrees, not cheap descriptor tiles"
+        ).evaluate(Double(canvas.qaTotalInstalledTileCount)))
+        measurements.append(PerfBudget(
+            metric: "geometry-hold.steppedBoundsSizeWrites", limit: .exactly(Double(steps * 2)), unit: .count,
+            rationale: "the A arm must trigger one real world-plane bounds-size write per target in both observations"
+        ).evaluate(Double(steppedWrites)))
+        measurements.append(PerfBudget(
+            metric: "geometry-hold.heldFrameBoundsSizeWrites", limit: .exactly(0), unit: .count,
+            rationale: "the B arm's presentation ticks are the held-geometry control and must not smuggle in a backing cascade"
+        ).evaluate(Double(heldFrameWrites)))
+        measurements.append(PerfBudget(
+            metric: "geometry-hold.bakeBoundsSizeWrites", limit: .exactly(2), unit: .count,
+            rationale: "each held observation must still pay exactly one final geometry bake; omitting it exaggerates recoverability"
+        ).evaluate(Double(bakeWrites)))
+        measurements.append(PerfBudget(
+            metric: "geometry-hold.steppedTranscriptLayouts", limit: .atLeast(1), unit: .count,
+            rationale: "teeth: the stepped backing cascade must reach the real transcript subtree, or this is another layout-blind harness"
+        ).evaluate(Double(steppedTranscriptLayouts)))
+        measurements.append(PerfBudget(
+            metric: "geometry-hold.heldFrameTileLayouts", limit: .exactly(0), unit: .count,
+            rationale: "a held, already-settled display tick should not re-lay any tile; work here would be a second mechanism contaminating the control"
+        ).evaluate(Double(heldTileLayouts)))
+        measurements.append(PerfBudget(
+            metric: "geometry-hold.heldFrameTranscriptLayouts", limit: .exactly(0), unit: .count,
+            rationale: "the held control must leave the heaviest body settled between the one final bake"
+        ).evaluate(Double(heldTranscriptLayouts)))
+        measurements.append(PerfBudget(
+            metric: "geometry-hold.heldP95Duration", limit: .atMost(frameBudgetMs), unit: .milliseconds,
+            rationale: "the held frame floor itself must fit a 120 Hz frame before a presentation mechanism can plausibly use it"
+        ).evaluate(heldP95))
+        measurements.append(PerfBudget(
+            metric: "geometry-hold.heldGestureCostRatio", limit: .atMost(0.1), unit: .count,
+            rationale: "including the final bake, the isolated geometry arm must stay below 10% of stepped cost; two establishing ABBA runs measured 1.5%"
+        ).evaluate(gestureCostRatio))
+        measurements.append(PerfBudget(
+            metric: "geometry-hold.restoredScreenFrameMismatches", limit: .exactly(0), unit: .count,
+            rationale: "after the causal probe restores baseline geometry, the production camera oracle must agree again"
+        ).evaluate(Double(restoredMismatches)))
+
+        let detail = "ABBA, \(steps) ticks/arm over \(tileCount) real agent tiles x \(turnsPerAgent) turns; "
+            + String(format: "stepped p50 %.2f / p95 %.2f ms (%.0f%% late), ", steppedMedian, steppedP95, steppedLateShare)
+            + String(format: "held p50 %.2f / p95 %.2f ms (%.0f%% late), ", heldMedian, heldP95, heldLateShare)
+            + String(format: "one-bake p50 %.2f ms; gross recoverable %.1f%%, cascade-only %.1f%%; ",
+                     bakeMedian, recoverablePercent, cascadeOnlyRecoverablePercent)
+            + "layouts stepped tile/transcript \(steppedTileLayouts)/\(steppedTranscriptLayouts), "
+            + "held ticks \(heldTileLayouts)/\(heldTranscriptLayouts)"
+        return PerfScenarioResult(name: "canvas.geometry-hold-probe", detail: detail, measurements: measurements)
     }
 
     // MARK: - Scenario: many tiles across many zones

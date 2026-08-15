@@ -6,6 +6,15 @@ pushed. The residual zoom choppiness is **diagnosed with a stack trace** (AppKit
 per-frame backing-properties cascade), the two next moves are decided, and the
 branch needs one clean matrix run and a tuning pass before it merges.
 
+> **Continuation update (2026-08-14):** step 1 landed as `574e7f7` (shared,
+> template-preserving bitmap SF Symbols; UI probe + geometry probe green). The
+> required geometry-hold A/B was then built before any mechanism: two 10-real-
+> agent ABBA runs show stepped p50/p95 ~30–31/~37–39 ms and held p50/p95
+> ~0.01/~0.01–0.02 ms; one ~28 ms bake included, **98.5% recoverable**. Counts:
+> 120 bounds-size writes → 1,200 transcript layouts; held ticks 0 → 0. The
+> missing backing-cascade witness is now `canvas.geometry-hold-probe`; next is
+> the supported held-zoom presentation design, not another attribution pass.
+
 Prerequisite reading, in order:
 1. [24](24-canvas-camera-unification.md) — the program record: the five
    mechanisms, the driver architecture, the numbers, the real-pinch profile.
@@ -105,14 +114,14 @@ samples of 8,963; background save queue: 6).
 - `canvas.zoom` — KNOWN-RED at 144 layout passes vs product target 12 (one per
   tile per bucket crossing vs one per gesture).
 - `--canvas-zoom-invalidation-probe-check` — KNOWN-RED, same target.
-- **Nothing witnesses the backing cascade or real-content zoom cost.** The
-  stalls Dylan feels live only in the profile and the frame stats. A
-  stress-tile A/B probe (bounds-size step vs held bounds, real agent tiles)
-  is the missing instrument — build it FIRST in the geometry-hold work below.
+- `canvas.geometry-hold-probe` — 10 real agent tiles, real display/transaction
+  pump, ABBA bounds-size stepping versus held ticks plus one bake; green and
+  display-dependent. It closes the backing-cascade/real-content blindness with
+  a 98.5% recoverable fraction and exact 120→1,200 versus 0→0 write/layout counts.
 
 ## Next steps, in order
 
-1. **Symbol bitmap freeze (quick trim, ~an hour).** The profile shows SF
+1. **DONE — Symbol bitmap freeze.** The profile shows SF
    Symbol vector glyphs re-rasterizing per zoom frame
    (`CUINamedVectorGlyph rasterizeImageUsingScaleFactor:` under
    `_NSSimpleImageView updateLayer`). Render each chrome/status symbol once to
@@ -125,9 +134,9 @@ samples of 8,963; background save queue: 6).
    present the zoom visually, bake true bounds once at the driver's settle
    (which exists as a single signal precisely for this). One backing cascade
    per gesture instead of ~120/s. Two hard sub-problems, in order:
-   - *Measure the recoverable fraction first:* an A/B probe on real agent
-     tiles (canvas.stress fixture) — per-frame cost with bounds-size stepping
-     vs held bounds — before writing the mechanism.
+   - **DONE — Measure the recoverable fraction first:** `canvas.geometry-hold-probe`
+     measured 98.5% recoverable including one final bake, twice, on real agent
+     tiles with a real display commit.
    - *The presentation mechanism is a design decision.* A raw transform on the
      view-backing layer is the explicitly rejected shortcut
      (infinite-canvas-rendering-research.md, "not adopted by default").

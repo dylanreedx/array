@@ -75,6 +75,7 @@ check --palette-jump-check
 check --palette-zone-check
 check --perf-budget-camera-slope-check
 check --perf-budget-check
+check --perf-budget-geometry-hold-probe-check
 check --perf-budget-gesture-transition-check
 check --perf-budget-magnify-slope-check
 check --perf-budget-raster-check
@@ -111,13 +112,13 @@ check --terminal-tmux-observer-check
 check --terminal-tmux-observer-wiring-check
 check --terminal-tmux-persistence-check
 check --ticket-queue-tile-check
-check --transcript-delta-index-oracle-check
 check --tile-action-check
 check --tile-chrome-scale-check
 check --tile-drag-grab-check
 check --tile-reveal-work-check
 check --tile-world-bounds-check
 check --topology-migration-check
+check --transcript-delta-index-oracle-check
 check --ui-baseline-check
 check --ui-contrast-check
 check --ui-geometry-check
@@ -237,6 +238,7 @@ leg run_app_check .build/debug/Array --palette-zone-check
 leg run_app_check .build/debug/Array --perf-budget-camera-slope-check
 leg run_app_check .build/debug/Array --perf-budget-check --scenario canvas.fractional-pan
 leg run_app_check .build/debug/Array --perf-budget-check --scenario canvas.pan
+leg run_app_check .build/debug/Array --perf-budget-geometry-hold-probe-check
 leg run_app_check .build/debug/Array --perf-budget-gesture-transition-check
 leg run_app_check .build/debug/Array --perf-budget-magnify-slope-check
 leg run_app_check .build/debug/Array --perf-budget-raster-check
@@ -273,13 +275,13 @@ leg run_app_check .build/debug/Array --terminal-tmux-observer-check
 leg run_app_check .build/debug/Array --terminal-tmux-observer-wiring-check
 leg run_app_check .build/debug/Array --terminal-tmux-persistence-check
 leg run_app_check .build/debug/Array --ticket-queue-tile-check
-leg run_app_check .build/debug/Array --transcript-delta-index-oracle-check
 leg run_app_check .build/debug/Array --tile-action-check
 leg run_app_check .build/debug/Array --tile-chrome-scale-check
 leg run_app_check .build/debug/Array --tile-drag-grab-check
 leg run_app_check .build/debug/Array --tile-reveal-work-check
 leg run_app_check .build/debug/Array --tile-world-bounds-check
 leg run_app_check .build/debug/Array --topology-migration-check
+leg run_app_check .build/debug/Array --transcript-delta-index-oracle-check
 leg run_app_check .build/debug/Array --ui-baseline-check
 leg run_app_check .build/debug/Array --ui-contrast-check
 leg run_app_check .build/debug/Array --ui-geometry-check

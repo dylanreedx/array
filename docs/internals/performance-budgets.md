@@ -476,6 +476,56 @@ asserts the live index is indistinguishable from a from-scratch walk — and
 asserts WHICH path ran, so it fails rather than passing perfectly the day the
 fast path declines everything.
 
+### `canvas.geometry-hold-probe` — gating, display-dependent, green
+
+```sh
+.build/debug/Array --perf-budget-geometry-hold-probe-check
+```
+
+The missing real-content A/B for the backing cascade. It builds 10 real
+`ManagedAgentTileNSView` subtrees with six transcript turns each, drains their
+first render, then runs ABBA over two causal arms with 60 display commits apiece:
+
+- **stepped:** write a distinct world-plane bounds size on every tick;
+- **held:** pump the same 60 frames with geometry unchanged, then pay exactly one
+  final bounds-size bake.
+
+Both arms run `window.displayIfNeeded()` and `CATransaction.flush()`. The flush is
+load-bearing: layer-backed work lands at the transaction commit, and omitting it
+would recreate the harness blindness that once reported 144 invalidations and 0
+executed draws. The held arm deliberately has no visual presentation mechanism;
+this is an upper bound on recoverable geometry/backing work, built before making
+that design decision. A raw transform on an AppKit-owned backing layer remains
+out of bounds.
+
+Two establishing runs on 2026-08-14:
+
+| arm / metric | run 1 | run 2 |
+|---|---:|---:|
+| stepped p50 | 31.07 ms | 30.02 ms |
+| stepped p95 | 39.47 ms | 37.35 ms |
+| stepped frames over 8.3 ms | 100% | 100% |
+| held p50 | 0.01 ms | 0.01 ms |
+| held p95 | 0.02 ms | 0.01 ms |
+| held frames over 8.3 ms | 0% | 0% |
+| one final bake p50 | 27.89 ms | 28.36 ms |
+| gross recoverable, bake included | **98.5%** | **98.5%** |
+| stepped bounds-size writes / transcript layouts | 120 / 1,200 | 120 / 1,200 |
+| held-tick bounds-size writes / transcript layouts | 0 / 0 | 0 / 0 |
+
+The shape matches the real-pinch profile: every bounds-size write reaches every
+real transcript subtree, and a held tick reaches none. The standing
+`heldGestureCostRatio` ceiling is 0.10; both establishing runs measured 0.015,
+leaving roughly 6× headroom without turning current timing into a high-water
+mark. The count budgets are the attribution: 10 real tiles, 120 stepped writes,
+0 held-tick writes, 2 final bakes, 1,200 stepped transcript layouts, 0 held
+layouts, and a clean camera oracle after restoring baseline geometry.
+
+This is a display-dependent matrix leg and skips with
+`CONTINUUM_SKIP_UI_BASELINES=1`. It is not KNOWN-RED: if the held arm stops
+recovering the cascade, the premise for the geometry-hold mechanism has failed
+and implementation should pause rather than normalize the result.
+
 ### `canvas.stress` — OPT-IN, not in the matrix
 
 ```sh

@@ -57,6 +57,12 @@ import AppKit
 final class CanvasWorldPlaneView: NSView {
     override var isFlipped: Bool { true }
 
+    /// QA: the exact write that triggers AppKit's backing-properties cascade.
+    /// Kept separate from `applyCamera`'s aggregate return so a probe cannot
+    /// confuse a harmless bounds-origin pan with a bounds-size zoom.
+    private(set) var qaBoundsSizeWriteCount = 0
+    func qaResetBoundsSizeWriteCount() { qaBoundsSizeWriteCount = 0 }
+
     init() {
         super.init(frame: .zero)
         clipsToBounds = true
@@ -97,6 +103,7 @@ final class CanvasWorldPlaneView: NSView {
         if !Self.nearlyEqual(bounds.size.width, desiredBounds.width)
             || !Self.nearlyEqual(bounds.size.height, desiredBounds.height) {
             setBoundsSize(desiredBounds)
+            qaBoundsSizeWriteCount += 1
             writes += 1
         }
         // PAN: the bounds origin is the world point at the viewport's top-left.

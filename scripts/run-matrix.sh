@@ -641,6 +641,17 @@ if [[ "${CONTINUUM_SKIP_UI_BASELINES:-0}" == "1" ]]; then
 else
   run_app_check .build/debug/Array --perf-budget-raster-check
 fi
+# The profiled backing cascade, isolated before the geometry-hold mechanism:
+# 10 real managed-agent tiles x 6 turns, ABBA, bounds size stepped once per tick
+# versus held for the same display pumps plus one final bake. Both arms call
+# CATransaction.flush(); without it the backing/raster work never lands inside
+# the synchronous harness. Gating and display-dependent for the same reason as
+# canvas.raster; it is NOT a KNOWN-RED product-mechanism leg.
+if [[ "${CONTINUUM_SKIP_UI_BASELINES:-0}" == "1" ]]; then
+  printf '\n==> SKIPPED (display-dependent, CONTINUUM_SKIP_UI_BASELINES=1): --perf-budget-geometry-hold-probe-check — needs a WindowServer session to commit real managed-agent backing stores.\n'
+else
+  run_app_check .build/debug/Array --perf-budget-geometry-hold-probe-check
+fi
 # The correctness oracle for the incremental row index, and the reason the cheap
 # path is allowed to exist. transcript.delta measures what a delta COSTS and is
 # structurally blind to a fast path that is cheap and WRONG — every count budget

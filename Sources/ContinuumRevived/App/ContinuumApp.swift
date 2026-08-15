@@ -1016,6 +1016,7 @@ enum ContinuumApp {
             || CommandLine.arguments.contains("--perf-budget-camera-slope-check")
             || CommandLine.arguments.contains("--perf-budget-transcript-delta-check")
             || CommandLine.arguments.contains("--perf-budget-gesture-transition-check")
+            || CommandLine.arguments.contains("--perf-budget-geometry-hold-probe-check")
             || CommandLine.arguments.contains("--perf-budget-magnify-slope-check")
             || CommandLine.arguments.contains("--perf-budget-raster-check") {
             do {
@@ -1034,6 +1035,8 @@ enum ContinuumApp {
                     filter = "transcript.delta"
                 } else if CommandLine.arguments.contains("--perf-budget-gesture-transition-check") {
                     filter = "canvas.gesture-transition"
+                } else if CommandLine.arguments.contains("--perf-budget-geometry-hold-probe-check") {
+                    filter = "canvas.geometry-hold-probe"
                 } else if CommandLine.arguments.contains("--perf-budget-magnify-slope-check") {
                     filter = "canvas.magnify-slope"
                 } else if CommandLine.arguments.contains("--perf-budget-raster-check") {

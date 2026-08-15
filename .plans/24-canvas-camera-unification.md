@@ -1,7 +1,8 @@
 # 24 — One camera: the pan/zoom unification (2026-08-14)
 
-Status: **built and witnessed on `array/zoom-unify`; awaiting Dylan's hand-tuning
-pass, then merge.** Successor to [23](23-canvas-zoom-handoff.md) — read that for
+Status: **built and witnessed on `array/zoom-unify`; the symbol freeze and the
+geometry-hold A/B are now complete; awaiting the held-zoom presentation slice,
+Dylan's hand-tuning pass, then merge.** Successor to [23](23-canvas-zoom-handoff.md) — read that for
 the two-problems-one-costume reframe this program executed.
 
 ## The reframe that finished the reframe
@@ -126,6 +127,30 @@ content Dylan pre-approved contingent on exactly this profile. A cheaper trim
 first: freeze chrome/status SF Symbols to bitmap images (template-preserving),
 killing the vector re-raster (~10–15% of the commit cost) with no architecture
 change.
+
+## Continuation: symbol freeze + geometry-hold A/B (2026-08-14)
+
+- `574e7f7` freezes every SF Symbol below the canvas plane into one shared 2x
+  `NSBitmapImageRep` per symbol/configuration, with `isTemplate = true`. The
+  close glyph, compact location/activity status, agent header, composer actions
+  and choices, and transcript command/tool icons no longer retain
+  `NSSymbolImageRep`. `--ui-probe-check` now asserts bitmap/template/cache
+  identity and includes those image-view tints in the light/dark token census;
+  `--ui-geometry-check` held all 14,661 compact-status geometry cases.
+- `canvas.geometry-hold-probe` is the missing real-content backing witness: 10
+  real agent tiles x 6 turns, ABBA, 60 display commits per arm, with
+  `CATransaction.flush()` on every measured tick. Two runs measured stepped
+  p50/p95 **31.07/39.47 ms** and **30.02/37.35 ms** (100% late), versus held
+  **0.01/0.02 ms** and **0.01/0.01 ms** (0% late). One bake costs ~28 ms, but
+  including it still recovers **98.5%** of gesture cost.
+- Attribution is structural, not just timing: 120 stepped bounds-size writes
+  produce exactly 1,200 transcript layouts; held ticks produce 0 writes and 0
+  layouts; each held arm pays exactly one final bake. This strongly validates
+  geometry-hold and closes the old simple-body probe's blind spot.
+
+The next work is now the presentation design itself. The A/B held arm draws
+nothing new by design, so it makes no claim about hit testing, softness, or the
+supported way to present pixels between the held geometry and the final bake.
 
 ## Traps this session added or re-confirmed
 
