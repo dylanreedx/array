@@ -157,6 +157,18 @@ experiment, not committed, because it is product-visible (the bar height steps
 while zooming). That addresses chrome only; the ~2,600 samples of content
 rasterization are Slice 5's semantic-zoom work.
 
+> **Update (2026-08-14, `array/zoom-unify`).** The bucketing shipped as a
+> product decision (Dylan approved the stepped bar), at 4 geometric steps per
+> octave rounding DOWN (`--tile-drag-grab-check` guards the direction), and the
+> close-button floors were bucketed with it — on raw zoom the × glyph re-minted
+> an SF Symbol `NSImage` per tile per step below zoom ~1.22, a cost no layout
+> counter could see. Measured now: `zoom.chromeRedraws` **1,392 → 144** (bound
+> 192), `zoom.tileLayoutPasses` **1,380 → 144**, invalidation probe `C − E`
+> **696 → 144**. The leg stays KNOWN-RED because the product target is ~1
+> settling layout per tile per gesture and 144 is one per tile per bucket
+> crossing; the number is published every run so the remaining gap stays
+> visible.
+
 `tileLayoutInvalidations` is 0 on both today — nothing on the camera path calls
 `invalidateForCanvasLayout`. It is a standing regression guard, not a live
 finding, and it is recorded as such rather than presented as a win.
@@ -317,6 +329,93 @@ the matrix. `canvas.stress` owns the real-content cost curve.
 
 This leg left `MATRIX_KNOWN_RED` when the plane landed. `canvas.zoom` did not —
 see below, because its remaining cost turned out to be a different defect.
+
+### `canvas.magnify-slope` — work slopes green, duration slope KNOWN-RED
+
+```sh
+.build/debug/Array --perf-budget-magnify-slope-check
+```
+
+The same complexity question as `camera-slope`, asked of ZOOM — which
+camera-slope structurally cannot ask, because a pan never enters the
+zoom-dependent chrome branch. Sweeps installed tiles `16 → 128` with the visible
+count pinned at 12, 40 zoom steps per configuration. It exists because
+hypothesis 6 of the zoom program ("the chrome refresh is O(visible)") was
+**wrong** — it was O(installed), measured at 4/9/19/38 chrome refreshes per step
+as installed count grew with visible pinned.
+
+| metric | budget | before visible-only refresh | after |
+|---|---|---|---|
+| `magnify-slope.chromeRedrawSlope` | == 0 | 33.6 | **0** |
+| `magnify-slope.layoutPassSlope` | == 0 | 33.6 | **0** |
+| `magnify-slope.durationSlope` | ≤ 0.5 ms | 23.08 ms | **~1.9–2.3 ms, RED** |
+| `magnify-slope.worstStepDuration` | ≤ 8.3 ms | 26.75 ms | ~3.5 ms |
+
+The work counters are flat — a zoom step performs the same number of chrome
+refreshes and layout passes at 128 installed tiles as at 16. The duration slope
+that remains is **AppKit's own view-tree traversal**: any bounds write on the
+world plane makes the next layout pass walk every installed subtree, even when
+zero tiles get laid out (the invalidation probe's condition B measures the
+bounds-size write itself at 0 passes). That residual is not reachable from our
+code without culling installed views, which the always-render-live constraint
+forbids — so the leg is KNOWN-RED against the product target and publishes the
+number every run.
+
+### `canvas.gesture-transition` — gating, green
+
+```sh
+.build/debug/Array --perf-budget-gesture-transition-check
+```
+
+The seam every pure-gesture scenario is blind to. The complaint that reframed
+the zoom program — *"it lags when zooming when you start panning"* — was a
+transition defect: deferred zoom work (a settle burst, per-step-re-armed
+debounce timers whose fsync-heavy saves detonated ~200 ms after the last camera
+step, chrome floors still moving) landing on the first pan frames. Four windows
+over the `canvas.pan`/`canvas.zoom` fixture:
+
+| window | drive | what it proves |
+|---|---|---|
+| P | 60 steady pan steps | the baseline median |
+| T | 30 zoom steps → immediately 30 pan steps | the handoff inherits nothing |
+| Zc | 30 pure zoom steps over a fixed sequence | the interleave's control |
+| I | strict interleave over the SAME zoom sequence | pans between zooms add zero |
+
+| metric | budget | measured |
+|---|---|---|
+| `gesture-transition.transitionPanChromeRedraws` | == 0 | 0 |
+| `gesture-transition.transitionPanLayoutPasses` | == 0 | 0 |
+| `gesture-transition.excessChromeRedraws` (I − Zc) | == 0 | 0 (84 == 84) |
+| `gesture-transition.excessLayoutPasses` (I − Zc) | == 0 | 0 (84 == 84) |
+| `gesture-transition.transitionStepOverhead` | ≤ 1 ms | 0.05 ms |
+| `gesture-transition.worstStepDuration` | ≤ 8.3 ms | ~5 ms |
+
+`transitionStepOverhead` is the direct encoding of the complaint: the worst of
+the first five pan steps after a zoom, over the steady pan median — the lag was
+a spike, and a mean hides a spike. Structural guards throw if the interleave
+degenerates (fewer than two distinct zooms, or no actual pan), because every
+zero above passes vacuously on a drive that did nothing.
+
+### The unified camera driver's own witnesses
+
+Two correctness legs guard `CanvasCameraDriver` (the display-paced input
+pipeline that .plans/22 Slice 2 specified — one owner for scroll pan, Cmd+scroll
+zoom, pinch and the pinch glide):
+
+- `--canvas-camera-coalesce-check` — the Slice 2 contract: N input events in
+  one display interval cause a bounded number of camera commits and preserve
+  the final desired viewport. Control: 6 direct `setViewport` calls count 6
+  applies (the counter cannot go blind). Driven: 6 precise scroll events
+  through the real `scrollWheel` handler with the driver's clock frozen count
+  **2** (leading-edge apply + one coalesced flush) — it was 6 before the
+  driver, one full funnel pass per event.
+- `--canvas-zoom-momentum-check` — glide mechanics on deterministic time: a
+  flick above the engage threshold glides ~46 steps and terminates; a
+  deliberate stop stays dead; a new pinch or any EXTERNAL viewport write
+  (navigation snap, pointer drag) cancels the glide; the zoom clamp stops it
+  in ~2 steps where decay alone takes ~45; and pan input COMPOSES with a live
+  glide in ONE commit — the property whose absence was the tracking error a
+  hand read as transition lag.
 
 ### `transcript.delta` — KNOWN-RED on duration, green on every count
 

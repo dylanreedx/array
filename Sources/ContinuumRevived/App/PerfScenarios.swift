@@ -137,6 +137,12 @@ enum PerfScenarios {
             // costs more because a zoom preceded it" is a measured difference,
             // not a feeling. The name shares no prefix with canvas.pan/zoom.
             Scenario(name: "canvas.gesture-transition", run: { try canvasGestureTransition() }),
+            // The RASTERIZATION witness — every scenario above counts asks
+            // (invalidations, layout) and never renders, which is how
+            // canvas.zoom lied. This one pumps window.displayIfNeeded per step
+            // and counts executed title-bar draws. Display-dependent: its
+            // matrix leg sits behind CONTINUUM_SKIP_UI_BASELINES.
+            Scenario(name: "canvas.raster", run: { try canvasRaster() }),
             // The streaming axis, and the same slope argument as camera-slope one
             // line up: the cost driver is HISTORY LENGTH, so a fixture that never
             // varies it can be green while a delta is linear in the conversation.
@@ -737,6 +743,130 @@ enum PerfScenarios {
             + "Zc \(control.chromeRedraws) chrome, \(control.layoutPasses) layouts | "
             + "I \(interleave.chromeRedraws) chrome, \(interleave.layoutPasses) layouts"
         return PerfScenarioResult(name: "canvas.gesture-transition", detail: detail, measurements: measurements)
+    }
+
+    // MARK: - Scenario: what a camera gesture actually RASTERIZES
+
+    /// Every other camera scenario counts invalidations and layout — the ASK.
+    /// None of them ever renders, and that blindness is how `canvas.zoom`
+    /// reported "green at 4.7 ms" the morning a real pinch was visibly bad.
+    /// This one pumps a real display cycle (`window.displayIfNeeded()`) after
+    /// every camera step and counts the title-bar draws AppKit EXECUTED, so
+    /// "a pan rasterizes no chrome" and "a zoom rasterizes chrome only at
+    /// bucket crossings" are witnessed as pixels-level facts, not inferred
+    /// from invalidation counts.
+    ///
+    /// Display-dependent by construction: it needs a WindowServer session, so
+    /// its matrix leg sits behind `CONTINUUM_SKIP_UI_BASELINES` with the two
+    /// baseline legs. Scope honesty: this witnesses CHROME rasterization; the
+    /// deep-content rasterization a live agent tile pays (`CA::Layer` display
+    /// of text/terminal surfaces) is still only visible to a profile of the
+    /// real app.
+    static func canvasRaster() throws -> PerfScenarioResult {
+        let tileCount = 12
+        let canvas = CanvasNSView(
+            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                                     tiles: [], groups: [], lastActiveTileId: nil),
+            activeZone: nil, zoneRenderModels: [], showsZoneChrome: false
+        )
+        canvas.frame = CGRect(x: 0, y: 0, width: 1_600, height: 1_000)
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless],
+                              backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+        }
+
+        for index in 0..<tileCount {
+            let tile = Tile(
+                id: UUID(), kind: .note, title: "raster-\(index)",
+                frame: TileFrame(x: Double(index % 4) * 380 + 40,
+                                 y: Double(index / 4) * 300 + 60,
+                                 width: 340, height: 240),
+                zPosition: .fromLegacyRank(index + 1),
+                runtimeRef: nil, metadata: TileMetadata()
+            )
+            canvas.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
+        }
+
+        func pump() {
+            canvas.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            // Layer-backed views do not run draw(_:) inside displayIfNeeded —
+            // the backing-store update happens when the CATransaction commits,
+            // which a scenario loop never lets happen on its own. The flush IS
+            // the display cycle here; without it this witness counted 144
+            // invalidations and 0 executed draws, which is precisely the
+            // blindness it exists to close.
+            CATransaction.flush()
+        }
+        // Drain the first render so the measured windows start from settled,
+        // already-drawn bars.
+        canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+        pump()
+
+        // Pan window: a translation rasterizes nothing.
+        let panDrawsBefore = canvas.qaTotalTitleBarDrawCount
+        for step in 0..<20 {
+            let t = Double(step + 1)
+            canvas.setViewport(CanvasViewport(x: t * 3, y: t * 2, zoom: 1))
+            pump()
+        }
+        let panDraws = canvas.qaTotalTitleBarDrawCount - panDrawsBefore
+
+        // Zoom window: chrome rasterizes at bucket crossings and nowhere else.
+        let zoomDrawsBefore = canvas.qaTotalTitleBarDrawCount
+        let zoomInvalidationsBefore = canvas.qaTotalTileChromeRedrawCount
+        for step in 0..<40 {
+            let zoom = 0.4 + 0.6 * (1 + sin(Double(step) / 6.0)) / 2
+            canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: zoom))
+            pump()
+        }
+        let zoomDraws = canvas.qaTotalTitleBarDrawCount - zoomDrawsBefore
+        let zoomInvalidations = canvas.qaTotalTileChromeRedrawCount - zoomInvalidationsBefore
+
+        var measurements: [PerfMeasurement] = []
+
+        measurements.append(PerfBudget(
+            metric: "raster.panTitleBarDraws",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "a pan is a composited translation; a single executed chrome draw means the camera is rasterizing what it only needed to move"
+        ).evaluate(Double(panDraws)))
+
+        measurements.append(PerfBudget(
+            metric: "raster.zoomTitleBarDraws",
+            limit: .atLeast(1),
+            unit: .count,
+            rationale: "teeth: the display pump must actually rasterize — zero draws across a bucket-crossing sweep means this harness never rendered, which is the exact blindness it exists to close"
+        ).evaluate(Double(zoomDraws)))
+
+        measurements.append(PerfBudget(
+            metric: "raster.zoomDrawOverdraw",
+            limit: .atMost(0),
+            unit: .count,
+            rationale: "draws minus invalidations: every executed chrome draw must trace to an invalidation we chose — an excess is something repainting chrome without asking, which no invalidation counter can see"
+        ).evaluate(Double(zoomDraws - zoomInvalidations)))
+
+        measurements.append(PerfBudget(
+            metric: "raster.zoomInvalidations",
+            limit: .atLeast(1),
+            unit: .count,
+            rationale: "teeth: the sweep must cross at least one chrome bucket, or the zero pan budget above passes vacuously"
+        ).evaluate(Double(zoomInvalidations)))
+
+        measurements.append(PerfBudget(
+            metric: "raster.screenFrameMismatches",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "teeth: the rendered canvas still presents every visible tile where CanvasEngine says"
+        ).evaluate(Double(canvas.qaTileScreenFrameMismatchCount)))
+
+        let detail = "\(tileCount) tiles; pan 20 pumped steps: \(panDraws) draws | "
+            + "zoom 40 pumped steps: \(zoomDraws) draws / \(zoomInvalidations) invalidations"
+        return PerfScenarioResult(name: "canvas.raster", detail: detail, measurements: measurements)
     }
 
     // MARK: - Scenario: transcript delta cost against history length

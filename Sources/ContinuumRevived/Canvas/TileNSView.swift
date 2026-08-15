@@ -733,6 +733,9 @@ class TileNSView: NSView, TokenThemed {
     var qaTitleBarFrame: CGRect { titleBar?.frame ?? .zero }
     /// Redraws the title bar has asked for. A camera move must not raise this.
     var qaTitleBarRedrawCount: Int { titleBar?.qaRedrawInvalidationCount ?? 0 }
+    /// Draws the title bar actually EXECUTED — the rasterization side of the
+    /// counter above; only a pumped display cycle moves it.
+    var qaTitleBarDrawCount: Int { titleBar?.qaDrawCount ?? 0 }
 
     /// QA: the title's world point size (scales with the bar). On-screen size is
     /// `* zoom`. Drives `--tile-chrome-scale-check`.
@@ -1091,7 +1094,15 @@ private final class TitleBarView: NSView, TokenThemed {
             width: available, height: height)
     }
 
+    /// QA: every ACTUAL draw of this bar. `qaRedrawInvalidationCount` counts the
+    /// ASK (`needsDisplay`); this counts AppKit executing it. The distinction is
+    /// the rasterization witness: a harness that never pumps a display cycle
+    /// sees invalidations but zero draws — which is exactly how `canvas.zoom`
+    /// reported green while a real pinch was visibly bad.
+    private(set) var qaDrawCount = 0
+
     override func draw(_ dirtyRect: NSRect) {
+        qaDrawCount += 1
         let scale = chromeScale
         let theme = effectiveTokenTheme
         let attrs = titleAttributes(theme: theme)

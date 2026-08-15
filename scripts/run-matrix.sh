@@ -106,6 +106,17 @@ MATRIX_KNOWN_RED=(
   # minus the zoom branch all cost zero tile layouts. Goes green when the chrome
   # floor stops changing on every zoom step.
   --canvas-zoom-invalidation-probe-check
+  # Zoom's complexity witness, publishing the one number the visible-only chrome
+  # refresh could not move: durationSlope. The WORK slopes gate at zero — a zoom
+  # step performs the same chrome refreshes and layout passes at 128 installed
+  # tiles as at 16 — but going 16 -> 128 still adds ~2 ms/step of AppKit's own
+  # view-tree traversal (any bounds write on the plane makes the next layout
+  # pass walk every installed subtree, even when zero tiles lay out; the
+  # invalidation probe's condition B pins the write itself at 0 passes). Not
+  # reachable from our code without culling installed views, which the
+  # always-render-live constraint forbids. Published in
+  # docs/internals/performance-budgets.md; do NOT bisect it as a regression.
+  --perf-budget-magnify-slope-check
   # The streaming axis's product target. Still RED, but NOT for the reason it was
   # published: the incremental row index (.plans/22 Slice 4) took the delta from
   # 10,000 block visits to 1, with fullFlattens 0 and slope 0, and the wall clock
@@ -615,6 +626,21 @@ run_app_check .build/debug/Array --canvas-zoom-momentum-check
 # transition regression can be known-red without dragging the gating pan
 # legs with it.
 run_app_check .build/debug/Array --perf-budget-gesture-transition-check
+# Zoom's O(1)-in-tiles contract: installed 16 -> 128 with visible pinned at 12,
+# work slopes must be exactly zero. KNOWN-RED on durationSlope only — the AppKit
+# traversal residual documented in MATRIX_KNOWN_RED above.
+run_app_check .build/debug/Array --perf-budget-magnify-slope-check
+# The RASTERIZATION witness. Every other camera leg counts asks (invalidations,
+# layout) and never renders — which is how canvas.zoom reported green while a
+# real pinch was visibly bad. This pumps window.displayIfNeeded per camera step
+# and counts EXECUTED title-bar draws: a pan rasterizes zero chrome, a zoom
+# rasterizes chrome only at bucket crossings, and every draw traces to an
+# invalidation we chose. Display-dependent, so it defers with the baselines.
+if [[ "${CONTINUUM_SKIP_UI_BASELINES:-0}" == "1" ]]; then
+  printf '\n==> SKIPPED (display-dependent, CONTINUUM_SKIP_UI_BASELINES=1): --perf-budget-raster-check — needs a WindowServer session to pump real draws.\n'
+else
+  run_app_check .build/debug/Array --perf-budget-raster-check
+fi
 # The correctness oracle for the incremental row index, and the reason the cheap
 # path is allowed to exist. transcript.delta measures what a delta COSTS and is
 # structurally blind to a fast path that is cheap and WRONG — every count budget

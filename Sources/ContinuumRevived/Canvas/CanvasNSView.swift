@@ -381,6 +381,18 @@ final class CanvasNSView: NSView, TokenThemed {
         tileViewsInVisualOrder.reduce(0) { $0 + $1.qaCanvasLayoutInvalidationCount }
     }
 
+    /// QA: title-bar draws AppKit actually executed, across every installed
+    /// tile. `qaTotalTileChromeRedrawCount` above counts invalidations — the
+    /// decision we control; this counts the rasterization that follows, and it
+    /// only moves when a display cycle is pumped. The pair closes the blindness
+    /// that let a layout-only harness call zoom green while a real pinch was
+    /// choppy: an invalidation storm with no draws means the harness never
+    /// rendered, and draws exceeding invalidations means something repaints
+    /// chrome without asking.
+    var qaTotalTitleBarDrawCount: Int {
+        tileViewsInVisualOrder.reduce(0) { $0 + $1.qaTitleBarDrawCount }
+    }
+
     /// QA: title-bar z-order repairs across every installed tile. `layoutChrome`
     /// used to re-insert the bar unconditionally — a sublayer reorder per visible
     /// tile on every camera step that no other counter could see. A camera step
