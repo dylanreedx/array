@@ -1,10 +1,14 @@
 # 25 — Session handoff: one camera, and the cascade that remains (2026-08-14)
 
-Status: **the unification is built, witnessed, and Dylan-confirmed** ("they feel
-unified! nice!") on `array/zoom-unify` — 8 commits on top of `array/zoom-feel`,
-pushed. The residual zoom choppiness is **diagnosed with a stack trace** (AppKit's
+Historical status at this handoff: **the unification was built, witnessed, and
+Dylan-confirmed** ("they feel unified! nice!") on `array/zoom-unify` — then 8
+commits on top of `array/zoom-feel`, pushed. The residual zoom choppiness was
+**diagnosed with a stack trace** (AppKit's
 per-frame backing-properties cascade), the two next moves are decided, and the
 branch needs one clean matrix run and a tuning pass before it merges.
+
+> **Superseded for continuation by [26](26-session-handoff-2026-08-15.md).**
+> This file remains the detailed record of the unification/profile session.
 
 > **Continuation update (2026-08-14):** step 1 landed as `574e7f7` (shared,
 > template-preserving bitmap SF Symbols; UI probe + geometry probe green). The
@@ -167,8 +171,8 @@ samples of 8,963; background save queue: 6).
 (reuse it — a fresh support dir mints duplicate agent records for the canvas's
 10 managed-agent tiles). Launch with `open --env …`, never the bare
 executable; add `CONTINUUM_FRAME_STATS=1` + `CONTINUUM_FRAME_STATS_FILE=<path>`
-to record gesture pacing, and `CONTINUUM_FRAME_HUD=1` to show the last completed
-gesture's effective FPS / late share / p95 directly on the canvas. The HUD adds
+to record gesture pacing, and `CONTINUUM_FRAME_HUD=1` to show rolling
+time-weighted FPS / late share / p95 directly on the canvas. The HUD adds
 no timer/display link; it shows a rolling 30-frame, time-weighted summary at
 4 Hz so stalls lower the headline FPS instead of hiding behind p50. Kill old instances
 **by pid** — every Desktop dev

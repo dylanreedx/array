@@ -16,7 +16,7 @@ whether that was 55 fps or 15 fps, nor any way to tell whether a change helped.
 |---|---|---|
 | **Budgets** (`--perf-budget-check`) | the WORK a scenario does — counts and per-step duration — offline and deterministic | every matrix run; while iterating on a fix |
 | **Stress** (`--scenario canvas.stress`) | synchronous scaling curves against tile count, zoom and transcript depth | deliberately, when changing tile or layout cost |
-| **Frame stats** (`CONTINUUM_FRAME_STATS=1`) | the FRAMES the display actually produced during a real gesture, on real hardware | dogfooding; confirming a fix is felt, not just counted |
+| **Frame stats / HUD** (`CONTINUUM_FRAME_STATS=1`, `CONTINUUM_FRAME_HUD=1`) | the FRAMES the display actually produced during a real gesture, on real hardware | dogfooding; confirming a fix is felt, not just counted |
 
 **The product ambition is a 120 Hz-capable canvas, not an 8.3 ms
 microbenchmark.** A 120 Hz display has 8.3 ms for input, application work,
@@ -526,6 +526,32 @@ This is a display-dependent matrix leg and skips with
 recovering the cascade, the premise for the geometry-hold mechanism has failed
 and implementation should pause rather than normalize the result.
 
+### `canvas.scroll-magnification-probe` — OPT-IN, intentionally red
+
+The first supported-presentation experiment after geometry-hold established the
+recoverable fraction. It puts the same 10 real managed-agent trees behind a
+borderless, scrollerless `NSScrollView` and drives AppKit's documented
+magnification API around a fixed anchor. The anchor is exact (`0.000 px` error),
+but the performance hypothesis fails:
+
+| metric | run 1 | run 2 |
+|---|---:|---:|
+| magnification p50 | 36.48 ms | 32.62 ms |
+| magnification p95 | 44.43 ms | 43.25 ms |
+| frames over 8.3 ms | 100% | 100% |
+| transcript layouts over 120 ticks | 1,200 | 1,200 |
+
+The supported live boundary reproduces the backing-properties cascade and is
+not the shipping presenter. The same probe measures the fallback compositor
+floor: a shallow bitmap proxy runs at **0.04/0.07 ms p50/p95** with zero native
+layouts, but fresh gesture-time capture costs **22.07 ms and 24.4 MiB** for a
+1600x1000 Retina viewport. It also cannot generically capture WKWebView/Ghostty
+pixels or reveal uncaptured world content on zoom-out. Capture-on-pinch is
+therefore rejected; the surviving design is a bounded cache prepared while idle.
+
+This scenario has no matrix leg. Its red budgets preserve why the rejected
+candidates must not be rediscovered and normalized into production.
+
 ### `canvas.stress` — OPT-IN, not in the matrix
 
 ```sh
@@ -685,3 +711,28 @@ reuses the recorder above and publishes at most four label changes per second;
 there is no second timer, display link, animation, traversal, event handling, or
 accessibility presence. Logging and the HUD are independently opt-in; normal
 runs instantiate neither recorder nor overlay.
+
+### Clean dogfood split after symbol freeze (2026-08-14/15)
+
+The current `array/zoom-unify` preview was rebuilt from the branch and launched
+against the preserved 10-agent workspace with frame logging and the live HUD.
+One earlier “laggier” feel check was invalid: the preview predated the symbol
+freeze and a separate `--ui-geometry-check` process was consuming 47–85% CPU.
+After that process ended and the preview was rebuilt, Dylan's verdict was:
+“that feels good, still a little bit” and, with the live HUD, “it barely drops
+when panning … as soon as I zoom it goes as low as 30.”
+
+The uncontaminated log has the same bimodal shape as the tripwire profile:
+
+- pan-like gesture: p50/p95 **8.33/8.33 ms**, **3% late**;
+- zoom examples: p50/p95 **23.13/33.60 ms**, **59% late**, and
+  **22.87/51.04 ms**, **53% late**;
+- another zoom retained an 8.33 ms median while p95 reached **53.68 ms** and
+  **40%** of frames were late—the reason median-derived “120 FPS” was a
+  misleading HUD headline.
+
+The HUD now reports a rolling 30-frame, time-weighted average FPS at 4 Hz, so
+stall time lowers the headline immediately. It reuses the recorder's display
+link; the HUD owns no timer, animation, traversal, or sampling loop. This live
+pan/zoom split is the product witness for the same mechanism the geometry-hold
+probe names structurally.

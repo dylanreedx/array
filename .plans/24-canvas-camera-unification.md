@@ -186,6 +186,28 @@ Array-owned; it may not carry or reparent AppKit backing layers. Capture cost,
 bytes, exposed-world coverage, live-surface policy, interaction gating, and the
 one-bake settle are all part of the mechanism's acceptance contract.
 
+## Continuation: clean dogfood + live frame HUD (2026-08-15)
+
+`135523a` added an opt-in, click-through, AX-ignored canvas frame HUD.
+`ff99949` made it live and corrected its headline: a rolling 30-frame,
+time-weighted FPS at 4 Hz, plus late-frame share and p95. It reuses
+`CanvasFrameRecorder`'s display link and adds no timer, animation, traversal, or
+sampling loop. A median-derived FPS had hidden the exact bimodal defect: 60% of
+frames can hit 8.33 ms while the other 40% stall, still printing “120 FPS.”
+
+The clean rebuilt preview on the preserved 10-agent workspace now makes the
+remaining boundary visible without instrumentation ambiguity. Dylan: **“it
+barely drops when panning like I thought but as soon as I zoom it goes as low as
+30.”** The log agrees: a pan-like gesture is 8.33/8.33 ms p50/p95 with 3% late;
+zoom examples are 23.13/33.60 ms with 59% late and 22.87/51.04 ms with 53% late.
+The bitmap symbol freeze improved feel, but did not change the defect class.
+
+This is the current acceptance criterion: zoom should approach the pan HUD shape
+on this same canvas. Further bucket/tuning trims do not satisfy it. The next
+slice remains the precomputed bounded presenter + held native geometry + one
+settle bake, with explicit installed-view fallback for live `TerminalTileNSView`
+and `BrowserTileNSView` surfaces.
+
 ## Traps this session added or re-confirmed
 
 - Do not edit Sources while a matrix run is in flight in the same worktree —
