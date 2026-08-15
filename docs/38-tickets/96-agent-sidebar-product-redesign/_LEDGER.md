@@ -855,3 +855,182 @@ show, and is worth taking:
 Array's row menu today, for the comparison when the screenshot arrives: Open / Rename /
 Settle / Snooze › / Mark Unread / Archive / Delete, unavailable actions hidden rather
 than greyed, and a multi-selection offering only what every member can take.
+
+---
+
+## Round 8 — the rose dies, and the gate learns why
+
+Dylan, on sight: *"i dont love the colour we chose... it's too similar to error."*
+
+He was right and it was measurable. Dark `accentFailed` is hue **3°**; the rose
+`#E5799B` was **342°**. Twenty-one degrees apart, stacked four rows apart in the same
+list, and **every gate in the file was green**.
+
+### What the suite could not see
+
+`runDesignTokenChecks` asked two questions about accents and neither was this one:
+whether a single accent holds its hue *across themes* (≤10° drift), and whether two
+accents are *exactly equal* values. Nothing compared two DIFFERENT accents to each other.
+A palette can converge to indistinguishability one token at a time and stay green
+throughout.
+
+So the complaint became a check. Accents that can share a list now need **30°** between
+them. Calibration was read off the live palette rather than chosen: the tightest real
+pair is red↔amber at **32°**, and the rose measures **21.40°**. Proven in both
+directions — palette green, rose red — before it was believed.
+
+`accentDone`/`accentReview` sit at 25° and are exempted **by name**, with the reason
+written at the exemption: they are the same family, and the row paints exactly one of
+them. An exception that stays visible beats a floor quietly lowered for everybody.
+
+### The colour, and why the first candidate failed on paper
+
+Dylan proposed `#79E5CA`. Before touching it, the accent band ceiling
+(`4.50…8.00`) was checked by back-solving the dark surface luminance from two pinned
+accents — amber 7.48 and green 6.74, both of which reproduced to two decimals. `#79E5CA`
+computes to **≈8.8:1 at worst**: right hue, one stop too pale, over the ceiling.
+
+Shipped instead at the same hue and a legal value: **light `#096B57`, dark `#4CD6B4`**.
+Predicted 5.41 / 7.34; the harness measured **5.41 / 7.35**, and handed `textOnAccent`'s
+worst dark case back to `accentInput` at 7.82 exactly as expected. Sidebar pairs 4.77 /
+7.75. Every figure written into the five pinned tables was read out of the check's own
+output.
+
+### Retiring green was not cosmetic
+
+Mint is 25° from `accentDone`. Keeping green on the row would have repeated the rose's
+failure one hue over. So `.ready` returns **no accent at all** — which costs nothing (a
+settled row is the one row asking for nothing) and buys mint a **48°** gap, the widest in
+the palette. Colour on a row now means exactly one thing: this wants you.
+
+### One word, then none
+
+`Landed` / `Waiting` collapsed to `Unseen`, then — after Dylan's *"we are
+overcomplicating it"* — to this:
+
+> done means agent is done, we remove status when we looked at it... we then have the
+> pill nudge when it has been seen for long enough
+
+Which is better, and it exposed why the pulse was wrong. The pulse was arming on the
+UNREAD row: the row that is already coloured, already marked, already sorted where you
+will see it. The row that actually gets lost is the one you read two hours ago and never
+closed — and blinking at a different row was never going to help with that. The pulse is
+gone; `escalationDelay` became `settleNudgeDelay` and now measures how long a row you
+have READ sits before it asks to be put away.
+
+Every finished row also got its age back. `row.elapsed` is a live turn's duration, so
+every terminal row rendered its state with no time at all — including, absurdly, the one
+state whose entire meaning is how long it has been sitting there.
+
+Glyph: `eye.circle.fill` for one round, then `checkmark.circle.fill` — it states the
+outcome rather than issuing an instruction. Both circular, because the column scales each
+symbol by its LARGEST dimension and a bare eye is 2:1, which would land it at half the
+height of the triangle beside it.
+
+---
+
+## Round 9 — the header, the hover card, and two bugs that were not taste
+
+### The header preview had three defects and only one was a design opinion
+
+**`Field`.** The search box contained that literal string. A programmatically created
+`NSTextFieldCell` arrives carrying AppKit's default title, and swapping the cell in handed
+it to the field. It looked exactly like a placeholder — because the real placeholder is
+hidden whenever `stringValue` is non-empty — and it never filtered anything, because
+`controlTextDidChange` fires on edits and not on a value the field was born with. It could
+have sat there indefinitely looking like a design choice.
+
+**The outline.** Not a focus ring:
+
+```swift
+window?.firstResponder === searchField.currentEditor()
+```
+
+An unfocused field has no field editor, so that is `nil === nil`, which is `true` — and
+during `init` there is no window either. The border was painted at construction and
+nothing ever cleared it. Dylan reported it as a styling complaint; it was a comparison bug.
+
+**The box itself**, which was the actual opinion — and the reference settled it. T3's
+input is `unstyled` inside a row that draws no border and no resting fill, only
+`hover:bg-sidebar-row-hover`. Ours is now a magnifier plus text at rest, a hover fill, and
+the focus hairline only while a caret is genuinely in it, with the clear button's space
+reserved permanently so typing does not shove the text sideways.
+
+### The clipping was older than the header, and I said otherwise first
+
+Reported as *"it is clipping"* alongside the header change, and the first diagnosis —
+that the taller header overflowed a stack — was **wrong**. `place()` centred a fixed frame
+in the Lab host without clamping, so any surface larger than the host got a **negative
+origin** and lost equal slices off both ends. The sidebar playground asked for 860pt in a
+640pt host and had been losing 110pt off each end since it was written; the tilted gallery
+asks for 960pt in a 720pt host and had been losing 120pt off each side.
+
+Nobody could see it because **every sweep guards on `.staticCard` and skips review
+surfaces** — correct, since a review surface owes no baseline, and also precisely how a
+surface came to be declared larger than the panel that shows it.
+
+The check that now asks that question had to be **hoisted to run first**, and the reason
+is the more useful finding: placed where it naturally belonged, it sat after
+`--component-lab-check`'s known-red composer leg and **stayed completely silent with a
+surface declared at 1600pt**. This is the matrix-halt lesson at method scale — a gate
+after a red leg does not run at all. Verified by oversizing a surface both before and
+after the hoist.
+
+### The hover card is not a feature, it is the missing half of §4.3
+
+The measured-fit sacrifice order lets a narrowing row drop placement, model text and
+branch detail **on the stated condition** that they "remain in tooltip and accessibility
+detail". No tooltip has ever existed, so every one of those drops has been a plain loss —
+P0.1 measured three long-title flows rendering no project at all at 280pt.
+
+Three of its nine lines are facts the sidebar has never rendered anywhere: **zone**,
+**harness**, and a **branch mismatch**. All three already existed in `AgentRowContext`
+and were being discarded by `AgentInboxRowBuilder`. `zoneName` had **zero consumers in the
+entire application**.
+
+**Harness does not come from `agentKind`, and never could.** `AgentContextIndex` folds
+every `AgentRecord`-backed agent in as `.managed`, and the inbox filters to managed
+agents — so `agentKind` is the same value for every row the sidebar draws. It comes from
+`AgentRecord.harness`, whose rawValues are already display text. That is what makes a Pi
+agent distinguishable from a Codex one for the first time.
+
+Placement was decided by two hazards the app had already recorded: a subview overhanging
+the sidebar's trailing edge is **occluded** by the canvas pane (added to the split after
+the sidebar) rather than clipped — invisible, not cut — and the `NSSplitView` **adopts**
+an added subview as a pane and overwrites its frame, which is how ⌘K once rendered as a
+full-height sidebar. So the card lives in the window's content view, which is a plain
+container for exactly that reason.
+
+It hangs off `setHovered`, the single hover choke point, so every existing dismissal —
+scroll under a still pointer, window resigning key, any full re-render — applies to it
+without knowing it exists.
+
+### Two gates, satisfied rather than worked around
+
+The token census hunted the new `TokenThemed` view and wanted it in **both** sweeps: the
+appearance surfaces and `adoptedSurfaces()`. Registering the name alone produced *"adopted
+owners that painted nothing in the probed surfaces"*. It is now rendered standalone in
+each, with the mismatch line included so the warning accent is painted rather than merely
+declared.
+
+The timestamp is POSIX with an explicit `dateFormat`, never `dateStyle`/`timeStyle` — the
+rule written on `InboxUndoToast.wakeTimeFormatter`: a locale-dependent rendering makes an
+assertion depend on whose machine ran it.
+
+### The witness asserts the claim, not the pixels
+
+Not "a card appeared". It hovers the mismatch row, reads the card's lines, requires zone,
+harness and the mismatch to be present, **and requires the row beside it to still not
+print them** — so if a future row starts saying them, the duplication gets decided rather
+than drifting into both places.
+
+It also witnesses `withUnconfirmed`, which rebuilds a row by hand, runs on the live path
+against the rows whose state is least certain, and silently drops any field it does not
+name. Removing one field reports `zone nil, harness Codex, checkout main`. Verified.
+
+### Still open
+
+The settle nudge pill — designed by Dylan, not built — plus the pointing-hand cursor, the
+bounded local project-favicon ladder, and the ink-alignment witness, which measures the
+mock's symbol set (hand + triangle) while the live cell now draws a checkmark. That last
+one is non-negotiable #2 and has been true since the file's header claimed otherwise.
