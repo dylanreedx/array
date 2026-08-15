@@ -75,6 +75,7 @@ check --palette-jump-check
 check --palette-zone-check
 check --perf-budget-camera-slope-check
 check --perf-budget-check
+check --perf-budget-gesture-transition-check
 check --perf-budget-transcript-delta-check
 check --perf-budget-zoom-check
 check --persistence-crash-safe-check
@@ -234,6 +235,7 @@ leg run_app_check .build/debug/Array --palette-zone-check
 leg run_app_check .build/debug/Array --perf-budget-camera-slope-check
 leg run_app_check .build/debug/Array --perf-budget-check --scenario canvas.fractional-pan
 leg run_app_check .build/debug/Array --perf-budget-check --scenario canvas.pan
+leg run_app_check .build/debug/Array --perf-budget-gesture-transition-check
 leg run_app_check .build/debug/Array --perf-budget-transcript-delta-check
 leg run_app_check .build/debug/Array --perf-budget-zoom-check
 leg run_app_check .build/debug/Array --persistence-crash-safe-check

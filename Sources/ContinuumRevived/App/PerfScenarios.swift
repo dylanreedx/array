@@ -128,6 +128,15 @@ enum PerfScenarios {
             // the filter is prefix-matched, so `--scenario canvas.zoom` would
             // otherwise sweep this in too.
             Scenario(name: "canvas.magnify-slope", run: { try canvasZoomSlope() }),
+            // The TRANSITION between gestures, which every scenario above is
+            // blind to: they each drive one pure gesture, and the complaint
+            // that reframed the zoom program lived exactly at the seam ("it
+            // lags when zooming when you start panning"). Four windows on one
+            // fixture — pure pan, zoom→pan handoff, a pure-zoom control, and a
+            // strict interleave over the SAME zoom sequence — so "a pan step
+            // costs more because a zoom preceded it" is a measured difference,
+            // not a feeling. The name shares no prefix with canvas.pan/zoom.
+            Scenario(name: "canvas.gesture-transition", run: { try canvasGestureTransition() }),
             // The streaming axis, and the same slope argument as camera-slope one
             // line up: the cost driver is HISTORY LENGTH, so a fixture that never
             // varies it can be green while a delta is linear in the conversation.
@@ -497,6 +506,237 @@ enum PerfScenarios {
                 + String(format: "%.2f ms", $0.perStepMs)
             }.joined(separator: " | ")
         return PerfScenarioResult(name: "canvas.magnify-slope", detail: detail, measurements: measurements)
+    }
+
+    // MARK: - Scenario: the zoom→pan transition
+
+    /// Does a pan step cost more because a zoom preceded it?
+    ///
+    /// Every other camera scenario drives ONE pure gesture, so all of them were
+    /// green while the felt defect lived at the seam: deferred zoom work — a
+    /// settle burst, re-armed debounce timers, chrome floors still moving —
+    /// landing on the first pan frames after a zoom. Four windows over the
+    /// `canvas.pan`/`canvas.zoom` fixture (same 3 Markdown documents + 9 notes,
+    /// so the numbers are comparable):
+    ///
+    /// - P  — steady-state pan at a fixed zoom: the baseline.
+    /// - T  — 30 zoom steps then IMMEDIATELY 30 pan steps at the final zoom:
+    ///        the user's exact complaint, isolated. The pan window must inherit
+    ///        nothing: zero chrome redraws, zero layout passes.
+    /// - Zc — a pure-zoom control over a fixed zoom sequence.
+    /// - I  — a strict interleave (pan step after every zoom step) over the
+    ///        SAME zoom sequence as Zc, so interleaving pans must add exactly
+    ///        zero chrome/layout work over the control. This defeats any
+    ///        per-gesture caching a fix might install and any zoom-cost
+    ///        differences bucket crossings would otherwise smuggle in.
+    static func canvasGestureTransition() throws -> PerfScenarioResult {
+        let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("continuum-perf-gesture-transition-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        let root = tempRoot.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        // The canvas.pan / canvas.zoom fixture, verbatim: comparability against
+        // their published numbers is the point of measuring on the same tiles.
+        let harness = try makeHarness(root: root, tempRoot: tempRoot)
+        let canvas = harness.canvas
+        for index in 0..<3 {
+            let path = root.appendingPathComponent("doc-\(index).md")
+            try documentFixture(index: index).write(to: path, atomically: true, encoding: .utf8)
+            guard case .opened = harness.runtime.openProjectFile(path: path.path) else {
+                throw Failure(message: "the fixture document must open as a tile")
+            }
+        }
+        guard let spawner = harness.runtime.activeController?.tileSpawner else {
+            throw Failure(message: "the harness must expose the active project's tile spawner")
+        }
+        for index in 0..<9 {
+            if case let .failure(error) = spawner.spawnNote(title: "perf-note-\(index)") {
+                throw Failure(message: "spawning a note tile failed: \(error)")
+            }
+        }
+        canvas.layoutSubtreeIfNeeded()
+        let tileCount = canvas.qaTotalInstalledTileCount
+        guard tileCount >= 12 else {
+            throw Failure(message: "the fixture canvas must hold a realistic number of tiles; got \(tileCount)")
+        }
+
+        let panZoom = 0.7
+        // The zoom sequence Zc and I share. Same construction as canvas.zoom's
+        // sweep (never repeat a value), compressed to 30 steps.
+        func zoomValue(_ step: Int) -> Double { 0.4 + 0.6 * (1 + sin(Double(step) / 6.0)) / 2 }
+
+        struct Window {
+            let chromeRedraws: Int
+            let layoutPasses: Int
+            let stepMs: [Double]
+        }
+        func runWindow(_ count: Int, viewport: (Int) -> CanvasViewport) -> Window {
+            let chromeBefore = canvas.qaTotalTileChromeRedrawCount
+            let passesBefore = canvas.qaTotalTileLayoutPassCount
+            var stepMs: [Double] = []
+            stepMs.reserveCapacity(count)
+            for step in 0..<count {
+                let start = ProcessInfo.processInfo.systemUptime
+                canvas.setViewport(viewport(step))
+                canvas.layoutSubtreeIfNeeded()
+                stepMs.append((ProcessInfo.processInfo.systemUptime - start) * 1_000)
+            }
+            return Window(
+                chromeRedraws: canvas.qaTotalTileChromeRedrawCount - chromeBefore,
+                layoutPasses: canvas.qaTotalTileLayoutPassCount - passesBefore,
+                stepMs: stepMs
+            )
+        }
+        // Settle steps run OUTSIDE the measured windows: crossing back to the
+        // pan zoom costs chrome by design and must not be charged to a window.
+        func settle(x: Double = 0, y: Double = 0, zoom: Double) {
+            canvas.setViewport(CanvasViewport(x: x, y: y, zoom: zoom))
+            canvas.layoutSubtreeIfNeeded()
+        }
+
+        settle(zoom: panZoom)
+        canvas.qaResetCameraLayoutStats()
+        let proseBefore = AssistantProseView.qaMeasurementCount
+        let invalidationsBefore = canvas.qaTotalTileLayoutInvalidationCount
+
+        // P — steady-state pan baseline.
+        let pure = runWindow(60) { step in
+            CanvasViewport(x: Double(step) * 3, y: Double(step) * 2, zoom: panZoom)
+        }
+        let panMedianMs = pure.stepMs.sorted()[pure.stepMs.count / 2]
+
+        // T — the handoff: a zoom sweep, then the pan begins where it ended.
+        settle(x: 120, y: 90, zoom: panZoom)
+        _ = runWindow(30) { step in CanvasViewport(x: 120, y: 90, zoom: zoomValue(step)) }
+        let handoffZoom = zoomValue(29)
+        let transitionPan = runWindow(30) { step in
+            CanvasViewport(x: 120 + Double(step + 1) * 3, y: 90 + Double(step + 1) * 2, zoom: handoffZoom)
+        }
+
+        // Zc — the pure-zoom control for the interleave.
+        settle(x: 120, y: 90, zoom: panZoom)
+        let control = runWindow(30) { step in CanvasViewport(x: 120, y: 90, zoom: zoomValue(step)) }
+
+        // I — strict interleave over the SAME zoom sequence: every pan step is
+        // a first-pan-after-zoom.
+        settle(x: 120, y: 90, zoom: panZoom)
+        let interleave = runWindow(60) { step in
+            let k = step / 2
+            let x = 120 + Double(k + step % 2) * 3
+            let y = 90 + Double(k + step % 2) * 2
+            return CanvasViewport(x: x, y: y, zoom: zoomValue(k))
+        }
+
+        // Structural guards, in the slope scenarios' style: a degenerate drive
+        // makes every zero budget pass vacuously, so prove the interleave really
+        // mixed both gestures before believing any of them.
+        let interleaveZooms = Set((0..<30).map { (zoomValue($0) * 10_000).rounded() })
+        guard interleaveZooms.count >= 2 else {
+            throw Failure(message: "the interleave must walk at least two distinct zooms; got \(interleaveZooms.count)")
+        }
+        guard abs(canvas.viewport.x - 120) > 1 else {
+            throw Failure(message: "the interleave must actually pan; x stayed at \(canvas.viewport.x)")
+        }
+
+        let stats = canvas.qaCameraLayoutStats
+        let prose = AssistantProseView.qaMeasurementCount - proseBefore
+        let invalidations = canvas.qaTotalTileLayoutInvalidationCount - invalidationsBefore
+        let allStepMs = pure.stepMs + transitionPan.stepMs + control.stepMs + interleave.stepMs
+        let transitionSpikeMs = (transitionPan.stepMs.prefix(5).max() ?? 0) - panMedianMs
+
+        var measurements: [PerfMeasurement] = []
+
+        measurements.append(PerfBudget(
+            metric: "gesture-transition.transitionPanChromeRedraws",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "a pan at the handed-off zoom changes no chrome floor; a nonzero here is zoom work leaking into the pan window"
+        ).evaluate(Double(transitionPan.chromeRedraws)))
+
+        measurements.append(PerfBudget(
+            metric: "gesture-transition.transitionPanLayoutPasses",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "the pan window must not inherit the zoom's per-tile layout — a value near the tile count is the deferred settling flush arriving on the first pan frames, which is the felt spike"
+        ).evaluate(Double(transitionPan.layoutPasses)))
+
+        measurements.append(PerfBudget(
+            metric: "gesture-transition.excessChromeRedraws",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "interleaved pans must add zero chrome work over the same zoom sequence run pure — the control and interleave cross identical scale buckets"
+        ).evaluate(Double(interleave.chromeRedraws - control.chromeRedraws)))
+
+        measurements.append(PerfBudget(
+            metric: "gesture-transition.excessLayoutPasses",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "the same for layout passes: a pan step between two zoom steps is not allowed to buy extra tile layout"
+        ).evaluate(Double(interleave.layoutPasses - control.layoutPasses)))
+
+        measurements.append(PerfBudget(
+            metric: "gesture-transition.transitionStepOverhead",
+            limit: .atMost(1.0),
+            unit: .milliseconds,
+            rationale: "the direct encoding of the complaint: the worst of the first five pan steps after a zoom, over the steady-state pan median — lag at the transition is a spike, and a mean hides it"
+        ).evaluate(transitionSpikeMs))
+
+        measurements.append(PerfBudget(
+            metric: "gesture-transition.worstStepDuration",
+            limit: .atMost(frameBudgetMs),
+            unit: .milliseconds,
+            rationale: "coarse alarm over every step of every window"
+        ).evaluate(allStepMs.max() ?? 0))
+
+        measurements.append(PerfBudget(
+            metric: "gesture-transition.boundsWrites",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "no gesture mix may resize a tile's logical bounds"
+        ).evaluate(Double(stats.boundsWrites)))
+
+        measurements.append(PerfBudget(
+            metric: "gesture-transition.modelWrites",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "no gesture mix touches tile models"
+        ).evaluate(Double(stats.modelWrites)))
+
+        measurements.append(PerfBudget(
+            metric: "gesture-transition.proseMeasurements",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "no gesture mix may re-measure text"
+        ).evaluate(Double(prose)))
+
+        measurements.append(PerfBudget(
+            metric: "gesture-transition.tileLayoutInvalidations",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "the canvas must not ASK for tile relayout on any step of a mixed gesture"
+        ).evaluate(Double(invalidations)))
+
+        measurements.append(PerfBudget(
+            metric: "gesture-transition.cameraMutations",
+            limit: .atLeast(1),
+            unit: .count,
+            rationale: "teeth: the camera actually moved — zero means the drive did nothing, not that it got cheap"
+        ).evaluate(Double(stats.cameraMutations)))
+
+        measurements.append(PerfBudget(
+            metric: "gesture-transition.screenFrameMismatches",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "teeth: after both gestures have composed, every visible tile sits where CanvasEngine says"
+        ).evaluate(Double(canvas.qaTileScreenFrameMismatchCount)))
+
+        let detail = "\(tileCount) tiles; P \(String(format: "%.2f", panMedianMs)) ms median | "
+            + "T-pan \(transitionPan.chromeRedraws) chrome, \(transitionPan.layoutPasses) layouts, "
+            + "first-5 spike \(String(format: "%.2f", transitionSpikeMs)) ms | "
+            + "Zc \(control.chromeRedraws) chrome, \(control.layoutPasses) layouts | "
+            + "I \(interleave.chromeRedraws) chrome, \(interleave.layoutPasses) layouts"
+        return PerfScenarioResult(name: "canvas.gesture-transition", detail: detail, measurements: measurements)
     }
 
     // MARK: - Scenario: transcript delta cost against history length

@@ -606,6 +606,15 @@ run_app_check .build/debug/Array --canvas-camera-coalesce-check
 # would take ~45; and pan input COMPOSES with a live glide in ONE commit —
 # the property whose absence was the zoom→pan transition lag.
 run_app_check .build/debug/Array --canvas-zoom-momentum-check
+# The gesture TRANSITION, which every pure-gesture scenario is blind to — the
+# complaint that reframed the zoom program ("it lags when zooming when you
+# start panning") lived at the seam. Four windows on the canvas.pan/zoom
+# fixture: the pan window after a zoom handoff must inherit ZERO chrome
+# redraws and ZERO layout passes, and a strict interleave must add exactly
+# zero work over the same zoom sequence run pure. Own leg name so a
+# transition regression can be known-red without dragging the gating pan
+# legs with it.
+run_app_check .build/debug/Array --perf-budget-gesture-transition-check
 # The correctness oracle for the incremental row index, and the reason the cheap
 # path is allowed to exist. transcript.delta measures what a delta COSTS and is
 # structurally blind to a fast path that is cheap and WRONG — every count budget

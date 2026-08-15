@@ -1014,7 +1014,8 @@ enum ContinuumApp {
         if CommandLine.arguments.contains("--perf-budget-check")
             || CommandLine.arguments.contains("--perf-budget-zoom-check")
             || CommandLine.arguments.contains("--perf-budget-camera-slope-check")
-            || CommandLine.arguments.contains("--perf-budget-transcript-delta-check") {
+            || CommandLine.arguments.contains("--perf-budget-transcript-delta-check")
+            || CommandLine.arguments.contains("--perf-budget-gesture-transition-check") {
             do {
                 _ = NSApplication.shared
                 func value(after flag: String) -> String? {
@@ -1029,6 +1030,8 @@ enum ContinuumApp {
                     filter = "canvas.camera-slope"
                 } else if CommandLine.arguments.contains("--perf-budget-transcript-delta-check") {
                     filter = "transcript.delta"
+                } else if CommandLine.arguments.contains("--perf-budget-gesture-transition-check") {
+                    filter = "canvas.gesture-transition"
                 } else {
                     filter = value(after: "--scenario")
                 }
