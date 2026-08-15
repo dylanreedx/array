@@ -66,7 +66,7 @@ final class CommandOutputView: NSView {
 
         disclosureButton.target = self
         disclosureButton.action = #selector(toggleDisclosure(_:))
-        iconView.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: nil)
+        iconView.image = CanvasSymbolImage.image(named: "terminal")
         iconView.imageScaling = .scaleProportionallyDown
         titleLabel.font = NSFont.token(.label)
         titleLabel.lineBreakMode = .byTruncatingTail

@@ -261,7 +261,7 @@ private final class ChoiceRowView: NSControl, TokenThemed {
         detailLabel.font = .token(.caption)
         detailLabel.lineBreakMode = .byTruncatingTail
         detailLabel.isHidden = item.detail == nil
-        checkView.image = NSImage(systemSymbolName: "checkmark", accessibilityDescription: nil)
+        checkView.image = CanvasSymbolImage.image(named: "checkmark")
         checkView.imageScaling = .scaleProportionallyDown
         addSubview(checkView)
         addSubview(titleLabel)

@@ -914,7 +914,8 @@ enum UIProbeAppearance {
     ///
     /// P1.11 needs this because most of what the chrome and the content tiles paint
     /// is not a layer colour: `NSTextView.textColor`, `NSOutlineView.backgroundColor`,
-    /// `NSTextField.textColor`, `NSButton.contentTintColor`. Check 4 could not see
+    /// `NSTextField.textColor`, `NSButton.contentTintColor`,
+    /// `NSImageView.contentTintColor`. Check 4 could not see
     /// any of them, which was its recorded honest limit.
     private static func legalForegroundValues(theme: TokenTheme) -> Set<String> {
         var values: Set<String> = []
@@ -1030,6 +1031,15 @@ enum UIProbeAppearance {
             case let button as NSButton:
                 // Only the tint we assign; a nil tint is AppKit's own and not ours.
                 if let tint = button.contentTintColor {
+                    slots.append(ForegroundSlot(label: "\(owner).contentTintColor", color: tint, isSurface: false, view: view))
+                }
+            case let imageView as NSImageView:
+                // Template bitmap symbols still take their live colour from the
+                // image view. Census the images this freeze owns (bitmap-only
+                // templates) so the new witness does not widen P1.11 onto
+                // unrelated vector/image surfaces in the same tree.
+                if CanvasSymbolImage.owns(imageView.image),
+                   let tint = imageView.contentTintColor {
                     slots.append(ForegroundSlot(label: "\(owner).contentTintColor", color: tint, isSurface: false, view: view))
                 }
             case let field as NSTextField:
@@ -1175,9 +1185,17 @@ enum UIProbeAppearance {
                         foregroundsAsserted += 1
                         continue
                     }
-                    let legal = slot.isSurface
+                    var legal = slot.isSurface
                         ? legalValues(for: .background, theme: theme)
                         : legalForegroundValues(theme: theme)
+                    // Choice-row checkmarks deliberately use the same focus-ring
+                    // line token as the selected row. Image-view tint was outside
+                    // this census before the bitmap freeze; admit that one owned
+                    // semantic without making line colours legal for prose/labels.
+                    if let imageView = slot.view as? NSImageView,
+                       CanvasSymbolImage.owns(imageView.image) {
+                        legal.insert(hex(AgentLineRole.focusRing.color.cgColor(for: theme)))
+                    }
                     guard legal.contains(value) else {
                         throw fail("\(surface.id): \(slot.label) is \(value) in \(theme.rawValue), which is not a DesignTokens \(slot.isSurface ? "surface" : "text/accent") value for that theme — an AppKit colour property still holds a literal, an Apple semantic colour, or a token resolved for the wrong appearance")
                     }
@@ -2047,6 +2065,9 @@ enum UIProbeAppearance {
 
     /// Called from `UIProbe.runUIProbeChecks` (`--ui-probe-check`).
     static func runAppearanceChecks() throws {
+        guard CanvasSymbolImage.qaBitmapContractHolds() else {
+            throw fail("canvas SF Symbol freeze lost its shared bitmap-only template contract")
+        }
         let composerAssertions = try runComposerShellAppearanceCheck()
         let transcriptReviewAssertions = try runTranscriptReviewAppearanceCheck()
         let proseAssertions = try runAssistantProseAppearanceCheck()
@@ -2057,6 +2078,7 @@ enum UIProbeAppearance {
         let witness = try runTokenFixtureCheck()
         let adoption = try runAdoptedTokenValueCheck()
         print("UIProbeAppearance: \(adoption.assertions) layer colours + \(adoption.foregrounds) non-layer colours across \(adoption.owners) adopted owners hold a DesignTokens value in both appearances (P1.10/P1.11)")
+        print("UIProbeAppearance: canvas SF Symbols are shared bitmap-only template images; NSImageView tint is included in the appearance census")
         let edges = try runTileEdgeContrastCheck()
         print("UIProbeAppearance: tile outline vs canvas — \(edges.joined(separator: "; ")) (P1.11 goal)")
         let descriptorFills = try runDescriptorTileFillCheck()

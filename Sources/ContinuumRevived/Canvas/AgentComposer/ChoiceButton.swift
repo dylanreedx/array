@@ -64,7 +64,7 @@ class ChoiceButton: NSControl, TokenThemed {
         titleLabel.stringValue = title
         titleLabel.font = .token(.label)
         titleLabel.lineBreakMode = .byTruncatingTail
-        chevronView.image = NSImage(systemSymbolName: "chevron.up.chevron.down", accessibilityDescription: nil)
+        chevronView.image = CanvasSymbolImage.image(named: "chevron.up.chevron.down")
         chevronView.imageScaling = .scaleProportionallyDown
         addSubview(titleLabel)
         addSubview(chevronView)

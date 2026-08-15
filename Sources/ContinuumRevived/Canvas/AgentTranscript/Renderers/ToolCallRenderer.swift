@@ -60,7 +60,7 @@ final class ToolCallView: NSView {
 
         disclosureButton.target = self
         disclosureButton.action = #selector(toggleDisclosure(_:))
-        iconView.image = NSImage(systemSymbolName: "wrench.and.screwdriver", accessibilityDescription: nil)
+        iconView.image = CanvasSymbolImage.image(named: "wrench.and.screwdriver")
         iconView.imageScaling = .scaleProportionallyDown
 
         titleLabel.font = NSFont.token(.label)

@@ -914,18 +914,11 @@ private final class TitleBarView: NSView, TokenThemed {
         applyTokens()
     }
 
-    /// One × image per glyph point size, shared across every tile's bar. The
-    /// glyph size is bucketed upstream (`closeGlyphWorldPointSize`), so this
-    /// holds a handful of sizes for the whole zoom range — without it, every
-    /// tile minted its own SF Symbol image at each bucket crossing.
-    private static var closeGlyphImageCache: [CGFloat: NSImage] = [:]
+    /// One bitmap × image per bucketed glyph point size, shared across every
+    /// tile's bar. The symbol's vector recipe is consumed here once, rather than
+    /// re-rasterized by AppKit at every effective backing scale during zoom.
     static func closeGlyphImage(pointSize: CGFloat) -> NSImage? {
-        if let cached = closeGlyphImageCache[pointSize] { return cached }
-        let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold)
-        let image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tile")?
-            .withSymbolConfiguration(config)
-        if let image { closeGlyphImageCache[pointSize] = image }
-        return image
+        CanvasSymbolImage.image(named: "xmark", pointSize: pointSize, weight: .semibold)
     }
 
     /// Set the close button's edge length (world units) and glyph point size.
