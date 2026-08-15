@@ -355,8 +355,21 @@ final class InsetTextFieldCell: NSTextFieldCell {
         return result
     }
 
+    /// Borderless AppKit text cells return the control's entire bounds as their
+    /// drawing rect. In a 28pt search row that leaves a 14pt line sitting on the
+    /// default baseline rather than optically centred. Use the cell's measured
+    /// single-line height for drawing AND editing so the placeholder, caret and
+    /// selection all occupy the same centred rect.
+    private func textRect(forBounds rect: NSRect) -> NSRect {
+        var result = inset(super.drawingRect(forBounds: rect))
+        let lineHeight = min(result.height, ceil(cellSize(forBounds: rect).height))
+        result.origin.y += floor((result.height - lineHeight) / 2)
+        result.size.height = lineHeight
+        return result
+    }
+
     override func drawingRect(forBounds rect: NSRect) -> NSRect {
-        inset(super.drawingRect(forBounds: rect))
+        textRect(forBounds: rect)
     }
 
     override func edit(
@@ -364,7 +377,7 @@ final class InsetTextFieldCell: NSTextFieldCell {
         delegate: Any?, event: NSEvent?
     ) {
         super.edit(
-            withFrame: inset(rect), in: controlView, editor: editor,
+            withFrame: textRect(forBounds: rect), in: controlView, editor: editor,
             delegate: delegate, event: event)
     }
 
@@ -373,7 +386,7 @@ final class InsetTextFieldCell: NSTextFieldCell {
         delegate: Any?, start: Int, length: Int
     ) {
         super.select(
-            withFrame: inset(rect), in: controlView, editor: editor,
+            withFrame: textRect(forBounds: rect), in: controlView, editor: editor,
             delegate: delegate, start: start, length: length)
     }
 }
@@ -3763,13 +3776,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         guard card.superview == nil else { return }
         contentView.addSubview(card)
         guard !prefersReducedMotion() else { return }
-        card.alphaValue = 0
-        card.layer?.transform = CATransform3DMakeScale(0.98, 0.98, 1)
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = Self.crossfadeDuration
-            card.animator().alphaValue = 1
-        }
-        card.layer?.transform = CATransform3DIdentity
+        card.animatePresentation(duration: Self.crossfadeDuration)
     }
 
     private func dismissHoverCard() {
@@ -3840,6 +3847,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var isHoverCardVisibleForQA: Bool { hoverCard?.superview != nil }
     var hoverCardFrameForQA: NSRect? { hoverCard?.superview == nil ? nil : hoverCard?.frame }
     var hoverCardLinesForQA: [String] { hoverCard?.qaLinesForQA ?? [] }
+    var hoverCardBrandMarksAreTemplatesForQA: Bool {
+        hoverCard?.qaBrandMarksAreTemplatesForQA ?? false
+    }
+    var hoverCardBrandMarkTintForQA: NSColor? { hoverCard?.qaBrandMarkTintForQA }
 
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.4-focus-ring-and-floors.md
     /// Move the ring, and answer which table rows have to be repainted for it.
@@ -4134,6 +4145,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var scopeButtonForQA: ChoiceButton { scopeButton }
     var searchFieldViewForQA: NSTextField { searchField }
     var searchFieldFrameForQA: NSRect { searchField.frame }
+    var searchTextDrawingRectForQA: NSRect {
+        searchField.cell?.drawingRect(forBounds: searchField.bounds) ?? .zero
+    }
+    var searchTextMeasuredHeightForQA: CGFloat {
+        searchField.cell?.cellSize(forBounds: searchField.bounds).height ?? 0
+    }
     var scopePopoverItemsForQA: [ChoiceItem] { scopeButton.qaPresentedItems }
     var scopePopoverWidthForQA: CGFloat? { scopeButton.qaPopoverWidth }
     var isScopePopoverPresentedForQA: Bool { scopeButton.qaIsPopoverPresented }

@@ -187,6 +187,14 @@ enum InkAlignedSymbol {
 enum BrandMark96 {
     private static var cache: [String: NSImage?] = [:]
 
+    /// Provider silhouettes use the strongest possible monochrome foreground.
+    /// `NSColor.labelColor` looks like this treatment but resolves at ~85% alpha;
+    /// at 14pt that softness costs real legibility. Resolve explicitly to opaque
+    /// black/white from the same appearance mapping as every tokenized view.
+    static func foreground(in view: NSView) -> NSColor {
+        BrandToken.providerForeground.nsColor(for: view.effectiveTokenTheme)
+    }
+
     /// The mark for a model id, or nil when Array has no asset for its vendor.
     ///
     /// **Keyed off the PROVIDER, not the model's spelling**, and that distinction
@@ -331,7 +339,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         card.addSubview(statusGlyph)
 
         placementLabel.font = .token(.caption)
-        stateLabel.font = .token(.label)
+        // Status is telemetry, not a heading. Keep the label rung's 11pt size so
+        // it fits the fixed 14pt band, but use a regular monospaced face: the
+        // changing word/time pair stays quiet and its digits do not breathe.
+        stateLabel.font = .monospacedSystemFont(
+            ofSize: Typography.style(for: .label).size, weight: .regular)
         titleLabel.font = .token(.title)
         branchLabel.font = .token(.label)
         modelLabel.font = .token(.label)
@@ -557,6 +569,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         decorations.accent = accent
         statusGlyph.colour = accent
         decorations.muted = TextToken.textSecondary.color.nsColor(in: self)
+        // Provider marks are silhouettes, not metadata text. Full-strength
+        // Opaque black in Aqua and white in Dark Aqua gives the tiny 14pt artwork
+        // maximum contrast without recolouring the vendor shape by status or row
+        // recession.
+        decorations.markColour = BrandMark96.foreground(in: self)
 
         // Recession is the row's words, never its accent: `accentOpacity` paints the
         // state at full strength however far the row recedes, which is queue-94's
@@ -901,6 +918,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         jumpHint.hitTest(NSPoint(x: jumpHint.bounds.midX, y: jumpHint.bounds.midY)) == nil
     }
     var qaStatusFrame: NSRect { stateLabel.convert(stateLabel.bounds, to: self) }
+    var qaStatusFontForQA: NSFont? { stateLabel.font }
+    var qaProviderMarkColourForQA: NSColor { decorations.markColour }
     var titleFrame: NSRect { titleLabel.convert(titleLabel.bounds, to: self) }
 
     func acceptsRenameDoubleClick(at point: NSPoint) -> Bool {
@@ -941,7 +960,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 @MainActor
 final class StatusGlyphView: NSView {
     var symbol: String? { didSet { needsDisplay = true } }
-    var colour: NSColor = .labelColor { didSet { needsDisplay = true } }
+    var colour = TextToken.textPrimary.color.nsColor(for: TokenTheme.light) {
+        didSet { needsDisplay = true }
+    }
     var inkFraction: CGFloat = InkAlignedSymbol.inkTargetFraction {
         didSet { needsDisplay = true }
     }
@@ -1014,8 +1035,9 @@ private final class Decorations: NSView {
     var drawsBranchGlyph = false
     var markSlot: NSRect?
     var mark: NSImage?
-    var accent: NSColor = .labelColor
-    var muted: NSColor = .secondaryLabelColor
+    var accent = TextToken.textPrimary.color.nsColor(for: TokenTheme.light)
+    var muted = TextToken.textSecondary.color.nsColor(for: TokenTheme.light)
+    var markColour = BrandToken.providerForeground.nsColor(for: TokenTheme.light)
     var border: SidebarRowAnatomy.Border = .none
     var borderWidth: CGFloat = 0
     var paintsBorder = false
@@ -1032,11 +1054,11 @@ private final class Decorations: NSView {
                 alignment: .centred, flipped: isFlipped)
         }
         if let slot = markSlot, let mark {
-            // Flat, in the theme's own colour. §4.5 forbids tinting a vendor mark
-            // without per-vendor permission, so this is a REVIEW treatment and the
-            // trademark question is open — `brand-marks/PROVENANCE.md`.
+            // Full-strength black in Aqua, white in Dark Aqua. The old secondary
+            // colour at 85% made already-tiny vendor silhouettes needlessly faint.
+            // §4.5's trademark question remains open — `brand-marks/PROVENANCE.md`.
             InkAlignedSymbol.drawTinted(
-                mark, in: slot, colour: muted.withAlphaComponent(0.85), flipped: isFlipped)
+                mark, in: slot, colour: markColour, flipped: isFlipped)
         }
     }
 

@@ -440,6 +440,10 @@ enum SidebarScreenshotChecks {
                     // and setting the override goes through exactly that path.
                     host.inbox.rebuildRowsForQA()
                     host.inbox.layoutForQA()
+                    if rowSetID == "rules" {
+                        try assertStatusTypographyAndProviderMarkContrast(
+                            inbox: host.inbox, appearance: appearance)
+                    }
                     let geometry = measuredGeometry(in: host)
                     // What the redesigned cell actually gave each band, read off the
                     // live cells. A row whose state column is narrower than the word
@@ -459,8 +463,12 @@ enum SidebarScreenshotChecks {
                                 cell.qaProviderGlyph))
                         }
                     }
+                    if rowSetID == "rules" {
+                        try assertHoverCardCarriesWhatTheRowCannot(
+                            inbox: host.inbox, rows: liveRows, appearance: appearance)
+                    }
                     if appearanceName == .darkAqua, rowSetID == "rules" {
-                        try assertHoverCardCarriesWhatTheRowCannot(inbox: host.inbox, rows: liveRows)
+                        try assertSearchPlaceholderIsVerticallyCentered(inbox: host.inbox)
                     }
                     let rep = try UIProbe.bitmap(
                         of: host.container, id: "live96-\(rowSetID)")
@@ -916,7 +924,7 @@ enum SidebarScreenshotChecks {
 /// and would silently drop every one of those fields.
 @MainActor
 private func assertHoverCardCarriesWhatTheRowCannot(
-    inbox: AgentInboxView, rows: [AgentInboxRow]
+    inbox: AgentInboxView, rows: [AgentInboxRow], appearance: NSAppearance
 ) throws {
     guard let subject = rows.first(where: { $0.checkedOutBranch != nil }) else {
         throw SidebarScreenshotChecks.Failure(description:
@@ -954,6 +962,29 @@ private func assertHoverCardCarriesWhatTheRowCannot(
                 "the hover card does not carry '\(expected)' — it said \(lines)")
         }
     }
+    guard inbox.hoverCardBrandMarksAreTemplatesForQA,
+          let tint = inbox.hoverCardBrandMarkTintForQA else {
+        throw SidebarScreenshotChecks.Failure(description:
+            "the hover-card provider image is not a tinted template — its source "
+            + "pixels can disappear against the glass surface")
+    }
+    var tintComponents: (CGFloat, CGFloat, CGFloat, CGFloat)?
+    appearance.performAsCurrentDrawingAppearance {
+        guard let resolved = tint.usingColorSpace(.sRGB) else { return }
+        tintComponents = (resolved.redComponent, resolved.greenComponent,
+                          resolved.blueComponent, resolved.alphaComponent)
+    }
+    let expectedTint: CGFloat = appearance.name == .darkAqua ? 1 : 0
+    guard let tintComponents,
+          abs(tintComponents.0 - expectedTint) < 0.01,
+          abs(tintComponents.1 - expectedTint) < 0.01,
+          abs(tintComponents.2 - expectedTint) < 0.01,
+          abs(tintComponents.3 - 1) < 0.01 else {
+        throw SidebarScreenshotChecks.Failure(description:
+            "the hover-card provider template did not resolve opaque "
+            + "\(expectedTint == 1 ? "white" : "black") in \(appearance.name.rawValue): "
+            + "\(String(describing: tintComponents))")
+    }
     // The other half of the claim: the ROW still does not say these, which is why
     // the card has to. If a future row starts printing them, this fires and the
     // duplication gets decided deliberately.
@@ -974,6 +1005,69 @@ private func assertHoverCardCarriesWhatTheRowCannot(
     print(
         "SidebarScreenshotChecks: hover card carries \(lines.count) lines the row cannot "
         + "— zone, harness and the branch mismatch, and withUnconfirmed keeps all three")
+}
+
+/// AppKit gives a borderless text cell the field's full height as its drawing
+/// rect. The 96 header centres the measured single-line rect instead, or its
+/// placeholder visibly hangs low inside the otherwise symmetric search row.
+@MainActor
+private func assertSearchPlaceholderIsVerticallyCentered(inbox: AgentInboxView) throws {
+    inbox.headerStyleOverride = AgentInboxHeaderStyleOverride()
+    defer { inbox.headerStyleOverride = nil }
+    inbox.layoutForQA()
+
+    let field = inbox.searchFieldViewForQA
+    let drawing = inbox.searchTextDrawingRectForQA
+    let measuredHeight = ceil(inbox.searchTextMeasuredHeightForQA)
+    guard abs(drawing.midY - field.bounds.midY) <= 0.5,
+          abs(drawing.height - measuredHeight) <= 0.5,
+          drawing.height < field.bounds.height else {
+        throw SidebarScreenshotChecks.Failure(description:
+            "the 96 search placeholder is not centred in its field "
+            + "(field \(field.bounds), drawing \(drawing), measured height \(measuredHeight))")
+    }
+    print("SidebarScreenshotChecks: 96 search placeholder uses a centred \(Int(drawing.height))pt line in a \(Int(field.bounds.height))pt field")
+}
+
+/// The 96 status is quiet, fixed-width telemetry; provider silhouettes need the
+/// opposite treatment and use the strongest native foreground at their tiny size.
+@MainActor
+private func assertStatusTypographyAndProviderMarkContrast(
+    inbox: AgentInboxView, appearance: NSAppearance
+) throws {
+    guard let cell = inbox.qaMaterializedRowCells
+        .compactMap({ $0 as? AgentInbox96CellView })
+        .first(where: { $0.qaProviderGlyph == "mark" }),
+          let font = cell.qaStatusFontForQA else {
+        throw SidebarScreenshotChecks.Failure(description:
+            "the 96 rules fixture materialized no provider mark/status font witness")
+    }
+    let traits = NSFontManager.shared.traits(of: font)
+    guard font.isFixedPitch, !traits.contains(.boldFontMask) else {
+        throw SidebarScreenshotChecks.Failure(description:
+            "the 96 status is not regular mono (font \(font), traits \(traits))")
+    }
+
+    var components: (CGFloat, CGFloat, CGFloat, CGFloat)?
+    appearance.performAsCurrentDrawingAppearance {
+        guard let colour = cell.qaProviderMarkColourForQA.usingColorSpace(.sRGB) else { return }
+        components = (colour.redComponent, colour.greenComponent,
+                      colour.blueComponent, colour.alphaComponent)
+    }
+    guard let components else {
+        throw SidebarScreenshotChecks.Failure(description:
+            "the 96 provider mark colour did not resolve in sRGB")
+    }
+    let isDark = appearance.name == .darkAqua
+    let expected: CGFloat = isDark ? 1 : 0
+    guard abs(components.0 - expected) < 0.01,
+          abs(components.1 - expected) < 0.01,
+          abs(components.2 - expected) < 0.01,
+          abs(components.3 - 1) < 0.01 else {
+        throw SidebarScreenshotChecks.Failure(description:
+            "the 96 provider mark is not full-strength \(isDark ? "white" : "black") "
+            + "in \(appearance.name.rawValue): \(components)")
+    }
 }
 
 @MainActor

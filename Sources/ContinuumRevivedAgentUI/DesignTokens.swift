@@ -164,6 +164,16 @@ public enum TextToken: String, CaseIterable, Sendable {
     }
 }
 
+/// Foregrounds for bundled brand silhouettes. These deliberately do not join
+/// `TextToken`: a vendor mark is neither text nor a status accent, and its tiny
+/// geometry needs the full black/white endpoint rather than the softened house
+/// foreground used for words.
+public enum BrandToken {
+    public static let providerForeground = TokenColor(
+        light: ChipColor(r: 0, g: 0, b: 0),
+        dark: ChipColor(r: 1, g: 1, b: 1))
+}
+
 /// Lines. Two are gated; one is an explicit, reasoned exemption.
 public enum LineToken: String, CaseIterable, Sendable {
     /// The outline of an object — a tile, a dock, a text field. Delineates, so
