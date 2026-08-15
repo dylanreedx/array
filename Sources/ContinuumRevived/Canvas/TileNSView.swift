@@ -1081,13 +1081,18 @@ private final class TitleBarView: NSView, TokenThemed {
 
     /// The rect the title is drawn into: from the leading inset to whatever comes
     /// next on the right — the status pill if there is one, otherwise the drag dots —
-    /// less one `Space.s` gap. Never negative-width.
+    /// less one `Space.s` gap. Never negative-width, and never STARTING past the
+    /// blocker either: on a 180-world tile at deep zoom-out the bucketed chrome
+    /// floors legitimately overflow the bar, and an empty title rect whose origin
+    /// sits right of the dots still reads as "title under the handle" to the
+    /// pill-layout census. The clamp only moves rects that are already empty.
     private func titleRect(theme: TokenTheme) -> NSRect {
         let scale = chromeScale
-        let leading = CGFloat(Space.m) * scale
         let blockedFrom = agentStatus.flatMap { statusPillRect(for: $0, theme: theme)?.minX }
             ?? qaDragHandleLeadingX
-        let available = max(0, blockedFrom - CGFloat(Space.s) * scale - leading)
+        let limit = max(0, blockedFrom - CGFloat(Space.s) * scale)
+        let leading = min(CGFloat(Space.m) * scale, limit)
+        let available = max(0, limit - leading)
         let height = ("X" as NSString).size(withAttributes: titleAttributes(theme: theme)).height
         return NSRect(
             x: leading, y: max(0, (bounds.height - height) / 2),
