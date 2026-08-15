@@ -3552,6 +3552,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// last hovered row stays lit behind an app you switched away from.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        // The card is a child of the WINDOW, not of this view, so it does not
+        // travel when the list is reparented or torn down — it would simply be
+        // left behind, floating over a canvas describing a row that is gone.
+        dismissHoverCard()
         let center = NotificationCenter.default
         // TOKENS, and never `removeObserver(self)`. The blanket form is one call
         // and it is wrong here: `NSView` and `NSTableView` register the view
@@ -3675,7 +3679,167 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         hoveredAgentId = agentId
         redraw(tableRows: [tableRow(forAgentId: previous), tableRow(forAgentId: agentId)]
             .compactMap { $0 })
+        // The card hangs off THIS, the one choke point, rather than off a tracking
+        // area of its own. Everything that already nulls hover — the list
+        // scrolling under a still pointer, the window resigning key, every full
+        // re-render — therefore dismisses the card too, without any of it knowing
+        // the card exists.
+        updateHoverCard()
     }
+
+    // MARK: - Hover card
+
+    /// How long the pointer must rest before the card opens. T3's number, and it
+    /// is the difference between a card that answers you and one that pounces.
+    private static let hoverCardDwell: TimeInterval = 0.15
+    /// After a card closes, the next one opens INSTANTLY for this long. Without
+    /// it, running the pointer down the list re-serves the delay on every row and
+    /// scanning feels like wading; with it, the first card costs 150ms and the
+    /// rest are immediate.
+    private static let hoverCardGrace: TimeInterval = 0.4
+    private static let hoverCardGap: CGFloat = 4
+
+    /// Nil-by-default, like the row and the header. Production hover is untouched,
+    /// so `--sidebar-ux-check`'s hover ladder never sees this.
+    var hoverCardEnabled = false {
+        didSet { if !hoverCardEnabled { dismissHoverCard() } }
+    }
+    /// Injectable so a check can fire the dwell without sleeping — the shape
+    /// `wakeRerenderScheduler` established.
+    var hoverCardScheduler: WakeRerenderScheduler?
+    private var hoverCard: InboxHoverCardView?
+    private var hoverCardCancel: (() -> Void)?
+    private var hoverCardClosedAt: Date?
+
+    private func updateHoverCard() {
+        hoverCardCancel?()
+        hoverCardCancel = nil
+        guard hoverCardEnabled, let id = hoveredAgentId,
+              let row = rows.first(where: { $0.id == id })
+        else {
+            dismissHoverCard()
+            return
+        }
+        let isOpen = hoverCard?.superview != nil
+        let withinGrace = hoverCardClosedAt.map {
+            clock().timeIntervalSince($0) <= Self.hoverCardGrace
+        } ?? false
+        guard !isOpen, !withinGrace else {
+            presentHoverCard(for: row)
+            return
+        }
+        let show: () -> Void = { [weak self] in
+            MainActor.assumeIsolated { self?.presentHoverCard(for: row) }
+        }
+        if let scheduler = hoverCardScheduler {
+            hoverCardCancel = scheduler(Self.hoverCardDwell, show)
+        } else {
+            let work = DispatchWorkItem(block: show)
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.hoverCardDwell, execute: work)
+            hoverCardCancel = { work.cancel() }
+        }
+    }
+
+    private func presentHoverCard(for row: AgentInboxRow) {
+        guard hoverCardEnabled, hoveredAgentId == row.id,
+              let contentView = window?.contentView,
+              let anchor = hoverCardAnchor(for: row.id)
+        else { return }
+
+        let card = hoverCard ?? InboxHoverCardView(frame: .zero)
+        hoverCard = card
+        card.apply(title: row.displayTitle, lines: hoverCardLines(for: row))
+        let size = card.intrinsicContentSize
+
+        // Top-aligned with the row and just clear of the sidebar, then clamped so a
+        // row near the bottom does not push the card off the window.
+        var origin = NSPoint(
+            x: anchor.maxX + Self.hoverCardGap,
+            y: anchor.maxY - size.height)
+        origin.x = min(origin.x, contentView.bounds.maxX - size.width - Self.hoverCardGap)
+        origin.y = max(Self.hoverCardGap, min(origin.y, contentView.bounds.maxY - size.height))
+        card.frame = NSRect(origin: origin, size: size)
+
+        guard card.superview == nil else { return }
+        contentView.addSubview(card)
+        guard !prefersReducedMotion() else { return }
+        card.alphaValue = 0
+        card.layer?.transform = CATransform3DMakeScale(0.98, 0.98, 1)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.crossfadeDuration
+            card.animator().alphaValue = 1
+        }
+        card.layer?.transform = CATransform3DIdentity
+    }
+
+    private func dismissHoverCard() {
+        hoverCardCancel?()
+        hoverCardCancel = nil
+        guard let card = hoverCard, card.superview != nil else { return }
+        card.removeFromSuperview()
+        hoverCardClosedAt = clock()
+    }
+
+    /// The hovered row's rect, in the window content view's coordinates.
+    private func hoverCardAnchor(for id: UUID) -> NSRect? {
+        guard let contentView = window?.contentView,
+              let rect = tableRowFrameForQA(id: id) else { return nil }
+        return contentView.convert(tableView.convert(rect, to: nil), from: nil)
+    }
+
+    /// Every line is optional and a missing fact draws nothing — a card padded
+    /// with "Unknown" would be worse than a shorter card.
+    private func hoverCardLines(for row: AgentInboxRow) -> [InboxHoverCardLine] {
+        var lines: [InboxHoverCardLine] = []
+        if let project = row.projectName, !project.isEmpty {
+            lines.append(.init(symbol: "folder", text: project))
+        }
+        if let zone = row.zoneName, !zone.isEmpty {
+            lines.append(.init(symbol: "square.grid.2x2", text: zone))
+        }
+        lines.append(.init(symbol: "desktopcomputer", text: Self.hostName))
+        if let branch = row.branch, !branch.isEmpty {
+            lines.append(.init(symbol: "arrow.triangle.branch", text: branch))
+        }
+        if let checkedOut = row.checkedOutBranch {
+            lines.append(.init(
+                symbol: "exclamationmark.triangle.fill",
+                text: "Checked out on \(checkedOut)", isWarning: true))
+        }
+        if let harness = row.harness, !harness.isEmpty {
+            lines.append(.init(symbol: "terminal", text: harness))
+        }
+        if let model = row.model, !model.isEmpty {
+            // The mark when we have one, the generic chip glyph when we do not —
+            // never a two-character cipher.
+            lines.append(.init(
+                symbol: "cpu", mark: BrandMark96.mark(forModel: model), text: model))
+        }
+        if let last = row.lastActiveAt {
+            lines.append(.init(symbol: "clock", text: Self.hoverCardTimestamp.string(from: last)))
+        }
+        return lines
+    }
+
+    /// The machine the agent is running on. One string for now, and honest:
+    /// everything Array runs is local. It earns its place by being the line a
+    /// remote environment will appear on rather than a line that has to be
+    /// invented later.
+    private static let hostName = Host.current().localizedName ?? "This Mac"
+
+    /// POSIX and explicit, never `dateStyle`/`timeStyle`. The house rule is
+    /// written out on `InboxUndoToast.wakeTimeFormatter`: a locale-dependent
+    /// rendering makes an assertion depend on whose machine ran it.
+    private static let hoverCardTimestamp: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "d MMM HH:mm"
+        return formatter
+    }()
+
+    var isHoverCardVisibleForQA: Bool { hoverCard?.superview != nil }
+    var hoverCardFrameForQA: NSRect? { hoverCard?.superview == nil ? nil : hoverCard?.frame }
+    var hoverCardLinesForQA: [String] { hoverCard?.qaLinesForQA ?? [] }
 
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.4-focus-ring-and-floors.md
     /// Move the ring, and answer which table rows have to be repainted for it.

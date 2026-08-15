@@ -1387,6 +1387,8 @@ final class SidebarInbox96PlaygroundView: NSView {
     /// header only when a redesigned row happens to be on.
     private let headerButton = NSButton(
         checkboxWithTitle: "96 header", target: nil, action: nil)
+    private let hoverCardButton = NSButton(
+        checkboxWithTitle: "Hover card", target: nil, action: nil)
     private let readout = NSTextField(labelWithString: "")
     private let inbox: AgentInboxView
     /// Pinned. Rule 2 is an AGE comparison, so a wall clock would have the fixture's
@@ -1429,6 +1431,9 @@ final class SidebarInbox96PlaygroundView: NSView {
         headerButton.state = .on
         headerButton.target = self
         headerButton.action = #selector(controlChanged)
+        hoverCardButton.state = .on
+        hoverCardButton.target = self
+        hoverCardButton.action = #selector(controlChanged)
 
         readout.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         readout.maximumNumberOfLines = 2
@@ -1437,7 +1442,7 @@ final class SidebarInbox96PlaygroundView: NSView {
         let topRow = NSStackView(views: [styleControl, rowsControl, pitchControl, headerButton])
         topRow.orientation = .horizontal
         topRow.spacing = CGFloat(Space.m)
-        let secondRow = NSStackView(views: [borderControl, iconControl, modelTextButton])
+        let secondRow = NSStackView(views: [borderControl, iconControl, modelTextButton, hoverCardButton])
         secondRow.orientation = .horizontal
         secondRow.spacing = CGFloat(Space.m)
         let controls = NSStackView(views: [topRow, secondRow, readout])
@@ -1519,6 +1524,7 @@ final class SidebarInbox96PlaygroundView: NSView {
         // one-row band back, which is the comparison this switch exists for.
         inbox.headerStyleOverride =
             headerButton.state == .on ? AgentInboxHeaderStyleOverride() : nil
+        inbox.hoverCardEnabled = hoverCardButton.state == .on
 
         // "Today's row" clears the override, which puts the list back to exactly
         // what ships — the A/B this section exists for.

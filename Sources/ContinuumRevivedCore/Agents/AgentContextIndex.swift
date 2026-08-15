@@ -42,6 +42,14 @@ public struct AgentRowContext: Equatable, Sendable {
     /// footing as the workspace / zone / project / tile names beside it.
     public let displayName: String?
     public let agentKind: AgentKind
+    /// Which CLI Array drives this agent — `AgentRecord.harness`, carried as its
+    /// rawValue (`Claude Code` / `Codex` / `Pi`), which is already display text.
+    ///
+    /// `agentKind` cannot answer this and never could: every `AgentRecord`-backed
+    /// agent is folded in as `.managed` below, and the inbox shows only managed
+    /// agents — so `agentKind` is the same value for every row the sidebar draws.
+    /// nil for a terminal session, which has no record to own a harness.
+    public let harness: String?
     /// nil for a terminal session: `AgentDescriptor` records a kind and a
     /// status, never a model. Only an `AgentRecord`-backed agent has one.
     public let model: String?
@@ -103,6 +111,7 @@ public struct AgentRowContext: Equatable, Sendable {
         tileTitle: String? = nil,
         displayName: String? = nil,
         agentKind: AgentKind,
+        harness: String? = nil,
         model: String? = nil,
         role: String? = nil,
         worktreeBranch: String? = nil,
@@ -116,6 +125,7 @@ public struct AgentRowContext: Equatable, Sendable {
         self.tileTitle = tileTitle
         self.displayName = displayName
         self.agentKind = agentKind
+        self.harness = harness
         self.model = model
         self.role = role
         self.worktreeBranch = worktreeBranch
@@ -191,6 +201,11 @@ public enum AgentContextIndex {
                 // record exists because Continuum runs the agent itself. The
                 // record carries no kind of its own to read.
                 agentKind: .managed,
+                // ...which is exactly why `harness` is carried separately. The kind
+                // above is `.managed` for every row the inbox draws, so it can never
+                // tell a Pi agent from a Codex one; the record knows, and its
+                // rawValue is already the display string.
+                harness: record.harness?.rawValue,
                 model: record.model,
                 role: record.role,
                 worktreeBranch: record.worktreeBranch,

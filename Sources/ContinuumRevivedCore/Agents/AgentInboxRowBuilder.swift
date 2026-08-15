@@ -233,7 +233,13 @@ public enum AgentInboxRowBuilder {
             // built rows with no context at all.
             createdAt: context?.createdAt ?? .distantPast,
             parentId: context?.parentId,
-            settlementBlocked: observedFacts.blocksSettlement(now: now)
+            settlementBlocked: observedFacts.blocksSettlement(now: now),
+            // §4.3's tooltip half. `branch(for:)` above collapses the two branches
+            // into the one the row prints; the card needs to know when they
+            // DISAGREE, which that collapse deliberately hides.
+            zoneName: context?.zoneName,
+            harness: context?.harness,
+            checkedOutBranch: mismatchedCheckout(for: context)
         )
     }
 
@@ -285,6 +291,17 @@ public enum AgentInboxRowBuilder {
     /// answers when it did not. nil means "not known", never "no branch".
     private static func branch(for context: AgentRowContext?) -> String? {
         context?.checkedOutBranch ?? context?.worktreeBranch
+    }
+
+    /// The checked-out branch, but ONLY when it disagrees with the agent's own.
+    ///
+    /// Carried nil when they agree, so the row's `isBranchMismatch` is a plain
+    /// presence test and no surface has to re-derive the comparison. The context
+    /// already computes the same predicate; this just refuses to carry a value
+    /// that says nothing.
+    private static func mismatchedCheckout(for context: AgentRowContext?) -> String? {
+        guard let context, context.isBranchMismatch else { return nil }
+        return context.checkedOutBranch
     }
 
     /// The row's elapsed reading, from the stamped turn start when there is one.

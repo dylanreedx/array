@@ -459,6 +459,9 @@ enum SidebarScreenshotChecks {
                                 cell.qaProviderGlyph))
                         }
                     }
+                    if appearanceName == .darkAqua, rowSetID == "rules" {
+                        try assertHoverCardCarriesWhatTheRowCannot(inbox: host.inbox, rows: liveRows)
+                    }
                     let rep = try UIProbe.bitmap(
                         of: host.container, id: "live96-\(rowSetID)")
                     let name = "live96-\(rowSetID)-280x\(Int(denseViewportHeight))-\(shortName(appearanceName)).png"
@@ -902,6 +905,77 @@ enum SidebarScreenshotChecks {
 ///
 /// A FIXTURE, and named one. Nothing here is evidence about the product — it is the
 /// set of rows the new design has to have an answer for.
+/// The hover card earns its place only if it says things the ROW does not.
+///
+/// §4.3 lets a narrowing row drop facts on the stated condition that they survive
+/// in the tooltip. So the assertion is not "a card appeared" — it is that the card
+/// carries zone, harness and a branch mismatch, three facts the sidebar has never
+/// rendered anywhere, and that the row beside it is still not rendering them.
+///
+/// Also witnesses `withUnconfirmed`, which rebuilds a row by hand on the live path
+/// and would silently drop every one of those fields.
+@MainActor
+private func assertHoverCardCarriesWhatTheRowCannot(
+    inbox: AgentInboxView, rows: [AgentInboxRow]
+) throws {
+    guard let subject = rows.first(where: { $0.checkedOutBranch != nil }) else {
+        throw SidebarScreenshotChecks.Failure(description:
+            "the 96 fixture no longer contains a branch-mismatch row — the card's "
+            + "only warning line is untested")
+    }
+    let frozen = subject.withUnconfirmed(true)
+    guard frozen.zoneName == subject.zoneName, frozen.harness == subject.harness,
+          frozen.checkedOutBranch == subject.checkedOutBranch else {
+        throw SidebarScreenshotChecks.Failure(description:
+            "withUnconfirmed dropped the card's fields (zone \(frozen.zoneName ?? "nil"), "
+            + "harness \(frozen.harness ?? "nil"), checkout \(frozen.checkedOutBranch ?? "nil")) "
+            + "— it rebuilds the row by hand and runs on the live path")
+    }
+
+    inbox.hoverCardEnabled = true
+    // Fire the dwell instead of sleeping through it.
+    inbox.hoverCardScheduler = { _, work in work(); return {} }
+    defer {
+        inbox.hoverCardEnabled = false
+        inbox.hoverCardScheduler = nil
+    }
+    guard inbox.hoverRowForQA(id: subject.id) else {
+        throw SidebarScreenshotChecks.Failure(description:
+            "could not hover the mismatch row — it is not on screen, so the card "
+            + "below would be measuring a row nobody can point at")
+    }
+    guard inbox.isHoverCardVisibleForQA else {
+        throw SidebarScreenshotChecks.Failure(description: "hovering a row did not open the card")
+    }
+    let lines = inbox.hoverCardLinesForQA
+    for expected in ["Review", "Codex", "Checked out on main"] {
+        guard lines.contains(where: { $0.contains(expected) }) else {
+            throw SidebarScreenshotChecks.Failure(description:
+                "the hover card does not carry '\(expected)' — it said \(lines)")
+        }
+    }
+    // The other half of the claim: the ROW still does not say these, which is why
+    // the card has to. If a future row starts printing them, this fires and the
+    // duplication gets decided deliberately.
+    let rowText = inbox.qaMaterializedRowCells
+        .filter { $0.qaAgentID == subject.id }
+        .flatMap { [$0.qaTitle, $0.qaStateLabel, $0.qaMeta, $0.qaBranch, $0.qaProject] }
+    for hidden in ["Review", "Codex"] {
+        guard !rowText.contains(where: { $0.contains(hidden) }) else {
+            throw SidebarScreenshotChecks.Failure(description:
+                "the row now prints '\(hidden)' as well as the card — decide which "
+                + "owns it rather than saying it twice")
+        }
+    }
+    inbox.hoverRowForQA(id: nil)
+    guard !inbox.isHoverCardVisibleForQA else {
+        throw SidebarScreenshotChecks.Failure(description: "the card outlived the hover that opened it")
+    }
+    print(
+        "SidebarScreenshotChecks: hover card carries \(lines.count) lines the row cannot "
+        + "— zone, harness and the branch mismatch, and withUnconfirmed keeps all three")
+}
+
 @MainActor
 enum AgentInbox96Fixtures {
     static func rows(now: Date) -> [AgentInboxRow] {
@@ -909,36 +983,50 @@ enum AgentInbox96Fixtures {
             _ index: Int, _ title: String, state: InboxState,
             attention: InboxAttention = .none, branch: String? = nil,
             model: String? = "anthropic/claude-opus-4-6", elapsed: TimeInterval? = nil,
-            lastActive: TimeInterval? = nil
+            lastActive: TimeInterval? = nil,
+            // The hover card's half of the row. None of it is drawn in the band —
+            // that is the point: §4.3 lets the row drop facts only because the
+            // tooltip keeps them, so the fixture has to carry facts the row does
+            // NOT show or the card would be demonstrating nothing.
+            zone: String? = nil, harness: String? = nil, checkedOut: String? = nil
         ) -> AgentInboxRow {
             AgentInboxRow(
                 id: UUID(uuidString: String(format: "00000096-0000-0000-0000-%012d", index))!,
                 title: title, projectName: "Array", state: state, attention: attention,
                 model: model, branch: branch, elapsed: elapsed,
                 lastActiveAt: lastActive.map { now.addingTimeInterval(-$0) },
-                createdAt: now.addingTimeInterval(-Double(index) * 600))
+                createdAt: now.addingTimeInterval(-Double(index) * 600),
+                zoneName: zone, harness: harness, checkedOutBranch: checkedOut)
         }
         let nudgeDelay = AgentInbox96CellView.settleNudgeDelay
         return [
             row(1, "Stop the camera resizing every tile view", state: .working,
                 branch: "agent/retained-world-plane", model: "openai-codex/gpt-5.6-sol",
-                elapsed: 84),
+                elapsed: 84, zone: "Canvas", harness: "Codex"),
             row(2, "Apply the measured-fit sacrifice order", state: .approval,
-                branch: "agent/measured-fit"),
+                branch: "agent/measured-fit", zone: "Sidebar", harness: "Claude Code"),
+            // The three harnesses side by side. On the ROW these are three identical
+            // agents — P3.1's complaint that a Pi agent is indistinguishable from
+            // the others is a fact about the row, and the card is where it stops
+            // being true.
             row(3, "Choose the provider mark set", state: .input,
-                branch: "agent/brand-marks", model: "google/gemini-3-pro"),
+                branch: "agent/brand-marks", model: "google/gemini-3-pro",
+                zone: "Sidebar", harness: "Pi"),
+            // The mismatch: assigned agent/terminal-outcomes, checkout sitting on
+            // main. The row prints one branch and cannot say they disagree.
             row(4, "Persist an honest terminal event", state: .failed,
                 attention: .unread, branch: "agent/terminal-outcomes",
-                model: "xai/grok-4-2", elapsed: 720),
+                model: "xai/grok-4-2", elapsed: 720,
+                zone: "Review", harness: "Codex", checkedOut: "main"),
             // A finished row's whole life, in four rows. Step one, twice: DONE and
             // unread. Same word, same mint, same check — only the number differs,
             // which is the only thing that actually differs.
             row(5, "Write the S0 density review", state: .ready, attention: .unread,
                 branch: "agent/s0-review", model: "mistralai/mistral-large-3",
-                lastActive: 90),
+                lastActive: 90, zone: "Review", harness: "Pi"),
             row(6, "Budget chrome repaints per camera step", state: .ready,
                 attention: .unread, branch: "agent/perf-budgets",
-                lastActive: nudgeDelay + 3600),
+                lastActive: nudgeDelay + 3600, zone: "Canvas", harness: "Claude Code"),
             // Step two: you looked at it. No word, no mark, no colour — looking is
             // the acknowledgement and silence is the reward. It keeps its age,
             // because "when did this land" is still a fair question.

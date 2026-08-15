@@ -302,6 +302,28 @@ enum UIProbeAppearance {
             ("appearance.agentInboxSettledTail", NSSize(width: 320, height: 620 + AgentInboxView.scopeControlHeight), {
                 LabCatalog.makeAgentInboxPreview(selecting: nil, rows: LabFixtures.inboxPagedRows())
             }),
+            // Program 96's hover card. Rendered standalone rather than through a
+            // hovered sidebar, because hover is a live pointer state a static
+            // sweep cannot hold — and what this sweep is for is the card's own two
+            // layers resolving in both appearances, which it paints from its
+            // content alone. The fixture carries a mismatch line deliberately, so
+            // the warning accent is painted here too and not only in theory.
+            ("appearance.inboxHoverCard", NSSize(width: 360, height: 220), {
+                let card = InboxHoverCardView(frame: .zero)
+                card.apply(
+                    title: "Stop the camera resizing every tile view",
+                    lines: [
+                        .init(symbol: "folder", text: "Array"),
+                        .init(symbol: "square.grid.2x2", text: "Sidebar"),
+                        .init(symbol: "desktopcomputer", text: "This Mac"),
+                        .init(symbol: "arrow.triangle.branch", text: "agent/retained-world-plane"),
+                        .init(symbol: "exclamationmark.triangle.fill",
+                              text: "Checked out on main", isWarning: true),
+                        .init(symbol: "terminal", text: "Claude Code"),
+                        .init(symbol: "cpu", text: "openai-codex/gpt-5.6-sol"),
+                    ])
+                return card
+            }),
             ("appearance.canvas", NSSize(width: 700, height: 480), {
                 CanvasNSView(canvasState: CanvasState(
                     viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
@@ -801,6 +823,13 @@ enum UIProbeAppearance {
         // what puts it under this gate is the `chrome.agentInbox.jumpHints` Lab card
         // — the one probed surface that renders the pills visible.
         "InboxJumpHintView",
+        // Program 96's hover card: `SurfaceToken.overlay` fill with an
+        // `AgentLineRole.controlBoundary` outline — the same pair as the pill
+        // above. It lives in the WINDOW's content view rather than in the sidebar,
+        // and it only paints while a row is hovered with the preview flag on, so
+        // no probed surface renders it today; it is listed here so that the first
+        // surface which does cannot arrive unregistered.
+        "InboxHoverCardView",
         // P3.11. The bulk-action bar, the same pair as the pill above it:
         // `SurfaceToken.overlay` fill with a `LineToken.border` outline. It paints only
         // while two or more rows are selected, so what puts it under this gate is the
@@ -1297,6 +1326,28 @@ enum UIProbeAppearance {
             ),
             AdoptedSurface(id: "descriptorTile", size: NSSize(width: 480, height: 320), make: {
                 DescriptorTileNSView(tile: canned(kind: .browser, title: "example.com"))
+            }),
+            // Program 96's hover card, built standalone with content: hover is a
+            // live pointer state no static probe can hold, and what this sweep
+            // needs is the card's own fill and boundary resolving per theme, which
+            // it paints from its content alone. Same fixture as
+            // `appearance.inboxHoverCard`, including the mismatch line, so both
+            // halves of the census see the same card.
+            AdoptedSurface(id: "inboxHoverCard", size: NSSize(width: 360, height: 220), make: {
+                let card = InboxHoverCardView(frame: .zero)
+                card.apply(
+                    title: "Stop the camera resizing every tile view",
+                    lines: [
+                        .init(symbol: "folder", text: "Array"),
+                        .init(symbol: "square.grid.2x2", text: "Sidebar"),
+                        .init(symbol: "desktopcomputer", text: "This Mac"),
+                        .init(symbol: "arrow.triangle.branch", text: "agent/retained-world-plane"),
+                        .init(symbol: "exclamationmark.triangle.fill",
+                              text: "Checked out on main", isWarning: true),
+                        .init(symbol: "terminal", text: "Claude Code"),
+                        .init(symbol: "cpu", text: "openai-codex/gpt-5.6-sol"),
+                    ])
+                return card
             }),
             AdoptedSurface(id: "noteTile", size: NSSize(width: 480, height: 320), make: {
                 NoteTileNSView(
