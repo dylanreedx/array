@@ -169,7 +169,8 @@ samples of 8,963; background save queue: 6).
 executable; add `CONTINUUM_FRAME_STATS=1` + `CONTINUUM_FRAME_STATS_FILE=<path>`
 to record gesture pacing, and `CONTINUUM_FRAME_HUD=1` to show the last completed
 gesture's effective FPS / late share / p95 directly on the canvas. The HUD adds
-no timer/display link and updates only after measurement. Kill old instances
+no timer/display link; it shows a rolling 30-frame, time-weighted summary at
+4 Hz so stalls lower the headline FPS instead of hiding behind p50. Kill old instances
 **by pid** — every Desktop dev
 bundle shares `dev.arrayapp.macos.dev`. Rebuild:
 `DEV_APP_PATH="$HOME/Desktop/Array Dev scalability.app" scripts/dev-app.sh

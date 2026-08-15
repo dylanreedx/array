@@ -3,9 +3,9 @@ import AppKit
 /// Opt-in, screen-space readout of the most recently completed canvas gesture.
 ///
 /// The view has no timer, display link, animation or layout constraints. Its
-/// text changes once at gesture completion through `CanvasFrameRecorder`, and
-/// it remains static during the next measured gesture so it cannot perturb the
-/// frame timings it reports.
+/// During a gesture the existing recorder publishes one rolling, 30-frame
+/// summary at most four times per second. There is no HUD-owned timer, display
+/// link, animation, or sampling path.
 @MainActor
 final class CanvasFrameHUDView: NSView {
     private let label = NSTextField(labelWithString: "FPS —")
@@ -46,7 +46,7 @@ final class CanvasFrameHUDView: NSView {
         let lateShare = Double(stats.overBudgetFrames) / Double(max(stats.frames, 1)) * 100
         return String(
             format: "%.0f FPS · %.0f%% late · p95 %.1f ms",
-            stats.effectiveFps,
+            stats.averageFps,
             lateShare,
             stats.p95Ms
         )

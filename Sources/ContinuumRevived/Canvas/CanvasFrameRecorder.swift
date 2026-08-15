@@ -42,6 +42,9 @@ final class CanvasFrameRecorder {
     private var gestureActive = false
     private var settleTimer: Timer?
     private let settleSeconds: CFTimeInterval = 0.25
+    private let hudPublishInterval: CFTimeInterval = 0.25
+    private let hudRollingFrameCount = 30
+    private var lastHUDPublishTimestamp: CFTimeInterval = 0
     private let onGestureStats: ((GestureStats) -> Void)?
 
     /// QA: the most recent completed gesture, so a check or a probe can read the
@@ -54,13 +57,16 @@ final class CanvasFrameRecorder {
         let p50Ms: Double
         let p95Ms: Double
         let worstMs: Double
+        /// Time-weighted throughput over the represented intervals. Unlike the
+        /// reciprocal of p50, long stalls lower this number immediately.
+        let averageFps: Double
         /// Frames that overran the display's own cadence — the honest "dropped"
         /// count, measured against the refresh rate actually in use rather than
         /// an assumed 60.
         let overBudgetFrames: Int
         let refreshHz: Double
 
-        var effectiveFps: Double { p50Ms > 0 ? 1_000 / p50Ms : 0 }
+        var medianFps: Double { p50Ms > 0 ? 1_000 / p50Ms : 0 }
     }
 
     init(view: NSView, onGestureStats: ((GestureStats) -> Void)? = nil) {
@@ -95,6 +101,7 @@ final class CanvasFrameRecorder {
         intervals.removeAll(keepingCapacity: true)
         cameraStepsThisGesture = 0
         lastTimestamp = 0
+        lastHUDPublishTimestamp = 0
         let link = view.displayLink(target: self, selector: #selector(tick(_:)))
         link.add(to: .main, forMode: .common)
         displayLink = link
@@ -106,7 +113,39 @@ final class CanvasFrameRecorder {
             intervals.append((now - lastTimestamp) * 1_000)
         }
         lastTimestamp = now
+        if lastHUDPublishTimestamp == 0 { lastHUDPublishTimestamp = now }
+        if Self.isHUDEnabled,
+           intervals.count >= 2,
+           now - lastHUDPublishTimestamp >= hudPublishInterval {
+            lastHUDPublishTimestamp = now
+            let rolling = Array(intervals.suffix(hudRollingFrameCount))
+            onGestureStats?(makeStats(intervals: rolling, cameraSteps: cameraStepsThisGesture))
+        }
         if CACurrentMediaTime() - lastCameraStep > settleSeconds { endGesture(link: link) }
+    }
+
+    private func makeStats(intervals: [Double], cameraSteps: Int) -> GestureStats {
+        let refreshHz: Double = {
+            let nominal = view?.window?.screen?.maximumFramesPerSecond ?? 60
+            return Double(max(nominal, 1))
+        }()
+        let budgetMs = 1_000 / refreshHz
+        let sorted = intervals.sorted()
+        func percentile(_ p: Double) -> Double {
+            let index = min(sorted.count - 1, max(0, Int((Double(sorted.count - 1) * p).rounded())))
+            return sorted[index]
+        }
+        let meanMs = intervals.reduce(0, +) / Double(max(intervals.count, 1))
+        return GestureStats(
+            frames: intervals.count,
+            cameraSteps: cameraSteps,
+            p50Ms: percentile(0.50),
+            p95Ms: percentile(0.95),
+            worstMs: sorted.last ?? 0,
+            averageFps: meanMs > 0 ? 1_000 / meanMs : 0,
+            overBudgetFrames: intervals.filter { $0 > budgetMs * 1.5 }.count,
+            refreshHz: refreshHz
+        )
     }
 
     private func endGesture(link: CADisplayLink?) {
@@ -120,37 +159,17 @@ final class CanvasFrameRecorder {
         // The display's own cadence is the budget. On a ProMotion panel that is
         // 8.3 ms; on an external 60 Hz monitor it is 16.7 ms. Asserting a fixed
         // 60 would call a perfect 120 Hz gesture a failure and vice versa.
-        let refreshHz: Double = {
-            let nominal = view?.window?.screen?.maximumFramesPerSecond ?? 60
-            return Double(max(nominal, 1))
-        }()
-        let budgetMs = 1_000 / refreshHz
-        let sorted = intervals.sorted()
-        func percentile(_ p: Double) -> Double {
-            let index = min(sorted.count - 1, max(0, Int((Double(sorted.count - 1) * p).rounded())))
-            return sorted[index]
-        }
-        // 1.5x the cadence: one late frame is a hitch, not a rounding artifact.
-        let over = intervals.filter { $0 > budgetMs * 1.5 }.count
-        let stats = GestureStats(
-            frames: intervals.count,
-            cameraSteps: cameraStepsThisGesture,
-            p50Ms: percentile(0.50),
-            p95Ms: percentile(0.95),
-            worstMs: sorted.last ?? 0,
-            overBudgetFrames: over,
-            refreshHz: refreshHz
-        )
+        let stats = makeStats(intervals: intervals, cameraSteps: cameraStepsThisGesture)
+        let budgetMs = 1_000 / stats.refreshHz
         lastGesture = stats
-        // The HUD intentionally receives only completed-gesture statistics. It
-        // stays visually static while a gesture is being measured, so the act
-        // of displaying FPS cannot add redraw work to those measured frames.
+        // Replace the rolling live sample with the whole-gesture result once the
+        // gesture closes.
         onGestureStats?(stats)
         guard Self.isLoggingEnabled else { return }
         let line = String(
                 format: "[frame-stats] gesture: %d frames, %d camera steps @ %.0f Hz (%.1f ms budget) — p50 %.2f ms (%.0f fps), p95 %.2f ms, worst %.2f ms, %d late (%.0f%%)\n",
-                stats.frames, stats.cameraSteps, refreshHz, budgetMs,
-                stats.p50Ms, stats.effectiveFps, stats.p95Ms, stats.worstMs,
+                stats.frames, stats.cameraSteps, stats.refreshHz, budgetMs,
+                stats.p50Ms, stats.medianFps, stats.p95Ms, stats.worstMs,
                 stats.overBudgetFrames,
                 Double(stats.overBudgetFrames) / Double(max(stats.frames, 1)) * 100
             )

@@ -679,9 +679,9 @@ is a median-interval shorthand, not achieved average FPS, and the current
 missed refresh. Use p50/p95/p99/worst and missed-vsync counts from an explicitly
 identified display mode before making a shipping claim.
 
-For an on-canvas readout of the most recently completed gesture, add
-`CONTINUUM_FRAME_HUD=1`. The HUD shows effective FPS, late-frame share, and p95.
-It reuses the recorder above and repaints once after the gesture closes—never
-during the frames it measures. It has no timer, display link, animation, event
-handling, or accessibility presence of its own. Logging and the HUD are
-independently opt-in; normal runs instantiate neither recorder nor overlay.
+For an on-canvas live readout, add `CONTINUUM_FRAME_HUD=1`. The HUD shows
+time-weighted FPS, late-frame share, and p95 over a rolling 30-frame window. It
+reuses the recorder above and publishes at most four label changes per second;
+there is no second timer, display link, animation, traversal, event handling, or
+accessibility presence. Logging and the HUD are independently opt-in; normal
+runs instantiate neither recorder nor overlay.
