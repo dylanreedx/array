@@ -591,6 +591,21 @@ run_app_check .build/debug/Array --perf-budget-transcript-delta-check
 # which is our own per-tile-per-step call, not the camera mechanism. KNOWN-RED
 # against that product target until the chrome floor stops moving every step.
 run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
+# The Slice 2 contract (.plans/22): N input events inside one display interval
+# cause a bounded number of camera commits and preserve the final desired
+# viewport. The control condition drives 6 direct setViewport calls and must
+# count 6 applies (the counter cannot go blind); the driven condition sends 6
+# precise scroll events through the REAL scrollWheel handler with the driver's
+# clock frozen and must land at most 2 (leading-edge apply + one coalesced
+# flush). Before CanvasCameraDriver, the driven condition measured 6.
+run_app_check .build/debug/Array --canvas-camera-coalesce-check
+# The pinch glide's mechanics, on deterministic time: a flick above the engage
+# threshold glides and terminates on its own; a deliberate stop stays dead; a
+# new pinch or an EXTERNAL viewport write (navigation snap, pointer drag)
+# cancels the glide; the zoom clamp stops it in ~2 steps where decay alone
+# would take ~45; and pan input COMPOSES with a live glide in ONE commit —
+# the property whose absence was the zoom→pan transition lag.
+run_app_check .build/debug/Array --canvas-zoom-momentum-check
 # The correctness oracle for the incremental row index, and the reason the cheap
 # path is allowed to exist. transcript.delta measures what a delta COSTS and is
 # structurally blind to a fast path that is cheap and WRONG — every count budget
