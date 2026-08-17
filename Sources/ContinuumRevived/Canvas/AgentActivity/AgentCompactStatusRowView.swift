@@ -220,7 +220,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
 
     func apply(_ next: AgentCompactStatusPresentation) {
         presentation = next
-        applySymbol(next.location.symbolName, to: locationIcon, description: next.location.accessibilityLabel)
+        applySymbol(next.location.symbolName, to: locationIcon)
         locationLabel.stringValue = next.location.text
         locationLabel.toolTip = next.location.detailText
         locationLabel.setAccessibilityLabel(next.location.accessibilityLabel)
@@ -235,7 +235,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
             needsLayout = true
             needsDisplay = true
         }
-        applySymbol(next.activity.symbolName, to: activityIcon, description: next.activity.accessibilityLabel)
+        applySymbol(next.activity.symbolName, to: activityIcon)
         activityLabel.stringValue = next.activity.text
         activityLabel.toolTip = next.activity.detailText
         activityLabel.setAccessibilityLabel(next.activity.accessibilityLabel)
@@ -335,7 +335,6 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
     private func configureIcon(_ icon: NSImageView) {
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.imageScaling = .scaleProportionallyDown
-        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
         icon.setContentHuggingPriority(.required, for: .horizontal)
         icon.setContentCompressionResistancePriority(.required, for: .horizontal)
         icon.setAccessibilityElement(false)
@@ -345,9 +344,9 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
         ])
     }
 
-    private func applySymbol(_ symbolName: String, to icon: NSImageView, description: String) {
-        icon.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: description)
-            ?? NSImage(systemSymbolName: "circle", accessibilityDescription: description)
+    private func applySymbol(_ symbolName: String, to icon: NSImageView) {
+        icon.image = CanvasSymbolImage.image(named: symbolName, pointSize: 11, weight: .semibold)
+            ?? CanvasSymbolImage.image(named: "circle", pointSize: 11, weight: .semibold)
     }
 
     private func updateThinkingLifecycle() {

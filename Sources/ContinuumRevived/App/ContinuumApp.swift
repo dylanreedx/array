@@ -1014,7 +1014,11 @@ enum ContinuumApp {
         if CommandLine.arguments.contains("--perf-budget-check")
             || CommandLine.arguments.contains("--perf-budget-zoom-check")
             || CommandLine.arguments.contains("--perf-budget-camera-slope-check")
-            || CommandLine.arguments.contains("--perf-budget-transcript-delta-check") {
+            || CommandLine.arguments.contains("--perf-budget-transcript-delta-check")
+            || CommandLine.arguments.contains("--perf-budget-gesture-transition-check")
+            || CommandLine.arguments.contains("--perf-budget-geometry-hold-probe-check")
+            || CommandLine.arguments.contains("--perf-budget-magnify-slope-check")
+            || CommandLine.arguments.contains("--perf-budget-raster-check") {
             do {
                 _ = NSApplication.shared
                 func value(after flag: String) -> String? {
@@ -1029,6 +1033,14 @@ enum ContinuumApp {
                     filter = "canvas.camera-slope"
                 } else if CommandLine.arguments.contains("--perf-budget-transcript-delta-check") {
                     filter = "transcript.delta"
+                } else if CommandLine.arguments.contains("--perf-budget-gesture-transition-check") {
+                    filter = "canvas.gesture-transition"
+                } else if CommandLine.arguments.contains("--perf-budget-geometry-hold-probe-check") {
+                    filter = "canvas.geometry-hold-probe"
+                } else if CommandLine.arguments.contains("--perf-budget-magnify-slope-check") {
+                    filter = "canvas.magnify-slope"
+                } else if CommandLine.arguments.contains("--perf-budget-raster-check") {
+                    filter = "canvas.raster"
                 } else {
                     filter = value(after: "--scenario")
                 }
@@ -1375,6 +1387,30 @@ enum ContinuumApp {
                 _ = NSApplication.shared
                 try CanvasZoomInvalidationProbeChecks.run()
                 print("ContinuumRevivedCanvasZoomInvalidationProbeChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--canvas-camera-coalesce-check") {
+            do {
+                _ = NSApplication.shared
+                try CanvasCameraDriverChecks.runCoalesce()
+                print("ContinuumRevivedCanvasCameraCoalesceChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--canvas-zoom-momentum-check") {
+            do {
+                _ = NSApplication.shared
+                try CanvasCameraDriverChecks.runMomentum()
+                print("ContinuumRevivedCanvasZoomMomentumChecks passed")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
@@ -6234,7 +6270,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let self, let canvas = self.canvasView else { return event }
             guard let window = canvas.window, event.window === window else { return event }
             guard event.hasPreciseScrollingDeltas else { return event }
-            if self.eventTargetsScrollableTileContent(event, in: window) {
+            // While a camera zoom session is live (pinch in progress, glide
+            // running, or just after zoom input), the follow-through pan keeps
+            // steering the CAMERA even over tile content. Without this, a
+            // pinch over a terminal zooms the canvas and the pan that follows
+            // scrolls the terminal — the canvas stops dead mid-gesture, which
+            // is exactly the "lags when I start panning" handoff. Checking the
+            // session first also skips the full-window hit test on every event
+            // of an active camera gesture.
+            if !canvas.cameraDriver.isCameraSessionActive,
+               self.eventTargetsScrollableTileContent(event, in: window) {
                 return event
             }
             canvas.scrollWheel(with: event)

@@ -319,6 +319,21 @@ corresponding architecture changes.
    newest camera state once per real display interval, and measure a
    gesture-cached redraw policy with one crisp settle repaint. Keep only wins on
    the weakest hardware and do not apply layer policies recursively by default.
+   > **Realized 2026-08-14** (`array/zoom-unify`, .plans/24/25): display-paced
+   > submission is `CanvasCameraDriver` — input accumulates, at most one
+   > `setViewport` per display interval (leading-edge, so sparse input keeps
+   > per-event latency), witnessed by `--canvas-camera-coalesce-check` (6
+   > events in one interval: 6 applies before, 2 after). The pinch glide,
+   > gesture-settle signal, and one shared zoom curve live in the same driver.
+   > The gesture-cached redraw half is NOT done: the real-pinch profile shows
+   > the remaining cost is AppKit's per-frame backing-properties cascade under
+   > the plane's bounds-size change — the geometry-hold slice in .plans/25/26.
+   > A real 10-agent A/B measured 98.5% recoverable with held geometry. The
+   > strongest supported live alternative, NSScrollView magnification, still
+   > produced 1,200 transcript layouts and 32–44 ms frames; gesture-time bitmap
+   > capture also failed its start-latency/coverage/live-surface contract. The
+   > remaining implementation is a precomputed, byte-bounded tile/zone proxy
+   > cache with one native bake at settle.
 4. **Retain the world once.** Split screen overlays from a nested world-content
    or clip view; make camera movement one ancestor mutation. Keep logical tile
    frames stable and prove hit testing, focus, cursor rects, overlays, spawning,

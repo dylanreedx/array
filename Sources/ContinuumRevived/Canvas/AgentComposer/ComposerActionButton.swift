@@ -125,10 +125,7 @@ final class ComposerActionButton: NSControl, TokenThemed {
 
     private func applyPresentation() {
         titleLabel.stringValue = presentation.title
-        iconView.image = NSImage(
-            systemSymbolName: presentation.symbolName,
-            accessibilityDescription: nil
-        )
+        iconView.image = CanvasSymbolImage.image(named: presentation.symbolName)
         isEnabled = presentation.isEnabled
         setAccessibilityLabel(presentation.accessibilityLabel)
         setAccessibilityEnabled(presentation.isEnabled)

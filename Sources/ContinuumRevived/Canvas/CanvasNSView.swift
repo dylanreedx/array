@@ -245,10 +245,18 @@ final class CanvasNSView: NSView, TokenThemed {
     private(set) var qaCameraLayoutStats = CameraLayoutStats()
     func qaResetCameraLayoutStats() { qaCameraLayoutStats = CameraLayoutStats() }
 
-    /// Live frame-time recorder for gestures. Nil unless `CONTINUUM_FRAME_STATS=1`,
-    /// so it costs nothing (and prints nothing) in a normal run.
+    /// Live frame-time recorder for gestures. Nil unless frame logging or the
+    /// frame HUD is explicitly enabled, so it costs nothing in a normal run.
     private(set) lazy var frameRecorder: CanvasFrameRecorder? =
-        CanvasFrameRecorder.isEnabled ? CanvasFrameRecorder(view: self) : nil
+        CanvasFrameRecorder.isEnabled
+            ? CanvasFrameRecorder(view: self) { [weak self] stats in
+                self?.frameHUD?.update(stats: stats)
+            }
+            : nil
+
+    /// Shallow, screen-space, click-through HUD. It is absent from the view tree
+    /// unless `CONTINUUM_FRAME_HUD=1`; it never participates in world geometry.
+    private var frameHUD: CanvasFrameHUDView?
 
     /// QA: every installed tile view, across BOTH models the canvas keeps —
     /// the flat collection and each `ZoneLayer` (see the zone-unify note on
@@ -293,6 +301,27 @@ final class CanvasNSView: NSView, TokenThemed {
     /// migration keeps its witnesses honest.
     var tileViewsInVisualOrder: [TileNSView] {
         worldPlane.subviews.compactMap { $0 as? TileNSView }
+    }
+
+    /// Tile views the user can actually see.
+    ///
+    /// The plane's `bounds` IS the visible world region — that is what makes it
+    /// the camera — so visibility is one rect test per tile against a value
+    /// already to hand, with no `CanvasEngine` round trip and no screen-space
+    /// conversion.
+    ///
+    /// This exists because zoom's chrome refresh used to run over EVERY installed
+    /// tile, which made a zoom step O(installed) rather than O(1): a tile parked
+    /// far off-screen cost a step exactly what an on-screen one cost.
+    /// `canvas.magnify-slope` measured 4 chrome refreshes per step at 16 installed
+    /// and 38 at 128, with the visible count pinned at 12 throughout.
+    var visibleTileViews: [TileNSView] {
+        let visibleWorld = worldPlane.bounds
+        return worldPlane.subviews.compactMap { subview in
+            guard let tile = subview as? TileNSView,
+                  tile.frame.intersects(visibleWorld) else { return nil }
+            return tile
+        }
     }
 
     /// QA: how many installed tile views are NOT where the camera says they
@@ -358,6 +387,26 @@ final class CanvasNSView: NSView, TokenThemed {
     /// rasterization pass drag the whole subtree with it.
     var qaTotalTileLayoutInvalidationCount: Int {
         tileViewsInVisualOrder.reduce(0) { $0 + $1.qaCanvasLayoutInvalidationCount }
+    }
+
+    /// QA: title-bar draws AppKit actually executed, across every installed
+    /// tile. `qaTotalTileChromeRedrawCount` above counts invalidations — the
+    /// decision we control; this counts the rasterization that follows, and it
+    /// only moves when a display cycle is pumped. The pair closes the blindness
+    /// that let a layout-only harness call zoom green while a real pinch was
+    /// choppy: an invalidation storm with no draws means the harness never
+    /// rendered, and draws exceeding invalidations means something repaints
+    /// chrome without asking.
+    var qaTotalTitleBarDrawCount: Int {
+        tileViewsInVisualOrder.reduce(0) { $0 + $1.qaTitleBarDrawCount }
+    }
+
+    /// QA: title-bar z-order repairs across every installed tile. `layoutChrome`
+    /// used to re-insert the bar unconditionally — a sublayer reorder per visible
+    /// tile on every camera step that no other counter could see. A camera step
+    /// over settled tiles must keep this at zero.
+    var qaTotalChromeZOrderRepairCount: Int {
+        tileViewsInVisualOrder.reduce(0) { $0 + $1.qaChromeZOrderRepairCount }
     }
 
     /// QA: layout passes that actually REACHED the tiles, whoever sent them.
@@ -426,6 +475,13 @@ final class CanvasNSView: NSView, TokenThemed {
         worldPlane.frame = bounds
         addSubview(worldPlane, positioned: .below, relativeTo: nil)
         syncWorldPlaneToCamera()
+        if CanvasFrameRecorder.isHUDEnabled {
+            let hud = CanvasFrameHUDView(frame: .zero)
+            hud.autoresizingMask = [.minXMargin, .maxYMargin]
+            frameHUD = hud
+            addSubview(hud, positioned: .above, relativeTo: nil)
+            layoutFrameHUD()
+        }
         applyTokens()
         registerForDraggedTypes([.fileURL])
         // zone-unify P0: seed the unified live model from the boot zone set.
@@ -1229,8 +1285,19 @@ final class CanvasNSView: NSView, TokenThemed {
         delegate?.canvasDidChange(self)
     }
 
+    /// QA: every camera apply, whoever asked. With the driver in place, N input
+    /// events inside one display interval must produce a BOUNDED number of
+    /// these — the N-inputs-one-commit witness counts this, and it is the
+    /// number that used to equal the raw event rate.
+    private(set) var qaViewportApplyCount = 0
+
     func setViewport(_ viewport: CanvasViewport) {
-        let previousZoom = canvasState.viewport.zoom
+        qaViewportApplyCount += 1
+        // Any writer other than the driver — a navigation snap, a pointer-pan
+        // drag, a restore, a self-check — owns the camera now: gesture state
+        // still in flight (a glide, accumulated scroll) must not keep steering
+        // it. Field writes only; this sits on the perf scenarios' hot path.
+        if !cameraDriver.isApplying { cameraDriver.noteExternalViewportChange() }
         canvasState.viewport = viewport
         frameRecorder?.noteCameraStep()
         // The camera is ONE view's geometry. Tiles and zone chrome hold world
@@ -1241,19 +1308,50 @@ final class CanvasNSView: NSView, TokenThemed {
         // `grabHeightInLocalCoordinates`, `closeButtonWorldSize` and the resize
         // margin are all `max(worldConstant, screenPx / zoom)`, so the move-grab
         // strip stays grabbable when zoomed out. Those values change with zoom
-        // and nothing else. The old per-tile camera pass repainted them as a side
-        // effect of resizing every tile; the plane does not, so a zoom has to say
-        // so explicitly. Guarded on the zoom actually changing, which keeps a pan
-        // at zero tile work — the property `--camera-chrome-redraw-check` asserts
-        // in both directions.
-        if !Self.geometryNearlyEqual(CGFloat(previousZoom), CGFloat(viewport.zoom)) {
-            for view in tileViewsInVisualOrder { view.refreshZoomDependentChrome() }
-        }
+        // (quantised into scale buckets) and nothing else. The old per-tile
+        // camera pass repainted them as a side effect of resizing every tile;
+        // the plane does not, so a zoom has to say so explicitly.
+        //
+        // VISIBLE tiles only, and unconditionally rather than guarded on the zoom
+        // having changed. Two reasons, and they replace an earlier version that
+        // was both narrower and wronger:
+        //
+        // - Iterating every INSTALLED tile made a zoom step O(installed) instead
+        //   of O(1). `canvas.magnify-slope` measured 4 chrome refreshes per step
+        //   at 16 installed and 38 at 128 with the visible count pinned at 12 —
+        //   a tile parked off-screen cost a step exactly what an on-screen one
+        //   cost.
+        // - Dropping the zoom-changed guard is what keeps that correct. A PAN can
+        //   bring a tile into view whose chrome was skipped while it was hidden,
+        //   and this is the only place that would notice. It costs a pan nothing:
+        //   `layoutChrome` compares the bar's frame before writing it, so at a
+        //   constant zoom every visible tile is a no-op and `pan.chromeRedraws`
+        //   and `pan.tileLayoutPasses` both stay at 0 — which the budgets assert.
+        for view in visibleTileViews { view.refreshZoomDependentChrome() }
         // Screen-fixed overlays are outside the plane, so they do not inherit the
         // camera and still have to be re-aimed at the tiles they track.
         repositionTrackingOverlaysForCamera()
         if navModeOverlayView != nil { qaCameraLayoutStats.chromeRepaints += 1 }
         navModeOverlayView?.needsDisplay = true
+        if !cameraDriver.isApplying {
+            // One-shot writers (navigation snaps, pointer drags, restores,
+            // checks) keep the synchronous housekeeping. Driver commits defer
+            // it to the gesture's settle: cursor rects are stale for at most
+            // the settle window, and the delegate's save/hydration debounces
+            // stop being re-armed per event only to detonate — a main-thread
+            // double-fsync and a zone re-plan — in the gap where the NEXT
+            // gesture begins. That gap was the zoom→pan transition lag.
+            discardCursorRects()
+            window?.invalidateCursorRects(for: self)
+            delegate?.canvasDidChange(self)
+        }
+    }
+
+    /// Once per gesture burst, when the driver's camera goes quiet: the
+    /// housekeeping its commits deferred. Cursor rects rebuild against the
+    /// resting camera; the delegate arms its persistence/hydration debounces
+    /// exactly once.
+    private func cameraGestureDidSettle() {
         discardCursorRects()
         window?.invalidateCursorRects(for: self)
         delegate?.canvasDidChange(self)
@@ -1901,6 +1999,28 @@ final class CanvasNSView: NSView, TokenThemed {
         // much world is visible. Tiles still hold world frames and are untouched.
         syncWorldPlaneToCamera()
         layoutNavModeOverlay()
+        layoutFrameHUD()
+    }
+
+    private func layoutFrameHUD() {
+        guard let frameHUD else { return }
+        let width: CGFloat = 190
+        frameHUD.frame = CGRect(
+            x: max(8, bounds.maxX - width - 10),
+            y: 10,
+            width: width,
+            height: 24
+        )
+    }
+
+    // Deterministic QA seam: presence, text, event transparency and AX silence.
+    var qaFrameHUDSnapshot: (text: String, hitTransparent: Bool, accessibilityIgnored: Bool)? {
+        guard let frameHUD else { return nil }
+        return (
+            frameHUD.qaText,
+            frameHUD.hitTest(CGPoint(x: frameHUD.bounds.midX, y: frameHUD.bounds.midY)) == nil,
+            frameHUD.qaIgnoresAccessibility
+        )
     }
 
     private func layoutAllTiles(invalidateTileDisplay: Bool = true) {
@@ -2049,27 +2169,39 @@ final class CanvasNSView: NSView, TokenThemed {
 
     // MARK: - Pan / zoom gestures
 
+    /// The one gesture pipeline: scroll pan, Cmd+scroll zoom and pinch all feed
+    /// the driver, which composes them into at most one `setViewport` per
+    /// display interval and carries the pinch glide. Pointer-pan drags stay
+    /// direct — AppKit already coalesces `mouseDragged`, and the drag oracles
+    /// assert the synchronous apply.
+    private(set) lazy var cameraDriver: CanvasCameraDriver = {
+        let driver = CanvasCameraDriver(
+            tuning: .fromEnvironment(),
+            currentViewport: { [weak self] in
+                self?.canvasState.viewport ?? CanvasViewport(x: 0, y: 0, zoom: 1)
+            },
+            applyViewport: { [weak self] viewport in self?.setViewport(viewport) },
+            makeDisplayLink: { [weak self] target, selector in
+                self?.displayLink(target: target, selector: selector)
+            }
+        )
+        driver.onSettle = { [weak self] in self?.cameraGestureDidSettle() }
+        return driver
+    }()
+
     override func scrollWheel(with event: NSEvent) {
+        let cursor = convert(event.locationInWindow, from: nil)
         if event.modifierFlags.contains(.command) {
-            let cursor = convert(event.locationInWindow, from: nil)
             // Roughly +/- 10% per logical line of scroll. Smooth, non-linear.
-            let factor = exp(event.scrollingDeltaY * 0.02)
-            let next = CanvasEngine.zoom(canvasState.viewport, by: factor, anchorScreen: cursor)
-            setViewport(next)
+            cameraDriver.noteScrollZoom(deltaY: Double(event.scrollingDeltaY), location: cursor)
         } else {
             var dx = event.scrollingDeltaX
             var dy = event.scrollingDeltaY
-            if event.hasPreciseScrollingDeltas {
-                dx *= 1
-                dy *= 1
-            } else {
+            if !event.hasPreciseScrollingDeltas {
                 dx *= 16
                 dy *= 16
             }
-            var v = canvasState.viewport
-            v.x -= Double(dx) / v.zoom
-            v.y -= Double(dy) / v.zoom
-            setViewport(v)
+            cameraDriver.noteScrollPan(dx: dx, dy: dy, location: cursor)
         }
     }
 
@@ -2078,10 +2210,12 @@ final class CanvasNSView: NSView, TokenThemed {
     /// canvas (the tile content has no zoom of its own to compete with).
     func handlePinch(_ event: NSEvent) {
         let cursor = convert(event.locationInWindow, from: nil)
-        let factor = 1.0 + Double(event.magnification)
-        guard factor > 0 else { return }
-        let next = CanvasEngine.zoom(canvasState.viewport, by: factor, anchorScreen: cursor)
-        setViewport(next)
+        cameraDriver.notePinch(
+            magnification: Double(event.magnification),
+            phase: event.phase,
+            location: cursor,
+            timestamp: event.timestamp
+        )
     }
 
     /// Whether this press should enter the shared camera-pan lifecycle. Tile
@@ -6372,17 +6506,31 @@ final class FocusBorderOverlayView: NSView {
     /// `NSColor` and applies alpha). Safe to call before each `show`.
     func configure(color: NSColor, gap: CGFloat, animationDuration: CFTimeInterval) {
         self.gap = gap
+        if animationDuration != self.animationDuration {
+            // A running loop keeps its old duration; drop it so the next `show`
+            // re-attaches at the configured speed.
+            shape.removeAnimation(forKey: Self.animationKey)
+        }
         self.animationDuration = animationDuration
         shape.strokeColor = color.cgColor
     }
 
     /// Position the overlay around `tileScreenFrame` (the focused tile's frame),
-    /// outset by `gap`, show it, and (re)attach the marching animation.
+    /// outset by `gap`, show it, and make sure the marching animation is attached.
     func show(around tileScreenFrame: CGRect) {
-        frame = tileScreenFrame.insetBy(dx: -gap, dy: -gap)
+        let next = tileScreenFrame.insetBy(dx: -gap, dy: -gap)
+        if frame != next {
+            frame = next
+            layoutShape()
+        }
         isHidden = false
-        layoutShape()
-        startMarchingAnts()
+        // Attach-if-missing, never re-add: this runs on every camera commit
+        // while a focused tile is on screen, and re-adding the infinite loop
+        // restarted the dash phase each time — ants frozen mid-gesture, plus a
+        // CA animation mutation per step.
+        if shape.animation(forKey: Self.animationKey) == nil {
+            startMarchingAnts()
+        }
     }
 
     func hide() {

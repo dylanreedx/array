@@ -212,7 +212,7 @@ private final class AgentTileOverflowButton: NSControl, TokenThemed {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        imageView.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: nil)
+        imageView.image = CanvasSymbolImage.image(named: "ellipsis")
         imageView.imageScaling = .scaleProportionallyDown
         addSubview(imageView)
         setAccessibilityRole(.button)

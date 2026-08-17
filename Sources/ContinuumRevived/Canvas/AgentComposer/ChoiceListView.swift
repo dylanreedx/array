@@ -8,11 +8,16 @@ enum ChoiceIcon: Equatable {
     case system(String)
     case asset(String)
 
+    @MainActor
     func image() -> NSImage? {
         let source: NSImage?
         switch self {
         case .system(let name):
-            source = NSImage(systemSymbolName: name, accessibilityDescription: nil)
+            // Reuse the canvas-wide template bitmap cache. Command-menu icons
+            // participate in the same backing cascade as the rest of the tile
+            // subtree, so retaining vector symbol reps here would undo part of
+            // the symbol freeze when the sidebar and camera programs merge.
+            source = CanvasSymbolImage.image(named: name)
         case .asset(let name):
             source = NSImage(named: NSImage.Name(name))
         }
@@ -354,7 +359,7 @@ private final class ChoiceRowView: NSControl, TokenThemed {
         detailLabel.lineBreakMode = .byTruncatingTail
         detailLabel.isHidden = item.detail == nil
         leadingImageView.image = presentation == .choices
-            ? NSImage(systemSymbolName: "checkmark", accessibilityDescription: nil)
+            ? CanvasSymbolImage.image(named: "checkmark")
             : item.icon?.image()
         leadingImageView.imageScaling = .scaleProportionallyDown
         leadingImageView.setAccessibilityElement(false)

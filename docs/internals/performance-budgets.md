@@ -16,7 +16,7 @@ whether that was 55 fps or 15 fps, nor any way to tell whether a change helped.
 |---|---|---|
 | **Budgets** (`--perf-budget-check`) | the WORK a scenario does — counts and per-step duration — offline and deterministic | every matrix run; while iterating on a fix |
 | **Stress** (`--scenario canvas.stress`) | synchronous scaling curves against tile count, zoom and transcript depth | deliberately, when changing tile or layout cost |
-| **Frame stats** (`CONTINUUM_FRAME_STATS=1`) | the FRAMES the display actually produced during a real gesture, on real hardware | dogfooding; confirming a fix is felt, not just counted |
+| **Frame stats / HUD** (`CONTINUUM_FRAME_STATS=1`, `CONTINUUM_FRAME_HUD=1`) | the FRAMES the display actually produced during a real gesture, on real hardware | dogfooding; confirming a fix is felt, not just counted |
 
 **The product ambition is a 120 Hz-capable canvas, not an 8.3 ms
 microbenchmark.** A 120 Hz display has 8.3 ms for input, application work,
@@ -156,6 +156,18 @@ floor into 1/8 scale buckets measures **132** — verified as a throwaway
 experiment, not committed, because it is product-visible (the bar height steps
 while zooming). That addresses chrome only; the ~2,600 samples of content
 rasterization are Slice 5's semantic-zoom work.
+
+> **Update (2026-08-14, `array/zoom-unify`).** The bucketing shipped as a
+> product decision (Dylan approved the stepped bar), at 4 geometric steps per
+> octave rounding DOWN (`--tile-drag-grab-check` guards the direction), and the
+> close-button floors were bucketed with it — on raw zoom the × glyph re-minted
+> an SF Symbol `NSImage` per tile per step below zoom ~1.22, a cost no layout
+> counter could see. Measured now: `zoom.chromeRedraws` **1,392 → 144** (bound
+> 192), `zoom.tileLayoutPasses` **1,380 → 144**, invalidation probe `C − E`
+> **696 → 144**. The leg stays KNOWN-RED because the product target is ~1
+> settling layout per tile per gesture and 144 is one per tile per bucket
+> crossing; the number is published every run so the remaining gap stays
+> visible.
 
 `tileLayoutInvalidations` is 0 on both today — nothing on the camera path calls
 `invalidateForCanvasLayout`. It is a standing regression guard, not a live
@@ -318,6 +330,93 @@ the matrix. `canvas.stress` owns the real-content cost curve.
 This leg left `MATRIX_KNOWN_RED` when the plane landed. `canvas.zoom` did not —
 see below, because its remaining cost turned out to be a different defect.
 
+### `canvas.magnify-slope` — work slopes green, duration slope KNOWN-RED
+
+```sh
+.build/debug/Array --perf-budget-magnify-slope-check
+```
+
+The same complexity question as `camera-slope`, asked of ZOOM — which
+camera-slope structurally cannot ask, because a pan never enters the
+zoom-dependent chrome branch. Sweeps installed tiles `16 → 128` with the visible
+count pinned at 12, 40 zoom steps per configuration. It exists because
+hypothesis 6 of the zoom program ("the chrome refresh is O(visible)") was
+**wrong** — it was O(installed), measured at 4/9/19/38 chrome refreshes per step
+as installed count grew with visible pinned.
+
+| metric | budget | before visible-only refresh | after |
+|---|---|---|---|
+| `magnify-slope.chromeRedrawSlope` | == 0 | 33.6 | **0** |
+| `magnify-slope.layoutPassSlope` | == 0 | 33.6 | **0** |
+| `magnify-slope.durationSlope` | ≤ 0.5 ms | 23.08 ms | **~1.9–2.3 ms, RED** |
+| `magnify-slope.worstStepDuration` | ≤ 8.3 ms | 26.75 ms | ~3.5 ms |
+
+The work counters are flat — a zoom step performs the same number of chrome
+refreshes and layout passes at 128 installed tiles as at 16. The duration slope
+that remains is **AppKit's own view-tree traversal**: any bounds write on the
+world plane makes the next layout pass walk every installed subtree, even when
+zero tiles get laid out (the invalidation probe's condition B measures the
+bounds-size write itself at 0 passes). That residual is not reachable from our
+code without culling installed views, which the always-render-live constraint
+forbids — so the leg is KNOWN-RED against the product target and publishes the
+number every run.
+
+### `canvas.gesture-transition` — gating, green
+
+```sh
+.build/debug/Array --perf-budget-gesture-transition-check
+```
+
+The seam every pure-gesture scenario is blind to. The complaint that reframed
+the zoom program — *"it lags when zooming when you start panning"* — was a
+transition defect: deferred zoom work (a settle burst, per-step-re-armed
+debounce timers whose fsync-heavy saves detonated ~200 ms after the last camera
+step, chrome floors still moving) landing on the first pan frames. Four windows
+over the `canvas.pan`/`canvas.zoom` fixture:
+
+| window | drive | what it proves |
+|---|---|---|
+| P | 60 steady pan steps | the baseline median |
+| T | 30 zoom steps → immediately 30 pan steps | the handoff inherits nothing |
+| Zc | 30 pure zoom steps over a fixed sequence | the interleave's control |
+| I | strict interleave over the SAME zoom sequence | pans between zooms add zero |
+
+| metric | budget | measured |
+|---|---|---|
+| `gesture-transition.transitionPanChromeRedraws` | == 0 | 0 |
+| `gesture-transition.transitionPanLayoutPasses` | == 0 | 0 |
+| `gesture-transition.excessChromeRedraws` (I − Zc) | == 0 | 0 (84 == 84) |
+| `gesture-transition.excessLayoutPasses` (I − Zc) | == 0 | 0 (84 == 84) |
+| `gesture-transition.transitionStepOverhead` | ≤ 1 ms | 0.05 ms |
+| `gesture-transition.worstStepDuration` | ≤ 8.3 ms | ~5 ms |
+
+`transitionStepOverhead` is the direct encoding of the complaint: the worst of
+the first five pan steps after a zoom, over the steady pan median — the lag was
+a spike, and a mean hides a spike. Structural guards throw if the interleave
+degenerates (fewer than two distinct zooms, or no actual pan), because every
+zero above passes vacuously on a drive that did nothing.
+
+### The unified camera driver's own witnesses
+
+Two correctness legs guard `CanvasCameraDriver` (the display-paced input
+pipeline that .plans/22 Slice 2 specified — one owner for scroll pan, Cmd+scroll
+zoom, pinch and the pinch glide):
+
+- `--canvas-camera-coalesce-check` — the Slice 2 contract: N input events in
+  one display interval cause a bounded number of camera commits and preserve
+  the final desired viewport. Control: 6 direct `setViewport` calls count 6
+  applies (the counter cannot go blind). Driven: 6 precise scroll events
+  through the real `scrollWheel` handler with the driver's clock frozen count
+  **2** (leading-edge apply + one coalesced flush) — it was 6 before the
+  driver, one full funnel pass per event.
+- `--canvas-zoom-momentum-check` — glide mechanics on deterministic time: a
+  flick above the engage threshold glides ~46 steps and terminates; a
+  deliberate stop stays dead; a new pinch or any EXTERNAL viewport write
+  (navigation snap, pointer drag) cancels the glide; the zoom clamp stops it
+  in ~2 steps where decay alone takes ~45; and pan input COMPOSES with a live
+  glide in ONE commit — the property whose absence was the tracking error a
+  hand read as transition lag.
+
 ### `transcript.delta` — KNOWN-RED on duration, green on every count
 
 ```sh
@@ -376,6 +475,127 @@ reasoning finishing, finished reasoning revising, an unknown id) and after each
 asserts the live index is indistinguishable from a from-scratch walk — and
 asserts WHICH path ran, so it fails rather than passing perfectly the day the
 fast path declines everything.
+
+### `canvas.geometry-hold-probe` — gating, display-dependent, green
+
+```sh
+.build/debug/Array --perf-budget-geometry-hold-probe-check
+```
+
+The default gating fixture remains 10 real managed-agent tiles and 60 ticks.
+Architecture work may reuse the identical harness at larger sizes without
+changing the gate:
+
+```bash
+PERF_GEOMETRY_HOLD_TILES=50 PERF_GEOMETRY_HOLD_STEPS=12 \
+  .build/debug/Array --perf-budget-geometry-hold-probe-check
+```
+
+The overrides must be positive; `PERF_GEOMETRY_HOLD_TURNS` can vary transcript
+depth. A 2026-08-15 5/10/25/50 sweep measured one-bake medians of
+14.56/28.05/70.79/137.89 ms while held p95 stayed at or below 0.12 ms. The
+result proves both halves of the architecture: held motion removes the repeated
+cascade, and native residency must be bounded because the one final bake still
+scales linearly with installed deep subtrees.
+
+### `canvas.proxy-scene-probe` — OPT-IN, green cost probe; rejected UX
+
+```bash
+.build/debug/Array --perf-budget-check --scenario canvas.proxy-scene-probe
+```
+
+This is the first supported motion-presentation witness, not the shipping
+mechanism. It leaves real managed-agent transcript trees installed and held,
+then presents one synthetic tile-shell image per tile beneath one Array-owned
+root layer affine. The layer-hosting proxy contains no AppKit subviews. It runs
+5/10/25/50 tiles by default; `PERF_PROXY_SCENE_TILE_COUNTS`,
+`PERF_PROXY_SCENE_TURNS`, and `PERF_PROXY_SCENE_STEPS` provide positive opt-in
+overrides.
+
+The first 60-tick sweep measured proxy p95 at 0.03/0.03/0.04/0.05 ms from 5 to
+50 tiles while stepped p95 rose 20.21/38.61/93.24/170.95 ms. Each cell requires
+one root mutation per target, zero native bounds writes/layouts during motion,
+one final bake, a moving visual witness, exact anchor/world mapping, no AppKit
+subviews in the proxy, and zero final camera mismatches. The probe deliberately
+does not claim cache/provider fidelity, mixed WKWebView/Ghostty coverage,
+interaction routing, or production `CanvasNSView` lifecycle.
+
+A subsequent default-off dogfood integration used those synthetic shells and
+was explicitly rejected on 2026-08-16 because visible tiles lost their full
+detail during zoom. That production code was removed before commit. Preserve
+this scenario only as evidence that an owned root affine is cheap; it is not a
+visual design precedent. Any future presenter must retain full transcript,
+browser, terminal, zone, status, and chrome detail throughout motion.
+
+The missing real-content A/B for the backing cascade. It builds 10 real
+`ManagedAgentTileNSView` subtrees with six transcript turns each, drains their
+first render, then runs ABBA over two causal arms with 60 display commits apiece:
+
+- **stepped:** write a distinct world-plane bounds size on every tick;
+- **held:** pump the same 60 frames with geometry unchanged, then pay exactly one
+  final bounds-size bake.
+
+Both arms run `window.displayIfNeeded()` and `CATransaction.flush()`. The flush is
+load-bearing: layer-backed work lands at the transaction commit, and omitting it
+would recreate the harness blindness that once reported 144 invalidations and 0
+executed draws. The held arm deliberately has no visual presentation mechanism;
+this is an upper bound on recoverable geometry/backing work, built before making
+that design decision. A raw transform on an AppKit-owned backing layer remains
+out of bounds.
+
+Two establishing runs on 2026-08-14:
+
+| arm / metric | run 1 | run 2 |
+|---|---:|---:|
+| stepped p50 | 31.07 ms | 30.02 ms |
+| stepped p95 | 39.47 ms | 37.35 ms |
+| stepped frames over 8.3 ms | 100% | 100% |
+| held p50 | 0.01 ms | 0.01 ms |
+| held p95 | 0.02 ms | 0.01 ms |
+| held frames over 8.3 ms | 0% | 0% |
+| one final bake p50 | 27.89 ms | 28.36 ms |
+| gross recoverable, bake included | **98.5%** | **98.5%** |
+| stepped bounds-size writes / transcript layouts | 120 / 1,200 | 120 / 1,200 |
+| held-tick bounds-size writes / transcript layouts | 0 / 0 | 0 / 0 |
+
+The shape matches the real-pinch profile: every bounds-size write reaches every
+real transcript subtree, and a held tick reaches none. The standing
+`heldGestureCostRatio` ceiling is 0.10; both establishing runs measured 0.015,
+leaving roughly 6× headroom without turning current timing into a high-water
+mark. The count budgets are the attribution: 10 real tiles, 120 stepped writes,
+0 held-tick writes, 2 final bakes, 1,200 stepped transcript layouts, 0 held
+layouts, and a clean camera oracle after restoring baseline geometry.
+
+This is a display-dependent matrix leg and skips with
+`CONTINUUM_SKIP_UI_BASELINES=1`. It is not KNOWN-RED: if the held arm stops
+recovering the cascade, the premise for the geometry-hold mechanism has failed
+and implementation should pause rather than normalize the result.
+
+### `canvas.scroll-magnification-probe` — OPT-IN, intentionally red
+
+The first supported-presentation experiment after geometry-hold established the
+recoverable fraction. It puts the same 10 real managed-agent trees behind a
+borderless, scrollerless `NSScrollView` and drives AppKit's documented
+magnification API around a fixed anchor. The anchor is exact (`0.000 px` error),
+but the performance hypothesis fails:
+
+| metric | run 1 | run 2 |
+|---|---:|---:|
+| magnification p50 | 36.48 ms | 32.62 ms |
+| magnification p95 | 44.43 ms | 43.25 ms |
+| frames over 8.3 ms | 100% | 100% |
+| transcript layouts over 120 ticks | 1,200 | 1,200 |
+
+The supported live boundary reproduces the backing-properties cascade and is
+not the shipping presenter. The same probe measures the fallback compositor
+floor: a shallow bitmap proxy runs at **0.04/0.07 ms p50/p95** with zero native
+layouts, but fresh gesture-time capture costs **22.07 ms and 24.4 MiB** for a
+1600x1000 Retina viewport. It also cannot generically capture WKWebView/Ghostty
+pixels or reveal uncaptured world content on zoom-out. Capture-on-pinch is
+therefore rejected; the surviving design is a bounded cache prepared while idle.
+
+This scenario has no matrix leg. Its red budgets preserve why the rejected
+candidates must not be rediscovered and normalized into production.
 
 ### `canvas.stress` — OPT-IN, not in the matrix
 
@@ -520,8 +740,12 @@ p50 8.34 ms (120 fps), p95 9.10 ms, worst 24.60 ms, 3 late (2%)
 
 A trace is bracketed by camera activity rather than AppKit gesture phases. That
 covers every path reaching `setViewport`, but the current recorder does not label
-pan versus zoom and includes the 250 ms quiet settle tail in its interval sample.
-Keep those limitations with any published result.
+pan versus zoom. Its display link stays alive for the 250 ms quiet settle window
+so the gesture can close reliably, while rolling and completed statistics stop
+one interval after the tick that observed the final camera step. That following
+interval retains AppKit/CA work the camera commit scheduled after the recorder
+callback; the remaining smooth idle callbacks are excluded. Keep the missing
+gesture label with any published result.
 
 `maximumFramesPerSecond` is the panel maximum, not proof of the current dynamic
 ProMotion, low-power, or external-display cadence. The printed reciprocal of p50
@@ -530,5 +754,34 @@ is a median-interval shorthand, not achieved average FPS, and the current
 missed refresh. Use p50/p95/p99/worst and missed-vsync counts from an explicitly
 identified display mode before making a shipping claim.
 
-It is inert unless the variable is set, because anything that can log or present
-at boot has to stay quiet in QA runs and in front of users.
+For an on-canvas live readout, add `CONTINUUM_FRAME_HUD=1`. The HUD shows
+time-weighted FPS, late-frame share, and p95 over a rolling 30-frame window. It
+reuses the recorder above and publishes at most four label changes per second;
+there is no second timer, display link, animation, traversal, event handling, or
+accessibility presence. Logging and the HUD are independently opt-in; normal
+runs instantiate neither recorder nor overlay.
+
+### Clean dogfood split after symbol freeze (2026-08-14/15)
+
+The current `array/zoom-unify` preview was rebuilt from the branch and launched
+against the preserved 10-agent workspace with frame logging and the live HUD.
+One earlier “laggier” feel check was invalid: the preview predated the symbol
+freeze and a separate `--ui-geometry-check` process was consuming 47–85% CPU.
+After that process ended and the preview was rebuilt, Dylan's verdict was:
+“that feels good, still a little bit” and, with the live HUD, “it barely drops
+when panning … as soon as I zoom it goes as low as 30.”
+
+The uncontaminated log has the same bimodal shape as the tripwire profile:
+
+- pan-like gesture: p50/p95 **8.33/8.33 ms**, **3% late**;
+- zoom examples: p50/p95 **23.13/33.60 ms**, **59% late**, and
+  **22.87/51.04 ms**, **53% late**;
+- another zoom retained an 8.33 ms median while p95 reached **53.68 ms** and
+  **40%** of frames were late—the reason median-derived “120 FPS” was a
+  misleading HUD headline.
+
+The HUD now reports a rolling 30-frame, time-weighted average FPS at 4 Hz, so
+stall time lowers the headline immediately. It reuses the recorder's display
+link; the HUD owns no timer, animation, traversal, or sampling loop. This live
+pan/zoom split is the product witness for the same mechanism the geometry-hold
+probe names structurally.

@@ -315,10 +315,27 @@ class TileNSView: NSView, TokenThemed {
             titleBar?.invalidateChrome()
         }
         titleBar?.applyCloseButtonSizing(buttonSize: closeButtonWorldSize, glyphPointSize: closeGlyphWorldPointSize)
-        if let titleBar, titleBar.superview === self {
+        // Repair the bar-above-body z-order only when it is actually wrong.
+        // `addSubview(_:positioned:)` is a remove+insert that reorders the
+        // backing sublayers even when the order is already correct, and this
+        // path runs per visible tile on every camera step — an unconditional
+        // reinsertion here put a sublayer reorder on every PAN event, which no
+        // layout or redraw counter could see.
+        if let titleBar, titleBar.superview === self,
+           let contentView, contentView.superview === self,
+           let barIndex = subviews.firstIndex(of: titleBar),
+           let contentIndex = subviews.firstIndex(of: contentView),
+           barIndex < contentIndex {
+            qaChromeZOrderRepairCount += 1
             addSubview(titleBar, positioned: .above, relativeTo: contentView)
         }
     }
+
+    /// Counts the times `layoutChrome` had to re-order the title bar above the
+    /// body. A camera step over a settled tile must never raise this — the
+    /// unconditional reinsertion it replaces was invisible to every other
+    /// counter.
+    private(set) var qaChromeZOrderRepairCount = 0
 
     private func layoutContentView() {
         // The inset is zoom-independent, so a camera move never re-frames the body:
@@ -616,7 +633,36 @@ class TileNSView: NSView, TokenThemed {
     /// Mirrors `resizeMarginInLocalCoordinates`'s screen-px-in-world pattern.
     var grabHeightInLocalCoordinates: CGFloat {
         guard let zoom = canvas?.viewport.zoom, zoom.isFinite, zoom > 0 else { return Self.titleBarHeight }
-        return max(Self.titleBarHeight, Self.minScreenGrabPx / CGFloat(zoom))
+        // The floor is quantised into scale BUCKETS before it is applied. Without
+        // this the bar's world height changes on every zoom step, which re-frames
+        // the title bar, which lays the whole tile out — measured at one layout
+        // pass per tile per step, and the largest single cost of a real pinch.
+        // Bucketing makes the bar hold still through a gesture and step only when
+        // the bucket changes.
+        return max(Self.titleBarHeight, Self.minScreenGrabPx / CGFloat(Self.chromeScaleBucket(for: zoom)))
+    }
+
+    /// Steps per octave for the chrome floor's scale bucket. Higher is
+    /// finer-grained chrome and more layout passes; lower is steadier and fewer.
+    static let chromeScaleStepsPerOctave: Double =
+        Double(ProcessInfo.processInfo.environment["ARRAY_CHROME_BUCKETS"] ?? "") ?? 4
+
+    /// Quantise the scale for chrome purposes, GEOMETRICALLY and always DOWNWARD.
+    ///
+    /// Downward is the load-bearing half. The floor exists so the move-grab strip
+    /// is never smaller than `minScreenGrabPx` on screen; bucketing to the NEAREST
+    /// step can round the scale UP, which makes the strip smaller than the floor
+    /// promised and silently breaks the affordance. `--tile-drag-grab-check`
+    /// catches exactly that at zoom 0.1. Rounding down can only make the strip
+    /// larger than strictly needed, which is safe.
+    ///
+    /// Geometric rather than linear so the relative step is constant across the
+    /// zoom range: a fixed 1/8 step is invisible at zoom 3 and enormous at 0.1.
+    static func chromeScaleBucket(for zoom: Double) -> Double {
+        guard zoom.isFinite, zoom > 0 else { return 1 }
+        let steps = max(1, chromeScaleStepsPerOctave)
+        let bucketed = pow(2, ((log2(zoom) * steps).rounded(.down)) / steps)
+        return bucketed.isFinite && bucketed > 0 ? min(zoom, bucketed) : zoom
     }
 
     /// World height the drawn title bar is laid out to. Aliased to the move-grab
@@ -658,17 +704,24 @@ class TileNSView: NSView, TokenThemed {
     }
 
     /// World edge length for the close button, floored so its on-screen size
-    /// stays `>= minScreenCloseButtonPx`. Mirrors the grab-strip floor pattern.
+    /// stays `>= minScreenCloseButtonPx`. Mirrors the grab-strip floor pattern,
+    /// including the scale bucket: on raw zoom this floor moved on every step
+    /// below zoom ~1.57, which re-framed the button per tile per step. The
+    /// bucket rounds DOWN, so the floor can only overshoot its screen-px
+    /// promise, never undercut it.
     var closeButtonWorldSize: CGFloat {
         guard let zoom = canvas?.viewport.zoom, zoom.isFinite, zoom > 0 else { return Self.closeButtonSize }
-        return max(Self.closeButtonSize, Self.minScreenCloseButtonPx / CGFloat(zoom))
+        return max(Self.closeButtonSize, Self.minScreenCloseButtonPx / CGFloat(Self.chromeScaleBucket(for: zoom)))
     }
 
     /// World point size for the × glyph, floored so it stays legible on screen
     /// (the glyph scales with the tile-view transform, hence the `/zoom` floor).
+    /// Bucketed like the button: on raw zoom this changed on every step below
+    /// zoom ~1.22, and each change rebuilt the button's SF Symbol NSImage — one
+    /// image mint per tile per zoom step, invisible to every layout counter.
     var closeGlyphWorldPointSize: CGFloat {
         guard let zoom = canvas?.viewport.zoom, zoom.isFinite, zoom > 0 else { return Self.closeGlyphPointSize }
-        return max(Self.closeGlyphPointSize, Self.minScreenCloseGlyphPx / CGFloat(zoom))
+        return max(Self.closeGlyphPointSize, Self.minScreenCloseGlyphPx / CGFloat(Self.chromeScaleBucket(for: zoom)))
     }
 
     func qaResizeEdge(at point: CGPoint) -> ResizeEdge? {
@@ -680,6 +733,9 @@ class TileNSView: NSView, TokenThemed {
     var qaTitleBarFrame: CGRect { titleBar?.frame ?? .zero }
     /// Redraws the title bar has asked for. A camera move must not raise this.
     var qaTitleBarRedrawCount: Int { titleBar?.qaRedrawInvalidationCount ?? 0 }
+    /// Draws the title bar actually EXECUTED — the rasterization side of the
+    /// counter above; only a pumped display cycle moves it.
+    var qaTitleBarDrawCount: Int { titleBar?.qaDrawCount ?? 0 }
 
     /// QA: the title's world point size (scales with the bar). On-screen size is
     /// `* zoom`. Drives `--tile-chrome-scale-check`.
@@ -816,9 +872,7 @@ private final class TitleBarView: NSView, TokenThemed {
         // that respects contentTintColor — the filled multicolor variant
         // renders red regardless of tint, which read as "alert" inside a
         // dark, dense canvas.
-        let config = NSImage.SymbolConfiguration(pointSize: TileNSView.closeGlyphPointSize, weight: .semibold)
-        btn.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tile")?
-            .withSymbolConfiguration(config)
+        btn.image = Self.closeGlyphImage(pointSize: TileNSView.closeGlyphPointSize)
         btn.imageScaling = .scaleProportionallyDown
         btn.isBordered = false
         btn.bezelStyle = .smallSquare
@@ -860,6 +914,13 @@ private final class TitleBarView: NSView, TokenThemed {
         applyTokens()
     }
 
+    /// One bitmap × image per bucketed glyph point size, shared across every
+    /// tile's bar. The symbol's vector recipe is consumed here once, rather than
+    /// re-rasterized by AppKit at every effective backing scale during zoom.
+    static func closeGlyphImage(pointSize: CGFloat) -> NSImage? {
+        CanvasSymbolImage.image(named: "xmark", pointSize: pointSize, weight: .semibold)
+    }
+
     /// Set the close button's edge length (world units) and glyph point size.
     /// Called from the tile's `layout()` so both track the current zoom; the
     /// button is then framed in `layout()`. The glyph is only re-imaged when its
@@ -871,9 +932,7 @@ private final class TitleBarView: NSView, TokenThemed {
         }
         if closeGlyphPointSize != glyphPointSize {
             closeGlyphPointSize = glyphPointSize
-            let config = NSImage.SymbolConfiguration(pointSize: glyphPointSize, weight: .semibold)
-            closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tile")?
-                .withSymbolConfiguration(config)
+            closeButton.image = Self.closeGlyphImage(pointSize: glyphPointSize)
         }
     }
 
@@ -1015,20 +1074,33 @@ private final class TitleBarView: NSView, TokenThemed {
 
     /// The rect the title is drawn into: from the leading inset to whatever comes
     /// next on the right — the status pill if there is one, otherwise the drag dots —
-    /// less one `Space.s` gap. Never negative-width.
+    /// less one `Space.s` gap. Never negative-width, and never STARTING past the
+    /// blocker either: on a 180-world tile at deep zoom-out the bucketed chrome
+    /// floors legitimately overflow the bar, and an empty title rect whose origin
+    /// sits right of the dots still reads as "title under the handle" to the
+    /// pill-layout census. The clamp only moves rects that are already empty.
     private func titleRect(theme: TokenTheme) -> NSRect {
         let scale = chromeScale
-        let leading = CGFloat(Space.m) * scale
         let blockedFrom = agentStatus.flatMap { statusPillRect(for: $0, theme: theme)?.minX }
             ?? qaDragHandleLeadingX
-        let available = max(0, blockedFrom - CGFloat(Space.s) * scale - leading)
+        let limit = max(0, blockedFrom - CGFloat(Space.s) * scale)
+        let leading = min(CGFloat(Space.m) * scale, limit)
+        let available = max(0, limit - leading)
         let height = ("X" as NSString).size(withAttributes: titleAttributes(theme: theme)).height
         return NSRect(
             x: leading, y: max(0, (bounds.height - height) / 2),
             width: available, height: height)
     }
 
+    /// QA: every ACTUAL draw of this bar. `qaRedrawInvalidationCount` counts the
+    /// ASK (`needsDisplay`); this counts AppKit executing it. The distinction is
+    /// the rasterization witness: a harness that never pumps a display cycle
+    /// sees invalidations but zero draws — which is exactly how `canvas.zoom`
+    /// reported green while a real pinch was visibly bad.
+    private(set) var qaDrawCount = 0
+
     override func draw(_ dirtyRect: NSRect) {
+        qaDrawCount += 1
         let scale = chromeScale
         let theme = effectiveTokenTheme
         let attrs = titleAttributes(theme: theme)
