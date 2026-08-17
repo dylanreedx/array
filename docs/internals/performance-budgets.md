@@ -482,6 +482,51 @@ fast path declines everything.
 .build/debug/Array --perf-budget-geometry-hold-probe-check
 ```
 
+The default gating fixture remains 10 real managed-agent tiles and 60 ticks.
+Architecture work may reuse the identical harness at larger sizes without
+changing the gate:
+
+```bash
+PERF_GEOMETRY_HOLD_TILES=50 PERF_GEOMETRY_HOLD_STEPS=12 \
+  .build/debug/Array --perf-budget-geometry-hold-probe-check
+```
+
+The overrides must be positive; `PERF_GEOMETRY_HOLD_TURNS` can vary transcript
+depth. A 2026-08-15 5/10/25/50 sweep measured one-bake medians of
+14.56/28.05/70.79/137.89 ms while held p95 stayed at or below 0.12 ms. The
+result proves both halves of the architecture: held motion removes the repeated
+cascade, and native residency must be bounded because the one final bake still
+scales linearly with installed deep subtrees.
+
+### `canvas.proxy-scene-probe` — OPT-IN, green cost probe; rejected UX
+
+```bash
+.build/debug/Array --perf-budget-check --scenario canvas.proxy-scene-probe
+```
+
+This is the first supported motion-presentation witness, not the shipping
+mechanism. It leaves real managed-agent transcript trees installed and held,
+then presents one synthetic tile-shell image per tile beneath one Array-owned
+root layer affine. The layer-hosting proxy contains no AppKit subviews. It runs
+5/10/25/50 tiles by default; `PERF_PROXY_SCENE_TILE_COUNTS`,
+`PERF_PROXY_SCENE_TURNS`, and `PERF_PROXY_SCENE_STEPS` provide positive opt-in
+overrides.
+
+The first 60-tick sweep measured proxy p95 at 0.03/0.03/0.04/0.05 ms from 5 to
+50 tiles while stepped p95 rose 20.21/38.61/93.24/170.95 ms. Each cell requires
+one root mutation per target, zero native bounds writes/layouts during motion,
+one final bake, a moving visual witness, exact anchor/world mapping, no AppKit
+subviews in the proxy, and zero final camera mismatches. The probe deliberately
+does not claim cache/provider fidelity, mixed WKWebView/Ghostty coverage,
+interaction routing, or production `CanvasNSView` lifecycle.
+
+A subsequent default-off dogfood integration used those synthetic shells and
+was explicitly rejected on 2026-08-16 because visible tiles lost their full
+detail during zoom. That production code was removed before commit. Preserve
+this scenario only as evidence that an owned root affine is cheap; it is not a
+visual design precedent. Any future presenter must retain full transcript,
+browser, terminal, zone, status, and chrome detail throughout motion.
+
 The missing real-content A/B for the backing cascade. It builds 10 real
 `ManagedAgentTileNSView` subtrees with six transcript turns each, drains their
 first render, then runs ABBA over two causal arms with 60 display commits apiece:
@@ -695,8 +740,12 @@ p50 8.34 ms (120 fps), p95 9.10 ms, worst 24.60 ms, 3 late (2%)
 
 A trace is bracketed by camera activity rather than AppKit gesture phases. That
 covers every path reaching `setViewport`, but the current recorder does not label
-pan versus zoom and includes the 250 ms quiet settle tail in its interval sample.
-Keep those limitations with any published result.
+pan versus zoom. Its display link stays alive for the 250 ms quiet settle window
+so the gesture can close reliably, while rolling and completed statistics stop
+one interval after the tick that observed the final camera step. That following
+interval retains AppKit/CA work the camera commit scheduled after the recorder
+callback; the remaining smooth idle callbacks are excluded. Keep the missing
+gesture label with any published result.
 
 `maximumFramesPerSecond` is the panel maximum, not proof of the current dynamic
 ProMotion, low-power, or external-display cadence. The printed reciprocal of p50

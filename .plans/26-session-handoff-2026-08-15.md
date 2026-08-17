@@ -3,6 +3,13 @@
 Status: the code state is complete through `ff99949` on `array/zoom-unify`,
 **14 program commits** on top of `array/zoom-feel` before this documentation
 commit. Pan/zoom ownership is unified and Dylan-confirmed.
+
+> 2026-08-15 continuation: read `.plans/27-bounded-canvas-presentation.md`
+> before implementing geometry hold. The all-or-nothing opaque-live fallback
+> below is superseded. A later synthetic-shell dogfood build was also explicitly
+> rejected by Dylan on 2026-08-16: every tile must retain full visual detail
+> during zoom, including browsers and terminals. See `.plans/27` for the current
+> full-detail contract.
 Pan is effectively at target. Zoom feels materially better after the driver and
 symbol freeze, but the live HUD now makes the remaining gap unambiguous: pan
 barely moves off cadence; zoom falls as low as ~30 FPS on the same 10-agent

@@ -142,6 +142,12 @@ enum PerfScenarios {
             // variable (`setBoundsSize`) stepped versus held. Opt-in until its
             // first measurements establish the recoverable fraction.
             Scenario(name: "canvas.geometry-hold-probe", isStress: true, run: { try canvasGeometryHoldProbe() }),
+            // First bounded motion-presenter experiment. A real managed-agent
+            // tree remains installed and geometrically held while a separate
+            // layer-hosting view presents synthetic tile-shell pixels through
+            // one owned root affine. Opt-in only: this proves the scene shape,
+            // not cache/provider fidelity or production CanvasNSView wiring.
+            Scenario(name: "canvas.proxy-scene-probe", isStress: true, run: { try canvasProxySceneProbe() }),
             // Supported-presentation experiment: AppKit owns an outer
             // NSScrollView/NSClipView and magnifies a real managed-agent
             // document tree. This stays opt-in until the real display pump says
@@ -1098,9 +1104,15 @@ enum PerfScenarios {
     /// bounds held, then pays one final bake. The result is an upper bound on the
     /// geometry/backing work a supported presentation mechanism may recover.
     static func canvasGeometryHoldProbe() throws -> PerfScenarioResult {
-        let tileCount = 10
-        let turnsPerAgent = 6
-        let steps = 60
+        // Defaults preserve the gating witness. The opt-in overrides let the
+        // architecture probe measure the final one-bake slope at realistic
+        // workspace sizes without cloning a second, subtly different harness.
+        let tileCount = Int(ProcessInfo.processInfo.environment["PERF_GEOMETRY_HOLD_TILES"] ?? "") ?? 10
+        let turnsPerAgent = Int(ProcessInfo.processInfo.environment["PERF_GEOMETRY_HOLD_TURNS"] ?? "") ?? 6
+        let steps = Int(ProcessInfo.processInfo.environment["PERF_GEOMETRY_HOLD_STEPS"] ?? "") ?? 60
+        guard tileCount > 0, turnsPerAgent > 0, steps > 0 else {
+            throw Failure(message: "geometry-hold overrides must all be positive")
+        }
         let baselineZoom = 1.0
         let finalZoom = 0.45
 
@@ -1317,6 +1329,434 @@ enum PerfScenarios {
             + "layouts stepped tile/transcript \(steppedTileLayouts)/\(steppedTranscriptLayouts), "
             + "held ticks \(heldTileLayouts)/\(heldTranscriptLayouts)"
         return PerfScenarioResult(name: "canvas.geometry-hold-probe", detail: detail, measurements: measurements)
+    }
+
+    // MARK: - Scenario: shallow proxy scene versus bounds stepping
+
+    /// Can an Array-owned, image-only layer scene keep active zoom work bounded
+    /// while a real native agent tree remains installed behind it?
+    ///
+    /// This is deliberately not production integration. The proxy uses one
+    /// shared synthetic tile-shell image, one layer per fixture tile, and one
+    /// root affine per desired camera tick. It performs no capture, admission,
+    /// cache generation, or native view conversion on the frame path. The same
+    /// fixture first runs the current bounds-stepping control, then holds native
+    /// geometry for the proxy arm and pays exactly one final native bake.
+    static func canvasProxySceneProbe() throws -> PerfScenarioResult {
+        let environment = ProcessInfo.processInfo.environment
+        let requestedCounts = environment["PERF_PROXY_SCENE_TILE_COUNTS"]
+            .map { raw in
+                raw.split(separator: ",").compactMap { token in
+                    Int(token.trimmingCharacters(in: .whitespaces))
+                }
+            } ?? [5, 10, 25, 50]
+        let turnsPerAgent = Int(environment["PERF_PROXY_SCENE_TURNS"] ?? "") ?? 6
+        let steps = Int(environment["PERF_PROXY_SCENE_STEPS"] ?? "") ?? 60
+        guard !requestedCounts.isEmpty,
+              requestedCounts.allSatisfy({ $0 > 0 }),
+              turnsPerAgent > 0,
+              steps > 1 else {
+            throw Failure(message: "proxy-scene counts/turns must be positive and steps must exceed one")
+        }
+
+        let viewportSize = CGSize(width: 1_600, height: 1_000)
+        let baseline = CanvasViewport(x: 0, y: 0, zoom: 1)
+        let finalZoom = 0.45
+
+        func percentile(_ values: [Double], _ fraction: Double) -> Double {
+            guard !values.isEmpty else { return 0 }
+            let sorted = values.sorted()
+            let index = Int((Double(sorted.count - 1) * fraction).rounded(.up))
+            return sorted[min(max(index, 0), sorted.count - 1)]
+        }
+
+        func milliseconds(_ body: () -> Void) -> Double {
+            let start = ProcessInfo.processInfo.systemUptime
+            body()
+            return (ProcessInfo.processInfo.systemUptime - start) * 1_000
+        }
+
+        func makeShellImage() throws -> CGImage {
+            let width = 420
+            let height = 300
+            guard let context = CGContext(
+                data: nil,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else {
+                throw Failure(message: "proxy-scene could not allocate its synthetic shell bitmap")
+            }
+            context.setFillColor(CGColor(red: 0.105, green: 0.112, blue: 0.125, alpha: 1))
+            context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            context.setFillColor(CGColor(red: 0.155, green: 0.165, blue: 0.185, alpha: 1))
+            context.fill(CGRect(x: 0, y: height - 46, width: width, height: 46))
+            context.setFillColor(CGColor(red: 0.31, green: 0.57, blue: 0.96, alpha: 1))
+            context.fill(CGRect(x: 16, y: height - 29, width: 94, height: 7))
+            context.setFillColor(CGColor(red: 0.27, green: 0.285, blue: 0.315, alpha: 1))
+            for row in 0..<7 {
+                context.fill(CGRect(x: 18, y: 26 + row * 29, width: 300 + (row % 3) * 34, height: 8))
+            }
+            context.setStrokeColor(CGColor(red: 0.29, green: 0.31, blue: 0.35, alpha: 1))
+            context.setLineWidth(2)
+            context.stroke(CGRect(x: 1, y: 1, width: width - 2, height: height - 2))
+            guard let image = context.makeImage() else {
+                throw Failure(message: "proxy-scene could not finish its synthetic shell bitmap")
+            }
+            return image
+        }
+
+        struct Row {
+            let count: Int
+            let steppedP50: Double
+            let steppedP95: Double
+            let proxyP50: Double
+            let proxyP95: Double
+            let bakeMs: Double
+            let steppedWrites: Int
+            let steppedTranscriptLayouts: Int
+            let proxyWrites: Int
+            let proxyTileLayouts: Int
+            let proxyTranscriptLayouts: Int
+            let rootMutations: Int
+            let bakeWrites: Int
+            let anchorError: CGFloat
+            let mappingError: CGFloat
+            let visualTravel: CGFloat
+            let finalMismatches: Int
+            let proxySubviewCount: Int
+            let proxyImageLayerCount: Int
+        }
+
+        let shellImage = try makeShellImage()
+        var rows: [Row] = []
+        var measurements: [PerfMeasurement] = []
+
+        for tileCount in requestedCounts {
+            let canvas = CanvasNSView(
+                canvasState: CanvasState(viewport: baseline, tiles: [], groups: [], lastActiveTileId: nil),
+                activeZone: nil, zoneRenderModels: [], showsZoneChrome: true
+            )
+            canvas.frame = CGRect(origin: .zero, size: viewportSize)
+            let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless],
+                                  backing: .buffered, defer: false)
+            window.contentView = canvas
+            window.orderFrontRegardless()
+            defer {
+                window.orderOut(nil)
+                window.contentView = nil
+            }
+
+            let zoneId = UUID()
+            let rowCount = Int(ceil(Double(tileCount) / 5.0))
+            let placement = ZonePlacement(
+                zoneId: zoneId, projectId: UUID(), origin: ZonePoint(x: 0, y: 0),
+                size: ZoneSize(width: 2_500, height: Double(max(rowCount, 1)) * 360 + 120),
+                color: "blue", collapsed: false, hydrationPolicy: .automatic
+            )
+            var tiles: [Tile] = []
+            for index in 0..<tileCount {
+                tiles.append(Tile(
+                    id: UUID(), kind: .managedAgent, title: "proxy-scene-\(tileCount)-\(index)",
+                    frame: TileFrame(x: Double(index % 5) * 480 + 40,
+                                     y: Double(index / 5) * 360 + 60,
+                                     width: 420, height: 300),
+                    zPosition: .fromLegacyRank(index + 1), zoneId: zoneId,
+                    runtimeRef: nil, metadata: TileMetadata()
+                ))
+            }
+            let zoneLayer = CanvasNSView.ZoneLayer(
+                placement: placement,
+                renderModel: CanvasNSView.ZoneRenderModel(placement: placement, displayName: "Proxy scene probe"),
+                tiles: tiles
+            )
+            for (index, tile) in tiles.enumerated() {
+                let view = ManagedAgentTileNSView(tile: tile, threadId: "proxy-scene-\(tileCount)-\(index)")
+                view.renderRehydratedPreviousSession(
+                    transcriptFixture(threadId: "proxy-scene-\(tileCount)-\(index)", turns: turnsPerAgent)
+                )
+                zoneLayer.tileViews[tile.id] = view
+            }
+            canvas.setZones([zoneLayer])
+
+            func pump() {
+                canvas.layoutSubtreeIfNeeded()
+                window.displayIfNeeded()
+                CATransaction.flush()
+            }
+
+            func applyNative(_ viewport: CanvasViewport) {
+                _ = canvas.worldPlane.applyCamera(
+                    viewportSize: viewportSize,
+                    worldOrigin: CGPoint(x: viewport.x, y: viewport.y),
+                    zoom: viewport.zoom
+                )
+            }
+
+            // Alternate the anchor across the viewport. Each desired viewport
+            // preserves the baked world point under that tick's anchor, which
+            // exercises both scale and translation rather than a center-only
+            // scale that could accidentally look correct.
+            let targets: [(viewport: CanvasViewport, anchor: CGPoint)] = (1...steps).map { step in
+                let progress = Double(step) / Double(steps)
+                let zoom = baseline.zoom + (finalZoom - baseline.zoom) * progress
+                let anchor = step.isMultiple(of: 2)
+                    ? CGPoint(x: 800, y: 500)
+                    : CGPoint(x: 220, y: 170)
+                let worldAtAnchor = CGPoint(
+                    x: baseline.x + anchor.x / baseline.zoom,
+                    y: baseline.y + anchor.y / baseline.zoom
+                )
+                return (
+                    CanvasViewport(
+                        x: worldAtAnchor.x - anchor.x / zoom,
+                        y: worldAtAnchor.y - anchor.y / zoom,
+                        zoom: zoom
+                    ),
+                    anchor
+                )
+            }
+
+            // Drain fixture construction and first rasterization, then warm the
+            // exact stepped geometry path before its clock starts.
+            applyNative(baseline)
+            pump()
+            for target in targets.prefix(3) {
+                applyNative(target.viewport)
+                pump()
+            }
+            applyNative(baseline)
+            pump()
+            canvas.worldPlane.qaResetBoundsSizeWriteCount()
+
+            let steppedTranscriptBefore = canvas.qaTotalTranscriptLayoutPassCount
+            var steppedFrames: [Double] = []
+            for target in targets {
+                steppedFrames.append(milliseconds {
+                    applyNative(target.viewport)
+                    pump()
+                })
+            }
+            let steppedWrites = canvas.worldPlane.qaBoundsSizeWriteCount
+            let steppedTranscriptLayouts = canvas.qaTotalTranscriptLayoutPassCount - steppedTranscriptBefore
+
+            // Settle native geometry back to B before admitting the proxy. This
+            // reset is outside all proxy counters and clocks.
+            applyNative(baseline)
+            pump()
+
+            let hostLayer = CALayer()
+            hostLayer.frame = CGRect(origin: .zero, size: viewportSize)
+            hostLayer.masksToBounds = true
+            hostLayer.isGeometryFlipped = true
+            let proxyHost = NSView(frame: CGRect(origin: .zero, size: viewportSize))
+            proxyHost.layer = hostLayer
+            proxyHost.wantsLayer = true
+
+            let rootLayer = CALayer()
+            rootLayer.bounds = CGRect(origin: .zero, size: viewportSize)
+            rootLayer.anchorPoint = .zero
+            rootLayer.position = .zero
+            rootLayer.isGeometryFlipped = true
+            hostLayer.addSublayer(rootLayer)
+            for tile in tiles {
+                let imageLayer = CALayer()
+                imageLayer.frame = CGRect(x: tile.frame.x, y: tile.frame.y,
+                                          width: tile.frame.width, height: tile.frame.height)
+                imageLayer.contents = shellImage
+                imageLayer.contentsGravity = .resize
+                imageLayer.contentsScale = 1
+                rootLayer.addSublayer(imageLayer)
+            }
+            canvas.addSubview(proxyHost, positioned: .above, relativeTo: nil)
+            pump()
+
+            canvas.worldPlane.qaResetBoundsSizeWriteCount()
+            let proxyTileLayoutsBefore = canvas.qaTotalTileLayoutPassCount
+            let proxyTranscriptLayoutsBefore = canvas.qaTotalTranscriptLayoutPassCount
+            var proxyFrames: [Double] = []
+            var rootMutations = 0
+            var worstAnchorError: CGFloat = 0
+            var worstMappingError: CGFloat = 0
+            var firstPresentedPoint: CGPoint?
+            var lastPresentedPoint: CGPoint?
+            let witnessWorldPoint = CGPoint(x: tiles[0].frame.x + 37, y: tiles[0].frame.y + 29)
+
+            for target in targets {
+                let q = target.viewport.zoom / baseline.zoom
+                let translation = CGPoint(
+                    x: (baseline.x - target.viewport.x) * target.viewport.zoom,
+                    y: (baseline.y - target.viewport.y) * target.viewport.zoom
+                )
+                let affine = CGAffineTransform(a: q, b: 0, c: 0, d: q,
+                                               tx: translation.x, ty: translation.y)
+                proxyFrames.append(milliseconds {
+                    CATransaction.begin()
+                    CATransaction.setDisableActions(true)
+                    rootLayer.setAffineTransform(affine)
+                    rootMutations += 1
+                    CATransaction.commit()
+                    pump()
+                })
+
+                let bakedWorldAtAnchor = CGPoint(
+                    x: baseline.x + target.anchor.x / baseline.zoom,
+                    y: baseline.y + target.anchor.y / baseline.zoom
+                )
+                // Read back the transform installed on the scene root rather
+                // than reusing the harness value. `CALayer.convert` expresses a
+                // geometry-flipped layer's local point in Core Animation's
+                // unflipped coordinate convention; the model affine itself is
+                // the visual world-to-screen mapping used by this scene.
+                let installedAffine = rootLayer.affineTransform()
+                let presentedAnchor = bakedWorldAtAnchor.applying(installedAffine)
+                worstAnchorError = max(
+                    worstAnchorError,
+                    hypot(presentedAnchor.x - target.anchor.x, presentedAnchor.y - target.anchor.y)
+                )
+                let presentedWitness = witnessWorldPoint.applying(installedAffine)
+                let expectedWitness = CGPoint(
+                    x: (witnessWorldPoint.x - target.viewport.x) * target.viewport.zoom,
+                    y: (witnessWorldPoint.y - target.viewport.y) * target.viewport.zoom
+                )
+                worstMappingError = max(
+                    worstMappingError,
+                    hypot(presentedWitness.x - expectedWitness.x, presentedWitness.y - expectedWitness.y)
+                )
+                if firstPresentedPoint == nil { firstPresentedPoint = presentedWitness }
+                lastPresentedPoint = presentedWitness
+            }
+
+            let proxyWrites = canvas.worldPlane.qaBoundsSizeWriteCount
+            let proxyTileLayouts = canvas.qaTotalTileLayoutPassCount - proxyTileLayoutsBefore
+            let proxyTranscriptLayouts = canvas.qaTotalTranscriptLayoutPassCount - proxyTranscriptLayoutsBefore
+            let visualTravel: CGFloat
+            if let firstPresentedPoint, let lastPresentedPoint {
+                visualTravel = hypot(lastPresentedPoint.x - firstPresentedPoint.x,
+                                     lastPresentedPoint.y - firstPresentedPoint.y)
+            } else {
+                visualTravel = 0
+            }
+
+            // Keep the proxy installed and visible through the real native
+            // display/CA flush. Removal happens only after the one measured bake.
+            canvas.worldPlane.qaResetBoundsSizeWriteCount()
+            let bakeMs = milliseconds {
+                // Use the production camera funnel for the final bake so the
+                // semantic viewport and the retained native plane become the
+                // same truth before the proxy disappears.
+                canvas.setViewport(targets[targets.count - 1].viewport)
+                pump()
+            }
+            let bakeWrites = canvas.worldPlane.qaBoundsSizeWriteCount
+            let proxyWasPresentThroughBake = proxyHost.superview === canvas
+            proxyHost.removeFromSuperview()
+
+            let finalMismatches = canvas.qaTileScreenFrameMismatchCount
+            let row = Row(
+                count: tileCount,
+                steppedP50: percentile(steppedFrames, 0.5),
+                steppedP95: percentile(steppedFrames, 0.95),
+                proxyP50: percentile(proxyFrames, 0.5),
+                proxyP95: percentile(proxyFrames, 0.95),
+                bakeMs: bakeMs,
+                steppedWrites: steppedWrites,
+                steppedTranscriptLayouts: steppedTranscriptLayouts,
+                proxyWrites: proxyWrites,
+                proxyTileLayouts: proxyTileLayouts,
+                proxyTranscriptLayouts: proxyTranscriptLayouts,
+                rootMutations: rootMutations,
+                bakeWrites: bakeWrites,
+                anchorError: worstAnchorError,
+                mappingError: worstMappingError,
+                visualTravel: visualTravel,
+                finalMismatches: finalMismatches,
+                proxySubviewCount: proxyHost.subviews.count,
+                proxyImageLayerCount: rootLayer.sublayers?.count ?? 0
+            )
+            rows.append(row)
+
+            let prefix = "proxy-scene.\(tileCount)"
+            measurements.append(PerfBudget(
+                metric: "\(prefix).managedAgentTiles", limit: .exactly(Double(tileCount)), unit: .count,
+                rationale: "each scene-size cell must retain the requested number of real managed-agent transcript trees behind the proxy"
+            ).evaluate(Double(canvas.qaTotalInstalledTileCount)))
+            measurements.append(PerfBudget(
+                metric: "\(prefix).steppedBoundsSizeWrites", limit: .exactly(Double(steps)), unit: .count,
+                rationale: "the control must exercise one real world-plane bounds-size write per desired zoom tick"
+            ).evaluate(Double(steppedWrites)))
+            measurements.append(PerfBudget(
+                metric: "\(prefix).steppedTranscriptLayouts", limit: .atLeast(1), unit: .count,
+                rationale: "the stepped control must reproduce the native transcript cascade or the comparison has no teeth"
+            ).evaluate(Double(steppedTranscriptLayouts)))
+            measurements.append(PerfBudget(
+                metric: "\(prefix).rootMutations", limit: .exactly(Double(steps)), unit: .count,
+                rationale: "the shallow presenter is O(1) in camera mutations: exactly one owned root affine per desired camera commit"
+            ).evaluate(Double(rootMutations)))
+            measurements.append(PerfBudget(
+                metric: "\(prefix).proxyBoundsSizeWrites", limit: .exactly(0), unit: .count,
+                rationale: "active proxy motion must leave native world-plane geometry held"
+            ).evaluate(Double(proxyWrites)))
+            measurements.append(PerfBudget(
+                metric: "\(prefix).proxyTileLayouts", limit: .exactly(0), unit: .count,
+                rationale: "an image-only root affine must not lay out installed native tile trees"
+            ).evaluate(Double(proxyTileLayouts)))
+            measurements.append(PerfBudget(
+                metric: "\(prefix).proxyTranscriptLayouts", limit: .exactly(0), unit: .count,
+                rationale: "the heaviest native subtree must remain untouched throughout active proxy motion"
+            ).evaluate(Double(proxyTranscriptLayouts)))
+            measurements.append(PerfBudget(
+                metric: "\(prefix).bakeBoundsSizeWrites", limit: .exactly(1), unit: .count,
+                rationale: "a normal held gesture pays one and only one final native geometry bake"
+            ).evaluate(Double(bakeWrites)))
+            measurements.append(PerfBudget(
+                metric: "\(prefix).anchorError", limit: .atMost(0.5), unit: .count,
+                rationale: "the root affine must preserve each changing gesture anchor to within one device pixel"
+            ).evaluate(Double(worstAnchorError)))
+            measurements.append(PerfBudget(
+                metric: "\(prefix).worldMappingError", limit: .atMost(0.5), unit: .count,
+                rationale: "an independent world point must land at the desired camera's screen coordinate, not merely keep the anchor fixed"
+            ).evaluate(Double(worstMappingError)))
+            measurements.append(PerfBudget(
+                metric: "\(prefix).visualTravel", limit: .atLeast(1), unit: .count,
+                rationale: "teeth: the synthetic tile scene must visibly move across the driven camera sequence"
+            ).evaluate(Double(visualTravel)))
+            measurements.append(PerfBudget(
+                metric: "\(prefix).proxySubviews", limit: .exactly(0), unit: .count,
+                rationale: "the layer-hosting proxy may contain only Array-owned layers/images, never AppKit subviews"
+            ).evaluate(Double(proxyHost.subviews.count)))
+            measurements.append(PerfBudget(
+                metric: "\(prefix).imageLayers", limit: .exactly(Double(tileCount)), unit: .count,
+                rationale: "the scene must actually present one synthetic tile shell for every real fixture tile"
+            ).evaluate(Double(rootLayer.sublayers?.count ?? 0)))
+            measurements.append(PerfBudget(
+                metric: "\(prefix).proxyP95Duration", limit: .atMost(frameBudgetMs), unit: .milliseconds,
+                rationale: "the isolated one-root affine and real display flush must fit a 120 Hz frame"
+            ).evaluate(row.proxyP95))
+            measurements.append(PerfBudget(
+                metric: "\(prefix).proxyPresentThroughBake", limit: .exactly(1), unit: .count,
+                rationale: "the presenter must survive through the native display/CA flush so the one-bake hitch can be visually covered"
+            ).evaluate(proxyWasPresentThroughBake ? 1 : 0))
+            measurements.append(PerfBudget(
+                metric: "\(prefix).finalScreenFrameMismatches", limit: .exactly(0), unit: .count,
+                rationale: "after the bake, the native camera oracle must exactly match the final desired viewport"
+            ).evaluate(Double(finalMismatches)))
+        }
+
+        let detail = "\(steps) ticks, \(turnsPerAgent) turns/real agent, one shared synthetic shell image; "
+            + rows.map { row in
+                String(format: "%d tiles stepped %.2f/%.2f ms, proxy %.2f/%.2f ms, bake %.2f ms, writes %d/%d+%d, layouts %d/%d, root %d, anchor %.3f px",
+                       row.count, row.steppedP50, row.steppedP95,
+                       row.proxyP50, row.proxyP95, row.bakeMs,
+                       row.steppedWrites, row.proxyWrites, row.bakeWrites,
+                       row.proxyTileLayouts, row.proxyTranscriptLayouts,
+                       row.rootMutations, row.anchorError)
+            }.joined(separator: " | ")
+        return PerfScenarioResult(name: "canvas.proxy-scene-probe", detail: detail,
+                                  measurements: measurements)
     }
 
     // MARK: - Scenario: AppKit scroll-view magnification

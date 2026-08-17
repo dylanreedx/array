@@ -35,8 +35,23 @@ final class CanvasFrameRecorder {
     private weak var view: NSView?
     private var displayLink: CADisplayLink?
     private var lastTimestamp: CFTimeInterval = 0
-    /// Frame intervals in milliseconds for the gesture in progress.
-    private var intervals: [Double] = []
+    /// Display intervals observed while the gesture recorder is alive. The link
+    /// intentionally survives for the quiet settle window, but only the prefix
+    /// through one interval after the last tick that observed a camera step
+    /// belongs to the gesture's frame statistics. That following interval is
+    /// load-bearing: a display-link camera commit can schedule AppKit/CA work
+    /// after this recorder's callback, delaying the next callback. Everything
+    /// beyond it is quiet tail and would make a bad zoom look healthier.
+    private struct FrameInterval {
+        let milliseconds: Double
+        let deliversCameraStep: Bool
+    }
+    private var intervals: [FrameInterval] = []
+    private var lastDeliveryIntervalIndex: Int?
+    /// Set by `noteCameraStep`, consumed by the next display-link tick. If the
+    /// final camera commit blocks the main thread, that delayed tick's long
+    /// interval remains marked as active and therefore remains in the result.
+    private var hasUndeliveredCameraStep = false
     private var cameraStepsThisGesture = 0
     private var lastCameraStep: CFTimeInterval = 0
     private var gestureActive = false
@@ -78,8 +93,11 @@ final class CanvasFrameRecorder {
     func noteCameraStep() {
         guard Self.isEnabled else { return }
         lastCameraStep = CACurrentMediaTime()
-        cameraStepsThisGesture += 1
         if !gestureActive { beginGesture() }
+        // `beginGesture` resets the previous gesture's counters, so account the
+        // leading camera commit afterwards. The old order silently lost step 1.
+        cameraStepsThisGesture += 1
+        hasUndeliveredCameraStep = true
         // The display link is the sampler, but it must not also be the only way a
         // gesture can END: it stops ticking when the window is occluded or the app
         // deactivates, and a gesture that finishes at that moment would never be
@@ -99,7 +117,9 @@ final class CanvasFrameRecorder {
         guard let view, displayLink == nil else { return }
         gestureActive = true
         intervals.removeAll(keepingCapacity: true)
+        lastDeliveryIntervalIndex = nil
         cameraStepsThisGesture = 0
+        hasUndeliveredCameraStep = false
         lastTimestamp = 0
         lastHUDPublishTimestamp = 0
         let link = view.displayLink(target: self, selector: #selector(tick(_:)))
@@ -110,15 +130,33 @@ final class CanvasFrameRecorder {
     @objc private func tick(_ link: CADisplayLink) {
         let now = link.timestamp
         if lastTimestamp > 0 {
-            intervals.append((now - lastTimestamp) * 1_000)
+            intervals.append(FrameInterval(
+                milliseconds: (now - lastTimestamp) * 1_000,
+                deliversCameraStep: hasUndeliveredCameraStep
+            ))
+            if hasUndeliveredCameraStep {
+                lastDeliveryIntervalIndex = intervals.count - 1
+            }
         }
         lastTimestamp = now
+        // The first tick establishes the timestamp and can deliver the leading
+        // camera step even though there is no preceding interval to time.
+        hasUndeliveredCameraStep = false
         if lastHUDPublishTimestamp == 0 { lastHUDPublishTimestamp = now }
         if Self.isHUDEnabled,
+           let lastDeliveryIntervalIndex,
            intervals.count >= 2,
            now - lastHUDPublishTimestamp >= hudPublishInterval {
             lastHUDPublishTimestamp = now
-            let rolling = Array(intervals.suffix(hudRollingFrameCount))
+            // Include one interval after the tick that observed the final step:
+            // AppKit/CA can commit that camera change after our callback and
+            // delay the next one. Take at most 30 values directly from that
+            // active prefix. Do not map
+            // the whole gesture on every display callback merely to discard its
+            // tail; instrumentation must not become frame-rate work itself.
+            let activeEnd = min(lastDeliveryIntervalIndex + 1, intervals.count - 1)
+            let first = max(0, activeEnd - hudRollingFrameCount + 1)
+            let rolling = intervals[first...activeEnd].map(\.milliseconds)
             onGestureStats?(makeStats(intervals: rolling, cameraSteps: cameraStepsThisGesture))
         }
         if CACurrentMediaTime() - lastCameraStep > settleSeconds { endGesture(link: link) }
@@ -154,12 +192,13 @@ final class CanvasFrameRecorder {
         settleTimer?.invalidate()
         settleTimer = nil
         gestureActive = false
-        guard intervals.count >= 2 else { return }
+        let activeIntervals = Self.activeIntervals(in: intervals)
+        guard activeIntervals.count >= 2 else { return }
 
         // The display's own cadence is the budget. On a ProMotion panel that is
         // 8.3 ms; on an external 60 Hz monitor it is 16.7 ms. Asserting a fixed
         // 60 would call a perfect 120 Hz gesture a failure and vice versa.
-        let stats = makeStats(intervals: intervals, cameraSteps: cameraStepsThisGesture)
+        let stats = makeStats(intervals: activeIntervals, cameraSteps: cameraStepsThisGesture)
         let budgetMs = 1_000 / stats.refreshHz
         lastGesture = stats
         // Replace the rolling live sample with the whole-gesture result once the
@@ -187,5 +226,38 @@ final class CanvasFrameRecorder {
                 try? Data(line.utf8).write(to: url)
             }
         }
+    }
+
+    /// Keep the contiguous gesture window through one interval after the last
+    /// tick that observed a camera commit. Intervals between camera deliveries
+    /// stay in the window; only the smooth tail after the final delivery is
+    /// removed.
+    private static func activeIntervals(in samples: [FrameInterval]) -> [Double] {
+        guard let finalDelivery = samples.lastIndex(where: \.deliversCameraStep) else { return [] }
+        let activeEnd = min(finalDelivery + 1, samples.count - 1)
+        return samples[...activeEnd].map(\.milliseconds)
+    }
+
+    /// Deterministic QA seam for the interval-attribution rule. This avoids a
+    /// live CADisplayLink in the camera-driver check while exercising the same
+    /// selector used by rolling and completed gesture statistics.
+    static func qaActiveIntervals(
+        _ samples: [(milliseconds: Double, deliversCameraStep: Bool)]
+    ) -> [Double] {
+        activeIntervals(in: samples.map {
+            FrameInterval(milliseconds: $0.milliseconds, deliversCameraStep: $0.deliversCameraStep)
+        })
+    }
+
+    var qaCameraStepCount: Int { cameraStepsThisGesture }
+
+    /// Stop a recorder created only to inspect its leading-step accounting.
+    /// Unlike `endGesture`, this deliberately publishes no partial result.
+    func qaCancel() {
+        displayLink?.invalidate()
+        displayLink = nil
+        settleTimer?.invalidate()
+        settleTimer = nil
+        gestureActive = false
     }
 }

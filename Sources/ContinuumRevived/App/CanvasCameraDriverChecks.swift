@@ -140,7 +140,45 @@ enum CanvasCameraDriverChecks {
         try expect(abs(canvas.viewport.y - expectedY) < 0.001,
                    "final viewport must equal the composition of all 6 deltas: expected y \(expectedY), got \(canvas.viewport.y)")
 
-        print("canvas camera coalesce — control \(controlApplies) applies for 6 direct calls; driven \(drivenApplies) applies for 6 events in one interval, final viewport preserved")
+        // Frame-recorder accounting: keep the whole active window, including a
+        // long final delivery caused by a camera commit, but trim the smooth
+        // settle callbacks after it. This is a pure seam over the production
+        // selector, so the witness does not depend on display-link timing.
+        let activeIntervals = CanvasFrameRecorder.qaActiveIntervals([
+            (8.3, true),
+            (8.3, false),
+            (8.3, true),
+            // The final camera step can schedule its expensive AppKit/CA commit
+            // after the recorder callback, making this following interval long.
+            (41.0, false),
+            (8.3, false),
+        ])
+        try expect(activeIntervals == [8.3, 8.3, 8.3, 41.0],
+                   "frame stats must retain the final long camera-delivery interval and trim its smooth settle tail; got \(activeIntervals)")
+        try expect(CanvasFrameRecorder.qaActiveIntervals([
+            (8.3, false), (8.3, false),
+        ]).isEmpty,
+                   "quiet display-link callbacks with no camera delivery must not mint a gesture sample")
+
+        // The recorder is normally absent in checks, so enable it only around a
+        // private instance and restore the process environment immediately.
+        // This exercises the production note/begin order that used to increment
+        // step 1 and then reset the count back to zero.
+        let statsKey = "CONTINUUM_FRAME_STATS"
+        let previousStatsValue = ProcessInfo.processInfo.environment[statsKey]
+        setenv(statsKey, "1", 1)
+        let accountingRecorder = CanvasFrameRecorder(view: canvas)
+        accountingRecorder.noteCameraStep()
+        try expect(accountingRecorder.qaCameraStepCount == 1,
+                   "the first camera step must survive gesture initialization; got \(accountingRecorder.qaCameraStepCount)")
+        accountingRecorder.qaCancel()
+        if let previousStatsValue {
+            setenv(statsKey, previousStatsValue, 1)
+        } else {
+            unsetenv(statsKey)
+        }
+
+        print("canvas camera coalesce — control \(controlApplies) applies for 6 direct calls; driven \(drivenApplies) applies for 6 events in one interval, final viewport preserved; frame stats retained final delivery and trimmed settle tail")
     }
 
     // MARK: - Leg 2: glide mechanics
@@ -257,4 +295,5 @@ enum CanvasCameraDriverChecks {
 
         print("canvas zoom momentum — flick glided \(glideSteps) steps and terminated; deliberate stop stayed dead; pinch/.began and external writes cancel; pan composed in one commit; clamp stopped the glide in \(clampSteps) steps; stickiness expires")
     }
+
 }
