@@ -570,7 +570,7 @@ enum SidebarScreenshotChecks {
                     let window = NSWindow(
                         contentRect: view.frame, styleMask: [.borderless],
                         backing: .buffered, defer: false)
-                    window.appearance = appearance
+                    window.appearance = NSAppearance(named: appearanceName)
                     window.contentView = view
                     view.layoutSubtreeIfNeeded()
                     let rep = try UIProbe.bitmap(of: view, id: fixture)
