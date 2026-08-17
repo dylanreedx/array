@@ -1034,3 +1034,30 @@ The settle nudge pill — designed by Dylan, not built — plus the pointing-han
 bounded local project-favicon ladder, and the ink-alignment witness, which measures the
 mock's symbol set (hand + triangle) while the live cell now draws a checkmark. That last
 one is non-negotiable #2 and has been true since the file's header claimed otherwise.
+
+## 2026-08-17 — command menus adopt their own anatomy
+
+The final polish tail is now part of the program record. Value pickers keep their
+selected-value checkmark rows and 36 pt pitch. Sidebar row and bulk actions opt into a
+distinct `commands` presentation: 30 pt rows, caller-owned leading symbols, no selection
+checkmarks, and one quiet separator before the first destructive action. Snooze presets
+use clock symbols; row and bulk verbs use stable semantic symbols. The shared popover
+still owns keyboard navigation, typeahead, accessibility, focus return, placement, and
+token painting—this is a presentation mode, not a second menu implementation.
+
+The Lab sidebar now wires inert host callbacks so its right-click review surface exposes
+the same capability-driven production menu instead of honestly hiding commands its fake
+host did not support.
+
+Verification before commit:
+
+- `swift build --product Array` — green;
+- `--ui-geometry-check` — green, including compact command density, dynamic icons,
+  checkmark suppression, and destructive grouping;
+- `--agent-inbox-check`, `--sidebar-ux-check`, and
+  `--sidebar-production-corpus-check` — green;
+- `--sidebar-screenshot-check` — green, 48 images;
+- `--ui-probe-check`, `--ui-contrast-check`,
+  `ContinuumRevivedAgentUIChecks`, and colour hygiene — green;
+- `--component-lab-check` — the same documented pre-existing known-red composer-provider
+  footer leg; no new failure was observed before it halted that process.

@@ -1413,6 +1413,18 @@ final class SidebarInbox96PlaygroundView: NSView {
         // wall clock would make the row flap while you are looking at it.
         inbox.clock = { Self.now }
 
+        // This is a behaviour review surface, so its context menu must expose the
+        // same host-backed actions as the shipped sidebar. Without these inert Lab
+        // callbacks P5.1 correctly hides every unsupported command and right-click
+        // shows only Rename — technically honest, but useless for judging the menu's
+        // spacing, hierarchy, destructive treatment, submenu, or selection-aware copy.
+        // Rename remains live because it is row-local; the host-owned callbacks below
+        // deliberately record no production mutation.
+        inbox.onRevealRow = { _ in }
+        inbox.onRowAction = { _, _ in }
+        inbox.onSnoozeSelection = { _, _ in }
+        inbox.wiredRowActions = Set(InboxRowAction.allCases.filter { $0 != .generateName })
+
         borderControl.addItems(withTitles: Self.borders.map(\.title))
         pitchControl.selectedSegment = 0
         borderControl.selectItem(at: 0)

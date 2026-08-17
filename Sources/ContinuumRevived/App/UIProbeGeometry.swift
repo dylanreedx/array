@@ -5936,6 +5936,21 @@ enum UIProbeGeometry {
         guard let panelBorder = list.layer?.borderWidth, panelBorder <= 0.5, panelBorder > 0 else {
             throw fail("choice popover: panel boundary is missing or heavier than 0.5pt")
         }
+
+        let commands = ChoiceListView(items: [
+            ChoiceItem(id: "rename", title: "Rename", icon: .system("pencil")),
+            ChoiceItem(id: "plain", title: "No icon"),
+            ChoiceItem(id: "delete", title: "Delete", icon: .system("trash"), destructive: true),
+        ], selectedID: nil, presentation: .commands)
+        commands.frame = NSRect(origin: .zero, size: commands.intrinsicContentSize)
+        commands.layoutSubtreeIfNeeded()
+        guard commands.qaRenderedRowHeight == ChoiceListView.commandRowHeight,
+              commands.qaRenderedRowHeight < ChoiceListView.rowHeight,
+              commands.qaVisibleIconIDs == Set(["rename", "delete"]),
+              commands.qaRowStates.allSatisfy({ !$0.checkVisible }),
+              commands.qaHasDestructiveSeparator else {
+            throw fail("choice popover: command presentation lost compact density, dynamic icons, checkmark suppression, or destructive grouping")
+        }
         guard let typeaheadEvent = NSEvent.keyEvent(
             with: .keyDown,
             location: .zero,

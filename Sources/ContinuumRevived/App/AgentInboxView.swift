@@ -2904,7 +2904,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         guard !ids.isEmpty, !options.isEmpty else { return }
         snoozeTargetIds = ids
         let items = options.map { option in
-            ChoiceItem(id: option.preset.rawValue, title: option.title)
+            ChoiceItem(
+                id: option.preset.rawValue, title: option.title,
+                icon: .system("clock"))
         }
         let onSelection: (ChoiceItem) -> Void = { [weak self] item in
             self?.commitSnoozePreset(item, options: options)
@@ -2912,7 +2914,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // Headless probes have no panel, but still need the same production list
         // and callback rather than a second fake preset path.
         guard view.window != nil else {
-            let list = ChoiceListView(items: items, selectedID: nil)
+            let list = ChoiceListView(
+                items: items, selectedID: nil, presentation: .commands)
             list.onSelection = onSelection
             qaSnoozeChoiceListForQA = list
             return
@@ -2921,6 +2924,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         rowChoiceController.present(
             items: items,
             selectedID: nil,
+            presentation: .commands,
             anchor: anchor,
             relativeTo: view,
             onSelection: onSelection,
@@ -3013,7 +3017,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             ChoiceItem(
                 id: action.rawValue,
                 title: action.title(forCount: targets.count),
-                detail: action == .delete || action == .archive ? "This cannot be undone." : nil,
+                icon: action.icon,
                 destructive: action == .delete || action == .archive
             )
         }
@@ -3024,14 +3028,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         if tableView.window == nil {
             // Headless checks retain the same ChoiceListView the controller presents;
             // only the AppKit panel is unavailable without a window.
-            let list = ChoiceListView(items: items, selectedID: nil)
+            let list = ChoiceListView(
+                items: items, selectedID: nil, presentation: .commands)
             list.onSelection = onSelection
             qaChoiceListForQA = list
             return true
         }
         qaChoiceListForQA = nil
         rowChoiceController.present(
-            items: items, selectedID: nil, anchor: anchor,
+            items: items, selectedID: nil, presentation: .commands, anchor: anchor,
             relativeTo: tableView,
             onSelection: onSelection, focusReturnView: tableView
         )
@@ -3039,7 +3044,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // transient panel visible in a headless probe (for example, before the app
         // activates its window). QA reads that same list, not a parallel menu model.
         if rowChoiceController.listView == nil {
-            let list = ChoiceListView(items: items, selectedID: nil)
+            let list = ChoiceListView(
+                items: items, selectedID: nil, presentation: .commands)
             list.onSelection = onSelection
             qaChoiceListForQA = list
         }
@@ -5614,6 +5620,16 @@ enum InboxBulkAction: String, CaseIterable, Equatable {
         }
     }
 
+    var icon: ChoiceIcon {
+        switch self {
+        case .settle: return .system("checkmark.circle")
+        case .snooze: return .system("clock")
+        case .markUnread: return .system("envelope.badge")
+        case .archive: return .system("archivebox")
+        case .delete: return .system("trash")
+        }
+    }
+
     // Ticket: docs/38-tickets/90-agent-ux/P4.11-undo-toast.md
     /// What the toast says this action DID, or nil for an action no undo covers.
     /// `InboxRowAction.undoVerb` records why the list is what it is.
@@ -5797,6 +5813,22 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         case .stopAgent: return "Stop Agent"
         case .archive: return "Archive"
         case .delete: return "Delete"
+        }
+    }
+
+    var icon: ChoiceIcon {
+        switch self {
+        case .openInTile: return .system("rectangle.on.rectangle")
+        case .settle: return .system("checkmark.circle")
+        case .unsettle: return .system("arrow.uturn.backward.circle")
+        case .snooze: return .system("clock")
+        case .wake: return .system("sun.max")
+        case .markUnread: return .system("envelope.badge")
+        case .rename: return .system("pencil")
+        case .generateName: return .system("sparkles")
+        case .stopAgent: return .system("stop.circle")
+        case .archive: return .system("archivebox")
+        case .delete: return .system("trash")
         }
     }
 
@@ -6042,6 +6074,7 @@ final class InboxBulkActionBar: NSView, TokenThemed {
         countLabel.translatesAutoresizingMaskIntoConstraints = false
         actionButton.translatesAutoresizingMaskIntoConstraints = false
         actionButton.preferredPopoverWidth = 150
+        actionButton.popoverPresentation = .commands
         // An action is a command, not the trigger's selected value. Keeping the
         // neutral title here also keeps it stable while the host owns a modal confirm.
         actionButton.keepsSelectionForItem = { _ in true }
@@ -6072,6 +6105,7 @@ final class InboxBulkActionBar: NSView, TokenThemed {
         self.actions = actions
         actionButton.items = actions.map {
             ChoiceItem(id: $0.rawValue, title: $0.title,
+                       icon: $0.icon,
                        destructive: $0 == .delete || $0 == .archive)
         }
         // Installing items can select the first enabled item. Reset the presentation

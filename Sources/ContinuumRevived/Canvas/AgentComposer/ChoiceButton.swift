@@ -47,6 +47,9 @@ class ChoiceButton: NSControl, TokenThemed {
     /// Optional per-client width for anchored menus. Nil preserves the intrinsic
     /// sizing used by composer pickers; fixed-width clients can pin the panel.
     var preferredPopoverWidth: CGFloat?
+    /// Callers offering actions opt into compact command anatomy and optional
+    /// leading icons; value pickers retain checkmark rows by default.
+    var popoverPresentation: ChoiceListPresentation = .choices
 
     static let controlHeight: CGFloat = 32
     static let horizontalPadding = CGFloat(Space.l)
@@ -235,7 +238,9 @@ class ChoiceButton: NSControl, TokenThemed {
     /// selection. Client-specific width is applied here, never in a QA-only branch.
     func presentPopover() {
         popoverController.present(
-            items: items, selectedID: selectedID, anchor: bounds, relativeTo: self
+            items: items, selectedID: selectedID,
+            presentation: popoverPresentation,
+            anchor: bounds, relativeTo: self
         ) { [weak self] item in
             guard let self else { return }
             self.handleSelection(item)
