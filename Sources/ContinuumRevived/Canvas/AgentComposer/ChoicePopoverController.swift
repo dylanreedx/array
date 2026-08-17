@@ -39,6 +39,7 @@ final class ChoicePopoverController {
     func present(
         items: [ChoiceItem],
         selectedID: String?,
+        presentation: ChoiceListPresentation = .choices,
         anchor: NSRect,
         relativeTo view: NSView,
         takesFocus: Bool = true,
@@ -51,7 +52,8 @@ final class ChoicePopoverController {
         // Build the production choice list before asking AppKit for a window. QA
         // probes can exercise the exact rendered contents while the host window is
         // not yet attached; a missing panel must not make that seam vacuous.
-        let list = ChoiceListView(items: items, selectedID: selectedID)
+        let list = ChoiceListView(
+            items: items, selectedID: selectedID, presentation: presentation)
         listView = list
         guard let window = view.window else { return }
 

@@ -1594,6 +1594,39 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        // Program 96/P0.1: the production-frequency corpus. Async for the same
+        // reason as `--agent-inbox-check` above — flows deliver runtime events
+        // through `AgentSupervisor.deliver`, which hops `DispatchQueue.main.async`.
+        if CommandLine.arguments.contains("--sidebar-production-corpus-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await SidebarProductionCorpus.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        // Program 96/P0.2: the offscreen screenshot set + density proposals. Async
+        // because it drives the corpus, whose events hop `DispatchQueue.main.async`.
+        if CommandLine.arguments.contains("--sidebar-screenshot-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await SidebarScreenshotChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--sidebar-ux-check") {
             do {
                 _ = NSApplication.shared
@@ -3870,7 +3903,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 }
             }
 
-            if CommandLine.arguments.contains("--agent-location-live-check") {
+            if CommandLine.arguments.contains("--sidebar-live-capture-check") {
+                runSidebarLiveCaptureCheck(window: window)
+            } else if CommandLine.arguments.contains("--agent-location-live-check") {
                 runAgentLocationLiveCheck(window: window)
             } else if CommandLine.arguments.contains("--managed-agent-live-check") {
                 runManagedAgentLiveCheck(window: window)
@@ -3900,6 +3935,247 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// window captures plus a local JSON manifest. The fixture paths must be
     /// supplied by the isolated launch environment; this check never targets the
     /// owner's project or Application Support store.
+    /// Program 96/P0.2 — the LIVE half of the screenshot harness, and the source of
+    /// gate S0's red baseline.
+    ///
+    /// The offscreen leg is a geometry gate (§3.3); this is the shipped product, in a
+    /// real window, composited by the WindowServer. It drives the same production
+    /// writers the corpus does — so the rows are production rows and the
+    /// `reloadWorkspaceSidebar`-overwrite hazard never arises — then captures the
+    /// window twice: once through the WindowServer and once through the sidebar view's
+    /// own `cacheDisplay`. Both are recorded with distinct `captureType`s because a
+    /// view render is not evidence about the live window, and conflating them is
+    /// exactly what §3.3 forbids.
+    ///
+    /// Not a matrix leg: it needs a WindowServer and Screen Recording permission.
+    private func runSidebarLiveCaptureCheck(window: NSWindow) {
+        let report: @MainActor @Sendable (String) -> Void = { line in
+            FileHandle.standardError.write(Data("[sidebar-96-live] \(line)\n".utf8))
+        }
+        guard let output = ProcessInfo.processInfo.environment["CONTINUUM_QA_CAPTURE"],
+              !output.isEmpty else {
+            report("FAIL: CONTINUUM_QA_CAPTURE must name an output directory")
+            Foundation.exit(2)
+        }
+        let directory = URL(fileURLWithPath: output, isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // This check MINTS five durable `AgentRecord`s and never deletes them, so it
+        // must be impossible to point at real state. A project-root check alone was not
+        // enough: run from the prod bundle against any other root it would have written
+        // junk agents into Dylan's own agent store (AGENTS.md non-negotiable #1).
+        guard ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"] != nil else {
+            report("FAIL: refusing to run without CONTINUUM_APP_SUPPORT — this check "
+                   + "creates durable agent records and must never write a real store")
+            Foundation.exit(2)
+        }
+        guard Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier else {
+            report("FAIL: refusing to run from the PROD bundle "
+                   + "(\(AppChannel.prodBundleIdentifier)) — dev channel only")
+            Foundation.exit(2)
+        }
+        guard let projectRoot = activeProject?.rootPath else {
+            report("FAIL: no active project — refusing to capture an unknown root")
+            Foundation.exit(2)
+        }
+        // Never Dylan's workspace, whatever the caller passed.
+        guard !projectRoot.contains("/Documents/personal") else {
+            report("FAIL: refusing to run against \(projectRoot)")
+            Foundation.exit(2)
+        }
+        let requestedWidth = WorkspaceSidebarConfig.resolveWidth(defaults: .standard)
+
+        // A Task rather than a fixed delay: the app is still finishing its own boot at
+        // one second, and the FIRST version of this check captured a sidebar reading
+        // "No agents yet" while reporting PASS — the app's later mount reloaded the
+        // list out from under the push. Now the rows are waited for and their absence
+        // is a FAILURE, because a green check over an empty screenshot is the exact
+        // false evidence this program exists to prevent.
+        Task { @MainActor [weak self] in
+            guard let self else { Foundation.exit(3) }
+            let root = URL(fileURLWithPath: projectRoot, isDirectory: true)
+            // Let the workspace mount settle before driving anything.
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+
+            // The same writers P0.1 drives: three untouched ⌘K drafts, one renamed, and
+            // one that finished a turn. Enough for the owner-screenshot row shape and
+            // one completion to be visible in the same frame.
+            for _ in 0..<3 {
+                _ = self.agentSupervisor.spawn(
+                    role: nil, prompt: nil, cwd: root,
+                    model: "openai-codex/gpt-5.6-sol", thinking: "medium",
+                    projectId: self.activeProject?.id, tileId: UUID())
+            }
+            let named = self.agentSupervisor.spawn(
+                role: nil, prompt: nil, cwd: root,
+                model: "anthropic/claude-opus-5", thinking: "medium",
+                projectId: self.activeProject?.id, tileId: UUID())
+            _ = self.agentSupervisor.rename(
+                agentID: named, to: "Replace sidebar identity and completion UX")
+            let finished = self.agentSupervisor.spawn(
+                role: nil, prompt: nil, cwd: root,
+                model: "openai-codex/gpt-5.6-sol", thinking: "medium",
+                projectId: self.activeProject?.id, tileId: UUID())
+            _ = self.agentSupervisor.rename(agentID: finished, to: "Stop the camera resizing tiles")
+            let turnEvents: [AgentRuntimeEvent] = [
+                .turnStarted(threadId: "s0", turnId: "s0-1"),
+                .turnCompleted(threadId: "s0", turnId: "s0-1", outcome: .completed, errorMessage: nil),
+            ]
+            for (index, event) in turnEvents.enumerated() {
+                // Both owners, as production wires them: `deliver` updates the turn
+                // facts the row's state reads, the bridge records the activity draft.
+                self.recordManagedActivity(
+                    agentId: finished, tileId: nil, event: event,
+                    status: index == turnEvents.count - 1 ? .done : .working)
+                self.agentSupervisor.qaDeliver(event, to: finished)
+            }
+            self.refreshAgentSurfaces(notify: false)
+
+            guard let sidebar = self.workspaceSidebarView else {
+                report("FAIL: no workspace sidebar view")
+                Foundation.exit(1)
+            }
+
+            // Poll for the rows to actually be on screen. Re-push each tick, because
+            // the app's own boot can reload the list after ours.
+            let expectedRows = 5
+            var settled = false
+            for _ in 0..<40 {
+                self.refreshAgentSurfaces(notify: false)
+                sidebar.layoutSubtreeIfNeeded()
+                sidebar.inboxForQA.layoutForQA()
+                let modelRows = sidebar.inboxForQA.rowIdsForQA.count
+                let painted = sidebar.inboxForQA.qaMaterializedRowCells
+                    .filter { $0.qaAgentID != nil }.count
+                if modelRows >= expectedRows, painted >= expectedRows,
+                   !sidebar.inboxForQA.isEmptyMessageVisibleForQA {
+                    settled = true
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            guard settled else {
+                report("FAIL: the sidebar never showed \(expectedRows) rows "
+                       + "(model \(sidebar.inboxForQA.rowIdsForQA.count), painted "
+                       + "\(sidebar.inboxForQA.qaMaterializedRowCells.filter { $0.qaAgentID != nil }.count), "
+                       + "empty-state visible "
+                       + "\(sidebar.inboxForQA.isEmptyMessageVisibleForQA)) — refusing to "
+                       + "capture an empty sidebar and call it a baseline")
+                Foundation.exit(1)
+            }
+            window.display()
+            window.flush()
+            // One more beat so the WindowServer has the composited frame.
+            try? await Task.sleep(nanoseconds: 400_000_000)
+
+            var entries: [SidebarScreenshotChecks.Entry] = []
+            let measuredWidth = Double(sidebar.bounds.width)
+            let appearance = window.effectiveAppearance.name == .aqua ? "aqua" : "darkAqua"
+            let workspace = NSWorkspace.shared
+            let reduceMotion = workspace.accessibilityDisplayShouldReduceMotion
+                ? "system-on" : "system-off"
+            let increaseContrast = workspace.accessibilityDisplayShouldIncreaseContrast
+                ? "system-on" : "system-off"
+            // Painted AGENT cells only. A bare tree walk also finds views AppKit has
+            // not yet removed, which is how the first version reported five rows over a
+            // screenshot of the empty state.
+            let rowCount = sidebar.inboxForQA.qaMaterializedRowCells
+                .filter { $0.qaAgentID != nil }.count
+
+            func record(_ png: String, captureType: String, scale: Double) {
+                entries.append(SidebarScreenshotChecks.Entry(
+                    png: png, fixture: "s0-red-baseline",
+                    widthRequestedPt: Double(requestedWidth),
+                    widthMeasuredPt: measuredWidth,
+                    heightPt: Double(sidebar.bounds.height),
+                    appearance: appearance,
+                    reduceMotion: reduceMotion, increaseContrast: increaseContrast,
+                    scale: scale, captureType: captureType,
+                    checkFlag: SidebarScreenshotChecks.liveFlag,
+                    digest: "n/a (live capture)",
+                    rowsRendered: rowCount,
+                    completeRowsIn662pt: nil, cardHeightPt: nil, pitchPt: nil))
+            }
+
+            // 1 — the WindowServer's own picture of the live window.
+            let windowName = "live-window-\(Int(requestedWidth))pt.png"
+            if let image = CGWindowListCreateImage(
+                .null, .optionIncludingWindow, CGWindowID(window.windowNumber),
+                [.boundsIgnoreFraming]) {
+                let rep = NSBitmapImageRep(cgImage: image)
+                // The offscreen leg applies a non-blank floor to every image; this one
+                // used to apply none, so a valid-but-empty WindowServer image would have
+                // been written and PASSed. `CGWindowListCreateImage` returning non-nil is
+                // not evidence that anything was composited.
+                let metrics = VisualSnapshot.metrics(of: rep)
+                if metrics.isBlank {
+                    report("FAIL: the window capture is blank "
+                           + "(\(metrics.distinctSampledColors) distinct colours) — "
+                           + "refusing to file an empty image as a baseline")
+                    Foundation.exit(1)
+                }
+                if let data = rep.representation(using: .png, properties: [:]) {
+                    try? data.write(
+                        to: directory.appendingPathComponent(windowName), options: .atomic)
+                    record(windowName, captureType: "live-window",
+                           scale: Double(image.width) / max(Double(window.frame.width), 1))
+                }
+            } else {
+                report("WARN: CGWindowListCreateImage returned nothing — Screen Recording "
+                       + "permission is probably not granted for this bundle")
+            }
+
+            // 2 — the sidebar view's own render. Not a substitute for the above; it is
+            // the exact subtree state at this instant, labelled as a view render.
+            let viewName = "live-view-cache-\(Int(requestedWidth))pt.png"
+            if let rep = sidebar.bitmapImageRepForCachingDisplay(in: sidebar.bounds) {
+                sidebar.cacheDisplay(in: sidebar.bounds, to: rep)
+                if let data = rep.representation(using: .png, properties: [:]) {
+                    try? data.write(
+                        to: directory.appendingPathComponent(viewName), options: .atomic)
+                    record(viewName, captureType: "live-view-cache",
+                           scale: Double(rep.pixelsWide) / max(measuredWidth, 1))
+                }
+            }
+
+            // A width recorded is not a width applied: `constrainedWidth` vetoes growth
+            // against a 640 pt content floor, so a 360 pt request in a narrow window is
+            // silently clamped. Without this the manifest would say 360 requested / 280
+            // measured and still call itself PASS.
+            let widthApplied = abs(measuredWidth - Double(requestedWidth)) <= 0.5
+            if !widthApplied {
+                report("FAIL: requested \(requestedWidth)pt but the sidebar measured "
+                       + "\(measuredWidth)pt — the width was clamped, so this capture is "
+                       + "not the width it claims")
+            }
+            let verdict = (widthApplied && entries.contains { $0.captureType == "live-window" })
+                ? "PASS" : "FAIL"
+            let payload: [String: Any] = [
+                "check": SidebarScreenshotChecks.liveCheckName,
+                "verdict": verdict,
+                "program": "96-P0.2",
+                "appearance": appearance,
+                "widthRequestedPt": requestedWidth,
+                "widthMeasuredPt": measuredWidth,
+                "rowsRendered": rowCount,
+                "reduceMotion": reduceMotion,
+                "increaseContrast": increaseContrast,
+                "scratchProjectRoot": projectRoot,
+                "bundlePath": Bundle.main.bundlePath,
+                "bundleVersion": Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "",
+                "captures": entries.map {
+                    ["png": $0.png, "captureType": $0.captureType, "scale": $0.scale]
+                },
+            ]
+            try? JSONSerialization.data(
+                withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]
+            ).write(to: directory.appendingPathComponent("manifest.json"), options: .atomic)
+
+            report("\(verdict): \(entries.count) capture(s), \(rowCount) rows at "
+                   + "\(Int(requestedWidth))pt (\(appearance)) -> \(directory.path)")
+            Foundation.exit(verdict == "PASS" ? 0 : 1)
+        }
+    }
+
     private func runAgentLocationLiveCheck(window: NSWindow) {
         let report: @MainActor @Sendable (String) -> Void = { line in
             FileHandle.standardError.write(Data("[agent-location-live] \(line)\n".utf8))
@@ -23750,6 +24026,171 @@ private final class AgentInboxCheckHarnessState {
 }
 
 extension AppDelegate {
+    /// Program 96/P0.1: wires a real app against real on-disk stores and hands back
+    /// the narrow handle `SidebarProductionCorpus` drives.
+    ///
+    /// This lives HERE rather than beside the corpus because the members it sets are
+    /// `private` to `AppDelegate` — Swift grants that access to same-file extensions
+    /// only — and `configureWorkspaceSidebar`'s declaration is pinned verbatim by a
+    /// program source-scan, so widening it is not an option. The corpus keeps every
+    /// flow, expectation, and the inventory gate; this function keeps only the wiring,
+    /// which is the same sequence `runAgentInboxChecks`' section B performs.
+    /// `reusing` builds a SECOND app over the SAME directories and ids — the relaunch
+    /// world. Nothing on disk is rewritten, so the new supervisor's `restore()` adopts
+    /// exactly the records the previous world persisted, which is the only way to
+    /// witness the relaunch truths (a pending `namingRequest` surviving,
+    /// `migrateDisplayNameIfNeeded`, `restoredIDs` → `.restored` → `InboxState.ready`).
+    static func makeSidebarCorpusWorld(
+        now: Date,
+        reusing previous: SidebarProductionCorpus.World? = nil
+    ) throws -> SidebarProductionCorpus.World {
+        let fm = FileManager.default
+        let tempRoot = previous?.tempRoot ?? fm.temporaryDirectory.appendingPathComponent(
+            "sidebar-96-corpus-\(UUID().uuidString)", isDirectory: true)
+        let appSupport = previous?.appSupport
+            ?? tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        let agentsSupport = previous?.agentsSupport
+            ?? tempRoot.appendingPathComponent("Agents", isDirectory: true)
+        // Named for the owner screenshot's placement band.
+        let projectRoot = previous?.projectRoot
+            ?? tempRoot.appendingPathComponent("array-scratch", isDirectory: true)
+        if previous == nil {
+            for dir in [appSupport, agentsSupport, projectRoot] {
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            }
+        }
+
+        let workspaceId = previous?.workspaceId ?? UUID()
+        let projectId = previous?.projectId ?? UUID()
+        let zoneId = UUID()
+        let placement = ZonePlacement(
+            zoneId: zoneId, projectId: projectId,
+            origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 600, height: 400),
+            color: "blue", collapsed: false, hydrationPolicy: .automatic)
+        // A SECOND zone backed by the SAME project. §5.3's ambiguity: `projectID`
+        // plus a later first-match lookup cannot say which Zone an agent lives in
+        // when one project appears twice. Non-overlapping, so a tile's centre lands
+        // in exactly one of them and the ambiguity is about PRESENTATION, not about
+        // the geometry being undecidable.
+        let secondZoneId = UUID()
+        let secondPlacement = ZonePlacement(
+            zoneId: secondZoneId, projectId: projectId,
+            origin: ZonePoint(x: 800, y: 0), size: ZoneSize(width: 600, height: 400),
+            color: "green", collapsed: false, hydrationPolicy: .automatic)
+
+        var registry = Registry.empty()
+        registry.lastActiveWorkspaceId = workspaceId
+        registry.workspaces = [WorkspaceEntry(
+            id: workspaceId, name: "Default", projectIds: [projectId],
+            createdAt: now, updatedAt: now)]
+        registry.projects = [ProjectEntry(
+            id: projectId, name: "array-scratch", rootPath: projectRoot.path,
+            workspaceId: workspaceId, lastOpenedAt: now, pinned: false, missing: false)]
+        // The registry VALUE is rebuilt either way (the reused ids make it identical to
+        // what is on disk) because `reconcile` below needs it — but on a relaunch
+        // nothing is written back, so tiles a previous world placed survive.
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        let projectStore = ProjectStore(projectRoot: projectRoot)
+        let canvasState: CanvasState
+        if previous == nil {
+            try registryStore.save(registry)
+            try WorkspaceStore(
+                workspaceId: workspaceId, applicationSupportDirectory: appSupport
+            ).save(WorkspaceDocument(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                zones: [placement, secondPlacement],
+                zoneZOrder: [zoneId, secondZoneId], lastActiveZoneId: zoneId))
+            canvasState = CanvasState(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                tiles: [], groups: [], lastActiveTileId: nil)
+            try projectStore.saveCanvas(canvasState)
+        } else {
+            canvasState = try projectStore.loadCanvas()
+        }
+
+        let agentStore = AgentStore(applicationSupportDirectory: agentsSupport)
+        // Image-bearing prompts are refused by the unchecked direct send, so the
+        // corpus needs the real composer attachment store to transport one.
+        let attachmentStore = AgentComposerAttachmentStore(
+            applicationSupportDirectory: agentsSupport)
+
+        let app = AppDelegate()
+        app.registryStore = registryStore
+        try app.reconciledManagedSessionSource.reconcile(
+            registry: registry, reason: .continuumRestarted, now: now)
+        // The scripted runner answers a send without spawning a CLI. Row STATE comes
+        // from `deliver`/`updateTurnFacts`, which the corpus drives directly, so no
+        // flow depends on this runner's own timing.
+        let supervisor = AgentSupervisor(
+            store: agentStore,
+            makeRunner: { _ in ScriptedAgentRunner(script: []) },
+            attachmentStore: attachmentStore)
+        app.agentSupervisor = supervisor
+        supervisor.restore()
+
+        let canvas = CanvasNSView(
+            canvasState: canvasState, activeZone: placement,
+            zoneRenderModels: [CanvasNSView.ZoneRenderModel(
+                placement: placement, displayName: "array-scratch")])
+        app.canvasView = canvas
+
+        // Tall on purpose. Cells materialize only for rows inside the table's
+        // viewport, and this corpus deliberately builds more rows than a real 640 pt
+        // sidebar shows; a short host would silently observe nothing for most flows.
+        // Height is free offscreen. Row-count-sensitive facts (History reachability
+        // under 50 rows) are P0.2's business at real heights, not this harness's.
+        let sidebarHeight: CGFloat = 640
+        let sidebar = WorkspaceSidebarView(frame: NSRect(
+            x: 0, y: 0, width: WorkspaceSidebarConfig.defaultWidth, height: sidebarHeight))
+        app.workspaceSidebarView = sidebar
+
+        // `configureWorkspaceSidebar` reads and writes the STANDARD defaults domain,
+        // so the stored scope is saved and put back — the courtesy
+        // `--agent-inbox-check` already pays. Scope `.all` so nothing this corpus
+        // spawns is filtered out for a reason unrelated to its flow.
+        let standardDefaults = UserDefaults.standard
+        let storedScope = standardDefaults.object(forKey: WorkspaceSidebarConfig.scopeKey)
+        WorkspaceSidebarConfig.setScope(.all, defaults: standardDefaults)
+        app.configureWorkspaceSidebar(sidebar)
+
+        // A real window, so the offscreen table has a viewport in which to
+        // materialize cells — without one, every rendered-cell read is vacuous.
+        let window = NSWindow(
+            contentRect: NSRect(
+                x: 0, y: 0,
+                width: WorkspaceSidebarConfig.defaultWidth, height: sidebarHeight),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = sidebar
+
+        return SidebarProductionCorpus.World(
+            tempRoot: tempRoot,
+            appSupport: appSupport,
+            agentsSupport: agentsSupport,
+            projectRoot: projectRoot,
+            projectId: projectId,
+            workspaceId: workspaceId,
+            supervisor: supervisor,
+            sidebar: sidebar,
+            attachmentStore: attachmentStore,
+            now: now,
+            // Captured STRONGLY on purpose: the world is the only owner of this
+            // AppDelegate, and a weak capture would let it deallocate and make every
+            // later observation silently empty.
+            refreshSurfaces: { app.refreshAgentSurfaces(notify: false) },
+            pushSurfaces: { app.pushAgentSurfaces(notify: false) },
+            recordActivity: { agentId, tileId, event, status in
+                app.recordManagedActivity(
+                    agentId: agentId, tileId: tileId, event: event, status: status)
+            },
+            restoreDefaults: {
+                if let storedScope {
+                    standardDefaults.set(storedScope, forKey: WorkspaceSidebarConfig.scopeKey)
+                } else {
+                    standardDefaults.removeObject(forKey: WorkspaceSidebarConfig.scopeKey)
+                }
+            })
+    }
+
     static func runAgentInboxChecks() async throws {
     enum CheckError: Error, CustomStringConvertible {
         case failed(String)

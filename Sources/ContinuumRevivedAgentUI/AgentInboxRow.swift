@@ -790,7 +790,34 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// one row-level action predicate.
     public let settlementBlocked: Bool
 
-    // Ticket: docs/38-tickets/94-sidebar-native-ux/P2.3-content-derived-row-height.md
+    // Ticket: docs/38-tickets/96-agent-sidebar-product-redesign/_DESIGN.md
+    //
+    // Identity the ROW does not draw, and the tooltip does.
+    //
+    // §4.3's measured-fit sacrifice order lets the row drop placement, model text
+    // and branch detail as it narrows, on the explicit condition that they "remain
+    // in tooltip and accessibility detail". Until there is a tooltip, every one of
+    // those drops is a plain loss — so these are the facts the card needs and the
+    // band has no room for.
+    //
+    // All three already existed in `AgentRowContext` and were discarded by the
+    // builder: `zoneName` had ZERO consumers anywhere in the app.
+    //
+    // Strings, not enums, and no paths. `ContinuumRevivedAgentUI` has no
+    // dependencies and cannot see Core's `AgentHarness`; and `AgentContextIndex`
+    // forbids a host path on this row outright, which `SyncPayloadTaintScanner`
+    // backstops. A branch NAME may cross to the phone; a worktree path may not.
+
+    /// The zone the agent's tile sits in. `Project › Zone` is what §4.3 asks the
+    /// row for and what it never has room to print.
+    public let zoneName: String?
+    /// Which CLI Array is driving: `Claude Code`, `Codex`, `Pi`. Nothing in the
+    /// sidebar has ever said this, which is why a Pi agent has been
+    /// indistinguishable from the other two.
+    public let harness: String?
+    /// The branch the checkout is actually on, when it differs from the agent's.
+    /// Nil when they agree — the disagreement is the whole content.
+    public let checkedOutBranch: String?
     /// Whether the card's upper metadata band has something to draw. These
     /// predicates intentionally inspect only the content slots, never a row's
     /// semantic importance or lifecycle. The AppKit cell uses the same facts to
@@ -893,7 +920,10 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         createdAt: Date,
         parentId: UUID? = nil,
         isUnconfirmed: Bool = false,
-        settlementBlocked: Bool? = nil
+        settlementBlocked: Bool? = nil,
+        zoneName: String? = nil,
+        harness: String? = nil,
+        checkedOutBranch: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -917,7 +947,14 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.parentId = parentId
         self.isUnconfirmed = isUnconfirmed
         self.settlementBlocked = settlementBlocked ?? InboxSettlement.inferredBlocker(for: state)
+        self.zoneName = zoneName
+        self.harness = harness
+        self.checkedOutBranch = checkedOutBranch
     }
+
+    /// The agent's branch and the checkout's disagree. `checkedOutBranch` is nil
+    /// unless they do, so this is a readability alias rather than a second rule.
+    public var isBranchMismatch: Bool { checkedOutBranch != nil }
 
     /// The one action predicate shared by the row menu and bulk bar. The Core
     /// builder already includes child hold-open in `settlementBlocked`; the
@@ -934,6 +971,11 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// A surface stamps observation knowledge after the Core join. Keeping this
     /// as a value copy preserves the builder's module boundary and the row's
     /// snapshot semantics.
+    /// EVERY stored field has to be named here. This rebuilds the row by hand, so
+    /// anything it forgets is silently dropped — and it runs on the live path
+    /// (`unconfirmedFreeze.apply`), against exactly the rows whose state is least
+    /// certain. A field added above and missed here would be present in fixtures
+    /// and absent in the product, which is this program's signature failure.
     public func withUnconfirmed(
         _ value: Bool = true,
         elapsed frozenElapsed: TimeInterval? = nil
@@ -944,7 +986,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             branch: branch, isIsolated: isIsolated,
             elapsed: frozenElapsed ?? elapsed, lastActiveAt: lastActiveAt, depth: depth,
             variant: variant, createdAt: createdAt, parentId: parentId,
-            isUnconfirmed: value, settlementBlocked: settlementBlocked)
+            isUnconfirmed: value, settlementBlocked: settlementBlocked,
+            zoneName: zoneName, harness: harness, checkedOutBranch: checkedOutBranch)
     }
 
     /// The status words the row may paint. Unconfirmed is a confidence modifier,

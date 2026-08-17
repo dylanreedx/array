@@ -523,10 +523,11 @@ private func runRecededContrastCheck() {
            "every documented text pair has a faded counterpart — \(pairs.count) of \(expectedCount)")
     // …and the count is pinned to a LITERAL as well, because the line above
     // derives both sides from `documentedPairs` and would stay green if a pair
-    // vanished from the palette entirely. 27 = textPrimary and textSecondary on
-    // the eleven surfaces (22) + textOnAccent on the five accent fills (5).
-    expect(pairs.count == 27,
-           "the faded set is the whole documented text palette — 22 surface pairs + 5 accent-fill pairs, got \(pairs.count)")
+    // vanished from the palette entirely. 28 = textPrimary and textSecondary on
+    // the eleven surfaces (22) + textOnAccent on the six accent fills (6), the
+    // sixth being program 96's `accentReview`.
+    expect(pairs.count == 28,
+           "the faded set is the whole documented text palette — 22 surface pairs + 6 accent-fill pairs, got \(pairs.count)")
 
     var worst = (ratio: Double.greatestFiniteMagnitude, label: "")
     var measured = 0

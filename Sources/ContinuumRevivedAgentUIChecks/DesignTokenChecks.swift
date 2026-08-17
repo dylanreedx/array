@@ -53,8 +53,12 @@ func runDesignTokenChecks() {
            "DesignTokens: expected 3 text tokens, got \(TextToken.allCases.count)")
     expect(LineToken.allCases.count == 3,
            "DesignTokens: expected 3 line tokens, got \(LineToken.allCases.count)")
-    expect(AccentToken.allCases.count == 5,
-           "DesignTokens: expected 5 accents, got \(AccentToken.allCases.count)")
+    // Six since program 96 added `accentReview` for work that finished and nobody
+    // looked at it. Raised deliberately, and the tripwire did its job: adding an
+    // accent went red until somebody came here and said why. Measured on arrival —
+    // tightest pair 4.78:1 (`cardUserMessage`, dark) against the 4.50 floor.
+    expect(AccentToken.allCases.count == 6,
+           "DesignTokens: expected 6 accents, got \(AccentToken.allCases.count)")
     expect(SurfaceToken.chrome.count + SurfaceToken.cards.count == SurfaceToken.allCases.count,
            "DesignTokens: chrome + cards must partition allCases (\(SurfaceToken.chrome.count) + \(SurfaceToken.cards.count) != \(SurfaceToken.allCases.count))")
 
@@ -63,7 +67,8 @@ func runDesignTokenChecks() {
     everyToken += TextToken.allCases.map { ($0.rawValue, $0.color) }
     everyToken += LineToken.allCases.map { ($0.rawValue, $0.color) }
     everyToken += AccentToken.allCases.map { ($0.rawValue, $0.color) }
-    expect(everyToken.count == 22, "DesignTokens: expected 22 tokens in total, got \(everyToken.count)")
+    // 23 since program 96 added `accentReview` — 11 surfaces + 3 text + 3 line + 6 accents.
+    expect(everyToken.count == 23, "DesignTokens: expected 23 tokens in total, got \(everyToken.count)")
     for (name, token) in everyToken {
         expect(token.light.hexKey != token.dark.hexKey,
                "DesignTokens: \(name) has the same value in both themes (\(token.light.hexKey)) — it is not themed")
@@ -117,12 +122,54 @@ func runDesignTokenChecks() {
                "DesignTokens: \(accent.rawValue) light variant must be the DARKER one (light \(f(lightLum)) vs dark \(f(darkLum)))")
     }
 
+    // 5b. Accents that can share a list must be tellable apart AT A GLANCE.
+    //
+    //     Nothing above catches this. Step 4 asks only whether two accents are
+    //     different VALUES; step 5 asks only whether ONE accent holds its hue
+    //     across themes. Neither notices two different accents converging — which
+    //     is exactly how program 96's first `accentReview` shipped: a rose at 342°
+    //     directly beneath the failure red at 3°, 21° apart, so a row that had
+    //     finished read as a row that had broken. Every gate in this file was
+    //     green. Dylan caught it by looking at it.
+    //
+    //     This is that complaint made mechanical. 30° is the floor; the tightest
+    //     real pair is red/amber at 32°, which also separate on lightness. The
+    //     rose measured 21° and fails.
+    let separationFloor = 30.0
+    let familyExemptions: [Set<String>] = [
+        // Same family by design — both mean "this finished", and their closeness
+        // is the point. Program 96's row paints exactly one of them: a row you
+        // have already seen returns no accent at all, so they are never in one
+        // column. Declared as an exception rather than lowering the floor for
+        // everybody, so the exception stays visible instead of disappearing into
+        // a looser number.
+        ["accentDone", "accentReview"]
+    ]
+    for theme in TokenTheme.allCases {
+        let accents = AccentToken.allCases
+        for (index, first) in accents.enumerated() {
+            for second in accents.dropFirst(index + 1) {
+                guard !familyExemptions.contains([first.rawValue, second.rawValue])
+                else { continue }
+                let raw = abs(hueDegrees(first.color.resolved(for: theme))
+                    - hueDegrees(second.color.resolved(for: theme)))
+                let separation = min(raw, 360 - raw)
+                expect(separation >= separationFloor,
+                       "DesignTokens: \(first.rawValue) and \(second.rawValue) are only \(f(separation))° apart in \(theme.rawValue) — two states that can share a list must not read as the same colour (floor \(f(separationFloor))°)")
+            }
+        }
+    }
+
     // 6. Every documented pair clears its floor in BOTH themes. The pair set is
     //    derived from the tokens' own declarations, so its size is pinned: 2
-    //    text tokens x 11 surfaces + textOnAccent x 5 accent fills + 5 accents x
-    //    11 surfaces + 2 gated line tokens x 11 surfaces = 104.
+    //    text tokens x 11 surfaces + textOnAccent x 6 accent fills + 6 accents x
+    //    11 surfaces + 2 gated line tokens x 11 surfaces = 116.
+    //
+    //    116 and not 104 since program 96's `accentReview`: one accent costs twelve
+    //    pairs, and every one of them is measured rather than assumed. The tightest
+    //    the new token produced is 4.78:1 (`cardUserMessage`, dark).
     let pairs = DesignTokens.documentedPairs
-    expect(pairs.count == 104, "DesignTokens: expected 104 documented pairs, got \(pairs.count)")
+    expect(pairs.count == 116, "DesignTokens: expected 116 documented pairs, got \(pairs.count)")
     var worst: (pair: TokenPair, theme: TokenTheme, ratio: Double)?
     for pair in pairs {
         for theme in TokenTheme.allCases {
@@ -157,7 +204,12 @@ func runDesignTokenChecks() {
         ("accentApproval", .light, "canvas", 5.62), ("accentApproval", .dark, "cardUserMessage", 7.48),
         ("accentInput", .light, "canvas", 6.32), ("accentInput", .dark, "cardUserMessage", 5.35),
         ("accentFailed", .light, "canvas", 5.27), ("accentFailed", .dark, "cardUserMessage", 5.85),
-        ("accentDone", .light, "canvas", 5.90), ("accentDone", .dark, "cardUserMessage", 6.74)
+        ("accentDone", .light, "canvas", 5.90), ("accentDone", .dark, "cardUserMessage", 6.74),
+        // Program 96, round 8. The rose this replaced sat at 4.78 dark — the
+        // tightest pair the table held, a quarter-point off the floor. The mint is
+        // an ordinary member of the palette at both ends, and it handed
+        // `textOnAccent`'s worst dark case back to `accentInput` on the way past.
+        ("accentReview", .light, "canvas", 5.41), ("accentReview", .dark, "cardUserMessage", 7.35)
     ]
     let gatedForegrounds = Set(pairs.map(\.foreground))
     expect(Set(pinnedWorst.map(\.foreground)) == gatedForegrounds,

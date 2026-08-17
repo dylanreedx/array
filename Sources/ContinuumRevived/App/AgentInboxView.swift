@@ -215,8 +215,11 @@ enum SlimRowFitTier: String, CaseIterable {
     var drawsTime: Bool { self != .timeHidden }
 }
 
+/// Internal, not private: program 96's card (`AgentInbox96CellView`) reports its
+/// label geometry through the same helper, so the two cells cannot describe
+/// themselves to a gate in two different ways.
 @MainActor
-private func inboxLabelGeometryForQA(
+func inboxLabelGeometryForQA(
     _ element: String, label: NSTextField, in cell: NSView
 ) -> AgentInboxLabelGeometryForQA {
     let font = label.font
@@ -287,8 +290,125 @@ private final class AgentInboxTableView: NSTableView {
 }
 
 @MainActor
+/// An alternative CARD presentation for the inbox, injected from outside.
+///
+/// Program 96 redesigns the row. It needs to be operated — scrolled, hovered,
+/// selected, right-clicked — long before the S0 pitch ruling lets it become the
+/// default, and reimplementing this list to do that would mean a second sidebar
+/// with its own bugs. So the list stays exactly as queue 94 built it and the two
+/// things that differ are handed in: how a card row is built, and how tall it is.
+///
+/// nil is the default and the only value production or any existing gate sees.
+struct AgentInboxCardStyleOverride {
+    let makeCell: () -> AgentInboxRowCell
+    /// A 96 card's height is fixed by its pitch rather than derived from which
+    /// bands have content, because every band always has content.
+    let cardHeight: (AgentInboxRow) -> Double
+}
+
+/// An alternative HEADER presentation, injected the same way and for the same
+/// reason as `AgentInboxCardStyleOverride`.
+///
+/// The scope control and the search field are shipped chrome — unlike the row,
+/// they are not behind any seam, so a redesign of them would move the committed
+/// `chrome.agentInbox` baselines and change what every user sees, while the design
+/// is still being argued about. This is that seam.
+///
+/// nil is the default and the only value production or any existing gate sees.
+struct AgentInboxHeaderStyleOverride {
+    /// Search takes a full-width row of its own, above the scope control, rather
+    /// than sharing one row with it.
+    var stacked = true
+    /// Search paints a recessed field with a leading magnifier, so it reads as
+    /// something you can type into. Bare placeholder text over the panel reads as
+    /// a label — which is exactly what it looked like.
+    var fieldChrome = true
+}
+
+/// An `NSTextFieldCell` that reserves room on its leading edge.
+///
+/// The search field paints its own background and carries the magnifier inside
+/// it, so the string has to start after the glyph. `NSTextField` has no text
+/// inset of its own — the cell decides where the string draws, and it has to be
+/// told the same number in three places. Miss `edit` or `select` and the
+/// placeholder sits in one position while the caret and the selection land in
+/// another, which looks like the field jumping when you click it.
+@MainActor
+final class InsetTextFieldCell: NSTextFieldCell {
+    var leadingInset: CGFloat = 0
+    /// Room for the clear button, reserved whether or not it is showing. Reserving
+    /// it only while visible would shift every character sideways the moment you
+    /// typed the first one.
+    var trailingInset: CGFloat = 0
+
+    /// Leading, not left: in an RTL layout the glyph is on the other side, so
+    /// insetting `origin.x` would reserve the space away from the icon.
+    private func inset(_ rect: NSRect) -> NSRect {
+        guard leadingInset > 0 || trailingInset > 0 else { return rect }
+        var result = rect
+        result.size.width -= leadingInset + trailingInset
+        if userInterfaceLayoutDirection != .rightToLeft {
+            result.origin.x += leadingInset
+        } else {
+            result.origin.x += trailingInset
+        }
+        return result
+    }
+
+    /// Borderless AppKit text cells return the control's entire bounds as their
+    /// drawing rect. In a 28pt search row that leaves a 14pt line sitting on the
+    /// default baseline rather than optically centred. Use the cell's measured
+    /// single-line height for drawing AND editing so the placeholder, caret and
+    /// selection all occupy the same centred rect.
+    private func textRect(forBounds rect: NSRect) -> NSRect {
+        var result = inset(super.drawingRect(forBounds: rect))
+        let lineHeight = min(result.height, ceil(cellSize(forBounds: rect).height))
+        result.origin.y += floor((result.height - lineHeight) / 2)
+        result.size.height = lineHeight
+        return result
+    }
+
+    override func drawingRect(forBounds rect: NSRect) -> NSRect {
+        textRect(forBounds: rect)
+    }
+
+    override func edit(
+        withFrame rect: NSRect, in controlView: NSView, editor: NSText,
+        delegate: Any?, event: NSEvent?
+    ) {
+        super.edit(
+            withFrame: textRect(forBounds: rect), in: controlView, editor: editor,
+            delegate: delegate, event: event)
+    }
+
+    override func select(
+        withFrame rect: NSRect, in controlView: NSView, editor: NSText,
+        delegate: Any?, start: Int, length: Int
+    ) {
+        super.select(
+            withFrame: textRect(forBounds: rect), in: controlView, editor: editor,
+            delegate: delegate, start: start, length: length)
+    }
+}
+
 final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                             NSTextFieldDelegate, TokenThemed {
+    /// Set to preview a redesigned card row in this real list. See
+    /// `AgentInboxCardStyleOverride`; nil everywhere but the Component Lab.
+    var cardStyleOverride: AgentInboxCardStyleOverride? {
+        didSet {
+            rebuildRowsForQA()
+            tableView.noteHeightOfRows(
+                withIndexesChanged: IndexSet(integersIn: 0..<tableView.numberOfRows))
+        }
+    }
+
+    /// Set to preview a redesigned header in this real sidebar. See
+    /// `AgentInboxHeaderStyleOverride`; nil everywhere but the Component Lab.
+    var headerStyleOverride: AgentInboxHeaderStyleOverride? {
+        didSet { applyHeaderStyle() }
+    }
+
     /// The tallest card height: three lines (metadata, name, detail), the two
     /// inter-band gaps, and the card's own padding. It remains a useful ceiling
     /// for offscreen probes, while individual cards use `height(for:)` below so
@@ -438,6 +558,20 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     private let scopeButton: ChoiceButton
     private let searchField: NSTextField
+    /// The leading magnifier, drawn only when a header override asks for field
+    /// chrome. An `NSImageView` rather than another `TokenThemed` view: its tint
+    /// is set from this view's `applyTokens`, which already owns the field's text
+    /// colour, so the header adds no new owner to the token census.
+    private let searchIcon = NSImageView(frame: .zero)
+    /// Shown only while the field holds text, the way T3's does. A search you can
+    /// see is a search you can get out of.
+    private let searchClearButton = NSButton(frame: .zero)
+    private var isSearchFieldHovered = false
+    /// The one-row header queue 94 ships, and the stacked one program 96 is
+    /// trying. Exactly one set is active at a time; `defaultHeader` is what
+    /// production and every existing gate see.
+    private var defaultHeaderConstraints: [NSLayoutConstraint] = []
+    private var stackedHeaderConstraints: [NSLayoutConstraint] = []
     private let scrollView: NSScrollView
     private let tableView: NSTableView
     private let column: NSTableColumn
@@ -944,6 +1078,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         scopeButton.preferredPopoverWidth = 124
         scopeButton.setAccessibilityLabel("Agent scope")
         searchField = NSTextField(frame: .zero)
+        // Before any other configuration: the field forwards isEditable, the font
+        // and the placeholder to its cell, so a cell swapped in afterwards would
+        // arrive blank.
+        searchField.cell = InsetTextFieldCell()
+        // A programmatically created cell arrives carrying AppKit's default title,
+        // and for a text cell that title is the literal string `Field`. It shipped
+        // to the preview looking like a deliberate placeholder: it never filters,
+        // because `controlTextDidChange` fires on edits and not on a value the
+        // field was born with, and the real placeholder stays hidden the whole time
+        // because a non-empty `stringValue` outranks it.
+        searchField.stringValue = ""
         searchField.translatesAutoresizingMaskIntoConstraints = false
         searchField.isEditable = true
         searchField.isSelectable = true
@@ -1051,6 +1196,25 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
         addSubview(scopeButton)
         addSubview(searchField)
+        searchIcon.translatesAutoresizingMaskIntoConstraints = false
+        searchIcon.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)
+        searchIcon.imageScaling = .scaleProportionallyDown
+        searchIcon.isHidden = true
+        // Decoration: the click belongs to the field behind it, or the caret would
+        // refuse to land whenever you aimed at the icon.
+        searchIcon.setAccessibilityElement(false)
+        addSubview(searchIcon)
+        searchClearButton.translatesAutoresizingMaskIntoConstraints = false
+        searchClearButton.image = NSImage(
+            systemSymbolName: "xmark.circle.fill", accessibilityDescription: nil)
+        searchClearButton.imagePosition = .imageOnly
+        searchClearButton.isBordered = false
+        searchClearButton.bezelStyle = .inline
+        searchClearButton.isHidden = true
+        searchClearButton.target = self
+        searchClearButton.action = #selector(clearSearch)
+        searchClearButton.setAccessibilityLabel("Clear search")
+        addSubview(searchClearButton)
         addSubview(scrollView)
         addSubview(emptyLabel)
         // P3.11: added LAST, so it draws over the bottom of the list.
@@ -1085,7 +1249,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         undoToast.onUndo = { [weak self] in self?.performUndo() }
         undoToast.setAccessibilityIdentifier("ContinuumAgentInboxUndoToast")
 
-        NSLayoutConstraint.activate([
+        // The shipped one-row header: scope on the left at a fixed 124pt, search
+        // sharing the row to its right. Held in a stored set rather than activated
+        // inline so a header override can swap it without touching production's
+        // numbers — see `AgentInboxHeaderStyleOverride`.
+        defaultHeaderConstraints = [
             scopeButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
             scopeButton.topAnchor.constraint(equalTo: topAnchor, constant: Space.s),
             scopeButton.widthAnchor.constraint(equalToConstant: 124),
@@ -1094,10 +1262,39 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             searchField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.m),
             searchField.centerYAnchor.constraint(equalTo: scopeButton.centerYAnchor),
             searchField.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
+            scrollView.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
+        ]
+
+        // Program 96's stacked header: search owns the top row at full width, the
+        // scope control sits under it at its own intrinsic width. Costs one extra
+        // control height plus a gap — about a third of an agent row — which is the
+        // trade the S0 density ruling has to weigh.
+        stackedHeaderConstraints = [
+            searchField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
+            searchField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.m),
+            searchField.topAnchor.constraint(equalTo: topAnchor, constant: Space.s),
+            searchField.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
+            scopeButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
+            scopeButton.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: Space.s),
+            scopeButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
+            scrollView.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
+        ]
+        NSLayoutConstraint.activate(defaultHeaderConstraints)
+
+        NSLayoutConstraint.activate([
+            searchIcon.leadingAnchor.constraint(equalTo: searchField.leadingAnchor, constant: CGFloat(Space.s)),
+            searchIcon.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
+            searchIcon.widthAnchor.constraint(equalToConstant: Self.searchIconSide),
+            searchIcon.heightAnchor.constraint(equalToConstant: Self.searchIconSide),
+
+            searchClearButton.trailingAnchor.constraint(
+                equalTo: searchField.trailingAnchor, constant: -CGFloat(Space.s)),
+            searchClearButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
+            searchClearButton.widthAnchor.constraint(equalToConstant: Self.searchIconSide),
+            searchClearButton.heightAnchor.constraint(equalToConstant: Self.searchIconSide),
 
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
 
             emptyLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.l),
@@ -1146,6 +1343,77 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         layer?.backgroundColor = SurfaceToken.panel.color.cgColor(in: self)
         emptyLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         searchField.textColor = TextToken.textPrimary.color.nsColor(in: self)
+        applySearchFieldChrome()
+    }
+
+    /// Paint the search field: a magnifier, and NOTHING at rest.
+    ///
+    /// The first version of this gave the field a filled, rounded, outlined box to
+    /// match `ChoiceButton`. It was wrong twice over. The outline was a bug — see
+    /// `isSearchFieldEditing` — and even without it, the box was more chrome than a
+    /// search field in a sidebar has earned. T3, the reference this header is
+    /// modelled on, draws no border and no resting fill either: the input is
+    /// `unstyled` and the row it sits in only takes a fill on hover.
+    ///
+    /// So: glyph plus text at rest, a hover fill to say it is a target, and the
+    /// focus hairline only while a caret is actually in it.
+    ///
+    /// Painted from HERE rather than from a new view class. This view already owns
+    /// the field's text colour, so borrowing its layer adds no owner to the token
+    /// census (hazard 8) and no surface for the appearance sweep to hunt.
+    private func applySearchFieldChrome() {
+        guard headerStyleOverride?.fieldChrome == true else {
+            searchField.layer?.backgroundColor = nil
+            searchField.layer?.borderWidth = 0
+            searchIcon.isHidden = true
+            searchClearButton.isHidden = true
+            return
+        }
+        searchField.wantsLayer = true
+        searchField.layer?.cornerRadius = CGFloat(Radius.card)
+        // Resting paints NOTHING, not a transparent colour: a painted `.clear` is an
+        // unregistered literal as far as the appearance census is concerned.
+        searchField.layer?.backgroundColor = isSearchFieldHovered
+            ? AgentSurfaceRole.rowHover.color.cgColor(in: self)
+            : nil
+        let editing = isSearchFieldEditing
+        searchField.layer?.borderWidth = editing ? ChoiceButton.focusBorderWidth : 0
+        searchField.layer?.borderColor = AgentLineRole.focusRing.color.cgColor(in: self)
+        searchIcon.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
+        searchIcon.isHidden = false
+        searchClearButton.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
+        searchClearButton.isHidden = searchField.stringValue.isEmpty
+    }
+
+    /// Whether a caret is genuinely in the search field.
+    ///
+    /// NOT `window?.firstResponder === searchField.currentEditor()`. An unfocused
+    /// field has no field editor, so that expression compares nil to nil — which is
+    /// `true` — and during `init` there is no window either, so the border was
+    /// painted at construction and never cleared. The outline in the first preview
+    /// was not a focus ring; it was this.
+    private var isSearchFieldEditing: Bool {
+        guard let editor = searchField.currentEditor() else { return false }
+        return window?.firstResponder === editor
+    }
+
+    /// The magnifier's box. Bigger than `ChoiceButton`'s 12pt chevron because a
+    /// chevron is a hint attached to a word and this glyph has to carry the field's
+    /// whole identity at rest.
+    private static let searchIconSide: CGFloat = 14
+
+    private func applyHeaderStyle() {
+        let stacked = headerStyleOverride?.stacked == true
+        NSLayoutConstraint.deactivate(stacked ? defaultHeaderConstraints : stackedHeaderConstraints)
+        NSLayoutConstraint.activate(stacked ? stackedHeaderConstraints : defaultHeaderConstraints)
+        // The glyph steals the field's leading edge, so the text has to start
+        // after it — otherwise the placeholder sits underneath the magnifier.
+        let chrome = headerStyleOverride?.fieldChrome == true
+        let cell = searchField.cell as? InsetTextFieldCell
+        cell?.leadingInset = chrome ? Self.searchIconSide + CGFloat(Space.s) * 2 : 0
+        cell?.trailingInset = chrome ? Self.searchIconSide + CGFloat(Space.s) * 2 : 0
+        applyTokens()
+        needsLayout = true
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -1875,7 +2143,31 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         selectedRowsForEmphasis = IndexSet()
         hoveredAgentId = nil
         keyboardFocusIntent = nil
+        // The clear button exists only while there is something to clear, so its
+        // visibility is a function of the text and has to be recomputed here —
+        // `setSearchForQA` routes through this same notification, which keeps the
+        // button honest under a check as well as under a keystroke.
+        applySearchFieldChrome()
         render(display(from: allRows))
+    }
+
+    /// The focus hairline is the only thing the field paints while you are in it,
+    /// so it has to be repainted when the caret arrives and when it leaves —
+    /// nothing else in this view is notified of either.
+    func controlTextDidBeginEditing(_ obj: Notification) {
+        guard (obj.object as? NSTextField) === searchField else { return }
+        applySearchFieldChrome()
+    }
+
+    /// Empty the search the way a person does, through the same notification a
+    /// keystroke raises, so the filter, the selection reset and the button's own
+    /// visibility all take one path.
+    @objc private func clearSearch() {
+        guard !searchField.stringValue.isEmpty else { return }
+        searchField.stringValue = ""
+        controlTextDidChange(
+            Notification(name: NSControl.textDidChangeNotification, object: searchField))
+        window?.makeFirstResponder(searchField)
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.14-preserve-workspace-management.md
@@ -1993,6 +2285,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             case .agent: return AgentInboxView.shelfHeaderHeight
             }
         }
+        // A 96 card is a FIXED three-band pitch — every band is always drawn, which
+        // is the point of the redesign — so its height cannot come from the
+        // content-derived ladder below. Cards only: a slim row is queue-94's and
+        // stays queue-94's.
+        if let override = cardStyleOverride, model.variant == .card {
+            return CGFloat(override.cardHeight(model))
+        }
         let indent = Double(max(0, model.depth)) * AgentInboxView.indentPerLevel
         let available = max(
             0,
@@ -2071,7 +2370,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let interacting = isInteracting(row: row)
         let cell: AgentInboxRowCell
         switch model.variant {
-        case .card: cell = AgentInboxCellView()
+        // Program 96's redesigned card, when something has injected one. nil is the
+        // default and the only thing production or any queue-94 gate ever sees.
+        case .card: cell = cardStyleOverride?.makeCell() ?? AgentInboxCellView()
         case .slim: cell = AgentInboxSlimCellView()
         }
         needsHeightRevalidation = true
@@ -2482,6 +2783,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     func controlTextDidEndEditing(_ obj: Notification) {
+        // The search field shares this delegate with the rename field. It only wants
+        // its focus hairline cleared; everything below is the rename's commit path.
+        if (obj.object as? NSTextField) === searchField {
+            applySearchFieldChrome()
+            return
+        }
         // Ignore the transient end `selectText(_:)` posts while the field is still
         // being installed (see `isOpeningRename`), and ignore any stale field after
         // Return/Escape has already finished the edit.
@@ -2605,7 +2912,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         guard !ids.isEmpty, !options.isEmpty else { return }
         snoozeTargetIds = ids
         let items = options.map { option in
-            ChoiceItem(id: option.preset.rawValue, title: option.title)
+            ChoiceItem(
+                id: option.preset.rawValue, title: option.title,
+                icon: .system("clock"))
         }
         let onSelection: (ChoiceItem) -> Void = { [weak self] item in
             self?.commitSnoozePreset(item, options: options)
@@ -2613,7 +2922,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // Headless probes have no panel, but still need the same production list
         // and callback rather than a second fake preset path.
         guard view.window != nil else {
-            let list = ChoiceListView(items: items, selectedID: nil)
+            let list = ChoiceListView(
+                items: items, selectedID: nil, presentation: .commands)
             list.onSelection = onSelection
             qaSnoozeChoiceListForQA = list
             return
@@ -2622,6 +2932,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         rowChoiceController.present(
             items: items,
             selectedID: nil,
+            presentation: .commands,
             anchor: anchor,
             relativeTo: view,
             onSelection: onSelection,
@@ -2714,7 +3025,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             ChoiceItem(
                 id: action.rawValue,
                 title: action.title(forCount: targets.count),
-                detail: action == .delete || action == .archive ? "This cannot be undone." : nil,
+                icon: action.icon,
                 destructive: action == .delete || action == .archive
             )
         }
@@ -2725,14 +3036,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         if tableView.window == nil {
             // Headless checks retain the same ChoiceListView the controller presents;
             // only the AppKit panel is unavailable without a window.
-            let list = ChoiceListView(items: items, selectedID: nil)
+            let list = ChoiceListView(
+                items: items, selectedID: nil, presentation: .commands)
             list.onSelection = onSelection
             qaChoiceListForQA = list
             return true
         }
         qaChoiceListForQA = nil
         rowChoiceController.present(
-            items: items, selectedID: nil, anchor: anchor,
+            items: items, selectedID: nil, presentation: .commands, anchor: anchor,
             relativeTo: tableView,
             onSelection: onSelection, focusReturnView: tableView
         )
@@ -2740,7 +3052,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // transient panel visible in a headless probe (for example, before the app
         // activates its window). QA reads that same list, not a parallel menu model.
         if rowChoiceController.listView == nil {
-            let list = ChoiceListView(items: items, selectedID: nil)
+            let list = ChoiceListView(
+                items: items, selectedID: nil, presentation: .commands)
             list.onSelection = onSelection
             qaChoiceListForQA = list
         }
@@ -3236,11 +3549,22 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
         setHovered(agentId: agentId(atWindowPoint: event.locationInWindow))
+        setSearchFieldHovered(searchField.frame.contains(convert(event.locationInWindow, from: nil)))
     }
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
         setHovered(agentId: nil)
+        setSearchFieldHovered(false)
+    }
+
+    /// The search field's only resting affordance is that it lights up under the
+    /// pointer, so this rides the tracking area the list already owns rather than
+    /// adding a second one over the same pixels.
+    private func setSearchFieldHovered(_ hovered: Bool) {
+        guard hovered != isSearchFieldHovered else { return }
+        isSearchFieldHovered = hovered
+        applySearchFieldChrome()
     }
 
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.2-interaction-fill-ladder.md
@@ -3255,6 +3579,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// last hovered row stays lit behind an app you switched away from.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        // The card is a child of the WINDOW, not of this view, so it does not
+        // travel when the list is reparented or torn down — it would simply be
+        // left behind, floating over a canvas describing a row that is gone.
+        dismissHoverCard()
         let center = NotificationCenter.default
         // TOKENS, and never `removeObserver(self)`. The blanket form is one call
         // and it is wrong here: `NSView` and `NSTableView` register the view
@@ -3378,7 +3706,165 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         hoveredAgentId = agentId
         redraw(tableRows: [tableRow(forAgentId: previous), tableRow(forAgentId: agentId)]
             .compactMap { $0 })
+        // The card hangs off THIS, the one choke point, rather than off a tracking
+        // area of its own. Everything that already nulls hover — the list
+        // scrolling under a still pointer, the window resigning key, every full
+        // re-render — therefore dismisses the card too, without any of it knowing
+        // the card exists.
+        updateHoverCard()
     }
+
+    // MARK: - Hover card
+
+    /// How long the pointer must rest before the card opens. T3's number, and it
+    /// is the difference between a card that answers you and one that pounces.
+    private static let hoverCardDwell: TimeInterval = 0.15
+    /// After a card closes, the next one opens INSTANTLY for this long. Without
+    /// it, running the pointer down the list re-serves the delay on every row and
+    /// scanning feels like wading; with it, the first card costs 150ms and the
+    /// rest are immediate.
+    private static let hoverCardGrace: TimeInterval = 0.4
+    private static let hoverCardGap: CGFloat = 4
+
+    /// Nil-by-default, like the row and the header. Production hover is untouched,
+    /// so `--sidebar-ux-check`'s hover ladder never sees this.
+    var hoverCardEnabled = false {
+        didSet { if !hoverCardEnabled { dismissHoverCard() } }
+    }
+    /// Injectable so a check can fire the dwell without sleeping — the shape
+    /// `wakeRerenderScheduler` established.
+    var hoverCardScheduler: WakeRerenderScheduler?
+    private var hoverCard: InboxHoverCardView?
+    private var hoverCardCancel: (() -> Void)?
+    private var hoverCardClosedAt: Date?
+
+    private func updateHoverCard() {
+        hoverCardCancel?()
+        hoverCardCancel = nil
+        guard hoverCardEnabled, let id = hoveredAgentId,
+              let row = rows.first(where: { $0.id == id })
+        else {
+            dismissHoverCard()
+            return
+        }
+        let isOpen = hoverCard?.superview != nil
+        let withinGrace = hoverCardClosedAt.map {
+            clock().timeIntervalSince($0) <= Self.hoverCardGrace
+        } ?? false
+        guard !isOpen, !withinGrace else {
+            presentHoverCard(for: row)
+            return
+        }
+        let show: () -> Void = { [weak self] in
+            MainActor.assumeIsolated { self?.presentHoverCard(for: row) }
+        }
+        if let scheduler = hoverCardScheduler {
+            hoverCardCancel = scheduler(Self.hoverCardDwell, show)
+        } else {
+            let work = DispatchWorkItem(block: show)
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.hoverCardDwell, execute: work)
+            hoverCardCancel = { work.cancel() }
+        }
+    }
+
+    private func presentHoverCard(for row: AgentInboxRow) {
+        guard hoverCardEnabled, hoveredAgentId == row.id,
+              let contentView = window?.contentView,
+              let anchor = hoverCardAnchor(for: row.id)
+        else { return }
+
+        let card = hoverCard ?? InboxHoverCardView(frame: .zero)
+        hoverCard = card
+        card.apply(title: row.displayTitle, lines: hoverCardLines(for: row))
+        let size = card.intrinsicContentSize
+
+        // Top-aligned with the row and just clear of the sidebar, then clamped so a
+        // row near the bottom does not push the card off the window.
+        var origin = NSPoint(
+            x: anchor.maxX + Self.hoverCardGap,
+            y: anchor.maxY - size.height)
+        origin.x = min(origin.x, contentView.bounds.maxX - size.width - Self.hoverCardGap)
+        origin.y = max(Self.hoverCardGap, min(origin.y, contentView.bounds.maxY - size.height))
+        card.frame = NSRect(origin: origin, size: size)
+
+        guard card.superview == nil else { return }
+        contentView.addSubview(card)
+        guard !prefersReducedMotion() else { return }
+        card.animatePresentation(duration: Self.crossfadeDuration)
+    }
+
+    private func dismissHoverCard() {
+        hoverCardCancel?()
+        hoverCardCancel = nil
+        guard let card = hoverCard, card.superview != nil else { return }
+        card.removeFromSuperview()
+        hoverCardClosedAt = clock()
+    }
+
+    /// The hovered row's rect, in the window content view's coordinates.
+    private func hoverCardAnchor(for id: UUID) -> NSRect? {
+        guard let contentView = window?.contentView,
+              let rect = tableRowFrameForQA(id: id) else { return nil }
+        return contentView.convert(tableView.convert(rect, to: nil), from: nil)
+    }
+
+    /// Every line is optional and a missing fact draws nothing — a card padded
+    /// with "Unknown" would be worse than a shorter card.
+    private func hoverCardLines(for row: AgentInboxRow) -> [InboxHoverCardLine] {
+        var lines: [InboxHoverCardLine] = []
+        if let project = row.projectName, !project.isEmpty {
+            lines.append(.init(symbol: "folder", text: project))
+        }
+        if let zone = row.zoneName, !zone.isEmpty {
+            lines.append(.init(symbol: "square.grid.2x2", text: zone))
+        }
+        lines.append(.init(symbol: "desktopcomputer", text: Self.hostName))
+        if let branch = row.branch, !branch.isEmpty {
+            lines.append(.init(symbol: "arrow.triangle.branch", text: branch))
+        }
+        if let checkedOut = row.checkedOutBranch {
+            lines.append(.init(
+                symbol: "exclamationmark.triangle.fill",
+                text: "Checked out on \(checkedOut)", isWarning: true))
+        }
+        if let harness = row.harness, !harness.isEmpty {
+            lines.append(.init(symbol: "terminal", text: harness))
+        }
+        if let model = row.model, !model.isEmpty {
+            // The mark when we have one, the generic chip glyph when we do not —
+            // never a two-character cipher.
+            lines.append(.init(
+                symbol: "cpu", mark: BrandMark96.mark(forModel: model), text: model))
+        }
+        if let last = row.lastActiveAt {
+            lines.append(.init(symbol: "clock", text: Self.hoverCardTimestamp.string(from: last)))
+        }
+        return lines
+    }
+
+    /// The machine the agent is running on. One string for now, and honest:
+    /// everything Array runs is local. It earns its place by being the line a
+    /// remote environment will appear on rather than a line that has to be
+    /// invented later.
+    private static let hostName = Host.current().localizedName ?? "This Mac"
+
+    /// POSIX and explicit, never `dateStyle`/`timeStyle`. The house rule is
+    /// written out on `InboxUndoToast.wakeTimeFormatter`: a locale-dependent
+    /// rendering makes an assertion depend on whose machine ran it.
+    private static let hoverCardTimestamp: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "d MMM HH:mm"
+        return formatter
+    }()
+
+    var isHoverCardVisibleForQA: Bool { hoverCard?.superview != nil }
+    var hoverCardFrameForQA: NSRect? { hoverCard?.superview == nil ? nil : hoverCard?.frame }
+    var hoverCardLinesForQA: [String] { hoverCard?.qaLinesForQA ?? [] }
+    var hoverCardBrandMarksAreTemplatesForQA: Bool {
+        hoverCard?.qaBrandMarksAreTemplatesForQA ?? false
+    }
+    var hoverCardBrandMarkTintForQA: NSColor? { hoverCard?.qaBrandMarkTintForQA }
 
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.4-focus-ring-and-floors.md
     /// Move the ring, and answer which table rows have to be repainted for it.
@@ -3530,6 +4016,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     var qaMaterializedRowCellCount: Int { qaMaterializedRowCells.count }
 
+
     /// Per-cell geometry and paint, in live-tree order. Every entry comes from a
     /// materialized row cell; no row model or expected token is substituted here.
     var qaRowGeometriesForQA: [AgentInboxRowGeometryForQA] {
@@ -3537,6 +4024,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     var rowIdsForQA: [UUID] { rows.map(\.id) }
+    /// Every row the last push handed this view, before scope/search/fold shaping.
+    /// Program 96/P0.1 reads these so a corpus can prove what the PRODUCTION join
+    /// produced, then render those exact values in a deterministic probe host.
+    var qaAllRowsForQA: [AgentInboxRow] { allRows }
     /// The live table index for an agent id, including the section rows that
     /// precede it. Native virtual AX children expose this same index even when
     /// the corresponding cell is outside the viewport.
@@ -3668,6 +4159,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var scopeButtonForQA: ChoiceButton { scopeButton }
     var searchFieldViewForQA: NSTextField { searchField }
     var searchFieldFrameForQA: NSRect { searchField.frame }
+    var searchTextDrawingRectForQA: NSRect {
+        searchField.cell?.drawingRect(forBounds: searchField.bounds) ?? .zero
+    }
+    var searchTextMeasuredHeightForQA: CGFloat {
+        searchField.cell?.cellSize(forBounds: searchField.bounds).height ?? 0
+    }
     var scopePopoverItemsForQA: [ChoiceItem] { scopeButton.qaPresentedItems }
     var scopePopoverWidthForQA: CGFloat? { scopeButton.qaPopoverWidth }
     var isScopePopoverPresentedForQA: Bool { scopeButton.qaIsPopoverPresented }
@@ -4403,6 +4900,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// did hold two). `reloadData(forRowIndexes:)` over every row rather than
     /// `reloadData()`, because the second one EMPTIES the selection and the
     /// selection is half of what is under test.
+
     func rebuildRowsForQA() {
         guard tableView.numberOfRows > 0 else { return }
         cellsByRow.removeAll()
@@ -4889,6 +5387,13 @@ protocol AgentInboxRowCell: NSTableCellView {
     var qaBranch: String { get }
     var qaElapsed: String { get }
     var qaGlyph: String { get }
+    /// The PROVIDER mark as rendered, distinct from `qaGlyph` (which is the status
+    /// glyph). Read off the label so a witness cannot pass by re-deriving
+    /// `AgentProviderGlyph` while the row paints something else. Program 96/P0.1.
+    var qaProviderGlyph: String { get }
+    /// The PLACEMENT band as rendered. Distinct from `qaMeta`, which composes
+    /// isolation and child rollup rather than where the agent lives. Program 96/P0.1.
+    var qaProject: String { get }
     var qaTextAlpha: Double { get }
     var qaAccentAlpha: Double { get }
     var qaGlyphAlpha: Double { get }
@@ -5123,6 +5628,16 @@ enum InboxBulkAction: String, CaseIterable, Equatable {
         }
     }
 
+    var icon: ChoiceIcon {
+        switch self {
+        case .settle: return .system("checkmark.circle")
+        case .snooze: return .system("clock")
+        case .markUnread: return .system("envelope.badge")
+        case .archive: return .system("archivebox")
+        case .delete: return .system("trash")
+        }
+    }
+
     // Ticket: docs/38-tickets/90-agent-ux/P4.11-undo-toast.md
     /// What the toast says this action DID, or nil for an action no undo covers.
     /// `InboxRowAction.undoVerb` records why the list is what it is.
@@ -5306,6 +5821,22 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         case .stopAgent: return "Stop Agent"
         case .archive: return "Archive"
         case .delete: return "Delete"
+        }
+    }
+
+    var icon: ChoiceIcon {
+        switch self {
+        case .openInTile: return .system("rectangle.on.rectangle")
+        case .settle: return .system("checkmark.circle")
+        case .unsettle: return .system("arrow.uturn.backward.circle")
+        case .snooze: return .system("clock")
+        case .wake: return .system("sun.max")
+        case .markUnread: return .system("envelope.badge")
+        case .rename: return .system("pencil")
+        case .generateName: return .system("sparkles")
+        case .stopAgent: return .system("stop.circle")
+        case .archive: return .system("archivebox")
+        case .delete: return .system("trash")
         }
     }
 
@@ -5551,6 +6082,7 @@ final class InboxBulkActionBar: NSView, TokenThemed {
         countLabel.translatesAutoresizingMaskIntoConstraints = false
         actionButton.translatesAutoresizingMaskIntoConstraints = false
         actionButton.preferredPopoverWidth = 150
+        actionButton.popoverPresentation = .commands
         // An action is a command, not the trigger's selected value. Keeping the
         // neutral title here also keeps it stable while the host owns a modal confirm.
         actionButton.keepsSelectionForItem = { _ in true }
@@ -5581,6 +6113,7 @@ final class InboxBulkActionBar: NSView, TokenThemed {
         self.actions = actions
         actionButton.items = actions.map {
             ChoiceItem(id: $0.rawValue, title: $0.title,
+                       icon: $0.icon,
                        destructive: $0 == .delete || $0 == .archive)
         }
         // Installing items can select the first enabled item. Reset the presentation
@@ -6892,6 +7425,10 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     /// the glyph is the collapsed row's way of saying the same thing in the room it
     /// has. Empty here is the fact, not a missing accessor.
     var qaGlyph: String { "" }
+    var qaProviderGlyph: String {
+        providerGlyphLabel.isHidden ? "" : providerGlyphLabel.stringValue
+    }
+    var qaProject: String { projectLabel.isHidden ? "" : projectLabel.stringValue }
     var qaTextAlpha: Double { Double(titleLabel.alphaValue) }
     var qaAccentAlpha: Double { Double(stateLabel.alphaValue) }
     var qaGlyphAlpha: Double { Opacity.full }
@@ -7482,6 +8019,12 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     var qaBranch: String { branchLabel.isHidden ? "" : branchLabel.stringValue }
     var qaElapsed: String { timeLabel.isHidden ? "" : timeLabel.stringValue }
     var qaGlyph: String { glyphLabel.stringValue }
+    /// A slim row draws no provider mark — its one glyph is the status glyph above.
+    var qaProviderGlyph: String { "" }
+    /// A slim row has no project child at all; the fact is relocated to its
+    /// accessibility aggregate (see `accessibilityAggregate(for:)`). Empty here is
+    /// the fact, not a missing accessor.
+    var qaProject: String { "" }
     var qaTextAlpha: Double { Double(titleLabel.alphaValue) }
     /// The glyph IS this row's accent — the same number as `qaGlyphAlpha`, and
     /// deliberately not `Opacity.full`: see the divergence note on the class.
