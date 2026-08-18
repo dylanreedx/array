@@ -318,10 +318,32 @@ final class ManagedAgentTileNSView: TileNSView {
     /// picture.
     override var surfaceableBody: NSView? { contentBackdrop }
 
-    /// The reducer's document version — already the tile's own change-detection
-    /// signal for forwarding to the transcript (`lastForwardedDocumentVersion`),
-    /// and monotonic, so equality is the whole freshness test.
-    override var surfaceContentRevision: UInt64? { model.document.version }
+    /// **A fingerprint of everything this body renders, not just its transcript.**
+    ///
+    /// `model.document.version` alone is not enough, and the gap is visible: a
+    /// `.turnStarted` or `.turnCompleted` moves the compact status row from "Done" to
+    /// "Working" and back, and starts or stops the elapsed tick, without necessarily
+    /// adding a card. A surface keyed on the document alone stays "fresh" through
+    /// that, so a quiet tile would sit there showing a status it no longer has.
+    ///
+    /// So the document version is mixed with a counter over every ingested event.
+    /// Over-counting is free here: an ingested event also makes the tile LIVE, which
+    /// means native, which means the extra invalidation costs one bake at the next
+    /// quiet transition and nothing during the burst.
+    override var surfaceContentRevision: UInt64? {
+        var mixed = model.document.version &* 0x9E37_79B9_7F4A_7C15
+        mixed ^= surfaceVisualEpoch &* 0xC2B2_AE3D_27D4_EB4F
+        return mixed
+    }
+
+    /// Bumped by every ingested runtime event. See `surfaceContentRevision`.
+    private var surfaceVisualEpoch: UInt64 = 0
+
+    /// The tile is repainting itself once a second while a live phase shows an
+    /// elapsed reading, and `compactStatusTickTimer` is exactly that condition —
+    /// the same signal `qaCompactStatusTickScheduled` reports. Surfacing such a tile
+    /// would freeze a counter the user can see counting.
+    override var surfaceIsAnimating: Bool { compactStatusTickTimer?.isValid == true }
     var qaCompositionIdentifiers: [String] {
         v2ComposeColumn?.arrangedSubviews.compactMap { $0.identifier?.rawValue } ?? []
     }
@@ -737,6 +759,9 @@ final class ManagedAgentTileNSView: TileNSView {
     /// the WINDOW focused and the composer dead until the tile was selected once.
     override func acquireFocus(reason: FocusRequest) -> Bool {
         canvas?.bringToFront(tileId: tile.id)
+        // Before the composer is targeted, not after: while surfaced, that text view
+        // is inside the parked body, and AppKit would focus it there.
+        promoteForIncomingFocus()
         if let composer = v2Composer {
             window?.makeFirstResponder(composer.textView)
             return true
@@ -912,6 +937,7 @@ final class ManagedAgentTileNSView: TileNSView {
         // Turn-local, not session-local: each new turn resets the semantic timer.
         // AgentTileHeaderView owns the one-second repaint and never touches the
         // transcript layout beneath it.
+        surfaceVisualEpoch &+= 1
         if case .turnStarted = event { startedAt = Date() }
         // A prompt is done once the agent settles or a turn ends. Clearing the
         // in-flight latch here re-enables the compose row (see submitPrompt).

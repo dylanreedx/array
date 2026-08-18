@@ -54,7 +54,11 @@ enum TileSurfaceResidencyChecks {
 
         final class Clock { var now: TimeInterval = 1_000 }
 
-        init(tileCount: Int, turns: Int = 4, viewportSize: CGSize = CGSize(width: 1_600, height: 1_000)) {
+        init(
+            tileCount: Int, turns: Int = 4,
+            viewportSize: CGSize = CGSize(width: 1_600, height: 1_000),
+            tileSize: CGSize = CGSize(width: 420, height: 300)
+        ) {
             canvas = CanvasNSView(
                 canvasState: CanvasState(
                     viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
@@ -80,8 +84,9 @@ enum TileSurfaceResidencyChecks {
                 built.append(Tile(
                     id: UUID(), kind: .managedAgent, title: "surface-residency-\(index)",
                     frame: TileFrame(
-                        x: Double(index % 3) * 480 + 40, y: Double(index / 3) * 360 + 60,
-                        width: 420, height: 300
+                        x: Double(index % 3) * Double(tileSize.width + 60) + 40,
+                        y: Double(index / 3) * Double(tileSize.height + 60) + 60,
+                        width: Double(tileSize.width), height: Double(tileSize.height)
                     ),
                     zPosition: .fromLegacyRank(index + 1), zoneId: zoneId,
                     runtimeRef: nil, metadata: TileMetadata()
@@ -107,7 +112,50 @@ enum TileSurfaceResidencyChecks {
             zoomGain = canvas.cameraDriver.tuning.scrollZoomGain
             commitGap = canvas.cameraDriver.tuning.minCommitInterval + 0.001
             canvas.cameraDriver.nowProvider = { [clock] in clock.now }
+            // Residency runs on the same injected clock as the camera, so "this tile
+            // has been quiet for a second" is a fact about the fixture and not about
+            // how long the check took to run.
+            canvas.residencyNowProvider = { [clock] in clock.now }
+            // And the pointer is injected, ALWAYS. The production fallback is
+            // `mouseLocationOutsideOfEventStream`, which in a check is wherever
+            // Dylan's actual mouse happens to be — over the fixture's window as
+            // often as not, which would make the pointer clause decide these
+            // witnesses at random.
+            canvas.residencyPointerProvider = { [weak self] in self?.injectedPointer }
             pump()
+        }
+
+        /// Pointer position in window coordinates, or nil for "the pointer is
+        /// somewhere else entirely".
+        var injectedPointer: NSPoint?
+
+        /// Move the shared clock. Residency and the camera both read it.
+        func advance(_ seconds: TimeInterval) { clock.now += seconds }
+
+        /// Production runs `evaluateTileResidency` from a 10 Hz timer; a check calls
+        /// it directly so every transition is caused rather than awaited.
+        func evaluateResidency(passes: Int = 1) {
+            for _ in 0..<passes {
+                canvas.evaluateTileResidency()
+                pump()
+            }
+        }
+
+        /// The steady state Option A lives in: nothing streaming, no pointer, no
+        /// focus — so every eligible tile is surfaced.
+        ///
+        /// Two stages, because the first pass is what LEARNS each tile's content
+        /// revision. Until it has run, `lastContentChangeAt` is nil and the rule
+        /// cannot tell a quiet tile from one mid-stream; after it, advancing past
+        /// `contentQuietDelay` makes every tile quiet. The repeated passes are the
+        /// per-pass bake budget: 4 bakes a pass means 12 tiles need three.
+        func quiesceAndSurface(passes: Int = 6) {
+            settle()
+            window.makeFirstResponder(nil)
+            injectedPointer = nil
+            evaluateResidency()
+            advance(canvas.residencyTuning.contentQuietDelay + 0.05)
+            evaluateResidency(passes: passes)
         }
 
         func teardown() {
@@ -250,13 +298,19 @@ enum TileSurfaceResidencyChecks {
     static func run() throws {
         try checkDefaultIsOff()
         try checkFlagOffChangesNothing()
-        try checkMotionSurfacesAndRestRestores()
+        try checkQuietSurfacesAndLiveStaysNative()
+        try checkHysteresisIgnoresAPointerSweep()
         try checkPixelEquivalence()
         try checkSharpnessNeverRegresses()
-        try checkStreamingSurvivesTheGesture()
-        try checkClickDuringSettleWindowReachesTheBody()
+        try checkContentWhileSurfacedPromotesAndSurvives()
+        try checkClickOnASurfacedTileReachesTheBody()
+        try checkFocusNeverLandsOnAPicture()
         try checkNothingIsStranded()
+        try checkAppearanceChangeGivesTheBodyBack()
+        try checkAccessibilityFindsTheRealBody()
+        try checkLeavingTheWindowRestoresEveryBody()
         try checkCost()
+        try checkBakeCost()
         print("tile-surface-residency check: ok")
     }
 
@@ -300,45 +354,49 @@ enum TileSurfaceResidencyChecks {
                    "flag off must still pay the native cascade — a gesture that laid nothing out was not a gesture")
     }
 
-    /// The two-state machine, from production transitions only.
-    private static func checkMotionSurfacesAndRestRestores() throws {
+    /// **Option A's rule, from production transitions only.** Quiet tiles surface,
+    /// live tiles keep their real body, and a settle is no longer a promotion event.
+    ///
+    /// The inverse of slice 1's witness, deliberately: slice 1 asserted that
+    /// settling restored every body, because residency was keyed on the camera.
+    /// Under Option A a tile stays surfaced across many gestures and across rest,
+    /// which is the entire point — reparenting is then paid per quiet<->live
+    /// crossing rather than twice per gesture (~2.1 ms out, ~2.9 ms back, per tile).
+    private static func checkQuietSurfacesAndLiveStaysNative() throws {
         let world = World(tileCount: 6)
         defer { world.teardown() }
         world.canvas.surfaceResidencyEnabled = true
-        // A settle first, so the store holds surfaces before the gesture starts —
-        // the steady state a real canvas is in.
+
+        // Before anything is quiet, nothing may be surfaced: a tile whose content
+        // just changed is live by definition, and the first pass is what learns that.
         world.settle()
-        world.canvas.refreshTileSurfaces()
-        for _ in 0..<3 {
-            world.settle()
-            world.canvas.refreshTileSurfaces()
-        }
-        try expect(world.canvas.tileSurfaceStore.count > 0,
-                   "the settle pass must produce at least one surface, or a gesture has nothing to use")
+        world.evaluateResidency()
+        try expect(world.canvas.qaSurfacedTileViews.isEmpty,
+                   "a tile whose content just changed must stay native, saw "
+                   + "\(world.canvas.qaSurfacedTileViews.count) surfaced")
 
-        world.canvas.qaResetSurfaceResidencyCounters()
-        world.cameraStep(toZoom: 0.8)
-        world.pump()
-
+        world.quiesceAndSurface()
         let surfaced = world.canvas.qaSurfacedTileViews.count
-        try expect(surfaced > 0, "entering motion must surface at least one tile")
+        try expect(surfaced == world.tiles.count,
+                   "every quiet tile must surface: \(surfaced) of \(world.tiles.count)")
         try expect(world.canvas.qaParkedBodyCount == surfaced,
                    "every surfaced tile must have exactly one body in the park: \(surfaced) surfaced, "
                    + "\(world.canvas.qaParkedBodyCount) parked")
+        for tile in world.tiles {
+            try expect(world.canvas.qaLastResidencyDecision(tile.id) == .surfaced,
+                       "a quiet tile's recorded decision must be .surfaced")
+        }
 
-        // The whole point, in two assertions — and the counter to use is the PARK
-        // walk, not `qaTotalTranscriptLayoutPassCount`. That one sums over
-        // `tileViewsInVisualOrder`, i.e. the world plane, so it cannot see a parked
-        // body at all: it goes to zero when a tile is surfaced, which reads like
-        // proof and is really blindness. Baselines are taken AFTER the first step,
-        // because being adopted by the park legitimately costs each body one layout.
+        // The win, across a gesture — and the counter to use is the PARK walk, not
+        // `qaTotalTranscriptLayoutPassCount`. That one sums over the world plane, so
+        // it cannot see a parked body at all: it goes to zero when a tile is
+        // surfaced, which reads like proof and is really blindness.
         let parkedBaseline = world.parkedTranscriptLayoutPasses
         let planeBaseline = world.transcriptLayoutPasses
         for step in 1...6 {
-            world.cameraStep(toZoom: 0.8 - 0.09 * Double(step))
+            world.cameraStep(toZoom: 0.9 - 0.05 * Double(step))
             world.pump()
         }
-        try expect(world.canvas.qaSurfacedTileViews.count > 0, "tiles must stay surfaced across the gesture")
         try expect(world.parkedTranscriptLayoutPasses == parkedBaseline,
                    "a camera step reached a PARKED transcript: \(parkedBaseline) -> "
                    + "\(world.parkedTranscriptLayoutPasses). The park is not outside the cascade.")
@@ -346,56 +404,155 @@ enum TileSurfaceResidencyChecks {
                    "a camera step laid out a transcript still in the world plane: \(planeBaseline) -> "
                    + "\(world.transcriptLayoutPasses)")
 
+        // **Settling must NOT promote anything.** This is the line between the two
+        // policies, and getting it wrong reintroduces slice 1's per-gesture bill.
         world.settle()
-        try expect(world.canvas.qaSurfacedTileViews.isEmpty,
-                   "settling must restore every real body — at rest nothing may be surfaced")
-        try expect(world.canvas.qaParkedBodyCount == 0,
-                   "settling must empty the park, saw \(world.canvas.qaParkedBodyCount)")
-        for view in world.agentViews.values {
-            try expect(view.surfaceableBody === view.contentView,
-                       "a restored tile's content view must be its real body again")
+        try expect(world.canvas.qaSurfacedTileViews.count == surfaced,
+                   "settling promoted \(surfaced - world.canvas.qaSurfacedTileViews.count) tiles — under "
+                   + "Option A rest is a surfaced state, not a native one")
+
+        // Content makes one tile live, and only that one.
+        let liveId = world.tiles[0].id
+        guard let liveView = world.agentViews[liveId] else {
+            throw Failure(message: "the fixture lost its first agent view")
         }
+        let thread = "surface-residency-0"
+        let turn = "\(thread)-live"
+        liveView.ingest(.turnStarted(threadId: thread, turnId: turn))
+        liveView.ingest(.contentDelta(
+            threadId: thread, turnId: turn, streamKind: .assistant, delta: "A token arrives."
+        ))
+        world.evaluateResidency()
+        try expect(liveView.surfaceResidency == .native,
+                   "a tile that received content must be promoted, not left as a picture")
+        try expect(world.canvas.qaLastResidencyDecision(liveId) == .native(.streaming),
+                   "the promotion reason must be .streaming, so the rule is observable: got "
+                   + String(describing: world.canvas.qaLastResidencyDecision(liveId)))
+        try expect(world.canvas.qaSurfacedTileViews.count == surfaced - 1,
+                   "one tile going live must not disturb the others")
+
+        // And it goes back once it is quiet again.
+        world.advance(world.canvas.residencyTuning.contentQuietDelay + 0.05)
+        world.evaluateResidency(passes: 2)
+        try expect(liveView.surfaceResidency == .surfaced,
+                   "a tile that fell quiet must surface again")
+
+        // Focus holds a tile native even though its content is old — and the focus
+        // test has to see through the park, because a surfaced tile's body is not in
+        // the tile's subtree any more.
+        guard let body = liveView.surfaceableBody else {
+            throw Failure(message: "the fixture's agent tile has no surfaceable body")
+        }
+        world.window.makeFirstResponder(body)
+        world.evaluateResidency()
+        try expect(liveView.surfaceResidency == .native,
+                   "the tile holding the first responder must be native — otherwise the user is typing "
+                   + "into a picture")
+        try expect(world.canvas.qaLastResidencyDecision(liveId) == .native(.focus),
+                   "the reason must be .focus: got "
+                   + String(describing: world.canvas.qaLastResidencyDecision(liveId)))
+        world.window.makeFirstResponder(nil)
+
+        // The pointer, once it has RESTED. Both halves are asserted: the tile under
+        // a resting pointer is native, and its neighbours are untouched.
+        let pointerTarget = world.tiles[1].id
+        guard let pointerView = world.agentViews[pointerTarget] else {
+            throw Failure(message: "the fixture lost its second agent view")
+        }
+        let centre = CGPoint(x: pointerView.bounds.midX, y: pointerView.bounds.midY)
+        world.injectedPointer = pointerView.convert(centre, to: nil)
+        world.evaluateResidency()
+        try expect(pointerView.surfaceResidency == .surfaced,
+                   "the pointer must have to REST before it promotes anything — a tile it has only just "
+                   + "arrived over is still surfaced")
+        world.advance(world.canvas.residencyTuning.pointerRestDelay + 0.01)
+        world.evaluateResidency()
+        try expect(pointerView.surfaceResidency == .native,
+                   "a tile under a resting pointer must be native, for cursor rects and tooltips")
+        try expect(world.canvas.qaLastResidencyDecision(pointerTarget) == .native(.pointerResting),
+                   "the reason must be .pointerResting: got "
+                   + String(describing: world.canvas.qaLastResidencyDecision(pointerTarget)))
+    }
+
+    /// **Hysteresis: sweeping the pointer across the canvas must cost nothing.**
+    ///
+    /// Without a rest delay, dragging the cursor over five surfaced tiles is five
+    /// promote/demote pairs — ~25 ms of AppKit subtree surgery during the sweep,
+    /// exactly the cost this policy exists to avoid paying casually.
+    private static func checkHysteresisIgnoresAPointerSweep() throws {
+        let world = World(tileCount: 6)
+        defer { world.teardown() }
+        world.canvas.surfaceResidencyEnabled = true
+        world.quiesceAndSurface()
+        try expect(world.canvas.qaSurfacedTileViews.count == world.tiles.count,
+                   "the sweep witness needs every tile surfaced first")
+        world.canvas.qaResetSurfaceResidencyCounters()
+
+        // One pass per tile, with the clock advancing by less than the rest delay
+        // between them — a pointer moving steadily, never lingering.
+        let hop = world.canvas.residencyTuning.pointerRestDelay / 3
+        for tile in world.tiles {
+            guard let view = world.agentViews[tile.id] else { continue }
+            let centre = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
+            world.injectedPointer = view.convert(centre, to: nil)
+            world.advance(hop)
+            world.evaluateResidency()
+        }
+        try expect(world.canvas.qaSurfacePromotionCount == 0,
+                   "a pointer sweep promoted \(world.canvas.qaSurfacePromotionCount) tiles — the rest "
+                   + "delay is not doing its job")
+        world.injectedPointer = nil
     }
 
     /// The gate Dylan's requirement actually names, aimed at the PRODUCER.
     ///
-    /// The surface is compared against a native bake of the same body at the same
-    /// moment and therefore the same resolution — no camera movement between them,
-    /// so no resampling in the comparison. That isolates what Array owns (does the
-    /// producer render the right pixels?) from what Core Animation owns (drawing a
-    /// sharp image smaller, which is inherent to showing any cached image at all
+    /// The surface is compared against a native bake of the same body taken at the
+    /// same content and the same resolution — the native bake FIRST, while the body
+    /// is still in the plane, because `.plans/37` Step 0 measured that a bake of a
+    /// parked body is not the body's pixels at all. That isolates what Array owns
+    /// (does the producer render the right pixels?) from what Core Animation owns
+    /// (drawing a sharp image smaller, which is inherent to showing any cached image
     /// and is bounded by the sharpness rule to downscaling only).
     ///
-    /// The first version of this check compared a surfaced tile against a native
-    /// bake taken at a DIFFERENT zoom. Two things were wrong with it, and both
-    /// mattered: `bitmapImageRepForCachingDisplay` sizes itself from the view's
-    /// effective scale, so the two reps were not even the same shape; and once that
-    /// was fixed the metric was dominated by resampling, which left the
-    /// half-scale negative witness indistinguishable from the green path (4.44 vs
-    /// 4.62 — a gate that cannot fail).
+    /// An early version compared against a native bake taken at a DIFFERENT zoom.
+    /// Two things were wrong and both mattered: `bitmapImageRepForCachingDisplay`
+    /// sizes itself from the view's effective scale, so the reps were not even the
+    /// same shape; and once that was fixed the metric was dominated by resampling,
+    /// which left the half-scale negative witness indistinguishable from the green
+    /// path (4.44 vs 4.62 — a gate that cannot fail).
     private static func checkPixelEquivalence() throws {
         let world = World(tileCount: 3)
         defer { world.teardown() }
         world.canvas.surfaceResidencyEnabled = true
-        for _ in 0..<4 {
-            world.settle()
-            world.canvas.refreshTileSurfaces()
-        }
+
+        // Make everything quiet WITHOUT surfacing it yet: one pass to learn the
+        // revisions, then time, then the native reference bakes, then the pass that
+        // bakes and demotes. Nothing changes content in between.
+        world.settle()
+        world.window.makeFirstResponder(nil)
+        world.evaluateResidency()
+        world.advance(world.canvas.residencyTuning.contentQuietDelay + 0.05)
         world.pump()
+
+        var references: [UUID: CGImage] = [:]
+        for tile in world.tiles {
+            guard let view = world.agentViews[tile.id], let body = view.surfaceableBody else { continue }
+            let rep = try bake(body)
+            guard let image = rep.cgImage else {
+                throw Failure(message: "the native comparison bake produced no image")
+            }
+            try expect(!VisualSnapshot.metrics(of: rep).isBlank,
+                       "the native body rendered blank — the fixture, not the surface, is wrong")
+            references[tile.id] = image
+        }
+        world.evaluateResidency(passes: 2)
 
         var worstDifference = 0.0
         var compared = 0
         for tile in world.tiles {
-            guard let view = world.agentViews[tile.id],
-                  let body = view.surfaceableBody,
+            guard let reference = references[tile.id],
                   let surface = world.canvas.tileSurfaceStore.surface(for: tile.id) else { continue }
-            let nativeRep = try bake(body)
-            guard let nativeImage = nativeRep.cgImage else {
-                throw Failure(message: "the native comparison bake produced no image")
-            }
-            try expect(!VisualSnapshot.metrics(of: nativeRep).isBlank,
-                       "the native body rendered blank — the fixture, not the surface, is wrong")
-            worstDifference = max(worstDifference, meanChannelDifference(surface.image, nativeImage))
+            worstDifference = max(worstDifference, meanChannelDifference(surface.image, reference))
             compared += 1
         }
         try expect(compared > 0, "no surface existed, so fidelity was never actually tested")
@@ -408,8 +565,6 @@ enum TileSurfaceResidencyChecks {
 
         // And separately: what the user actually sees while surfaced must not be
         // blank. Cheap, and it is the failure mode that would matter most.
-        world.cameraStep(toZoom: 0.9)
-        world.pump()
         var checkedComposite = 0
         for tile in world.tiles {
             guard let view = world.agentViews[tile.id], view.surfaceResidency == .surfaced else { continue }
@@ -419,7 +574,6 @@ enum TileSurfaceResidencyChecks {
             checkedComposite += 1
         }
         try expect(checkedComposite > 0, "no tile surfaced, so the composite was never checked")
-        world.settle()
     }
 
     /// Mean per-channel difference the producer may show against the real body.
@@ -428,49 +582,50 @@ enum TileSurfaceResidencyChecks {
     private static let surfaceFidelityThreshold = 0.25
 
     /// Zooming IN past what a surface carries must refuse the surface, not show a
-    /// soft one. This is the rule that keeps sharpness from ever regressing.
+    /// soft one — in the same step that made it so, not at the next gesture.
+    ///
+    /// Under Option A the tiles are already surfaced before the zoom starts, so this
+    /// exercises `enforceSurfaceSharpness`, which runs per camera step over the
+    /// maintained surfaced set. It is scoped to tiles at or near the viewport: a tile
+    /// nobody can see is not showing anything soft, and zooming in shrinks the
+    /// visible set, which is what makes the rule affordable.
     private static func checkSharpnessNeverRegresses() throws {
         let world = World(tileCount: 4)
         defer { world.teardown() }
         world.canvas.surfaceResidencyEnabled = true
-        world.settle()
-        world.canvas.refreshTileSurfaces()
-        for _ in 0..<3 {
-            world.settle()
-            world.canvas.refreshTileSurfaces()
-        }
+        world.quiesceAndSurface()
         try expect(world.canvas.tileSurfaceStore.count > 0, "need surfaces before testing refusal")
         let bakedScale = world.canvas.tileSurfaceStore.surface(for: world.tiles[0].id)?.bakedScale ?? 0
         try expect(bakedScale > 0, "a stored surface must know its own density")
 
-        // Jump to a zoom whose demand exceeds what any surface carries.
         world.canvas.qaResetSurfaceResidencyCounters()
         let backing = world.window.backingScaleFactor
         let tooSharp = Double(bakedScale / backing) * 2
         world.cameraStep(toZoom: tooSharp)
         world.pump()
-        try expect(world.canvas.qaSurfacedTileViews.isEmpty,
-                   "zooming past the baked density must leave every tile native, saw "
-                   + "\(world.canvas.qaSurfacedTileViews.count) surfaced at zoom \(tooSharp)")
+
+        let softAndVisible = world.canvas.visibleTileViews.filter { $0.surfaceResidency == .surfaced }
+        try expect(softAndVisible.isEmpty,
+                   "zooming past the baked density left \(softAndVisible.count) VISIBLE tiles surfaced at "
+                   + "zoom \(tooSharp) — those are showing soft text")
         try expect(world.canvas.qaSurfaceRefusedSharpnessCount > 0,
                    "the refusal must be the SHARPNESS one, so the reason is observable and not a coincidence")
-        world.settle()
     }
 
-    /// A parked body is quiet, not dead: events ingested mid-gesture are in the
-    /// transcript once the gesture ends.
-    private static func checkStreamingSurvivesTheGesture() throws {
+    /// A parked body is quiet, not dead — and content arriving is what makes a tile
+    /// live again.
+    ///
+    /// Both halves matter, and `.plans/37` Step 0 is why the second one is phrased
+    /// as promotion rather than as pixels: a parked body keeps ingesting (its row
+    /// count advances) but its PIXELS never change, because its transcript's
+    /// `visibleRect` degenerates once no ancestor places it in the visible area. So
+    /// the design cannot leave a streaming tile surfaced and re-bake it; it has to
+    /// give the tile back.
+    private static func checkContentWhileSurfacedPromotesAndSurvives() throws {
         let world = World(tileCount: 4)
         defer { world.teardown() }
         world.canvas.surfaceResidencyEnabled = true
-        world.settle()
-        world.canvas.refreshTileSurfaces()
-        for _ in 0..<3 {
-            world.settle()
-            world.canvas.refreshTileSurfaces()
-        }
-        world.cameraStep(toZoom: 0.85)
-        world.pump()
+        world.quiesceAndSurface()
 
         guard let view = world.agentViews[world.tiles[0].id], view.surfaceResidency == .surfaced else {
             throw Failure(message: "the streaming witness needs a surfaced tile and did not get one")
@@ -487,31 +642,27 @@ enum TileSurfaceResidencyChecks {
         try expect(view.transcriptCardCount > cardsBefore,
                    "a surfaced tile stopped ingesting its stream — parking must not detach the subscriber")
 
-        world.settle()
-        // At rest the real body is back, and it must show what arrived while it was
-        // parked. `flushPendingVisualUpdate` is the transcript's own 30 Hz gate.
+        world.evaluateResidency()
+        try expect(view.surfaceResidency == .native,
+                   "a tile receiving content must be promoted within one evaluation — a parked body's "
+                   + "pixels never change, so leaving it surfaced would freeze the stream on screen")
         view.qaTranscriptCollectionFixture?.flushPendingVisualUpdate()
         world.pump()
-        try expect(view.surfaceResidency == .native, "the tile must be native again after settling")
         try expect(view.qaTranscriptText.contains("while the tile was rendering from a surface"),
-                   "content ingested during the gesture is missing from the restored transcript")
+                   "content ingested while surfaced is missing from the restored transcript")
     }
 
     /// A picture swallows clicks. `hitTest` promotes first, so the event lands on
-    /// the real body — the 250 ms settle window is when a user actually reaches for
-    /// a tile they were just looking at.
-    private static func checkClickDuringSettleWindowReachesTheBody() throws {
+    /// the real body.
+    ///
+    /// This mattered in slice 1 only during the 250 ms settle window. Under Option A
+    /// a surfaced tile at rest is the NORMAL state, so it is the ordinary click path
+    /// for every quiet tile on the canvas.
+    private static func checkClickOnASurfacedTileReachesTheBody() throws {
         let world = World(tileCount: 3)
         defer { world.teardown() }
         world.canvas.surfaceResidencyEnabled = true
-        world.settle()
-        world.canvas.refreshTileSurfaces()
-        for _ in 0..<3 {
-            world.settle()
-            world.canvas.refreshTileSurfaces()
-        }
-        world.cameraStep(toZoom: 0.9)
-        world.pump()
+        world.quiesceAndSurface()
 
         guard let view = world.agentViews[world.tiles[0].id], view.surfaceResidency == .surfaced else {
             throw Failure(message: "the click witness needs a surfaced tile and did not get one")
@@ -535,7 +686,38 @@ enum TileSurfaceResidencyChecks {
                        "the hit landed outside the restored body — the click would go somewhere unexpected")
         }
         try expect(view.qaParkedBody == nil, "promotion must take the body back out of the park")
-        world.settle()
+    }
+
+    /// **Focus must never land on a picture.**
+    ///
+    /// `TileNSView.acquireFocus` makes `contentView` the first responder, and while a
+    /// tile is surfaced `contentView` IS the surface host. Slice 1 never reached this
+    /// because at rest nothing was surfaced; Option A makes surfaced-at-rest normal,
+    /// so a focus request on a quiet tile is the common case, not the corner.
+    private static func checkFocusNeverLandsOnAPicture() throws {
+        let world = World(tileCount: 3)
+        defer { world.teardown() }
+        world.canvas.surfaceResidencyEnabled = true
+        world.quiesceAndSurface()
+
+        guard let view = world.agentViews[world.tiles[0].id], view.surfaceResidency == .surfaced,
+              let body = view.surfaceableBody else {
+            throw Failure(message: "the focus witness needs a surfaced tile and did not get one")
+        }
+        _ = view.acquireFocus(reason: .userClick)
+        world.pump()
+        try expect(view.surfaceResidency == .native,
+                   "acquiring focus must promote the tile first — making a surface host the first "
+                   + "responder sends every keystroke to a picture")
+        guard let responder = world.window.firstResponder as? NSView else {
+            throw Failure(message: "focus did not land on a view at all")
+        }
+        try expect(responder === body || responder.isDescendant(of: body) || responder === view,
+                   "the first responder is not inside the real body: \(type(of: responder))")
+        // And the policy must not undo it on the next pass.
+        world.evaluateResidency()
+        try expect(view.surfaceResidency == .native,
+                   "the focused tile was demoted again — `containsResponder` must see through the park")
     }
 
     /// Nothing may be left in the park, and no surface may outlive its tile.
@@ -543,18 +725,11 @@ enum TileSurfaceResidencyChecks {
         let world = World(tileCount: 4)
         defer { world.teardown() }
         world.canvas.surfaceResidencyEnabled = true
-        world.settle()
-        world.canvas.refreshTileSurfaces()
-        for _ in 0..<3 {
-            world.settle()
-            world.canvas.refreshTileSurfaces()
-        }
-        world.cameraStep(toZoom: 0.9)
-        world.pump()
+        world.quiesceAndSurface()
         try expect(world.canvas.qaParkedBodyCount > 0, "need a populated park before testing teardown")
 
-        // Removing a tile MID-GESTURE is the case that strands a body: the tile view
-        // leaves the world plane while its real body is somewhere else entirely.
+        // Removing a tile while it is SURFACED is the case that strands a body: the
+        // tile view leaves the world plane while its real body is somewhere else.
         let doomed = world.tiles[0].id
         world.canvas.removeTile(id: doomed)
         world.pump()
@@ -566,8 +741,6 @@ enum TileSurfaceResidencyChecks {
         }
 
         // A project switch replaces every layer; nothing from the old one may remain.
-        world.cameraStep(toZoom: 0.7)
-        world.pump()
         let survivingIds = Set(world.tiles.dropFirst().map { $0.id })
         world.canvas.setZones([])
         world.pump()
@@ -579,162 +752,589 @@ enum TileSurfaceResidencyChecks {
                    "pruning must not keep a departed project's surfaces")
     }
 
-    /// Cost, with the Core Animation flush kept OUT of the Array-owned number: a
-    /// returning `CATransaction.flush()` is compositor synchronisation, and folding
-    /// it in once reported a 0.07 ms camera path as 119% over budget.
+    /// **An appearance change must give every body back.**
     ///
-    /// Reports the per-step win AND decomposes the gesture-start transition, because
-    /// the transition is where this variant can lose: entering motion reparents every
-    /// eligible body into the park, and `addSubview` invalidates the view it adopts —
-    /// so a transition pays one full transcript layout per demoted tile unless
-    /// something stops it. Bakes are separated out by pre-baking every surface
-    /// through `qaBakeAllSurfaces`, so the two costs cannot hide inside each other.
+    /// `TileSurfaceRevision` carries `appearanceName`, and switching to dark mode
+    /// ingests nothing, animates nothing and touches no content — so every liveness
+    /// clause still says "quiet" while every surface on the canvas has just become a
+    /// picture of the light-mode tile. This is the one way a surface goes stale
+    /// without its tile going live, and without the stale-promotion path the canvas
+    /// would sit in the wrong appearance until something unrelated happened.
+    private static func checkAppearanceChangeGivesTheBodyBack() throws {
+        let world = World(tileCount: 4)
+        defer { world.teardown() }
+        world.canvas.surfaceResidencyEnabled = true
+        world.quiesceAndSurface()
+        try expect(world.canvas.qaSurfacedTileViews.count == world.tiles.count,
+                   "the appearance witness needs every tile surfaced first")
+        world.canvas.qaResetSurfaceResidencyCounters()
+
+        world.window.appearance = NSAppearance(named: .darkAqua)
+        world.pump()
+        world.evaluateResidency()
+        try expect(world.canvas.qaSurfacedTileViews.isEmpty,
+                   "an appearance change left \(world.canvas.qaSurfacedTileViews.count) tiles showing a "
+                   + "light-mode picture")
+        try expect(world.canvas.qaSurfaceStalePromotionCount == world.tiles.count,
+                   "the promotions must be attributed to STALENESS, not to a liveness clause: "
+                   + "\(world.canvas.qaSurfaceStalePromotionCount) of \(world.tiles.count)")
+
+        // And the canvas settles back to surfaced, with surfaces baked in the new
+        // appearance — bakes taken while native, as always.
+        world.evaluateResidency(passes: 4)
+        try expect(world.canvas.qaSurfacedTileViews.count == world.tiles.count,
+                   "the canvas did not return to surfaced after re-baking: "
+                   + "\(world.canvas.qaSurfacedTileViews.count) of \(world.tiles.count)")
+        for tile in world.tiles {
+            let wanted = world.agentViews[tile.id]?.currentSurfaceRevision
+            try expect(world.canvas.tileSurfaceStore.surface(for: tile.id)?.revision == wanted,
+                       "a re-baked surface does not match the tile's current revision")
+        }
+    }
+
+    /// **A screen reader must find the real body, in the right place.**
+    ///
+    /// This is the one gap the pointer clause does not cover: VoiceOver walks the
+    /// hierarchy with no pointer and no focus, so nothing else would have promoted
+    /// the tile. Measured before it was designed — while surfaced, the transcript is
+    /// still reachable, through the PARK, at `{{0, 1132}, {420, 90}}` while its tile
+    /// sits at `{{40, 640}, {420, 300}}`. Wrong place, wrong size, detached from its
+    /// owner. So the park is opaque to accessibility and the tile hands its body back
+    /// when asked, exactly as `hitTest` does for input.
+    private static func checkAccessibilityFindsTheRealBody() throws {
+        let world = World(tileCount: 3)
+        defer { world.teardown() }
+        world.canvas.surfaceResidencyEnabled = true
+        world.quiesceAndSurface()
+        let tileId = world.tiles[0].id
+        guard let view = world.agentViews[tileId], view.surfaceResidency == .surfaced else {
+            throw Failure(message: "the accessibility witness needs a surfaced tile and did not get one")
+        }
+
+        func findTranscript(_ elements: [Any]) -> AgentTranscriptListView? {
+            for element in elements {
+                if let transcript = element as? AgentTranscriptListView { return transcript }
+                if let view = element as? NSView,
+                   let found = findTranscript(view.accessibilityChildren() ?? view.subviews) {
+                    return found
+                }
+            }
+            return nil
+        }
+
+        // 1. The park exposes nothing. Otherwise a parked body is reachable as an
+        //    orphan at coordinates that belong to no tile.
+        try expect((world.canvas.surfaceParkView.accessibilityChildren() ?? []).isEmpty,
+                   "the park exposed \((world.canvas.surfaceParkView.accessibilityChildren() ?? []).count) "
+                   + "accessibility children — a parked body must not be reachable except through its tile")
+        try expect(world.canvas.surfaceParkView.isAccessibilityElement() == false,
+                   "the park must not be an accessibility element itself")
+        try expect(findTranscript(world.canvas.surfaceParkView.accessibilityChildren() ?? []) == nil,
+                   "a transcript is still reachable by walking the park")
+
+        // 2. Asking the tile promotes, and what comes back is the real body.
+        let accessesBefore = view.accessibilityAccessCount
+        let children = view.accessibilityChildren() ?? []
+        try expect(view.accessibilityAccessCount > accessesBefore,
+                   "the tile did not record the accessibility access, so the policy cannot keep it native")
+        try expect(view.surfaceResidency == .native,
+                   "an accessibility client read a surfaced tile without it handing the body back")
+        guard let transcript = findTranscript(children) else {
+            throw Failure(message: "the promoted tile's accessibility subtree has no transcript in it")
+        }
+
+        // 3. And the frames are true — the whole point. A VoiceOver cursor is drawn
+        //    on the frame the element reports.
+        let tileFrame = view.accessibilityFrame()
+        let transcriptFrame = transcript.accessibilityFrame()
+        try expect(tileFrame.insetBy(dx: -1, dy: -1).contains(transcriptFrame),
+                   "the transcript reports \(NSStringFromRect(transcriptFrame)), which is not inside its "
+                   + "tile at \(NSStringFromRect(tileFrame)) — a screen reader would highlight the wrong "
+                   + "part of the screen")
+
+        // 4. It STAYS native while the client keeps reading. Without this the next
+        //    pass demotes it 100 ms later and the AX tree churns under the user.
+        world.evaluateResidency()
+        try expect(view.surfaceResidency == .native,
+                   "the tile was demoted while an accessibility client was reading it")
+        try expect(world.canvas.qaLastResidencyDecision(tileId) == .native(.accessibility),
+                   "the reason must be .accessibility: got "
+                   + String(describing: world.canvas.qaLastResidencyDecision(tileId)))
+
+        // 5. And it goes back once nothing is reading.
+        world.advance(world.canvas.residencyTuning.contentQuietDelay + 0.05)
+        world.evaluateResidency(passes: 2)
+        try expect(view.surfaceResidency == .surfaced,
+                   "a tile nothing is reading any more must surface again")
+
+        // 6. The claim that makes this affordable: with NO accessibility client, this
+        //    path costs nothing. AppKit asked a tile for its children zero times over
+        //    a full run of settles, evaluations and camera steps.
+        world.canvas.qaResetSurfaceResidencyCounters()
+        for step in 1...6 {
+            world.cameraStep(toZoom: 0.9 - 0.05 * Double(step))
+            world.pump()
+        }
+        world.settle()
+        world.evaluateResidency(passes: 2)
+        try expect(world.canvas.qaSurfacePromotionCount == 0,
+                   "\(world.canvas.qaSurfacePromotionCount) tiles were promoted with no accessibility "
+                   + "client asking — the AX hook must be free when nobody is reading")
+    }
+
+    /// A canvas that leaves its window must hand every body back. Nothing evaluates
+    /// residency out there, so a body parked in a windowless canvas is a body no
+    /// policy will ever reclaim.
+    private static func checkLeavingTheWindowRestoresEveryBody() throws {
+        let world = World(tileCount: 4)
+        defer { world.teardown() }
+        world.canvas.surfaceResidencyEnabled = true
+        world.quiesceAndSurface()
+        try expect(world.canvas.qaParkedBodyCount == world.tiles.count,
+                   "this witness needs every body parked first")
+
+        world.window.contentView = NSView(frame: world.canvas.frame)
+        world.pump()
+        try expect(world.canvas.qaParkedBodyCount == 0,
+                   "leaving the window left \(world.canvas.qaParkedBodyCount) bodies in the park")
+        try expect(world.canvas.qaSurfacedTileViews.isEmpty,
+                   "leaving the window left \(world.canvas.qaSurfacedTileViews.count) tiles surfaced")
+    }
+
+    /// **The number Option A stands on: what does a camera step cost per LIVE tile?**
+    ///
+    /// Slice 1 answered "surfaced vs native" — 24 ms against 0.1 ms at 12 tiles — and
+    /// that is not the question any more. Under Option A the camera pays for exactly
+    /// the tiles keeping their real body (streaming, focused, or under the pointer)
+    /// and nothing for the rest, so what matters is **how many tiles may be live at
+    /// once before a step stops fitting a frame.**
+    ///
+    /// The Core Animation flush is kept OUT of the Array-owned number: a returning
+    /// `CATransaction.flush()` is compositor synchronisation, and folding it in once
+    /// reported a 0.07 ms camera path as 119% over budget.
     private static func checkCost() throws {
         let tileCount = 12
         let frameBudgetMs = 8.3
 
-        struct Arm {
-            var perStep = 0.0
-            var transition = 0.0
-            var demotions = 0
-            var bakesDuringTransition = 0
-            var parkedLayoutsDuringTransition = 0
-            var commit = 0.0
-            var layout = 0.0
-            var display = 0.0
-            var demoteHost = 0.0
-            var demoteContentSwap = 0.0
-            var demotePark = 0.0
-        }
-
-        func measure(residency: Bool, preBakeEverything: Bool) throws -> Arm {
+        /// Median Array-owned cost of one camera step with `liveCount` tiles held
+        /// native and the rest surfaced. `residency: false` is the reference arm:
+        /// today's canvas, where every tile is native.
+        func perStepMs(liveCount: Int, residency: Bool = true) throws -> Double {
             let world = World(tileCount: tileCount)
             defer { world.teardown() }
             world.canvas.surfaceResidencyEnabled = residency
-            for _ in 0..<3 {
+            if residency {
+                world.quiesceAndSurface(passes: 8)
+                // A live tile is one that is streaming, so make it stream. One burst
+                // is enough: demotions are suppressed for the duration of a gesture,
+                // which is production behaviour, not a fixture shortcut.
+                for (index, tile) in world.tiles.prefix(liveCount).enumerated() {
+                    guard let view = world.agentViews[tile.id] else { continue }
+                    let thread = "surface-residency-\(index)"
+                    let turn = "\(thread)-cost"
+                    view.ingest(.turnStarted(threadId: thread, turnId: turn))
+                    view.ingest(.contentDelta(
+                        threadId: thread, turnId: turn, streamKind: .assistant,
+                        delta: "Streaming keeps this tile live for the whole gesture."
+                    ))
+                }
+                world.evaluateResidency()
+                let live = world.tiles.prefix(liveCount).filter {
+                    world.agentViews[$0.id]?.surfaceResidency == .native
+                }.count
+                guard live == liveCount else {
+                    throw Failure(message: "cost: wanted \(liveCount) live tiles, got \(live)")
+                }
+            } else {
                 world.settle()
-                world.canvas.refreshTileSurfaces()
             }
-            if preBakeEverything { world.canvas.qaBakeAllSurfaces() }
-            // Drain the first rasterisation and any symbol-cache population before
-            // the clock: a cold first step belongs to construction.
+            // Drain the first rasterisation and any symbol-cache population before the
+            // clock: a cold first step belongs to construction.
             world.cameraStep(toZoom: 0.95)
             world.pump()
-            world.settle()
-            if preBakeEverything { world.canvas.qaBakeAllSurfaces() }
-            world.canvas.qaResetSurfaceResidencyCounters()
-
-            var arm = Arm()
-            let bakesBefore = world.canvas.tileSurfaceStore.qaBakeCount
-            let layoutsBefore = world.fixtureTranscriptLayoutPasses
-            TileNSView.qaResetDemoteTiming()
-            // Split, because "the transition is slow" is not actionable and two
-            // guesses at WHY it was slow were already wrong (a fresh texture upload
-            // per gesture; an empty visibleRect in the park). `onActivityBegin` fires
-            // synchronously from `noteScrollZoom`, so the demote loop is inside the
-            // commit stage.
-            let commitMs = milliseconds { world.cameraStep(toZoom: 0.9) }
-            let layoutMs = milliseconds { world.canvas.layoutSubtreeIfNeeded() }
-            let displayMs = milliseconds { world.window.displayIfNeeded() }
-            arm.commit = commitMs
-            arm.layout = layoutMs
-            arm.display = displayMs
-            arm.demoteHost = TileNSView.qaDemoteHostMs
-            arm.demoteContentSwap = TileNSView.qaDemoteContentSwapMs
-            arm.demotePark = TileNSView.qaDemoteParkMs
-            arm.transition = commitMs + layoutMs + displayMs
-            arm.bakesDuringTransition = world.canvas.tileSurfaceStore.qaBakeCount - bakesBefore
-            arm.demotions = world.canvas.qaSurfaceDemotionCount
-            arm.parkedLayoutsDuringTransition = world.fixtureTranscriptLayoutPasses - layoutsBefore
             CATransaction.flush()
 
             var steps: [Double] = []
             for index in 1...12 {
                 steps.append(milliseconds {
-                    world.cameraStep(toZoom: 0.9 - 0.05 * Double(index))
+                    world.cameraStep(toZoom: 0.9 - 0.03 * Double(index))
                     world.canvas.layoutSubtreeIfNeeded()
                     world.window.displayIfNeeded()
                 })
                 CATransaction.flush()
             }
-            if residency {
-                try expect(arm.demotions > 0,
-                           "the residency arm never demoted anything, so its cost is the native arm's")
-                try expect(world.canvas.qaTrackedSurfacedTileCount == world.canvas.qaSurfacedTileViews.count,
-                           "the maintained surfaced set drifted from the view tree: "
-                           + "\(world.canvas.qaTrackedSurfacedTileCount) tracked vs "
-                           + "\(world.canvas.qaSurfacedTileViews.count) in the tree")
-            }
-            world.settle()
             let sorted = steps.sorted()
-            arm.perStep = sorted[sorted.count / 2]
-            return arm
+            return sorted[sorted.count / 2]
         }
 
-        let native = try measure(residency: false, preBakeEverything: false)
-        let stale = try measure(residency: true, preBakeEverything: false)
-        let fresh = try measure(residency: true, preBakeEverything: true)
+        let native = try perStepMs(liveCount: 0, residency: false)
+        let quiet = try perStepMs(liveCount: 0)
+        let oneLive = try perStepMs(liveCount: 1)
+        let threeLive = try perStepMs(liveCount: 3)
+        let sixLive = try perStepMs(liveCount: 6)
 
+        let marginal = (sixLive - quiet) / 6
+        let headroom = marginal > 0.01 ? (frameBudgetMs - quiet) / marginal : Double(tileCount)
         print(String(
-            format: "tile-surface-residency: %d tiles | per step p50 native %.2f ms -> surfaced %.2f ms "
-            + "(%.4fx) | transition native %.2f ms, surfaced-with-stale %.2f ms (%d demoted, %d baked), "
-            + "surfaced-all-fresh %.2f ms (%d demoted, %d baked, %d transcript layouts; native "
-            + "transition cost %d) | transition stages native commit %.2f/layout %.2f/display %.2f "
-            + "-> surfaced commit %.2f/layout %.2f/display %.2f | demote breakdown host %.2f/"
-            + "contentSwap %.2f/park %.2f",
-            tileCount, native.perStep, fresh.perStep,
-            native.perStep > 0 ? fresh.perStep / native.perStep : 1,
-            native.transition,
-            stale.transition, stale.demotions, stale.bakesDuringTransition,
-            fresh.transition, fresh.demotions, fresh.bakesDuringTransition,
-            fresh.parkedLayoutsDuringTransition, native.parkedLayoutsDuringTransition,
-            native.commit, native.layout, native.display,
-            fresh.commit, fresh.layout, fresh.display,
-            fresh.demoteHost, fresh.demoteContentSwap, fresh.demotePark
+            format: "tile-surface-residency: %d tiles | per step p50 — every tile native %.2f ms | "
+            + "Option A with 0 live %.2f ms, 1 live %.2f ms, 3 live %.2f ms, 6 live %.2f ms | marginal "
+            + "%.2f ms per live tile | fits %.1f live tiles in an %.1f ms frame (and %.1f at 60 Hz)",
+            tileCount, native, quiet, oneLive, threeLive, sixLive, marginal, headroom, frameBudgetMs,
+            marginal > 0.01 ? (16.7 - quiet) / marginal : Double(tileCount)
         ))
-
-        try expect(fresh.perStep <= frameBudgetMs,
-                   String(format: "surfaced camera step must fit a frame: %.2f ms > %.2f ms",
-                          fresh.perStep, frameBudgetMs))
-        try expect(fresh.perStep < native.perStep,
+        try expect(quiet <= frameBudgetMs,
+                   String(format: "an all-quiet canvas must cost almost nothing: %.2f ms > %.2f ms",
+                          quiet, frameBudgetMs))
+        try expect(quiet < native,
                    String(format: "surfacing must be cheaper than not surfacing: %.2f ms vs %.2f ms",
-                          fresh.perStep, native.perStep))
-        // The transition is PUBLISHED and deliberately NOT gated.
-        //
-        // It was a gate, it fired, and it did its job: entering motion costs ~4x a
-        // native step with every surface already fresh, and the demote breakdown
-        // attributes all of it to plain AppKit subtree surgery — ~2.1 ms to remove a
-        // deep body from the tile and ~2.9 ms to re-add it to the park, per tile, per
-        // direction, with host construction at 0.00 ms. That killed "surfaced in
-        // motion only" (`.plans/36`), because any policy that reparents per gesture
-        // pays it twice per tile per gesture.
-        //
-        // Keeping it as a gate now would assert a decision rather than protect a
-        // behaviour: the policy is abandoned, so there is no regression left to
-        // catch. What this leg still protects is the MECHANISM, which the next policy
-        // reuses unchanged — the per-step cost above, the producer's fidelity, the
-        // sharpness refusal, streaming through a park, and the absence of leaks.
-        //
-        // Three hypotheses for this number were measured and refuted along the way:
-        // a fresh CALayer texture upload per gesture (retaining the host moved it
-        // 0.1 ms), an empty visibleRect in the park (sizing the park changed
-        // nothing), and the forced offscreen pass in `AgentTranscriptListView.layout`
-        // (gating it changed the native step by 0.2 ms — those calls really were
-        // nearly free, and the ~960 profile samples belong to AppKit's own forced
-        // subtree layout).
-        let transitionRatio = native.transition > 0 ? fresh.transition / native.transition : 0
-        print(String(format: "tile-surface-residency: transition is PUBLISHED, not gated — %.2fx a native "
-                     + "step. Reparenting a deep body costs ~%.2f ms/tile out and ~%.2f ms/tile back; this "
-                     + "is why \"surfaced in motion only\" was abandoned (.plans/36).",
-                     transitionRatio,
-                     fresh.demotions > 0 ? fresh.demoteContentSwap / Double(fresh.demotions) : 0,
-                     fresh.demotions > 0 ? fresh.demotePark / Double(fresh.demotions) : 0))
-        // What DOES stay gated about the transition: the breakdown must account for
-        // the commit stage it claims to explain. An instrument that stops adding up
-        // is how a published number quietly becomes fiction.
-        let attributed = fresh.demoteHost + fresh.demoteContentSwap + fresh.demotePark
-        try expect(attributed >= fresh.commit * 0.6,
-                   String(format: "the demote breakdown no longer explains the commit stage: %.2f ms "
-                          + "attributed of %.2f ms measured", attributed, fresh.commit))
+                          quiet, native))
+        // One live tile has to fit, because every canvas has one: the tile under the
+        // pointer, or the one holding focus. That is the floor Option A cannot be
+        // below.
+        try expect(oneLive <= frameBudgetMs,
+                   String(format: "one live tile must fit a frame: %.2f ms > %.2f ms. There is always at "
+                          + "least one — whatever the pointer is resting on.", oneLive, frameBudgetMs))
+        // The marginal cost per live tile is the regression gate, and the headroom it
+        // implies is PUBLISHED rather than gated. Measured at ~2.9 ms/tile, so an
+        // 8.3 ms frame (120 Hz) holds about 2.8 live tiles and a 16.7 ms frame
+        // (60 Hz) about 5.7. That number is AppKit's constraint solve over a real
+        // transcript, marked dirty by the plane's bounds cascade — the same cost
+        // today's canvas pays for EVERY tile. Getting below it means a live tile not
+        // being an AppKit view tree in the cascade at all, which is I2/I4, not tuning.
+        try expect(marginal <= 3.5,
+                   String(format: "a live tile now costs %.2f ms per camera step, up from ~2.9 ms. Option "
+                          + "A's headroom is proportional to this, so a regression here shrinks how many "
+                          + "agents can stream while the camera moves.", marginal))
+
+        // **The transition, published: what one quiet<->live crossing costs.** Option
+        // A pays this per crossing instead of twice per gesture, which is the whole
+        // reason it exists. The demote path is timed per call because "the transition
+        // is slow" is not actionable, and two guesses at WHY were already wrong (a
+        // fresh CALayer texture upload per gesture; an empty visibleRect in the park).
+        let world = World(tileCount: tileCount)
+        defer { world.teardown() }
+        world.canvas.surfaceResidencyEnabled = true
+        world.settle()
+        world.window.makeFirstResponder(nil)
+        world.evaluateResidency()
+        world.advance(world.canvas.residencyTuning.contentQuietDelay + 0.05)
+        TileNSView.qaResetDemoteTiming()
+        // The evaluation calls ONLY — no `pump()` between them. A first attempt timed
+        // `evaluateResidency(passes: 8)`, whose pumps carry a layout, a display and a
+        // CATransaction flush apiece, and then reported that the breakdown explained
+        // 42% of "the transition". It explained 82% of the transition; the instrument
+        // was measuring the fixture.
+        let demotePassMs = milliseconds {
+            for _ in 0..<8 { world.canvas.evaluateTileResidency() }
+        }
+        world.pump()
+        let demoted = world.canvas.qaSurfacedTileViews.count
+        try expect(demoted == tileCount, "the transition arm needs every tile surfaced, got \(demoted)")
+        let promoteMs = milliseconds { world.canvas.promoteAllSurfacedTiles() }
+        print(String(
+            format: "tile-surface-residency: one quiet->live crossing, %d tiles | demote %.2f ms total "
+            + "(host %.2f / contentSwap %.2f / park %.2f) = %.2f ms per tile | promote %.2f ms total = "
+            + "%.2f ms per tile. Paid per crossing, NOT per gesture — that is the policy.",
+            demoted, demotePassMs, TileNSView.qaDemoteHostMs, TileNSView.qaDemoteContentSwapMs,
+            TileNSView.qaDemoteParkMs,
+            (TileNSView.qaDemoteHostMs + TileNSView.qaDemoteContentSwapMs + TileNSView.qaDemoteParkMs)
+                / Double(demoted),
+            promoteMs, promoteMs / Double(demoted)
+        ))
+        // Instrument integrity, not a budget: a breakdown that stops accounting for
+        // the pass it explains turns a published number into fiction. The unattributed
+        // remainder is the bakes — one per tile, ~1 ms each (`checkBakeCost`).
+        let attributed = TileNSView.qaDemoteHostMs + TileNSView.qaDemoteContentSwapMs
+            + TileNSView.qaDemoteParkMs
+        try expect(attributed >= demotePassMs * 0.5,
+                   String(format: "the demote breakdown no longer explains the pass: %.2f ms attributed "
+                          + "of %.2f ms measured", attributed, demotePassMs))
+    }
+
+    /// **`.plans/37` Step 0: what does ONE bake cost?**
+    ///
+    /// Slice 1 only ever baked at rest, where a bake is free by construction — the
+    /// gesture had not started yet. Always-surfaced inverts that. A VISIBLE
+    /// streaming agent is showing a picture, so it has to RE-bake to keep showing
+    /// live text, at the transcript's own presentation cadence. The cost of one bake
+    /// is therefore the number the whole next policy stands on, and it has never
+    /// been measured — the same way the parked arm had to be measured before slice 1
+    /// could be built.
+    ///
+    /// Four costs, because they are not the same number and the policy pays
+    /// different ones in different places:
+    ///
+    /// - a clean bake of a body **in the plane** (what slice 1 does at rest);
+    /// - a **streaming refresh** in the plane — the layout the new content forces
+    ///   plus the bake, which is what a live streamer actually pays;
+    /// - both again with the body **parked**, which is where always-surfaced keeps
+    ///   it, and which is the number slice 2 is judged on.
+    ///
+    /// Two body sizes, so the result extrapolates by area rather than by hope.
+    ///
+    /// Published, with three gates: one bake must fit a frame (true for any policy),
+    /// the alloc/draw split must still explain the bake it claims to explain, and a
+    /// refresh must produce DIFFERENT PIXELS — otherwise this is timing a no-op and
+    /// reporting it as a bake, which is exactly the mistake the parked arm's
+    /// liveness teeth exist to stop.
+    private static func checkBakeCost() throws {
+        let frameBudgetMs = 8.3
+        /// The transcript presents at 30 Hz (`AgentTranscriptListView.enqueue`), so
+        /// that is the re-bake cadence a visible streamer imposes — not the frame rate.
+        let refreshHz = 30.0
+        let sizes = [CGSize(width: 420, height: 300), CGSize(width: 760, height: 900)]
+
+        func p50(_ samples: [Double]) -> Double {
+            let sorted = samples.sorted()
+            return sorted.isEmpty ? 0 : sorted[sorted.count / 2]
+        }
+
+        for size in sizes {
+            let world = World(
+                tileCount: 6,
+                viewportSize: CGSize(
+                    width: max(1_600, size.width * 3 + 200), height: max(1_000, size.height * 2 + 200)
+                ),
+                tileSize: size
+            )
+            defer { world.teardown() }
+            world.pump()
+
+            let tiles = world.tiles
+            let store = TileSurfaceStore()
+
+            func agent(_ id: UUID) throws -> ManagedAgentTileNSView {
+                guard let view = world.agentViews[id] else {
+                    throw Failure(message: "bake cost: a fixture tile has no agent view")
+                }
+                return view
+            }
+            func body(_ id: UUID) throws -> NSView {
+                guard let body = try agent(id).surfaceableBody else {
+                    throw Failure(message: "bake cost: an agent tile has no surfaceable body")
+                }
+                return body
+            }
+            func revision(_ id: UUID) throws -> TileSurfaceRevision {
+                guard let revision = try agent(id).currentSurfaceRevision else {
+                    throw Failure(message: "bake cost: an agent tile cannot state its surface revision")
+                }
+                return revision
+            }
+
+            /// One streamed delta into a tile, presented and laid out, then baked.
+            /// The whole thing is the unit, because a streamer cannot pay the bake
+            /// without paying the layout that made it necessary.
+            func refresh(_ tileId: UUID, index: Int, tag: String) throws -> Double {
+                let view = try agent(tileId)
+                let threadId = "surface-residency-\(index)"
+                let turnId = "\(threadId)-bake-cost-\(tag)"
+                view.ingest(.turnStarted(threadId: threadId, turnId: turnId))
+                let target = try body(tileId)
+                return milliseconds {
+                    view.ingest(.contentDelta(
+                        threadId: threadId, turnId: turnId, streamKind: .assistant,
+                        delta: "One more streamed sentence arrives while this tile is surfaced. "
+                    ))
+                    view.qaTranscriptCollectionFixture?.flushPendingVisualUpdate()
+                    target.layoutSubtreeIfNeeded()
+                    if let revision = view.currentSurfaceRevision {
+                        store.bake(tileId: tileId, body: target, revision: revision)
+                    }
+                }
+            }
+
+            // Warm. The first bake of a body pays for context creation, font and
+            // symbol caches, and a first rasterisation of everything beneath it —
+            // construction cost, not the cost of keeping a streamer fresh.
+            for tile in tiles {
+                store.bake(tileId: tile.id, body: try body(tile.id), revision: try revision(tile.id))
+            }
+            guard let warmed = store.surface(for: tiles[0].id) else {
+                throw Failure(message: "bake cost: the warm-up bake produced no surface")
+            }
+
+            var planeClean: [Double] = []
+            for tile in tiles {
+                let target = try body(tile.id)
+                let rev = try revision(tile.id)
+                planeClean.append(milliseconds { store.bake(tileId: tile.id, body: target, revision: rev) })
+            }
+
+            // Split, inline rather than through the store, because "a bake costs N
+            // ms" does not say whether the fix is a smaller image or a cheaper draw.
+            var allocSamples: [Double] = []
+            var drawSamples: [Double] = []
+            for tile in tiles {
+                let target = try body(tile.id)
+                var rep: NSBitmapImageRep?
+                allocSamples.append(milliseconds { rep = target.bitmapImageRepForCachingDisplay(in: target.bounds) })
+                guard let rep else { throw Failure(message: "bake cost: could not allocate a rep") }
+                drawSamples.append(milliseconds { target.cacheDisplay(in: target.bounds, to: rep) })
+            }
+
+            var planeRefresh: [Double] = []
+            let beforeRefresh = store.surface(for: tiles[0].id)?.image
+            for (index, tile) in tiles.enumerated() {
+                planeRefresh.append(try refresh(tile.id, index: index, tag: "plane"))
+            }
+            guard let beforeRefresh, let afterRefresh = store.surface(for: tiles[0].id)?.image else {
+                throw Failure(message: "bake cost: the refresh path stored no surface")
+            }
+            let refreshDelta = meanChannelDifference(beforeRefresh, afterRefresh)
+
+            // Now the state Option A lives in: the body parked outside the world
+            // plane, reached through the PRODUCTION residency pass rather than by
+            // moving views here. Production never bakes in this state — the pass bakes
+            // while a tile is still native and demotes afterwards — so this is a
+            // deliberate look at what it would get if it did.
+            //
+            // The A/B is deliberately tight: quiet the canvas, bake IN-PLANE, then run
+            // the pass whose only effect is the demotion, then bake PARKED. Nothing is
+            // ingested in between. A first attempt compared bakes taken either side of
+            // a settle AND a streaming loop and reported 3.2844, which measured the
+            // fixture's own progress, not the park.
+            world.canvas.surfaceResidencyEnabled = true
+            world.settle()
+            world.window.makeFirstResponder(nil)
+            world.evaluateResidency()
+            world.advance(world.canvas.residencyTuning.contentQuietDelay + 0.05)
+            world.pump()
+
+            let transcript = try agent(tiles[0].id).qaTranscriptCollectionFixture
+            let planeVisibleRect = transcript?.visibleRect ?? .zero
+            let planeDocumentHeight = transcript?.qaTranscriptDocumentHeight ?? 0
+            guard let inPlaneReference = store.bake(
+                tileId: tiles[0].id, body: try body(tiles[0].id), revision: try revision(tiles[0].id)
+            )?.image else {
+                throw Failure(message: "bake cost: the in-plane reference bake produced nothing")
+            }
+
+            // The residency pass is what parks the bodies. The camera never moves here,
+            // so both bakes are the same shape — and even if it did, a parked body is
+            // OUT of the plane's backing cascade, so its effective scale is the
+            // display's alone. A first attempt learned that the loud way, comparing
+            // 840x552 against 757x497 for an `.infinity` difference.
+            world.evaluateResidency(passes: 6)
+            try expect(world.canvas.qaParkedBodyCount == tiles.count,
+                       "bake cost: the parked measurement needs every body parked, saw "
+                       + "\(world.canvas.qaParkedBodyCount) of \(tiles.count)")
+
+            guard let parkedReference = store.bake(
+                tileId: tiles[0].id, body: try body(tiles[0].id), revision: try revision(tiles[0].id)
+            )?.image else {
+                throw Failure(message: "bake cost: the parked reference bake produced nothing")
+            }
+            let parkedVisibleRect = transcript?.visibleRect ?? .zero
+            let parkedVsPlane = meanChannelDifference(inPlaneReference, parkedReference)
+            if let dir = ProcessInfo.processInfo.environment["TILE_SURFACE_DUMP_DIR"] {
+                func write(_ image: CGImage, _ name: String) {
+                    let rep = NSBitmapImageRep(cgImage: image)
+                    if let data = rep.representation(using: .png, properties: [:]) {
+                        try? data.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name))
+                    }
+                }
+                write(inPlaneReference, "plane-\(Int(size.width)).png")
+                write(parkedReference, "parked-\(Int(size.width)).png")
+            }
+
+            var parkedClean: [Double] = []
+            for tile in tiles {
+                let target = try body(tile.id)
+                let rev = try revision(tile.id)
+                parkedClean.append(milliseconds { store.bake(tileId: tile.id, body: target, revision: rev) })
+            }
+
+            // Does a parked body stay CURRENT? The model does — that is slice 1's
+            // claim and it holds — so the row count is asserted separately from the
+            // pixels. Without that split a zero pixel delta is unreadable: it could
+            // mean the content never arrived.
+            let rowsBeforeParkedRefresh = transcript?.qaSemanticRowCount ?? 0
+            var parkedRefresh: [Double] = []
+            for (index, tile) in tiles.enumerated() {
+                parkedRefresh.append(try refresh(tile.id, index: index, tag: "parked"))
+            }
+            guard let afterParkedRefresh = store.surface(for: tiles[0].id)?.image else {
+                throw Failure(message: "bake cost: the parked refresh path stored no surface")
+            }
+            let rowsAfterParkedRefresh = transcript?.qaSemanticRowCount ?? 0
+            let parkedRefreshDelta = meanChannelDifference(parkedReference, afterParkedRefresh)
+
+            // The gate this finding earns: **no bake may be taken while a body is
+            // parked.** Option A satisfies it by construction — the residency pass
+            // bakes before it demotes and never after — and this pins it, because a
+            // parked bake is not the body. See the published numbers below.
+            // Every body here is parked and every surface is stale — the refresh loop
+            // above ingested into all of them — which is exactly the state a caller
+            // that baked before promoting would bake from. One production pass must
+            // promote them all and bake none.
+            let bakesBeforeReclaim = world.canvas.tileSurfaceStore.qaBakeCount
+            world.canvas.evaluateTileResidency()
+            world.pump()
+            try expect(world.canvas.tileSurfaceStore.qaBakeCount == bakesBeforeReclaim,
+                       "bake cost: production baked "
+                       + "\(world.canvas.tileSurfaceStore.qaBakeCount - bakesBeforeReclaim) surfaces from "
+                       + "PARKED bodies, which do not render what the native body renders")
+            try expect(world.canvas.qaParkedBodyCount == 0,
+                       "bake cost: the pass left \(world.canvas.qaParkedBodyCount) bodies parked behind "
+                       + "stale surfaces — a stale surface is a picture of a state the tile no longer has")
+
+            let cleanMs = p50(planeClean)
+            let parkedCleanMs = p50(parkedClean)
+            let refreshMs = p50(planeRefresh)
+            let parkedRefreshMs = p50(parkedRefresh)
+            let megapixels = Double(warmed.image.width * warmed.image.height) / 1_000_000
+            let streamersPerFrame = parkedRefreshMs > 0 ? frameBudgetMs / parkedRefreshMs : .infinity
+            let coreShare = parkedRefreshMs * refreshHz / 10
+
+            print(String(
+                format: "tile-surface-residency bake: body %.0fx%.0f -> %dx%d px (%.2f MP, %.0f KB, "
+                + "50 tiles = %.0f MB) | clean bake p50 in-plane %.2f ms, parked %.2f ms (alloc %.2f / "
+                + "draw %.2f) | streaming refresh p50 in-plane %.2f ms, parked %.2f ms | one visible "
+                + "streamer at %.0f Hz = %.1f%% of one core | %.1f streamers fit an %.1f ms frame",
+                size.width, size.height, warmed.image.width, warmed.image.height, megapixels,
+                Double(warmed.byteCount) / 1_024, Double(warmed.byteCount) * 50 / 1_048_576,
+                cleanMs, parkedCleanMs, p50(allocSamples), p50(drawSamples),
+                refreshMs, parkedRefreshMs, refreshHz, coreShare, streamersPerFrame, frameBudgetMs
+            ))
+
+            try expect(store.qaBakeFailureCount == 0,
+                       "bake cost: \(store.qaBakeFailureCount) bakes failed, so the timings are of nothing")
+            try expect(refreshDelta > 0 && refreshDelta.isFinite,
+                       String(format: "bake cost: a refresh must produce different pixels or it is a no-op "
+                              + "being timed as a bake — mean channel difference %.4f", refreshDelta))
+            // **The finding, and the reason Step 0 existed.** A parked body's pixels
+            // are neither current nor equivalent, and the cause is one thing: the
+            // transcript's scroll geometry degenerates once no ancestor places the body
+            // in the visible area. Its `visibleRect` lands nowhere near its own content
+            // (published below), so the collection view materialises no item for a row
+            // that just arrived, and the offset it does present is not the offset the
+            // native body presents. Sizing the park does not move it — the offset is
+            // what degenerates, not the size.
+            //
+            // Both numbers are PUBLISHED, not gated. Gating "a parked refresh changes
+            // pixels" would assert a behaviour the mechanism does not have; gating "it
+            // does not" would freeze a defect into a requirement. The gate above — that
+            // production never bakes a parked body — is the behaviour worth protecting,
+            // and the row count is gated so this zero cannot be read as "no content
+            // arrived".
+            print(String(format: "tile-surface-residency bake: PARKED PIXELS ARE NOT THE BODY'S — parked "
+                         + "vs in-plane bake of the same body at the same content, mean channel difference "
+                         + "%.4f | parked refresh is FROZEN: rows %d -> %d, pixels unchanged (%.4f) | "
+                         + "transcript visibleRect in plane %@ vs parked %@ against a %.0fpt document. "
+                         + "A surfaced body cannot be re-baked in place; see .plans/37 Step 0.",
+                         parkedVsPlane, rowsBeforeParkedRefresh, rowsAfterParkedRefresh, parkedRefreshDelta,
+                         NSStringFromRect(planeVisibleRect), NSStringFromRect(parkedVisibleRect),
+                         planeDocumentHeight))
+            try expect(rowsAfterParkedRefresh > rowsBeforeParkedRefresh,
+                       "bake cost: the parked model must still ingest content (\(rowsBeforeParkedRefresh) "
+                       + "-> \(rowsAfterParkedRefresh) rows), or the frozen pixels above mean something else")
+            // Instrument integrity, the same guard the demote breakdown carries: a
+            // split that stops adding up turns a published number into fiction.
+            let attributed = p50(allocSamples) + p50(drawSamples)
+            try expect(attributed >= cleanMs * 0.6,
+                       String(format: "bake cost: the alloc/draw split no longer explains the bake: "
+                              + "%.2f ms attributed of %.2f ms measured", attributed, cleanMs))
+        }
     }
 }

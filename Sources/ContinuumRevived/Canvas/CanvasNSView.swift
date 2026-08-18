@@ -273,7 +273,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Where a surfaced tile's real body lives while the camera moves: in the
     /// window, outside the world plane, clipped out of every draw. See the comment
     /// at its installation in `init` for why this shape and not `isHidden`.
-    let surfaceParkView = NSView(frame: .zero)
+    let surfaceParkView = TileSurfaceParkView(frame: .zero)
 
     /// One baked surface per tile, with the revision it represents. `.plans/36`.
     let tileSurfaceStore = TileSurfaceStore()
@@ -303,6 +303,7 @@ final class CanvasNSView: NSView, TokenThemed {
         qaSurfaceRefusedStaleCount = 0
         qaSurfaceRefusedSharpnessCount = 0
         qaSurfaceRefusedBudgetCount = 0
+        qaSurfaceStalePromotionCount = 0
         tileSurfaceStore.qaResetCounters()
     }
 
@@ -1397,14 +1398,14 @@ final class CanvasNSView: NSView, TokenThemed {
         //   constant zoom every visible tile is a no-op and `pan.chromeRedraws`
         //   and `pan.tileLayoutPasses` both stay at 0 — which the budgets assert.
         for view in visibleTileViews { view.refreshZoomDependentChrome() }
-        // Sharpness is enforced HERE, per step, and not once at gesture start.
+        // Sharpness is enforced HERE, per step, and not once per gesture.
         //
-        // `onActivityBegin` fires before the first commit, so the zoom it sees is
-        // the one the gesture is leaving, not the one it is heading for: a tile
-        // admitted as sharp-enough at zoom 1.0 is not sharp enough two steps into a
-        // zoom to 2.0, and deciding once would show exactly the soft text this
-        // design promises never to show. Checking every step turns the guarantee
-        // from "sharp when the gesture started" into "sharp in every frame".
+        // A tile admitted as sharp-enough at zoom 1.0 is not sharp enough two steps
+        // into a zoom to 2.0, and deciding once per gesture would show exactly the
+        // soft text this design promises never to show. Checking every step makes the
+        // guarantee "sharp in every frame" rather than "sharp when it was surfaced" —
+        // which matters more under Option A, where a tile can stay surfaced across
+        // many gestures.
         //
         // O(surfaced) over a maintained set, deliberately not a view-tree walk —
         // the same lesson `visibleTileViews` above records.
@@ -1433,72 +1434,234 @@ final class CanvasNSView: NSView, TokenThemed {
     /// resting camera; the delegate arms its persistence/hydration debounces
     /// exactly once.
     private func cameraGestureDidSettle() {
-        // Guarded so the flag being off costs one bool per gesture and not a
-        // view-tree walk.
-        if surfaceResidencyEnabled { promoteAllSurfacedTiles() }
         discardCursorRects()
         window?.invalidateCursorRects(for: self)
         delegate?.canvasDidChange(self)
-        // AFTER the promotion and the delegate: baking is the expensive half, and it
-        // belongs on the far side of everything that makes the canvas interactive
-        // again. Visible tiles first, capped, so the frame that ends a gesture is
-        // not the frame that pays for the next one.
-        refreshTileSurfaces()
+        // AFTER the delegate: baking and reparenting are the expensive halves, and
+        // they belong on the far side of everything that makes the canvas
+        // interactive again. Under Option A a settle is simply the first moment
+        // demotions are allowed again, so the ordinary pass does the work.
+        evaluateTileResidency()
     }
 
     // MARK: - Surface residency (.plans/36)
 
-    /// Enter motion: every eligible tile that can be surfaced safely is, for the
-    /// duration of the gesture. Runs ONCE per burst, ahead of the first commit.
+    // MARK: - Tile residency (Option A, `.plans/37`)
+
+    /// Injected for QA determinism, exactly like `CanvasCameraDriver.nowProvider`.
+    var residencyNowProvider: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+
+    /// Where the pointer is, in WINDOW coordinates. Injected because
+    /// `mouseLocationOutsideOfEventStream` cannot be driven from a check, and the
+    /// pointer clause is a rule that has to be witnessed rather than assumed.
+    var residencyPointerProvider: (() -> NSPoint?)?
+
+    var residencyTuning = TileResidencyPolicy.Tuning.default
+
+    private var tileLiveness: [UUID: TileResidencyPolicy.Liveness] = [:]
+    private var lastResidencyDecisions: [UUID: TileResidencyPolicy.Decision] = [:]
+    private var residencyTimer: Timer?
+
+    private(set) var qaResidencyEvaluationCount = 0
+    private(set) var qaResidencySuppressedDemotionCount = 0
+    private(set) var qaSurfaceStalePromotionCount = 0
+
+    func qaLastResidencyDecision(_ tileId: UUID) -> TileResidencyPolicy.Decision? {
+        lastResidencyDecisions[tileId]
+    }
+
+    /// **One residency pass: who is live, who is quiet, and who therefore changes
+    /// state.** This is Option A's whole production entry point.
     ///
-    /// The refusal paths are the design, not error handling. A tile stays native
-    /// when its surface is stale, when the surface is less sharp than the screen is
-    /// about to need, or when the bake budget for this transition is spent — and a
-    /// native tile is simply a tile that costs what it costs today. There is no
-    /// state in which a user sees the wrong pixels; only states in which a gesture
-    /// is less cheap than it could be.
-    private func cameraGestureWillMove() {
-        guard surfaceResidencyEnabled else { return }
-        let backingScale = window?.backingScaleFactor ?? 2
+    /// Promotions run whether or not the camera is moving — a tile that starts
+    /// streaming mid-pan must show live text, and promoting one tile costs ~5 ms
+    /// once. **Demotions are suppressed while the camera moves**, because a demote
+    /// sweep at gesture time is precisely the 4.6x transition that killed slice 1.
+    ///
+    /// Nothing here is keyed on the camera otherwise, and nothing walks a tile's
+    /// subtree: liveness is a `UInt64` compare, a rect test, and one responder
+    /// question per tile.
+    func evaluateTileResidency() {
+        // A windowless canvas has no pointer, no first responder and no backing scale
+        // to bake against, and nothing out there is visible to anyone. `.plans/38`.
+        guard surfaceResidencyEnabled, window != nil else { return }
+        qaResidencyEvaluationCount += 1
+        // `TileNSView.hitTest` and `promoteForIncomingFocus` promote on their own, to
+        // keep a click or a keystroke from reaching a picture. That leaves this set
+        // holding tiles that are already native, so reconcile before deciding
+        // anything — the same reconcile `enforceSurfaceSharpness` does.
+        surfacedTiles = surfacedTiles.filter { $0.value.surfaceResidency == .surfaced }
+        let now = residencyNowProvider()
+        let allowDemotions = cameraDriver.isSettled
+        // Spelled out, NOT `residencyPointerProvider?() ?? window?.mouse…`. That
+        // collapses a doubly-optional: an installed provider RETURNING nil ("the
+        // pointer is nowhere near this canvas") is indistinguishable from no provider
+        // at all, so it fell through to the real cursor — which had a check reading
+        // Dylan's actual mouse position and promoting whichever tile it happened to
+        // sit over.
+        let pointer: NSPoint?
+        if let residencyPointerProvider {
+            pointer = residencyPointerProvider()
+        } else {
+            pointer = window?.mouseLocationOutsideOfEventStream
+        }
+        let responder = window?.firstResponder as? NSView
         let zoom = canvasState.viewport.zoom
-        var bakeBudget = TileSurfaceResidencyConfig.maxBakesPerTransition
-        // Visible first: if the budget runs out, it should run out on tiles nobody
-        // can see. `visibleTileViews` is one rect test per tile against a value
-        // already to hand.
+        let backingScale = window?.backingScaleFactor ?? 2
+        var bakeBudget = residencyTuning.maxBakesPerPass
+
+        // Visible first: if the bake budget runs out, it should run out on tiles
+        // nobody can see. One rect test per tile against a value already to hand.
         let visible = Set(visibleTileViews.map { ObjectIdentifier($0) })
         let ordered = tileViewsInVisualOrder.sorted { lhs, rhs in
             visible.contains(ObjectIdentifier(lhs)) && !visible.contains(ObjectIdentifier(rhs))
         }
         for tileView in ordered {
-            guard tileView.surfaceResidency == .native,
-                  let body = tileView.surfaceableBody,
-                  let wanted = tileView.currentSurfaceRevision else { continue }
+            guard tileView.surfaceableBody != nil else { continue }
             let tileId = tileView.tile.id
-            var surface = tileSurfaceStore.surface(for: tileId)
-            if surface?.revision != wanted {
-                // Budget, not staleness: the tile IS stale, but what refused it is
-                // the cap. Counting both would make the two reasons add up to more
-                // refusals than there were tiles.
-                guard bakeBudget > 0 else {
-                    qaSurfaceRefusedBudgetCount += 1
+            var liveness = tileLiveness[tileId] ?? TileResidencyPolicy.Liveness()
+
+            let revision = tileView.surfaceContentRevision
+            if liveness.lastContentRevision != revision {
+                liveness.lastContentRevision = revision
+                liveness.lastContentChangeAt = now
+            }
+            if let pointer, tileView.bounds.contains(tileView.convert(pointer, from: nil)) {
+                if liveness.pointerInsideSince == nil { liveness.pointerInsideSince = now }
+            } else {
+                liveness.pointerInsideSince = nil
+            }
+            // `containsResponder`, not `isDescendant`: a surfaced tile's body is in
+            // the park and is no longer part of the tile's subtree, so the plain
+            // test would report "not focused" for the tile being typed into.
+            liveness.hasFocus = responder.map { tileView.containsResponder($0) } ?? false
+            liveness.isAnimating = tileView.surfaceIsAnimating
+            let accessibilityCount = tileView.accessibilityAccessCount
+            if liveness.lastAccessibilityCount != accessibilityCount {
+                liveness.lastAccessibilityCount = accessibilityCount
+                liveness.lastAccessibilityAccessAt = now
+            }
+            tileLiveness[tileId] = liveness
+
+            let decision = TileResidencyPolicy.decide(
+                now: now, liveness: liveness, tuning: residencyTuning
+            )
+            lastResidencyDecisions[tileId] = decision
+            switch decision {
+            case .native:
+                guard tileView.surfaceResidency == .surfaced else { continue }
+                tileView.promoteBodyToNative()
+                surfacedTiles.removeValue(forKey: tileId)
+                qaSurfacePromotionCount += 1
+            case .surfaced:
+                if tileView.surfaceResidency == .surfaced {
+                    // **A surfaced tile whose surface went stale WITHOUT the tile
+                    // becoming live.** The appearance changing is the case that
+                    // matters: `TileSurfaceRevision` carries `appearanceName`, and
+                    // switching to dark mode ingests nothing, animates nothing and
+                    // touches no content — so every clause of the rule still says
+                    // "quiet" while every surface on the canvas is now a picture of
+                    // the light-mode tile. Give the body back; the next quiet pass
+                    // re-bakes it, while native, which is the only faithful state.
+                    if let wanted = tileView.currentSurfaceRevision,
+                       tileSurfaceStore.surface(for: tileId)?.revision != wanted {
+                        tileView.promoteBodyToNative()
+                        surfacedTiles.removeValue(forKey: tileId)
+                        qaSurfacePromotionCount += 1
+                        qaSurfaceStalePromotionCount += 1
+                    }
                     continue
                 }
-                bakeBudget -= 1
-                surface = tileSurfaceStore.bake(tileId: tileId, body: body, revision: wanted)
-                guard surface != nil else {
-                    qaSurfaceRefusedStaleCount += 1
+                guard allowDemotions else {
+                    qaResidencySuppressedDemotionCount += 1
                     continue
                 }
+                surfaceIfAdmissible(
+                    tileView, bakeBudget: &bakeBudget, zoom: zoom, backingScale: backingScale
+                )
             }
-            guard let admissible = surface else { continue }
-            guard admissible.isSharpEnough(forZoom: zoom, backingScale: backingScale) else {
-                qaSurfaceRefusedSharpnessCount += 1
-                continue
+        }
+    }
+
+    /// Give one quiet tile a surface, or leave it native.
+    ///
+    /// The refusal paths are the design, not error handling. A tile stays native
+    /// when its bake fails, when the resulting surface is less sharp than the screen
+    /// needs, or when this pass's bake budget is spent — and a native tile is simply
+    /// a tile that costs what it costs today. There is no state in which a user sees
+    /// the wrong pixels; only states in which the canvas is less cheap than it could
+    /// be.
+    ///
+    /// **The bake happens here, while the body is still native, and that is
+    /// load-bearing.** `.plans/37` Step 0 measured what a bake of a PARKED body
+    /// produces: pixels that differ from the real body by 3.28 to 7.41 mean channel
+    /// difference, and that never change again no matter what streams in, because
+    /// the transcript's `visibleRect` degenerates once no ancestor places it in the
+    /// visible area. Native is the only faithful state to bake from.
+    private func surfaceIfAdmissible(
+        _ tileView: TileNSView, bakeBudget: inout Int, zoom: Double, backingScale: CGFloat
+    ) {
+        guard let body = tileView.surfaceableBody,
+              let wanted = tileView.currentSurfaceRevision else { return }
+        let tileId = tileView.tile.id
+        var surface = tileSurfaceStore.surface(for: tileId)
+        if surface?.revision != wanted {
+            // Budget, not staleness: the tile IS stale, but what refused it is the
+            // cap. Counting both would make the two reasons add up to more refusals
+            // than there were tiles.
+            guard bakeBudget > 0 else {
+                qaSurfaceRefusedBudgetCount += 1
+                return
             }
-            if tileView.demoteBodyToSurface(admissible, park: surfaceParkView, backingScale: backingScale) {
-                surfacedTiles[tileId] = tileView
-                qaSurfaceDemotionCount += 1
+            bakeBudget -= 1
+            surface = tileSurfaceStore.bake(tileId: tileId, body: body, revision: wanted)
+            guard surface != nil else {
+                qaSurfaceRefusedStaleCount += 1
+                return
             }
+        }
+        guard let admissible = surface else { return }
+        guard admissible.isSharpEnough(forZoom: zoom, backingScale: backingScale) else {
+            qaSurfaceRefusedSharpnessCount += 1
+            return
+        }
+        if tileView.demoteBodyToSurface(admissible, park: surfaceParkView, backingScale: backingScale) {
+            surfacedTiles[tileId] = tileView
+            qaSurfaceDemotionCount += 1
+        }
+    }
+
+    /// The 10 Hz heartbeat behind `evaluateTileResidency`. Everything else that
+    /// changes liveness — a keystroke, a streamed token, the pointer moving — does
+    /// so without telling this view, and a hook per source would need
+    /// `tileView.canvas` to be set on every install path, which `_installLayer`
+    /// does not do.
+    private func startResidencyEvaluation() {
+        guard surfaceResidencyEnabled, residencyTimer == nil, window != nil else { return }
+        let timer = Timer(
+            timeInterval: residencyTuning.evaluationInterval, repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.evaluateTileResidency() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        residencyTimer = timer
+    }
+
+    private func stopResidencyEvaluation() {
+        residencyTimer?.invalidate()
+        residencyTimer = nil
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            stopResidencyEvaluation()
+            // Nothing evaluates residency for a canvas that is not in a window, so
+            // no body may be left parked there. Same invariant
+            // `releaseSurfaceResidency` keeps per tile, at canvas scale.
+            promoteAllSurfacedTiles()
+        } else {
+            startResidencyEvaluation()
         }
     }
 
@@ -1535,8 +1698,16 @@ final class CanvasNSView: NSView, TokenThemed {
         surfacedTiles = surfacedTiles.filter { $0.value.surfaceResidency == .surfaced }
         let zoom = canvasState.viewport.zoom
         let backingScale = window?.backingScaleFactor ?? 2
+        // Softness only matters where it can be seen, and zooming in shrinks the
+        // visible set — which is what makes this affordable. The rect is inflated by
+        // a quarter of the viewport so a tile is promoted just BEFORE it arrives on
+        // screen: checking the exact viewport would leave a one-frame window in which
+        // a tile entering the screen is visibly soft.
+        let visibleWorld = worldPlane.bounds
+        let lead = visibleWorld.insetBy(dx: -visibleWorld.width * 0.25, dy: -visibleWorld.height * 0.25)
         var promoted: [UUID] = []
         for (tileId, tileView) in surfacedTiles {
+            guard tileView.frame.intersects(lead) else { continue }
             let surface = tileSurfaceStore.surface(for: tileId)
             // A missing surface is not a state this can be in, but if it ever is,
             // native is the answer.
@@ -1549,40 +1720,6 @@ final class CanvasNSView: NSView, TokenThemed {
         for tileId in promoted { surfacedTiles.removeValue(forKey: tileId) }
     }
 
-    /// Produce surfaces for tiles whose cached one is stale, capped, visible first.
-    ///
-    /// Called on settle so the NEXT gesture starts with fresh surfaces already in
-    /// hand. A streaming agent goes stale continuously, which is exactly why the
-    /// gesture-start path can also bake — this pass is what keeps that path from
-    /// having anything to do in the common case.
-    func refreshTileSurfaces() {
-        guard surfaceResidencyEnabled else { return }
-        var budget = TileSurfaceResidencyConfig.maxBakesPerTransition
-        for tileView in visibleTileViews {
-            guard budget > 0 else { return }
-            guard tileView.surfaceResidency == .native,
-                  let body = tileView.surfaceableBody,
-                  let wanted = tileView.currentSurfaceRevision else { continue }
-            let tileId = tileView.tile.id
-            guard tileSurfaceStore.surface(for: tileId)?.revision != wanted else { continue }
-            budget -= 1
-            tileSurfaceStore.bake(tileId: tileId, body: body, revision: wanted)
-        }
-    }
-
-    /// QA: produce a surface for EVERY tile, ignoring the visible-first order and
-    /// the per-transition cap, so a witness can separate what a gesture-start
-    /// transition costs to REPARENT from what it costs to BAKE. Drives the same
-    /// production producer; no separate path.
-    func qaBakeAllSurfaces() {
-        for tileView in tileViewsInVisualOrder {
-            guard let body = tileView.surfaceableBody,
-                  let wanted = tileView.currentSurfaceRevision else { continue }
-            guard tileSurfaceStore.surface(for: tileView.tile.id)?.revision != wanted else { continue }
-            tileSurfaceStore.bake(tileId: tileView.tile.id, body: body, revision: wanted)
-        }
-    }
-
     /// Give a tile its real body back and forget its surface, before the tile view
     /// leaves this canvas. Without this a departing surfaced tile strands its body
     /// in the park, where nothing owns it and nothing will ever remove it.
@@ -1592,6 +1729,8 @@ final class CanvasNSView: NSView, TokenThemed {
             qaSurfacePromotionCount += 1
         }
         surfacedTiles.removeValue(forKey: tileView.tile.id)
+        tileLiveness.removeValue(forKey: tileView.tile.id)
+        lastResidencyDecisions.removeValue(forKey: tileView.tile.id)
         tileView.discardRetainedSurfaceHost()
         tileSurfaceStore.drop(tileView.tile.id)
     }
@@ -2425,7 +2564,6 @@ final class CanvasNSView: NSView, TokenThemed {
             }
         )
         driver.onSettle = { [weak self] in self?.cameraGestureDidSettle() }
-        driver.onActivityBegin = { [weak self] in self?.cameraGestureWillMove() }
         return driver
     }()
 

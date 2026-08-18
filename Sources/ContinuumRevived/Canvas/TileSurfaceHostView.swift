@@ -97,3 +97,20 @@ final class TileSurfaceHostView: NSView {
         qaContentsScaleChangeCount = 0
     }
 }
+
+/// The container that holds real tile bodies while their tiles render from
+/// surfaces.
+///
+/// Its whole job is to be invisible in every sense. Zero-sized, so AppKit clips it
+/// out of every draw without `isHidden` — which would stop layout, and a parked
+/// body has to keep laying out. And opaque to accessibility, because a parked body
+/// IS still in the window's view tree: measured, VoiceOver reached a parked
+/// transcript at `{{0, 1132}, {420, 90}}` while its tile sat at
+/// `{{40, 640}, {420, 300}}` — wrong place, wrong size, detached from its owner.
+/// The body is reached through its tile instead, which hands it back first
+/// (`TileNSView.accessibilityChildren`).
+@MainActor
+final class TileSurfaceParkView: NSView {
+    override func accessibilityChildren() -> [Any]? { [] }
+    override func isAccessibilityElement() -> Bool { false }
+}

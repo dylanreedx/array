@@ -9,8 +9,10 @@ import ContinuumRevivedCore
 /// (resource and style epochs, scene generation); slice 1 needs three fields and
 /// gains nothing from the other three.
 struct TileSurfaceRevision: Equatable {
-    /// The family's own content revision — `AgentDocument.version` for an agent
-    /// tile. A monotonic counter, so equality is the whole freshness test.
+    /// The family's own fingerprint of what its body renders — for an agent tile, a
+    /// mix of `AgentDocument.version` and a counter over ingested events, because the
+    /// document version alone misses the compact status row moving between "Working"
+    /// and "Done". Equality is the whole freshness test.
     let contentVersion: UInt64
     let bodySize: CGSize
     let appearanceName: String

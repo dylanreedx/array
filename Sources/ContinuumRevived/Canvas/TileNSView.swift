@@ -101,7 +101,7 @@ class TileNSView: NSView, TokenThemed {
     }
 
     private(set) var surfaceResidency: SurfaceResidency = .native
-    private var parkedBody: NSView?
+    private(set) var parkedBody: NSView?
     private var surfaceHost: TileSurfaceHostView?
 
     /// The host is RETAINED across gestures, not rebuilt on every demotion.
@@ -123,6 +123,14 @@ class TileNSView: NSView, TokenThemed {
     /// The family's content revision, for freshness. nil means "cannot say", which
     /// is treated as stale — the safe direction.
     var surfaceContentRevision: UInt64? { nil }
+
+    /// Is this tile's body repainting itself on its own clock right now?
+    ///
+    /// A surface freezes whatever it captured, so a tile that animates while nobody
+    /// touches it — an elapsed reading counting up, a spinner — must keep its real
+    /// body no matter how quiet it looks by every other measure. This is the clause
+    /// that makes "quiet" mean "not changing" rather than "no events arrived".
+    var surfaceIsAnimating: Bool { false }
 
     /// The revision a surface must match to be shown for this tile right now.
     var currentSurfaceRevision: TileSurfaceRevision? {
@@ -492,6 +500,7 @@ class TileNSView: NSView, TokenThemed {
 
     func acquireFocus(reason: FocusRequest) -> Bool {
         canvas?.bringToFront(tileId: tile.id)
+        promoteForIncomingFocus()
         if let contentView {
             window?.makeFirstResponder(contentView)
         } else {
@@ -500,7 +509,62 @@ class TileNSView: NSView, TokenThemed {
         return true
     }
 
+    /// **Call this before focus lands anywhere inside this tile.**
+    ///
+    /// While a tile is surfaced its `contentView` is a picture and its real body is
+    /// PARKED — still in the window, so AppKit will happily make a view inside it the
+    /// first responder, after which the user types into something clipped out of
+    /// every draw and sees nothing happen.
+    ///
+    /// It is `final` and separate from `acquireFocus` on purpose: every tile family
+    /// overrides `acquireFocus` and most of them return before calling `super`
+    /// (`ManagedAgentTileNSView` targets its composer's text view directly), so the
+    /// promotion cannot live in the base implementation alone. Any family that opts
+    /// into surfacing by overriding `surfaceableBody` must call this first.
+    /// Bumped whenever an accessibility client asks this tile for its contents.
+    /// Polled by the residency pass the same way `surfaceContentRevision` is, so the
+    /// policy keeps ONE clock (its own injected one) and the tile needs no reference
+    /// back to the canvas — which matters, because `_installLayer` does not set one.
+    private(set) var accessibilityAccessCount: UInt64 = 0
+
+    /// **A surfaced tile must hand back its real body before an accessibility client
+    /// reads it** — the same trade `hitTest` makes for input, for the same reason.
+    ///
+    /// Measured, not assumed: with the body parked, the transcript is still reachable
+    /// through the park, so VoiceOver finds *something* — at
+    /// `{{0, 1132}, {420, 90}}` while its tile is at `{{40, 640}, {420, 300}}`. Wrong
+    /// place, wrong size, detached from the tile that owns it. Promoting first puts
+    /// the body back where its frames are true.
+    ///
+    /// This costs nothing when nobody is asking: over a full residency check —
+    /// settles, evaluations and six camera steps — AppKit called this **zero** times
+    /// with no accessibility client attached.
+    override func accessibilityChildren() -> [Any]? {
+        accessibilityAccessCount &+= 1
+        if surfaceResidency == .surfaced { promoteBodyToNative() }
+        return super.accessibilityChildren()
+    }
+
+    final func promoteForIncomingFocus() {
+        if surfaceResidency == .surfaced { promoteBodyToNative() }
+    }
+
     func releaseFocus(reason: FocusRequest) {}
+
+    /// Is `responder` this tile, or anything inside it — INCLUDING a body that is
+    /// currently parked, which is no longer a descendant of the tile?
+    ///
+    /// The parked half is the whole point. A focus test that walks only the tile's
+    /// own subtree reports "not focused" for a surfaced tile whose composer holds
+    /// the cursor, and the residency policy would then keep it surfaced while the
+    /// user types into it.
+    func containsResponder(_ responder: NSView) -> Bool {
+        if responder === self || responder.isDescendant(of: self) { return true }
+        if let parkedBody, responder === parkedBody || responder.isDescendant(of: parkedBody) {
+            return true
+        }
+        return false
+    }
     func canHandleReservedShortcut(_ shortcut: ReservedShortcut) -> Bool { false }
 
     /// Resolves the tile owning a responder by walking up the view hierarchy.

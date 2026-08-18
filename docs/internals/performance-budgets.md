@@ -611,52 +611,179 @@ was only ever meant to be published. A published slope needs a sign-safe floor.
 .build/debug/Array --tile-surface-residency-check
 ```
 
-The production counterpart to `canvas.surface-host-slope`, and the first
-production slice of the unbounded-canvas program (`.plans/36`). Everything runs
-through the real `CanvasNSView`, the real `CanvasCameraDriver` (transitions
-arrive via `noteScrollZoom` -> `onActivityBegin` and `qaMarkSettledNow` ->
-`onSettle`), and real `ManagedAgentTileNSView`s. The feature it exercises is OFF
-by default (`continuum.tileSurfaceResidency.enabled`, env override
+The production counterpart to `canvas.surface-host-slope`, and the
+unbounded-canvas program's shipping residency policy. Everything runs through the
+real `CanvasNSView`, the real `CanvasCameraDriver` (settles arrive via
+`qaMarkSettledNow` -> `markSettled` -> `onSettle`), and real
+`ManagedAgentTileNSView`s. The feature is OFF by default
+(`continuum.tileSurfaceResidency.enabled`, env override
 `ARRAY_TILE_SURFACE_RESIDENCY`).
+
+**The policy is Option A of `.plans/37`: a tile keeps its real body while it is
+LIVE, and renders from a surface while it is quiet.** Live means any of four
+things, and the reason is recorded per tile so a witness asserts the rule rather
+than an outcome: it holds the first responder, the pointer has RESTED inside it,
+it is animating on its own clock (`surfaceIsAnimating` — the compact status row's
+elapsed tick), or its content changed within the last second. Slice 1's
+camera-keyed policy — surfaced in motion, native at rest — is dead: its own
+witness measured entering motion at ~4.6x a native step, and `.plans/37` Step 0
+then measured that a parked body cannot be re-baked at all.
 
 Its subject is not speed. It is the requirement speed has to survive: **a user
 must not be able to tell.** What it gates:
 
-- **producer fidelity** — a surface against a native bake of the same body at
-  the same instant and resolution, mean channel difference **0.000** against a
-  0.25 threshold. `TILE_SURFACE_HALF_SCALE=1` is the negative witness and drives
-  it to **1.156**, so the gate fails when it should;
-- **sharpness never regresses** — a surface less sharp than the screen needs is
-  refused, and the refusal reason is asserted, not inferred;
-- **exactly-once input** — a click during the settle window promotes through
-  `hitTest` and lands on the real body;
-- **streaming through a park** — events ingested while surfaced are in the
-  restored transcript;
+- **the rule itself** — a tile whose content just changed stays native; every
+  quiet tile surfaces; a settle does NOT promote anything (that is the line
+  between the two policies); content, focus, and a resting pointer each promote,
+  each with its recorded reason;
+- **hysteresis** — sweeping the pointer across six surfaced tiles, with the clock
+  advancing less than `pointerRestDelay` between them, promotes **zero**. Without
+  it a sweep costs six promote/demote pairs;
+- **producer fidelity** — the surface against a native bake of the same body at
+  the same content and resolution, taken while the body is still in the plane,
+  mean channel difference **0.000** against a 0.25 threshold.
+  `TILE_SURFACE_HALF_SCALE=1` is the negative witness and drives it to **1.156**;
+- **sharpness never regresses** — zooming past what a surface carries leaves no
+  VISIBLE tile surfaced, enforced per camera step over the maintained surfaced
+  set, scoped to a viewport inflated by a quarter so a tile is promoted just
+  before it arrives on screen rather than one frame after;
+- **content while surfaced promotes** — a parked body keeps ingesting (its card
+  count advances) but its pixels never change, so a tile receiving content must be
+  given back within one evaluation, and the delta must be in the restored
+  transcript;
+- **exactly-once input** — a click on a surfaced tile promotes through `hitTest`
+  before AppKit delivers, and the hit lands inside the real body;
+- **focus never lands on a picture** — `acquireFocus` promotes first. Every tile
+  family overrides `acquireFocus` and most return before calling `super`
+  (`ManagedAgentTileNSView` targets its composer's text view), so the promotion
+  lives in `final func promoteForIncomingFocus()` and each opted-in family calls
+  it. While surfaced, that composer is inside the PARKED body — AppKit would
+  focus it there quite happily, and the user would type into something clipped out
+  of every draw;
+- **an appearance change gives every body back** — `TileSurfaceRevision` carries
+  `appearanceName`, and switching to dark mode ingests nothing, animates nothing
+  and touches no content, so every liveness clause still says "quiet" while every
+  surface on the canvas has just become a picture of the light-mode tile. It is the
+  one way a surface goes stale without its tile going live. A surfaced tile whose
+  surface no longer matches is promoted (`qaSurfaceStalePromotionCount` attributes
+  it to staleness rather than to a liveness clause), re-baked while native on the
+  next quiet pass, and surfaced again. Witnessed red-then-green;
+- **a screen reader finds the real body, in the right place** — the gap the pointer
+  clause does not cover, since VoiceOver walks the hierarchy with no pointer and no
+  focus. Measured before it was designed: while surfaced the transcript is still
+  reachable, through the PARK, at `{{0, 1132}, {420, 90}}` while its tile sits at
+  `{{40, 640}, {420, 300}}` — wrong place, wrong size, detached from its owner. So
+  the park is opaque to accessibility (`TileSurfaceParkView`) and
+  `TileNSView.accessibilityChildren` hands the body back before an AX client reads
+  it, exactly as `hitTest` does for input, with an `.accessibility` liveness clause
+  so it stays native while the client keeps reading. The witness asserts the
+  promotion, the returned subtree, the FRAMES (the transcript's must be inside its
+  tile's), the hysteresis, and that with no AX client attached this path promotes
+  nothing — AppKit called `accessibilityChildren()` **zero** times over a full run
+  of settles, evaluations and camera steps;
 - **flag off changes nothing** — no demotions, no bakes, an empty park, and the
   native cascade still paid;
-- **no stranded state** — removing a tile mid-gesture and switching zones both
-  leave the park empty and the store pruned;
-- **camera cost** — Array-owned CPU per step, 12 real agent tiles: **24.34 ms
-  native -> 0.11 ms surfaced**, gated under one frame.
+- **no stranded state** — removing a surfaced tile, switching zones, and the
+  canvas leaving its window all end with an empty park and a pruned store. The
+  window case matters because nothing evaluates residency out there;
+- **no bake while a body is parked** — with every body parked and every surface
+  stale, `refreshTileSurfaces()` must bake nothing.
 
-**The gesture-start transition is published, NOT gated, and that is
-deliberate.** It was a gate, it fired at **~4.6x a native step**, and it killed
-the "surfaced in motion only" policy. The demote path is timed per call and the
-cost is fully attributed: host construction/reuse **0.00 ms**, `setContentView`
-(removing the deep body) **2.03 ms/tile**, `park.addSubview` (re-adding it)
-**2.80 ms/tile**. That is plain AppKit subtree surgery, so any policy that
-reparents per gesture pays it twice per tile per gesture. Keeping it as a gate
-would assert a decision rather than protect a behaviour; what the leg protects
-is the mechanism, which the next policy reuses unchanged. One guard does remain
-on the instrument itself: the breakdown must account for at least 60% of the
-commit stage it explains, so a published number cannot quietly become fiction.
+**The cost model is what changed, and it is the number Option A stands on.** The
+camera now pays for exactly the live tiles. 12 real agent tiles, Array-owned CPU
+per step:
 
-Three hypotheses for that transition cost were measured and **refuted**: a fresh
+| arm | p50 |
+|---|---:|
+| every tile native (today's canvas) | 28.6 ms |
+| Option A, 0 live | 0.16 ms |
+| Option A, 1 live | 3.46 ms |
+| Option A, 3 live | 8.52 ms |
+| Option A, 6 live | 18.45 ms |
+
+**Marginal cost is ~2.9-3.0 ms per live tile**, which is gated at 3.5 ms as a
+regression bound. The headroom it implies is published, not gated: an 8.3 ms frame
+(120 Hz) holds about **2.8 live tiles**, a 16.7 ms frame (60 Hz) about **5.5**.
+One live tile is gated to fit a frame, because there is always at least one —
+whatever the pointer is resting on. That per-tile cost is AppKit's constraint
+solve over a real transcript, marked dirty by the plane's bounds cascade: the same
+cost today's canvas pays for EVERY tile. Getting below it means a live tile not
+being an AppKit view tree in the cascade at all, which is I2/I4, not tuning.
+
+**The quiet<->live crossing is published, not gated.** 12 tiles: demote ~4.5-5.6
+ms per tile (host construction/reuse **0.2 ms**, `setContentView` removing the
+deep body **~2.0 ms**, `park.addSubview` re-adding it **~2.5 ms**), promote
+~4.8-5.4 ms per tile. Plain AppKit subtree surgery. Option A pays it per crossing
+instead of twice per gesture, which is the entire reason it exists. One guard
+remains on the instrument: the breakdown must still account for at least half the
+evaluation pass it explains — a first attempt timed the pass WITH its pumps
+(a layout, a display and a CATransaction flush apiece) and reported that the
+breakdown explained 42% of something it explains 82% of.
+
+Three hypotheses for the crossing cost were measured and **refuted**: a fresh
 `CALayer` texture upload per gesture (host retention moved it 0.1 ms), an empty
 `visibleRect` in the park (sizing the park changed nothing), and the
 unconditional forced offscreen pass in `AgentTranscriptListView.layout()`
 (gating it moved the native step 0.2 ms — those calls were already nearly free,
 and that change was reverted rather than kept for no benefit).
+
+**Two discrepancies this leg found in production, both fixed:**
+
+- `surfaceContentRevision` was `model.document.version` alone, and
+  `.turnStarted`/`.turnCompleted` move the compact status row between "Working"
+  and "Done" — and start or stop the elapsed tick — without necessarily adding a
+  card. A surface keyed on the document stayed admissible through that, so a quiet
+  tile would show a status it no longer had. It is now a mix of the document
+  version and a counter over every ingested event. Over-counting is free: an
+  ingested event also makes the tile live, so the extra invalidation costs one
+  bake at the next quiet transition and nothing during the burst.
+- A tile can repaint on its own clock with no events at all — the elapsed reading
+  counting up during a long tool call. `surfaceIsAnimating` is that exact
+  condition (`compactStatusTickTimer?.isValid`), and it is now a native clause, so
+  "quiet" means "not changing" rather than "no events arrived".
+
+**What one bake costs, and why a surfaced body cannot be re-baked in place.**
+Added as `.plans/37`'s Step 0, the gating measurement for always-surfaced
+residency: with everything surfaced permanently, a visible streaming agent has to
+RE-bake to keep showing live text, so the cost of one bake is what that policy
+stands on. Two body sizes, so the result extrapolates by area:
+
+| body | surface | clean bake, in plane | clean bake, parked | streaming refresh (layout + bake), parked | one streamer at 30 Hz | 50 surfaces |
+|---|---|---:|---:|---:|---:|---:|
+| 420x300 | 840x552 (0.46 MP) | 0.90 ms | 1.29 ms | 4.45 ms | 13.4% of a core | 88 MB |
+| 760x900 | 1520x1752 (2.66 MP) | 1.91 ms | 3.93 ms | 12.31 ms | 36.9% of a core | 508 MB |
+
+The bake itself is affordable — allocation is **0.01 ms** and the draw is the
+whole cost — and one bake fits a frame, which is gated. Refreshing a streamer
+does not: at a realistic agent-tile size **0.7 refreshes fit an 8.3 ms frame**.
+
+The correctness result is stronger than the cost one. **A bake taken while the
+body is parked is neither the body's pixels nor current.** Against an in-plane
+bake of the same body at the same content, mean channel difference is **3.2844**
+(420x300) and **7.4126** (760x900); a streamed row that arrives while parked
+advances the model (rows 10 -> 11) and changes the pixels by **0.0000**. The
+cause is measured, not inferred: the transcript's `visibleRect` in the plane is
+`{{0, -132}, {420, 300}}` — the clip over its own document — and in the park it
+is `{{0, -1132}, {1600, 1000}}`, the canvas-sized rect offset nowhere near a
+613 pt document. The collection view therefore materialises no item for the new
+row, and the offset it does present is not the one the native body presents.
+Sizing the park does not move it; the offset degenerates, not the size.
+
+So this leg gates **no bake while a body is parked** — `refreshTileSurfaces()`
+called with every body parked and every surface stale must bake nothing. Both
+bake sites take only `.native` tiles, and the gate pins that. The witness
+deliberately does NOT run a residency pass first: the pass would promote those
+tiles (they just received content, so they are live) and a bake would then be
+legitimate, gating nothing. Surfaced AND stale is the state with teeth. The two difference numbers are
+published rather than gated: gating "a parked refresh changes pixels" would
+assert a behaviour the mechanism does not have, and gating "it does not" would
+freeze a defect into a requirement. The row count IS gated, because without it a
+zero pixel delta could just as well mean the content never arrived.
+
+`TILE_SURFACE_DUMP_DIR=<dir>` writes the in-plane and parked bakes as PNGs. That
+is how 3.2844 stopped being a mystery: the parked bake presents the transcript
+scrolled to its Notice card while the native body shows the tail, which no scalar
+difference would have said.
 
 ### `canvas.proxy-scene-probe` — OPT-IN, green cost probe; rejected UX
 
