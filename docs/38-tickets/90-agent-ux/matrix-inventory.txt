@@ -79,6 +79,7 @@ check --perf-budget-geometry-hold-probe-check
 check --perf-budget-gesture-transition-check
 check --perf-budget-magnify-slope-check
 check --perf-budget-raster-check
+check --perf-budget-surface-host-slope-check
 check --perf-budget-transcript-delta-check
 check --perf-budget-zoom-check
 check --persistence-crash-safe-check
@@ -118,6 +119,7 @@ check --tile-action-check
 check --tile-chrome-scale-check
 check --tile-drag-grab-check
 check --tile-reveal-work-check
+check --tile-surface-residency-check
 check --tile-world-bounds-check
 check --topology-migration-check
 check --transcript-delta-index-oracle-check
@@ -244,6 +246,7 @@ leg run_app_check .build/debug/Array --perf-budget-geometry-hold-probe-check
 leg run_app_check .build/debug/Array --perf-budget-gesture-transition-check
 leg run_app_check .build/debug/Array --perf-budget-magnify-slope-check
 leg run_app_check .build/debug/Array --perf-budget-raster-check
+leg run_app_check .build/debug/Array --perf-budget-surface-host-slope-check
 leg run_app_check .build/debug/Array --perf-budget-transcript-delta-check
 leg run_app_check .build/debug/Array --perf-budget-zoom-check
 leg run_app_check .build/debug/Array --persistence-crash-safe-check
@@ -283,6 +286,7 @@ leg run_app_check .build/debug/Array --tile-action-check
 leg run_app_check .build/debug/Array --tile-chrome-scale-check
 leg run_app_check .build/debug/Array --tile-drag-grab-check
 leg run_app_check .build/debug/Array --tile-reveal-work-check
+leg run_app_check .build/debug/Array --tile-surface-residency-check
 leg run_app_check .build/debug/Array --tile-world-bounds-check
 leg run_app_check .build/debug/Array --topology-migration-check
 leg run_app_check .build/debug/Array --transcript-delta-index-oracle-check

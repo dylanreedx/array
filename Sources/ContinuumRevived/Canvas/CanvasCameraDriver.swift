@@ -128,6 +128,14 @@ final class CanvasCameraDriver: NSObject {
     /// rects) hang off this instead of re-arming their own timers per step.
     var onSettle: (() -> Void)?
 
+    /// Fired once per activity burst, on the settled -> moving edge, BEFORE the
+    /// first commit of that burst. Symmetric with `onSettle` and deliberately an
+    /// edge rather than a per-step callback: consumers that want to change what is
+    /// mounted for the duration of a gesture (surface residency, `.plans/36`) get
+    /// exactly one chance to do it, ahead of the geometry, instead of re-deciding
+    /// on every step inside the frame budget.
+    var onActivityBegin: (() -> Void)?
+
     init(
         tuning: Tuning,
         currentViewport: @escaping () -> CanvasViewport,
@@ -287,7 +295,11 @@ final class CanvasCameraDriver: NSObject {
         let now = nowProvider()
         lastActivityTime = now
         if zoom { lastZoomInputTime = now }
+        let wasSettled = settled
         settled = false
+        // Before `ensureDisplayLink`, so a consumer that swaps what is mounted has
+        // done so by the time the first commit of this burst runs.
+        if wasSettled { onActivityBegin?() }
         ensureDisplayLink()
     }
 

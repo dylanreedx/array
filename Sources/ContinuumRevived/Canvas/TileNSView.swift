@@ -87,6 +87,141 @@ class TileNSView: NSView, TokenThemed {
     private var affordanceOverlay: AffordanceOverlayView?
     private(set) var contentView: NSView?
 
+    // MARK: - Surface residency (.plans/36)
+
+    enum SurfaceResidency {
+        /// The real body is the content view. Everything about the tile behaves as
+        /// it always has: cursor rects, selection, IME, tooltips, the accessibility
+        /// tree, and anything that walks the view hierarchy.
+        case native
+        /// The content view is a `TileSurfaceHostView` and the real body is parked
+        /// outside the world plane, still laid out and still receiving its stream —
+        /// just somewhere a camera step cannot reach it.
+        case surfaced
+    }
+
+    private(set) var surfaceResidency: SurfaceResidency = .native
+    private var parkedBody: NSView?
+    private var surfaceHost: TileSurfaceHostView?
+
+    /// The host is RETAINED across gestures, not rebuilt on every demotion.
+    ///
+    /// This is worth 4x of the gesture-start transition. A fresh host means a fresh
+    /// `CALayer` with a fresh ~2 MB texture, and the first composite after that has
+    /// to upload it: measured at 115 ms to enter motion with 12 tiles, against 25 ms
+    /// for the same step natively, with an IDENTICAL 12 transcript layout passes in
+    /// both — so the cost was never layout, it was building and uploading twelve
+    /// textures that had already been built for the previous gesture.
+    private var retainedSurfaceHost: TileSurfaceHostView?
+
+    /// The body a surface may replace, or nil for a family that must never be
+    /// surfaced. **nil by default on purpose**: opting in is per-family and each
+    /// one owes its own pixel-equivalence witness, so a new tile kind cannot start
+    /// rendering from a cache by inheriting it.
+    var surfaceableBody: NSView? { nil }
+
+    /// The family's content revision, for freshness. nil means "cannot say", which
+    /// is treated as stale — the safe direction.
+    var surfaceContentRevision: UInt64? { nil }
+
+    /// The revision a surface must match to be shown for this tile right now.
+    var currentSurfaceRevision: TileSurfaceRevision? {
+        guard let body = surfaceableBody, let version = surfaceContentRevision else { return nil }
+        return TileSurfaceRevision(
+            contentVersion: version,
+            bodySize: body.bounds.size,
+            appearanceName: body.effectiveAppearance.name.rawValue
+        )
+    }
+
+    /// Swap the real body for `surface` and park the body in `park`.
+    ///
+    /// Returns false and changes nothing if this tile is not in a state where that
+    /// is safe — already surfaced, no surfaceable body, or a body that is not
+    /// actually the current content view. Callers treat false as "stay native".
+    @discardableResult
+    func demoteBodyToSurface(_ surface: TileSurface, park: NSView, backingScale: CGFloat) -> Bool {
+        guard surfaceResidency == .native,
+              let body = surfaceableBody,
+              body === contentView else { return false }
+        let bodySize = body.bounds.size
+        // Three timestamps, accumulated statically. A demotion measured 4.5 ms per
+        // tile BEFORE any layout pass ran, and two guesses at which call owned that
+        // were already wrong — so the calls are timed rather than reasoned about.
+        // Four `systemUptime` reads against a 4.5 ms operation is not a measurement
+        // that changes what it measures.
+        let t0 = ProcessInfo.processInfo.systemUptime
+        let host: TileSurfaceHostView
+        if let reusable = retainedSurfaceHost,
+           reusable.surface === surface.image,
+           reusable.bakedScale == surface.bakedScale {
+            host = reusable
+        } else {
+            host = TileSurfaceHostView(
+                surface: surface.image, bakedScale: surface.bakedScale, backingScale: backingScale
+            )
+            retainedSurfaceHost = host
+        }
+        let t1 = ProcessInfo.processInfo.systemUptime
+        // `setContentView` unparents the outgoing body, so the park has to adopt it
+        // immediately afterwards or it stops being laid out and stops streaming —
+        // which is the entire property this design depends on.
+        setContentView(host)
+        let t2 = ProcessInfo.processInfo.systemUptime
+        body.frame = CGRect(origin: .zero, size: bodySize)
+        park.addSubview(body)
+        let t3 = ProcessInfo.processInfo.systemUptime
+        Self.qaDemoteHostMs += (t1 - t0) * 1_000
+        Self.qaDemoteContentSwapMs += (t2 - t1) * 1_000
+        Self.qaDemoteParkMs += (t3 - t2) * 1_000
+        parkedBody = body
+        surfaceHost = host
+        surfaceResidency = .surfaced
+        return true
+    }
+
+    /// Put the real body back. Idempotent, and safe to call from anywhere —
+    /// including `hitTest`, which is how a click during the settle window reaches
+    /// the real body instead of being swallowed by a picture of it.
+    func promoteBodyToNative() {
+        guard surfaceResidency == .surfaced, let body = parkedBody else { return }
+        let start = ProcessInfo.processInfo.systemUptime
+        body.removeFromSuperview()
+        setContentView(body)
+        Self.qaPromoteMs += (ProcessInfo.processInfo.systemUptime - start) * 1_000
+        parkedBody = nil
+        // `surfaceHost` tracks what is INSTALLED; `retainedSurfaceHost` keeps the
+        // view and its uploaded texture alive for the next gesture.
+        surfaceHost = nil
+        surfaceResidency = .native
+    }
+
+    /// Drop the retained host and its texture. For teardown and for a tile whose
+    /// surface will never be shown again — holding one costs a body's worth of
+    /// pixels.
+    func discardRetainedSurfaceHost() {
+        guard surfaceResidency == .native else { return }
+        retainedSurfaceHost = nil
+    }
+
+    /// QA: where a demotion's time actually goes, summed across every tile.
+    /// Static because the question is about the transition as a whole, not one tile.
+    static var qaDemoteHostMs = 0.0
+    static var qaDemoteContentSwapMs = 0.0
+    static var qaDemoteParkMs = 0.0
+    static var qaPromoteMs = 0.0
+
+    static func qaResetDemoteTiming() {
+        qaDemoteHostMs = 0
+        qaDemoteContentSwapMs = 0
+        qaDemoteParkMs = 0
+        qaPromoteMs = 0
+    }
+
+    var qaSurfaceHostBackingCallbackCount: Int { surfaceHost?.qaBackingCallbackCount ?? 0 }
+    var qaSurfaceHostContentsScaleChangeCount: Int { surfaceHost?.qaContentsScaleChangeCount ?? 0 }
+    var qaParkedBody: NSView? { parkedBody }
+
     /// Debug-draw mode, default off and set only by the Component Lab: overlays
     /// the interaction hitboxes (move-grab strip, resize edge bands, corner
     /// zones, close-button target) plus live screen-px metrics, so the otherwise
@@ -397,6 +532,15 @@ class TileNSView: NSView, TokenThemed {
         // elsewhere body content swallows the bottom/side rings while the title
         // bar makes the top edge appear to work.
         let local = superview.map { convert(point, from: $0) } ?? point
+        // A surfaced body is a picture, and a picture swallows clicks. AppKit
+        // hit-tests BEFORE it delivers, so promoting here puts the real body back
+        // in time to receive this very event — `.plans/34` I7's exactly-once
+        // delivery, with no queue and no replay. It matters in the 250 ms settle
+        // window after a gesture, when tiles are still surfaced but the user is
+        // reaching for one; during the gesture itself it costs one native tile.
+        if surfaceResidency == .surfaced, bounds.contains(local) {
+            promoteBodyToNative()
+        }
         if bounds.contains(local), resizeEdge(at: local) != nil {
             return self
         }

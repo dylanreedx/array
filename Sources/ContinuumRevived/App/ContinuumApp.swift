@@ -1017,6 +1017,7 @@ enum ContinuumApp {
             || CommandLine.arguments.contains("--perf-budget-transcript-delta-check")
             || CommandLine.arguments.contains("--perf-budget-gesture-transition-check")
             || CommandLine.arguments.contains("--perf-budget-geometry-hold-probe-check")
+            || CommandLine.arguments.contains("--perf-budget-surface-host-slope-check")
             || CommandLine.arguments.contains("--perf-budget-magnify-slope-check")
             || CommandLine.arguments.contains("--perf-budget-raster-check") {
             do {
@@ -1037,6 +1038,8 @@ enum ContinuumApp {
                     filter = "canvas.gesture-transition"
                 } else if CommandLine.arguments.contains("--perf-budget-geometry-hold-probe-check") {
                     filter = "canvas.geometry-hold-probe"
+                } else if CommandLine.arguments.contains("--perf-budget-surface-host-slope-check") {
+                    filter = "canvas.surface-host-slope"
                 } else if CommandLine.arguments.contains("--perf-budget-magnify-slope-check") {
                     filter = "canvas.magnify-slope"
                 } else if CommandLine.arguments.contains("--perf-budget-raster-check") {
@@ -1387,6 +1390,18 @@ enum ContinuumApp {
                 _ = NSApplication.shared
                 try CanvasZoomInvalidationProbeChecks.run()
                 print("ContinuumRevivedCanvasZoomInvalidationProbeChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--tile-surface-residency-check") {
+            do {
+                _ = NSApplication.shared
+                try TileSurfaceResidencyChecks.run()
+                print("ContinuumRevivedTileSurfaceResidencyChecks passed")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)

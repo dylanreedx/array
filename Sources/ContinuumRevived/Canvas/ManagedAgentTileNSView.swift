@@ -306,6 +306,22 @@ final class ManagedAgentTileNSView: TileNSView {
     var activeToolCount: Int { model.activeToolCount }
     var currentAgentStatus: AgentStatus { descriptor.status }
     var qaStatusRowPlacement: AgentStatusRowPlacement { statusRowPlacement }
+
+    // MARK: - Surface residency (.plans/36)
+
+    /// The agent tile is the first — and in slice 1 the only — family that opts
+    /// into surface residency, because it is the one the cost was measured on: at
+    /// 50 of these, a camera step costs 140 ms native and 0.19 ms surfaced.
+    ///
+    /// `contentBackdrop` and not `contentView`: once surfaced, `contentView` IS the
+    /// surface host, and returning that would let a tile bake a picture of a
+    /// picture.
+    override var surfaceableBody: NSView? { contentBackdrop }
+
+    /// The reducer's document version — already the tile's own change-detection
+    /// signal for forwarding to the transcript (`lastForwardedDocumentVersion`),
+    /// and monotonic, so equality is the whole freshness test.
+    override var surfaceContentRevision: UInt64? { model.document.version }
     var qaCompositionIdentifiers: [String] {
         v2ComposeColumn?.arrangedSubviews.compactMap { $0.identifier?.rawValue } ?? []
     }

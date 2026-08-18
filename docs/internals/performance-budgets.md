@@ -498,6 +498,166 @@ result proves both halves of the architecture: held motion removes the repeated
 cascade, and native residency must be bounded because the one final bake still
 scales linearly with installed deep subtrees.
 
+### `canvas.surface-host-slope` — gating, display-dependent, green
+
+```sh
+.build/debug/Array --perf-budget-surface-host-slope-check
+```
+
+The Shape A camera witness for the unbounded-canvas program
+(`.plans/34` I15). Four arms over ONE real managed-agent fixture at
+5/15/25/50 tiles, ~150 s, ABBA with both observations pooled:
+
+- **native** — real `ManagedAgentTileNSView`, all installed;
+- **unculled** — flat layer-hosting surface hosts, all installed;
+- **culled** — surface hosts, only the viewport's presentation set installed;
+- **parked** — surface hosts for every tile AND every real agent body still
+  alive, held in the window but outside `CanvasWorldPlaneView`. This is the
+  shippable configuration: an interim `cacheDisplay` producer needs the real
+  body to keep laying out and streaming (`.plans/34` I11), and that is only
+  affordable if a camera step cannot reach it.
+
+Every step is a real production `CanvasCameraDriver` commit, reached by
+inverting the driver's own log-zoom gain, so `isApplying` is true, cursor-rect
+housekeeping defers exactly as it does in a gesture, and the visible-tile chrome
+refresh is inside the measurement. Surfaces are the real tiles' pixels, baked
+once per host through `cacheDisplay` before any clock starts — one DISTINCT bake
+per host, so Core Animation cannot collapse the scene onto a shared texture.
+Zone chrome is on and the gesture reaches the real overview at zoom 0.2.
+
+**Array-owned CPU per camera step (p50), 2026-08-18:**
+
+| installed | native | unculled | culled | parked |
+|---:|---:|---:|---:|---:|
+| 5 | 9.39 ms | 0.08 ms | 0.07 ms | 0.07 ms |
+| 15 | 30.31 ms | 0.11 ms | 0.07 ms | 0.11 ms |
+| 25 | 57.01 ms | 0.14 ms | 0.07 ms | 0.17 ms |
+| 50 | 140.57 ms | 0.23 ms | 0.06 ms | 0.19 ms |
+
+`parkedVsNativeRatio` 0.001, `parkedDurationSlope` 0.122 ms over 5 → 50;
+`culledVsNativeRatio` 0.000, `culledDurationSlope` -0.014 ms;
+`unculledDurationSlope` 0.155 ms. The native arm reproduces the ladder
+`.plans/31` published (15.29/30.50/72.46/132.72 ms for the whole pump at
+5/10/25/50), which is the precondition for reading any other number here.
+
+The native arm is the noisiest thing in the leg: an earlier run of the same
+three arms on the same machine read 9.64/29.00/50.45/111.78 ms, ~25% under the
+table above at the top of the sweep. Read the ratios and the slopes, which held
+across both runs; do not treat a single native median as a machine constant.
+
+**Array CPU and the Core Animation flush are separate stages, and that is the
+point.** The first version of this leg reported one number per step and looked
+119% over budget with a 13% late share — while Array's own camera work was
+0.07 ms. The whole signal was `CATransaction.flush()`, which can block on the
+render server: in the surface arms it stays flat at ~2 ms p50 / ~9–10 ms p95 at
+every count, while in the native arm it scales 6.60 → 11.23 → 16.85 ms because
+there is genuinely more to commit. `culledFlushP95` and `culledStepP95` are
+published, never gated as Array cost, and a returning flush is never called
+"presented".
+
+**A parked live body costs nothing measurable.** `parkedVsUnculledRatio` is
+0.824 — keeping all 50 real agent bodies alive, laying out and ingesting events
+beside the surfaces, is inside the noise of the surfaces alone, and
+`parkedTranscriptLayouts` is exactly 0 across every count and both ABBA
+observations. A camera step cannot reach a body that is not under the world
+plane, which is the whole mechanism. Three teeth stop that zero from being read
+as a body that simply died: `parkedStreamingCards` (the ingested event became
+transcript content), `parkedBakeColors` (`cacheDisplay` of a body clipped out of
+every draw still yields real pixels — 41 distinct sampled colours), and
+`parkedStreamingPixelDelta` (a bake taken after the event differs from one taken
+before, 6,867 bytes). Together they say the interim `cacheDisplay` producer
+exists and is affordable.
+
+`parkedStreamingLayouts` was the first attempt at that liveness tooth and it was
+wrong: a content change does not move `AgentTranscriptListView`'s own frame, so
+its `layout()` legitimately never runs, and the counter read 0 for a body that
+was working fine. `AgentTranscriptListView.enqueue` also gates presentation at
+30 Hz, so the model gains its card a frame before the view is asked to show it —
+the witness drives `flushPendingVisualUpdate()` (the same call the gate makes)
+rather than racing a timer.
+
+Two more findings worth carrying forward:
+
+- **AppKit sends `viewDidChangeBackingProperties` to every installed surface
+  host on every camera step** — exactly `hosts x steps` (300 = 5 x 60,
+  1500 = 25 x 60). The trap is real; the host owns its layer and applies a
+  bucketed scale policy, so `cameraCausedRasterRequests` stays 0.
+  `PERF_SURFACE_HOST_NAIVE_SCALE=1` swaps in the naive policy that follows the
+  live effective scale and drives that counter to 1,200 — the permanent negative
+  witness. It is a witness about the DECISION, not the cost: re-publishing the
+  same image barely moves the clock, and a real producer would re-render.
+- **With the body gone, chrome is essentially all of Array's camera cost.**
+  Sweeping `ARRAY_CHROME_BUCKETS` at 25 tiles: 1 → 15 redraws, 0.08 ms p50;
+  4 (shipped) → 50 redraws, 0.07 ms; 16 → 180 redraws, 0.87 ms. This is the
+  evidence for moving chrome to a screen-space compositor overlay under Shape B,
+  and it also refuted the first hypothesis for the step-time tail — more chrome
+  crossings produced FEWER late steps, because the tail was the flush.
+
+Overrides for architecture work, none of which change the gate:
+`PERF_SURFACE_HOST_TILE_COUNTS` (ascending, each >= the visible cluster),
+`PERF_SURFACE_HOST_VISIBLE`, `PERF_SURFACE_HOST_TURNS`,
+`PERF_SURFACE_HOST_STEPS`. The default stops at 50 because every host needs its
+own baked surface and a bake needs a real agent tile: 100/200 are reachable but
+are a deliberate memory event.
+
+`unculledDurationSlope`'s floor is `-8.3 ms`, not 0, because a slope between two
+sub-millisecond medians can legitimately land below zero on noise — a run at
+`PERF_SURFACE_HOST_TILE_COUNTS=5,15` reported -0.056 ms and failed a metric that
+was only ever meant to be published. A published slope needs a sign-safe floor.
+
+### `--tile-surface-residency-check` — gating, display-dependent, green
+
+```sh
+.build/debug/Array --tile-surface-residency-check
+```
+
+The production counterpart to `canvas.surface-host-slope`, and the first
+production slice of the unbounded-canvas program (`.plans/36`). Everything runs
+through the real `CanvasNSView`, the real `CanvasCameraDriver` (transitions
+arrive via `noteScrollZoom` -> `onActivityBegin` and `qaMarkSettledNow` ->
+`onSettle`), and real `ManagedAgentTileNSView`s. The feature it exercises is OFF
+by default (`continuum.tileSurfaceResidency.enabled`, env override
+`ARRAY_TILE_SURFACE_RESIDENCY`).
+
+Its subject is not speed. It is the requirement speed has to survive: **a user
+must not be able to tell.** What it gates:
+
+- **producer fidelity** — a surface against a native bake of the same body at
+  the same instant and resolution, mean channel difference **0.000** against a
+  0.25 threshold. `TILE_SURFACE_HALF_SCALE=1` is the negative witness and drives
+  it to **1.156**, so the gate fails when it should;
+- **sharpness never regresses** — a surface less sharp than the screen needs is
+  refused, and the refusal reason is asserted, not inferred;
+- **exactly-once input** — a click during the settle window promotes through
+  `hitTest` and lands on the real body;
+- **streaming through a park** — events ingested while surfaced are in the
+  restored transcript;
+- **flag off changes nothing** — no demotions, no bakes, an empty park, and the
+  native cascade still paid;
+- **no stranded state** — removing a tile mid-gesture and switching zones both
+  leave the park empty and the store pruned;
+- **camera cost** — Array-owned CPU per step, 12 real agent tiles: **24.34 ms
+  native -> 0.11 ms surfaced**, gated under one frame.
+
+**The gesture-start transition is published, NOT gated, and that is
+deliberate.** It was a gate, it fired at **~4.6x a native step**, and it killed
+the "surfaced in motion only" policy. The demote path is timed per call and the
+cost is fully attributed: host construction/reuse **0.00 ms**, `setContentView`
+(removing the deep body) **2.03 ms/tile**, `park.addSubview` (re-adding it)
+**2.80 ms/tile**. That is plain AppKit subtree surgery, so any policy that
+reparents per gesture pays it twice per tile per gesture. Keeping it as a gate
+would assert a decision rather than protect a behaviour; what the leg protects
+is the mechanism, which the next policy reuses unchanged. One guard does remain
+on the instrument itself: the breakdown must account for at least 60% of the
+commit stage it explains, so a published number cannot quietly become fiction.
+
+Three hypotheses for that transition cost were measured and **refuted**: a fresh
+`CALayer` texture upload per gesture (host retention moved it 0.1 ms), an empty
+`visibleRect` in the park (sizing the park changed nothing), and the
+unconditional forced offscreen pass in `AgentTranscriptListView.layout()`
+(gating it moved the native step 0.2 ms — those calls were already nearly free,
+and that change was reverted rather than kept for no benefit).
+
 ### `canvas.proxy-scene-probe` — OPT-IN, green cost probe; rejected UX
 
 ```bash

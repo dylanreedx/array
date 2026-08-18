@@ -148,6 +148,13 @@ enum PerfScenarios {
             // one owned root affine. Opt-in only: this proves the scene shape,
             // not cache/provider fidelity or production CanvasNSView wiring.
             Scenario(name: "canvas.proxy-scene-probe", isStress: true, run: { try canvasProxySceneProbe() }),
+            // The Shape A witness (.plans/34 I15): three arms over one real
+            // agent fixture — deep native tiles, flat surface hosts at the same
+            // installed count, and flat surface hosts culled to the viewport's
+            // presentation set — every step a real production driver commit.
+            // Opt-in: it bakes one distinct surface per host from a real agent
+            // body, so the fixture is a memory event as well as a CPU one.
+            Scenario(name: "canvas.surface-host-slope", isStress: true, run: { try canvasSurfaceHostSlope() }),
             // Supported-presentation experiment: AppKit owns an outer
             // NSScrollView/NSClipView and magnifies a real managed-agent
             // document tree. This stays opt-in until the real display pump says
@@ -1757,6 +1764,1003 @@ enum PerfScenarios {
             }.joined(separator: " | ")
         return PerfScenarioResult(name: "canvas.proxy-scene-probe", detail: detail,
                                   measurements: measurements)
+    }
+
+    // MARK: - Scenario: flat surface hosts versus deep native tiles
+
+    /// **The Shape A witness.** `.plans/34` decided that a retained scene's
+    /// surface hosts are `TileNSView`s at WORLD frames installed as ordinary
+    /// children of `CanvasWorldPlaneView` — chrome untouched, only the BODY
+    /// replaced. That keeps z-order, hit testing, the install path, chrome, focus
+    /// registration and the camera oracle working unchanged, and it leaves the
+    /// camera still writing `bounds.size`. So it trades the `O(1)` camera for a
+    /// traversal over a FLAT tree, and the whole architecture rests on one
+    /// unmeasured number: what does a camera step cost when the plane's children
+    /// are flat layer hosts instead of deep native tiles?
+    ///
+    /// `canvas.magnify-slope` already brackets it from one side: 16 -> 128
+    /// installed `DescriptorTileNSView`s (shallower than a real tile, deeper than
+    /// a surface host) adds ~1.9-2.3 ms/step of pure AppKit traversal with every
+    /// WORK counter flat at zero. Its published rationale also names the escape —
+    /// "not reachable from our code without culling installed views, which the
+    /// always-render-live constraint forbids" — and a retained scene is exactly
+    /// what makes culling legal, because runtime residency stops implying view
+    /// residency. An offscreen agent keeps streaming with no installed host.
+    ///
+    /// Hence three arms over ONE fixture, all of them moving the camera for real:
+    ///
+    /// - **native** — real `ManagedAgentTileNSView`, all installed. Does the
+    ///   control reproduce the known cascade? If not, no other number is
+    ///   admissible.
+    /// - **unculled** — surface hosts, all installed. Isolates what replacing the
+    ///   BODY buys at equal installed count.
+    /// - **culled** — surface hosts, visible presentation set only. Isolates what
+    ///   CULLING buys, and answers whether the slope against TOTAL tiles goes
+    ///   flat.
+    ///
+    /// Four things this probe does that its predecessors did not, all from
+    /// `.plans/31`'s red-team corrections and `.plans/34`'s findings:
+    ///
+    /// - **It measures the PRODUCTION camera step, not a bare bounds write.**
+    ///   Every step is a real `CanvasCameraDriver` commit through the driver's
+    ///   deterministic QA seams, so `isApplying` is true, cursor-rect housekeeping
+    ///   defers exactly as it does in a gesture, and the visible-tile chrome
+    ///   refresh — which Shape A deliberately KEEPS — is inside the measurement.
+    ///   Zoom targets are hit by inverting the driver's own log-zoom gain, so the
+    ///   trajectory and the anchor mathematics belong to production code and the
+    ///   harness computes no geometry of its own.
+    /// - **The surfaces are the real tiles' pixels.** Each agent body is baked
+    ///   once through `cacheDisplay` before any clock starts — an exact-surface
+    ///   scene rather than the synthetic shells that were rejected as a product
+    ///   design — with one DISTINCT bake per host so Core Animation cannot
+    ///   collapse the scene onto a single shared texture and understate it.
+    /// - **Zone chrome is on and the gesture reaches the real overview (0.2).**
+    ///   Translucency, rounded masks and low zoom are what CA and WindowServer
+    ///   actually charge for, and every earlier probe omitted them while stopping
+    ///   at 0.45.
+    /// - **It settles the `contentsScale` trap instead of assuming it.** A
+    ///   bounds-size write reaches descendants through
+    ///   `viewDidChangeBackingProperties`; if that callback re-derives a surface at
+    ///   the ancestor's new effective scale then every zoom step re-rasterises
+    ///   every surface — a green geometry counter over a red gesture. The host owns
+    ///   its layer, so it applies a BUCKETED policy and counts what a camera step
+    ///   actually caused. `PERF_SURFACE_HOST_NAIVE_SCALE=1` swaps in the naive
+    ///   policy that tracks the live effective scale: that is the permanent
+    ///   negative witness proving the counter can fail.
+    ///
+    /// Not a production mechanism: no snapshot revisions, no cache generation, no
+    /// dirty regions, no promotion, no interaction. It measures the camera under
+    /// Shape A geometry and nothing else.
+    static func canvasSurfaceHostSlope() throws -> PerfScenarioResult {
+        let environment = ProcessInfo.processInfo.environment
+        // The default sweep stops at 50 because every host needs its OWN baked
+        // surface to keep the texture count honest, and a bake needs a real agent
+        // tile: 50 is the top of the ladder `.plans/31` published, and
+        // docs/internals/performance.md is explicit that a big fixture is a memory
+        // event and not just a CPU one. 100/200 are available, deliberately opt-in.
+        let requestedCounts = environment["PERF_SURFACE_HOST_TILE_COUNTS"]
+            .map { raw in
+                raw.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+            } ?? [5, 15, 25, 50]
+        let turnsPerAgent = Int(environment["PERF_SURFACE_HOST_TURNS"] ?? "") ?? 6
+        let steps = Int(environment["PERF_SURFACE_HOST_STEPS"] ?? "") ?? 60
+        let visibleClusterCount = Int(environment["PERF_SURFACE_HOST_VISIBLE"] ?? "") ?? 5
+        let usesNaiveScalePolicy = environment["PERF_SURFACE_HOST_NAIVE_SCALE"] == "1"
+        guard !requestedCounts.isEmpty,
+              requestedCounts.allSatisfy({ $0 >= visibleClusterCount }),
+              requestedCounts == requestedCounts.sorted(),
+              visibleClusterCount > 0,
+              turnsPerAgent > 0,
+              steps > 1 else {
+            throw Failure(message: "surface-host counts must be ascending and >= the visible cluster, "
+                          + "with positive turns and steps > 1")
+        }
+
+        let viewportSize = CGSize(width: 1_600, height: 1_000)
+        let baselineZoom = 1.0
+        let finalZoom = 0.2
+
+        func percentile(_ values: [Double], _ fraction: Double) -> Double {
+            guard !values.isEmpty else { return 0 }
+            let sorted = values.sorted()
+            let index = Int((Double(sorted.count - 1) * fraction).rounded(.up))
+            return sorted[min(max(index, 0), sorted.count - 1)]
+        }
+
+        func milliseconds(_ body: () -> Void) -> Double {
+            let start = ProcessInfo.processInfo.systemUptime
+            body()
+            return (ProcessInfo.processInfo.systemUptime - start) * 1_000
+        }
+
+        enum Arm: String, CaseIterable {
+            case native
+            case unculled
+            case culled
+            /// Surface hosts in the plane AND every real agent body still alive,
+            /// parked in the window but OUTSIDE `CanvasWorldPlaneView`. This is the
+            /// arm the first production slice is downstream of: an interim
+            /// `cacheDisplay` producer needs the native body to keep laying out and
+            /// streaming (I11), and the only way that is affordable is if a camera
+            /// step cannot reach it. If a parked body re-lays out on camera steps,
+            /// parking is not a producer strategy and the slice needs an off-main
+            /// display list before it can ship at all.
+            case parked
+        }
+
+        struct ArmSample {
+            /// Every observed interval per stage, retained rather than reduced:
+            /// doc 33 requires the raw values, and pooling both ABBA observations
+            /// is only possible if neither is collapsed to a percentile first.
+            var commit: [Double] = []
+            var layout: [Double] = []
+            var display: [Double] = []
+            var flush: [Double] = []
+
+            /// Work Array itself performed: the driver commit, the layout pass it
+            /// caused, and the draw cycle. This is the number a renderer change can
+            /// actually move.
+            var arrayCPU: [Double] {
+                zip(zip(commit, layout), display).map { $0.0 + $0.1 + $1 }
+            }
+            /// Everything, including the transaction flush. Named `step`, never
+            /// "presented": a flush returning is not a frame on screen.
+            var step: [Double] {
+                zip(arrayCPU, flush).map(+)
+            }
+
+            static func quantile(_ values: [Double], _ fraction: Double) -> Double {
+                guard !values.isEmpty else { return 0 }
+                let sorted = values.sorted()
+                let index = Int((Double(sorted.count - 1) * fraction).rounded(.up))
+                return sorted[min(max(index, 0), sorted.count - 1)]
+            }
+            var p50: Double { Self.quantile(step, 0.5) }
+            var p95: Double { Self.quantile(step, 0.95) }
+            var worst: Double { step.max() ?? 0 }
+            var arrayP50: Double { Self.quantile(arrayCPU, 0.5) }
+            var arrayP95: Double { Self.quantile(arrayCPU, 0.95) }
+            var flushP50: Double { Self.quantile(flush, 0.5) }
+            var flushP95: Double { Self.quantile(flush, 0.95) }
+            func lateShare(_ budget: Double) -> Double {
+                let values = step
+                guard !values.isEmpty else { return 0 }
+                return Double(values.filter { $0 > budget }.count) / Double(values.count) * 100
+            }
+            func arrayLateShare(_ budget: Double) -> Double {
+                let values = arrayCPU
+                guard !values.isEmpty else { return 0 }
+                return Double(values.filter { $0 > budget }.count) / Double(values.count) * 100
+            }
+
+            var boundsSizeWrites = 0
+            var driverCommits = 0
+            var tileLayouts = 0
+            var transcriptLayouts = 0
+            var chromeRedraws = 0
+            var installedHosts = 0
+            var onScreen = 0
+            var backingCallbacks = 0
+            var rasterRequests = 0
+            /// Transcript layout passes inside the park during the clocked schedule.
+            /// The decisive number for the parked arm: zero means a camera step
+            /// cannot reach a demoted tile's live body.
+            var parkedTranscriptLayouts = 0
+            var parkedBodies = 0
+            var oracleMismatches = 0
+        }
+
+        struct Row {
+            let count: Int
+            var arms: [Arm: ArmSample] = [:]
+            var orderControl: [Arm: ArmSample] = [:]
+            /// [first-pass p50, second-pass p50] per arm — the order/drift control.
+            var passMedians: [Arm: [Double]] = [:]
+            var bakedPixels = 0
+            var bakedMegabytes = 0.0
+            var distinctSurfaces = 0
+            var finalZoomReached = 0.0
+            /// Liveness of the park, measured once per row after the ABBA passes:
+            /// a parked body must be QUIET, not dead. Cards are the model side;
+            /// the pixel delta is the side an interim `cacheDisplay` producer
+            /// actually depends on.
+            var parkedStreamingCards = 0
+            var parkedStreamingPixelDelta = 0
+            var parkedBakeColors = 0
+        }
+
+        var rows: [Row] = []
+
+        for tileCount in requestedCounts {
+            let canvas = CanvasNSView(
+                canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: baselineZoom),
+                                         tiles: [], groups: [], lastActiveTileId: nil),
+                activeZone: nil, zoneRenderModels: [], showsZoneChrome: true
+            )
+            canvas.frame = CGRect(origin: .zero, size: viewportSize)
+            let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless],
+                                  backing: .buffered, defer: false)
+            window.contentView = canvas
+            window.orderFrontRegardless()
+            defer {
+                window.orderOut(nil)
+                window.contentView = nil
+            }
+
+            // The visible cluster sits near the origin and stays on screen across
+            // the whole 1.0 -> 0.2 sweep; filler is parked beyond the envelope at
+            // zoom 0.2 (which covers ~8,000 x 5,000 world units), so "installed"
+            // and "visible" are independent and the slope means something. This is
+            // canvas.magnify-slope's methodology, on real content.
+            let zoneId = UUID()
+            let placement = ZonePlacement(
+                zoneId: zoneId, projectId: UUID(), origin: ZonePoint(x: 0, y: 0),
+                size: ZoneSize(width: 40_000, height: 30_000), color: "blue",
+                collapsed: false, hydrationPolicy: .automatic
+            )
+            var tiles: [Tile] = []
+            for index in 0..<tileCount {
+                let frame: TileFrame
+                if index < visibleClusterCount {
+                    frame = TileFrame(x: Double(index % 3) * 480 + 40,
+                                      y: Double(index / 3) * 360 + 60,
+                                      width: 420, height: 300)
+                } else {
+                    let filler = index - visibleClusterCount
+                    frame = TileFrame(x: 12_000 + Double(filler % 16) * 500,
+                                      y: 9_000 + Double(filler / 16) * 400,
+                                      width: 420, height: 300)
+                }
+                tiles.append(Tile(
+                    id: UUID(), kind: .managedAgent, title: "surface-host-\(tileCount)-\(index)",
+                    frame: frame, zPosition: .fromLegacyRank(index + 1), zoneId: zoneId,
+                    runtimeRef: nil, metadata: TileMetadata()
+                ))
+            }
+            let layer = CanvasNSView.ZoneLayer(
+                placement: placement,
+                renderModel: CanvasNSView.ZoneRenderModel(placement: placement, displayName: "Surface host slope"),
+                tiles: tiles
+            )
+
+            // Retained for the whole sweep so the native arm can be reinstalled
+            // without rebuilding — that is what makes the three arms PAIRED
+            // observations of one fixture rather than three separate fixtures.
+            var agentViews: [UUID: ManagedAgentTileNSView] = [:]
+            for (index, tile) in tiles.enumerated() {
+                let threadId = "surface-host-\(tileCount)-\(index)"
+                let view = ManagedAgentTileNSView(tile: tile, threadId: threadId)
+                view.renderRehydratedPreviousSession(
+                    transcriptFixture(threadId: threadId, turns: turnsPerAgent)
+                )
+                // `_installLayer` (the setZones path) does not set this; only
+                // `install(tileView:for:)` and `installProjectTile` do. Without it
+                // `canvas` is nil, every chrome floor collapses to its unfloored
+                // constant, and the visible-tile chrome refresh this probe claims
+                // to include becomes a no-op — the first run reported 0 chrome
+                // redraws across a 1.0 -> 0.2 gesture that should cross ~9 buckets.
+                view.canvas = canvas
+                agentViews[tile.id] = view
+                layer.tileViews[tile.id] = view
+            }
+            canvas.setZones([layer])
+
+            // Where the eventual production slice keeps a DEMOTED tile's real body:
+            // in the window — so appearance, backing scale and the layout cycle stay
+            // the real ones — but not under the world plane, so a camera step's
+            // `bounds.size` write cannot cascade into it. Zero-sized, so AppKit
+            // clips every parked body out of the draw without `isHidden`, which
+            // would also stop the layout this arm exists to keep alive.
+            let parkContainer = NSView(frame: .zero)
+            parkContainer.identifier = NSUserInterfaceItemIdentifier("surfaceHost.park")
+            canvas.addSubview(parkContainer)
+
+            /// Transcript layout passes inside the park, which
+            /// `canvas.qaTotalTranscriptLayoutPassCount` cannot see: that walks
+            /// `tileViewsInVisualOrder`, i.e. the world plane, and the whole point of
+            /// a parked body is that it is not there. Cumulative, so callers take
+            /// deltas.
+            func parkedTranscriptLayoutPasses() -> Int {
+                func walk(_ view: NSView) -> Int {
+                    var total = (view as? AgentTranscriptListView)?.qaLayoutPassCount ?? 0
+                    for subview in view.subviews { total += walk(subview) }
+                    return total
+                }
+                return parkContainer.subviews.reduce(0) { $0 + walk($1) }
+            }
+
+            func pump() {
+                canvas.layoutSubtreeIfNeeded()
+                window.displayIfNeeded()
+                // The backing store commits here, not in `displayIfNeeded()` —
+                // canvas.raster observed 144 invalidations and zero executed draws
+                // without this flush, and timing without it would recreate that
+                // blindness.
+                CATransaction.flush()
+            }
+
+            // ---- Drive the REAL production camera path ----
+            //
+            // A bare `worldPlane.applyCamera` is not a camera step: Shape A keeps
+            // the visible-tile chrome refresh, and a driver commit also defers
+            // cursor-rect housekeeping that an external `setViewport` would pay.
+            // Driving the actual driver with an injected clock gets both right and
+            // leaves every geometry decision — the log-zoom curve, the anchor
+            // mathematics, the float tolerance — in production code.
+            final class Clock {
+                var now: TimeInterval = 1_000
+            }
+            let clock = Clock()
+            canvas.cameraDriver.nowProvider = { [clock] in clock.now }
+            let zoomGain = canvas.cameraDriver.tuning.scrollZoomGain
+            let commitGap = canvas.cameraDriver.tuning.minCommitInterval + 0.001
+
+            /// One driver commit that lands on `target`, by inverting the driver's
+            /// own gain. Returns whether the driver actually committed.
+            @discardableResult
+            func cameraStep(toZoom target: Double, anchor: CGPoint) -> Bool {
+                let current = canvas.viewport.zoom
+                guard current > 0, target > 0, zoomGain > 0 else { return false }
+                let deltaY = log(target / current) / zoomGain
+                guard deltaY.isFinite, deltaY != 0 else { return false }
+                clock.now += commitGap
+                canvas.cameraDriver.noteScrollZoom(deltaY: deltaY, location: anchor)
+                return true
+            }
+
+            func resetCamera() {
+                canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: baselineZoom))
+                pump()
+            }
+
+            /// Alternating anchor, so each step exercises translation as well as
+            /// scale rather than a centre-only zoom that could look correct by
+            /// accident.
+            let schedule: [(zoom: Double, anchor: CGPoint)] = (1...steps).map { step in
+                let progress = Double(step) / Double(steps)
+                return (
+                    baselineZoom + (finalZoom - baselineZoom) * progress,
+                    step.isMultiple(of: 2) ? CGPoint(x: 800, y: 500) : CGPoint(x: 220, y: 170)
+                )
+            }
+
+            // ---- Bake one distinct real surface per host, before any clock ----
+            resetCamera()
+            var bakedBodies: [UUID: CGImage] = [:]
+            var bakedPixels = 0
+            for tile in tiles {
+                guard let agentView = agentViews[tile.id], let body = agentView.contentView else {
+                    throw Failure(message: "surface-host bake found no agent body for a fixture tile")
+                }
+                let bodyBounds = body.bounds
+                guard bodyBounds.width > 1, bodyBounds.height > 1,
+                      let rep = body.bitmapImageRepForCachingDisplay(in: bodyBounds) else {
+                    throw Failure(message: "surface-host could not allocate a bake for a real agent body")
+                }
+                body.cacheDisplay(in: bodyBounds, to: rep)
+                guard let image = rep.cgImage else {
+                    throw Failure(message: "surface-host bake produced no image for a real agent body")
+                }
+                // A blank bake would make every surface arm cheap for the wrong
+                // reason. `VisualSnapshot.isBlank` is only a smoke floor, and a
+                // smoke floor is exactly what is wanted here: prove pixels exist.
+                if VisualSnapshot.metrics(of: rep).isBlank {
+                    throw Failure(message: "surface-host baked a blank agent body — "
+                                  + "the surface arms would be cheap for the wrong reason")
+                }
+                bakedBodies[tile.id] = image
+                bakedPixels += image.width * image.height
+            }
+
+            var row = Row(count: tileCount)
+            row.bakedPixels = bakedPixels
+            row.bakedMegabytes = Double(bakedPixels * 4) / 1_048_576
+            row.distinctSurfaces = bakedBodies.count
+
+            var surfaceViews: [UUID: TileSurfaceProbeView] = [:]
+            for tile in tiles {
+                guard let image = bakedBodies[tile.id] else { continue }
+                let view = TileSurfaceProbeView(tile: tile, surface: image)
+                view.usesNaiveScalePolicy = usesNaiveScalePolicy
+                // Same reason as the agent views: a surface host must pay the
+                // chrome refresh Shape A keeps, or the arms are not comparable.
+                view.canvas = canvas
+                surfaceViews[tile.id] = view
+            }
+
+            // Whatever the previous arm put in the world plane, tracked
+            // explicitly. `setZones` removes the views in `layer.tileViews` as it
+            // finds them, so mutating that dictionary FIRST makes it remove the
+            // incoming set and orphan the outgoing one — which leaves the previous
+            // arm's tiles installed, in the view tree, and being laid out. The
+            // first run of this probe measured three arms that were all paying the
+            // native agent cost and reported them as identical; the
+            // `surfaceArmTranscriptLayouts == 0` tooth is what caught it.
+            var installedForArm: [TileNSView] = []
+
+            func installArm(_ arm: Arm) throws {
+                for view in installedForArm { view.removeFromSuperview() }
+                installedForArm = []
+                var installed: [UUID: TileNSView] = [:]
+                switch arm {
+                case .native:
+                    for (id, view) in agentViews { installed[id] = view }
+                case .unculled:
+                    for (id, view) in surfaceViews { installed[id] = view }
+                case .culled:
+                    // The presentation set a scene would freeze for the gesture
+                    // (`.plans/34` D-G), computed once BEFORE the clock: installing
+                    // per frame would itself be the cost under measurement.
+                    for tile in tiles.prefix(visibleClusterCount) {
+                        if let view = surfaceViews[tile.id] { installed[tile.id] = view }
+                    }
+                case .parked:
+                    for (id, view) in surfaceViews { installed[id] = view }
+                }
+                layer.tileViews = installed
+                installedForArm = Array(installed.values)
+                // Unpark unconditionally: `setZones` only knows about the views in
+                // `layer.tileViews`, so a body left in the park would stay in the
+                // window's layout tree for an arm that never asked for it — the same
+                // shape of mistake as the `layer.tileViews` aliasing trap above.
+                for view in agentViews.values where view.superview === parkContainer {
+                    view.removeFromSuperview()
+                }
+                if arm == .parked {
+                    // Stacked at world size at scale 1, so each body lays out at the
+                    // width it would really have. Frames are set BEFORE the clock;
+                    // nothing here moves during the gesture.
+                    for (index, tile) in tiles.enumerated() {
+                        guard let view = agentViews[tile.id] else { continue }
+                        view.frame = CGRect(x: 0, y: Double(index) * (tile.frame.height + 8),
+                                            width: tile.frame.width, height: tile.frame.height)
+                        parkContainer.addSubview(view)
+                    }
+                }
+                canvas.setZones([layer])
+                pump()
+                // The arm's composition is a PRECONDITION for its numbers, not
+                // something to discover in the report afterwards. This sums only
+                // over currently-installed tile views, so a nonzero value in a
+                // surface arm means a native body is still in the world plane.
+                if arm != .native, canvas.qaTotalTranscriptLayoutPassCount != 0 {
+                    throw Failure(message: "surface-host \(arm.rawValue) arm still has a native "
+                                  + "transcript installed; its timings would be the native arm's")
+                }
+            }
+
+            func measure(_ arm: Arm) throws -> ArmSample {
+                try installArm(arm)
+                resetCamera()
+                // Drain first rasterisation and symbol-cache population before the
+                // clock: a cold first step belongs to construction, not the camera.
+                for entry in schedule.prefix(3) {
+                    cameraStep(toZoom: entry.zoom, anchor: entry.anchor)
+                    pump()
+                }
+                resetCamera()
+
+                canvas.worldPlane.qaResetBoundsSizeWriteCount()
+                canvas.qaResetCameraLayoutStats()
+                for view in surfaceViews.values { view.qaResetSurfaceCounters() }
+                let tileLayoutsBefore = canvas.qaTotalTileLayoutPassCount
+                let transcriptLayoutsBefore = canvas.qaTotalTranscriptLayoutPassCount
+                let chromeBefore = canvas.qaTotalTileChromeRedrawCount
+                let viewportApplyBefore = canvas.qaViewportApplyCount
+                let onScreen = canvas.qaTilesIntersectingViewport
+                let parkedTranscriptBefore = parkedTranscriptLayoutPasses()
+
+                // Doc 33's "one honest timeline": Array-owned work and the Core
+                // Animation transaction flush are DIFFERENT stages and must never
+                // be one number. `CATransaction.flush()` can block on the render
+                // server, so folding it into the step time reports compositor
+                // synchronisation as if it were Array CPU — which is exactly the
+                // mistake that would make a fast path look over budget. The first
+                // decomposed run is what settles which stage the tail lives in.
+                var commitMs: [Double] = []
+                var layoutMs: [Double] = []
+                var displayMs: [Double] = []
+                var flushMs: [Double] = []
+                for entry in schedule {
+                    commitMs.append(milliseconds { cameraStep(toZoom: entry.zoom, anchor: entry.anchor) })
+                    layoutMs.append(milliseconds { canvas.layoutSubtreeIfNeeded() })
+                    displayMs.append(milliseconds { window.displayIfNeeded() })
+                    flushMs.append(milliseconds { CATransaction.flush() })
+                }
+
+                var sample = ArmSample()
+                sample.commit = commitMs
+                sample.layout = layoutMs
+                sample.display = displayMs
+                sample.flush = flushMs
+                sample.boundsSizeWrites = canvas.worldPlane.qaBoundsSizeWriteCount
+                sample.driverCommits = canvas.qaViewportApplyCount - viewportApplyBefore
+                sample.tileLayouts = canvas.qaTotalTileLayoutPassCount - tileLayoutsBefore
+                sample.transcriptLayouts = canvas.qaTotalTranscriptLayoutPassCount - transcriptLayoutsBefore
+                sample.chromeRedraws = canvas.qaTotalTileChromeRedrawCount - chromeBefore
+                sample.installedHosts = canvas.qaTotalInstalledTileCount
+                sample.onScreen = onScreen
+                // Captured here, before the unclocked oracle pass drives the same
+                // schedule again — otherwise the oracle's own steps would double it.
+                sample.parkedTranscriptLayouts = parkedTranscriptLayoutPasses() - parkedTranscriptBefore
+                sample.parkedBodies = parkContainer.subviews.count
+                for view in surfaceViews.values where view.superview != nil {
+                    sample.backingCallbacks += view.qaBackingCallbackCount
+                    sample.rasterRequests += view.qaRasterRequestCount
+                }
+
+                // The geometry oracle runs on its own unclocked pass over the same
+                // schedule, so a thorough per-step check never inflates the timing
+                // it is protecting. Zero here is what makes the durations above
+                // claims about a CORRECT presentation rather than a stalled one.
+                resetCamera()
+                var mismatches = 0
+                for entry in schedule {
+                    cameraStep(toZoom: entry.zoom, anchor: entry.anchor)
+                    pump()
+                    mismatches += canvas.qaTileScreenFrameMismatchCount
+                }
+                sample.oracleMismatches = mismatches
+                return sample
+            }
+
+            // ABBA across three arms: the second observation of each sees the
+            // reversed order, so first-run caches and short thermal drift cannot
+            // belong to one side.
+            //
+            // Both observations are POOLED into one sample per arm rather than
+            // reporting the later one, which is what `canvasGeometryHoldProbe`
+            // already does. The first version of this probe reported only the
+            // second pass and printed a 4x disagreement between passes at 15 tiles
+            // (1.48 vs 6.15 ms p50) — a number that would have been published as
+            // if it were the arm's cost. The per-pass medians are kept as an
+            // explicit DRIFT metric instead of being averaged away.
+            for arm in Arm.allCases {
+                row.orderControl[arm] = try measure(arm)
+            }
+            for arm in Arm.allCases.reversed() {
+                var pooled = try measure(arm)
+                if let first = row.orderControl[arm] {
+                    row.passMedians[arm] = [first.arrayP50, pooled.arrayP50]
+                    pooled.commit.append(contentsOf: first.commit)
+                    pooled.layout.append(contentsOf: first.layout)
+                    pooled.display.append(contentsOf: first.display)
+                    pooled.flush.append(contentsOf: first.flush)
+                }
+                row.arms[arm] = pooled
+            }
+            row.finalZoomReached = canvas.viewport.zoom
+
+            // ---- I11 liveness: a parked body must be QUIET, not DEAD ----
+            //
+            // `parkedTranscriptLayouts == 0` is also what a body that had stopped
+            // being a view at all would report, and that reading would make the
+            // parked arm meaningless. So ingest one real streaming event into a
+            // parked agent and require the transcript to respond. This is the exact
+            // property an interim `cacheDisplay` producer depends on: the body keeps
+            // receiving its stream and re-laying out while the camera cannot see it.
+            try installArm(.parked)
+            pump()
+            guard let livenessView = agentViews[tiles[0].id] else {
+                throw Failure(message: "surface-host has no parked body to test for liveness")
+            }
+            let livenessThread = "surface-host-\(tileCount)-0"
+            let livenessTurn = "\(livenessThread)-liveness"
+            /// A bake of a body while it is parked — the interim producer's exact
+            /// operation. If this cannot produce pixels from a clipped-out view, the
+            /// `cacheDisplay` producer is not available and the slice needs the
+            /// off-main display list (I2) before it can ship at all.
+            func bakeParked(_ view: ManagedAgentTileNSView) throws -> NSBitmapImageRep {
+                guard let body = view.contentView, body.bounds.width > 1, body.bounds.height > 1,
+                      let rep = body.bitmapImageRepForCachingDisplay(in: body.bounds) else {
+                    throw Failure(message: "surface-host could not allocate a bake of a parked body")
+                }
+                body.cacheDisplay(in: body.bounds, to: rep)
+                return rep
+            }
+            func differingBytes(_ before: NSBitmapImageRep, _ after: NSBitmapImageRep) -> Int {
+                guard let a = before.bitmapData, let b = after.bitmapData,
+                      before.bytesPerPlane == after.bytesPerPlane else { return 0 }
+                var differing = 0
+                for offset in 0..<before.bytesPerPlane where a[offset] != b[offset] { differing += 1 }
+                return differing
+            }
+
+            let livenessCardsBefore = livenessView.transcriptCardCount
+            let livenessBakeBefore = try bakeParked(livenessView)
+            livenessView.ingest(.turnStarted(threadId: livenessThread, turnId: livenessTurn))
+            livenessView.ingest(.contentDelta(
+                threadId: livenessThread, turnId: livenessTurn, streamKind: .assistant,
+                delta: "A parked body still receives its stream, and this delta must reach layout."
+            ))
+            // `AgentTranscriptListView.enqueue` gates presentation at 30 Hz, so the
+            // model gains its card immediately while the view is scheduled — the
+            // first version of this witness read that gate as deadness (1 card, 0
+            // layouts). Flushing it is the same call the gate itself makes a frame
+            // later, and it keeps the witness synchronous instead of racing a timer.
+            livenessView.qaTranscriptCollectionFixture?.flushPendingVisualUpdate()
+            pump()
+            // NOT the list view's own `qaLayoutPassCount`: a content change does not
+            // move that view's frame, so its `layout()` legitimately does not run,
+            // and reading zero there as deadness is what the first version of this
+            // witness did. The producer's requirement is narrower and checkable —
+            // a bake taken after the event must differ from one taken before.
+            let livenessBakeAfter = try bakeParked(livenessView)
+            row.parkedStreamingCards = livenessView.transcriptCardCount - livenessCardsBefore
+            row.parkedStreamingPixelDelta = differingBytes(livenessBakeBefore, livenessBakeAfter)
+            row.parkedBakeColors = VisualSnapshot.metrics(of: livenessBakeAfter).distinctSampledColors
+
+            for view in agentViews.values where view.superview === parkContainer {
+                view.removeFromSuperview()
+            }
+            parkContainer.removeFromSuperview()
+            for view in installedForArm { view.removeFromSuperview() }
+            installedForArm = []
+            for (_, view) in surfaceViews { view.removeFromSuperview() }
+            for (_, view) in agentViews { view.removeFromSuperview() }
+            rows.append(row)
+        }
+
+        guard let smallest = rows.first, let largest = rows.last else {
+            throw Failure(message: "surface-host is missing a sweep endpoint")
+        }
+        func arm(_ row: Row, _ key: Arm) throws -> ArmSample {
+            guard let sample = row.arms[key] else {
+                throw Failure(message: "surface-host row \(row.count) is missing its \(key.rawValue) arm")
+            }
+            return sample
+        }
+        let smallestCulled = try arm(smallest, .culled)
+        let largestCulled = try arm(largest, .culled)
+        let smallestUnculled = try arm(smallest, .unculled)
+        let largestUnculled = try arm(largest, .unculled)
+        let largestNative = try arm(largest, .native)
+        let smallestParked = try arm(smallest, .parked)
+        let largestParked = try arm(largest, .parked)
+
+        let culledSlope = largestCulled.arrayP50 - smallestCulled.arrayP50
+        let unculledSlope = largestUnculled.arrayP50 - smallestUnculled.arrayP50
+        let worstCulled = rows.compactMap { $0.arms[.culled]?.worst }.max() ?? 0
+        let p95Culled = rows.compactMap { $0.arms[.culled]?.p95 }.max() ?? 0
+        let arrayP95Culled = rows.compactMap { $0.arms[.culled]?.arrayP95 }.max() ?? 0
+        let flushP95Culled = rows.compactMap { $0.arms[.culled]?.flushP95 }.max() ?? 0
+        let arrayLateShareCulled = rows.compactMap {
+            $0.arms[.culled]?.arrayLateShare(frameBudgetMs)
+        }.max() ?? 0
+        // The largest disagreement between any arm's two ABBA observations, across
+        // the whole sweep. Ratios only mean something once the numbers are off the
+        // timer's floor, so sub-0.5 ms pairs are excluded rather than allowed to
+        // manufacture a huge ratio out of noise.
+        let worstPassDrift = rows.flatMap { row in
+            row.passMedians.values.compactMap { pair -> Double? in
+                guard pair.count == 2, let low = pair.min(), let high = pair.max(),
+                      low > 0.5 else { return nil }
+                return high / low
+            }
+        }.max() ?? 1
+        let culledVsNative = largestNative.arrayP50 > 0
+            ? largestCulled.arrayP50 / largestNative.arrayP50 : 1
+        let unculledVsNative = largestNative.arrayP50 > 0
+            ? largestUnculled.arrayP50 / largestNative.arrayP50 : 1
+        let surfaceRasterRequests = rows.reduce(0) { total, row in
+            total + Arm.allCases.filter { $0 != .native }
+                .reduce(0) { $0 + (row.arms[$1]?.rasterRequests ?? 0) }
+        }
+        let surfaceTranscriptLayouts = rows.reduce(0) { total, row in
+            total + Arm.allCases.filter { $0 != .native }
+                .reduce(0) { $0 + (row.arms[$1]?.transcriptLayouts ?? 0) }
+        }
+        // Summed over every row and both ABBA observations: one re-layout anywhere
+        // in the park, on any camera step, at any tile count, kills parking as a
+        // producer strategy.
+        let parkedTranscriptLayouts = rows.reduce(0) { $0 + ($1.arms[.parked]?.parkedTranscriptLayouts ?? 0) }
+        let parkedSlope = largestParked.arrayP50 - smallestParked.arrayP50
+        let arrayP95Parked = rows.compactMap { $0.arms[.parked]?.arrayP95 }.max() ?? 0
+        let parkedVsNative = largestNative.arrayP50 > 0
+            ? largestParked.arrayP50 / largestNative.arrayP50 : 1
+        let parkedVsUnculled = largestUnculled.arrayP50 > 0
+            ? largestParked.arrayP50 / largestUnculled.arrayP50 : 1
+        // Per-row shortfall, because the count that has to be right differs per
+        // row: gating the minimum parked-body count across the sweep against the
+        // LARGEST row's tile count fails on the smallest row by construction, which
+        // is exactly how the first run of this arm reported 5 against a budget of 15.
+        let worstParkedShortfall = rows.map { row in
+            (row.arms[.parked]?.parkedBodies ?? 0) - row.count
+        }.min() ?? 0
+        let weakestStreamingCards = rows.map { $0.parkedStreamingCards }.min() ?? 0
+        let weakestStreamingPixels = rows.map { $0.parkedStreamingPixelDelta }.min() ?? 0
+        let weakestBakeColors = rows.map { $0.parkedBakeColors }.min() ?? 0
+        let nativeTranscriptLayouts = rows.reduce(0) { $0 + ($1.arms[.native]?.transcriptLayouts ?? 0) }
+        let oracleMismatches = rows.reduce(0) { row, next in
+            row + Arm.allCases.reduce(0) { $0 + (next.arms[$1]?.oracleMismatches ?? 0) }
+        }
+        let onScreenCounts = Set(rows.compactMap { $0.arms[.culled]?.onScreen })
+        let worstFinalZoomError = rows.map { abs($0.finalZoomReached - finalZoom) }.max() ?? 0
+
+        guard onScreenCounts.count <= 1 else {
+            throw Failure(message: "surface-host must hold the culled arm's visible count fixed; "
+                          + "saw \(onScreenCounts.sorted()) — the slope would conflate installed with visible")
+        }
+
+        var measurements: [PerfMeasurement] = []
+
+        // ---- Structural gate: the arms are what they claim to be ----
+        measurements.append(PerfBudget(
+            metric: "surface-host.nativeArmTranscriptLayouts", limit: .atLeast(1), unit: .count,
+            rationale: "teeth: the control must reproduce the real backing cascade, or the surface arms are being compared against nothing"
+        ).evaluate(Double(nativeTranscriptLayouts)))
+        measurements.append(PerfBudget(
+            metric: "surface-host.surfaceArmTranscriptLayouts", limit: .exactly(0), unit: .count,
+            rationale: "a flat surface body has no transcript to lay out; a pass here means a native tree is still installed in a surface arm"
+        ).evaluate(Double(surfaceTranscriptLayouts)))
+        measurements.append(PerfBudget(
+            metric: "surface-host.culledDriverCommits", limit: .exactly(Double(steps)), unit: .count,
+            rationale: "teeth: every step must be one real production driver commit — a cheap arm that stopped committing is not a fast arm"
+        ).evaluate(Double(largestCulled.driverCommits)))
+        measurements.append(PerfBudget(
+            metric: "surface-host.culledBoundsSizeWrites", limit: .atLeast(Double(steps)), unit: .count,
+            rationale: "teeth: Shape A still moves the camera through bounds.size — the zoom cascade is entered for real, nothing is held"
+        ).evaluate(Double(largestCulled.boundsSizeWrites)))
+        measurements.append(PerfBudget(
+            metric: "surface-host.culledInstalledHosts", limit: .exactly(Double(visibleClusterCount)), unit: .count,
+            rationale: "teeth: the culled arm must actually have culled — the claim is that installed count follows the viewport, not the world"
+        ).evaluate(Double(largestCulled.installedHosts)))
+        measurements.append(PerfBudget(
+            metric: "surface-host.unculledInstalledHosts", limit: .exactly(Double(largest.count)), unit: .count,
+            rationale: "teeth: the unculled arm must hold every host, or there is no culling contrast and the two effects cannot be separated"
+        ).evaluate(Double(largestUnculled.installedHosts)))
+        measurements.append(PerfBudget(
+            metric: "surface-host.parkedInstalledHosts", limit: .exactly(Double(largest.count)), unit: .count,
+            rationale: "teeth: the parked arm installs the same hosts as the unculled arm, so the only difference between them is that the real bodies are still alive"
+        ).evaluate(Double(largestParked.installedHosts)))
+        measurements.append(PerfBudget(
+            metric: "surface-host.parkedBodyShortfall", limit: .exactly(0), unit: .count,
+            rationale: "teeth: every real agent body is actually IN the park, at every count in the sweep — an empty park would make the parked arm a duplicate of the unculled one"
+        ).evaluate(Double(worstParkedShortfall)))
+        measurements.append(PerfBudget(
+            metric: "surface-host.parkedStreamingCards", limit: .atLeast(1), unit: .count,
+            rationale: "teeth at the model level: the ingested event became transcript content, so the park preserves the subscriber and not merely the view"
+        ).evaluate(Double(weakestStreamingCards)))
+        measurements.append(PerfBudget(
+            metric: "surface-host.parkedBakeColors", limit: .atLeast(2), unit: .count,
+            rationale: "teeth: cacheDisplay of a body clipped out of every draw still yields real pixels. A blank bake here means the interim producer does not exist and the slice needs the off-main display list first"
+        ).evaluate(Double(weakestBakeColors)))
+        measurements.append(PerfBudget(
+            metric: "surface-host.parkedStreamingPixelDelta", limit: .atLeast(1), unit: .count,
+            rationale: "teeth: a parked body must be QUIET, not dead — a bake taken after one real streaming event must differ from one taken before, or every surface would be stale by construction"
+        ).evaluate(Double(weakestStreamingPixels)))
+        measurements.append(PerfBudget(
+            metric: "surface-host.parkedTranscriptLayouts", limit: .exactly(0), unit: .count,
+            rationale: "the question the first production slice is downstream of: a camera step must not reach a demoted tile's live body. Nonzero means parking is not a producer strategy and an off-main display list is required before anything ships"
+        ).evaluate(Double(parkedTranscriptLayouts)))
+        measurements.append(PerfBudget(
+            metric: "surface-host.cameraCausedRasterRequests", limit: .exactly(0), unit: .count,
+            rationale: "the contentsScale trap: a camera step may not re-derive a surface. PERF_SURFACE_HOST_NAIVE_SCALE=1 is the negative witness that this counter can fail"
+        ).evaluate(Double(surfaceRasterRequests)))
+        measurements.append(PerfBudget(
+            metric: "surface-host.distinctSurfaces", limit: .exactly(Double(largest.count)), unit: .count,
+            rationale: "one real bake per host: a shared texture would let Core Animation collapse the scene and understate every surface arm"
+        ).evaluate(Double(largest.distinctSurfaces)))
+        measurements.append(PerfBudget(
+            metric: "surface-host.surfaceMegabytes", limit: .atLeast(1), unit: .megabytes,
+            rationale: "published, not gated down: a cheap camera result is only interesting if the pixels it moved were real ones"
+        ).evaluate(largest.bakedMegabytes))
+
+        // ---- Correctness gate: it was correct while it was fast ----
+        measurements.append(PerfBudget(
+            metric: "surface-host.oracleMismatches", limit: .exactly(0), unit: .count,
+            rationale: "teeth: on an unclocked pass over the same schedule every installed tile must sit where CanvasEngine says, in every arm"
+        ).evaluate(Double(oracleMismatches)))
+        measurements.append(PerfBudget(
+            metric: "surface-host.finalZoomError", limit: .atMost(0.01), unit: .count,
+            rationale: "teeth: the driver-inverted trajectory must actually arrive at the overview zoom it claims to measure"
+        ).evaluate(worstFinalZoomError))
+
+        // ---- Product targets ----
+        measurements.append(PerfBudget(
+            metric: "surface-host.culledArrayCpuP95", limit: .atMost(frameBudgetMs), unit: .milliseconds,
+            rationale: "Shape A's product target, on the stage Array owns: driver commit + layout + draw must fit a 120 Hz frame at every count in the sweep"
+        ).evaluate(arrayP95Culled))
+        measurements.append(PerfBudget(
+            metric: "surface-host.culledArrayCpuLateShare", limit: .atMost(10), unit: .count,
+            rationale: "the tail an average hides: at most a tenth of Array-owned steps may overrun a frame, so a good median cannot cover a bimodal gesture"
+        ).evaluate(arrayLateShareCulled))
+        measurements.append(PerfBudget(
+            metric: "surface-host.culledFlushP95", limit: .atLeast(0), unit: .milliseconds,
+            rationale: "published, never gated as Array cost: CATransaction.flush can block on the render server, so this is compositor synchronisation and NOT proof of anything presented"
+        ).evaluate(flushP95Culled))
+        measurements.append(PerfBudget(
+            metric: "surface-host.culledStepP95", limit: .atLeast(0), unit: .milliseconds,
+            rationale: "published: Array CPU plus the flush. Reported so the two stages can never be silently traded against each other"
+        ).evaluate(p95Culled))
+        measurements.append(PerfBudget(
+            metric: "surface-host.culledWorstStep", limit: .atLeast(0), unit: .milliseconds,
+            rationale: "published: over a short trace the single worst step is usually the first display cycle after a reset, which is not the gesture a user feels"
+        ).evaluate(worstCulled))
+        measurements.append(PerfBudget(
+            metric: "surface-host.armPassDrift", limit: .atMost(2), unit: .count,
+            rationale: "doc 33's A/A rule: if one arm's two ABBA observations disagree by more than 2x the environment is not stable enough for an A/B conclusion, and the durations below are not admissible"
+        ).evaluate(worstPassDrift))
+        measurements.append(PerfBudget(
+            metric: "surface-host.culledDurationSlope", limit: .atMost(0.5), unit: .milliseconds,
+            rationale: "the same target magnify-slope publishes: culling is supposed to make a camera step independent of TOTAL tile count"
+        ).evaluate(culledSlope))
+        measurements.append(PerfBudget(
+            metric: "surface-host.unculledDurationSlope", limit: .atLeast(-frameBudgetMs), unit: .milliseconds,
+            rationale: "effectively published: the slope culling has to remove (magnify-slope measured ~2 ms over 16 -> 128 shallow tiles). A slope may sit slightly BELOW zero when both endpoints are near the timer floor, so the floor is a frame rather than zero — a fast path must not be reported as failing because noise ordered two sub-millisecond medians the other way"
+        ).evaluate(unculledSlope))
+        measurements.append(PerfBudget(
+            metric: "surface-host.parkedArrayCpuP95", limit: .atMost(frameBudgetMs), unit: .milliseconds,
+            rationale: "the shippable configuration's product target: surfaces on the canvas with every real body still streaming beside it must fit a 120 Hz frame"
+        ).evaluate(arrayP95Parked))
+        measurements.append(PerfBudget(
+            metric: "surface-host.parkedDurationSlope", limit: .atMost(0.5), unit: .milliseconds,
+            rationale: "keeping N live bodies out of the plane must not reintroduce a per-tile camera cost by another route"
+        ).evaluate(parkedSlope))
+        measurements.append(PerfBudget(
+            metric: "surface-host.parkedVsNativeRatio", limit: .atMost(0.5), unit: .count,
+            rationale: "the honest headline for the slice: same tiles, same live agents, same installed count — only the body in the plane differs"
+        ).evaluate(parkedVsNative))
+        measurements.append(PerfBudget(
+            metric: "surface-host.parkedVsUnculledRatio", limit: .atLeast(0), unit: .count,
+            rationale: "published, not gated: what keeping the real bodies alive costs on top of surfaces alone. Above 1 by much means the window's layout pass still charges for the park"
+        ).evaluate(parkedVsUnculled))
+        measurements.append(PerfBudget(
+            metric: "surface-host.culledVsNativeRatio", limit: .atMost(0.5), unit: .count,
+            rationale: "a Shape A step must cost under half a native step at the top of the sweep, or replacing the body and culling together bought nothing"
+        ).evaluate(culledVsNative))
+        measurements.append(PerfBudget(
+            metric: "surface-host.unculledVsNativeRatio", limit: .atLeast(0), unit: .count,
+            rationale: "published, not gated: at equal installed count this isolates what replacing the BODY bought, separately from what culling bought"
+        ).evaluate(unculledVsNative))
+
+        let policyLabel = usesNaiveScalePolicy
+            ? "NAIVE scale policy (negative witness)"
+            : "owned bucketed scale policy"
+        let detail = "ABBA over 3 arms, \(steps) production driver commits 1.0->"
+            + String(format: "%.2f", finalZoom)
+            + " on real agent tiles x \(turnsPerAgent) turns, \(policyLabel), zone chrome on, counts "
+            + requestedCounts.map(String.init).joined(separator: "/")
+            + "; " + rows.map { row in
+                let perArm = Arm.allCases.map { key -> String in
+                    guard let s = row.arms[key] else { return "\(key.rawValue) missing" }
+                    let passes = (row.passMedians[key] ?? []).map { String(format: "%.2f", $0) }
+                        .joined(separator: "/")
+                    return String(format: "%@ arrayCPU p50 %.2f p95 %.2f (%.0f%% late) + flush p50 %.2f p95 %.2f = step p50 %.2f p95 %.2f worst %.2f ms (passes %@, %d inst, %d vis, %d tileLay, %d chrome, %d cb)",
+                                  key.rawValue, s.arrayP50, s.arrayP95, s.arrayLateShare(frameBudgetMs),
+                                  s.flushP50, s.flushP95, s.p50, s.p95, s.worst,
+                                  passes, s.installedHosts, s.onScreen, s.tileLayouts,
+                                  s.chromeRedraws, s.backingCallbacks)
+                }.joined(separator: ", ")
+                return String(format: "[%d tiles, %.1f MB, park liveness %d cards/%d px bytes/%d colors] ",
+                              row.count, row.bakedMegabytes, row.parkedStreamingCards,
+                              row.parkedStreamingPixelDelta, row.parkedBakeColors) + perArm
+            }.joined(separator: " | ")
+        return PerfScenarioResult(name: "canvas.surface-host-slope", detail: detail, measurements: measurements)
+    }
+
+    /// A Shape A surface host, exactly as `.plans/34` I15 describes it: a normal
+    /// `TileNSView` — chrome, close button, grab strip, resize edges, cursor
+    /// rects, focus adapter and z-order all inherited untouched — whose CONTENT
+    /// VIEW is one layer-hosting view carrying an Array-owned layer.
+    ///
+    /// The body owns its layer, so it also owns the response to a backing-property
+    /// change. AppKit's default would track the window/effective scale; this
+    /// applies a BUCKETED policy and counts what a camera step actually caused, so
+    /// the `contentsScale` trap becomes a measured fact rather than an assumption.
+    @MainActor
+    final class TileSurfaceProbeView: TileNSView {
+        /// Swap the owned policy for the naive one that follows the live effective
+        /// scale. This is the permanent negative witness for
+        /// `surface-host.cameraCausedRasterRequests`: with it on, a camera step
+        /// re-derives every surface and the counter must go nonzero.
+        var usesNaiveScalePolicy = false {
+            didSet { surfaceBody.usesNaiveScalePolicy = usesNaiveScalePolicy }
+        }
+
+        private let surfaceBody: SurfaceBodyView
+
+        var qaBackingCallbackCount: Int { surfaceBody.qaBackingCallbackCount }
+        var qaRasterRequestCount: Int { surfaceBody.qaRasterRequestCount }
+        func qaResetSurfaceCounters() { surfaceBody.qaResetCounters() }
+
+        init(tile: Tile, surface: CGImage) {
+            surfaceBody = SurfaceBodyView(surface: surface)
+            super.init(tile: tile)
+            setContentView(surfaceBody)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+        private final class SurfaceBodyView: NSView {
+            /// Geometric, and the same 4 steps/octave the chrome floor already
+            /// uses, so a surface's resolution changes at a bounded number of
+            /// boundaries across a gesture instead of on every step.
+            private static let stepsPerOctave: Double = 4
+
+            private let surface: CGImage
+            private let surfaceLayer = CALayer()
+
+            var usesNaiveScalePolicy = false
+            private(set) var qaBackingCallbackCount = 0
+            private(set) var qaRasterRequestCount = 0
+
+            init(surface: CGImage) {
+                self.surface = surface
+                super.init(frame: .zero)
+                surfaceLayer.contents = surface
+                surfaceLayer.contentsGravity = .resize
+                surfaceLayer.contentsScale = 2
+                surfaceLayer.isGeometryFlipped = true
+                surfaceLayer.masksToBounds = true
+                // Layer-HOSTING, not layer-backed: AppKit does not own these
+                // contents, which is the whole point — a camera step must not be
+                // able to invalidate them behind our back.
+                layer = surfaceLayer
+                wantsLayer = true
+            }
+
+            @available(*, unavailable)
+            required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+            override var isFlipped: Bool { true }
+
+            override func layout() {
+                super.layout()
+                // Guarded: an unchanged frame assignment still marks the layer
+                // dirty, which is the identity-write mistake AssistantProseView
+                // already documents.
+                if surfaceLayer.frame != bounds { surfaceLayer.frame = bounds }
+            }
+
+            /// The effective points-to-device-pixels ratio this view is currently
+            /// rasterised at: the ancestor camera scale times the window's backing
+            /// scale. A naive implementation reads exactly this and re-derives.
+            private var effectiveScale: CGFloat {
+                let backing = window?.backingScaleFactor ?? 2
+                let unit = convert(CGSize(width: 1, height: 1), to: nil)
+                return max(0.01, unit.width) * backing
+            }
+
+            private static func bucket(_ scale: CGFloat) -> CGFloat {
+                guard scale.isFinite, scale > 0 else { return 1 }
+                let bucketed = pow(2, (log2(Double(scale)) * stepsPerOctave).rounded(.down) / stepsPerOctave)
+                return bucketed.isFinite && bucketed > 0 ? CGFloat(bucketed) : scale
+            }
+
+            override func viewDidChangeBackingProperties() {
+                qaBackingCallbackCount += 1
+                // The owned policy deliberately ignores the ancestor's effective
+                // scale and follows only the DISPLAY's backing scale, which canvas
+                // zoom does not change. The naive policy is the bug this probe
+                // exists to be able to fail on.
+                let desired = usesNaiveScalePolicy
+                    ? effectiveScale
+                    : Self.bucket(window?.backingScaleFactor ?? 2)
+                guard abs(surfaceLayer.contentsScale - desired) > 0.0001 else { return }
+                surfaceLayer.contentsScale = desired
+                // A scale change is a re-derivation request: the surface has to be
+                // produced again at the new density. The probe does the real work
+                // rather than only counting, so the negative arm pays what the bug
+                // would actually cost.
+                qaRasterRequestCount += 1
+                // Re-publishing the SAME image is deliberately not a real
+                // re-rasterisation, and the negative arm is therefore a witness
+                // about the DECISION, not about the cost: with the naive policy the
+                // counter goes to steps x hosts while the duration barely moves
+                // (measured 0.12 vs 0.07 ms p50). A real producer would re-render
+                // the surface here and pay for it. Counts prove causality; do not
+                // read this arm as a cost measurement.
+                surfaceLayer.contents = surface
+                surfaceLayer.setNeedsDisplay()
+            }
+
+            func qaResetCounters() {
+                qaBackingCallbackCount = 0
+                qaRasterRequestCount = 0
+            }
+        }
     }
 
     // MARK: - Scenario: AppKit scroll-view magnification

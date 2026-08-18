@@ -658,6 +658,41 @@ if [[ "${CONTINUUM_SKIP_UI_BASELINES:-0}" == "1" ]]; then
 else
   run_app_check .build/debug/Array --perf-budget-geometry-hold-probe-check
 fi
+
+# The Shape A camera witness (.plans/34 I15). Three arms over ONE real
+# managed-agent fixture at 5/15/25/50 tiles, every step a real production
+# CanvasCameraDriver commit: deep native tiles, flat layer-hosting surface hosts at
+# the same installed count, and surface hosts culled to the viewport's presentation
+# set. Array-owned CPU and the CATransaction flush are reported as SEPARATE stages,
+# because the flush can block on the render server and folding the two together
+# reports compositor synchronisation as if it were Array cost — which is what made
+# the first version of this leg look over budget while Array's own camera work was
+# 0.07 ms. Display-dependent for the same reason as canvas.raster and
+# geometry-hold-probe; gating, not KNOWN-RED. Published in
+# docs/internals/performance-budgets.md. Takes ~90s: it bakes one distinct real
+# surface per host, so it is a memory event as well as a CPU one.
+if [[ "${CONTINUUM_SKIP_UI_BASELINES:-0}" == "1" ]]; then
+  printf '\n==> SKIPPED (display-dependent, CONTINUUM_SKIP_UI_BASELINES=1): --perf-budget-surface-host-slope-check — needs a WindowServer session to bake real agent bodies and commit surface backing stores.\n'
+else
+  run_app_check .build/debug/Array --perf-budget-surface-host-slope-check
+fi
+# The production counterpart to surface-host-slope: does surface residency hold its
+# promises in the REAL canvas, driver and tile views? Its subject is not speed but
+# the requirement speed has to survive — that a user cannot tell. It gates the
+# producer's pixel fidelity against a native bake of the same body at the same
+# instant (mean channel difference 0.000; TILE_SURFACE_HALF_SCALE=1 is the negative
+# witness that drives it to 1.156 and fails), that a surface less sharp than the
+# screen needs is REFUSED rather than shown, that a click during the settle window
+# reaches the real body, that streaming survives a park, that the flag being off
+# changes nothing, and that nothing is stranded when tiles or projects leave. The
+# gesture-start transition cost is PUBLISHED, not gated: it killed the
+# surfaced-in-motion-only policy (.plans/36) and there is no regression left in it
+# to catch. Display-dependent for the same reason as the leg above.
+if [[ "${CONTINUUM_SKIP_UI_BASELINES:-0}" == "1" ]]; then
+  printf '\n==> SKIPPED (display-dependent, CONTINUUM_SKIP_UI_BASELINES=1): --tile-surface-residency-check — needs a WindowServer session to bake real agent bodies and compare surfaced pixels.\n'
+else
+  run_app_check .build/debug/Array --tile-surface-residency-check
+fi
 # The correctness oracle for the incremental row index, and the reason the cheap
 # path is allowed to exist. transcript.delta measures what a delta COSTS and is
 # structurally blind to a fast path that is cheap and WRONG — every count budget
