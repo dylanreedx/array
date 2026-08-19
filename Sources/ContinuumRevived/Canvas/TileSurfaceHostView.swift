@@ -137,6 +137,16 @@ final class TileSurfaceParkView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         clipsToBounds = true
+        // HIDDEN, not merely clipped. A parked body draws nothing either way, but
+        // a clipped-out subtree is still walked by AppKit's per-display-cycle
+        // machinery: a 20 s sample of a real 83-tile zoom session (2026-08-19)
+        // showed ~0.7 s in tracking-area structural-region updates and deep
+        // layout chains recursing through PARKED transcript trees — a per-frame
+        // tax during gestures paid for views nobody can see. Hidden subtrees are
+        // pruned from those walks. Bakes are unaffected: a re-bake requires the
+        // body native and in-plane (parked pixels are not faithful), so nothing
+        // ever draws a parked body from here.
+        isHidden = true
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
