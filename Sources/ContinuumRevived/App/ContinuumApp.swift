@@ -2389,6 +2389,7 @@ enum ContinuumApp {
             do {
                 _ = NSApplication.shared
                 let artifact = try CanvasNSView.runFocusBorderSelfCheck()
+                try CanvasNSView.runFocusBorderActivationSelfCheck()
                 print("ContinuumRevivedFocusBorderChecks passed: \(artifact.path)")
                 Foundation.exit(0)
             } catch {

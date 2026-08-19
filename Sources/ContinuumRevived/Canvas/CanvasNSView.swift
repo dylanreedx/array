@@ -546,10 +546,11 @@ final class CanvasNSView: NSView, TokenThemed {
         // backing scale and the layout cycle — measured at zero transcript layout
         // passes per camera step — while costing the camera nothing.
         //
-        // Zero-sized rather than `isHidden`: AppKit clips children to an ancestor's
-        // bounds when drawing, so nothing parked is ever painted, but layout still
-        // runs. `isHidden` would stop the layout too, and with it the streaming this
-        // design exists to preserve.
+        // Zero-sized AND clipped (the park sets `clipsToBounds` itself — macOS 14
+        // flipped the default to NO, so relying on ancestor clipping silently
+        // stopped being true), rather than `isHidden`: clipping bounds drawing and
+        // compositing while layout still runs. `isHidden` would stop the layout
+        // too, and with it the streaming this design exists to preserve.
         surfaceParkView.frame = .zero
         surfaceParkView.identifier = NSUserInterfaceItemIdentifier("canvas.surfacePark")
         addSubview(surfaceParkView, positioned: .below, relativeTo: nil)
@@ -580,6 +581,21 @@ final class CanvasNSView: NSView, TokenThemed {
             self,
             selector: #selector(focusBorderConfigDidChange),
             name: .continuumSettingsChanged,
+            object: nil
+        )
+        // Overlay-animation suspension: the marching ants freeze while the app
+        // is inactive (and, via A3, while the window is occluded). Registered
+        // with object nil so the activation witness can post synthetically.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(appDidBecomeActiveForOverlays),
+            name: NSApplication.didBecomeActiveNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(appDidResignActiveForOverlays),
+            name: NSApplication.didResignActiveNotification,
             object: nil
         )
         // Ticket 24: a lazy-resume failure (ZoneRuntimeController.recoverManagedSessionOnFocus)
@@ -1047,12 +1063,65 @@ final class CanvasNSView: NSView, TokenThemed {
     /// deterministically without touching standard defaults.
     var focusBorderDefaults: UserDefaults = .standard
 
+    /// App-activation input to overlay-animation suspension. Defaults TRUE and
+    /// is flipped ONLY by the activation notifications — never initialized from
+    /// live `NSApp.isActive` — so headless fixtures, which never activate the
+    /// app, keep today's always-animating behavior without posting anything.
+    private var appIsActiveForOverlayAnimation = true
+
+    /// Occlusion input to the same suspension. Wired by the occlusion state
+    /// machine (Leg A3); until then it stays true.
+    private(set) var windowOcclusionVisible = true
+
+    /// The ants march only when BOTH hold: the app is active and the window is
+    /// at least partially visible. Everything else is compositor tax for motion
+    /// nobody can see.
+    private var overlayAnimationsSuspended: Bool {
+        !(appIsActiveForOverlayAnimation && windowOcclusionVisible)
+    }
+
+    private func applyOverlayAnimationSuspension() {
+        let suspended = overlayAnimationsSuspended
+        focusBorderOverlay?.setMarchingSuspended(suspended)
+        for overlay in attentionBorderOverlays.values {
+            overlay.setMarchingSuspended(suspended)
+        }
+    }
+
+    @objc private func appDidBecomeActiveForOverlays() {
+        appIsActiveForOverlayAnimation = true
+        applyOverlayAnimationSuspension()
+    }
+
+    @objc private func appDidResignActiveForOverlays() {
+        appIsActiveForOverlayAnimation = false
+        applyOverlayAnimationSuspension()
+    }
+
     private func focusBorderOverlayView() -> FocusBorderOverlayView {
         if let overlay = focusBorderOverlay { return overlay }
         let overlay = FocusBorderOverlayView(frame: .zero)
+        // Born with the CURRENT suspension: an overlay created while the app is
+        // inactive must be born static, not animate until the next transition.
+        overlay.setMarchingSuspended(overlayAnimationsSuspended)
         focusBorderOverlay = overlay
         addSubview(overlay, positioned: .above, relativeTo: nil)
         return overlay
+    }
+
+    /// Show `overlay` around the tile's screen frame, or hide it when the outset
+    /// ring would not intersect the canvas at all. Attention rings are uncapped
+    /// (one per needs-attention tile), so without this an off-screen agent keeps
+    /// an infinite animation running for pixels nobody can see. The reposition
+    /// hooks run per camera commit for every ringed tile, so visibility tracks
+    /// the camera with no extra plumbing.
+    private func showOverlayIfOnViewport(_ overlay: FocusBorderOverlayView, around tileScreenFrame: CGRect) {
+        let outset = tileScreenFrame.insetBy(dx: -overlay.gap, dy: -overlay.gap)
+        if outset.intersects(bounds) {
+            overlay.show(around: tileScreenFrame)
+        } else {
+            overlay.hide()
+        }
     }
 
     // MARK: - Resize dimension HUD (live W×H readout near the cursor)
@@ -1179,7 +1248,7 @@ final class CanvasNSView: NSView, TokenThemed {
             gap: CGFloat(config.gap),
             animationDuration: config.speed
         )
-        overlay.show(around: tileRectInCanvasSpace(view))
+        showOverlayIfOnViewport(overlay, around: tileRectInCanvasSpace(view))
         // Keep the overlay topmost — tile installs/reorders can otherwise leave
         // it under later-added tile subviews.
         overlay.removeFromSuperview()
@@ -1259,9 +1328,10 @@ final class CanvasNSView: NSView, TokenThemed {
         for tileId in attentionTileIds.sorted(by: { $0.uuidString < $1.uuidString }) {
             guard let view = tileViews[tileId] else { continue }
             let overlay = attentionBorderOverlays[tileId] ?? FocusBorderOverlayView(frame: .zero)
+            overlay.setMarchingSuspended(overlayAnimationsSuspended)
             attentionBorderOverlays[tileId] = overlay
             overlay.configure(color: color, gap: gap, animationDuration: FocusBorderConfig.attentionSpeed)
-            overlay.show(around: tileRectInCanvasSpace(view))
+            showOverlayIfOnViewport(overlay, around: tileRectInCanvasSpace(view))
             overlay.removeFromSuperview()
             addSubview(overlay, positioned: .above, relativeTo: nil)
         }
@@ -1290,14 +1360,14 @@ final class CanvasNSView: NSView, TokenThemed {
     /// on pan/zoom/move/resize. No-op when `tileId` is not bordered.
     private func repositionFocusBorderIfNeeded(for tileId: UUID) {
         guard tileId == borderedTileId, let view = tileViews[tileId] else { return }
-        focusBorderOverlayView().show(around: tileRectInCanvasSpace(view))
+        showOverlayIfOnViewport(focusBorderOverlayView(), around: tileRectInCanvasSpace(view))
     }
 
     private func repositionAttentionBorderIfNeeded(for tileId: UUID) {
         guard attentionTileIds.contains(tileId),
               let view = tileViews[tileId],
               let overlay = attentionBorderOverlays[tileId] else { return }
-        overlay.show(around: tileRectInCanvasSpace(view))
+        showOverlayIfOnViewport(overlay, around: tileRectInCanvasSpace(view))
     }
 
     /// Clear the focus border when scope leaves all tiles (scope→canvas/modal).
@@ -1333,6 +1403,25 @@ final class CanvasNSView: NSView, TokenThemed {
     /// QA: freeze the dash phase for a deterministic offscreen capture.
     func qaFreezeFocusBorder(phase: CGFloat = 0) {
         focusBorderOverlay?.qaFreeze(phase: phase)
+    }
+
+    /// QA: is the focus overlay's marching loop attached right now, regardless
+    /// of which tile it frames. `qaFocusBorderActive` folds animation and
+    /// geometry together; the activation witness needs them apart, because its
+    /// subject is "visible but FROZEN".
+    var qaFocusBorderAnimating: Bool {
+        focusBorderOverlay?.qaIsAnimating == true
+    }
+
+    func qaAttentionBorderAnimating(for tileId: UUID) -> Bool {
+        attentionBorderOverlays[tileId]?.qaIsAnimating == true
+    }
+
+    /// QA: the attention ring's painted frame, or nil when it is not on screen —
+    /// same screen-truth contract as `qaFocusBorderFrame`.
+    func qaAttentionBorderFrame(for tileId: UUID) -> CGRect? {
+        guard let overlay = attentionBorderOverlays[tileId], !overlay.isHidden else { return nil }
+        return overlay.frame
     }
 
     func qaAttentionBorderActive(for tileId: UUID) -> Bool {
@@ -1695,6 +1784,13 @@ final class CanvasNSView: NSView, TokenThemed {
             }
             if let pointer, tileView.bounds.contains(tileView.convert(pointer, from: nil)) {
                 if liveness.pointerInsideSince == nil { liveness.pointerInsideSince = now }
+                // Rest ACHIEVED is recorded separately from rest in progress: the
+                // policy's exit hysteresis lingers on this stamp, and it must
+                // never be set by a pointer merely passing through.
+                if let since = liveness.pointerInsideSince,
+                   now - since >= residencyTuning.pointerRestDelay {
+                    liveness.lastPointerRestingAt = now
+                }
             } else {
                 liveness.pointerInsideSince = nil
             }
@@ -1827,11 +1923,35 @@ final class CanvasNSView: NSView, TokenThemed {
         let surfaced = surfacedTiles.count
         guard surfaced != lastLoggedSurfacedCount else { return }
         lastLoggedSurfacedCount = surfaced
-        let eligible = tileViewsInVisualOrder.filter { $0.surfaceableBody != nil }.count
+        let eligibleViews = tileViewsInVisualOrder.filter { $0.surfaceableBody != nil }
+        // WHY the count moved, not just that it did. A resting canvas that flaps
+        // 82<->83 has several possible promoters — a liveness clause, a hitTest
+        // (AppKit hit-tests for scroll routing, tooltips and cursor updates,
+        // background windows included), or an AX client polling the tree — and the
+        // bare count cannot name one. "outOfBand" is a native tile whose last
+        // DECISION was still .surfaced: a hitTest/AX/focus promotion the policy
+        // pass has not caught up with yet. The trigger counters are cumulative;
+        // read deltas between consecutive lines.
+        var reasons: [String: Int] = [:]
+        for view in eligibleViews where view.surfaceResidency != .surfaced {
+            switch lastResidencyDecisions[view.tile.id] {
+            case .native(let reason): reasons[reason.rawValue, default: 0] += 1
+            case .surfaced, nil: reasons["outOfBand", default: 0] += 1
+            }
+        }
+        let hitTestPromotes = eligibleViews.reduce(UInt64(0)) { $0 + $1.qaHitTestPromotionCount }
+        let axReads = eligibleViews.reduce(UInt64(0)) { $0 + $1.accessibilityAccessCount }
+        let native = reasons
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key) \($0.value)" }
+            .joined(separator: ", ")
         // Composed as a String first: `OSLogMessage` is built from one interpolated
         // literal and cannot be concatenated.
-        let line = "surfaced \(surfaced) of \(eligible) eligible tiles, "
+        let line = "surfaced \(surfaced) of \(eligibleViews.count) eligible tiles, "
             + "\(tileSurfaceStore.totalBytes / 1_024) KB of surfaces"
+            + " | native by: [\(native)]"
+            + " | promotions \(qaSurfacePromotionCount) demotions \(qaSurfaceDemotionCount)"
+            + " | hitTest promotes \(hitTestPromotes), ax reads \(axReads)"
         Logger(subsystem: "continuum.canvas", category: "residency").notice("\(line, privacy: .public)")
     }
 
@@ -6300,6 +6420,92 @@ final class CanvasNSView: NSView, TokenThemed {
         return artifact
     }
 
+    /// The marching ants must march ONLY while the app is active and the ringed
+    /// tile is on the viewport.
+    ///
+    /// An infinite `lineDashPhase` animation is re-rasterized by the RENDER
+    /// SERVER every display refresh for as long as the window is on screen —
+    /// app activation, key status and the residency flag are all irrelevant to
+    /// it. Measured live (2026-08-19): WindowServer held at 17-23% CPU by an
+    /// idle, backgrounded Array, and the whole machine chopped on window drags
+    /// and space switches; the ants were the dominant cause. The rule: suspended
+    /// (app inactive, or later occluded) means the border stays VISIBLE with a
+    /// frozen dash phase; off-viewport means hidden entirely. Fixtures that
+    /// never post activation notifications see today's behavior byte-for-byte —
+    /// the state flips ONLY on the notifications this check posts synthetically
+    /// (precedent: UIProbeGeometry posts didResignKey).
+    static func runFocusBorderActivationSelfCheck() throws {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(m): return m } }
+        }
+        func expect(_ c: @autoclosure () -> Bool, _ m: String) throws {
+            if !c() { throw CheckError.failed(m) }
+        }
+
+        let tileAId = UUID(uuidString: "00000000-0000-0000-0000-0000000006A1")!
+        let tileBId = UUID(uuidString: "00000000-0000-0000-0000-0000000006B2")!
+        let tileA = Tile(id: tileAId, kind: .note, title: "ANTS_A", frame: TileFrame(x: 60, y: 60, width: 280, height: 200), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let tileB = Tile(id: tileBId, kind: .note, title: "ANTS_B", frame: TileFrame(x: 420, y: 60, width: 280, height: 200), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileA, tileB], groups: [], lastActiveTileId: nil))
+        let focusBroker = FocusBroker()
+        canvas.focusBroker = focusBroker
+        focusBroker.onAcceptedTileFocus = { [weak canvas] id in canvas?.markActive(tileId: id) }
+        focusBroker.onAcceptedCanvasScope = { [weak canvas] in canvas?.clearFocusBorder() }
+        canvas.frame = NSRect(x: 0, y: 0, width: 800, height: 360)
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+        }
+        let viewA = DescriptorTileNSView(tile: tileA)
+        let viewB = DescriptorTileNSView(tile: tileB)
+        canvas.install(tileView: viewA, for: tileA)
+        canvas.install(tileView: viewB, for: tileB)
+        canvas.layoutSubtreeIfNeeded()
+
+        // 1) Focus A in the default (active) state: the ants march.
+        let titleAPoint = viewA.convert(NSPoint(x: viewA.bounds.midX, y: TileNSView.titleBarHeight / 2), to: nil)
+        AppDelegate.routeTileClickFocus(at: titleAPoint, in: canvas, focusBroker: focusBroker)
+        try expect(canvas.qaFocusBorderAnimating, "baseline: the ants must march while the app is active")
+
+        // 2) The app resigns active: the border stays VISIBLE, the ants FREEZE.
+        NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: nil)
+        try expect(canvas.qaFocusBorderFrame != nil, "resigning active must keep the focus border visible — the glanceable cue survives, only the motion stops")
+        try expect(!canvas.qaFocusBorderAnimating,
+                   "resigning active must freeze the ants — an infinite dash animation makes the render server produce a frame for this window at every display refresh, forever")
+
+        // 3) A camera commit while inactive must not re-attach the loop
+        //    (`show` runs per commit for the bordered tile).
+        canvas.setViewport(CanvasViewport(x: 10, y: 10, zoom: 1))
+        try expect(canvas.qaFocusBorderFrame != nil, "the border must survive a camera commit while inactive")
+        try expect(!canvas.qaFocusBorderAnimating, "a camera commit while inactive re-attached the marching loop")
+
+        // 4) An overlay BORN while inactive is born static.
+        canvas.updateAttentionBorder(for: tileBId, status: .needsAttention)
+        try expect(canvas.qaAttentionBorderFrame(for: tileBId) != nil, "an attention ring created while inactive must still be visible")
+        try expect(!canvas.qaAttentionBorderAnimating(for: tileBId), "an attention ring created while inactive must be born with its dashes frozen")
+
+        // 5) Becoming active resumes both, instantly.
+        NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        try expect(canvas.qaFocusBorderAnimating, "becoming active must resume the focus ants")
+        try expect(canvas.qaAttentionBorderAnimating(for: tileBId), "becoming active must resume attention rings")
+
+        // 6) Off-viewport rings carry no animation at all: pan both tiles far
+        //    off screen — the overlays hide (hide() detaches the animation).
+        canvas.setViewport(CanvasViewport(x: 50_000, y: 50_000, zoom: 1))
+        try expect(canvas.qaFocusBorderFrame == nil,
+                   "a bordered tile panned off the viewport must not keep an animated ring on the canvas — attention rings are uncapped, so N offscreen agents would mean N infinite animations")
+        try expect(canvas.qaAttentionBorderFrame(for: tileBId) == nil, "an attention ring off the viewport must hide")
+
+        // 7) Panning back restores both, animating (the app is active).
+        canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+        try expect(canvas.qaFocusBorderAnimating, "panning back must restore the animated focus ring")
+        try expect(canvas.qaAttentionBorderAnimating(for: tileBId), "panning back must restore the attention ring")
+    }
+
     // MARK: - Zone create/move gesture check (T19)
 
     /// P1 (zone naming): a drag-created zone is auto-named "<base> N" (default
@@ -7212,6 +7418,30 @@ final class FocusBorderOverlayView: NSView {
         shape.strokeColor = color.cgColor
     }
 
+    /// While suspended (app inactive, window occluded) the border stays visible
+    /// with a frozen dash phase and the infinite animation is DETACHED. An
+    /// attached `lineDashPhase` loop makes the render server produce a frame for
+    /// this window at every display refresh, forever — measured live as the
+    /// dominant cause of system-wide chop while Array sat backgrounded
+    /// (2026-08-19). Suspension is pushed by the canvas from activation and
+    /// occlusion state; it defaults OFF so fixtures that never post those
+    /// notifications see the historical behavior byte-for-byte.
+    private(set) var marchingSuspended = false
+
+    func setMarchingSuspended(_ suspended: Bool) {
+        guard suspended != marchingSuspended else { return }
+        marchingSuspended = suspended
+        if suspended {
+            shape.removeAnimation(forKey: Self.animationKey)
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            shape.lineDashPhase = 0
+            CATransaction.commit()
+        } else if !isHidden, shape.animation(forKey: Self.animationKey) == nil {
+            startMarchingAnts()
+        }
+    }
+
     /// Position the overlay around `tileScreenFrame` (the focused tile's frame),
     /// outset by `gap`, show it, and make sure the marching animation is attached.
     func show(around tileScreenFrame: CGRect) {
@@ -7224,8 +7454,9 @@ final class FocusBorderOverlayView: NSView {
         // Attach-if-missing, never re-add: this runs on every camera commit
         // while a focused tile is on screen, and re-adding the infinite loop
         // restarted the dash phase each time — ants frozen mid-gesture, plus a
-        // CA animation mutation per step.
-        if shape.animation(forKey: Self.animationKey) == nil {
+        // CA animation mutation per step. While suspended, never attach: a
+        // camera commit in an inactive app must not resurrect the loop.
+        if !marchingSuspended, shape.animation(forKey: Self.animationKey) == nil {
             startMarchingAnts()
         }
     }
