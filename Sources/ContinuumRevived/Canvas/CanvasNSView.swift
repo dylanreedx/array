@@ -1859,7 +1859,12 @@ final class CanvasNSView: NSView, TokenThemed {
             let accessibilityCount = tileView.accessibilityAccessCount
             if liveness.lastAccessibilityCount != accessibilityCount {
                 liveness.lastAccessibilityCount = accessibilityCount
-                liveness.lastAccessibilityAccessAt = now
+                // A passive sweeper's reads are counted but are not liveness;
+                // stamping them would make the policy finish what
+                // `accessibilityChildren` correctly refused to start.
+                if TileNSView.assistiveClientActive() {
+                    liveness.lastAccessibilityAccessAt = now
+                }
             }
             tileLiveness[tileId] = liveness
 

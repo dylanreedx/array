@@ -317,6 +317,7 @@ enum TileSurfaceResidencyChecks {
         try checkNothingIsStranded()
         try checkAppearanceChangeGivesTheBodyBack()
         try checkAccessibilityFindsTheRealBody()
+        try checkAPassiveAccessibilitySweepPromotesNothing()
         try checkFileAndNoteTilesSurface()
         try checkAGestureThatBeginsAllNativeConvergesAtSettle()
         try checkSurfaceMemoryIsBounded()
@@ -1225,6 +1226,10 @@ enum TileSurfaceResidencyChecks {
     private static func checkAccessibilityFindsTheRealBody() throws {
         let world = World(tileCount: 3)
         defer { world.teardown() }
+        // This witness is the ASSISTIVE arm; the passive arm is the next check.
+        let originalProvider = TileNSView.assistiveClientActive
+        defer { TileNSView.assistiveClientActive = originalProvider }
+        TileNSView.assistiveClientActive = { true }
         world.canvas.surfaceResidencyEnabled = true
         world.quiesceAndSurface()
         let tileId = world.tiles[0].id
@@ -1301,6 +1306,51 @@ enum TileSurfaceResidencyChecks {
         try expect(world.canvas.qaSurfacePromotionCount == 0,
                    "\(world.canvas.qaSurfacePromotionCount) tiles were promoted with no accessibility "
                    + "client asking — the AX hook must be free when nobody is reading")
+    }
+
+    /// **A passive accessibility sweep promotes nothing.** The hand-the-body-back
+    /// rule above was written for VoiceOver, but the AX API has passive clients —
+    /// launchers, window managers, screen recorders — that walk the whole tree with
+    /// no user behind them. Measured live (2026-08-19): one such sweep touched all
+    /// 83 tiles in a pass, every surface on the canvas handed its body back at
+    /// once, and the 4-bake-per-pass recovery spent twenty seconds flipping tiles
+    /// while a zoom ran through it at 5 fps. So the body is handed back only when
+    /// an assistive client is genuinely active; a passive sweeper still gets the
+    /// tile (and its read is still counted for the log), but nothing on screen
+    /// moves.
+    private static func checkAPassiveAccessibilitySweepPromotesNothing() throws {
+        let world = World(tileCount: 6)
+        defer { world.teardown() }
+        let originalProvider = TileNSView.assistiveClientActive
+        defer { TileNSView.assistiveClientActive = originalProvider }
+        TileNSView.assistiveClientActive = { false }
+        world.canvas.surfaceResidencyEnabled = true
+        world.quiesceAndSurface()
+        world.canvas.qaResetSurfaceResidencyCounters()
+
+        // The sweep: every tile read, twice, the way a full-tree walker does.
+        for _ in 0..<2 {
+            for tile in world.tiles {
+                _ = world.agentViews[tile.id]?.accessibilityChildren()
+            }
+        }
+        for tile in world.tiles {
+            try expect(world.agentViews[tile.id]?.surfaceResidency == .surfaced,
+                       "a passive AX sweep made a tile hand its body back with no assistive client")
+        }
+
+        // And the residency pass must not finish the job: the reads were counted,
+        // but with no assistive client they are not liveness.
+        world.evaluateResidency(passes: 2)
+        world.advance(0.3)
+        world.evaluateResidency(passes: 2)
+        try expect(world.canvas.qaSurfacePromotionCount == 0,
+                   "\(world.canvas.qaSurfacePromotionCount) promotions after a passive sweep — the "
+                   + "policy treated counted reads as liveness with no assistive client attached")
+        for tile in world.tiles {
+            try expect(world.agentViews[tile.id]?.surfaceResidency == .surfaced,
+                       "the residency pass took a body back after a passive AX sweep")
+        }
     }
 
     /// **Resident surface memory is bounded, and bounding it costs nothing a user

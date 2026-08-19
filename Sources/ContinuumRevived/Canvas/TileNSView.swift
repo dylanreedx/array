@@ -579,9 +579,22 @@ class TileNSView: NSView, TokenThemed {
     /// This costs nothing when nobody is asking: over a full residency check —
     /// settles, evaluations and six camera steps — AppKit called this **zero** times
     /// with no accessibility client attached.
+    /// Is an assistive client — one with a user behind it — actually attached?
+    /// The AX API has passive clients too (launchers, window managers, screen
+    /// recorders) that walk the whole tree with nobody reading: measured live
+    /// (2026-08-19), one such sweep touched all 83 tiles in a single pass and the
+    /// promote-on-read rule below turned it into every surface on the canvas
+    /// handing its body back at once. Injectable so the witnesses can pin both
+    /// answers; static because `_installLayer` gives a tile no canvas reference.
+    static var assistiveClientActive: () -> Bool = {
+        NSWorkspace.shared.isVoiceOverEnabled || NSWorkspace.shared.isSwitchControlEnabled
+    }
+
     override func accessibilityChildren() -> [Any]? {
         accessibilityAccessCount &+= 1
-        if surfaceResidency == .surfaced { promoteBodyToNative() }
+        // Reads are ALWAYS counted (the residency log attributes sweeps by this
+        // number), but the body is handed back only for a client that can see it.
+        if surfaceResidency == .surfaced, Self.assistiveClientActive() { promoteBodyToNative() }
         return super.accessibilityChildren()
     }
 
