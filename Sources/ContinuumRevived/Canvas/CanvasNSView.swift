@@ -297,6 +297,10 @@ final class CanvasNSView: NSView, TokenThemed {
     private(set) var qaSurfaceRefusedStaleCount = 0
     private(set) var qaSurfaceRefusedSharpnessCount = 0
     private(set) var qaSurfaceRefusedBudgetCount = 0
+    /// Too-soft tiles a camera step left surfaced because the per-step promotion
+    /// cap was spent. Deferral is the storm policy working; this is what makes it
+    /// observable instead of indistinguishable from a stall.
+    private(set) var qaSurfaceSharpnessDeferredCount = 0
 
     func qaResetSurfaceResidencyCounters() {
         qaSurfaceDemotionCount = 0
@@ -307,6 +311,7 @@ final class CanvasNSView: NSView, TokenThemed {
         qaSurfaceStalePromotionCount = 0
         qaSurfaceEvictionCount = 0
         qaSurfaceRefusedMemoryCount = 0
+        qaSurfaceSharpnessDeferredCount = 0
         tileSurfaceStore.qaResetCounters()
     }
 
@@ -1416,11 +1421,13 @@ final class CanvasNSView: NSView, TokenThemed {
         // Sharpness is enforced HERE, per step, and not once per gesture.
         //
         // A tile admitted as sharp-enough at zoom 1.0 is not sharp enough two steps
-        // into a zoom to 2.0, and deciding once per gesture would show exactly the
-        // soft text this design promises never to show. Checking every step makes the
-        // guarantee "sharp in every frame" rather than "sharp when it was surfaced" —
-        // which matters more under Option A, where a tile can stay surfaced across
-        // many gestures.
+        // into a zoom to 2.0, and deciding once per gesture would leave it soft for
+        // the whole gesture. The per-step guarantee is CONVERGENCE, not
+        // instantaneous sharpness: each step spends a capped promotion budget on
+        // the too-soft tiles nearest the gesture anchor, because promoting them all
+        // at once was the zoom-in storm (19 promotions, a 1.65 s gap, in a real
+        // 89-tile session). The settled heartbeat catches up whatever a gesture
+        // deferred.
         //
         // O(surfaced) over a maintained set, deliberately not a view-tree walk —
         // the same lesson `visibleTileViews` above records.
@@ -1658,6 +1665,17 @@ final class CanvasNSView: NSView, TokenThemed {
         let zoom = canvasState.viewport.zoom
         let backingScale = window?.backingScaleFactor ?? 2
         var bakeBudget = residencyTuning.maxBakesPerPass
+        // The catch-up half of the sharpness cap: tiles a mid-gesture step left
+        // deliberately soft (see `enforceSurfaceSharpness`) are promoted here once
+        // the camera is settled — capped per pass too, because a storm moved to
+        // the settle edge is still a storm. Zero while the camera moves: motion
+        // spend is the per-step cap's, and only the per-step cap's.
+        var sharpnessCatchUpBudget =
+            cameraDriver.isSettled ? residencyTuning.maxSharpnessCatchUpPromotionsPerPass : 0
+        let visibleWorld = worldPlane.bounds
+        let catchUpLead = visibleWorld.insetBy(
+            dx: -visibleWorld.width * 0.25, dy: -visibleWorld.height * 0.25
+        )
 
         // Visible first: if the bake budget runs out, it should run out on tiles
         // nobody can see. One rect test per tile against a value already to hand.
@@ -1738,6 +1756,24 @@ final class CanvasNSView: NSView, TokenThemed {
                         tileSurfaceStore.drop(tileId)
                         qaSurfacePromotionCount += 1
                         qaSurfaceStalePromotionCount += 1
+                    }
+                    // A quiet tile still surfaced TOO SOFT: the per-step cap
+                    // deferred it mid-gesture, and softness at rest is plainly
+                    // visible, so it is caught up here. Promote only — a bake
+                    // needs the native body (a parked body's pixels are not
+                    // faithful), so the NEXT pass's too-soft re-bake in
+                    // `surfaceIfAdmissible` is what returns it, sharp at the
+                    // current zoom. The surface is kept: its revision still
+                    // matches, and dropping it is what the stale path is for.
+                    if tileView.surfaceResidency == .surfaced,
+                       sharpnessCatchUpBudget > 0,
+                       tileView.frame.intersects(catchUpLead),
+                       let surface = tileSurfaceStore.surface(for: tileId),
+                       !surface.isSharpEnough(forZoom: zoom, backingScale: backingScale) {
+                        tileView.promoteBodyToNative()
+                        surfacedTiles.removeValue(forKey: tileId)
+                        qaSurfacePromotionCount += 1
+                        sharpnessCatchUpBudget -= 1
                     }
                     continue
                 }
@@ -1928,10 +1964,19 @@ final class CanvasNSView: NSView, TokenThemed {
         surfacedTiles.removeAll()
     }
 
-    /// Per camera step: a surfaced tile whose surface has become softer than the
-    /// screen needs goes back to its real body immediately, in the same step that
-    /// made it so. This is what makes "a surfaced tile never looks softer than the
-    /// native one" true in every frame rather than only at gesture start.
+    /// Per camera step: surfaced tiles whose surfaces have become softer than the
+    /// screen needs go back to their real bodies — capped per step, nearest the
+    /// gesture anchor first.
+    ///
+    /// Promoting every too-soft tile in the same step that made it so was the
+    /// zoom-in STORM: a real 89-tile session paid 19 promotions in one step and a
+    /// 1.65 s frame gap, because each promotion is a reparent plus the transcript
+    /// rows it materialises. The guarantee is now convergence, not instantaneous
+    /// sharpness: each step spends `maxSharpnessPromotionsPerStep` on the tiles
+    /// nearest the gesture's anchor (on-screen before lead-rect), the rest stay
+    /// briefly soft and are counted, and the settled heartbeat catches them up.
+    /// Brief peripheral softness on moving content was chosen over the
+    /// whole-canvas hitch (2026-08-19, `.plans/38`).
     private func enforceSurfaceSharpness() {
         guard surfaceResidencyEnabled, !surfacedTiles.isEmpty else { return }
         // `TileNSView.hitTest` can promote a tile on its own, to keep a click from
@@ -1947,19 +1992,46 @@ final class CanvasNSView: NSView, TokenThemed {
         // a tile entering the screen is visibly soft.
         let visibleWorld = worldPlane.bounds
         let lead = visibleWorld.insetBy(dx: -visibleWorld.width * 0.25, dy: -visibleWorld.height * 0.25)
-        var promoted: [UUID] = []
+        var soft: [(view: TileNSView, visible: Bool, distance: CGFloat)] = []
+        let anchorWorld = worldPlane.convert(cameraDriver.anchor, from: self)
         for (tileId, tileView) in surfacedTiles {
             guard tileView.frame.intersects(lead) else { continue }
-            let surface = tileSurfaceStore.surface(for: tileId)
-            // A missing surface is not a state this can be in, but if it ever is,
-            // native is the answer.
-            if let surface, surface.isSharpEnough(forZoom: zoom, backingScale: backingScale) { continue }
-            tileView.promoteBodyToNative()
+            guard let surface = tileSurfaceStore.surface(for: tileId) else {
+                // A missing surface is not a state this can be in, but if it ever
+                // is, native is the answer — immediately and outside the cap,
+                // because that tile is showing nothing at all, not soft text.
+                tileView.promoteBodyToNative()
+                surfacedTiles.removeValue(forKey: tileId)
+                qaSurfacePromotionCount += 1
+                continue
+            }
+            if surface.isSharpEnough(forZoom: zoom, backingScale: backingScale) { continue }
+            let mid = CGPoint(x: tileView.frame.midX, y: tileView.frame.midY)
+            soft.append((
+                view: tileView,
+                visible: tileView.frame.intersects(visibleWorld),
+                distance: hypot(mid.x - anchorWorld.x, mid.y - anchorWorld.y)
+            ))
+        }
+        guard !soft.isEmpty else { return }
+        // A settled one-shot writer (a navigation snap, a restore) has no later
+        // steps to spread the work across, and a hitch with no motion behind it is
+        // invisible — so only an in-flight gesture is capped.
+        let cap = cameraDriver.isSettled ? Int.max : residencyTuning.maxSharpnessPromotionsPerStep
+        soft.sort { lhs, rhs in
+            if lhs.visible != rhs.visible { return lhs.visible }
+            return lhs.distance < rhs.distance
+        }
+        for (index, entry) in soft.enumerated() {
+            guard index < cap else {
+                qaSurfaceSharpnessDeferredCount += soft.count - index
+                break
+            }
+            entry.view.promoteBodyToNative()
+            surfacedTiles.removeValue(forKey: entry.view.tile.id)
             qaSurfacePromotionCount += 1
             qaSurfaceRefusedSharpnessCount += 1
-            promoted.append(tileId)
         }
-        for tileId in promoted { surfacedTiles.removeValue(forKey: tileId) }
     }
 
     /// Give a tile its real body back and forget its surface, before the tile view

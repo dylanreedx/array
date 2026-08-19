@@ -301,7 +301,7 @@ enum TileSurfaceResidencyChecks {
         try checkQuietSurfacesAndLiveStaysNative()
         try checkHysteresisIgnoresAPointerSweep()
         try checkPixelEquivalence()
-        try checkSharpnessNeverRegresses()
+        try checkSharpnessConvergesWithoutAStorm()
         try checkContentWhileSurfacedPromotesAndSurvives()
         try checkClickOnASurfacedTileReachesTheBody()
         try checkFocusNeverLandsOnAPicture()
@@ -584,45 +584,98 @@ enum TileSurfaceResidencyChecks {
     /// docs/internals/performance-budgets.md for both measured numbers.
     private static let surfaceFidelityThreshold = 0.25
 
-    /// Zooming IN past what a surface carries must refuse the surface, not show a
-    /// soft one — in the same step that made it so, not at the next gesture.
+    /// Zooming IN past what the surfaces carry must sharpen the canvas WITHOUT a
+    /// storm: capped per step, nearest the gesture anchor first, converging to
+    /// all-sharp — never everything at once, and never permanently soft.
     ///
-    /// Under Option A the tiles are already surfaced before the zoom starts, so this
-    /// exercises `enforceSurfaceSharpness`, which runs per camera step over the
-    /// maintained surfaced set. It is scoped to tiles at or near the viewport: a tile
-    /// nobody can see is not showing anything soft, and zooming in shrinks the
-    /// visible set, which is what makes the rule affordable.
-    private static func checkSharpnessNeverRegresses() throws {
-        let world = World(tileCount: 4)
+    /// Promoting every too-soft surfaced tile in one camera step was the zoom-in
+    /// storm: a real 89-tile session paid 19 promotions in a single step and a
+    /// 1.65 s frame gap (`.plans/38`). The rule now spreads that work — at most
+    /// `maxSharpnessPromotionsPerStep` per camera step, ordered by distance from
+    /// the gesture anchor so the tile the user is zooming TOWARD sharpens first;
+    /// after the gesture settles, the heartbeat catches the deferred rest up at
+    /// `maxSharpnessCatchUpPromotionsPerPass` per pass. The periphery is briefly
+    /// soft while that converges, which is the chosen trade (2026-08-19): every
+    /// felt complaint has been chop, never softness, and a mid-gesture blur on
+    /// moving content is close to invisible while a whole-canvas stall is not.
+    private static func checkSharpnessConvergesWithoutAStorm() throws {
+        let world = World(tileCount: 6)
         defer { world.teardown() }
         world.canvas.surfaceResidencyEnabled = true
         world.quiesceAndSurface()
-        try expect(world.canvas.tileSurfaceStore.count > 0, "need surfaces before testing refusal")
+        try expect(world.canvas.qaSurfacedTileViews.count == world.tiles.count,
+                   "need every tile surfaced before zooming in")
         let bakedScale = world.canvas.tileSurfaceStore.surface(for: world.tiles[0].id)?.bakedScale ?? 0
         try expect(bakedScale > 0, "a stored surface must know its own density")
 
         world.canvas.qaResetSurfaceResidencyCounters()
         let backing = world.window.backingScaleFactor
         let tooSharp = Double(bakedScale / backing) * 2
-        world.cameraStep(toZoom: tooSharp)
+        // The fixture's viewport starts at (0, 0, zoom 1), so the anchor's WORLD
+        // point is numerically its canvas point — which is what the ordering
+        // assertion below measures tile distance against.
+        let anchor = CGPoint(x: 800, y: 500)
+        world.cameraStep(toZoom: tooSharp, anchor: anchor)
         world.pump()
 
-        let softAndVisible = world.canvas.visibleTileViews.filter { $0.surfaceResidency == .surfaced }
-        try expect(softAndVisible.isEmpty,
-                   "zooming past the baked density left \(softAndVisible.count) VISIBLE tiles surfaced at "
-                   + "zoom \(tooSharp) — those are showing soft text")
-        try expect(world.canvas.qaSurfaceRefusedSharpnessCount > 0,
-                   "the refusal must be the SHARPNESS one, so the reason is observable and not a coincidence")
+        // 1. No storm: one step promotes at most the cap, and the deferral is
+        // observable rather than silent.
+        let stepCap = world.canvas.residencyTuning.maxSharpnessPromotionsPerStep
+        let afterFirstStep = world.canvas.qaSurfacePromotionCount
+        try expect(afterFirstStep <= stepCap,
+                   "one zoom-in step promoted \(afterFirstStep) tiles — that is the storm; the cap is \(stepCap)")
+        try expect(afterFirstStep == stepCap,
+                   "every tile is too soft, so the step must spend its whole budget: "
+                   + "promoted \(afterFirstStep) of a cap of \(stepCap)")
+        try expect(world.canvas.qaSurfaceSharpnessDeferredCount > 0,
+                   "the tiles the cap left soft must be counted, or a storm and a stall are indistinguishable")
 
-        // **And the refusal must not be permanent.** A fresh surface that is too
-        // soft for the current zoom has to trigger a re-bake at that zoom, exactly
-        // as a stale one does. Without that, one zoom-in turned residency off for
-        // good: every pass found a matching revision, skipped the bake, failed the
-        // sharpness gate, and left the tile native — a real session measured 0 of 8
+        // 2. Ordering: the promoted tile is the VISIBLE too-soft one nearest the
+        // anchor — the tile the user is zooming toward, which is where softness
+        // would actually be seen.
+        func anchorDistance(_ view: TileNSView) -> Double {
+            let mid = CGPoint(x: view.frame.midX, y: view.frame.midY)
+            return Double(hypot(mid.x - anchor.x, mid.y - anchor.y))
+        }
+        let promoted = world.canvas.visibleTileViews.filter { $0.surfaceResidency == .native }
+        let nearestVisible = world.canvas.visibleTileViews.min {
+            anchorDistance($0) < anchorDistance($1)
+        }
+        try expect(promoted.count == 1, "expected exactly one native tile after one capped step, got \(promoted.count)")
+        try expect(promoted.first === nearestVisible,
+                   "the capped promotion must go to the tile nearest the anchor, not an arbitrary one")
+
+        // 3. Each further step makes capped progress — never a burst.
+        world.cameraStep(toZoom: tooSharp * 1.05, anchor: anchor)
+        world.pump()
+        let afterSecondStep = world.canvas.qaSurfacePromotionCount
+        try expect(afterSecondStep - afterFirstStep <= stepCap,
+                   "the second step promoted \(afterSecondStep - afterFirstStep), over the per-step cap of \(stepCap)")
+        try expect(afterSecondStep > afterFirstStep,
+                   "with soft tiles still visible, the second step must keep converging")
+
+        // 4. Settle: the heartbeat catches the deferred tiles up, ALSO capped per
+        // pass — a storm moved to the settle edge is still a storm — and the
+        // too-soft re-bake returns every quiet tile to a surface sharp at the new
+        // zoom. Without that, one zoom-in turned residency off for good: every
+        // pass found a matching revision, skipped the bake, failed the sharpness
+        // gate, and left the tile native — a real session measured 0 of 8
         // surfaced for 36 seconds until the user happened to zoom back out.
-        world.settle()
+        let passCap = world.canvas.residencyTuning.maxSharpnessCatchUpPromotionsPerPass
+        var beforePass = world.canvas.qaSurfacePromotionCount
+        world.settle() // fires cameraGestureDidSettle, which is itself one pass
+        try expect(world.canvas.qaSurfacePromotionCount - beforePass <= passCap,
+                   "the settle pass promoted \(world.canvas.qaSurfacePromotionCount - beforePass), "
+                   + "over the per-pass catch-up cap of \(passCap)")
         world.advance(world.canvas.residencyTuning.contentQuietDelay + 0.05)
-        world.evaluateResidency(passes: 4)
+        for _ in 0..<12 {
+            beforePass = world.canvas.qaSurfacePromotionCount
+            world.evaluateResidency()
+            try expect(world.canvas.qaSurfacePromotionCount - beforePass <= passCap,
+                       "one settled pass promoted \(world.canvas.qaSurfacePromotionCount - beforePass), "
+                       + "over the per-pass catch-up cap of \(passCap)")
+            if world.canvas.qaSurfacedTileViews.count == world.tiles.count { break }
+        }
         try expect(world.canvas.qaSurfacedTileViews.count == world.tiles.count,
                    "after settling zoomed IN, quiet tiles must re-bake at the new zoom and surface again: "
                    + "\(world.canvas.qaSurfacedTileViews.count) of \(world.tiles.count) surfaced")

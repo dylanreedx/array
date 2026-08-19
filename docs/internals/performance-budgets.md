@@ -643,10 +643,20 @@ must not be able to tell.** What it gates:
   the same content and resolution, taken while the body is still in the plane,
   mean channel difference **0.000** against a 0.25 threshold.
   `TILE_SURFACE_HALF_SCALE=1` is the negative witness and drives it to **1.156**;
-- **sharpness never regresses** — zooming past what a surface carries leaves no
-  VISIBLE tile surfaced, enforced per camera step over the maintained surfaced
-  set, scoped to a viewport inflated by a quarter so a tile is promoted just
-  before it arrives on screen rather than one frame after;
+- **sharpness converges without a storm** — promoting every too-soft tile in
+  the step that made it so was the zoom-in STORM: a real 89-tile session paid
+  19 promotions in one camera step and a 1.65 s frame gap. The guarantee is now
+  convergence: each step spends `maxSharpnessPromotionsPerStep` (1) on the
+  too-soft tiles nearest the gesture anchor — on-screen before lead-rect — the
+  rest stay briefly soft and are counted (`qaSurfaceSharpnessDeferredCount`),
+  and once the camera settles the heartbeat promotes the deferred remainder at
+  `maxSharpnessCatchUpPromotionsPerPass` (2) per pass, where the too-soft
+  re-bake returns them sharp at the new zoom. Brief peripheral softness on
+  moving content was chosen over the whole-canvas hitch (2026-08-19): every
+  felt complaint in this program has been chop, never softness. Still scoped to
+  a viewport inflated by a quarter, still per camera step over the maintained
+  surfaced set, and still never permanently soft — the witness asserts the cap,
+  the nearest-anchor ordering, the per-pass catch-up cap, and the convergence;
 - **content while surfaced promotes** — a parked body keeps ingesting (its card
   count advances) but its pixels never change, so a tile receiving content must be
   given back within one evaluation, and the delta must be in the restored

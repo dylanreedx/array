@@ -39,6 +39,19 @@ enum TileResidencyPolicy {
         /// Bakes allowed in one evaluation pass. Surfacing 50 quiet tiles at once
         /// would otherwise pay ~50 ms of bake in one frame.
         var maxBakesPerPass: Int = TileSurfaceResidencyConfig.maxBakesPerTransition
+        /// Sharpness promotions allowed in ONE camera step. Promoting every
+        /// too-soft surfaced tile at once was the zoom-in storm: 19 promotions in
+        /// a single step and a 1.65 s frame gap, in a real 89-tile session
+        /// (`.plans/38`). One per step, nearest the gesture anchor first, spreads
+        /// the same work across the gesture's own steps; the periphery is briefly
+        /// soft while it converges — chosen over the hitch (2026-08-19), because
+        /// every felt complaint has been chop and never softness.
+        var maxSharpnessPromotionsPerStep: Int = 1
+        /// Sharpness promotions allowed per SETTLED evaluation pass — the
+        /// catch-up for tiles the per-step cap deferred, once the gesture is
+        /// over. At 10 Hz a worst-case storm of ~20 sharpens in about a second,
+        /// with no single frame paying for more than two reparents.
+        var maxSharpnessCatchUpPromotionsPerPass: Int = 2
 
         static let `default` = Tuning()
     }

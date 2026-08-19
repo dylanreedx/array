@@ -101,9 +101,12 @@ final class CanvasCameraDriver: NSObject {
     private var pendingPanDY: CGFloat = 0
     private var pendingLogZoom: Double = 0
     /// The last pointer position any camera input reported, in canvas
-    /// coordinates. LIVE on purpose: a glide that zooms around the finger-lift
-    /// point while the user pans slides the content out from under them.
-    private var anchor: CGPoint = .zero
+    /// coordinates. LIVE on purpose: a glide that zooms around a frozen
+    /// finger-lift point while the user pans slides the content out from under
+    /// them. Read-only outside: sharpness promotion orders its per-step budget
+    /// nearest-anchor-first, so the tile the user is zooming toward sharpens
+    /// before the periphery.
+    private(set) var anchor: CGPoint = .zero
 
     // Pinch velocity tracking (log space).
     private var pinchActive = false
