@@ -535,6 +535,11 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         super.init(frame: NSRect(x: 0, y: 0, width: 1000, height: 700))
         wantsLayer = true
+        // Defense-in-depth against the macOS 14 clipsToBounds default (NO): the
+        // canvas's screen-fixed overlays (focus/attention rings outset past an
+        // edge tile, HUDs) must not draw or composite over sibling chrome such
+        // as the sidebar. The park clips itself; this bounds everything else.
+        clipsToBounds = true
         // The world plane goes in FIRST and stays the bottom-most subview, so
         // every screen-fixed overlay added later with `positioned: .above` sits
         // above all world content without any further ordering work.
