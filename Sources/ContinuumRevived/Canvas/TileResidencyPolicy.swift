@@ -77,6 +77,10 @@ enum TileResidencyPolicy {
         var lastContentRevision: UInt64?
         var lastContentChangeAt: TimeInterval?
         var pointerInsideSince: TimeInterval?
+        /// The last instant the pointer was RESTING in this tile — set only once
+        /// `pointerRestDelay` has been met, never by mere transit. This is the
+        /// exit half of the pointer hysteresis; see `decide`.
+        var lastPointerRestingAt: TimeInterval?
         var hasFocus = false
         var isAnimating = false
         var lastAccessibilityCount: UInt64?
@@ -90,6 +94,17 @@ enum TileResidencyPolicy {
     ) -> Decision {
         if liveness.hasFocus { return .native(.focus) }
         if let since = liveness.pointerInsideSince, now - since >= tuning.pointerRestDelay {
+            return .native(.pointerResting)
+        }
+        // Exit hysteresis, and it is as load-bearing as the entry rest delay. A
+        // cursor jittering at a tile edge — a thumb resting on the trackpad is
+        // enough — otherwise promotes and demotes the same tile several times a
+        // second, for minutes, on an idle canvas: each cycle a ~10 ms reparent
+        // pair plus a damaged window for WindowServer to recomposite (attributed
+        // live, 2026-08-19). Keyed on rest having been ACHIEVED, never on mere
+        // transit, so a sweep still promotes nothing.
+        if let rested = liveness.lastPointerRestingAt,
+           now - rested < tuning.contentQuietDelay {
             return .native(.pointerResting)
         }
         // Hysteresis, and it is not optional. `TileNSView.accessibilityChildren`
