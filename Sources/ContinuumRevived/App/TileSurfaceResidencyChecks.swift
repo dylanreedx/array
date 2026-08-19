@@ -300,6 +300,7 @@ enum TileSurfaceResidencyChecks {
         try checkFlagOffChangesNothing()
         try checkQuietSurfacesAndLiveStaysNative()
         try checkHysteresisIgnoresAPointerSweep()
+        try checkPointerJitterAtATileEdgeDoesNotFlap()
         try checkPixelEquivalence()
         try checkSharpnessConvergesWithoutAStorm()
         try checkContentWhileSurfacedPromotesAndSurvives()
@@ -312,6 +313,7 @@ enum TileSurfaceResidencyChecks {
         try checkMidGestureDemotionCatchesUp()
         try checkSurfaceMemoryIsBounded()
         try checkLeavingTheWindowRestoresEveryBody()
+        try checkParkedBodiesPaintNoPixels()
         try checkCost()
         try checkBakeCost()
         print("tile-surface-residency check: ok")
@@ -505,6 +507,73 @@ enum TileSurfaceResidencyChecks {
                    "a pointer sweep promoted \(world.canvas.qaSurfacePromotionCount) tiles — the rest "
                    + "delay is not doing its job")
         world.injectedPointer = nil
+    }
+
+    /// Exit hysteresis on the pointer clause, because entry hysteresis alone
+    /// FLAPPED in production: a cursor jittering at a tile edge (a thumb resting
+    /// on the trackpad is enough) promoted and demoted the same tile several
+    /// times a second, for minutes, on an idle canvas — each cycle a ~10 ms
+    /// reparent pair plus a damaged window for WindowServer to recomposite.
+    /// Attributed live on 2026-08-19: `native by: [pointerResting 1]` and
+    /// `native by: []` alternating at up to 5 Hz with surface bytes constant.
+    ///
+    /// The rule mirrors the accessibility clause: once a tile is native for a
+    /// RESTING pointer, it stays native until the pointer has been away for the
+    /// quiet delay. A sweep still promotes nothing — lingering is keyed on rest
+    /// having been achieved, never on mere transit.
+    private static func checkPointerJitterAtATileEdgeDoesNotFlap() throws {
+        let world = World(tileCount: 4)
+        defer { world.teardown() }
+        world.canvas.surfaceResidencyEnabled = true
+        world.quiesceAndSurface()
+        try expect(world.canvas.qaSurfacedTileViews.count == world.tiles.count,
+                   "the jitter witness needs every tile surfaced first")
+        guard let view = world.agentViews[world.tiles[0].id] else {
+            throw Failure(message: "fixture tile 0 has no view")
+        }
+        let inside = view.convert(CGPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil)
+        // The gutter just past the tile's edge — still no other tile there.
+        let outside = view.convert(CGPoint(x: view.bounds.midX, y: view.bounds.maxY + 30), to: nil)
+
+        // Rest inside long enough to promote — that half is designed behaviour.
+        world.injectedPointer = inside
+        world.evaluateResidency()
+        world.advance(world.canvas.residencyTuning.pointerRestDelay + 0.05)
+        world.evaluateResidency()
+        try expect(view.surfaceResidency == .native, "a rested pointer must promote its tile")
+
+        // Jitter: out for one pass, back in long enough to rest again, repeatedly.
+        // This is the flap's exact shape, and it must cost NOTHING after the
+        // initial promotion.
+        world.canvas.qaResetSurfaceResidencyCounters()
+        for _ in 0..<6 {
+            world.injectedPointer = outside
+            world.advance(0.1)
+            world.evaluateResidency()
+            world.injectedPointer = inside
+            world.advance(0.1)
+            world.evaluateResidency()
+            world.advance(0.1)
+            world.evaluateResidency()
+            // Long enough inside to REST again (0.2 s since the first inside
+            // pass), so the unfixed policy re-promotes and the cycle is the real
+            // flap — promote, demote, promote — not a single demotion.
+            world.advance(0.1)
+            world.evaluateResidency()
+        }
+        try expect(world.canvas.qaSurfaceDemotionCount == 0,
+                   "pointer jitter at a tile edge cost \(world.canvas.qaSurfaceDemotionCount) demotions "
+                   + "— that is the resting-pointer flap, reparenting an idle canvas at up to 5 Hz")
+        try expect(view.surfaceResidency == .native,
+                   "the tile under a jittering-but-present pointer must stay native")
+
+        // And the linger ends: once the pointer is genuinely gone, the tile
+        // surfaces again — this is hysteresis, not a leak of native residency.
+        world.injectedPointer = nil
+        world.advance(world.canvas.residencyTuning.contentQuietDelay + 0.05)
+        world.evaluateResidency(passes: 3)
+        try expect(view.surfaceResidency == .surfaced,
+                   "after the pointer leaves for good the tile must surface again")
     }
 
     /// The gate Dylan's requirement actually names, aimed at the PRODUCER.
@@ -1219,6 +1288,72 @@ enum TileSurfaceResidencyChecks {
     /// A canvas that leaves its window must hand every body back. Nothing evaluates
     /// residency out there, so a body parked in a windowless canvas is a body no
     /// policy will ever reclaim.
+    /// Parked bodies must contribute NOTHING to the rendered window.
+    ///
+    /// The park's design claims "AppKit clips children to an ancestor's bounds
+    /// when drawing, so nothing parked is ever painted" — true before macOS 14,
+    /// FALSE since: `NSView.clipsToBounds` now defaults to `false`, nothing set
+    /// it on the park, and the deployment target is macOS 14. So every parked
+    /// full-size body was drawn at the park's origin AND left in the window's
+    /// composited layer tree — measured live as roughly doubling the window's
+    /// resident surface footprint beside the baked images (2026-08-19).
+    ///
+    /// The witness renders the exact region parked bodies land in (the park sits
+    /// at the canvas origin with frame .zero) through the real view-drawing path
+    /// — the same path the macOS 14 default un-clipped — with every tile panned
+    /// far off screen, and demands the pixels be byte-identical before and after
+    /// parking. A property echo ("clipsToBounds is true") could pass while the
+    /// render regressed some other way; the pixels cannot.
+    private static func checkParkedBodiesPaintNoPixels() throws {
+        let world = World(tileCount: 4)
+        defer { world.teardown() }
+        world.canvas.surfaceResidencyEnabled = true
+        // Pan every tile far off screen so the park's landing zone shows pure
+        // canvas background. Tiles stay installed and eligible; visibility only
+        // orders the bake budget, it never refuses residency.
+        world.canvas.setViewport(CanvasViewport(x: 50_000, y: 50_000, zoom: 1))
+        world.pump()
+        try expect(world.canvas.visibleTileViews.isEmpty, "precondition: no tile may intersect the canvas")
+
+        // Parked bodies land ABOVE the canvas: the park (frame .zero, at the
+        // canvas origin) is not flipped, so a body framed (0,0,w,h) extends into
+        // NEGATIVE canvas y — measured at (0,-276,420,276) for this fixture.
+        // Inside the canvas they were never visible even unclipped, which is why
+        // nobody saw them; but they render into the region above the canvas
+        // (window chrome territory in production) and their layers stay in the
+        // composited tree. Probe that overflow region.
+        let probe = CGRect(x: 0, y: -320, width: 520, height: 320)
+        func probePixels() throws -> [UInt8] {
+            world.pump()
+            guard let rep = world.canvas.bitmapImageRepForCachingDisplay(in: probe) else {
+                throw Failure(message: "could not allocate the park-region probe bake")
+            }
+            world.canvas.cacheDisplay(in: probe, to: rep)
+            guard let cg = rep.cgImage, let bytes = normalizedBytes(cg) else {
+                throw Failure(message: "could not normalize the park-region probe bake")
+            }
+            return bytes
+        }
+
+        let allNative = try probePixels()
+        world.quiesceAndSurface()
+        try expect(world.canvas.qaSurfacedTileViews.count == world.tiles.count,
+                   "precondition: every tile parked, got \(world.canvas.qaSurfacedTileViews.count) of \(world.tiles.count)")
+        let parked = try probePixels()
+        try expect(allNative == parked,
+                   "parking painted pixels into the park's landing zone — parked bodies are being drawn "
+                   + "(macOS 14 clipsToBounds default): the park must clip its children out of every draw")
+        // The compositing half: a masked, zero-sized layer is culled from the
+        // render tree by documented CA semantics. Assert the properties that
+        // guarantee it — the pixel assertion above keeps this honest.
+        try expect(world.canvas.surfaceParkView.clipsToBounds,
+                   "the park must clip its children (macOS 14 defaults this OFF)")
+        try expect(world.canvas.surfaceParkView.layer?.masksToBounds == true,
+                   "the park's layer must mask to bounds so the compositor culls parked subtrees")
+        try expect(world.canvas.surfaceParkView.frame.size == .zero,
+                   "the park must stay zero-sized — clipping a non-empty park would still composite it")
+    }
+
     private static func checkLeavingTheWindowRestoresEveryBody() throws {
         let world = World(tileCount: 4)
         defer { world.teardown() }

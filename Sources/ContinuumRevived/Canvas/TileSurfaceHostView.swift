@@ -101,9 +101,16 @@ final class TileSurfaceHostView: NSView {
 /// The container that holds real tile bodies while their tiles render from
 /// surfaces.
 ///
-/// Its whole job is to be invisible in every sense. Zero-sized, so AppKit clips it
-/// out of every draw without `isHidden` — which would stop layout, and a parked
-/// body has to keep laying out. And opaque to accessibility, because a parked body
+/// Its whole job is to be invisible in every sense. Zero-sized AND explicitly
+/// clipped — `clipsToBounds` defaults to FALSE on macOS 14+, so the original
+/// "AppKit clips children to an ancestor's bounds when drawing" assumption was
+/// silently untrue on the deployment target: every parked full-size body was
+/// drawn into the region above the canvas and left renderable in the window's
+/// composited layer tree (`checkParkedBodiesPaintNoPixels` is the pixel
+/// witness). Clipping bounds drawing and compositing only — never layout,
+/// timers, or semantic work — which is exactly why `isHidden` remains wrong
+/// here: it would stop the layout, and with it the streaming this design
+/// exists to preserve. And opaque to accessibility, because a parked body
 /// IS still in the window's view tree: measured, VoiceOver reached a parked
 /// transcript at `{{0, 1132}, {420, 90}}` while its tile sat at
 /// `{{40, 640}, {420, 300}}` — wrong place, wrong size, detached from its owner.
@@ -111,6 +118,13 @@ final class TileSurfaceHostView: NSView {
 /// (`TileNSView.accessibilityChildren`).
 @MainActor
 final class TileSurfaceParkView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        clipsToBounds = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
     override func accessibilityChildren() -> [Any]? { [] }
     override func isAccessibilityElement() -> Bool { false }
 }
