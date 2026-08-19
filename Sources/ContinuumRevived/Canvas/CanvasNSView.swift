@@ -1655,7 +1655,16 @@ final class CanvasNSView: NSView, TokenThemed {
     /// flag ships off, so there is no UI for it, and every other piece of evidence
     /// so far comes from a fixture. `log stream --predicate 'subsystem ==
     /// "continuum.canvas"'` while dogfooding with `ARRAY_TILE_SURFACE_RESIDENCY=1`.
-    private var lastLoggedSurfacedCount = -1
+    /// What the residency log last printed. A tuple rather than the surfaced count
+    /// alone, so a pass whose promotions and demotions cancel still prints — the
+    /// flicker the log exists to explain was exactly the case it used to skip.
+    private struct ResidencySignature: Equatable {
+        let surfaced: Int
+        let promotions: Int
+        let demotions: Int
+    }
+
+    private var lastLoggedResidencySignature: ResidencySignature?
 
     /// Array-owned cost of each camera commit in the current gesture, logged once
     /// when it settles.
@@ -1969,8 +1978,19 @@ final class CanvasNSView: NSView, TokenThemed {
 
     private func logResidencyIfChanged() {
         let surfaced = surfacedTiles.count
-        guard surfaced != lastLoggedSurfacedCount else { return }
-        lastLoggedSurfacedCount = surfaced
+        // **Every crossing, not every count change.** This used to return unless the
+        // surfaced COUNT moved, so a pass that promoted one tile and demoted another
+        // logged NOTHING — which is why a real session's "738 crossings" was a floor
+        // read across lines that silently skipped, and why the flicker was invisible
+        // in the very log built to explain it. The signature includes both crossing
+        // counters, so a net-zero pass still prints.
+        let signature = ResidencySignature(
+            surfaced: surfaced,
+            promotions: qaSurfacePromotionCount,
+            demotions: qaSurfaceDemotionCount
+        )
+        guard signature != lastLoggedResidencySignature else { return }
+        lastLoggedResidencySignature = signature
         let eligibleViews = tileViewsInVisualOrder.filter { $0.surfaceableBody != nil }
         // WHY the count moved, not just that it did. A resting canvas that flaps
         // 82<->83 has several possible promoters — a liveness clause, a hitTest
@@ -2003,6 +2023,18 @@ final class CanvasNSView: NSView, TokenThemed {
             + " | refused: blank \(qaSurfaceRefusedBlankCount)"
             + " (uniform bakes \(tileSurfaceStore.qaUniformBakeCount)),"
             + " occluded \(qaSurfaceRefusedOccludedCount)"
+            // Attribution, so a crossing count can be DECOMPOSED rather than
+            // guessed at. Sharpness promotions and stale promotions are different
+            // problems with different fixes, and a bare promotion count cannot tell
+            // them apart — which left 485 demotions against 253 promotions
+            // unexplained in the session that prompted the hold.
+            + " | why: stale \(qaSurfaceStalePromotionCount),"
+            + " softDeferred \(qaSurfaceSharpnessDeferredCount),"
+            + " suppressedDemotes \(qaResidencySuppressedDemotionCount),"
+            + " evictions \(qaSurfaceEvictionCount),"
+            + " refusedMemory \(qaSurfaceRefusedMemoryCount),"
+            + " refusedBudget \(qaSurfaceRefusedBudgetCount)"
+            + " | camera \(cameraDriver.isSettled ? "settled" : "moving")"
         Logger(subsystem: "continuum.canvas", category: "residency").notice("\(line, privacy: .public)")
     }
 
