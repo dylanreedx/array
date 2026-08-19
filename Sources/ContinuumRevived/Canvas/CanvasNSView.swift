@@ -330,6 +330,10 @@ final class CanvasNSView: NSView, TokenThemed {
         qaSurfaceSharpnessDeferredCount = 0
         qaSurfaceRefusedBlankCount = 0
         qaSurfaceRefusedOccludedCount = 0
+        // Was missing, and its absence made `checkMidGestureDemotionCatchesUp`'s
+        // "suppression must be observable" assertion satisfiable by history from an
+        // earlier arm — a false green.
+        qaResidencySuppressedDemotionCount = 0
         tileSurfaceStore.qaResetCounters()
     }
 
@@ -1758,20 +1762,30 @@ final class CanvasNSView: NSView, TokenThemed {
         // anything — the same reconcile `enforceSurfaceSharpness` does.
         surfacedTiles = surfacedTiles.filter { $0.value.surfaceResidency == .surfaced }
         let now = residencyNowProvider()
-        // Demotions during motion are RATE-LIMITED, not forbidden. A blanket
-        // suppression meant a gesture that began all-native stayed all-native to its
-        // last frame — a real 96-step zoom ran every step over eight native
-        // transcripts because the previous zoom-in had promoted them. One demotion
-        // costs ~5 ms once; a native transcript costs ~3 ms every frame, so it pays
-        // for itself in two. Two per pass keeps the spend per frame bounded.
+        // **Nothing crosses while the camera moves.** A demotion is a sharp body
+        // becoming a picture — as visible as the promotion in the other direction —
+        // so under the hold (see `enforceSurfaceSharpness`) both directions are shut
+        // for the duration of a gesture and everything reconciles once at settle.
         //
-        // Except while zooming IN: a bake taken now is exactly sharp for the current
-        // zoom, so the very next inward step would refuse it and promote right back —
-        // a demote/promote pair per step, which is thrash, not progress.
-        let zoomNow = canvasState.viewport.zoom
-        let zoomingIn = !cameraDriver.isSettled && zoomNow > lastResidencyZoom + 0.0001
-        lastResidencyZoom = zoomNow
-        var demotionBudget = cameraDriver.isSettled ? Int.max : (zoomingIn ? 0 : 2)
+        // This replaces a rate limit of two per pass, whose stated reason was that a
+        // gesture beginning all-native stayed all-native to its last frame (a real
+        // 96-step zoom ran every step over eight native transcripts at ~3 ms each).
+        // That reason is now self-cancelling: the tiles in that story were native
+        // "because the previous zoom-in had promoted them", and the hold is precisely
+        // what stops a zoom-in promoting anything. What remains native across a
+        // gesture is native for a LIVE reason — streaming, focus, a resting pointer —
+        // which a demote sweep should never have been touching mid-gesture anyway.
+        //
+        // The honest cost: a tile that falls quiet mid-gesture now stays native until
+        // settle, at ~3 ms per step, bounded by the gesture plus `settleQuiet`
+        // (0.25 s). Watched by `checkCost`.
+        //
+        // Deleted with it: a `zoomingIn` predicate derived from the zoom delta
+        // BETWEEN 10 Hz passes (`lastResidencyZoom`), which read false on every
+        // zoom-OUT and on any pass that happened to land between camera steps — so
+        // the budget it guarded opened exactly when it should not have. Measured in a
+        // real session as part of 738 crossings in 2m45s.
+        var demotionBudget = cameraDriver.isSettled ? Int.max : 0
         // Spelled out, NOT `residencyPointerProvider?() ?? window?.mouse…`. That
         // collapses a doubly-optional: an installed provider RETURNING nil ("the
         // pointer is nowhere near this canvas") is indistinguishable from no provider
@@ -2007,8 +2021,6 @@ final class CanvasNSView: NSView, TokenThemed {
     /// difference, and that never change again no matter what streams in, because
     /// the transcript's `visibleRect` degenerates once no ancestor places it in the
     /// visible area. Native is the only faithful state to bake from.
-    private var lastResidencyZoom: Double = 1
-
     @discardableResult
     private func surfaceIfAdmissible(
         _ tileView: TileNSView, bakeBudget: inout Int, zoom: Double, backingScale: CGFloat
@@ -2223,6 +2235,27 @@ final class CanvasNSView: NSView, TokenThemed {
     /// whole-canvas hitch (2026-08-19, `.plans/38`).
     private func enforceSurfaceSharpness() {
         guard surfaceResidencyEnabled, !surfacedTiles.isEmpty else { return }
+        // **The hold (Dylan's ruling, 2026-08-19).** While the camera is in flight,
+        // nothing crosses: tiles may go progressively soft, and they converge ONCE at
+        // the settle edge, which `cameraGestureDidSettle` already drives.
+        //
+        // The per-step cap below was already a concession that instantaneous
+        // sharpness is not worth a hitch — one promotion per step, nearest the anchor,
+        // periphery briefly soft. A real session showed the remaining per-step spend
+        // is itself the artifact: one promotion per camera step is one visible
+        // blur->sharp flip per step, and a 12-tile fixture zooming 1.0 -> 2.0 in eight
+        // steps crossed eight times. He reported it as "SOOO much flickering".
+        //
+        // This reverses `.plans/36`, which added per-step enforcement because "a tile
+        // admitted as sharp-enough at zoom 1.0 was still surfaced two steps into a
+        // zoom to 2.0, showing exactly the soft text this design promises never to
+        // show". That promise is the one being traded away, deliberately and for the
+        // second time: chop over softness.
+        //
+        // The guard sits AFTER the soft set is collected, not here: returning early
+        // would also stop counting `qaSurfaceSharpnessDeferredCount`, and a hold that
+        // silences its own instrument is how "briefly soft" becomes "soft forever"
+        // with every gate green.
         // `TileNSView.hitTest` can promote a tile on its own, to keep a click from
         // being swallowed. That leaves this set holding a tile that is already
         // native, so reconcile before deciding anything.
@@ -2258,6 +2291,12 @@ final class CanvasNSView: NSView, TokenThemed {
             ))
         }
         guard !soft.isEmpty else { return }
+        // The hold: while the camera is in flight nothing crosses. The soft tiles are
+        // COUNTED so the softness is observable, then left alone until settle.
+        if !cameraDriver.isSettled {
+            qaSurfaceSharpnessDeferredCount += soft.count
+            return
+        }
         // A settled one-shot writer (a navigation snap, a restore) has no later
         // steps to spread the work across, and a hitch with no motion behind it is
         // invisible — so only an in-flight gesture is capped.

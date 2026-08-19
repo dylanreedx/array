@@ -310,7 +310,7 @@ enum TileSurfaceResidencyChecks {
         try checkHysteresisIgnoresAPointerSweep()
         try checkPointerJitterAtATileEdgeDoesNotFlap()
         try checkPixelEquivalence()
-        try checkSharpnessConvergesWithoutAStorm()
+        try checkSharpnessHoldsDuringAGestureAndConvergesAtSettle()
         try checkContentWhileSurfacedPromotesAndSurvives()
         try checkClickOnASurfacedTileReachesTheBody()
         try checkFocusNeverLandsOnAPicture()
@@ -318,7 +318,7 @@ enum TileSurfaceResidencyChecks {
         try checkAppearanceChangeGivesTheBodyBack()
         try checkAccessibilityFindsTheRealBody()
         try checkFileAndNoteTilesSurface()
-        try checkMidGestureDemotionCatchesUp()
+        try checkAGestureThatBeginsAllNativeConvergesAtSettle()
         try checkSurfaceMemoryIsBounded()
         try checkLeavingTheWindowRestoresEveryBody()
         try checkParkedBodiesPaintNoPixels()
@@ -327,6 +327,7 @@ enum TileSurfaceResidencyChecks {
         try checkOcclusionPausesAndResumesResidency()
         try checkTheSurfaceLandsExactlyWhereTheBodyDrew()
         try checkAScrollIsNeverShownStale()
+        try checkAZoomGestureCrossesResidencyAlmostNever()
         try checkCost()
         try checkBakeCost()
         print("tile-surface-residency check: ok")
@@ -395,6 +396,93 @@ enum TileSurfaceResidencyChecks {
             try expect(keys.isEmpty,
                        "an implicit animation is riding the surface swap: \(keys)")
         }
+    }
+
+    /// **The number that tracks what Dylan actually feels: crossings per gesture.**
+    ///
+    /// Every other witness in this file asserts an END STATE, which is how a real
+    /// session came to log **738 surface<->native crossings** in 2m45s — 253 policy
+    /// promotions and 485 demotions, surface memory swinging 0 -> 62 MB, 70% of
+    /// lines reporting a tile native while the policy wanted it surfaced — with the
+    /// whole suite green. Each crossing is a visible blur<->sharp flip AND ~5 ms of
+    /// AppKit subtree surgery, so the count IS the complaint: "SOOO much
+    /// flickering/jitering tiles with the bluring/focusing".
+    ///
+    /// The ruling being witnessed (Dylan, 2026-08-19): during an active gesture
+    /// tiles HOLD — soft is allowed, flipping is not — and converge ONCE at settle.
+    private static func checkAZoomGestureCrossesResidencyAlmostNever() throws {
+        // Both directions. Zoom-OUT is not a formality: it never fails the sharpness
+        // test, so `zoomingIn` read false and the mid-gesture demotion budget opened
+        // to 2 per pass — a witness that only zoomed in would call this fixed while
+        // half the crossings continued.
+        try expectNoCrossingsDuring(gesture: "zoom-in", from: 1.0, to: 2.0)
+        try expectNoCrossingsDuring(gesture: "zoom-out", from: 1.0, to: 0.5)
+    }
+
+    private static func expectNoCrossingsDuring(
+        gesture: String, from start: Double, to target: Double
+    ) throws {
+        let world = World(tileCount: 12)
+        defer { world.teardown() }
+        world.canvas.surfaceResidencyEnabled = true
+        world.canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: start))
+        world.quiesceAndSurface()
+        let surfaced = world.canvas.qaSurfacedTileViews.count
+        try expect(surfaced == world.tiles.count,
+                   "\(gesture): need every tile surfaced before the gesture, got "
+                   + "\(surfaced) of \(world.tiles.count)")
+        world.canvas.qaResetSurfaceResidencyCounters()
+
+        // A real gesture: eight driver commits, a display pass each, and the 10 Hz
+        // heartbeat interleaved — because the heartbeat running DURING a gesture is
+        // half of where the crossings came from, and stubbing it out would hide that.
+        let steps = 8
+        for step in 1...steps {
+            let t = Double(step) / Double(steps)
+            world.cameraStep(toZoom: start + (target - start) * t)
+            world.pump()
+            if step % 2 == 0 { world.evaluateResidency() }
+        }
+
+        let promotedDuring = world.canvas.qaSurfacePromotionCount
+        let demotedDuring = world.canvas.qaSurfaceDemotionCount
+        try expect(
+            promotedDuring + demotedDuring == 0,
+            "\(gesture): \(promotedDuring + demotedDuring) residency crossings DURING the "
+            + "gesture (\(promotedDuring) promotions, \(demotedDuring) demotions). Every one "
+            + "is a visible blur<->sharp flip plus ~10 ms of reparenting. Tiles are allowed to "
+            + "go soft while the camera moves; they are not allowed to flip."
+        )
+
+        // Converge once. A tile that must re-sharpen inherently costs a promote AND a
+        // demote, so the honest bound is one crossing per tile PER DIRECTION — what
+        // is being forbidden is the cascade (56 tiles recovering 4 per pass over
+        // 2.1 s), not the single convergence.
+        world.settle()
+        world.advance(world.canvas.residencyTuning.contentQuietDelay + 0.05)
+        world.evaluateResidency(passes: 12)
+
+        let promoted = world.canvas.qaSurfacePromotionCount
+        let demoted = world.canvas.qaSurfaceDemotionCount
+        try expect(
+            promoted <= world.tiles.count,
+            "\(gesture): \(promoted) promotions to converge \(world.tiles.count) tiles — more "
+            + "than one per tile means tiles crossed repeatedly, which is the cascade"
+        )
+        try expect(
+            demoted <= world.tiles.count,
+            "\(gesture): \(demoted) demotions to converge \(world.tiles.count) tiles — more "
+            + "than one per tile means tiles crossed repeatedly, which is the cascade"
+        )
+
+        // And the end state still has to be right, or "no crossings" is just a
+        // canvas that gave up.
+        let settledSurfaced = world.canvas.qaSurfacedTileViews.count
+        try expect(settledSurfaced == world.tiles.count,
+                   "\(gesture): after settling, \(settledSurfaced) of \(world.tiles.count) tiles "
+                   + "are surfaced — holding during the gesture must not strand tiles native")
+        print("tile-surface-residency \(gesture): 0 crossings during the gesture, "
+              + "\(promoted) promotions + \(demoted) demotions to converge \(world.tiles.count) tiles")
     }
 
     /// **A surface must never outlive the scroll position it was taken at.**
@@ -809,21 +897,31 @@ enum TileSurfaceResidencyChecks {
     /// docs/internals/performance-budgets.md for both measured numbers.
     private static let surfaceFidelityThreshold = 0.25
 
-    /// Zooming IN past what the surfaces carry must sharpen the canvas WITHOUT a
-    /// storm: capped per step, nearest the gesture anchor first, converging to
-    /// all-sharp — never everything at once, and never permanently soft.
+    /// Zooming IN past what the surfaces carry must NOT flip anything while the
+    /// camera moves, and must converge once it settles.
     ///
-    /// Promoting every too-soft surfaced tile in one camera step was the zoom-in
-    /// storm: a real 89-tile session paid 19 promotions in a single step and a
-    /// 1.65 s frame gap (`.plans/38`). The rule now spreads that work — at most
-    /// `maxSharpnessPromotionsPerStep` per camera step, ordered by distance from
-    /// the gesture anchor so the tile the user is zooming TOWARD sharpens first;
-    /// after the gesture settles, the heartbeat catches the deferred rest up at
-    /// `maxSharpnessCatchUpPromotionsPerPass` per pass. The periphery is briefly
-    /// soft while that converges, which is the chosen trade (2026-08-19): every
-    /// felt complaint has been chop, never softness, and a mid-gesture blur on
-    /// moving content is close to invisible while a whole-canvas stall is not.
-    private static func checkSharpnessConvergesWithoutAStorm() throws {
+    /// **This witness was rewritten, and the old guarantee is gone deliberately.**
+    /// It used to assert that each camera step promoted exactly
+    /// `maxSharpnessPromotionsPerStep` tiles and that every step made progress —
+    /// i.e. it asserted the storm was SPREAD OUT rather than absent. A real session
+    /// then measured 738 surface<->native crossings in 2m45s and Dylan reported it
+    /// as "SOOO much flickering/jitering tiles with the bluring/focusing": one
+    /// promotion per camera step is one visible blur->sharp flip per step, so the
+    /// spread-out storm was itself the artifact. Its per-step clauses would now be
+    /// vacuously green (nothing crosses mid-gesture), which is worse than deleted.
+    ///
+    /// The guarantee now witnessed: tiles may go progressively soft during a
+    /// gesture, the softness is COUNTED so it cannot become permanent unnoticed,
+    /// nothing crosses until the camera stops, and the settled heartbeat converges
+    /// every tile back to a sharp surface at a bounded rate. Kept from the old
+    /// version: the per-pass catch-up cap (a storm moved to the settle edge is still
+    /// a storm), the re-bake density assertion, and the convergence/no-thrash
+    /// clause. Dropped from it: the nearest-anchor ORDERING assertion, because
+    /// mid-gesture ordering no longer has anything to order — the settled catch-up
+    /// walks `surfacedTiles` unordered, and asserting an order the code does not
+    /// implement would be fiction. Center-out settle ordering is a separate,
+    /// unimplemented step.
+    private static func checkSharpnessHoldsDuringAGestureAndConvergesAtSettle() throws {
         let world = World(tileCount: 6)
         defer { world.teardown() }
         world.canvas.surfaceResidencyEnabled = true
@@ -833,51 +931,54 @@ enum TileSurfaceResidencyChecks {
         let bakedScale = world.canvas.tileSurfaceStore.surface(for: world.tiles[0].id)?.bakedScale ?? 0
         try expect(bakedScale > 0, "a stored surface must know its own density")
 
+        // A fresh bake must satisfy its OWN sharpness test at the zoom it was taken
+        // at. `bakedScale` is `rep.pixelsWide / bounds.width`, whose quantum for a
+        // 420 pt body is ~0.0024 — twenty-four times the 0.0001 epsilon in
+        // `isSharpEnough`. If AppKit ever rounded that pixel width DOWN, a surface
+        // would fail its own test at its own zoom and re-bake forever. It rounds up
+        // today; this pins that, because nothing else does.
+        let backingAtBake = world.window.backingScaleFactor
+        try expect(
+            world.canvas.tileSurfaceStore.surface(for: world.tiles[0].id)?
+                .isSharpEnough(forZoom: world.canvas.viewport.zoom, backingScale: backingAtBake) == true,
+            "a surface baked at this very zoom does not satisfy its own sharpness test — "
+            + "bakedScale \(bakedScale) against zoom \(world.canvas.viewport.zoom) x "
+            + "backing \(backingAtBake). That is an unbounded re-bake loop."
+        )
+
         world.canvas.qaResetSurfaceResidencyCounters()
         let backing = world.window.backingScaleFactor
         let tooSharp = Double(bakedScale / backing) * 2
-        // The fixture's viewport starts at (0, 0, zoom 1), so the anchor's WORLD
-        // point is numerically its canvas point — which is what the ordering
-        // assertion below measures tile distance against.
         let anchor = CGPoint(x: 800, y: 500)
         world.cameraStep(toZoom: tooSharp, anchor: anchor)
         world.pump()
 
-        // 1. No storm: one step promotes at most the cap, and the deferral is
-        // observable rather than silent.
-        let stepCap = world.canvas.residencyTuning.maxSharpnessPromotionsPerStep
-        let afterFirstStep = world.canvas.qaSurfacePromotionCount
-        try expect(afterFirstStep <= stepCap,
-                   "one zoom-in step promoted \(afterFirstStep) tiles — that is the storm; the cap is \(stepCap)")
-        try expect(afterFirstStep == stepCap,
-                   "every tile is too soft, so the step must spend its whole budget: "
-                   + "promoted \(afterFirstStep) of a cap of \(stepCap)")
+        // 1. The hold: a step that makes every surface too soft crosses NOTHING.
+        try expect(world.canvas.qaSurfacePromotionCount == 0,
+                   "a mid-gesture step promoted \(world.canvas.qaSurfacePromotionCount) tiles — under "
+                   + "the hold, tiles go soft while the camera moves and flip only when it stops")
+        try expect(world.canvas.qaSurfaceDemotionCount == 0,
+                   "a mid-gesture step demoted \(world.canvas.qaSurfaceDemotionCount) tiles — a demote "
+                   + "is a sharp body becoming a picture, which is just as visible as the reverse")
+
+        // 2. And the softness it chose is OBSERVABLE. A hold that silences its own
+        // instrument is how "briefly soft" becomes "soft forever" with every gate
+        // green, so the deferral count is the thing that makes the trade auditable.
         try expect(world.canvas.qaSurfaceSharpnessDeferredCount > 0,
-                   "the tiles the cap left soft must be counted, or a storm and a stall are indistinguishable")
+                   "the tiles left soft by the hold must be counted, or softness and a stall "
+                   + "are indistinguishable from outside")
 
-        // 2. Ordering: the promoted tile is the VISIBLE too-soft one nearest the
-        // anchor — the tile the user is zooming toward, which is where softness
-        // would actually be seen.
-        func anchorDistance(_ view: TileNSView) -> Double {
-            let mid = CGPoint(x: view.frame.midX, y: view.frame.midY)
-            return Double(hypot(mid.x - anchor.x, mid.y - anchor.y))
-        }
-        let promoted = world.canvas.visibleTileViews.filter { $0.surfaceResidency == .native }
-        let nearestVisible = world.canvas.visibleTileViews.min {
-            anchorDistance($0) < anchorDistance($1)
-        }
-        try expect(promoted.count == 1, "expected exactly one native tile after one capped step, got \(promoted.count)")
-        try expect(promoted.first === nearestVisible,
-                   "the capped promotion must go to the tile nearest the anchor, not an arbitrary one")
-
-        // 3. Each further step makes capped progress — never a burst.
+        // 3. Still nothing on a later step — the hold is for the whole gesture, not
+        // a one-step rate limit.
         world.cameraStep(toZoom: tooSharp * 1.05, anchor: anchor)
         world.pump()
-        let afterSecondStep = world.canvas.qaSurfacePromotionCount
-        try expect(afterSecondStep - afterFirstStep <= stepCap,
-                   "the second step promoted \(afterSecondStep - afterFirstStep), over the per-step cap of \(stepCap)")
-        try expect(afterSecondStep > afterFirstStep,
-                   "with soft tiles still visible, the second step must keep converging")
+        world.evaluateResidency()
+        try expect(world.canvas.qaSurfacePromotionCount == 0,
+                   "a second mid-gesture step promoted \(world.canvas.qaSurfacePromotionCount) — the hold "
+                   + "must cover the gesture, and the 10 Hz heartbeat running inside it must not "
+                   + "cross either")
+        try expect(world.canvas.qaSurfaceDemotionCount == 0,
+                   "the heartbeat demoted \(world.canvas.qaSurfaceDemotionCount) tiles mid-gesture")
 
         // 4. Settle: the heartbeat catches the deferred tiles up, ALSO capped per
         // pass — a storm moved to the settle edge is still a storm — and the
@@ -1369,14 +1470,28 @@ enum TileSurfaceResidencyChecks {
         world.window.makeFirstResponder(nil)
     }
 
-    /// **A gesture that begins all-native must not stay all-native.** Demotions
-    /// during motion are rate-limited, not forbidden: a real 96-step zoom ran every
-    /// frame over eight native transcripts because the previous zoom-in had
-    /// promoted them and the old blanket suppression never let them back. And the
-    /// exception has teeth in the other direction — while zooming IN, a bake at the
-    /// current zoom would be refused one step later, so demoting then is thrash and
-    /// must not happen.
-    private static func checkMidGestureDemotionCatchesUp() throws {
+    /// **A gesture that begins all-native must converge — at the settle edge, not
+    /// during the gesture.**
+    ///
+    /// This is a deliberate behaviour REVERSAL, and the reason is worth keeping.
+    /// This witness used to assert the opposite: that mid-gesture passes clawed
+    /// tiles back two at a time, because a real 96-step zoom once ran every frame
+    /// over eight native transcripts (~3 ms each) after a previous zoom-in had
+    /// promoted them, and one demotion paid for itself in two frames.
+    ///
+    /// That trade no longer applies, because its own precondition is gone: the tiles
+    /// in that story were native "because the previous zoom-in had promoted them",
+    /// and the hold is precisely what stops a zoom-in promoting anything. What is
+    /// still native across a gesture is native for a LIVE reason — streaming, focus,
+    /// a resting pointer — which a demote sweep should never have been touching. And
+    /// a demotion is a sharp body becoming a picture: as visible as the promotion in
+    /// the other direction, which is what Dylan was reporting as flicker.
+    ///
+    /// So the protective intent is preserved exactly — nothing may be left stranded
+    /// native — and only the deadline moves, from "two per pass during the gesture"
+    /// to "all of them at settle". The cost is bounded by the gesture plus
+    /// `settleQuiet` (0.25 s), and `checkCost` is the gate on it.
+    private static func checkAGestureThatBeginsAllNativeConvergesAtSettle() throws {
         let world = World(tileCount: 6)
         defer { world.teardown() }
         world.canvas.surfaceResidencyEnabled = true
@@ -1384,7 +1499,8 @@ enum TileSurfaceResidencyChecks {
         try expect(world.canvas.qaSurfacedTileViews.count == world.tiles.count,
                    "precondition: all quiet tiles surfaced")
 
-        // Everything promotes (content arrives everywhere), then falls quiet.
+        // Everything promotes (content arrives everywhere), then falls quiet — the
+        // all-native gesture start this witness is named for.
         for (index, tile) in world.tiles.enumerated() {
             guard let view = world.agentViews[tile.id] else { continue }
             let thread = "surface-residency-\(index)"
@@ -1398,47 +1514,30 @@ enum TileSurfaceResidencyChecks {
         try expect(world.canvas.qaSurfacedTileViews.isEmpty,
                    "precondition: content promoted every tile")
         world.advance(world.canvas.residencyTuning.contentQuietDelay + 0.05)
-
-        // A zoom-OUT gesture starts while everything is native. Mid-gesture passes
-        // must claw tiles back, at most two per pass.
-        world.cameraStep(toZoom: 0.9)
-        world.pump()
-        world.evaluateResidency()
-        let afterOnePass = world.canvas.qaSurfacedTileViews.count
-        try expect(afterOnePass == 2,
-                   "one mid-gesture pass must demote exactly the rate limit (2), got \(afterOnePass)")
-        world.cameraStep(toZoom: 0.85)
-        world.pump()
-        world.evaluateResidency()
-        try expect(world.canvas.qaSurfacedTileViews.count == 4,
-                   "the second mid-gesture pass must demote two more, got "
-                   + "\(world.canvas.qaSurfacedTileViews.count)")
-        world.settle()
-        world.evaluateResidency(passes: 2)
-        try expect(world.canvas.qaSurfacedTileViews.count == world.tiles.count,
-                   "settling must let the rest catch up")
-
-        // Zooming IN: nothing demotes, and the suppression is recorded.
-        for (index, tile) in world.tiles.enumerated() {
-            guard let view = world.agentViews[tile.id] else { continue }
-            let thread = "surface-residency-\(index)"
-            view.ingest(.turnStarted(threadId: thread, turnId: "\(thread)-again"))
-            view.ingest(.contentDelta(
-                threadId: thread, turnId: "\(thread)-again", streamKind: .assistant, delta: "wake"
-            ))
-        }
-        world.evaluateResidency()
-        world.advance(world.canvas.residencyTuning.contentQuietDelay + 0.05)
         world.canvas.qaResetSurfaceResidencyCounters()
-        world.cameraStep(toZoom: 1.4)
-        world.pump()
-        world.evaluateResidency()
-        try expect(world.canvas.qaSurfaceDemotionCount == 0,
-                   "zooming IN must demote nothing mid-gesture — a bake now is refused one step later, "
-                   + "which is thrash; saw \(world.canvas.qaSurfaceDemotionCount)")
+
+        // Both directions of gesture, because the demotion budget used to depend on a
+        // zoom-direction predicate that read false on every zoom-OUT.
+        for target in [0.9, 0.85] {
+            world.cameraStep(toZoom: target)
+            world.pump()
+            world.evaluateResidency()
+            try expect(world.canvas.qaSurfaceDemotionCount == 0,
+                       "a mid-gesture pass demoted \(world.canvas.qaSurfaceDemotionCount) tiles at zoom "
+                       + "\(target) — under the hold nothing crosses until the camera stops")
+        }
         try expect(world.canvas.qaResidencySuppressedDemotionCount > 0,
-                   "the zoom-in suppression must be recorded, not coincidental")
+                   "the mid-gesture suppression must be RECORDED, not coincidental — otherwise a "
+                   + "canvas that simply had nothing to demote is indistinguishable from the hold")
+
+        // The deadline: settling converges every one of them.
         world.settle()
+        world.advance(world.canvas.residencyTuning.contentQuietDelay + 0.05)
+        world.evaluateResidency(passes: 8)
+        try expect(world.canvas.qaSurfacedTileViews.count == world.tiles.count,
+                   "settling must converge every quiet tile — the hold defers crossings, it does not "
+                   + "strand tiles native: \(world.canvas.qaSurfacedTileViews.count) of "
+                   + "\(world.tiles.count) surfaced")
     }
 
     /// A canvas that leaves its window must hand every body back. Nothing evaluates
