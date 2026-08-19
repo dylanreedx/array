@@ -81,6 +81,7 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
     private var surfaceEpoch: UInt64 = 1
     override var surfaceableBody: NSView? { scrollView }
     override var surfaceContentRevision: UInt64? { surfaceEpoch }
+    override var surfaceScrollOffsets: [CGPoint] { [scrollView.contentView.bounds.origin] }
 
     // MARK: - Export (A4)
 

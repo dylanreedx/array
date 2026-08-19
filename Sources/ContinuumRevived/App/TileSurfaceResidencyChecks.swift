@@ -326,6 +326,7 @@ enum TileSurfaceResidencyChecks {
         try checkNoBakeWhileTheWindowIsNotShown()
         try checkOcclusionPausesAndResumesResidency()
         try checkTheSurfaceLandsExactlyWhereTheBodyDrew()
+        try checkAScrollIsNeverShownStale()
         try checkCost()
         try checkBakeCost()
         print("tile-surface-residency check: ok")
@@ -394,6 +395,78 @@ enum TileSurfaceResidencyChecks {
             try expect(keys.isEmpty,
                        "an implicit animation is riding the surface swap: \(keys)")
         }
+    }
+
+    /// **A surface must never outlive the scroll position it was taken at.**
+    ///
+    /// `TileSurfaceRevision` is a CONTENT fingerprint — version, body size,
+    /// appearance — and scrolling changes no content. So a surface baked at one
+    /// offset still passed the freshness test after the body scrolled somewhere
+    /// else, `surfaceIfAdmissible` skipped the bake, and the tile was handed back a
+    /// perfectly faithful picture of where it used to be looking. That is the
+    /// largest single displacement this design can produce and it reads as the tile
+    /// jumping — `.plans/39` mechanism 1.
+    ///
+    /// Driven exactly as production reaches it, which is the whole point: the tile
+    /// is promoted by the POINTER (so its content version never moves and its
+    /// existing surface stays valid), scrolled while native, then left to fall
+    /// quiet. A witness that instead scrolled a PARKED body would be asserting
+    /// against degenerate clip geometry and would demand behaviour that thrashes.
+    private static func checkAScrollIsNeverShownStale() throws {
+        let world = World(tileCount: 3)
+        defer { world.teardown() }
+        world.canvas.surfaceResidencyEnabled = true
+        world.quiesceAndSurface()
+
+        guard let tile = world.tiles.first, let view = world.agentViews[tile.id] else {
+            throw Failure(message: "fixture built no agent tile")
+        }
+        try expect(view.surfaceResidency == .surfaced,
+                   "the tile must start surfaced or this witness has nothing to say")
+        let staleImage = world.canvas.tileSurfaceStore.surface(for: tile.id)?.image
+        try expect(staleImage != nil, "a surfaced tile must have a stored surface")
+
+        // Rest the pointer on it: promoted for a reason that does not touch content,
+        // so the surface it already has stays revision-fresh.
+        let centre = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
+        world.injectedPointer = view.convert(centre, to: nil)
+        // Two passes: the first OBSERVES the pointer arriving, the second sees that
+        // it has not moved for the rest delay. Rest is achieved, never just elapsed.
+        world.evaluateResidency()
+        world.advance(world.canvas.residencyTuning.pointerRestDelay + 0.05)
+        world.evaluateResidency()
+        try expect(view.surfaceResidency == .native,
+                   "a resting pointer must give the body back, or the scroll below is not real")
+        try expect(world.canvas.tileSurfaceStore.surface(for: tile.id)?.image === staleImage,
+                   "the surface must still be the one baked before the scroll, else this "
+                   + "witness cannot tell a re-bake from a replacement")
+
+        // Scroll where the user would: a native body, in the plane.
+        let offsetsBefore = view.surfaceScrollOffsets
+        view.qaScrollTranscript(toY: 180)
+        world.pump()
+        try expect(view.surfaceScrollOffsets != offsetsBefore,
+                   "the fixture did not actually scroll (\(offsetsBefore) -> "
+                   + "\(view.surfaceScrollOffsets)), so nothing was tested")
+
+        // Let it fall quiet. The surface it is offered is revision-fresh and sharp,
+        // so ONLY the scroll comparison can refuse it.
+        world.injectedPointer = nil
+        world.advance(world.canvas.residencyTuning.contentQuietDelay + 0.05)
+        world.evaluateResidency(passes: 3)
+        try expect(view.surfaceResidency == .surfaced,
+                   "the tile must come back to a surface once it is quiet again")
+
+        guard let shown = world.canvas.tileSurfaceStore.surface(for: tile.id) else {
+            throw Failure(message: "a surfaced tile must have a stored surface")
+        }
+        try expect(shown.image !== staleImage,
+                   "the tile re-surfaced with the very picture taken before the scroll — a "
+                   + "faithful image of a position the body has left")
+        try expect(shown.bakedScrollOffsets == view.surfaceScrollOffsets,
+                   "the installed surface does not record the body's current scroll position "
+                   + "(\(shown.bakedScrollOffsets) vs \(view.surfaceScrollOffsets)), so the next "
+                   + "scroll can be missed the same way")
     }
 
     private static func geometryNearlyEqual(_ lhs: CGRect, _ rhs: CGRect) -> Bool {

@@ -330,6 +330,21 @@ final class ManagedAgentTileNSView: TileNSView {
     /// Over-counting is free here: an ingested event also makes the tile LIVE, which
     /// means native, which means the extra invalidation costs one bake at the next
     /// quiet transition and nothing during the burst.
+    /// The transcript's clip origin. The composer does not scroll independently of
+    /// its own height changes (which move `surfaceContentRevision`), so the
+    /// transcript is the one scroll owner a bake can disagree with.
+    override var surfaceScrollOffsets: [CGPoint] {
+        guard let clip = transcriptCollectionFixture?.scrollView.contentView else { return [] }
+        return [clip.bounds.origin]
+    }
+
+    /// Scroll the transcript from a witness without reaching into its privates.
+    func qaScrollTranscript(toY y: CGFloat) {
+        guard let scrollView = transcriptCollectionFixture?.scrollView else { return }
+        scrollView.contentView.scroll(to: CGPoint(x: 0, y: y))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+
     override var surfaceContentRevision: UInt64? {
         var mixed = model.document.version &* 0x9E37_79B9_7F4A_7C15
         mixed ^= surfaceVisualEpoch &* 0xC2B2_AE3D_27D4_EB4F

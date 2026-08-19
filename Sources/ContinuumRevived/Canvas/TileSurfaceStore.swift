@@ -25,6 +25,24 @@ struct TileSurface {
     /// Device pixels per world point the image actually carries. Compared against
     /// what the screen needs — never assumed.
     let bakedScale: CGFloat
+    /// Where the body's scrollable content sat when this picture was taken.
+    ///
+    /// Deliberately NOT part of `TileSurfaceRevision`. Scrolling changes no
+    /// CONTENT, so a family's fingerprint does not move, and a surface baked
+    /// before a scroll still matched the revision afterwards — the residency pass
+    /// skipped the bake and handed the tile a faithful picture of a position the
+    /// body had already left (`.plans/39` mechanism 1). But it cannot go in the
+    /// revision either: the revision is recomputed for SURFACED tiles too, whose
+    /// bodies are parked, and a parked body's clip geometry is degenerate — that
+    /// comparison never settles and every tile thrashes. Measured: a witness that
+    /// had passed for weeks ("a tile that fell quiet must surface again") went red
+    /// the moment scroll offsets entered the revision.
+    ///
+    /// So it lives here and is compared in exactly one place — `surfaceIfAdmissible`,
+    /// which only ever runs on a NATIVE tile, whose body is in the plane and whose
+    /// scroll position is therefore real.
+    let bakedScrollOffsets: [CGPoint]
+
     /// Every sampled pixel identical: a flat rectangle. Correct for an empty
     /// note, never correct for a tile that always paints chrome of its own — the
     /// canvas decides which case it has.
@@ -79,7 +97,9 @@ final class TileSurfaceStore {
     /// store already uses. Returns nil rather than storing anything questionable —
     /// the caller's contract is that a failed bake leaves the tile native.
     @discardableResult
-    func bake(tileId: UUID, body: NSView, revision: TileSurfaceRevision) -> TileSurface? {
+    func bake(
+        tileId: UUID, body: NSView, revision: TileSurfaceRevision, scrollOffsets: [CGPoint] = []
+    ) -> TileSurface? {
         let bounds = body.bounds
         guard bounds.width >= 1, bounds.height >= 1,
               let rep = body.bitmapImageRepForCachingDisplay(in: bounds),
@@ -110,7 +130,10 @@ final class TileSurfaceStore {
         // surface that claims a sharpness it does not have would be shown when it
         // should have been refused.
         let scale = CGFloat(rep.pixelsWide) / max(1, bounds.width)
-        let surface = TileSurface(image: image, revision: revision, bakedScale: scale, isUniform: uniform)
+        let surface = TileSurface(
+            image: image, revision: revision, bakedScale: scale,
+            bakedScrollOffsets: scrollOffsets, isUniform: uniform
+        )
         surfaces[tileId] = surface
         qaBakeCount += 1
         return surface

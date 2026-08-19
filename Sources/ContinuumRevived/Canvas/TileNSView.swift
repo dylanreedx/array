@@ -147,6 +147,15 @@ class TileNSView: NSView, TokenThemed {
     /// them — a fully occluded window should cost nothing to composite.
     func windowOcclusionChanged(visible: Bool) {}
 
+    /// Scroll positions the baked picture depends on, in a stable order.
+    ///
+    /// Families name their own scroll owners rather than the base class walking the
+    /// subtree: `currentSurfaceRevision` is polled per tile per residency pass, and
+    /// traversing a whole transcript's view tree 10 times a second per tile is the
+    /// kind of cost this program exists to remove. Empty means "nothing here
+    /// scrolls", which is correct for a tile whose body cannot scroll.
+    var surfaceScrollOffsets: [CGPoint] { [] }
+
     /// The revision a surface must match to be shown for this tile right now.
     var currentSurfaceRevision: TileSurfaceRevision? {
         guard let body = surfaceableBody, let version = surfaceContentRevision else { return nil }

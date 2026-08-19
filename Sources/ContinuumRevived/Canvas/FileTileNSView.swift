@@ -120,6 +120,15 @@ final class FileTileNSView: TileNSView {
     override var surfaceableBody: NSView? { activeBody }
     override var surfaceContentRevision: UInt64? { surfaceEpoch }
 
+    /// `activeBody` is a scroll view for some file kinds and a container holding
+    /// one for others, so both shapes are covered — one level only, deliberately:
+    /// this is polled per residency pass.
+    override var surfaceScrollOffsets: [CGPoint] {
+        guard let body = activeBody else { return [] }
+        if let scrollView = body as? NSScrollView { return [scrollView.contentView.bounds.origin] }
+        return body.subviews.compactMap { ($0 as? NSScrollView)?.contentView.bounds.origin }
+    }
+
     /// Anything that changes what the body renders. Appearance is already in the
     /// revision vector; the epoch covers content and mode.
     private func bumpSurfaceEpoch() { surfaceEpoch &+= 1 }

@@ -2024,7 +2024,16 @@ final class CanvasNSView: NSView, TokenThemed {
         // the sharpness gate, and left the tile native — measured in a real session
         // as 0 of 8 surfaced for 36 seconds until the user happened to zoom back out.
         let tooSoft = surface.map { !$0.isSharpEnough(forZoom: zoom, backingScale: backingScale) } ?? false
-        if surface?.revision != wanted || tooSoft {
+        // **A scroll is not a content change, and it moves the picture anyway.**
+        // The revision cannot see it (scrolling bumps no version), so a surface
+        // baked before the user scrolled matched the freshness test afterwards and
+        // was handed straight back — a faithful picture of where the body used to be
+        // looking, which is the largest jump this design can produce. Compared HERE
+        // and nowhere else, because this function only ever runs on a native tile:
+        // its body is in the world plane, so its scroll position is real. A parked
+        // body's is not, and comparing that one thrashes every tile.
+        let scrollMoved = surface.map { $0.bakedScrollOffsets != tileView.surfaceScrollOffsets } ?? false
+        if surface?.revision != wanted || tooSoft || scrollMoved {
             // **Refuse BEFORE baking, not after.** Evicting after the fact thrashes:
             // the pass bakes eight surfaces, the budget evicts the farthest four, and
             // 100 ms later the same four are still quiet and get baked again —
@@ -2059,7 +2068,10 @@ final class CanvasNSView: NSView, TokenThemed {
                 return false
             }
             bakeBudget -= 1
-            surface = tileSurfaceStore.bake(tileId: tileId, body: body, revision: wanted)
+            surface = tileSurfaceStore.bake(
+                tileId: tileId, body: body, revision: wanted,
+                scrollOffsets: tileView.surfaceScrollOffsets
+            )
             guard let baked = surface else {
                 qaSurfaceRefusedStaleCount += 1
                 return false
