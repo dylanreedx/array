@@ -5859,7 +5859,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func refreshAgentSurfaces(notify: Bool = true) {
         rebuildAgentActivitySnapshot()
         pushAgentSurfaces(notify: notify)
+        warmCheckedOutBranchesIfNeeded()
     }
+
+    /// The branch chips' freshness, moved OFF the main thread. The sidebar
+    /// rebuild above serves the cache and never spawns git (a 20 s sample of a
+    /// real session showed ~0.4 s frozen per app switch in synchronous
+    /// `rev-parse` spawns from this path); this reads every agent repo once on a
+    /// utility queue and re-renders one time if any chip changed.
+    private func warmCheckedOutBranchesIfNeeded() {
+        guard !branchWarmInFlight else { return }
+        let targets = agentSupervisor.warmCheckedOutBranchTargets()
+        guard !targets.isEmpty else { return }
+        branchWarmInFlight = true
+        Task { [weak self] in
+            let read: [(URL, String?)] = await Task.detached(priority: .utility) {
+                let manager = WorktreeManager()
+                return targets.map { ($0, (try? manager.currentBranch(repo: $0)) ?? nil) }
+            }.value
+            guard let self else { return }
+            var changed = false
+            for (repo, branch) in read
+            where self.agentSupervisor.storeCheckedOutBranch(branch, repo: repo) {
+                changed = true
+            }
+            self.branchWarmInFlight = false
+            if changed { self.reloadWorkspaceSidebar(rebuildAgentActivity: false) }
+        }
+    }
+
+    private var branchWarmInFlight = false
 
     /// Push whatever `agentActivity` currently holds at all four surfaces, and
     /// publish the change-set that got it there. Split out of
@@ -8243,7 +8272,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         var turnSnapshots: [UUID: AgentTileTurnSnapshot] = [:]
         var lifecycleFacts: [UUID: AgentLifecycleFacts] = [:]
         for record in records {
-            if let branch = agentSupervisor.branchContext(for: record.id)?.checkedOutBranch {
+            if let branch = agentSupervisor.branchContextCachedOnly(for: record.id)?.checkedOutBranch {
                 checkedOutBranches[record.id.rawValue] = branch
             }
             attention[record.id.rawValue] = agentSupervisor.attention(for: record.id, now: now)

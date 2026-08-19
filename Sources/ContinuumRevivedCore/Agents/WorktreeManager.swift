@@ -536,6 +536,22 @@ public final class CheckedOutBranchCache {
         return resolved
     }
 
+    /// The cache's answer WITHOUT ever shelling out. Outer nil: this repo has
+    /// never been read. Inner nil: read, and its HEAD is detached. Staleness is
+    /// deliberately ignored here: the sidebar rebuild runs on app activate/resign
+    /// on the MAIN thread, and with a 2 s TTL every app switch paid two git
+    /// spawns per agent repo — ~0.4 s frozen per switch, sampled live
+    /// (2026-08-19). `store` is how an off-main warmer fills what this serves.
+    public func cachedOnly(repo: URL) -> String?? {
+        entries[WorktreeManager.resolved(repo)]?.branch
+    }
+
+    /// Record a value read elsewhere (the off-main warmer), so `cachedOnly`
+    /// serves it and the TTL path does not immediately re-read it.
+    public func store(branch: String?, repo: URL, now: Date = Date()) {
+        entries[WorktreeManager.resolved(repo)] = (now, branch)
+    }
+
     /// Forget everything, for a caller that knows a checkout moved (a `git
     /// checkout` the app itself ran, or a manual refresh). The TTL alone would get
     /// there, but only after up to `ttl` of showing the old branch.

@@ -3223,6 +3223,40 @@ final class AgentSupervisor {
         )
     }
 
+    /// `branchContext(for:)` without the shell-out: serves whatever the cache
+    /// holds, possibly stale, possibly absent. The activation-path sidebar
+    /// rebuild reads through THIS — the TTL variant put two synchronous git
+    /// spawns per agent repo on the main thread at every app switch (~0.4 s
+    /// frozen, sampled live 2026-08-19). `warmCheckedOutBranchTargets` +
+    /// `storeCheckedOutBranch` are how an off-main pass keeps it fresh.
+    func branchContextCachedOnly(for id: AgentID) -> AgentRowContext? {
+        guard let record = records[id] else { return nil }
+        return AgentRowContext(
+            agentKind: .managed,
+            worktreeBranch: record.worktreeBranch,
+            checkedOutBranch: checkedOutBranches.cachedOnly(
+                repo: URL(fileURLWithPath: record.cwd, isDirectory: true)) ?? nil
+        )
+    }
+
+    /// Every distinct working directory a warm pass should read, each once.
+    func warmCheckedOutBranchTargets() -> [URL] {
+        var seen = Set<String>()
+        return records.values.compactMap { record in
+            seen.insert(record.cwd).inserted
+                ? URL(fileURLWithPath: record.cwd, isDirectory: true) : nil
+        }
+    }
+
+    /// Fold one off-main read back into the cache. True when the value CHANGED,
+    /// so the caller re-renders only when a chip would actually differ.
+    @discardableResult
+    func storeCheckedOutBranch(_ branch: String?, repo: URL) -> Bool {
+        let before = checkedOutBranches.cachedOnly(repo: repo)
+        checkedOutBranches.store(branch: branch, repo: repo)
+        return before != .some(branch)
+    }
+
     /// Forget the cached branches, for a caller that knows a checkout moved. The
     /// TTL gets there on its own; this is how a refresh gets there at once.
     func invalidateCheckedOutBranches() {
@@ -10658,6 +10692,31 @@ private func checkBranchChip(
                 + "the chip re-renders per streamed token, so the read has to come from cache"
         )
     }
+
+    // MARK: 5b · the activation path never shells out at all
+    //
+    // The sidebar rebuild runs on app activate/resign, on the main thread; the
+    // TTL variant froze every app switch for ~0.4 s in git spawns (sampled live
+    // 2026-08-19). Its replacement reads through `branchContextCachedOnly`,
+    // whose contract is ZERO reads even cold, serving what the warmer stored.
+    supervisor.invalidateCheckedOutBranches()
+    let coldReads = supervisor.qaBranchGitReads
+    let cold = supervisor.branchContextCachedOnly(for: isolatedId)
+    guard supervisor.qaBranchGitReads == coldReads else {
+        throw fail("a cachedOnly branch read shelled out on a COLD cache — the activation path would freeze again")
+    }
+    guard cold?.checkedOutBranch == nil else {
+        throw fail("a cold cachedOnly read invented a branch: \(String(describing: cold?.checkedOutBranch))")
+    }
+    let isolatedRepo = URL(fileURLWithPath: isolated.cwd, isDirectory: true)
+    supervisor.storeCheckedOutBranch("warmed-branch", repo: isolatedRepo)
+    guard supervisor.branchContextCachedOnly(for: isolatedId)?.checkedOutBranch == "warmed-branch" else {
+        throw fail("a value the warmer stored was not served by the cachedOnly path")
+    }
+    guard supervisor.qaBranchGitReads == coldReads else {
+        throw fail("serving a warmed value cost a git read")
+    }
+    supervisor.invalidateCheckedOutBranches()
 
     // MARK: 4 · the agent leaves the branch it was given, for real
     //
