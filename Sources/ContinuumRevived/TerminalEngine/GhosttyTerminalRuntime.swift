@@ -90,6 +90,15 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
         hostView = nil
     }
 
+    /// Pause or resume the terminal's renderer for WINDOW occlusion.
+    ///
+    /// Deliberately NOT `dehydrateForSnapshot`: that also hides the view and
+    /// blurs focus, which is right for a snapshot and wrong here — focus must
+    /// survive a space round-trip. Only the render loop is told.
+    func setRendererOccluded(_ occluded: Bool) {
+        terminalView?.setSnapshotOccluded(occluded)
+    }
+
     func dehydrateForSnapshot() {
         guard let terminalView else { return }
         blur()

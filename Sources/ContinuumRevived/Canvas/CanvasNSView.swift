@@ -1614,6 +1614,14 @@ final class CanvasNSView: NSView, TokenThemed {
     /// pointer clause is a rule that has to be witnessed rather than assumed.
     var residencyPointerProvider: (() -> NSPoint?)?
 
+    /// Injectable read of "is this window visible on the active space" for the
+    /// occlusion witnesses — real occlusion cannot be simulated headlessly, so
+    /// the check drives the real notification -> observer -> state machine path
+    /// with only this OS-state read stubbed. Mirrors `residencyPointerProvider`.
+    var occlusionVisibilityProvider: (() -> Bool)?
+
+    var qaResidencyTimerRunning: Bool { residencyTimer != nil }
+
     var residencyTuning = TileResidencyPolicy.Tuning.default
 
     private var tileLiveness: [UUID: TileResidencyPolicy.Liveness] = [:]
@@ -1721,7 +1729,10 @@ final class CanvasNSView: NSView, TokenThemed {
     func evaluateTileResidency() {
         // A windowless canvas has no pointer, no first responder and no backing scale
         // to bake against, and nothing out there is visible to anyone. `.plans/38`.
-        guard surfaceResidencyEnabled, window != nil else { return }
+        // Occluded is checked HERE, not only where the timer is armed: the guard
+        // is what makes a stray fire or a direct call provably inert, and a
+        // guard cannot be defeated by a path that forgot to stop the timer.
+        guard surfaceResidencyEnabled, window != nil, windowOcclusionVisible else { return }
         qaResidencyEvaluationCount += 1
         // `TileNSView.hitTest` and `promoteForIncomingFocus` promote on their own, to
         // keep a click or a keystroke from reaching a picture. That leaves this set
@@ -2038,7 +2049,8 @@ final class CanvasNSView: NSView, TokenThemed {
     /// `tileView.canvas` to be set on every install path, which `_installLayer`
     /// does not do.
     private func startResidencyEvaluation() {
-        guard surfaceResidencyEnabled, residencyTimer == nil, window != nil else { return }
+        guard surfaceResidencyEnabled, residencyTimer == nil, window != nil,
+              windowOcclusionVisible else { return }
         let timer = Timer(
             timeInterval: residencyTuning.evaluationInterval, repeats: true
         ) { [weak self] _ in
@@ -2053,8 +2065,48 @@ final class CanvasNSView: NSView, TokenThemed {
         residencyTimer = nil
     }
 
+    /// **The canvas sleeps while its window cannot be seen.**
+    ///
+    /// `NSWindow.occlusionState` contains `.visible` only when the window is at
+    /// least partially unoccluded ON THE ACTIVE SPACE, so one notification
+    /// covers being covered, being hidden, being miniaturized, and sitting on
+    /// another space — which is why there is no separate space observer.
+    ///
+    /// Asleep means: no heartbeat (it polled the window server for the mouse ten
+    /// times a second and could bake four bodies a pass), no overlay animation,
+    /// and every tile family with its own render loop told to pause. Residency
+    /// state is deliberately UNTOUCHED — waking must not storm — so waking is
+    /// one immediate catch-up pass and then the ordinary cadence.
+    @objc private func windowOcclusionDidChange(_ notification: Notification) {
+        let visible = occlusionVisibilityProvider?() ?? (window?.occlusionState.contains(.visible) ?? true)
+        noteWindowOcclusionChanged(visible: visible)
+    }
+
+    private func noteWindowOcclusionChanged(visible: Bool) {
+        guard visible != windowOcclusionVisible else { return }
+        windowOcclusionVisible = visible
+        applyOverlayAnimationSuspension()
+        for tileView in tileViewsInVisualOrder {
+            tileView.windowOcclusionChanged(visible: visible)
+        }
+        if visible {
+            startResidencyEvaluation()
+            // One catch-up immediately: liveness stamps are stale by however long
+            // the window was away, and the next timer tick is up to 100 ms out.
+            evaluateTileResidency()
+        } else {
+            stopResidencyEvaluation()
+        }
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        // The occlusion observer is per-WINDOW, so it is re-registered on every
+        // move: a canvas that changed windows would otherwise be listening to a
+        // window it no longer lives in.
+        NotificationCenter.default.removeObserver(
+            self, name: NSWindow.didChangeOcclusionStateNotification, object: nil
+        )
         if window == nil {
             removeFrameTailObserver()
             stopResidencyEvaluation()
@@ -2063,6 +2115,12 @@ final class CanvasNSView: NSView, TokenThemed {
             // `releaseSurfaceResidency` keeps per tile, at canvas scale.
             promoteAllSurfacedTiles()
         } else {
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(windowOcclusionDidChange(_:)),
+                name: NSWindow.didChangeOcclusionStateNotification,
+                object: window
+            )
             installFrameTailObserver()
             startResidencyEvaluation()
         }
@@ -6509,6 +6567,17 @@ final class CanvasNSView: NSView, TokenThemed {
         canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
         try expect(canvas.qaFocusBorderAnimating, "panning back must restore the animated focus ring")
         try expect(canvas.qaAttentionBorderAnimating(for: tileBId), "panning back must restore the attention ring")
+
+        // 8) Occlusion freezes the ants the same way activation does: an ACTIVE
+        //    app whose window is covered or parked on another space is still
+        //    demanding a compositor frame per refresh for motion nobody can see.
+        canvas.occlusionVisibilityProvider = { false }
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: window)
+        try expect(canvas.qaFocusBorderFrame != nil, "occlusion must keep the border visible (it will be there when the space returns)")
+        try expect(!canvas.qaFocusBorderAnimating, "occlusion must freeze the ants — the app being active does not make a covered window worth animating")
+        canvas.occlusionVisibilityProvider = { true }
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: window)
+        try expect(canvas.qaFocusBorderAnimating, "becoming visible again must resume the ants")
     }
 
     // MARK: - Zone create/move gesture check (T19)

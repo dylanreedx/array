@@ -314,6 +314,7 @@ enum TileSurfaceResidencyChecks {
         try checkSurfaceMemoryIsBounded()
         try checkLeavingTheWindowRestoresEveryBody()
         try checkParkedBodiesPaintNoPixels()
+        try checkOcclusionPausesAndResumesResidency()
         try checkCost()
         try checkBakeCost()
         print("tile-surface-residency check: ok")
@@ -1304,6 +1305,69 @@ enum TileSurfaceResidencyChecks {
     /// far off screen, and demands the pixels be byte-identical before and after
     /// parking. A property echo ("clipsToBounds is true") could pass while the
     /// render regressed some other way; the pixels cannot.
+    /// A fully occluded window must cost nothing: no heartbeat, no bakes, no
+    /// mouse polling — and every tile family with its own render loop gets told.
+    ///
+    /// Nothing in the app observed occlusion, spaces, or activation before this:
+    /// the 10 Hz heartbeat ran identically whether the user was looking at Array
+    /// or it sat buried three Spaces away, polling the window server for the
+    /// mouse and baking up to 4 bodies per pass. The rule: occluded means the
+    /// canvas is ASLEEP — residency state untouched (waking must not storm),
+    /// evaluation provably inert, timers stopped — and visible again means one
+    /// immediate catch-up pass, then the ordinary cadence.
+    private static func checkOcclusionPausesAndResumesResidency() throws {
+        final class OcclusionRecordingTileView: TileNSView {
+            var feeds: [Bool] = []
+            override func windowOcclusionChanged(visible: Bool) { feeds.append(visible) }
+        }
+
+        let world = World(tileCount: 4)
+        defer { world.teardown() }
+        world.canvas.surfaceResidencyEnabled = true
+        // The fixture enabled the flag after the window attach, so start the
+        // heartbeat the way production does — through viewDidMoveToWindow, whose
+        // installs are idempotent.
+        world.canvas.viewDidMoveToWindow()
+        try expect(world.canvas.qaResidencyTimerRunning, "precondition: the heartbeat runs while windowed and visible")
+
+        let recorder = OcclusionRecordingTileView(tile: Tile(
+            id: UUID(), kind: .note, title: "occlusion-recorder",
+            frame: TileFrame(x: 2_000, y: 60, width: 200, height: 120),
+            zPosition: .fromLegacyRank(99), zoneId: nil, runtimeRef: nil, metadata: TileMetadata()
+        ))
+        world.canvas.install(tileView: recorder, for: recorder.tile)
+
+        world.quiesceAndSurface()
+        let surfacedBefore = world.canvas.qaSurfacedTileViews.count
+        try expect(surfacedBefore == world.tiles.count,
+                   "precondition: every fixture tile surfaced, got \(surfacedBefore) of \(world.tiles.count)")
+
+        // The window becomes fully occluded (covered, hidden, or on another
+        // space — AppKit reports all of them through this one notification).
+        world.canvas.occlusionVisibilityProvider = { false }
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: world.window)
+        try expect(!world.canvas.qaResidencyTimerRunning,
+                   "occlusion must stop the 10 Hz heartbeat — it was polling the window server and baking for a window nobody can see")
+        let evaluationsWhileOccluded = world.canvas.qaResidencyEvaluationCount
+        world.canvas.evaluateTileResidency()
+        try expect(world.canvas.qaResidencyEvaluationCount == evaluationsWhileOccluded,
+                   "a stray evaluation while occluded must no-op — the guard, not the timer, is the safety")
+        try expect(world.canvas.qaSurfacedTileViews.count == surfacedBefore,
+                   "occlusion must not change residency: the canvas is asleep, not rearranged")
+        try expect(recorder.feeds.last == false,
+                   "every tile must be told the window is occluded, so families with render loops can pause them")
+
+        // Visible again: one immediate catch-up pass, then the ordinary cadence.
+        world.canvas.occlusionVisibilityProvider = { true }
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: world.window)
+        try expect(world.canvas.qaResidencyTimerRunning, "becoming visible must restart the heartbeat")
+        try expect(world.canvas.qaResidencyEvaluationCount == evaluationsWhileOccluded + 1,
+                   "becoming visible runs exactly one immediate catch-up pass")
+        try expect(world.canvas.qaSurfacedTileViews.count == surfacedBefore,
+                   "no storm on waking: quiet tiles stay surfaced")
+        try expect(recorder.feeds.last == true, "every tile must be told the window is visible again")
+    }
+
     private static func checkParkedBodiesPaintNoPixels() throws {
         let world = World(tileCount: 4)
         defer { world.teardown() }

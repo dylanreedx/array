@@ -132,6 +132,12 @@ class TileNSView: NSView, TokenThemed {
     /// that makes "quiet" mean "not changing" rather than "no events arrived".
     var surfaceIsAnimating: Bool { false }
 
+    /// Window-occlusion feed, dispatched by the canvas when its window stops
+    /// being visible on the active space (and again when it returns). Base is a
+    /// no-op; families that own render loops (terminals) override it to pause
+    /// them — a fully occluded window should cost nothing to composite.
+    func windowOcclusionChanged(visible: Bool) {}
+
     /// The revision a surface must match to be shown for this tile right now.
     var currentSurfaceRevision: TileSurfaceRevision? {
         guard let body = surfaceableBody, let version = surfaceContentRevision else { return nil }
@@ -527,6 +533,12 @@ class TileNSView: NSView, TokenThemed {
     /// back to the canvas — which matters, because `_installLayer` does not set one.
     private(set) var accessibilityAccessCount: UInt64 = 0
 
+    /// Times `hitTest` promoted this tile's surfaced body. Cumulative; the
+    /// residency log prints the canvas-wide sum so an idle flap can be attributed
+    /// to hit-testing (scroll routing, tooltips, cursor updates) versus AX reads
+    /// versus a liveness clause.
+    private(set) var qaHitTestPromotionCount: UInt64 = 0
+
     /// **A surfaced tile must hand back its real body before an accessibility client
     /// reads it** — the same trade `hitTest` makes for input, for the same reason.
     ///
@@ -602,7 +614,12 @@ class TileNSView: NSView, TokenThemed {
         // delivery, with no queue and no replay. It matters in the 250 ms settle
         // window after a gesture, when tiles are still surfaced but the user is
         // reaching for one; during the gesture itself it costs one native tile.
+        // Counted, because AppKit hit-tests for far more than clicks (scroll
+        // routing, tooltips, cursor updates — background windows included), and a
+        // resting canvas that flaps between surfaced counts needs its promoter
+        // named before it can be fixed.
         if surfaceResidency == .surfaced, bounds.contains(local) {
+            qaHitTestPromotionCount &+= 1
             promoteBodyToNative()
         }
         if bounds.contains(local), resizeEdge(at: local) != nil {
