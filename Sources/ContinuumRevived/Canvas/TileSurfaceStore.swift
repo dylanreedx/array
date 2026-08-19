@@ -56,8 +56,18 @@ struct TileSurface {
     /// the image carries, and those tiles stay native instead of going blurry.
     /// Since zooming in also shrinks the visible set, that is cheap.
     func isSharpEnough(forZoom zoom: Double, backingScale: CGFloat) -> Bool {
-        let needed = CGFloat(max(0.0001, zoom)) * backingScale
-        return bakedScale + 0.0001 >= needed
+        isSharpEnough(forScale: CGFloat(max(0.0001, zoom)) * backingScale)
+    }
+
+    /// The same rule against a caller-computed requirement. Visibility owns the
+    /// requirement: an on-screen tile needs the zoom's full density, an off-screen
+    /// one only the capped density its bake was asked for. Judging every tile
+    /// against the zoom is what filled the byte budget with dense pictures nobody
+    /// could see — at zoom 2 a full canvas of bakes needs ~650 MB against a 256 MB
+    /// budget, so off-screen tiles stranded native (measured live 2026-08-19:
+    /// surfaced bled 83 -> 59 while refusedMemory climbed 2 -> 225, evictions 0).
+    func isSharpEnough(forScale required: CGFloat) -> Bool {
+        bakedScale + 0.0001 >= required
     }
 }
 
@@ -98,7 +108,8 @@ final class TileSurfaceStore {
     /// the caller's contract is that a failed bake leaves the tile native.
     @discardableResult
     func bake(
-        tileId: UUID, body: NSView, revision: TileSurfaceRevision, scrollOffsets: [CGPoint] = []
+        tileId: UUID, body: NSView, revision: TileSurfaceRevision, scrollOffsets: [CGPoint] = [],
+        maxScale: CGFloat? = nil
     ) -> TileSurface? {
         let bounds = body.bounds
         guard bounds.width >= 1, bounds.height >= 1,
@@ -122,14 +133,24 @@ final class TileSurfaceStore {
             qaBakeFailureCount += 1
             return nil
         }
-        let image = TileSurfaceResidencyConfig.degradesBakes()
+        var image = TileSurfaceResidencyConfig.degradesBakes()
             ? (Self.halved(produced) ?? produced)
             : produced
         // Read the density off the rep instead of assuming the backing scale: a
         // window on a 1x display, or none at all, produces a different rep, and a
         // surface that claims a sharpness it does not have would be shown when it
         // should have been refused.
-        let scale = CGFloat(rep.pixelsWide) / max(1, bounds.width)
+        var scale = CGFloat(rep.pixelsWide) / max(1, bounds.width)
+        // The caller (visibility) may want LESS than the body's natural density:
+        // `cacheDisplay` renders at zoom x backing no matter who will see it, and
+        // keeping the full rep for an off-screen tile is what filled the byte
+        // budget at high zoom. Downscale once at bake; the scale is re-measured
+        // off the RESULT, so the surface never claims density it does not carry.
+        if let maxScale, scale > maxScale * 1.001,
+           let smaller = Self.scaled(image, by: maxScale / scale) {
+            image = smaller
+            scale = CGFloat(smaller.width) / max(1, bounds.width)
+        }
         let surface = TileSurface(
             image: image, revision: revision, bakedScale: scale,
             bakedScrollOffsets: scrollOffsets, isUniform: uniform
@@ -197,6 +218,19 @@ final class TileSurfaceStore {
     /// pixel-equivalence gate. A fidelity gate that cannot be made to fail proves
     /// nothing, and `--tile-surface-residency-check` must go red under
     /// `TILE_SURFACE_HALF_SCALE=1`.
+    private static func scaled(_ image: CGImage, by factor: CGFloat) -> CGImage? {
+        let width = max(1, Int(CGFloat(image.width) * factor))
+        let height = max(1, Int(CGFloat(image.height) * factor))
+        guard let context = CGContext(
+            data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        context.interpolationQuality = .medium
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage()
+    }
+
     private static func halved(_ image: CGImage) -> CGImage? {
         func context(width: Int, height: Int) -> CGContext? {
             CGContext(

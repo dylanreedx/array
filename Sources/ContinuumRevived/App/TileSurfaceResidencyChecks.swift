@@ -331,6 +331,11 @@ enum TileSurfaceResidencyChecks {
         try checkAZoomGestureCrossesResidencyAlmostNever()
         try checkCost()
         try checkBakeCost()
+        // AFTER the timing legs on purpose: this witness bakes ~100 MB of dense
+        // surfaces, and running it first shifted checkCost's marginal by +0.5 ms
+        // (5.0-5.2 vs 4.5) purely through heap state — measured both orders,
+        // same binary, 2026-08-19. Timing legs run on a clean heap.
+        try checkOffscreenBakesAreCappedSoTheBudgetHoldsAtAnyZoom()
         print("tile-surface-residency check: ok")
     }
 
@@ -1350,6 +1355,106 @@ enum TileSurfaceResidencyChecks {
         for tile in world.tiles {
             try expect(world.agentViews[tile.id]?.surfaceResidency == .surfaced,
                        "the residency pass took a body back after a passive AX sweep")
+        }
+    }
+
+    /// **Density follows visibility, so the byte budget holds at any zoom.**
+    ///
+    /// Bakes happen in-plane, so `cacheDisplay` renders at zoom x backing no matter
+    /// who will see the result. At zoom 2 that is ~8 MB per 420x300 tile — a full
+    /// canvas needs ~650 MB against a 256 MB budget. Measured live (2026-08-19):
+    /// once the budget filled, every native tile's re-bake was refused
+    /// (refusedMemory 2 -> 225, evictions 0), so tiles stranded native and the
+    /// surfaced count bled 83 -> 59 while each stranded body made gestures heavier.
+    ///
+    /// The rule: a tile OUTSIDE the lead rect only needs `offscreenBakeZoomCap`
+    /// density — softness nobody can see costs nothing, and the lead-rect catch-up
+    /// re-bakes it at full density just before it arrives on screen.
+    private static func checkOffscreenBakesAreCappedSoTheBudgetHoldsAtAnyZoom() throws {
+        let world = World(tileCount: 18)
+        defer { world.teardown() }
+        world.canvas.surfaceResidencyEnabled = true
+        world.quiesceAndSurface()
+        let backing = world.window.backingScaleFactor
+
+        func leadRect() -> CGRect {
+            let vp = world.canvas.viewport
+            let visible = CGRect(
+                x: vp.x, y: vp.y,
+                width: 1_600 / CGFloat(vp.zoom), height: 1_000 / CGFloat(vp.zoom)
+            )
+            return visible.insetBy(dx: -visible.width * 0.25, dy: -visible.height * 0.25)
+        }
+        func frames(inLead: Bool) -> [Tile] {
+            world.tiles.filter {
+                CGRect(x: $0.frame.x, y: $0.frame.y, width: $0.frame.width, height: $0.frame.height)
+                    .intersects(leadRect()) == inLead
+            }
+        }
+
+        // A real zoom to 2, settled — the state that filled the budget in production.
+        for step in 1...8 {
+            _ = world.cameraStep(toZoom: 1.0 + 0.125 * Double(step))
+            world.pump()
+        }
+        world.settle()
+        world.evaluateResidency(passes: 6)
+
+        let inLead = frames(inLead: true)
+        let outOfLead = frames(inLead: false)
+        try expect(inLead.count >= 3 && outOfLead.count >= 3,
+                   "the fixture must straddle the lead rect (in \(inLead.count), out \(outOfLead.count)) "
+                   + "or this witness tests nothing")
+
+        // The production path that stranded tiles: every tile native, then allowed
+        // back. Off-screen tiles must come back CHEAP; on-screen ones dense.
+        for tile in world.tiles { world.agentViews[tile.id]?.promoteBodyToNative() }
+        world.advance(0.3)
+        world.evaluateResidency(passes: 10)
+
+        let full = CGFloat(2.0) * backing
+        for tile in world.tiles {
+            guard let view = world.agentViews[tile.id] else { continue }
+            try expect(view.surfaceResidency == .surfaced,
+                       "tile at y=\(tile.frame.y) is still native after 10 settled passes — "
+                       + "the state that bled the canvas in production")
+        }
+        for tile in inLead {
+            let scale = world.canvas.tileSurfaceStore.surface(for: tile.id)?.bakedScale ?? 0
+            try expect(scale + 0.01 >= full,
+                       "an on-screen tile at y=\(tile.frame.y) is surfaced at \(scale), "
+                       + "softer than the zoom needs (\(full))")
+        }
+        for tile in outOfLead {
+            let scale = world.canvas.tileSurfaceStore.surface(for: tile.id)?.bakedScale ?? 0
+            try expect(scale <= backing * 1.01,
+                       "an OFF-SCREEN tile at y=\(tile.frame.y) baked at \(scale) — full zoom "
+                       + "density for a tile nobody can see is what fills the budget")
+        }
+
+        // The arithmetic the budget depends on: bytes scale with the VISIBLE set.
+        let denseBytes = world.tiles.count
+            * Int(420 * full) * Int(300 * full) * 4
+        try expect(world.canvas.tileSurfaceStore.totalBytes < denseBytes * 65 / 100,
+                   "\(world.canvas.tileSurfaceStore.totalBytes) bytes held vs \(denseBytes) if "
+                   + "everything baked dense — the cap saved less than a third")
+
+        // The upgrade path: zoom out enough that a capped row enters the lead, and
+        // it must be re-baked to the new requirement, not left visibly soft.
+        for step in 1...4 {
+            _ = world.cameraStep(toZoom: 2.0 - 0.225 * Double(step))
+            world.pump()
+        }
+        world.settle()
+        world.advance(0.3)
+        world.evaluateResidency(passes: 10)
+        let nowNeeded = CGFloat(1.1) * backing
+        for tile in frames(inLead: true) {
+            guard world.agentViews[tile.id]?.surfaceResidency == .surfaced else { continue }
+            let scale = world.canvas.tileSurfaceStore.surface(for: tile.id)?.bakedScale ?? 0
+            try expect(scale + 0.01 >= nowNeeded,
+                       "a tile that entered the lead at y=\(tile.frame.y) is showing \(scale) "
+                       + "against a needed \(nowNeeded) — the upgrade path did not re-bake it")
         }
     }
 

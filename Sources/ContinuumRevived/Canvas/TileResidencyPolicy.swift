@@ -39,6 +39,12 @@ enum TileResidencyPolicy {
         /// Bakes allowed in one evaluation pass. Surfacing 50 quiet tiles at once
         /// would otherwise pay ~50 ms of bake in one frame.
         var maxBakesPerPass: Int = TileSurfaceResidencyConfig.maxBakesPerTransition
+        /// The zoom-equivalent density an OFF-SCREEN bake is capped at. Softness
+        /// only matters where it can be seen, and bytes are what it trades against:
+        /// full-density bakes for the whole canvas at zoom 2 need ~650 MB against a
+        /// 256 MB budget. 1.0 = rest density; the lead-rect sharpening re-bakes a
+        /// tile at full density just before it arrives on screen.
+        var offscreenBakeZoomCap: Double = 1.0
         /// Sharpness promotions allowed in ONE camera step. Promoting every
         /// too-soft surfaced tile at once was the zoom-in storm: 19 promotions in
         /// a single step and a 1.65 s frame gap, in a real 89-tile session

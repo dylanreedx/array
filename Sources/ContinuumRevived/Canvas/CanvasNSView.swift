@@ -1732,9 +1732,8 @@ final class CanvasNSView: NSView, TokenThemed {
     /// its rep sizes from the view's EFFECTIVE scale, which for an in-plane body
     /// includes the camera. Estimating without the zoom under-counted a zoomed-in
     /// bake by zoom squared.
-    private static func estimatedSurfaceBytes(of body: NSView, backingScale: CGFloat, zoom: Double) -> Int {
-        let effective = backingScale * CGFloat(max(0.0001, zoom))
-        let pixels = body.bounds.width * effective * body.bounds.height * effective
+    private static func estimatedSurfaceBytes(of body: NSView, scale: CGFloat) -> Int {
+        let pixels = body.bounds.width * scale * body.bounds.height * scale
         return Int(max(0, pixels)) * 4
     }
 
@@ -1939,8 +1938,17 @@ final class CanvasNSView: NSView, TokenThemed {
                     qaResidencySuppressedDemotionCount += 1
                     continue
                 }
+                // Density follows visibility: full zoom density inside the lead
+                // rect, capped at rest density outside it. The lead-rect catch-up
+                // above is the upgrade path — a capped tile entering the lead is
+                // promoted, and this re-bakes it at the full requirement.
+                let fullScale = CGFloat(max(0.0001, zoom)) * backingScale
+                let requiredScale = tileView.frame.intersects(catchUpLead)
+                    ? fullScale
+                    : min(fullScale, CGFloat(residencyTuning.offscreenBakeZoomCap) * backingScale)
                 if surfaceIfAdmissible(
-                    tileView, bakeBudget: &bakeBudget, zoom: zoom, backingScale: backingScale
+                    tileView, bakeBudget: &bakeBudget,
+                    requiredScale: requiredScale, backingScale: backingScale
                 ) {
                     demotionBudget -= 1
                 }
@@ -2060,7 +2068,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// visible area. Native is the only faithful state to bake from.
     @discardableResult
     private func surfaceIfAdmissible(
-        _ tileView: TileNSView, bakeBudget: inout Int, zoom: Double, backingScale: CGFloat
+        _ tileView: TileNSView, bakeBudget: inout Int, requiredScale: CGFloat, backingScale: CGFloat
     ) -> Bool {
         guard let body = tileView.surfaceableBody,
               let wanted = tileView.currentSurfaceRevision else { return false }
@@ -2072,7 +2080,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // and every later pass found a matching revision, skipped the bake, failed
         // the sharpness gate, and left the tile native — measured in a real session
         // as 0 of 8 surfaced for 36 seconds until the user happened to zoom back out.
-        let tooSoft = surface.map { !$0.isSharpEnough(forZoom: zoom, backingScale: backingScale) } ?? false
+        let tooSoft = surface.map { !$0.isSharpEnough(forScale: requiredScale) } ?? false
         // **A scroll is not a content change, and it moves the picture anyway.**
         // The revision cannot see it (scrolling bumps no version), so a surface
         // baked before the user scrolled matched the freshness test afterwards and
@@ -2089,7 +2097,7 @@ final class CanvasNSView: NSView, TokenThemed {
             // forever, at ~2 ms a bake and ~5 ms a reparent. Prevention costs one
             // multiplication.
             let projected = tileSurfaceStore.totalBytes + Self.estimatedSurfaceBytes(
-                of: body, backingScale: backingScale, zoom: zoom
+                of: body, scale: requiredScale
             )
             guard projected <= residencySurfaceByteBudget else {
                 qaSurfaceRefusedMemoryCount += 1
@@ -2119,7 +2127,7 @@ final class CanvasNSView: NSView, TokenThemed {
             bakeBudget -= 1
             surface = tileSurfaceStore.bake(
                 tileId: tileId, body: body, revision: wanted,
-                scrollOffsets: tileView.surfaceScrollOffsets
+                scrollOffsets: tileView.surfaceScrollOffsets, maxScale: requiredScale
             )
             guard let baked = surface else {
                 qaSurfaceRefusedStaleCount += 1
@@ -2138,7 +2146,7 @@ final class CanvasNSView: NSView, TokenThemed {
             }
         }
         guard let admissible = surface else { return false }
-        guard admissible.isSharpEnough(forZoom: zoom, backingScale: backingScale) else {
+        guard admissible.isSharpEnough(forScale: requiredScale) else {
             qaSurfaceRefusedSharpnessCount += 1
             return false
         }
