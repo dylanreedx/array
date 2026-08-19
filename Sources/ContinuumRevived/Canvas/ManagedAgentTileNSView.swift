@@ -344,6 +344,11 @@ final class ManagedAgentTileNSView: TileNSView {
     /// the same signal `qaCompactStatusTickScheduled` reports. Surfacing such a tile
     /// would freeze a counter the user can see counting.
     override var surfaceIsAnimating: Bool { compactStatusTickTimer?.isValid == true }
+
+    /// An agent body always paints: a status line, a composer with its border and
+    /// its model row, and usually a transcript. A uniform bake of one is the blank
+    /// tile body users reported, never a faithful picture.
+    override var surfaceBakeExpectsContent: Bool { true }
     var qaCompositionIdentifiers: [String] {
         v2ComposeColumn?.arrangedSubviews.compactMap { $0.identifier?.rawValue } ?? []
     }

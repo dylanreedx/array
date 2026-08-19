@@ -25,6 +25,10 @@ struct TileSurface {
     /// Device pixels per world point the image actually carries. Compared against
     /// what the screen needs — never assumed.
     let bakedScale: CGFloat
+    /// Every sampled pixel identical: a flat rectangle. Correct for an empty
+    /// note, never correct for a tile that always paints chrome of its own — the
+    /// canvas decides which case it has.
+    let isUniform: Bool
 
     var byteCount: Int { image.width * image.height * 4 }
 
@@ -84,6 +88,16 @@ final class TileSurfaceStore {
             return nil
         }
         body.cacheDisplay(in: bounds, to: rep)
+        // Measured HERE because this is where the rep is; judged by the canvas,
+        // which is the only place that knows whether a flat rectangle is a
+        // legitimate picture of this tile. An empty note bakes uniform and is
+        // perfectly correct; an agent tile — composer, status line, transcript —
+        // never is, and a uniform bake of one is the blank body users reported.
+        let scanStart = ProcessInfo.processInfo.systemUptime
+        let uniform = Self.isUniform(rep)
+        Self.qaBakeScanMsTotal += (ProcessInfo.processInfo.systemUptime - scanStart) * 1_000
+        Self.qaBakeScanCount += 1
+        if uniform { qaUniformBakeCount += 1 }
         guard let produced = rep.cgImage else {
             qaBakeFailureCount += 1
             return nil
@@ -96,7 +110,7 @@ final class TileSurfaceStore {
         // surface that claims a sharpness it does not have would be shown when it
         // should have been refused.
         let scale = CGFloat(rep.pixelsWide) / max(1, bounds.width)
-        let surface = TileSurface(image: image, revision: revision, bakedScale: scale)
+        let surface = TileSurface(image: image, revision: revision, bakedScale: scale, isUniform: uniform)
         surfaces[tileId] = surface
         qaBakeCount += 1
         return surface
@@ -105,6 +119,55 @@ final class TileSurfaceStore {
     func qaResetCounters() {
         qaBakeCount = 0
         qaBakeFailureCount = 0
+        qaUniformBakeCount = 0
+    }
+
+    /// Cost of the uniformity scan, accumulated statically so the bake-cost
+    /// instrument can attribute it: an unattributed millisecond turns a published
+    /// number into fiction, which is the guard that caught this scan in the first
+    /// place.
+    private(set) static var qaBakeScanMsTotal: Double = 0
+    private(set) static var qaBakeScanCount = 0
+
+    static func qaResetBakeScanTiming() {
+        qaBakeScanMsTotal = 0
+        qaBakeScanCount = 0
+    }
+
+    /// Bakes that came out as a flat rectangle. Not a failure by itself — an
+    /// empty note legitimately bakes uniform — but a canvas producing them in
+    /// bulk for content-bearing tiles is a bug upstream of this store.
+    private(set) var qaUniformBakeCount = 0
+
+    /// Is every sampled pixel identical — i.e. would a user see a flat rectangle?
+    ///
+    /// Reads `bitmapData` on a coarse stride (about 24x24 samples, bounded) so the
+    /// cost is a few hundred pointer reads per bake rather than `colorAt`'s
+    /// per-pixel object allocation. Any single differing byte answers "not
+    /// uniform" and returns immediately, so a real tile costs almost nothing.
+    private static func isUniform(_ rep: NSBitmapImageRep) -> Bool {
+        guard let data = rep.bitmapData else { return false }
+        let width = rep.pixelsWide
+        let height = rep.pixelsHigh
+        let rowBytes = rep.bytesPerRow
+        let sample = max(1, rep.bitsPerPixel / 8)
+        guard width > 0, height > 0, rowBytes > 0, sample >= 1 else { return false }
+        let strideX = max(1, width / 24)
+        let strideY = max(1, height / 24)
+        let first = data[0]
+        var y = 0
+        while y < height {
+            var x = 0
+            let row = y * rowBytes
+            while x < width {
+                let offset = row + x * sample
+                guard offset < rowBytes * height else { break }
+                if data[offset] != first { return false }
+                x += strideX
+            }
+            y += strideY
+        }
+        return true
     }
 
     /// Round-trip through a half-size bitmap: the negative witness for the

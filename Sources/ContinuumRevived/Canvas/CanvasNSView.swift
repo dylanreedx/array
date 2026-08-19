@@ -301,6 +301,22 @@ final class CanvasNSView: NSView, TokenThemed {
     /// cap was spent. Deferral is the storm policy working; this is what makes it
     /// observable instead of indistinguishable from a stall.
     private(set) var qaSurfaceSharpnessDeferredCount = 0
+    /// Bakes dropped for being a flat rectangle on a tile whose body always
+    /// paints. Non-zero means something upstream is leaving bodies undrawable.
+    private(set) var qaSurfaceRefusedBlankCount = 0
+    /// Bakes refused because the window was not being shown. Non-zero is normal
+    /// (it is the notification-lag gap being covered); large and growing means
+    /// something is evaluating residency for a window nobody can see.
+    private(set) var qaSurfaceRefusedOccludedCount = 0
+
+    /// Live occlusion answer: the injected provider in checks, otherwise the
+    /// window's own state. `nil` means "cannot know", which callers treat as
+    /// permission — a canvas with no window has other guards.
+    private func resolvedWindowVisibility() -> Bool? {
+        if let occlusionVisibilityProvider { return occlusionVisibilityProvider() }
+        guard let window else { return nil }
+        return window.occlusionState.contains(.visible)
+    }
 
     func qaResetSurfaceResidencyCounters() {
         qaSurfaceDemotionCount = 0
@@ -312,6 +328,8 @@ final class CanvasNSView: NSView, TokenThemed {
         qaSurfaceEvictionCount = 0
         qaSurfaceRefusedMemoryCount = 0
         qaSurfaceSharpnessDeferredCount = 0
+        qaSurfaceRefusedBlankCount = 0
+        qaSurfaceRefusedOccludedCount = 0
         tileSurfaceStore.qaResetCounters()
     }
 
@@ -1968,6 +1986,9 @@ final class CanvasNSView: NSView, TokenThemed {
             + " | native by: [\(native)]"
             + " | promotions \(qaSurfacePromotionCount) demotions \(qaSurfaceDemotionCount)"
             + " | hitTest promotes \(hitTestPromotes), ax reads \(axReads)"
+            + " | refused: blank \(qaSurfaceRefusedBlankCount)"
+            + " (uniform bakes \(tileSurfaceStore.qaUniformBakeCount)),"
+            + " occluded \(qaSurfaceRefusedOccludedCount)"
         Logger(subsystem: "continuum.canvas", category: "residency").notice("\(line, privacy: .public)")
     }
 
@@ -2023,10 +2044,35 @@ final class CanvasNSView: NSView, TokenThemed {
                 qaSurfaceRefusedBudgetCount += 1
                 return false
             }
+            // **Never bake a window the system is not showing.** The cached
+            // occlusion flag is notification-driven, so between the window
+            // actually going away and the notification arriving there is a window
+            // in which a pass can still run — and a body in a window with no
+            // valid backing store bakes to nothing. Reported from the real canvas
+            // after clicking in and out repeatedly: tiles left showing chrome
+            // over an empty body, one blank surface per bake in that gap,
+            // persisting because the revision still matched. Read the state
+            // authoritatively here; `== false` on purpose, so an unknown state
+            // (no window, a fixture that cannot answer) still bakes.
+            if resolvedWindowVisibility() == false {
+                qaSurfaceRefusedOccludedCount += 1
+                return false
+            }
             bakeBudget -= 1
             surface = tileSurfaceStore.bake(tileId: tileId, body: body, revision: wanted)
-            guard surface != nil else {
+            guard let baked = surface else {
                 qaSurfaceRefusedStaleCount += 1
+                return false
+            }
+            // **A picture of nothing is the wrong pixels.** Reported from the real
+            // canvas: tiles showing chrome over an empty body while the log said
+            // every tile was surfaced. Whatever leaves a content-bearing body
+            // unable to draw itself at bake time, showing that bake breaks the
+            // design's one promise, so the surface is dropped and the tile stays
+            // native — which costs what a native tile costs today, and no more.
+            if baked.isUniform, tileView.surfaceBakeExpectsContent {
+                tileSurfaceStore.drop(tileId)
+                qaSurfaceRefusedBlankCount += 1
                 return false
             }
         }
@@ -2078,8 +2124,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// state is deliberately UNTOUCHED — waking must not storm — so waking is
     /// one immediate catch-up pass and then the ordinary cadence.
     @objc private func windowOcclusionDidChange(_ notification: Notification) {
-        let visible = occlusionVisibilityProvider?() ?? (window?.occlusionState.contains(.visible) ?? true)
-        noteWindowOcclusionChanged(visible: visible)
+        noteWindowOcclusionChanged(visible: resolvedWindowVisibility() ?? true)
     }
 
     private func noteWindowOcclusionChanged(visible: Bool) {
@@ -2091,9 +2136,13 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         if visible {
             startResidencyEvaluation()
-            // One catch-up immediately: liveness stamps are stale by however long
-            // the window was away, and the next timer tick is up to 100 ms out.
-            evaluateTileResidency()
+            // NO immediate bake here, deliberately. A window that has just come
+            // back has not necessarily redrawn itself yet, and a bake taken in
+            // that instant captures nothing — which is the blank-tile report. The
+            // ordinary tick is at most 100 ms away and a tile surfaced 100 ms
+            // late is invisible; ask for a redraw and let it happen.
+            needsDisplay = true
+            for tileView in tileViewsInVisualOrder { tileView.needsDisplay = true }
         } else {
             stopResidencyEvaluation()
         }

@@ -122,6 +122,14 @@ enum TileSurfaceResidencyChecks {
             // often as not, which would make the pointer clause decide these
             // witnesses at random.
             canvas.residencyPointerProvider = { [weak self] in self?.injectedPointer }
+            // And visibility, ALWAYS — for the same reason. Production refuses to
+            // bake a window the system is not showing (a body in a window with no
+            // valid backing store bakes to nothing), and a borderless fixture
+            // window ordered front in a check process genuinely reports NOT
+            // visible: measured, every witness went to "0 of 6 surfaced" the
+            // moment that guard landed. The occlusion witness overrides this to
+            // drive the real transitions.
+            canvas.occlusionVisibilityProvider = { true }
             pump()
         }
 
@@ -314,6 +322,8 @@ enum TileSurfaceResidencyChecks {
         try checkSurfaceMemoryIsBounded()
         try checkLeavingTheWindowRestoresEveryBody()
         try checkParkedBodiesPaintNoPixels()
+        try checkSurfacesAreNeverBlankAfterAParkRoundTrip()
+        try checkNoBakeWhileTheWindowIsNotShown()
         try checkOcclusionPausesAndResumesResidency()
         try checkCost()
         try checkBakeCost()
@@ -1315,6 +1325,147 @@ enum TileSurfaceResidencyChecks {
     /// canvas is ASLEEP — residency state untouched (waking must not storm),
     /// evaluation provably inert, timers stopped — and visible again means one
     /// immediate catch-up pass, then the ordinary cadence.
+    /// **A surface may never be a picture of nothing.**
+    ///
+    /// Reported from the real 89-tile canvas: after clicking in and out of the
+    /// window and navigating, tiles rendered chrome with a BLANK body — and the
+    /// residency log said "surfaced 83 of 83", so those were surfaces whose baked
+    /// image carried no content.
+    ///
+    /// The suspected cause is worth stating because it inverts an earlier fix: an
+    /// UNCLIPPED parked body was still being drawn (that is exactly what
+    /// `checkParkedBodiesPaintNoPixels` measured before the park was clipped), and
+    /// being drawn is what kept a transcript's rows MATERIALIZED. Clipped, a
+    /// parked body stops drawing, its collection view releases its item views,
+    /// and a body promoted out of the park can be baked before any layout pass
+    /// re-materialises it — so the surface is blank, and it stays blank until
+    /// something happens to re-bake it.
+    ///
+    /// This witness drives the round trip the user drove: surface, promote, dirty
+    /// the content, let it go quiet, re-bake — then demands every stored surface
+    /// carry real pixels.
+    private static func checkSurfacesAreNeverBlankAfterAParkRoundTrip() throws {
+        let world = World(tileCount: 4)
+        defer { world.teardown() }
+        world.canvas.surfaceResidencyEnabled = true
+
+        func assertNoBlankSurfaces(_ stage: String) throws {
+            for (index, tile) in world.tiles.enumerated() {
+                guard let surface = world.canvas.tileSurfaceStore.surface(for: tile.id) else { continue }
+                let rep = NSBitmapImageRep(cgImage: surface.image)
+                let metrics = VisualSnapshot.metrics(of: rep)
+                try expect(!metrics.isBlank,
+                           "\(stage): tile \(index)'s surface is BLANK — \(metrics.distinctSampledColors) distinct "
+                           + "sampled colour(s) at \(metrics.width)x\(metrics.height). A surfaced tile is showing a "
+                           + "picture of nothing, which is what the user saw as empty tile bodies")
+            }
+        }
+
+        // First bake: the body has never been parked. This is the baseline, and it
+        // is what a fresh canvas shows.
+        world.quiesceAndSurface()
+        try expect(world.canvas.tileSurfaceStore.count > 0, "precondition: something must be surfaced")
+        try assertNoBlankSurfaces("first bake")
+
+        // The round trip: every body back to native (this is what a click, a
+        // focus, or a sharpness promotion does), then content changes so the next
+        // quiet pass MUST re-bake from a body that has just come out of the park.
+        world.canvas.promoteAllSurfacedTiles()
+        world.pump()
+        for (index, tile) in world.tiles.enumerated() {
+            guard let view = world.agentViews[tile.id] else { continue }
+            let thread = "surface-residency-\(index)"
+            let turn = "\(thread)-roundtrip"
+            view.ingest(.turnStarted(threadId: thread, turnId: turn))
+            view.ingest(.contentDelta(
+                threadId: thread, turnId: turn, streamKind: .assistant,
+                delta: "A body promoted out of the park must still know how to draw itself."
+            ))
+            view.ingest(.turnCompleted(threadId: thread, turnId: turn, outcome: .completed, errorMessage: nil))
+        }
+        world.evaluateResidency()
+        world.advance(world.canvas.residencyTuning.contentQuietDelay + 0.05)
+        world.evaluateResidency(passes: 8)
+        try expect(world.canvas.qaSurfacedTileViews.count == world.tiles.count,
+                   "after the round trip every quiet tile must be surfaced again, got "
+                   + "\(world.canvas.qaSurfacedTileViews.count) of \(world.tiles.count)")
+        try assertNoBlankSurfaces("re-bake after a park round trip")
+
+        // **And the same round trip for a tile the camera cannot see**, which is
+        // the state most of a big canvas is in: 83 tiles, a handful on screen. An
+        // off-screen tile is clipped by the world plane, so its transcript's
+        // `visibleRect` is empty and its collection view has no reason to hold any
+        // item views — nothing re-materialises it the way an on-screen layout pass
+        // does. If a bake in that state yields blank pixels, every off-screen tile
+        // on the canvas is a picture of nothing waiting for the user to pan to it.
+        world.canvas.promoteAllSurfacedTiles()
+        world.canvas.setViewport(CanvasViewport(x: 40_000, y: 40_000, zoom: 1))
+        world.pump()
+        try expect(world.canvas.visibleTileViews.isEmpty, "precondition: every tile must be off-screen")
+        for (index, tile) in world.tiles.enumerated() {
+            guard let view = world.agentViews[tile.id] else { continue }
+            let thread = "surface-residency-\(index)"
+            let turn = "\(thread)-offscreen"
+            view.ingest(.turnStarted(threadId: thread, turnId: turn))
+            view.ingest(.contentDelta(
+                threadId: thread, turnId: turn, streamKind: .assistant,
+                delta: "An off-screen body must still bake the content it holds."
+            ))
+            view.ingest(.turnCompleted(threadId: thread, turnId: turn, outcome: .completed, errorMessage: nil))
+        }
+        world.evaluateResidency()
+        world.advance(world.canvas.residencyTuning.contentQuietDelay + 0.05)
+        world.evaluateResidency(passes: 8)
+        try assertNoBlankSurfaces("re-bake while off-screen")
+    }
+
+    /// **The notification-lag gap: a pass may run after the window has stopped
+    /// being shown but before anyone has been told.**
+    ///
+    /// This is the reported blank-tile bug's most likely origin. Clicking in and
+    /// out of the window repeatedly means many visibility transitions, and in the
+    /// gap between the window actually going away and
+    /// `didChangeOcclusionStateNotification` arriving, the 10 Hz pass can still
+    /// fire — baking bodies in a window with no valid backing store, up to four
+    /// blank surfaces per gap, each persisting because its revision still matched
+    /// its content. The cached occlusion flag cannot close this; only reading the
+    /// state at bake time can.
+    ///
+    /// The fixture reproduces the gap exactly: flip the injected visibility
+    /// WITHOUT posting the notification, so the canvas still believes it is
+    /// visible, and demand that no bake happens anyway.
+    private static func checkNoBakeWhileTheWindowIsNotShown() throws {
+        let world = World(tileCount: 4)
+        defer { world.teardown() }
+        world.canvas.surfaceResidencyEnabled = true
+        world.settle()
+        world.window.makeFirstResponder(nil)
+        world.injectedPointer = nil
+        world.evaluateResidency()
+        world.advance(world.canvas.residencyTuning.contentQuietDelay + 0.05)
+        world.canvas.qaResetSurfaceResidencyCounters()
+
+        // The gap: not shown any more, nobody has been told.
+        world.canvas.occlusionVisibilityProvider = { false }
+        world.evaluateResidency(passes: 4)
+
+        try expect(world.canvas.tileSurfaceStore.qaBakeCount == 0,
+                   "baked \(world.canvas.tileSurfaceStore.qaBakeCount) times while the window was not being "
+                   + "shown — those are the blank surfaces users saw as empty tile bodies")
+        try expect(world.canvas.qaSurfaceRefusedOccludedCount > 0,
+                   "the refusal must be attributed to the window not being shown, so the reason stays observable")
+        try expect(world.canvas.qaSurfacedTileViews.isEmpty,
+                   "nothing may be surfaced from a bake that never happened")
+
+        // And it recovers on its own once the window is shown again: no
+        // notification needed, because the same authoritative read allows it.
+        world.canvas.occlusionVisibilityProvider = { true }
+        world.evaluateResidency(passes: 6)
+        try expect(world.canvas.qaSurfacedTileViews.count == world.tiles.count,
+                   "once the window is shown again every quiet tile must surface: "
+                   + "\(world.canvas.qaSurfacedTileViews.count) of \(world.tiles.count)")
+    }
+
     private static func checkOcclusionPausesAndResumesResidency() throws {
         final class OcclusionRecordingTileView: TileNSView {
             var feeds: [Bool] = []
@@ -1361,8 +1512,17 @@ enum TileSurfaceResidencyChecks {
         world.canvas.occlusionVisibilityProvider = { true }
         NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: world.window)
         try expect(world.canvas.qaResidencyTimerRunning, "becoming visible must restart the heartbeat")
+        // NO immediate evaluation on waking, deliberately: a window that has just
+        // come back has not necessarily redrawn itself, and a bake taken in that
+        // instant captures nothing — which is exactly the blank-tile report that
+        // `qaSurfaceRefusedOccludedCount` and the uniform-bake refusal now guard.
+        // The heartbeat is at most 100 ms away and a tile surfaced 100 ms late is
+        // invisible.
+        try expect(world.canvas.qaResidencyEvaluationCount == evaluationsWhileOccluded,
+                   "waking must not evaluate (and therefore must not bake) inline — it restarts the heartbeat and asks for a redraw")
+        world.evaluateResidency()
         try expect(world.canvas.qaResidencyEvaluationCount == evaluationsWhileOccluded + 1,
-                   "becoming visible runs exactly one immediate catch-up pass")
+                   "the next tick after waking must evaluate normally")
         try expect(world.canvas.qaSurfacedTileViews.count == surfacedBefore,
                    "no storm on waking: quiet tiles stay surfaced")
         try expect(recorder.feeds.last == true, "every tile must be told the window is visible again")
@@ -1889,7 +2049,13 @@ enum TileSurfaceResidencyChecks {
                        + "-> \(rowsAfterParkedRefresh) rows), or the frozen pixels above mean something else")
             // Instrument integrity, the same guard the demote breakdown carries: a
             // split that stops adding up turns a published number into fiction.
-            let attributed = p50(allocSamples) + p50(drawSamples)
+            let scanMs = TileSurfaceStore.qaBakeScanCount > 0
+                ? TileSurfaceStore.qaBakeScanMsTotal / Double(TileSurfaceStore.qaBakeScanCount)
+                : 0
+            print(String(format: "tile-surface-residency bake: uniformity scan (the blank-bake guard) "
+                         + "costs %.3f ms per bake, %.1f%% of a %.2f ms clean bake",
+                         scanMs, scanMs / max(0.0001, cleanMs) * 100, cleanMs))
+            let attributed = p50(allocSamples) + p50(drawSamples) + scanMs
             try expect(attributed >= cleanMs * 0.6,
                        String(format: "bake cost: the alloc/draw split no longer explains the bake: "
                               + "%.2f ms attributed of %.2f ms measured", attributed, cleanMs))

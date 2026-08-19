@@ -132,6 +132,15 @@ class TileNSView: NSView, TokenThemed {
     /// that makes "quiet" mean "not changing" rather than "no events arrived".
     var surfaceIsAnimating: Bool { false }
 
+    /// Does this family's body ALWAYS paint something of its own?
+    ///
+    /// True means a flat, uniform bake is proof the body failed to draw — an
+    /// unmaterialised transcript, a body that has not laid out, a dropped backing
+    /// store — and the surface must be refused rather than shown. False is the
+    /// safe default: an empty note or an unloaded file tile bakes uniform and
+    /// that picture is perfectly faithful.
+    var surfaceBakeExpectsContent: Bool { false }
+
     /// Window-occlusion feed, dispatched by the canvas when its window stops
     /// being visible on the active space (and again when it returns). Base is a
     /// no-op; families that own render loops (terminals) override it to pause
