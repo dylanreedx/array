@@ -94,7 +94,7 @@ enum CanvasZoomInvalidationProbeChecks {
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless],
                               backing: .buffered, defer: false)
         window.contentView = canvas
-        window.orderFrontRegardless()
+        window.orderFrontOffscreenForChecks()
 
         var views: [TileNSView] = []
         for index in 0..<tileCount {

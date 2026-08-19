@@ -52,7 +52,7 @@ enum CanvasCameraDriverChecks {
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless],
                               backing: .buffered, defer: false)
         window.contentView = canvas
-        window.orderFrontRegardless()
+        window.orderFrontOffscreenForChecks()
 
         for index in 0..<4 {
             let tile = Tile(

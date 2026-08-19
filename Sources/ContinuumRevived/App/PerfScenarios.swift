@@ -233,7 +233,7 @@ enum PerfScenarios {
                 let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless],
                                       backing: .buffered, defer: false)
                 window.contentView = canvas
-                window.orderFrontRegardless()
+                window.orderFrontOffscreenForChecks()
 
                 var tiles: [Tile] = []
                 for index in 0..<installed {
@@ -415,7 +415,7 @@ enum PerfScenarios {
             let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless],
                                   backing: .buffered, defer: false)
             window.contentView = canvas
-            window.orderFrontRegardless()
+            window.orderFrontOffscreenForChecks()
 
             for index in 0..<installed {
                 // The visible cluster sits near the origin; filler is parked far
@@ -797,7 +797,7 @@ enum PerfScenarios {
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless],
                               backing: .buffered, defer: false)
         window.contentView = canvas
-        window.orderFrontRegardless()
+        window.orderFrontOffscreenForChecks()
         defer {
             window.orderOut(nil)
             window.contentView = nil
@@ -1132,7 +1132,7 @@ enum PerfScenarios {
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless],
                               backing: .buffered, defer: false)
         window.contentView = canvas
-        window.orderFrontRegardless()
+        window.orderFrontOffscreenForChecks()
         defer {
             window.orderOut(nil)
             window.contentView = nil
@@ -1451,7 +1451,7 @@ enum PerfScenarios {
             let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless],
                                   backing: .buffered, defer: false)
             window.contentView = canvas
-            window.orderFrontRegardless()
+            window.orderFrontOffscreenForChecks()
             defer {
                 window.orderOut(nil)
                 window.contentView = nil
@@ -1981,7 +1981,7 @@ enum PerfScenarios {
             let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless],
                                   backing: .buffered, defer: false)
             window.contentView = canvas
-            window.orderFrontRegardless()
+            window.orderFrontOffscreenForChecks()
             defer {
                 window.orderOut(nil)
                 window.contentView = nil
@@ -2844,7 +2844,7 @@ enum PerfScenarios {
         let window = NSWindow(contentRect: scrollView.frame, styleMask: [.borderless],
                               backing: .buffered, defer: false)
         window.contentView = viewportHost
-        window.orderFrontRegardless()
+        window.orderFrontOffscreenForChecks()
         defer {
             window.orderOut(nil)
             window.contentView = nil
@@ -3058,7 +3058,7 @@ enum PerfScenarios {
         canvas.frame = CGRect(x: 0, y: 0, width: 1_600, height: 1_000)
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = canvas
-        window.orderFrontRegardless()
+        window.orderFrontOffscreenForChecks()
 
         var layers: [CanvasNSView.ZoneLayer] = []
         for zoneIndex in 0..<zoneCount {
@@ -3504,7 +3504,7 @@ enum PerfScenarios {
         // it would run in the app rather than short-circuiting offscreen.
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = canvas
-        window.orderFrontRegardless()
+        window.orderFrontOffscreenForChecks()
         try runtime.install(into: canvas, appRegistry: appRegistry)
         canvas.layoutSubtreeIfNeeded()
         return Harness(runtime: runtime, canvas: canvas)

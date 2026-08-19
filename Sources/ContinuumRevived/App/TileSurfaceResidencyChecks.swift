@@ -71,7 +71,7 @@ enum TileSurfaceResidencyChecks {
                 contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false
             )
             window.contentView = canvas
-            window.orderFrontRegardless()
+            window.orderFrontOffscreenForChecks()
 
             let zoneId = UUID()
             let placement = ZonePlacement(
