@@ -245,6 +245,16 @@ class TileNSView: NSView, TokenThemed {
     var qaSurfaceHostContentsScaleChangeCount: Int { surfaceHost?.qaContentsScaleChangeCount ?? 0 }
     var qaParkedBody: NSView? { parkedBody }
 
+    /// The installed surface host's geometry and animation state, for the
+    /// swap-rendering witnesses. `qaSurfaceHostExpectedLayerFrame` is where the
+    /// hosted root layer has to be for the picture to land exactly where the body
+    /// drew: AppKit's own convention for a view's root layer, i.e. the view's
+    /// frame in its superlayer's space.
+    var qaSurfaceHostLayerFrame: CGRect? { surfaceHost?.qaSurfaceLayerFrame }
+    var qaSurfaceHostLayerAnimationKeys: [String] { surfaceHost?.qaSurfaceLayerAnimationKeys ?? [] }
+    var qaSurfaceHostFrame: CGRect? { surfaceHost?.frame }
+    var qaSurfaceHostBounds: CGRect? { surfaceHost?.bounds }
+
     /// Debug-draw mode, default off and set only by the Component Lab: overlays
     /// the interaction hitboxes (move-grab strip, resize edge bands, corner
     /// zones, close-button target) plus live screen-px metrics, so the otherwise

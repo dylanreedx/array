@@ -53,12 +53,22 @@ final class TileSurfaceHostView: NSView {
 
     override var isFlipped: Bool { true }
 
-    override func layout() {
-        super.layout()
-        // Guarded: an unchanged frame assignment still marks the layer dirty, which
-        // is the identity-write mistake `applyTileGeometry` already documents.
-        if surfaceLayer.frame != bounds { surfaceLayer.frame = bounds }
-    }
+    // **No `layout()` override, deliberately — and this is load-bearing.**
+    //
+    // `surfaceLayer` is this view's ROOT layer, so its frame lives in the
+    // SUPERLAYER's coordinate space and AppKit already maintains it from the
+    // view's frame. The override that used to live here wrote `surfaceLayer.frame
+    // = bounds`, whose origin is always `(0, 0)`, and a surfaced tile's host is
+    // framed at `(0, titleBarHeight)` inside its tile — so every layout pass over
+    // a surfaced tile shoved the baked picture UP by the full title-bar height,
+    // 24 pt, while the native body drew at the correct offset. That was the
+    // "the whole tile shifts" half of the blur->sharp transition report.
+    //
+    // Measured (`.plans/39`): correct at `(0, 24, 420, 276)` in the turn the swap
+    // happened — AppKit's sync, before any layout pass — then `(0, 0, 420, 276)`
+    // after one pump, and NOT on every tile in the same pass, which is why the
+    // shift looked intermittent. Witnessed by
+    // `checkTheSurfaceLandsExactlyWhereTheBodyDrew`.
 
     /// **The `contentsScale` trap, and the reason this class exists.**
     ///
@@ -91,6 +101,12 @@ final class TileSurfaceHostView: NSView {
         let bucketed = pow(2, (log2(Double(scale)) * stepsPerOctave).rounded(.down) / stepsPerOctave)
         return bucketed.isFinite && bucketed > 0 ? CGFloat(bucketed) : scale
     }
+
+    /// The hosted layer's own geometry and animation state. Read by witnesses:
+    /// this layer is the view's ROOT layer and Array owns it, so nothing in AppKit
+    /// disables implicit animations on it and nothing else asserts where it sits.
+    var qaSurfaceLayerFrame: CGRect { surfaceLayer.frame }
+    var qaSurfaceLayerAnimationKeys: [String] { surfaceLayer.animationKeys() ?? [] }
 
     func qaResetCounters() {
         qaBackingCallbackCount = 0

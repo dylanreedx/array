@@ -325,10 +325,82 @@ enum TileSurfaceResidencyChecks {
         try checkSurfacesAreNeverBlankAfterAParkRoundTrip()
         try checkNoBakeWhileTheWindowIsNotShown()
         try checkOcclusionPausesAndResumesResidency()
+        try checkTheSurfaceLandsExactlyWhereTheBodyDrew()
         try checkCost()
         try checkBakeCost()
         print("tile-surface-residency check: ok")
     }
+
+    /// **The picture has to sit exactly where the body sat.** A surfaced tile's
+    /// host is framed at `(0, titleBarHeight)` inside the tile, and the host's
+    /// hosted layer IS the view's root layer — AppKit's convention for which is the
+    /// view's FRAME, in the superlayer's space. `layout()` wrote `bounds` instead,
+    /// whose origin is `(0, 0)`, so every layout pass over a surfaced tile shoved
+    /// the baked picture UP by the full title-bar height while the native body drew
+    /// at the correct offset. Measured before the fix: correct at `(0, 24, 420, 276)`
+    /// the instant the swap happened, then `(0, 0, 420, 276)` after one layout pass —
+    /// and not on every tile in the same pass, which is why Dylan saw tiles shift
+    /// intermittently rather than uniformly.
+    ///
+    /// Asserted through a real pump, because the corruption is the LAYOUT pass, not
+    /// the swap: a witness that only looked at the swap turn reads green.
+    private static func checkTheSurfaceLandsExactlyWhereTheBodyDrew() throws {
+        let world = World(tileCount: 6)
+        defer { world.teardown() }
+        world.canvas.surfaceResidencyEnabled = true
+        world.quiesceAndSurface()
+
+        var checked = 0
+        for tile in world.tiles {
+            guard let view = world.agentViews[tile.id],
+                  let hostFrame = view.qaSurfaceHostFrame,
+                  let layerFrame = view.qaSurfaceHostLayerFrame else { continue }
+            checked += 1
+            try expect(
+                geometryNearlyEqual(layerFrame, hostFrame),
+                "a surfaced tile's hosted layer must sit at the host's frame — the picture is "
+                + "drawn where the body drew or it is drawn in the wrong place. host=\(hostFrame) "
+                + "layer=\(layerFrame)"
+            )
+        }
+        try expect(checked > 0, "nothing was surfaced, so this witness proved nothing")
+
+        // And it must survive the camera: a reused host carries its layer geometry
+        // across a gesture, so a zoom is the other way this can go wrong.
+        for step in 1...4 {
+            world.cameraStep(toZoom: 1.0 + 0.1 * Double(step))
+            world.pump()
+        }
+        world.settle()
+        world.pump()
+        for tile in world.tiles {
+            guard let view = world.agentViews[tile.id],
+                  let hostFrame = view.qaSurfaceHostFrame,
+                  let layerFrame = view.qaSurfaceHostLayerFrame else { continue }
+            try expect(
+                geometryNearlyEqual(layerFrame, hostFrame),
+                "after a zoom, a surfaced tile's hosted layer drifted from its host: "
+                + "host=\(hostFrame) layer=\(layerFrame)"
+            )
+        }
+
+        // No implicit animation may ride the swap either. The host is layer-HOSTING,
+        // so AppKit is not the layer's delegate and nothing disables actions on it.
+        // Measured empty before the geometry fix — recorded here so a future
+        // `CATransaction`-less write cannot start animating the picture unnoticed.
+        for tile in world.tiles {
+            guard let view = world.agentViews[tile.id], view.qaSurfaceHostFrame != nil else { continue }
+            let keys = view.qaSurfaceHostLayerAnimationKeys
+            try expect(keys.isEmpty,
+                       "an implicit animation is riding the surface swap: \(keys)")
+        }
+    }
+
+    private static func geometryNearlyEqual(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+        abs(lhs.origin.x - rhs.origin.x) < 0.01 && abs(lhs.origin.y - rhs.origin.y) < 0.01
+            && abs(lhs.width - rhs.width) < 0.01 && abs(lhs.height - rhs.height) < 0.01
+    }
+
 
     /// The flag ships OFF. Asserted rather than assumed: a default flipped by
     /// accident is how an experiment becomes everyone's problem.
