@@ -681,6 +681,22 @@ must not be able to tell.** What it gates:
   tile's), the hysteresis, and that with no AX client attached this path promotes
   nothing — AppKit called `accessibilityChildren()` **zero** times over a full run
   of settles, evaluations and camera steps;
+- **resident surface memory is bounded** — measured in a real workspace rather than
+  extrapolated: **10.4 MB per surface** for a 760x900 agent body (1.8 MB for a
+  420x300 one), so six large tiles held **62 MB** and fifty would hold half a
+  gigabyte. `TileSurfaceResidencyConfig.maxSurfaceBytes` (256 MB) is enforced by
+  handing the FARTHEST tiles their real bodies back — evicting means promoting,
+  since a tile's host holds the same `CGImage` the store does, so dropping the store
+  entry alone frees nothing. It costs camera time (~2.9 ms per live tile per step)
+  and changes nothing a user can see; the alternative levers, baking off-screen
+  tiles at lower density or lowering density everywhere, trade memory for softness
+  or for reparenting churn while panning. A stale surface is also dropped outright
+  on promotion, since it will be re-baked before it is shown again. **The budget is
+  enforced BEFORE baking, not only after**, and the leg gates convergence: eviction
+  alone thrashes, because the pass bakes, the budget evicts the farthest, and 100 ms
+  later those tiles are still quiet and get baked again. Measured with the pre-bake
+  refusal removed: **10 further passes baked 40 more surfaces on a canvas where
+  nothing changed**;
 - **flag off changes nothing** — no demotions, no bakes, an empty park, and the
   native cascade still paid;
 - **no stranded state** — removing a surfaced tile, switching zones, and the

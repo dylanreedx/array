@@ -305,6 +305,27 @@ enum FileOpenChecks {
         let panSeconds = ProcessInfo.processInfo.systemUptime - panStart
         let panMeasurements = view.qaMeasurementCount - measurementsAfterRender
 
+        // **The sub-pixel jiggle a camera zoom actually produces.** Pixel snapping
+        // at the effective scale re-rounds interior widths by up to one device
+        // pixel per zoom step — a live gesture log measured 599.6 -> 600.9 -> 600.3
+        // -> 599.1, and the old 0.5 pt guard re-measured the whole document for
+        // each: 4,310 prose measurements in one 8-step gesture, 569 ms per frame,
+        // "zooming is horrendous". Widths inside the hysteresis band must measure
+        // NOTHING.
+        let jiggleBase = view.qaMeasurementCount
+        for delta in [CGFloat(1.3), -0.6, -1.2, 1.0, -1.3, 0.9] {
+            view.frame = NSRect(x: 0, y: 0, width: 620 + delta, height: 460)
+            view.layoutSubtreeIfNeeded()
+            view.qaRelayout()
+        }
+        let jiggleMeasurements = view.qaMeasurementCount - jiggleBase
+        try expect(jiggleMeasurements == 0,
+                   "sub-pixel width jiggle (the camera-zoom snap, ±1.3 pt) re-measured "
+                   + "\(jiggleMeasurements) block(s); the hysteresis is not holding")
+        view.frame = NSRect(x: 0, y: 0, width: 620, height: 460)
+        view.layoutSubtreeIfNeeded()
+        view.qaRelayout()
+
         // A width change is the one thing that legitimately re-measures.
         view.frame = NSRect(x: 0, y: 0, width: 520, height: 460)
         view.layoutSubtreeIfNeeded()
@@ -327,6 +348,39 @@ enum FileOpenChecks {
                    "the first render of a large document must stay under 2s; took \(String(format: "%.3f", renderSeconds))s")
         try expect(view.qaTruncatedBlockCount == 0,
                    "a document of \(blocks) blocks must render in full, not truncate")
+
+        // The transcript's prose renderer shares both the anti-pattern and the fix,
+        // and it was the LARGER half of the measured cost (30,000 CoreText samples,
+        // most attributed to `AssistantProseView.layout()`), so it is witnessed
+        // here beside the markdown case rather than trusted by analogy.
+        let prose = AssistantProseView(frame: NSRect(x: 0, y: 0, width: 620, height: 200))
+        prose.apply(
+            block: AgentBlock(
+                id: AgentNodeID(rawValue: "prose-hysteresis")!,
+                revision: 1,
+                kind: .paragraph,
+                payload: .paragraph([.text(String(
+                    repeating: "A sentence long enough to wrap several times at this width. ", count: 8
+                ))])
+            ),
+            context: AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
+        )
+        prose.layoutSubtreeIfNeeded()
+        let proseBase = AssistantProseView.qaMeasurementCount
+        for delta in [CGFloat(1.3), -0.6, -1.2, 1.0, -1.3, 0.9] {
+            prose.frame = NSRect(x: 0, y: 0, width: 620 + delta, height: 200)
+            prose.needsLayout = true
+            prose.layoutSubtreeIfNeeded()
+        }
+        let proseJiggle = AssistantProseView.qaMeasurementCount - proseBase
+        try expect(proseJiggle == 0,
+                   "prose re-measured \(proseJiggle) row(s) for a sub-pixel width jiggle; "
+                   + "the hysteresis is not holding")
+        prose.frame = NSRect(x: 0, y: 0, width: 520, height: 200)
+        prose.needsLayout = true
+        prose.layoutSubtreeIfNeeded()
+        try expect(AssistantProseView.qaMeasurementCount > proseBase,
+                   "a REAL width change must still re-measure prose, or the cache is dead rather than lazy")
 
         // The file loader admits up to 1 MB. Un-budgeted, a 546 KB Markdown file
         // built 12,000 TextKit views: 5.1s to build, 5.1s to lay out, 1.39 GB

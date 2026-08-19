@@ -79,6 +79,7 @@ final class FileTileNSView: TileNSView {
         super.init(tile: tile)
 
         setContentView(sv)
+        activeBody = sv
         loadFile()
     }
 
@@ -90,13 +91,38 @@ final class FileTileNSView: TileNSView {
         messageContainer?.layer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(in: self)
         messageLabel?.textColor = TextToken.textSecondary.color.nsColor(in: self)
         markdownView?.applyTheme(effectiveTokenTheme)
+        bumpSurfaceEpoch()
     }
 
     override func acquireFocus(reason: FocusRequest) -> Bool {
         canvas?.bringToFront(tileId: tile.id)
+        // Before targeting a view inside the body: while surfaced, that view is
+        // PARKED, and AppKit will happily focus it there.
+        promoteForIncomingFocus()
         window?.makeFirstResponder(mode == .preview ? (markdownView ?? textView) : textView)
         return true
     }
+
+    // MARK: - Surface residency (Option A, `.plans/38`)
+
+    /// A markdown file tile was the HEAVIEST body in the real-gesture profile —
+    /// a 183-block document re-measuring inside the camera cascade — and it is
+    /// content that changes only when the file is reloaded, the mode switches, or
+    /// the theme does. The ideal candidate for rendering from a surface at rest.
+    ///
+    /// The body handle is tracked (`activeBody`), not derived from `contentView`:
+    /// this family swaps its content view between the source scroller, the
+    /// markdown document and the unavailable-message placeholder, and while
+    /// surfaced `contentView` is the surface host.
+    private var activeBody: NSView?
+    private var surfaceEpoch: UInt64 = 1
+
+    override var surfaceableBody: NSView? { activeBody }
+    override var surfaceContentRevision: UInt64? { surfaceEpoch }
+
+    /// Anything that changes what the body renders. Appearance is already in the
+    /// revision vector; the epoch covers content and mode.
+    private func bumpSurfaceEpoch() { surfaceEpoch &+= 1 }
 
     // MARK: - Markdown mode
 
@@ -127,17 +153,25 @@ final class FileTileNSView: TileNSView {
     /// Installs the body for the current mode from the loaded snapshot.
     private func showBody() {
         guard let loadedText else { return }
+        // A mode switch arrives via a click, so `hitTest` has already promoted —
+        // but this must hold even for a programmatic switch (`reveal(line:)`),
+        // because `setContentView` below would replace the surface host and strand
+        // the parked body.
+        promoteForIncomingFocus()
         switch (presentation, mode) {
         case (.markdown, .preview):
             let view = markdownView ?? FileMarkdownDocumentView(frame: bounds)
             markdownView = view
             view.apply(markdown: loadedText, theme: effectiveTokenTheme)
             setContentView(view)
+            activeBody = view
         default:
             textView.string = loadedText
             setContentView(scrollView)
+            activeBody = scrollView
             applyPendingReveal()
         }
+        bumpSurfaceEpoch()
     }
 
     /// Scrolls the source view to a one-based line (and optional column) without
@@ -397,7 +431,10 @@ final class FileTileNSView: TileNSView {
             label.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             label.centerYAnchor.constraint(equalTo: container.centerYAnchor)
         ])
+        promoteForIncomingFocus()
         setContentView(container)
+        activeBody = container
+        bumpSurfaceEpoch()
     }
 
     nonisolated private static func shouldLoadAsynchronously(path: String) -> Bool {

@@ -100,6 +100,8 @@ final class FileMarkdownDocumentView: NSView {
 
     /// How many times a block has been measured since this view was built.
     var qaMeasurementCount: Int { body.measurementCount }
+    static var qaLastMeasureTrigger: String { BodyView.qaLastMeasureTrigger }
+    static var qaTotalMeasurePasses: Int { BodyView.qaTotalMeasurePasses }
 
     /// Forces the document body through a real layout pass, the way a canvas
     /// relayout does. Used to prove a pan costs no measurement.
@@ -260,8 +262,19 @@ final class FileMarkdownDocumentView: NSView {
             return ceil(total)
         }
 
+        /// See `AssistantProseView.qaLastMeasureTrigger` — the same instrument, for
+        /// the same investigation.
+        static private(set) var qaLastMeasureTrigger = "-"
+        static private(set) var qaTotalMeasurePasses = 0
+
         private func measureIfNeeded(width: CGFloat) {
-            guard abs(measuredWidth - width) > 0.5 else { return }
+            // Same hysteresis as `AssistantProseView.measureWidthHysteresis`, for
+            // the same measured reason: zoom-driven pixel snapping jiggles this
+            // width by up to a device pixel per step, and re-measuring a whole
+            // markdown document for ±1.3 pt is what made zooming horrendous.
+            guard abs(measuredWidth - width) > AssistantProseView.measureWidthHysteresis else { return }
+            Self.qaLastMeasureTrigger = String(format: "markdown %.1f->%.1f", measuredWidth, width)
+            Self.qaTotalMeasurePasses += 1
             let available = max(1, width - Self.documentInset * 2)
             for index in rows.indices {
                 measurementCount += 1
@@ -279,8 +292,10 @@ final class FileMarkdownDocumentView: NSView {
             super.layout()
             let width = bounds.width
             guard width > 0 else { return }
-            let available = max(1, width - Self.documentInset * 2)
             measureIfNeeded(width: width)
+            // The measured width, not today's: see `measureIfNeeded` — row frames
+            // must match the width the heights came from.
+            let available = max(1, (measuredWidth > 0 ? measuredWidth : width) - Self.documentInset * 2)
             var y = Self.documentInset
             for (index, row) in rows.enumerated() {
                 let frame = NSRect(x: Self.documentInset, y: y, width: available, height: row.measuredHeight)

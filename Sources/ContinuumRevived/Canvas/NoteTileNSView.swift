@@ -60,11 +60,27 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
 
     override func acquireFocus(reason: FocusRequest) -> Bool {
         canvas?.bringToFront(tileId: tile.id)
+        // While surfaced, `textView` is parked; focusing it there would send every
+        // keystroke into a view clipped out of every draw.
+        promoteForIncomingFocus()
         window?.makeFirstResponder(textView)
         return true
     }
 
-    func textDidChange(_ notification: Notification) { onTextChange?() }
+    func textDidChange(_ notification: Notification) {
+        surfaceEpoch &+= 1
+        onTextChange?()
+    }
+
+    // MARK: - Surface residency (Option A, `.plans/38`)
+
+    /// A note is static text except while it is being edited — and while it is
+    /// being edited it holds the first responder, which the liveness rule already
+    /// keeps native. `textDidChange` bumps the epoch so a note edited moments ago
+    /// re-bakes before it is next surfaced.
+    private var surfaceEpoch: UInt64 = 1
+    override var surfaceableBody: NSView? { scrollView }
+    override var surfaceContentRevision: UInt64? { surfaceEpoch }
 
     // MARK: - Export (A4)
 

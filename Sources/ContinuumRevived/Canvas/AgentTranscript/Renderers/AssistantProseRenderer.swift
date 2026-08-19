@@ -119,15 +119,37 @@ final class AssistantProseView: NSView {
     /// witness. Not used by production.
     static private(set) var qaMeasurementCount = 0
 
+    /// The width transition that caused the most recent re-measure, kept so a
+    /// gesture log can NAME the trigger. A cache keyed on width can only miss when
+    /// the width moved (or the row count did), and 30,000 CoreText samples during a
+    /// camera gesture came through here without anything saying what moved.
+    static private(set) var qaLastMeasureTrigger = "-"
+
+
     private func invalidateRowHeights() {
         cachedRowHeights = []
         cachedWidth = -1
     }
 
+    /// Re-measure only when the width has REALLY moved. During a camera zoom,
+    /// pixel snapping at the effective scale (which includes the zoom) re-rounds
+    /// interior widths by up to one device pixel — ±1.3 pt at zoom 0.4, measured in
+    /// a live gesture log — and a 0.5 pt guard re-shaped every row for it: 4,310
+    /// measurements in one 8-step gesture, 569 ms per frame. Two points is wider
+    /// than a device pixel at any zoom the canvas allows and invisibly small for a
+    /// ragged text edge; rows are laid out at the MEASURED width, so wrap geometry
+    /// always matches what was measured and nothing can clip.
+    static let measureWidthHysteresis: CGFloat = 2.0
+
     override func layout() {
         super.layout()
         let availableWidth = max(1, bounds.width - Self.horizontalReadingInset * 2)
-        if abs(cachedWidth - availableWidth) > 0.5 || cachedRowHeights.count != rows.count {
+        if abs(cachedWidth - availableWidth) > Self.measureWidthHysteresis
+            || cachedRowHeights.count != rows.count {
+            Self.qaLastMeasureTrigger = String(
+                format: "prose %.1f->%.1f rows %d->%d", cachedWidth, availableWidth,
+                cachedRowHeights.count, rows.count
+            )
             cachedRowHeights = rows.map { row in
                 Self.qaMeasurementCount += 1
                 return RichInlineTextView.measuredHeight(
@@ -140,9 +162,13 @@ final class AssistantProseView: NSView {
             cachedWidth = availableWidth
         }
         var y = bounds.minY
+        // `cachedWidth`, not `availableWidth`: the frames must be the width the
+        // heights were measured at, or a width inside the hysteresis band could
+        // wrap one line more than was measured and clip it.
+        let rowWidth = cachedWidth > 0 ? cachedWidth : availableWidth
         for (index, pair) in zip(rows, textFields).enumerated() {
             let height = cachedRowHeights[index]
-            let frame = NSRect(x: Self.horizontalReadingInset, y: y, width: availableWidth, height: height)
+            let frame = NSRect(x: Self.horizontalReadingInset, y: y, width: rowWidth, height: height)
             // An unchanged frame still costs a TextKit glyph-bounds pass, and it
             // re-dirties the view — which is what kept the display cycle spinning.
             if pair.1.frame != frame { pair.1.frame = frame }

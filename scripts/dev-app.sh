@@ -6,6 +6,12 @@
 # Debug is incremental — touching one file rebuilds that file. Release mode is
 # for shipping (scripts/release-app.sh); it buys nothing for looking at a change.
 #
+# BUT NEVER JUDGE PERFORMANCE ON A DEBUG BUILD. Unoptimized Swift through this
+# much view code is several times slower than release, so a debug preview app can
+# feel unusable while the same code ships fine — which happened on 2026-08-18,
+# costing a session's worth of hunting a phantom regression. `--release` exists
+# for exactly that: behaviour on debug, feel on release.
+#
 # The bundle is DEV channel (`dev.arrayapp.macos.dev`, "Array Dev" store,
 # updater inert) because that is make-app-bundle.sh's default. It cannot touch
 # the prod app's state. It CAN touch a project's own state — `<project>/.array/`
@@ -25,15 +31,35 @@
 # Usage:
 #   scripts/dev-app.sh              # rebuild + relaunch on the scratch project
 #   scripts/dev-app.sh --no-launch  # rebuild only
+#   scripts/dev-app.sh --release    # ~6 min, for judging FEEL rather than behaviour
+#   scripts/dev-app.sh --env KEY=VALUE   # extra env for the launch, repeatable
 #   DEV_PROJECT_ROOT=/path scripts/dev-app.sh
 #   DEV_APP_PATH=... scripts/dev-app.sh
+#
+# `--env` exists because a default-off feature flag is only dogfoodable if it can
+# reach the launch, and `open` starts a detached process that inherits nothing
+# from this shell:
+#   scripts/dev-app.sh --env ARRAY_TILE_SURFACE_RESIDENCY=1
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_PATH="${DEV_APP_PATH:-$HOME/Desktop/Array Dev.app}"
 PROJECT_ROOT="${DEV_PROJECT_ROOT:-$HOME/array-scratch}"
 LAUNCH=1
-[[ "${1:-}" == "--no-launch" ]] && LAUNCH=0
+CONFIGURATION=debug
+EXTRA_ENV=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-launch) LAUNCH=0; shift ;;
+    --release) CONFIGURATION=release; shift ;;
+    --debug) CONFIGURATION=debug; shift ;;
+    --env) EXTRA_ENV+=("${2:?--env needs KEY=VALUE}"); shift 2 ;;
+    --env=*) EXTRA_ENV+=("${1#--env=}"); shift ;;
+    # Unknown arguments were ignored before this parser existed, and
+    # `sidebar-96-preview.sh` forwards its own "$@" here. Warn, do not fail.
+    *) echo "dev-app.sh: ignoring unknown argument: $1" >&2; shift ;;
+  esac
+done
 
 started=$(date +%s)
 
@@ -51,8 +77,12 @@ if pgrep -f "$APP_PATH/Contents/MacOS/Array" >/dev/null 2>&1; then
   done
 fi
 
-echo "==> building (debug, incremental)"
-"$ROOT_DIR/scripts/make-app-bundle.sh" --configuration debug --output "$APP_PATH"
+if [[ "$CONFIGURATION" == release ]]; then
+  echo "==> building (release, whole-module — minutes, not seconds)"
+else
+  echo "==> building (debug, incremental)"
+fi
+"$ROOT_DIR/scripts/make-app-bundle.sh" --configuration "$CONFIGURATION" --output "$APP_PATH"
 
 if [[ $LAUNCH -eq 1 ]]; then
   mkdir -p "$PROJECT_ROOT"
@@ -63,7 +93,14 @@ if [[ $LAUNCH -eq 1 ]]; then
   # caller's whole process group is torn down (which is what happens when an
   # agent runs this). `open` hands the launch to LaunchServices, which detaches
   # it properly, and `--env` still gets the pin through.
-  open --env "CONTINUUM_PROJECT_ROOT=$PROJECT_ROOT" "$APP_PATH"
+  # `${arr[@]+...}` because macOS ships bash 3.2, where an empty array under
+  # `set -u` is an unbound variable rather than nothing.
+  open_args=(--env "CONTINUUM_PROJECT_ROOT=$PROJECT_ROOT")
+  for kv in ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}; do
+    echo "==> extra env: $kv"
+    open_args+=(--env "$kv")
+  done
+  open "${open_args[@]}" "$APP_PATH"
 fi
 
 echo "==> done in $(( $(date +%s) - started ))s"

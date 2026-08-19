@@ -45,6 +45,18 @@ public enum TileSurfaceResidencyConfig {
     /// precisely the seam a user feels. Tiles that miss the budget stay native.
     public static let maxBakesPerTransition = 4
 
+    /// How many bytes of baked surfaces may be resident at once.
+    ///
+    /// Not a hypothetical: a real workspace measured **10.4 MB per surface** for a
+    /// 760x900 agent body (a 420x300 one is 1.8 MB), so six large tiles held 62 MB
+    /// and fifty would hold half a gigabyte. The cap is enforced by handing the
+    /// FARTHEST tiles their real bodies back, which costs camera time and changes
+    /// nothing a user can see — the alternative levers (baking off-screen tiles at
+    /// lower density, or lowering density everywhere) trade memory for softness or
+    /// for reparenting churn while panning, and this design does not spend
+    /// user-visible quality on memory.
+    public static let maxSurfaceBytes = 256 * 1_024 * 1_024
+
     /// Fidelity injection for the negative witness. The pixel-equivalence gate
     /// must be able to FAIL, or it is decoration: with this set, every bake is
     /// round-tripped through a half-size bitmap, degrading it exactly as a

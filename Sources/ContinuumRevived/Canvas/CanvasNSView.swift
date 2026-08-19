@@ -1,4 +1,5 @@
 import AppKit
+import OSLog
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
@@ -304,6 +305,8 @@ final class CanvasNSView: NSView, TokenThemed {
         qaSurfaceRefusedSharpnessCount = 0
         qaSurfaceRefusedBudgetCount = 0
         qaSurfaceStalePromotionCount = 0
+        qaSurfaceEvictionCount = 0
+        qaSurfaceRefusedMemoryCount = 0
         tileSurfaceStore.qaResetCounters()
     }
 
@@ -324,6 +327,9 @@ final class CanvasNSView: NSView, TokenThemed {
     var qaTrackedSurfacedTileCount: Int { surfacedTiles.count }
 
     var qaParkedBodyCount: Int { surfaceParkView.subviews.count }
+
+    /// The visible world region, which is what "farthest" is measured from.
+    var qaWorldPlaneBounds: CGRect { worldPlane.bounds }
 
     /// Point the world plane at `canvasState.viewport`. This is the whole camera
     /// application — one view's bounds — and it replaces the per-tile screen-frame
@@ -1362,6 +1368,15 @@ final class CanvasNSView: NSView, TokenThemed {
     private(set) var qaViewportApplyCount = 0
 
     func setViewport(_ viewport: CanvasViewport) {
+        let cameraStepStart = ProcessInfo.processInfo.systemUptime
+        if let last = lastViewportCommitAt {
+            gestureCommitGapsMs.append((cameraStepStart - last) * 1_000)
+        }
+        lastViewportCommitAt = cameraStepStart
+        // Read by the run-loop observer AFTER layout, display and the CA commit have
+        // run — the three stages this method's own timing cannot see.
+        pendingFrameStartedAt = cameraStepStart
+        defer { gestureStepDurationsMs.append((ProcessInfo.processInfo.systemUptime - cameraStepStart) * 1_000) }
         qaViewportApplyCount += 1
         // Any writer other than the driver — a navigation snap, a pointer-pan
         // drag, a restore, a self-check — owns the camera now: gesture state
@@ -1442,6 +1457,48 @@ final class CanvasNSView: NSView, TokenThemed {
         // interactive again. Under Option A a settle is simply the first moment
         // demotions are allowed again, so the ordinary pass does the work.
         evaluateTileResidency()
+        logGestureCost()
+    }
+
+    private func logGestureCost() {
+        let steps = gestureStepDurationsMs.sorted()
+        let frames = gestureFrameTailsMs.sorted()
+        let gaps = gestureCommitGapsMs.sorted()
+        gestureStepDurationsMs.removeAll(keepingCapacity: true)
+        gestureFrameTailsMs.removeAll(keepingCapacity: true)
+        gestureCommitGapsMs.removeAll(keepingCapacity: true)
+        lastViewportCommitAt = nil
+        pendingFrameStartedAt = nil
+        guard steps.count >= 3 else { return }
+        func p(_ sorted: [Double], _ q: Double) -> Double {
+            guard !sorted.isEmpty else { return 0 }
+            return sorted[min(sorted.count - 1, Int(Double(sorted.count) * q))]
+        }
+        // Three views of one gesture. camera = Array's slice of the frame; frame =
+        // the whole in-process frame including layout, display and the CA commit;
+        // gap = the cadence commits actually arrived at. A smooth gesture needs
+        // frame under the budget AND gap near the display period — a cheap frame at
+        // 10 Hz and an expensive frame at 120 Hz feel identically bad.
+        // Text measurement during a gesture is the identified cost (30k CoreText
+        // samples), so every gesture reports how many measure passes it caused and
+        // what the LAST one says moved. Deltas against the previous gesture's
+        // totals, so a busy canvas at rest does not pollute the number.
+        let proseMeasures = AssistantProseView.qaMeasurementCount - lastProseMeasureCount
+        let markdownMeasures = FileMarkdownDocumentView.qaTotalMeasurePasses
+            - lastMarkdownMeasureCount
+        lastProseMeasureCount = AssistantProseView.qaMeasurementCount
+        lastMarkdownMeasureCount = FileMarkdownDocumentView.qaTotalMeasurePasses
+        let line = String(
+            format: "gesture: %d steps | camera p50 %.2f / p95 %.2f ms | frame p50 %.2f / p95 %.2f ms "
+            + "| gap p50 %.1f / p95 %.1f ms | %d surfaced, %d visible, %d chrome redraws | "
+            + "prose measures %d (%@), markdown passes %d (%@)",
+            steps.count, p(steps, 0.5), p(steps, 0.95), p(frames, 0.5), p(frames, 0.95),
+            p(gaps, 0.5), p(gaps, 0.95), surfacedTiles.count, visibleTileViews.count,
+            qaCameraLayoutStats.chromeRepaints,
+            proseMeasures, AssistantProseView.qaLastMeasureTrigger,
+            markdownMeasures, FileMarkdownDocumentView.qaLastMeasureTrigger
+        )
+        Logger(subsystem: "continuum.canvas", category: "gesture").notice("\(line, privacy: .public)")
     }
 
     // MARK: - Surface residency (.plans/36)
@@ -1462,9 +1519,88 @@ final class CanvasNSView: NSView, TokenThemed {
     private var lastResidencyDecisions: [UUID: TileResidencyPolicy.Decision] = [:]
     private var residencyTimer: Timer?
 
+    /// Edge-triggered, so an idle canvas logs nothing and a busy one logs once per
+    /// change. This is the only way to see the policy working in a REAL app: the
+    /// flag ships off, so there is no UI for it, and every other piece of evidence
+    /// so far comes from a fixture. `log stream --predicate 'subsystem ==
+    /// "continuum.canvas"'` while dogfooding with `ARRAY_TILE_SURFACE_RESIDENCY=1`.
+    private var lastLoggedSurfacedCount = -1
+
+    /// Array-owned cost of each camera commit in the current gesture, logged once
+    /// when it settles.
+    ///
+    /// This exists because the fixtures and the app disagreed: `--tile-surface-
+    /// residency-check` measures 0.16 ms a step with everything surfaced, and the
+    /// real app still felt laggy with 7 of 8 tiles surfaced. A number from the
+    /// fixture cannot settle that; a number from the gesture the user actually made
+    /// can. If this reports sub-millisecond steps while a gesture feels bad, the cost
+    /// is not Array's camera path at all and the search moves to rasterisation and
+    /// the compositor — which is what `MATRIX_KNOWN_RED`'s zoom note already
+    /// suspects.
+    private var gestureStepDurationsMs: [Double] = []
+
+    /// The WHOLE in-process frame, per commit: from `setViewport` to the run loop
+    /// going back to sleep, which is after AppKit layout, display, and the Core
+    /// Animation commit. `gestureStepDurationsMs` measures only the camera slice,
+    /// and a real session proved that number can be 1.4 ms while the gesture feels
+    /// unusable — the cost it is blind to is exactly the cost in question.
+    private var gestureFrameTailsMs: [Double] = []
+
+    /// Gap between consecutive camera commits — the actual cadence the user's
+    /// gesture ran at. A cheap step arriving 10 times a second is still 10 Hz.
+    private var gestureCommitGapsMs: [Double] = []
+    private var lastViewportCommitAt: TimeInterval?
+    private var lastProseMeasureCount = 0
+    private var lastMarkdownMeasureCount = 0
+    private var pendingFrameStartedAt: TimeInterval?
+    private var frameTailObserver: CFRunLoopObserver?
+
+    /// Order 3,000,000: AFTER Core Animation's own commit observer (~2,000,000), so
+    /// the tail includes the commit, and after NSWindow's display cycle. Repeats on
+    /// every run-loop turn but costs one nil check when no camera commit happened.
+    private func installFrameTailObserver() {
+        guard frameTailObserver == nil else { return }
+        let observer = CFRunLoopObserverCreateWithHandler(
+            kCFAllocatorDefault, CFRunLoopActivity.beforeWaiting.rawValue, true, 3_000_000
+        ) { [weak self] _, _ in
+            MainActor.assumeIsolated {
+                guard let self, let start = self.pendingFrameStartedAt else { return }
+                self.pendingFrameStartedAt = nil
+                self.gestureFrameTailsMs.append(
+                    (ProcessInfo.processInfo.systemUptime - start) * 1_000
+                )
+            }
+        }
+        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+        frameTailObserver = observer
+    }
+
+    private func removeFrameTailObserver() {
+        guard let observer = frameTailObserver else { return }
+        CFRunLoopRemoveObserver(CFRunLoopGetMain(), observer, .commonModes)
+        frameTailObserver = nil
+    }
+
     private(set) var qaResidencyEvaluationCount = 0
     private(set) var qaResidencySuppressedDemotionCount = 0
     private(set) var qaSurfaceStalePromotionCount = 0
+    private(set) var qaSurfaceEvictionCount = 0
+    private(set) var qaSurfaceRefusedMemoryCount = 0
+
+    /// What a surface for this body would cost, before paying for it. Four bytes a
+    /// device pixel, which is what `bitmapImageRepForCachingDisplay` produces — and
+    /// its rep sizes from the view's EFFECTIVE scale, which for an in-plane body
+    /// includes the camera. Estimating without the zoom under-counted a zoomed-in
+    /// bake by zoom squared.
+    private static func estimatedSurfaceBytes(of body: NSView, backingScale: CGFloat, zoom: Double) -> Int {
+        let effective = backingScale * CGFloat(max(0.0001, zoom))
+        let pixels = body.bounds.width * effective * body.bounds.height * effective
+        return Int(max(0, pixels)) * 4
+    }
+
+    /// Settable so a witness can drive eviction with a budget it can actually
+    /// exceed, instead of building a canvas of hundreds of megabytes to prove it.
+    var residencySurfaceByteBudget = TileSurfaceResidencyConfig.maxSurfaceBytes
 
     func qaLastResidencyDecision(_ tileId: UUID) -> TileResidencyPolicy.Decision? {
         lastResidencyDecisions[tileId]
@@ -1492,7 +1628,20 @@ final class CanvasNSView: NSView, TokenThemed {
         // anything — the same reconcile `enforceSurfaceSharpness` does.
         surfacedTiles = surfacedTiles.filter { $0.value.surfaceResidency == .surfaced }
         let now = residencyNowProvider()
-        let allowDemotions = cameraDriver.isSettled
+        // Demotions during motion are RATE-LIMITED, not forbidden. A blanket
+        // suppression meant a gesture that began all-native stayed all-native to its
+        // last frame — a real 96-step zoom ran every step over eight native
+        // transcripts because the previous zoom-in had promoted them. One demotion
+        // costs ~5 ms once; a native transcript costs ~3 ms every frame, so it pays
+        // for itself in two. Two per pass keeps the spend per frame bounded.
+        //
+        // Except while zooming IN: a bake taken now is exactly sharp for the current
+        // zoom, so the very next inward step would refuse it and promote right back —
+        // a demote/promote pair per step, which is thrash, not progress.
+        let zoomNow = canvasState.viewport.zoom
+        let zoomingIn = !cameraDriver.isSettled && zoomNow > lastResidencyZoom + 0.0001
+        lastResidencyZoom = zoomNow
+        var demotionBudget = cameraDriver.isSettled ? Int.max : (zoomingIn ? 0 : 2)
         // Spelled out, NOT `residencyPointerProvider?() ?? window?.mouse…`. That
         // collapses a doubly-optional: an installed provider RETURNING nil ("the
         // pointer is nowhere near this canvas") is indistinguishable from no provider
@@ -1565,22 +1714,89 @@ final class CanvasNSView: NSView, TokenThemed {
                     // re-bakes it, while native, which is the only faithful state.
                     if let wanted = tileView.currentSurfaceRevision,
                        tileSurfaceStore.surface(for: tileId)?.revision != wanted {
+                        // Which field went stale, because "everything re-baked" has
+                        // three very different causes and only one of them is normal.
+                        // A canvas that re-bakes every second is a churn bug, and
+                        // this is what names it without a rebuild.
+                        if let held = tileSurfaceStore.surface(for: tileId)?.revision {
+                            var reasons: [String] = []
+                            if held.contentVersion != wanted.contentVersion { reasons.append("content") }
+                            if held.bodySize != wanted.bodySize {
+                                reasons.append("size \(held.bodySize) -> \(wanted.bodySize)")
+                            }
+                            if held.appearanceName != wanted.appearanceName { reasons.append("appearance") }
+                            let why = reasons.joined(separator: ", ")
+                            Logger(subsystem: "continuum.canvas", category: "residency")
+                                .debug("surface went stale: \(why, privacy: .public)")
+                        }
                         tileView.promoteBodyToNative()
                         surfacedTiles.removeValue(forKey: tileId)
+                        // Drop it: this surface is stale by definition and will be
+                        // re-baked before it is ever shown again, so keeping it is
+                        // pure resident memory — 1.8 MB for a 420x300 body and
+                        // 10.4 MB for a 760x900 one.
+                        tileSurfaceStore.drop(tileId)
                         qaSurfacePromotionCount += 1
                         qaSurfaceStalePromotionCount += 1
                     }
                     continue
                 }
-                guard allowDemotions else {
+                guard demotionBudget > 0 else {
                     qaResidencySuppressedDemotionCount += 1
                     continue
                 }
-                surfaceIfAdmissible(
+                if surfaceIfAdmissible(
                     tileView, bakeBudget: &bakeBudget, zoom: zoom, backingScale: backingScale
-                )
+                ) {
+                    demotionBudget -= 1
+                }
             }
         }
+        enforceSurfaceMemoryBudget()
+        logResidencyIfChanged()
+    }
+
+    /// The safety net under the budget: give the FARTHEST tiles their real bodies
+    /// back when bytes are over the cap despite the pre-bake refusal — a body that
+    /// grew, or a budget that shrank.
+    ///
+    /// Evicting a surfaced tile means promoting it: a tile's host holds the same
+    /// `CGImage` the store does, so dropping the store entry alone frees nothing.
+    /// Farthest-first because the near ones are what the camera is actually moving,
+    /// and a promoted tile costs ~2.9 ms per camera step — real, but bounded, and
+    /// invisible.
+    private func enforceSurfaceMemoryBudget() {
+        let budget = residencySurfaceByteBudget
+        guard tileSurfaceStore.totalBytes > budget, !surfacedTiles.isEmpty else { return }
+        let centre = CGPoint(x: worldPlane.bounds.midX, y: worldPlane.bounds.midY)
+        let ordered = surfacedTiles.sorted { lhs, rhs in
+            func distance(_ view: TileNSView) -> CGFloat {
+                let mid = CGPoint(x: view.frame.midX, y: view.frame.midY)
+                return hypot(mid.x - centre.x, mid.y - centre.y)
+            }
+            return distance(lhs.value) > distance(rhs.value)
+        }
+        for (tileId, tileView) in ordered {
+            guard tileSurfaceStore.totalBytes > budget else { break }
+            tileView.promoteBodyToNative()
+            surfacedTiles.removeValue(forKey: tileId)
+            tileView.discardRetainedSurfaceHost()
+            tileSurfaceStore.drop(tileId)
+            qaSurfacePromotionCount += 1
+            qaSurfaceEvictionCount += 1
+        }
+    }
+
+    private func logResidencyIfChanged() {
+        let surfaced = surfacedTiles.count
+        guard surfaced != lastLoggedSurfacedCount else { return }
+        lastLoggedSurfacedCount = surfaced
+        let eligible = tileViewsInVisualOrder.filter { $0.surfaceableBody != nil }.count
+        // Composed as a String first: `OSLogMessage` is built from one interpolated
+        // literal and cannot be concatenated.
+        let line = "surfaced \(surfaced) of \(eligible) eligible tiles, "
+            + "\(tileSurfaceStore.totalBytes / 1_024) KB of surfaces"
+        Logger(subsystem: "continuum.canvas", category: "residency").notice("\(line, privacy: .public)")
     }
 
     /// Give one quiet tile a surface, or leave it native.
@@ -1598,37 +1814,61 @@ final class CanvasNSView: NSView, TokenThemed {
     /// difference, and that never change again no matter what streams in, because
     /// the transcript's `visibleRect` degenerates once no ancestor places it in the
     /// visible area. Native is the only faithful state to bake from.
+    private var lastResidencyZoom: Double = 1
+
+    @discardableResult
     private func surfaceIfAdmissible(
         _ tileView: TileNSView, bakeBudget: inout Int, zoom: Double, backingScale: CGFloat
-    ) {
+    ) -> Bool {
         guard let body = tileView.surfaceableBody,
-              let wanted = tileView.currentSurfaceRevision else { return }
+              let wanted = tileView.currentSurfaceRevision else { return false }
         let tileId = tileView.tile.id
         var surface = tileSurfaceStore.surface(for: tileId)
-        if surface?.revision != wanted {
+        // A fresh surface that is TOO SOFT for the current zoom is as unusable as a
+        // stale one, and it has to trigger a re-bake the same way. Without this, one
+        // zoom-in turned residency off permanently: sharpness promoted every tile,
+        // and every later pass found a matching revision, skipped the bake, failed
+        // the sharpness gate, and left the tile native — measured in a real session
+        // as 0 of 8 surfaced for 36 seconds until the user happened to zoom back out.
+        let tooSoft = surface.map { !$0.isSharpEnough(forZoom: zoom, backingScale: backingScale) } ?? false
+        if surface?.revision != wanted || tooSoft {
+            // **Refuse BEFORE baking, not after.** Evicting after the fact thrashes:
+            // the pass bakes eight surfaces, the budget evicts the farthest four, and
+            // 100 ms later the same four are still quiet and get baked again —
+            // forever, at ~2 ms a bake and ~5 ms a reparent. Prevention costs one
+            // multiplication.
+            let projected = tileSurfaceStore.totalBytes + Self.estimatedSurfaceBytes(
+                of: body, backingScale: backingScale, zoom: zoom
+            )
+            guard projected <= residencySurfaceByteBudget else {
+                qaSurfaceRefusedMemoryCount += 1
+                return false
+            }
             // Budget, not staleness: the tile IS stale, but what refused it is the
             // cap. Counting both would make the two reasons add up to more refusals
             // than there were tiles.
             guard bakeBudget > 0 else {
                 qaSurfaceRefusedBudgetCount += 1
-                return
+                return false
             }
             bakeBudget -= 1
             surface = tileSurfaceStore.bake(tileId: tileId, body: body, revision: wanted)
             guard surface != nil else {
                 qaSurfaceRefusedStaleCount += 1
-                return
+                return false
             }
         }
-        guard let admissible = surface else { return }
+        guard let admissible = surface else { return false }
         guard admissible.isSharpEnough(forZoom: zoom, backingScale: backingScale) else {
             qaSurfaceRefusedSharpnessCount += 1
-            return
+            return false
         }
         if tileView.demoteBodyToSurface(admissible, park: surfaceParkView, backingScale: backingScale) {
             surfacedTiles[tileId] = tileView
             qaSurfaceDemotionCount += 1
+            return true
         }
+        return false
     }
 
     /// The 10 Hz heartbeat behind `evaluateTileResidency`. Everything else that
@@ -1655,12 +1895,14 @@ final class CanvasNSView: NSView, TokenThemed {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window == nil {
+            removeFrameTailObserver()
             stopResidencyEvaluation()
             // Nothing evaluates residency for a canvas that is not in a window, so
             // no body may be left parked there. Same invariant
             // `releaseSurfaceResidency` keeps per tile, at canvas scale.
             promoteAllSurfacedTiles()
         } else {
+            installFrameTailObserver()
             startResidencyEvaluation()
         }
     }
