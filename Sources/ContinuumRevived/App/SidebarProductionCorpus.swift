@@ -125,7 +125,10 @@ enum SidebarProductionCorpus {
             expected.stateLabel = "Needs attention"
         case .succeeded:
             expected.titleContains = "work that ends"
-            expected.stateLabel = ""
+            // This flow is observed after its completion has been visited. It no
+            // longer says `Done`, but keeps the durable terminal time as neutral
+            // relative context rather than going blank.
+            expected.stateLabel = "now"
         case .interrupted:
             expected.titleContains = "work that ends"
             expected.stateLabel = "Stopped"
@@ -871,7 +874,7 @@ enum SidebarProductionCorpus {
         let outcomeStates = [Flow.succeeded, .interrupted, .cancelled].compactMap { flow in
             results.first { $0.flow == flow }?.row?.stateLabel
         }
-        try expect(outcomeStates == ["", "Stopped", "Cancelled"],
+        try expect(outcomeStates == ["now", "Stopped", "Cancelled"],
                    "§4.6: success, interruption and cancellation must remain distinct; "
                    + "got \(outcomeStates)")
 

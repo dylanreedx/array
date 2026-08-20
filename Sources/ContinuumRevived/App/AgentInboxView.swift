@@ -619,9 +619,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private var settleNudgeTimer: Timer?
     private var settleNudgePhaseVisible = true
     private static let settleNudgePeriod: TimeInterval = 30
-    /// One clock for every materialized live duration. It exists only while a
-    /// visible working row has an authoritative start; cells never schedule work.
+    /// One clock for every materialized live duration and relative completion age.
+    /// It ticks each second while work is running and only once a minute for a list
+    /// of seen completions; cells never schedule work.
     private var elapsedTickTimer: Timer?
+    private var elapsedTickInterval: TimeInterval?
     // P6.3: wake is derived from the stored date. This single timer only asks the
     // list/host to re-render when the earliest shelf entry may have expired; it
     // never writes the record or schedules a daemon wake.
@@ -3683,6 +3685,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             settleNudgeTimer = nil
             elapsedTickTimer?.invalidate()
             elapsedTickTimer = nil
+            elapsedTickInterval = nil
             cancelWakeRerender()
             setHovered(agentId: nil)
             setKeyboardFocus(agentId: nil)
@@ -3743,10 +3746,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         guard range.location != NSNotFound, range.length > 0 else { return [] }
         return (range.location..<(range.location + range.length)).compactMap { tableRow in
             guard items.indices.contains(tableRow),
-                  let row = items[tableRow].agentRow,
-                  row.state == .working,
-                  row.elapsedStartedAt != nil else { return nil }
+                  let row = items[tableRow].agentRow else { return nil }
+            let hasLiveClock = row.state == .working && row.elapsedStartedAt != nil
+            let hasCompletionClock = AgentInbox96CellView.seenCompletionDate(row) != nil
+            guard hasLiveClock || hasCompletionClock else { return nil }
             return tableRow
+        }
+    }
+
+    private func visibleClockNeedsSecondCadence() -> Bool {
+        visibleTimedTableRows().contains { tableRow in
+            guard let row = items[tableRow].agentRow else { return false }
+            return row.state == .working && row.elapsedStartedAt != nil
         }
     }
 
@@ -3754,20 +3765,26 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         guard window != nil, !visibleTimedTableRows().isEmpty else {
             elapsedTickTimer?.invalidate()
             elapsedTickTimer = nil
+            elapsedTickInterval = nil
             return
         }
-        guard elapsedTickTimer == nil else { return }
-        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+        let interval: TimeInterval = visibleClockNeedsSecondCadence() ? 1 : 60
+        if elapsedTickTimer != nil, elapsedTickInterval == interval { return }
+        elapsedTickTimer?.invalidate()
+        elapsedTickTimer = nil
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.window != nil else {
                     self?.elapsedTickTimer?.invalidate()
                     self?.elapsedTickTimer = nil
+                    self?.elapsedTickInterval = nil
                     return
                 }
                 let visible = self.visibleTimedTableRows()
                 guard !visible.isEmpty else {
                     self.elapsedTickTimer?.invalidate()
                     self.elapsedTickTimer = nil
+                    self.elapsedTickInterval = nil
                     return
                 }
                 self.updateVisibleElapsedClock(now: self.clock())
@@ -3776,6 +3793,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         timer.tolerance = 0.2
         RunLoop.main.add(timer, forMode: .common)
         elapsedTickTimer = timer
+        elapsedTickInterval = interval
     }
 
     private func updateVisibleElapsedClock(now: Date) {
@@ -4270,6 +4288,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var stateLabelsForQA: [String] { cells().map(\.qaStateLabel) }
     var elapsedLabelsForQA: [String] { cells().map(\.qaElapsed) }
     var hasElapsedTickTimerForQA: Bool { elapsedTickTimer != nil }
+    var elapsedTickIntervalForQA: TimeInterval? { elapsedTickInterval }
     func updateElapsedClockForQA(now: Date) { updateVisibleElapsedClock(now: now) }
     var metaLinesForQA: [String] { cells().map(\.qaMeta) }
     var branchLinesForQA: [String] { cells().map(\.qaBranch) }

@@ -1116,19 +1116,25 @@ enum AgentInbox96Fixtures {
             attention: InboxAttention = .none, branch: String? = nil,
             model: String? = "anthropic/claude-opus-4-6", elapsed: TimeInterval? = nil,
             lastActive: TimeInterval? = nil,
+            seenCompletion: Bool = false,
             // The hover card's half of the row. None of it is drawn in the band —
             // that is the point: §4.3 lets the row drop facts only because the
             // tooltip keeps them, so the fixture has to carry facts the row does
             // NOT show or the card would be demonstrating nothing.
             zone: String? = nil, harness: String? = nil, checkedOut: String? = nil
         ) -> AgentInboxRow {
-            AgentInboxRow(
+            let activeAt = lastActive.map { now.addingTimeInterval(-$0) }
+            return AgentInboxRow(
                 id: UUID(uuidString: String(format: "00000096-0000-0000-0000-%012d", index))!,
                 title: title, projectName: "Array", state: state, attention: attention,
                 model: model, branch: branch, elapsed: elapsed,
-                lastActiveAt: lastActive.map { now.addingTimeInterval(-$0) },
+                lastActiveAt: activeAt,
                 createdAt: now.addingTimeInterval(-Double(index) * 600),
-                zoneName: zone, harness: harness, checkedOutBranch: checkedOut)
+                zoneName: zone, harness: harness, checkedOutBranch: checkedOut,
+                terminalEvent: seenCompletion ? AgentTerminalEvent(
+                    sequence: 1, turnID: "seen-\(index)", outcome: .succeeded,
+                    endedAt: activeAt ?? now) : nil,
+                terminalIsUnread: false)
         }
         let nudgeDelay = AgentInbox96CellView.settleNudgeDelay
         return [
@@ -1164,12 +1170,12 @@ enum AgentInbox96Fixtures {
             // because "when did this land" is still a fair question.
             row(7, "Bound restore concurrency", state: .ready,
                 branch: "agent/restore-bounds", model: "openai/gpt-5.6-sol",
-                lastActive: 1_320),
+                lastActive: 59 * 60, seenCompletion: true),
             // Step three: read, silent, and left lying there. This is the row the
             // settle nudge is for — the graveyard you read past to find live work.
             row(8, "تحديث الشريط الجانبي · סוכן עם שם ארוך", state: .ready,
                 branch: "agent/rtl-truncation", model: "xai/grok-4-2",
-                lastActive: 9_600),
+                lastActive: 9_600, seenCompletion: true),
         ]
     }
 }

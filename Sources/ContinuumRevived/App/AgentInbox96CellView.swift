@@ -426,9 +426,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // branch lane while folded; the exact branch remains in the hover card.
         branchLabel.stringValue = rollupSummary ?? row.branch ?? ""
 
-        // The state WORD and, only while executing, its live duration. The elapsed
-        // half comes from the shipped formatter, so every surface uses one clock
-        // vocabulary.
+        // The state word and its time context share one quiet telemetry lane.
+        // Running rows show execution duration; a successful completion keeps
+        // saying `Done` until it is read, then becomes a neutral relative finish
+        // time. Those are different clocks and never reuse one another's stamp.
         updateStateLabel(for: row, now: now)
 
         // Mark or name, never a cipher.
@@ -483,7 +484,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     ///
     /// The whole lifecycle of a finished row is three steps and no vocabulary to
     /// learn: it says `Done` in mint with a check, you look at it and it goes
-    /// silent, and if you leave it silent for long enough it asks to be settled.
+    /// quiet except for its neutral finish age, and if you leave it for long enough
+    /// it asks to be settled.
     /// Earlier drafts spent two words (`Landed`, `Waiting`) and a pulsing mark on
     /// the first step alone, which was effort spent on the row that needed it
     /// least.
@@ -514,7 +516,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     static func stateWord(_ row: AgentInboxRow, now: Date) -> String? {
         if let label = row.state.label { return label }
         guard !row.isUnconfirmed else { return nil }
-        // `.ready` says `Done` until you look at it, and then says nothing at all.
+        // `.ready` says `Done` until you look at it, and then drops the status word.
         //
         // Looking IS the acknowledgement, and the reward for it is a row that stops
         // talking — a settled row keeps its age, because "when did this land" is a
@@ -535,9 +537,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         }
     }
 
-    /// The number beside the word is current execution duration, never age since
-    /// completion. Completion time belongs in hover/history detail; showing it on
-    /// a ready row produces an unexplained bare `5m` after `Done` is acknowledged.
+    /// The number beside a live word is current execution duration, never age since
+    /// completion.
     static func stateAge(_ row: AgentInboxRow, now: Date) -> TimeInterval? {
         guard row.state == .working else { return nil }
         if let since = row.elapsedStartedAt {
@@ -546,18 +547,44 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         return row.elapsed
     }
 
+    /// A seen successful completion has no status left to announce, but still
+    /// answers the useful question "when did this finish?". The durable terminal
+    /// stamp is authoritative; new/idle rows without one must not acquire a
+    /// fictional completion age merely because they are `.ready`.
+    static func seenCompletionDate(_ row: AgentInboxRow) -> Date? {
+        guard row.state == .ready, case .active = row.lifecycle,
+              !row.isUnconfirmed, !row.terminalIsUnread,
+              let terminal = row.terminalEvent, terminal.outcome == .succeeded
+        else { return nil }
+        return terminal.endedAt
+    }
+
+    static func relativeCompletionText(_ row: AgentInboxRow, now: Date) -> String? {
+        guard let endedAt = seenCompletionDate(row) else { return nil }
+        let age = max(0, now.timeIntervalSince(endedAt))
+        if age < 60 { return "now" }
+        let minutes = Int(age / 60)
+        if minutes < 60 { return "\(minutes)m ago" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h ago" }
+        return "\(hours / 24)d ago"
+    }
+
     private func updateStateLabel(for row: AgentInboxRow, now: Date) {
         let word = Self.stateWord(row, now: now)
         let elapsed = AgentInboxCellView.elapsedText(Self.stateAge(row, now: now))
-        stateLabel.stringValue = [word, elapsed].compactMap { $0 }.joined(separator: " · ")
+        let completion = word == nil && elapsed == nil
+            ? Self.relativeCompletionText(row, now: now) : nil
+        stateLabel.stringValue = [word, elapsed, completion].compactMap { $0 }.joined(separator: " · ")
         stateLabel.isHidden = stateLabel.stringValue.isEmpty
     }
 
     /// Called by the inbox's one shared clock. This changes and locally reflows
     /// only the status band; it does not rebuild the row or invalidate transcript/
-    /// canvas layout, and a non-working row is a no-op by construction.
+    /// canvas layout. Only a running or seen-completed row participates.
     func updateElapsedClock(now: Date) {
-        guard let row = shown?.row, row.state == .working else { return }
+        guard let row = shown?.row,
+              row.state == .working || Self.seenCompletionDate(row) != nil else { return }
         updateStateLabel(for: row, now: now)
         needsLayout = true
         applyAccessibility()

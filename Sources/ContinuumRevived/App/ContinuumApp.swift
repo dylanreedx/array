@@ -24384,20 +24384,31 @@ extension AppDelegate {
     clockInbox.layoutForQA()
     try expect(clockInbox.hasElapsedTickTimerForQA,
                "one shared elapsed clock must exist while a stamped working row is visible")
+    try expect(clockInbox.elapsedTickIntervalForQA == 1,
+               "a visible running row must select the shared clock's one-second cadence")
     clockInbox.updateElapsedClockForQA(now: inboxCheckNow.addingTimeInterval(2))
     try expect(clockInbox.stateLabelsForQA == ["Working · 1m 1s"],
                "the visible elapsed label did not advance without hover — got \(clockInbox.stateLabelsForQA)")
 
     let completedClockRow = AgentInboxRow(
         id: clockRow.id, title: clockRow.title, state: .ready,
-        elapsed: 61, elapsedStartedAt: clockStart,
-        createdAt: clockRow.createdAt)
+        lifecycle: .active, elapsed: 61, elapsedStartedAt: clockStart,
+        createdAt: clockRow.createdAt,
+        terminalEvent: AgentTerminalEvent(
+            sequence: 1, turnID: "clock-complete", outcome: .succeeded,
+            endedAt: inboxCheckNow.addingTimeInterval(-59 * 60)),
+        terminalIsUnread: false)
     clockInbox.reload(rows: [completedClockRow])
     clockInbox.layoutForQA()
-    try expect(clockInbox.stateLabelsForQA == [""],
-               "a non-running row must not paint execution elapsed — got \(clockInbox.stateLabelsForQA)")
-    try expect(!clockInbox.hasElapsedTickTimerForQA,
-               "the shared elapsed clock must stop when no visible stamped run exists")
+    try expect(clockInbox.stateLabelsForQA == ["59m ago"],
+               "a seen completion must paint finish age, never stale execution elapsed — got \(clockInbox.stateLabelsForQA)")
+    try expect(clockInbox.hasElapsedTickTimerForQA,
+               "the shared clock must remain at minute cadence for a visible seen completion")
+    try expect(clockInbox.elapsedTickIntervalForQA == 60,
+               "seen completions alone must lower the shared clock to minute cadence")
+    clockInbox.updateElapsedClockForQA(now: inboxCheckNow.addingTimeInterval(60))
+    try expect(clockInbox.stateLabelsForQA == ["1h ago"],
+               "the seen-completion age did not cross its hour boundary — got \(clockInbox.stateLabelsForQA)")
 
     let sorted = InboxSort.sortForInbox(rows: fixture)
     let byId = Dictionary(uniqueKeysWithValues: sorted.map { ($0.id, $0) })
@@ -24442,6 +24453,9 @@ extension AppDelegate {
             endedAt: inboxCheckNow.addingTimeInterval(-60)), terminalIsUnread: false)
     try expect(AgentInbox96CellView.stateWord(acknowledgedSuccess, now: inboxCheckNow) == nil,
                "an acknowledged success must quiet its word while retaining its age")
+    try expect(AgentInbox96CellView.relativeCompletionText(
+        acknowledgedSuccess, now: inboxCheckNow) == "1m ago",
+        "an acknowledged success must retain a neutral relative completion time")
 
     // P3.5, PAINTED. Both numbers read off the rendered labels.
     for (index, row) in sorted.enumerated() {
