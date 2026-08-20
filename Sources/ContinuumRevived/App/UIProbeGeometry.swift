@@ -988,6 +988,10 @@ enum UIProbeGeometry {
         // pass or fail by accident.
         inbox.prefersReducedMotion = { false }
         inbox.prefersIncreasedContrast = { false }
+        // This broad suite retains the content-derived legacy card contract.
+        // The shipping fixed-pitch 96 card has its own production corpus and
+        // 48-image gate, which opt into `.production` explicitly.
+        inbox.cardStyleOverride = nil
         return SidebarProbeHost(window: window, host: host, inbox: inbox)
     }
 
