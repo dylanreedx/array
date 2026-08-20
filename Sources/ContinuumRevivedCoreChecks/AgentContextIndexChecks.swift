@@ -637,6 +637,7 @@ private func runAgentContextSyncBoundaryCheck() {
         scannable["\(agentId).workspaceName"] = context.workspaceName
         scannable["\(agentId).zoneName"] = context.zoneName
         scannable["\(agentId).projectName"] = context.projectName
+        scannable["\(agentId).directoryName"] = context.directoryName
         scannable["\(agentId).tileTitle"] = context.tileTitle
         // P3.1 added this field to the type this sweep enumerates by hand; a
         // field left out of the list is a hole in the sweep, not an exemption.
@@ -660,6 +661,8 @@ private func runAgentContextSyncBoundaryCheck() {
 
     let text = compacted.values.map { "\($0)" }.joined(separator: "\n")
     expect(!text.contains(secretCwd), "AgentRowContext does not carry AgentRecord.cwd")
+    expect(text.contains("p2b3-secret"),
+           "AgentRowContext carries the safe final directory component without the host path")
     // P2C.4 RULED THE BRANCH ADMISSIBLE — "the branch *name* may cross to the
     // phone; the worktree **path** must not" — so this asserts the opposite of what
     // it did under P2B.3: the name is carried VERBATIM, and the two branch fields

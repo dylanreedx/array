@@ -65,6 +65,24 @@ final class AgentTranscriptScrollController {
         }
     }
 
+    /// A disclosure toggle is direct reader input, even when the viewport was
+    /// near the bottom. Preserve what was under their eyes instead of pulling
+    /// the expanded row toward the new document bottom.
+    func applyPreservingReaderAnchor(
+        in scrollView: NSScrollView,
+        idAtY: (CGFloat) -> AgentNodeID?,
+        yForID: (AgentNodeID) -> CGFloat?,
+        update: () -> Void
+    ) {
+        let anchor = captureTopAnchor(in: scrollView, idAtY: idAtY, yForID: yForID)
+        update()
+        if let anchor, let newY = yForID(anchor.id) {
+            scrollView.contentView.scroll(to: NSPoint(x: 0, y: max(0, newY + anchor.offset)))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+        }
+        showsJumpToLatest = !isNearBottom(in: scrollView)
+    }
+
     func jumpToLatest(in scrollView: NSScrollView) {
         let height = scrollView.documentView?.frame.height ?? 0
         let viewport = scrollView.contentView.bounds.height

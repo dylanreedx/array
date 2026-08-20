@@ -6537,10 +6537,10 @@ enum UIProbeGeometry {
         let identity = AgentToolDetailKey(scope: scope, providerItemID: itemID)
         let record = AgentToolDetailRecord(
             identity: identity,
-            toolName: "/Users/private/project/run-tool",
+            toolName: "bash",
             arguments: [AgentToolDetailArgument(
                 key: "command",
-                value: AgentToolDetailBoundedText(text: "echo safe")
+                value: AgentToolDetailBoundedText(text: String(repeating: "inspect safe output ", count: 12))
             )],
             status: .completed,
             updatedAt: Date(timeIntervalSinceReferenceDate: 10)
@@ -6580,12 +6580,18 @@ enum UIProbeGeometry {
         list.collectionView.layoutSubtreeIfNeeded()
 
         var assertions = 0
-        guard list.qaPresentedToolSummary(for: blockID)?.contains("Tool") == true else {
+        guard list.qaPresentedToolSummary(for: blockID)?.contains("Ran") == true else {
             throw fail("host-local tool composition did not reflow the sanitized terminal summary")
         }
         assertions += 1
-        guard list.qaTranscriptRowHeight(for: blockID).map({ $0 > 0 }) == true else {
+        guard let collapsedToolHeight = list.qaTranscriptRowHeight(for: blockID),
+              collapsedToolHeight > ToolCallView.rowHeight else {
             throw fail("host-local tool composition produced no measured row height")
+        }
+        assertions += 1
+        guard list.qaPerformToolDisclosureClick(for: blockID),
+              list.qaTranscriptRowHeight(for: blockID).map({ $0 > collapsedToolHeight }) == true else {
+            throw fail("top-level tool disclosure persisted state but the transcript row did not remeasure")
         }
         assertions += 1
 
@@ -7413,6 +7419,7 @@ enum UIProbeGeometry {
         }
         guard view.accessibilityRole() == .group,
               view.accessibilityLabel() == "Code block",
+              view.accessibilityChildren()?.contains(where: { ($0 as? NSTextField)?.stringValue == "Streaming" }) == false,
               view.accessibilityChildren()?.contains(where: { ($0 as? NSButton)?.accessibilityLabel() == "Copy code" }) == true else {
             throw fail("code block accessibility lost its semantic group or copy action")
         }
@@ -7494,13 +7501,14 @@ enum UIProbeGeometry {
         try toolHost.apply(block: completedTool, context: contextA)
         toolHost.layoutSubtreeIfNeeded()
         guard let toolView = toolHost.rendererView as? ToolCallView,
-              collapsedHeight == ToolCallView.rowHeight,
+              collapsedHeight > ToolCallView.rowHeight,
               !toolView.isExpanded,
-              toolView.summaryLabel.isHidden,
+              !toolView.summaryLabel.isHidden,
+              toolView.summaryLabel.maximumNumberOfLines == 1,
               toolView.titleLabel.stringValue == "Read files",
               toolView.statusLabel.stringValue == "✓ Completed",
               !visibleStrings(in: toolView).contains(where: { $0.contains(secret) }) else {
-            throw fail("routine tool did not collapse safely with textual completed status or exposed raw arguments")
+            throw fail("routine tool did not expose a safe one-line collapsed summary with textual completed status")
         }
 
         toolView.disclosureButton.performClick(nil)
@@ -7516,8 +7524,9 @@ enum UIProbeGeometry {
         toolHost.frame.size.height = expandedHeight
         toolHost.layoutSubtreeIfNeeded()
         toolView.layoutSubtreeIfNeeded()
-        guard expandedHeight > collapsedHeight,
+        guard expandedHeight >= collapsedHeight,
               toolHost.measurementCache.cachedMeasurementCount == 1,
+              toolView.summaryLabel.maximumNumberOfLines == 4,
               toolView.summaryLabel.frame.maxY <= toolView.bounds.maxY + 0.5 else {
             throw fail("live tool disclosure did not remeasure and lay out its expanded summary")
         }

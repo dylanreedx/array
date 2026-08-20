@@ -3956,6 +3956,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         if let project = row.projectName, !project.isEmpty {
             lines.append(.init(symbol: "folder", text: project))
         }
+        if let directory = row.directoryName, !directory.isEmpty,
+           directory != row.projectName {
+            lines.append(.init(symbol: "folder.badge.gearshape", text: directory))
+        }
         if let zone = row.zoneName, !zone.isEmpty {
             lines.append(.init(symbol: "square.grid.2x2", text: zone))
         }

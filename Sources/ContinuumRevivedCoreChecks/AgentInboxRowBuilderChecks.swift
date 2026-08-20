@@ -280,6 +280,8 @@ private func runInboxRowHeadlessCheck() {
            "a headless agent's title is its record's displayName, got \(headless.title)")
     expect(headless.projectName == "Continuum",
            "a headless agent still resolves its project from its record, got \(headless.projectName ?? "nil")")
+    expect(headless.directoryName == "continuum-inbox-fixture",
+           "a headless agent keeps the privacy-safe working-directory name, got \(headless.directoryName ?? "nil")")
     expect(headless.branch == nil && !headless.isIsolated,
            "a headless agent sharing the project checkout reports no branch, got \(headless.branch ?? "nil")")
     expect(headless.model == "anthropic/claude-opus-5" && headless.role == "reviewer",
@@ -353,6 +355,8 @@ private func runInboxRowTitleSourceAndTerminalCheck() {
            "an idle terminal session is at rest, got \(terminal.state.rawValue)/\(String(describing: terminal.elapsed))")
     expect(terminal.projectName == nil,
            "the fixture's group zone has no project, so neither does its session — got \(terminal.projectName ?? "nil")")
+    expect(terminal.directoryName == "continuum-inbox-fixture",
+           "a session without a project still identifies its working directory, got \(terminal.directoryName ?? "nil")")
 }
 
 // MARK: - 4 · elapsed

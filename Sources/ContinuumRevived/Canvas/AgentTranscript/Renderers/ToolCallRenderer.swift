@@ -68,7 +68,7 @@ final class ToolCallView: NSView {
         statusLabel.font = NSFont.token(.caption)
         statusLabel.lineBreakMode = .byTruncatingTail
         summaryLabel.font = NSFont.token(.body)
-        summaryLabel.maximumNumberOfLines = 4
+        summaryLabel.maximumNumberOfLines = 1
         summaryLabel.lineBreakMode = .byWordWrapping
         summaryLabel.isSelectable = true
 
@@ -98,8 +98,12 @@ final class ToolCallView: NSView {
         titleLabel.stringValue = Self.safeSingleLine(payload.name, fallback: "Tool")
         let presentation = payload.status.agentToolStatusPresentation
         statusLabel.stringValue = "\(presentation.glyph) \(presentation.label)"
-        summaryLabel.stringValue = payload.summary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        summaryLabel.isHidden = !isExpanded || summaryLabel.stringValue.isEmpty
+        let candidateSummary = payload.summary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        summaryLabel.stringValue = candidateSummary.caseInsensitiveCompare(presentation.label) == .orderedSame
+            ? "" : candidateSummary
+        summaryLabel.maximumNumberOfLines = isExpanded ? 4 : 1
+        summaryLabel.isHidden = summaryLabel.stringValue.isEmpty
+        disclosureButton.isEnabled = !summaryLabel.stringValue.isEmpty
         disclosureButton.apply(expanded: isExpanded, title: titleLabel.stringValue)
         identifier = NSUserInterfaceItemIdentifier("agent.toolCall.\(blockID.rawValue)")
         applyAccessibility(name: titleLabel.stringValue, status: payload.status)
@@ -167,8 +171,7 @@ final class ToolCallView: NSView {
     }
 
     static func measuredHeight(summary: String?, width: CGFloat, expanded: Bool) -> CGFloat {
-        guard expanded,
-              let summary = summary?.trimmingCharacters(in: .whitespacesAndNewlines),
+        guard let summary = summary?.trimmingCharacters(in: .whitespacesAndNewlines),
               !summary.isEmpty else { return rowHeight }
         let available = max(1, width - horizontalInset * 2)
         let rect = (summary as NSString).boundingRect(
@@ -177,14 +180,16 @@ final class ToolCallView: NSView {
             attributes: [.font: NSFont.token(.body)]
         )
         let lineHeight = CGFloat(Metrics.lineHeight(for: .body))
-        return rowHeight + min(ceil(rect.height), lineHeight * 4) + detailBottomInset
+        let lines: CGFloat = expanded ? 4 : 1
+        return rowHeight + min(ceil(rect.height), lineHeight * lines) + detailBottomInset
     }
 
     @objc private func toggleDisclosure(_ sender: Any?) {
         guard let blockID else { return }
         isExpanded.toggle()
         context.actions.setExpanded(isExpanded, blockID: blockID)
-        summaryLabel.isHidden = !isExpanded || summaryLabel.stringValue.isEmpty
+        summaryLabel.maximumNumberOfLines = isExpanded ? 4 : 1
+        summaryLabel.isHidden = summaryLabel.stringValue.isEmpty
         disclosureButton.apply(expanded: isExpanded, title: titleLabel.stringValue)
         applyAccessibility(name: titleLabel.stringValue, status: status)
         invalidateIntrinsicContentSize()
@@ -218,6 +223,8 @@ final class AgentDisclosureButton: NSButton {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func accessibilityChildren() -> [Any]? { [] }
 
     func apply(expanded: Bool, title itemTitle: String) {
         title = expanded ? "▾" : "▸"

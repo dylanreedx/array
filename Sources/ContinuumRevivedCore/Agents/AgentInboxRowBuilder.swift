@@ -197,6 +197,7 @@ public enum AgentInboxRowBuilder {
             title: title(for: context),
             projectName: context?.projectName,
             projectId: context?.projectId,
+            directoryName: context?.directoryName,
             // P3.8: the scope dropdown filters by project OR workspace, and the
             // filter is pure, so the row has to carry the name. Nothing draws it.
             workspaceName: context?.workspaceName,

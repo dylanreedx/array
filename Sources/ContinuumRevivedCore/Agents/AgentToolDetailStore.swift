@@ -889,7 +889,7 @@ public enum AgentToolDetailPresenter {
         let safeName = safeToolName(detail.toolName)
         let duration = detail.duration.map(formatDuration)
         let fileText: String? = detail.affectedFiles.isEmpty ? nil : "\(detail.affectedFiles.count) file\(detail.affectedFiles.count == 1 ? "" : "s")"
-        let coreSummary = shortLine(pureSummary(for: detail) ?? safeName)
+        let coreSummary = observableSummary(detail)
         let suffix = [status, duration, fileText].compactMap { $0 }.joined(separator: " · ")
         let summary = shortLine(suffix.isEmpty ? coreSummary : "\(coreSummary) · \(suffix)")
         return AgentToolDetailCompactPresentation(
@@ -898,6 +898,13 @@ public enum AgentToolDetailPresenter {
             summary: summary,
             accessibilitySummary: accessibilitySummary(for: detail, status: status)
         )
+    }
+
+    /// The action/result text a tool row can show beside its separately rendered
+    /// lifecycle. Keeping status out prevents a completed row from saying
+    /// “Completed” twice (or composing a stale detail status with the semantic one).
+    public static func observableSummary(_ detail: AgentToolDetailRecord) -> String {
+        shortLine(pureSummary(for: detail) ?? safeToolName(detail.toolName))
     }
 
     public static func expanded(_ detail: AgentToolDetailRecord) -> AgentToolDetailExpandedPresentation {

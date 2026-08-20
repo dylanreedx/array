@@ -17,12 +17,10 @@ import Foundation
 // and the inbox end up disagreeing about where an agent lives.
 //
 // I5 (sync-boundary purity): every field here is a NAME or a model id — a
-// workspace name, a zone name, a project name, a tile title, and since P2C.4 a
-// BRANCH name. `AgentRecord.cwd` is a host path and is deliberately never read,
-// not even as a fallback for a missing project name. `AgentContextIndexChecks`
-// witnesses that with a record whose cwd is a distinctive string, and witnesses
-// the branch fields the other way round: they must carry the name verbatim, and a
-// host path handed to one of them is still caught by the taint scanner.
+// workspace name, a zone name, a project name, a tile title, a privacy-safe
+// directory basename, and since P2C.4 a BRANCH name. `AgentRecord.cwd` is read
+// only to derive that final component; the host path itself is never carried.
+// `AgentContextIndexChecks` witnesses both sides with a distinctive cwd.
 //
 // P2C.4 rules the branch admissible ("the branch *name* may cross to the phone;
 // the worktree **path** must not"). A branch name is a ref, not a location: it
@@ -34,6 +32,9 @@ public struct AgentRowContext: Equatable, Sendable {
     public let zoneName: String?
     public let projectName: String?
     public let projectId: UUID?
+    /// The final component of the directory the agent works in. This is display
+    /// identity (for example `harmony`), never the host path it came from.
+    public let directoryName: String?
     /// nil when the agent has no tile rendering it.
     public let tileTitle: String?
     /// P3.1: `AgentRecord.displayName` — the name the AGENT owns, which outlives
@@ -110,6 +111,7 @@ public struct AgentRowContext: Equatable, Sendable {
         zoneName: String? = nil,
         projectName: String? = nil,
         projectId: UUID? = nil,
+        directoryName: String? = nil,
         tileTitle: String? = nil,
         displayName: String? = nil,
         agentKind: AgentKind,
@@ -125,6 +127,7 @@ public struct AgentRowContext: Equatable, Sendable {
         self.zoneName = zoneName
         self.projectName = projectName
         self.projectId = projectId
+        self.directoryName = directoryName
         self.tileTitle = tileTitle
         self.displayName = displayName
         self.agentKind = agentKind
@@ -175,6 +178,7 @@ public enum AgentContextIndex {
                 zoneName: placement?.zoneName,
                 projectName: placement?.projectId.flatMap { projectNames[$0] },
                 projectId: placement?.projectId,
+                directoryName: directoryName(for: descriptor.cwd),
                 // The builder's title, not the descriptor's: the tile row is what
                 // the sidebar shows, and two names for one tile is a bug waiting.
                 tileTitle: placement?.tileTitle,
@@ -200,6 +204,7 @@ public enum AgentContextIndex {
                 // record with no projectId still names one.
                 projectName: (record.projectId ?? placement?.projectId).flatMap { projectNames[$0] },
                 projectId: record.projectId ?? placement?.projectId,
+                directoryName: directoryName(for: record.cwd),
                 tileTitle: placement?.tileTitle,
                 displayName: nonEmpty(record.displayName),
                 // An `AgentRecord` is the managed tier by construction — the
@@ -223,6 +228,13 @@ public enum AgentContextIndex {
             )
         }
         return index
+    }
+
+    private static func directoryName(for path: String) -> String? {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let name = URL(fileURLWithPath: trimmed, isDirectory: true).lastPathComponent
+        return name.isEmpty ? nil : name
     }
 
     private struct TilePlacement {

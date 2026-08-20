@@ -708,6 +708,9 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// Stable local identity used to look up a project icon. The host path never
     /// enters this Foundation-only row value.
     public let projectId: UUID?
+    /// Privacy-safe basename of the working directory. The absolute host path
+    /// never enters this cross-surface row value.
+    public let directoryName: String?
     // Ticket: docs/38-tickets/90-agent-ux/P3.8-scope-dropdown.md
     /// The workspace the agent's tile is in (`AgentRowContext.workspaceName`), and
     /// NOT DRAWN ANYWHERE: the row shows the project chip and no second one.
@@ -811,7 +814,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     // All three already existed in `AgentRowContext` and were discarded by the
     // builder: `zoneName` had ZERO consumers anywhere in the app.
     //
-    // Strings, not enums, and no paths. `ContinuumRevivedAgentUI` has no
+    // Strings, not enums, and no paths (a directory basename is a name, not its
+    // host location). `ContinuumRevivedAgentUI` has no
     // dependencies and cannot see Core's `AgentHarness`; and `AgentContextIndex`
     // forbids a host path on this row outright, which `SyncPayloadTaintScanner`
     // backstops. A branch NAME may cross to the phone; a worktree path may not.
@@ -913,6 +917,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         title: String,
         projectName: String? = nil,
         projectId: UUID? = nil,
+        directoryName: String? = nil,
         workspaceName: String? = nil,
         state: InboxState,
         attention: InboxAttention = .none,
@@ -943,6 +948,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.title = title
         self.projectName = projectName
         self.projectId = projectId
+        self.directoryName = directoryName
         self.workspaceName = workspaceName
         self.state = state
         self.attention = attention
@@ -1000,6 +1006,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     ) -> AgentInboxRow {
         AgentInboxRow(
             id: id, title: title, projectName: projectName, projectId: projectId,
+            directoryName: directoryName,
             workspaceName: workspaceName,
             state: state, attention: attention, lifecycle: lifecycle, model: model, role: role,
             branch: branch, isIsolated: isIsolated,

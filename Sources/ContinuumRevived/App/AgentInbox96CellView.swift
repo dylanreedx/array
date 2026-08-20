@@ -409,8 +409,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         self.indent = indent
         card.isSelected = isSelected
 
-        placementLabel.stringValue = row.projectName ?? ""
-        projectIcon.image = row.projectName?.isEmpty == false
+        let placement = row.directoryName ?? row.projectName ?? ""
+        placementLabel.stringValue = placement
+        projectIcon.image = !placement.isEmpty
             ? NSImage(systemSymbolName: "folder", accessibilityDescription: nil) : nil
         projectIcon.image?.isTemplate = true
         titleLabel.stringValue = row.displayTitle

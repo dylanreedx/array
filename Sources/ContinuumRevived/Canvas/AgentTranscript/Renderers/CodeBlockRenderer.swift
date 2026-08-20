@@ -103,7 +103,10 @@ final class CodeBlockView: NSView {
     func applyAccessibility(language: String?, isComplete: Bool) {
         let name = Self.displayLanguage(language).map { "\($0) code block" } ?? "Code block"
         setAccessibilityLabel(isComplete ? name : "\(name), streaming")
-        setAccessibilityChildren([languageLabel, streamingLabel, copyButton, codeTextView])
+        var children: [NSView] = [languageLabel]
+        if !isComplete { children.append(streamingLabel) }
+        children.append(contentsOf: [copyButton, codeTextView])
+        setAccessibilityChildren(children)
     }
 
     override func layout() {
@@ -186,4 +189,6 @@ final class CodeCopyButton: NSButton {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func accessibilityChildren() -> [Any]? { [] }
 }

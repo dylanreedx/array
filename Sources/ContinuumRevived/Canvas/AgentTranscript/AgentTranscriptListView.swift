@@ -254,6 +254,7 @@ final class AgentTranscriptListView: NSView {
         button.font = .systemFont(ofSize: 12, weight: .medium)
         button.setAccessibilityRole(.button)
         button.setAccessibilityLabel("Jump to latest transcript content")
+        button.setAccessibilityChildren([])
         button.isHidden = true
         return button
     }()
@@ -984,20 +985,15 @@ final class AgentTranscriptListView: NSView {
         // a reasoning disclosure is not itself a collection item; route it back
         // through the flattened ownership map so the outer entry is remeasured.
         let topLevelIDs = topLevelIDsByNodeID[id] ?? []
-        let reasoningIDs = Set(topLevelIDs.filter { topLevelID in
-            guard let content = rowsByID[topLevelID]?.content else { return false }
-            if case .completedReasoning = content { return true }
-            return false
-        })
-        guard !reasoningIDs.isEmpty else { return }
-        scrollController.apply(
+        let affectedIDs = Set(topLevelIDs.filter { rowsByID[$0] != nil })
+        guard !affectedIDs.isEmpty else { return }
+        scrollController.applyPreservingReaderAnchor(
             in: scrollView,
             idAtY: { [weak self] y in self?.transcriptID(at: y) },
             yForID: { [weak self] id in self?.transcriptY(for: id) },
-            isSelecting: { [weak self] in self?.hasActiveTextSelection() ?? false },
             update: { [weak self] in
                 guard let self else { return }
-                transcriptLayout.invalidate(changedIDs: reasoningIDs)
+                transcriptLayout.invalidate(changedIDs: affectedIDs)
                 layoutSubtreeIfNeeded()
             }
         )
@@ -1377,10 +1373,9 @@ final class AgentTranscriptListView: NSView {
               let detail = AgentToolDetailPresenter.sanitizedProviderRecord(candidate) else { return block }
         var presented = block
         var presentedPayload = payload
-        // The compact human summary may include a basename or command query.
-        // The disclosure surface is stricter: expose only the presenter's
-        // value-free accessibility/count summary, never a path or raw value.
-        presentedPayload.summary = AgentToolDetailPresenter.compact(detail).accessibilitySummary
+        // The observable summary may include a sanitized basename or command
+        // query. Opaque semantic arguments still never enter this presentation.
+        presentedPayload.summary = AgentToolDetailPresenter.observableSummary(detail)
         presented.payload = .toolCall(presentedPayload)
         return presented
     }
@@ -1567,6 +1562,15 @@ final class AgentTranscriptListView: NSView {
         layoutSubtreeIfNeeded()
         guard let index = rows.firstIndex(where: { $0.id == id }) else { return nil }
         return collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0))?.frame.height
+    }
+    @discardableResult
+    func qaPerformToolDisclosureClick(for id: AgentNodeID) -> Bool {
+        guard let index = rows.firstIndex(where: { $0.id == id }),
+              let item = collectionView.item(at: IndexPath(item: index, section: 0)) as? AgentTranscriptCollectionItem,
+              let tool = item.hostView?.rendererView as? ToolCallView else { return false }
+        tool.disclosureButton.performClick(nil)
+        layoutSubtreeIfNeeded()
+        return true
     }
 
     /// Production-route probe: returns the exact compact text supplied to the
