@@ -121,6 +121,7 @@ public enum AgentInventory {
             tone: draft.tone,
             kind: draft.kind,
             status: draft.status,
+            terminalOutcome: draft.terminalOutcome,
             summary: draft.summary,
             occurredAt: draft.occurredAt,
             approvalRequestId: draft.approvalRequestId
@@ -139,6 +140,7 @@ public enum AgentInventory {
             tone: status == .needsAttention ? .approval : .info,
             kind: "desktop.managedStatus",
             status: status,
+            terminalOutcome: record.latestTerminalEvent?.outcome,
             // The local record is host-bound and automatic names can carry
             // prompt/source/parent-derived text. Only the provenance-aware
             // projection crosses here — never cwd, branch, or the raw local title

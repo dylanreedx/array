@@ -741,7 +741,7 @@ enum SidebarScreenshotChecks {
                        + "appearance was not actually applied")
         }
 
-        // TEETH: proposal C is today's geometry, so its computed row count must equal
+        // TEETH: proposal A is the production geometry, so its computed row count must equal
         // the count measured off the real sidebar's painted cells at the same viewport.
         // If these drift, the proposal arithmetic S0 is asked to trust is fiction.
         if let measured = entries.first(where: {
@@ -750,16 +750,21 @@ enum SidebarScreenshotChecks {
         }) {
             let measuredCard = measured.cardHeightPt ?? 0
             let measuredPitch = measured.pitchPt ?? 0
-            try expect(abs(measuredCard - Double(SidebarDensityProposal.c.cardHeight)) <= 0.5
-                       && abs(measuredPitch - Double(SidebarDensityProposal.c.pitch)) <= 0.5,
-                       "proposal C claims \(SidebarDensityProposal.c.cardHeight)/"
-                       + "\(SidebarDensityProposal.c.pitch)pt but the shipped sidebar "
-                       + "measures \(measuredCard)/\(measuredPitch)pt — C is supposed to BE "
-                       + "today's geometry, so fix C rather than the comparison")
-            try expect(measured.completeRowsIn662pt
-                       == SidebarDensityProposal.c.completeRows(in: denseViewportHeight),
-                       "proposal C computes "
-                       + "\(SidebarDensityProposal.c.completeRows(in: denseViewportHeight)) "
+            let expectedCard = AgentInbox96CellView.rowHeight(for: .a)
+            let expectedPitch = expectedCard + Space.s
+            try expect(abs(measuredCard - expectedCard) <= 0.5
+                       && abs(measuredPitch - expectedPitch) <= 0.5,
+                       "proposal A's live list geometry claims \(expectedCard)/"
+                       + "\(expectedPitch)pt but the shipped sidebar "
+                       + "measures \(measuredCard)/\(measuredPitch)pt — A is supposed to BE "
+                       + "today's geometry, so fix A rather than the comparison")
+            let stackedHeaderHeight = Space.s + ChoiceButton.controlHeight + Space.s
+                + ChoiceButton.controlHeight + Space.s
+            let rowViewport = denseViewportHeight - stackedHeaderHeight
+            let expectedRows = Int(((rowViewport - SidebarDensityProposal.outerGutter)
+                                    / CGFloat(expectedPitch)).rounded(.down))
+            try expect(measured.completeRowsIn662pt == expectedRows,
+                       "proposal A plus the stacked header computes \(expectedRows) "
                        + "rows in \(Int(denseViewportHeight))pt but the real sidebar paints "
                        + "\(measured.completeRowsIn662pt ?? -1) at the same geometry — the "
                        + "row-count arithmetic every proposal reports is wrong")
@@ -772,7 +777,7 @@ enum SidebarScreenshotChecks {
         // Dylan's report was "they are too different to look properly aligned because of
         // the various shapes", and the raw numbers below say why: SF Symbols share a
         // bounding box, not an optical size.
-        let statusSymbols = SidebarDensityProposalView.statusSymbolsInUse
+        let statusSymbols = AgentInbox96CellView.statusSymbolsInUse
         try expect(statusSymbols.count >= 2,
                    "the mock draws \(statusSymbols.count) distinct status symbols; with "
                    + "fewer than two there is no column to align and this witness is "
@@ -781,8 +786,8 @@ enum SidebarScreenshotChecks {
         var alignedInk: [(name: String, raw: NSRect, painted: NSRect)] = []
         try drawing(NSAppearance(named: .darkAqua) ?? NSAppearance.currentDrawing()) {
             for name in statusSymbols {
-                guard let raw = SidebarDensityProposalView.symbolInk(name),
-                      let image = SidebarDensityProposalView.symbolImage(name) else {
+                guard let raw = InkAlignedSymbol.ink(name),
+                      let image = InkAlignedSymbol.image(name) else {
                     throw Failure(description:
                         "\(checkName): no SF Symbol '\(name)' — the mock's status glyph "
                         + "set cannot be measured, so the alignment claim is unwitnessed")
@@ -797,7 +802,7 @@ enum SidebarScreenshotChecks {
                       let context = NSGraphicsContext(bitmapImageRep: rep) else {
                     throw Failure(description: "\(checkName): no alignment probe bitmap")
                 }
-                let placed = SidebarDensityProposalView.alignedRect(
+                let placed = InkAlignedSymbol.rect(
                     slot: slot, ink: raw, alignment: .leadingEdge)
                 NSGraphicsContext.saveGraphicsState()
                 NSGraphicsContext.current = context
@@ -807,7 +812,7 @@ enum SidebarScreenshotChecks {
                                width: placed.width * scale, height: placed.height * scale),
                     from: .zero, operation: .sourceOver, fraction: 1)
                 NSGraphicsContext.restoreGraphicsState()
-                guard let painted = SidebarDensityProposalView.inkBounds(of: rep) else {
+                guard let painted = InkAlignedSymbol.inkBounds(of: rep) else {
                     throw Failure(description:
                         "\(checkName): '\(name)' painted no ink into its slot")
                 }
@@ -827,7 +832,7 @@ enum SidebarScreenshotChecks {
         }
         // The claim being witnessed: in a leading column every glyph starts on ONE line,
         // sits on ONE centre line, and reaches ONE extent.
-        let target = slot.width * SidebarDensityProposalView.inkTargetFraction
+        let target = slot.width * InkAlignedSymbol.inkTargetFraction
         for entry in alignedInk {
             let extent = max(entry.painted.width, entry.painted.height)
             try expect(abs(extent - target) <= 0.75,
@@ -1162,7 +1167,7 @@ struct SidebarDensityProposal: Sendable {
 
     /// The list opens with an outer gutter before the first card, so the rows that fit
     /// are `(viewport - gutter) / pitch` — NOT `(viewport + gap) / pitch`, which
-    /// over-counts by one. The difference is caught by a teeth check: proposal C is
+    /// over-counts by one. The difference is caught by a teeth check: proposal A is
     /// today's geometry, so this must agree with the count measured off the real
     /// sidebar's painted cells, and the first version of this formula did not.
     static let outerGutter: CGFloat = 4
@@ -1448,21 +1453,6 @@ final class SidebarDensityProposalView: NSView {
          "agent/restore-bounds", "Sonnet"),
     ]
 
-    /// Every distinct status symbol the mock actually draws, derived from its own rows.
-    ///
-    /// The alignment witness reads this rather than a list of its own, so it can never
-    /// end up measuring a glyph the mock stopped drawing — or, worse, silently skip one
-    /// it started drawing. The set shrank from six to two the moment Dylan cut the icon
-    /// list, and this is what keeps the check honest about that.
-    static var statusSymbolsInUse: [String] {
-        var seen: [String] = []
-        for row in rows {
-            guard let symbol = stateSymbol(row.state), !seen.contains(symbol) else { continue }
-            seen.append(symbol)
-        }
-        return seen
-    }
-
     init(proposal: SidebarDensityProposal, anatomy: SidebarRowAnatomy, frame: NSRect) {
         self.proposal = proposal
         self.anatomy = anatomy
@@ -1534,8 +1524,8 @@ final class SidebarDensityProposalView: NSView {
                 contentWidth * 0.55, measure(row.state, size: 11).width + 2)
             let bandTop = proposal.bandTop
             // A leading column lines up left EDGES; a glyph sitting beside its own word
-            // centres. See `InkAlignment`.
-            let inkAlignment: SidebarDensityProposalView.InkAlignment =
+            // centres. See `InkAlignedSymbol.Alignment`.
+            let inkAlignment: InkAlignedSymbol.Alignment =
                 anatomy.iconPlacement == .leading ? .leadingEdge : .centred
             func paintStatusIcon(in rect: NSRect) {
                 if isWorking {
@@ -1771,7 +1761,7 @@ final class SidebarDensityProposalView: NSView {
     }
 
     private func drawSymbol(_ name: String, in rect: NSRect, color: NSColor) {
-        guard let image = Self.symbolImage(name) else { return }
+        guard let image = InkAlignedSymbol.image(name) else { return }
         drawImage(image, in: rect, tint: color)
     }
 
@@ -1790,109 +1780,15 @@ final class SidebarDensityProposalView: NSView {
     /// re-measuring what this method actually paints.
     private func drawAlignedSymbol(
         _ name: String, in slot: NSRect, color: NSColor,
-        alignment: SidebarDensityProposalView.InkAlignment = .centred
+        alignment: InkAlignedSymbol.Alignment = .centred
     ) {
-        guard let image = Self.symbolImage(name), let ink = Self.symbolInk(name) else {
+        guard let image = InkAlignedSymbol.image(name), let ink = InkAlignedSymbol.ink(name) else {
             drawSymbol(name, in: slot, color: color)
             return
         }
         drawImage(
-            image, in: Self.alignedRect(slot: slot, ink: ink, alignment: alignment),
+            image, in: InkAlignedSymbol.rect(slot: slot, ink: ink, alignment: alignment),
             tint: color)
-    }
-
-    /// Which edge of the ink to line up.
-    ///
-    /// Measuring the glyph set answered a question I had guessed at wrongly. Their
-    /// LARGEST dimensions already agree to within 5% — SF Symbols are normalised on that.
-    /// What differs is **width**: 68% of the box for `hand.raised.fill` against 86% for
-    /// the circles. Centre those in one slot and their left edges land ~1.4 pt apart at
-    /// 16 pt, which in a left-aligned column reads as a ragged margin — Dylan's "they
-    /// seem all a little off". A leading column therefore aligns LEFT EDGES; a trailing
-    /// glyph beside its word still centres.
-    enum InkAlignment { case centred, leadingEdge }
-
-    /// Where to draw the unit-square glyph image so its ink lands correctly on `slot` at
-    /// a common extent. Pure arithmetic, so the gate can drive it directly.
-    static func alignedRect(
-        slot: NSRect, ink: NSRect, alignment: InkAlignment = .centred
-    ) -> NSRect {
-        let target = slot.width * Self.inkTargetFraction
-        let side = target / max(max(ink.width, ink.height), 0.0001)
-        let x = alignment == .leadingEdge
-            ? slot.minX - (ink.minX * side)
-            : slot.midX - (ink.midX * side)
-        return NSRect(x: x, y: slot.midY - (ink.midY * side), width: side, height: side)
-    }
-
-    /// How much of the slot the ink fills. 0.82 leaves the glyph room to breathe beside
-    /// 11 pt text without the slot itself changing size.
-    static let inkTargetFraction: CGFloat = 0.82
-
-    private static var symbolImageCache: [String: NSImage?] = [:]
-
-    static func symbolImage(_ name: String) -> NSImage? {
-        if let cached = symbolImageCache[name] { return cached }
-        let config = NSImage.SymbolConfiguration(pointSize: 96, weight: .semibold)
-        let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
-            .withSymbolConfiguration(config)
-        image?.isTemplate = true
-        symbolImageCache[name] = image
-        return image
-    }
-
-    private static var symbolInkCache: [String: NSRect?] = [:]
-
-    /// The glyph's ink extent as a fraction of a unit square, measured top-down so it
-    /// composes with `respectFlipped:` drawing without a second flip.
-    static func symbolInk(_ name: String) -> NSRect? {
-        if let cached = symbolInkCache[name] { return cached }
-        let ink = symbolImage(name).flatMap { measureInk(of: $0) }
-        symbolInkCache[name] = ink
-        return ink
-    }
-
-    /// Render into a square bitmap and find the alpha extent.
-    static func measureInk(of image: NSImage, side: Int = 128) -> NSRect? {
-        guard let rep = NSBitmapImageRep(
-            bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side,
-            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
-            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
-              let context = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
-        let box = NSRect(x: 0, y: 0, width: CGFloat(side), height: CGFloat(side))
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = context
-        // A template image draws in the current fill colour; force an opaque one so the
-        // alpha scan measures the glyph and not a stroke's antialiased ghost.
-        NSColor.black.setFill()
-        image.draw(in: box, from: .zero, operation: .sourceOver, fraction: 1)
-        NSGraphicsContext.restoreGraphicsState()
-        return inkBounds(of: rep)
-    }
-
-    /// Alpha extent of a bitmap, normalised to its own size, measured top-down.
-    static func inkBounds(of rep: NSBitmapImageRep, threshold: Int = 24) -> NSRect? {
-        guard let data = rep.bitmapData else { return nil }
-        let width = rep.pixelsWide, height = rep.pixelsHigh
-        let rowBytes = rep.bytesPerRow, pixelBytes = rep.bitsPerPixel / 8
-        // Alpha is the last sample of each pixel in the RGBA reps built above and in the
-        // premultiplied reps `bitmapImageRepForCachingDisplay` hands back.
-        let alphaOffset = pixelBytes - 1
-        var minX = width, minY = height, maxX = -1, maxY = -1
-        for y in 0..<height {
-            let row = y * rowBytes
-            for x in 0..<width where Int(data[row + x * pixelBytes + alphaOffset]) > threshold {
-                if x < minX { minX = x }
-                if x > maxX { maxX = x }
-                if y < minY { minY = y }
-                if y > maxY { maxY = y }
-            }
-        }
-        guard maxX >= minX, maxY >= minY else { return nil }
-        return NSRect(
-            x: CGFloat(minX) / CGFloat(width), y: CGFloat(minY) / CGFloat(height),
-            width: CGFloat(maxX - minX + 1) / CGFloat(width),
-            height: CGFloat(maxY - minY + 1) / CGFloat(height))
     }
 
     /// Array's OWN thinking indicator, posed at a fixed phase rather than imitated. The

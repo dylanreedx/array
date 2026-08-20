@@ -25,6 +25,10 @@ public struct AgentsBoardRow: Equatable, Sendable, Identifiable {
     /// rows. nil means "not joined", never "the agent has no context".
     public let context: AgentRowContext?
 
+    public var terminalOutcome: AgentTerminalOutcome? {
+        recent.last(where: { $0.terminalOutcome != nil })?.terminalOutcome
+    }
+
     public init(
         agentId: UUID,
         tileId: UUID? = nil,

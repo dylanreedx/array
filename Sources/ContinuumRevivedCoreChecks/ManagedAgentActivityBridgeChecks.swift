@@ -26,8 +26,15 @@ func runManagedAgentActivityBridgeChecks() {
     let approval = draft(.requestOpened(threadId: thread, requestId: "r1", kind: .commandExecutionApproval))
     expect(approval?.tone == .approval && approval?.approvalRequestId == "r1",
            "bridge: requestOpened → approval draft carrying the request id")
-    expect(draft(.turnCompleted(threadId: thread, turnId: "t1", outcome: .completed, errorMessage: nil))?.kind == "turn.completed",
+    let completed = draft(.turnCompleted(threadId: thread, turnId: "t1", outcome: .completed, errorMessage: nil))
+    expect(completed?.kind == "turn.completed" && completed?.terminalOutcome == .succeeded,
            "bridge: turnCompleted(.completed) → turn.completed")
+    expect(draft(.turnCompleted(threadId: thread, turnId: "t2", outcome: .interrupted,
+                                errorMessage: nil))?.terminalOutcome == .interrupted,
+           "bridge: interrupted terminal outcome must survive the sync boundary")
+    expect(draft(.turnCompleted(threadId: thread, turnId: "t3", outcome: .cancelled,
+                                errorMessage: nil))?.terminalOutcome == .cancelled,
+           "bridge: cancelled terminal outcome must survive the sync boundary")
 
     // 2. Dropped events return nil (never cross): content deltas + token/context telemetry.
     expect(draft(.contentDelta(threadId: thread, turnId: "t1", streamKind: .assistant, delta: "some assistant text")) == nil,
@@ -43,9 +50,11 @@ func runManagedAgentActivityBridgeChecks() {
     //    entirely, not merely truncated.
     let secretErr = "pi failed: /Users/dylan/secret/path SECRET-TOKEN-42 " + String(repeating: "x", count: 5000)
     let errDraft = draft(.runtimeError(threadId: thread, message: secretErr))
-    expect(errDraft?.summary == "Runtime error", "bridge I5: runtimeError summary is generic, got \(String(describing: errDraft?.summary))")
+    expect(errDraft?.summary == "Runtime error" && errDraft?.terminalOutcome == .runtimeError,
+           "bridge I5: runtimeError summary is generic and outcome is exact, got \(String(describing: errDraft?.summary))")
     let failDraft = draft(.turnCompleted(threadId: thread, turnId: "t1", outcome: .failed, errorMessage: secretErr))
-    expect(failDraft?.summary == "Turn failed", "bridge I5: failed-turn summary is generic, got \(String(describing: failDraft?.summary))")
+    expect(failDraft?.summary == "Turn failed" && failDraft?.terminalOutcome == .failed,
+           "bridge I5: failed-turn summary is generic and outcome is exact, got \(String(describing: failDraft?.summary))")
     for d in [errDraft, failDraft] {
         let json = String(decoding: try! JSONEncoder().encode(AgentActivityEvent(stamping: d!, sequence: 1, replicaId: UUID())), as: UTF8.self)
         expect(!json.contains("SECRET-TOKEN-42") && !json.contains("/Users/dylan"),

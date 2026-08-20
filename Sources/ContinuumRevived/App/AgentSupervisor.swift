@@ -3296,6 +3296,10 @@ final class AgentSupervisor {
         let visited = previous.map { max($0, now) } ?? now
         guard visited != previous else { return }
         record.lastVisitedAt = visited
+        if let terminal = record.latestTerminalEvent {
+            record.acknowledgedTerminalSequence = max(
+                record.acknowledgedTerminalSequence, terminal.sequence)
+        }
         records[id] = record
         let elapsed = lastVisitedPersistAt[id].map { now.timeIntervalSince($0) } ?? .infinity
         let shouldPersist = wasUnread || previous == nil || elapsed >= Self.lastVisitedPersistThrottle
@@ -3567,8 +3571,14 @@ final class AgentSupervisor {
             warn("AgentSupervisor.markUnread: no agent \(id.rawValue.uuidString)")
             return false
         }
-        guard record.lastVisitedAt != .distantPast else { return false }
+        let terminalCanRewind = record.latestTerminalEvent.map {
+            record.acknowledgedTerminalSequence >= $0.sequence
+        } ?? false
+        guard record.lastVisitedAt != .distantPast || terminalCanRewind else { return false }
         record.lastVisitedAt = .distantPast
+        if let terminal = record.latestTerminalEvent {
+            record.acknowledgedTerminalSequence = terminal.sequence &- 1
+        }
         lastVisitedPersistAt[id] = now
         records[id] = record
         persist(record)
@@ -3721,10 +3731,19 @@ final class AgentSupervisor {
             // though ordinary focus writes are throttled; otherwise the just-read
             // completion would reappear after a relaunch.
             let watchedCompletion: Bool
-            if case .turnCompleted = event, focusedAgentID == id {
+            let isTerminalArrival: Bool
+            switch event {
+            case .turnCompleted, .runtimeError: isTerminalArrival = true
+            default: isTerminalArrival = false
+            }
+            if isTerminalArrival, focusedAgentID == id {
                 watchedCompletion = record.isUnread
                 let visited = record.lastVisitedAt.map { max($0, now) } ?? now
                 record.lastVisitedAt = visited
+                if let terminal = record.latestTerminalEvent {
+                    record.acknowledgedTerminalSequence = max(
+                        record.acknowledgedTerminalSequence, terminal.sequence)
+                }
                 if watchedCompletion { lastVisitedPersistAt[id] = now }
             } else {
                 watchedCompletion = false
@@ -3789,7 +3808,7 @@ final class AgentSupervisor {
                 record.latestTurnAt = max(record.latestTurnAt ?? .distantPast, now)
                 records[id] = record
             }
-        case let .turnCompleted(_, _, outcome, errorMessage):
+        case let .turnCompleted(_, turnID, outcome, errorMessage):
             facts.execution = .ready
             facts.didFail = outcome == .failed
             facts.failureMessage = outcome == .failed ? errorMessage : nil
@@ -3801,6 +3820,18 @@ final class AgentSupervisor {
                 record.runCompletedAt = max(record.runCompletedAt ?? .distantPast, now)
                 if outcome == .failed {
                     record.failedAt = max(record.failedAt ?? .distantPast, now)
+                }
+                if record.latestTerminalEvent?.turnID != turnID {
+                    let terminalOutcome: AgentTerminalOutcome
+                    switch outcome {
+                    case .completed: terminalOutcome = .succeeded
+                    case .failed: terminalOutcome = .failed
+                    case .interrupted: terminalOutcome = .interrupted
+                    case .cancelled: terminalOutcome = .cancelled
+                    }
+                    record.latestTerminalEvent = AgentTerminalEvent(
+                        sequence: (record.latestTerminalEvent?.sequence ?? 0) &+ 1,
+                        turnID: turnID, outcome: terminalOutcome, endedAt: now)
                 }
                 records[id] = record
             }
@@ -3849,13 +3880,21 @@ final class AgentSupervisor {
         case let .requestResolved(_, requestID, _), let .userInputResolved(_, requestID):
             facts.pendingRequests.removeValue(forKey: requestID)
             facts.requestOrder.removeAll { $0 == requestID }
-        case let .runtimeError(_, message):
+        case let .runtimeError(threadID, message):
             facts.execution = .ready
             facts.didFail = true
             facts.failureMessage = message
             facts.turnStartedAt = nil
             if var record = records[id] {
                 record.failedAt = max(record.failedAt ?? .distantPast, now)
+                record.runCompletedAt = max(record.runCompletedAt ?? .distantPast, now)
+                let eventID = threadID.map { "runtime:\($0)" }
+                if record.latestTerminalEvent?.turnID != eventID
+                    || record.latestTerminalEvent?.outcome != .runtimeError {
+                    record.latestTerminalEvent = AgentTerminalEvent(
+                        sequence: (record.latestTerminalEvent?.sequence ?? 0) &+ 1,
+                        turnID: eventID, outcome: .runtimeError, endedAt: now)
+                }
                 records[id] = record
             }
         case .itemStarted, .itemCompleted, .contentDelta, .tokenUsageUpdated, .contextWindowUpdated:

@@ -287,6 +287,15 @@ private final class AgentInboxTableView: NSTableView {
             super.mouseDown(with: event)
         }
     }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        guard let contextHandler else { return }
+        for tableRow in 0..<numberOfRows
+        where contextHandler.isAgentTableRowForCursor(tableRow) {
+            addCursorRect(rect(ofRow: tableRow), cursor: .pointingHand)
+        }
+    }
 }
 
 @MainActor
@@ -298,12 +307,31 @@ private final class AgentInboxTableView: NSTableView {
 /// with its own bugs. So the list stays exactly as queue 94 built it and the two
 /// things that differ are handed in: how a card row is built, and how tall it is.
 ///
-/// nil is the default and the only value production or any existing gate sees.
+/// Program 96 is now the production default. Keeping this optional seam for the
+/// moment lets the Component Lab compare the retired queue-94 cell without
+/// maintaining a second list implementation; nil explicitly requests that legacy
+/// comparison.
 struct AgentInboxCardStyleOverride {
     let makeCell: () -> AgentInboxRowCell
     /// A 96 card's height is fixed by its pitch rather than derived from which
     /// bands have content, because every band always has content.
     let cardHeight: (AgentInboxRow) -> Double
+
+    static var production: Self {
+        let proposal = SidebarDensityProposal.a
+        let anatomy = SidebarRowAnatomy(
+            id: "production", label: "production",
+            border: .none, iconPlacement: .leading, showsModelText: false)
+        return Self(
+            makeCell: {
+                AgentInbox96CellView(
+                    proposal: proposal, anatomy: anatomy,
+                    prefersReducedMotion: {
+                        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                    })
+            },
+            cardHeight: { _ in AgentInbox96CellView.rowHeight(for: proposal) })
+    }
 }
 
 /// An alternative HEADER presentation, injected the same way and for the same
@@ -314,7 +342,8 @@ struct AgentInboxCardStyleOverride {
 /// `chrome.agentInbox` baselines and change what every user sees, while the design
 /// is still being argued about. This is that seam.
 ///
-/// nil is the default and the only value production or any existing gate sees.
+/// The stacked, boxless search treatment is now the production default. nil is
+/// retained only for the Component Lab's explicit legacy comparison.
 struct AgentInboxHeaderStyleOverride {
     /// Search takes a full-width row of its own, above the scope control, rather
     /// than sharing one row with it.
@@ -395,7 +424,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                             NSTextFieldDelegate, TokenThemed {
     /// Set to preview a redesigned card row in this real list. See
     /// `AgentInboxCardStyleOverride`; nil everywhere but the Component Lab.
-    var cardStyleOverride: AgentInboxCardStyleOverride? {
+    var cardStyleOverride: AgentInboxCardStyleOverride? = .production {
         didSet {
             rebuildRowsForQA()
             tableView.noteHeightOfRows(
@@ -405,7 +434,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     /// Set to preview a redesigned header in this real sidebar. See
     /// `AgentInboxHeaderStyleOverride`; nil everywhere but the Component Lab.
-    var headerStyleOverride: AgentInboxHeaderStyleOverride? {
+    var headerStyleOverride: AgentInboxHeaderStyleOverride? = AgentInboxHeaderStyleOverride() {
         didSet { applyHeaderStyle() }
     }
 
@@ -585,6 +614,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// restore twice over facts the first one already changed.
     private var pendingUndo: [UUID: InboxLifecycleSnapshot]?
     private var undoToastTimer: Timer?
+    /// One cadence for the whole list. Cells never own timers; the single oldest
+    /// eligible visible row borrows this phase when it is materialized.
+    private var settleNudgeTimer: Timer?
+    private var settleNudgePhaseVisible = true
+    private static let settleNudgePeriod: TimeInterval = 30
     // P6.3: wake is derived from the stored date. This single timer only asks the
     // list/host to re-render when the earliest shelf entry may have expired; it
     // never writes the record or schedules a daemon wake.
@@ -609,6 +643,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     // Headless checks retain the same ChoiceListView when no AppKit window exists.
     private var qaChoiceListForQA: ChoiceListView?
     private var qaSnoozeChoiceListForQA: ChoiceListView?
+    private let projectFaviconResolver = ProjectFaviconResolver()
     /// Capability state starts unknown/hidden. It is filled by the detached,
     /// bounded resolver and then repaints an already-open menu on the main actor;
     /// building a menu never performs the capability lookup itself.
@@ -2390,6 +2425,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         cell.onToggleDisclosure = { [weak self] in self?.toggleCollapse(parentId: agentId) }
         let rowDisclosure = disclosure(for: model)
         let rowRollup = rollupsByParent[model.id]
+        let renderNow = clock()
         cell.apply(
             model,
             emphasis: AgentInboxRow.emphasis(
@@ -2405,8 +2441,21 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // `selectedRow` is one index and a range is a set.
             isSelected: tableView.selectedRowIndexes.contains(row),
             isInteracting: interacting,
-            now: clock()
+            now: renderNow
         )
+        if let redesigned = cell as? AgentInbox96CellView {
+            let nudgeTarget = settleNudgePhaseVisible ? settleNudgeTargetID(now: renderNow) : nil
+            redesigned.showSettleNudge(nudgeTarget == model.id) { [weak self] in
+                guard let self else { return }
+                self.rowChoiceTargetIds = [agentId]
+                self.performRowAction(.settle)
+            }
+            if let projectID = model.projectId {
+                projectFaviconResolver.image(for: projectID) { [weak redesigned] image in
+                    redesigned?.setProjectIcon(image, for: agentId)
+                }
+            }
+        }
         // P1.2/P1.4: the interaction ladder is set through its own call for the
         // reason the pill below is — `apply` paints what the agent IS, and where
         // the pointer and the keyboard are is not that.
@@ -2421,6 +2470,24 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         cellsByRow[row] = cell
         updateAccessibilityHierarchy()
         return cell
+    }
+
+    /// At most one nudge is ever offered, and only while the list has no unread or
+    /// action-blocked row. The oldest eligible completion wins, so a clock edge
+    /// cannot make six cards bloom together.
+    private func settleNudgeTargetID(now: Date) -> UUID? {
+        let hasHigherPriorityWork = rows.contains { row in
+            row.terminalIsUnread || row.attention == .unread
+                || row.state == .approval || row.state == .input || row.state == .failed
+        }
+        guard !hasHigherPriorityWork, isWired(.settle) else { return nil }
+        return rows.filter {
+            AgentInbox96CellView.isSettleCandidate($0, now: now)
+                && $0.canSettle(rollup: rollupsByParent[$0.id])
+        }.min {
+            ($0.terminalEvent?.endedAt ?? $0.lastActiveAt ?? .distantFuture)
+                < ($1.terminalEvent?.endedAt ?? $1.lastActiveAt ?? .distantFuture)
+        }?.id
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -3596,6 +3663,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         }
         interactionObservers = []
         guard let window else {
+            settleNudgeTimer?.invalidate()
+            settleNudgeTimer = nil
             cancelWakeRerender()
             setHovered(agentId: nil)
             setKeyboardFocus(agentId: nil)
@@ -3606,7 +3675,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         interactionObservers.append(center.addObserver(
             forName: NSView.boundsDidChangeNotification, object: clipView, queue: nil
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refreshHoverFromPointer() }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.refreshHoverFromPointer()
+                self.window?.invalidateCursorRects(for: self.tableView)
+            }
         })
         for name in [NSWindow.didResignKeyNotification, NSWindow.didResignMainNotification] {
             interactionObservers.append(center.addObserver(
@@ -3633,6 +3706,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         })
         reapplyDisplayPreferences()
         scheduleWakeRerender()
+        settleNudgeTimer?.invalidate()
+        let timer = Timer(timeInterval: Self.settleNudgePeriod, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.settleNudgePhaseVisible.toggle()
+                self.redraw(tableRows: Array(self.items.indices))
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        settleNudgeTimer = timer
     }
 
     /// The first visible agent not being changed by an incremental apply. The
@@ -3728,7 +3811,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     /// Nil-by-default, like the row and the header. Production hover is untouched,
     /// so `--sidebar-ux-check`'s hover ladder never sees this.
-    var hoverCardEnabled = false {
+    var hoverCardEnabled = true {
         didSet { if !hoverCardEnabled { dismissHoverCard() } }
     }
     /// Injectable so a check can fire the dwell without sleeping — the shape
@@ -3865,6 +3948,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         hoverCard?.qaBrandMarksAreTemplatesForQA ?? false
     }
     var hoverCardBrandMarkTintForQA: NSColor? { hoverCard?.qaBrandMarkTintForQA }
+
+    fileprivate func isAgentTableRowForCursor(_ tableRow: Int) -> Bool {
+        rowIndex(forTableRow: tableRow) != nil
+    }
+
+    var rowCursorForQA: NSCursor { .pointingHand }
+
+    func setProjectIconSources(_ roots: [UUID: URL]) {
+        projectFaviconResolver.update(roots)
+    }
 
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.4-focus-ring-and-floors.md
     /// Move the ring, and answer which table rows have to be repainted for it.
@@ -4387,6 +4480,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             var frames: [NSRect] = []
             func visit(_ view: NSView) {
                 guard !(view is InboxJumpHintView) else { return }
+                guard !(view is InboxSettleNudgeButton) else { return }
                 frames.append(view.convert(view.bounds, to: cell))
                 view.subviews.forEach(visit)
             }

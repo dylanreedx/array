@@ -1,6 +1,8 @@
+import Foundation
 import AppKit
 import ContinuumRevivedAgentUI
-import Foundation
+
+final class InboxSettleNudgeButton: NSButton {}
 
 // Program 96 — the redesigned agent row, as a REAL cell.
 //
@@ -11,11 +13,8 @@ import Foundation
 // multi-selection, context menus, disclosure triangles, jump pills, rename and
 // accessibility, none of which is reimplemented here.
 //
-// **It is injected, never defaulted.** `AgentInboxView.cardStyleOverride` is nil
-// everywhere except the Component Lab section that sets it, so production and
-// every queue-94 gate see exactly the view they saw before. Making this the
-// default is Phase 1–3 work and needs the S0 ruling first: the pitch below is
-// still a proposal.
+// It is the production card. The optional injection seam remains only so the
+// Component Lab can render the retired queue-94 cell as a comparison.
 //
 // WHAT IS SHARED, AND WHY IT MATTERS: the ink alignment and the brand marks live
 // here, and `SidebarScreenshotChecks` calls into them. So the review images, this
@@ -174,15 +173,8 @@ enum InkAlignedSymbol {
 
 // MARK: - Brand marks
 
-/// Vendor marks, loaded from the ticket directory by repo-relative path.
-///
-/// **DESIGN-TIME ONLY. This cannot ship.** Nothing here is bundled into the
-/// `.app`, so a released build would find no file and draw the name fallback for
-/// every provider. The real pipeline — a resource catalogue, `Package.swift`
-/// declarations, `make-app-bundle.sh` handling and §5.5's offline bundle witness —
-/// is P3.1, and so is the per-vendor trademark review that has to happen before
-/// any of these are distributed. §10 forbids fetching a logo at runtime and
-/// nothing here fetches.
+/// Vendor marks bundled into the app at build time, with a repo-relative fallback
+/// for a bare SwiftPM executable. Nothing here performs a network request.
 @MainActor
 enum BrandMark96 {
     private static var cache: [String: NSImage?] = [:]
@@ -246,13 +238,18 @@ enum BrandMark96 {
 
     static func load(_ key: String) -> NSImage? {
         if let cached = cache[key] { return cached }
-        let url = URL(fileURLWithPath: #filePath)
+        let bundled = Bundle.main.resourceURL?
+            .appendingPathComponent("BrandMarks", isDirectory: true)
+            .appendingPathComponent("\(key).svg")
+        let source = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()   // App
             .deletingLastPathComponent()   // ContinuumRevived
             .deletingLastPathComponent()   // Sources
             .deletingLastPathComponent()   // repo root
             .appendingPathComponent(
                 "docs/38-tickets/96-agent-sidebar-product-redesign/brand-marks/\(key).svg")
+        let url = bundled.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+            ?? source
         let image = NSImage(contentsOf: url)
         cache[key] = image
         return image
@@ -269,6 +266,10 @@ enum BrandMark96 {
 /// same arithmetic `SidebarDensityProposal` reports and the two cannot drift.
 @MainActor
 final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
+    static let statusSymbolsInUse = [
+        "checkmark.circle.fill", "hand.raised.fill",
+        "exclamationmark.triangle.fill", "stop.circle.fill", "xmark.circle.fill",
+    ]
     /// Pitch and anatomy for THIS cell, handed in by whoever built it, so the Lab
     /// can retune live without a static anyone else can see.
     let proposal: SidebarDensityProposal
@@ -278,8 +279,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     private let jumpHint = InboxJumpHintView()
     private let disclosureButton = InboxDisclosureButton()
     var onToggleDisclosure: (() -> Void)?
+    private let settleNudge = InboxSettleNudgeButton(frame: .zero)
+    private var onSettleNudge: (() -> Void)?
 
     private let placementLabel = NSTextField(labelWithString: "")
+    private let projectIcon = NSImageView(frame: .zero)
     private let stateLabel = NSTextField(labelWithString: "")
     private let titleLabel = NSTextField(labelWithString: "")
     private let branchLabel = NSTextField(labelWithString: "")
@@ -339,6 +343,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         card.addSubview(statusGlyph)
 
         placementLabel.font = .token(.caption)
+        projectIcon.imageScaling = .scaleProportionallyDown
+        projectIcon.setAccessibilityElement(false)
+        card.addSubview(projectIcon)
         // Status is telemetry, not a heading. Keep the label rung's 11pt size so
         // it fits the fixed 14pt band, but use a regular monospaced face: the
         // changing word/time pair stays quiet and its digits do not breathe.
@@ -360,6 +367,20 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         disclosureButton.action = #selector(disclosureClicked)
         disclosureButton.isHidden = true
         card.addSubview(disclosureButton)
+        settleNudge.title = "All set?  ×"
+        settleNudge.image = NSImage(
+            systemSymbolName: "wand.and.stars", accessibilityDescription: nil)
+        settleNudge.imagePosition = .imageLeading
+        settleNudge.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+        settleNudge.isBordered = false
+        settleNudge.wantsLayer = true
+        settleNudge.layer?.cornerRadius = 11
+        settleNudge.target = self
+        settleNudge.action = #selector(settleNudgeClicked)
+        settleNudge.isHidden = true
+        settleNudge.setAccessibilityLabel("Settle agent")
+        settleNudge.setAccessibilityIdentifier("ContinuumAgentInboxSettleNudge")
+        card.addSubview(settleNudge)
         // An OVERLAY, never an arranged subview: a pill that joins the row's stack
         // pushes the status label out of the line. That regression has a name in
         // this codebase — holding ⌘ blanked out "Working".
@@ -389,8 +410,20 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         card.isSelected = isSelected
 
         placementLabel.stringValue = row.projectName ?? ""
+        projectIcon.image = row.projectName?.isEmpty == false
+            ? NSImage(systemSymbolName: "folder", accessibilityDescription: nil) : nil
+        projectIcon.image?.isTemplate = true
         titleLabel.stringValue = row.displayTitle
-        branchLabel.stringValue = row.branch ?? ""
+        let rollupSummary: String?
+        if disclosure == .collapsed {
+            rollupSummary = rollup?.summary
+        } else {
+            rollupSummary = rollup?.cappedAttentionSummary
+        }
+        // A folded parent has to speak for the rows it hides. The compact card has
+        // no fourth metadata band, so that transient structural fact takes the
+        // branch lane while folded; the exact branch remains in the hover card.
+        branchLabel.stringValue = rollupSummary ?? row.branch ?? ""
 
         // The state WORD and its time, in one string, exactly as the review images
         // read: `Done · 4m`. The elapsed half comes from the shipped formatter, not
@@ -422,7 +455,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // the settle nudge's job, and it is a different row entirely.
         statusGlyph.setPulsing(false)
         decorations.isWorking = row.state == .working
-        decorations.drawsBranchGlyph = !branchLabel.stringValue.isEmpty
+        decorations.drawsBranchGlyph = rollupSummary == nil && !branchLabel.stringValue.isEmpty
 
         disclosureButton.isHidden = disclosure == .none
         disclosureButton.show(disclosure)
@@ -458,15 +491,20 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// the first step alone, which was effort spent on the row that needed it
     /// least.
     static func isUnseen(_ row: AgentInboxRow) -> Bool {
-        row.state == .ready && row.attention == .unread && !row.isUnconfirmed
+        guard row.state == .ready, !row.isUnconfirmed else { return false }
+        if let terminal = row.terminalEvent {
+            return terminal.outcome == .succeeded && row.terminalIsUnread
+        }
+        return row.attention == .unread
     }
 
     /// A finished row you have read and left sitting. What the settle nudge asks
     /// about — see `settleNudgeDelay`.
     static func isSettleCandidate(_ row: AgentInboxRow, now: Date) -> Bool {
-        guard row.state == .ready, !isUnseen(row), !row.isUnconfirmed,
+        guard row.state == .ready, !row.terminalIsUnread, !isUnseen(row), !row.isUnconfirmed,
               case .active = row.lifecycle, let since = row.lastActiveAt
         else { return false }
+        if let outcome = row.terminalEvent?.outcome, outcome != .succeeded { return false }
         return now.timeIntervalSince(since) >= settleNudgeDelay
     }
 
@@ -485,7 +523,19 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // talking — a settled row keeps its age, because "when did this land" is a
         // fair question, but it has no status left to report. What eventually gets
         // it off the list is the nudge to settle, not another word here.
-        return isUnseen(row) ? "Done" : nil
+        guard let terminal = row.terminalEvent else {
+            return isUnseen(row) ? "Done" : nil
+        }
+        switch terminal.outcome {
+        case .succeeded:
+            return row.terminalIsUnread ? "Done" : nil
+        case .failed, .runtimeError:
+            return "Failed"
+        case .interrupted:
+            return "Stopped"
+        case .cancelled:
+            return "Cancelled"
+        }
     }
 
     /// The number beside the word.
@@ -500,7 +550,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// it does on every other surface.
     static func stateAge(_ row: AgentInboxRow, now: Date) -> TimeInterval? {
         if let elapsed = row.elapsed { return elapsed }
-        guard row.state == .ready, !row.isUnconfirmed, let since = row.lastActiveAt
+        guard row.state == .ready, !row.isUnconfirmed,
+              let since = row.terminalEvent?.endedAt ?? row.lastActiveAt
         else { return nil }
         return max(0, now.timeIntervalSince(since))
     }
@@ -526,7 +577,14 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         case .working: return nil   // the throbber, not a symbol
         case .approval, .input: return "hand.raised.fill"
         case .failed: return "exclamationmark.triangle.fill"
-        case .ready: return nil
+        case .ready:
+            guard row.terminalIsUnread, let outcome = row.terminalEvent?.outcome else { return nil }
+            switch outcome {
+            case .succeeded: return "checkmark.circle.fill"
+            case .failed, .runtimeError: return "exclamationmark.triangle.fill"
+            case .interrupted: return "stop.circle.fill"
+            case .cancelled: return "xmark.circle.fill"
+            }
         }
     }
 
@@ -561,6 +619,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         guard let shown else { return }
         let row = shown.row
         placementLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        projectIcon.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
         titleLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
         branchLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         modelLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
@@ -574,6 +633,12 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // maximum contrast without recolouring the vendor shape by status or row
         // recession.
         decorations.markColour = BrandMark96.foreground(in: self)
+        let nudgeForeground = TextToken.textPrimary.color.nsColor(in: self)
+        settleNudge.contentTintColor = nudgeForeground
+        settleNudge.attributedTitle = NSAttributedString(
+            string: settleNudge.title,
+            attributes: [.font: settleNudge.font as Any, .foregroundColor: nudgeForeground])
+        settleNudge.layer?.backgroundColor = SidebarSurfaceRole.hover.color.cgColor(in: self)
 
         // Recession is the row's words, never its accent: `accentOpacity` paints the
         // state at full strength however far the row recedes, which is queue-94's
@@ -632,7 +697,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         case .approval, .input: return .accentApproval
         case .failed: return .accentFailed
         // Seen, finished, closed. `accentColour` routes nil to `textSecondary`.
-        case .ready: return nil
+        case .ready:
+            guard row.terminalIsUnread, let outcome = row.terminalEvent?.outcome else { return nil }
+            switch outcome {
+            case .succeeded: return .accentReview
+            case .failed, .runtimeError: return .accentFailed
+            case .interrupted, .cancelled: return nil
+            }
         }
     }
 
@@ -723,6 +794,15 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let stateWidth = stateLabel.isHidden
             ? 0 : min(card.bounds.width * 0.55, Self.width(of: stateLabel))
         var placementLeft = textLeft
+        if projectIcon.image != nil {
+            let side: CGFloat = 12
+            projectIcon.frame = inCard(NSRect(
+                x: placementLeft, y: bandY + (proposal.bandTop - side) / 2,
+                width: side, height: side))
+            placementLeft += side + 4
+        } else {
+            projectIcon.frame = .zero
+        }
         var trailingIconWidth: CGFloat = 0
         if leadsWithIcon {
             statusSlot = hasIcon
@@ -802,6 +882,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             y: (bounds.height - jumpHint.intrinsicContentSize.height) / 2,
             width: jumpHint.intrinsicContentSize.width,
             height: jumpHint.intrinsicContentSize.height)
+        let nudgeSize = NSSize(width: 94, height: 22)
+        settleNudge.frame = inCard(NSRect(
+            x: max(textLeft, textRight - nudgeSize.width),
+            y: (card.bounds.height - nudgeSize.height) / 2,
+            width: nudgeSize.width, height: nudgeSize.height))
     }
 
     /// The states that are asking for a person, as opposed to reporting one. The
@@ -825,6 +910,32 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     }
 
     @objc private func disclosureClicked() { onToggleDisclosure?() }
+    @objc private func settleNudgeClicked() { onSettleNudge?() }
+
+    func showSettleNudge(_ shown: Bool, onSettle: (() -> Void)?) {
+        onSettleNudge = shown ? onSettle : nil
+        guard settleNudge.isHidden == shown else { return }
+        settleNudge.isHidden = !shown
+        guard shown, !prefersReducedMotion(), let layer = settleNudge.layer else { return }
+        let slide = CABasicAnimation(keyPath: "transform.translation.x")
+        slide.fromValue = 14
+        slide.toValue = 0
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0
+        fade.toValue = 1
+        let group = CAAnimationGroup()
+        group.animations = [slide, fade]
+        group.duration = 0.22
+        group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer.add(group, forKey: "settle-nudge-arrive")
+    }
+
+    func setProjectIcon(_ image: NSImage?, for rowID: UUID) {
+        guard shown?.row.id == rowID, let image else { return }
+        projectIcon.image = image
+        projectIcon.contentTintColor = nil
+        needsLayout = true
+    }
 
     // MARK: AgentInboxRowCell
 
@@ -890,9 +1001,12 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
     var qaTitle: String { titleLabel.stringValue }
     var qaStateLabel: String { stateLabel.isHidden ? "" : stateLabel.stringValue }
-    /// 96 removes the isolation/rollup band entirely — the third band carries the
-    /// branch and the provider. Empty here is the design, not a missing accessor.
-    var qaMeta: String { "" }
+    /// The compact card borrows the branch lane for a folded/capped child rollup.
+    var qaMeta: String {
+        guard let shown else { return "" }
+        if shown.disclosure == .collapsed { return shown.rollup?.summary ?? "" }
+        return shown.rollup?.cappedAttentionSummary ?? ""
+    }
     var qaBranch: String { branchLabel.stringValue }
     /// The elapsed time is part of the state string on this row (`Done · 4m`),
     /// which is what the review images show, so there is no separate label to read.
@@ -924,6 +1038,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
     func acceptsRenameDoubleClick(at point: NSPoint) -> Bool {
         guard bounds.contains(point) else { return false }
+        if !settleNudge.isHidden,
+           settleNudge.convert(settleNudge.bounds, to: self).contains(point) { return false }
         guard !disclosureButton.isHidden, disclosureButton.isDescendant(of: self) else {
             return true
         }

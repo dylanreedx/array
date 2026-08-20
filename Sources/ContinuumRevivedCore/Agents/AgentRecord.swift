@@ -217,6 +217,11 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// The most recent completed run, used both by the raised hand and the read
     /// watermark. A missing value is a legacy/no-history record, not activity.
     public var runCompletedAt: Date?
+    /// Honest terminal result plus a per-agent monotonic sequence. Optional for
+    /// legacy records because `runCompletedAt` did not retain the outcome.
+    public var latestTerminalEvent: AgentTerminalEvent?
+    /// Desktop-local acknowledgement. This never enters companion inventory.
+    public var acknowledgedTerminalSequence: UInt64
     /// Desktop-local read watermark. It is persisted for this device only and is
     /// never part of a companion payload.
     public var lastVisitedAt: Date?
@@ -301,6 +306,9 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// A completion later than the read watermark is unread. Never visiting is
     /// intentionally treated as read so a relaunch does not light up history.
     public var isUnread: Bool {
+        if let latestTerminalEvent {
+            return latestTerminalEvent.sequence > acknowledgedTerminalSequence
+        }
         guard let runCompletedAt else { return false }
         return runCompletedAt > (lastVisitedAt ?? .distantFuture)
     }
@@ -468,6 +476,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         latestTurnAt: Date? = nil,
         failedAt: Date? = nil,
         runCompletedAt: Date? = nil,
+        latestTerminalEvent: AgentTerminalEvent? = nil,
+        acknowledgedTerminalSequence: UInt64 = 0,
         lastVisitedAt: Date? = nil,
         tileId: UUID? = nil,
         lastContextWindow: AgentContextWindowSnapshot? = nil,
@@ -500,6 +510,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         self.latestTurnAt = latestTurnAt
         self.failedAt = failedAt
         self.runCompletedAt = runCompletedAt
+        self.latestTerminalEvent = latestTerminalEvent
+        self.acknowledgedTerminalSequence = acknowledgedTerminalSequence
         self.lastVisitedAt = lastVisitedAt
         self.tileId = tileId
         self.lastContextWindow = lastContextWindow
@@ -607,6 +619,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         case createdAtReferenceInterval, lastActivityAtReferenceInterval
         case latestPromptAtReferenceInterval, latestTurnAtReferenceInterval
         case failedAtReferenceInterval, runCompletedAtReferenceInterval
+        case latestTerminalEvent, acknowledgedTerminalSequence
         case lastVisitedAtReferenceInterval
         case tileId
         case lastContextWindow
@@ -679,6 +692,13 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         latestTurnAt = latestTurnInterval.map(Date.init(timeIntervalSinceReferenceDate:))
         failedAt = failedInterval.map(Date.init(timeIntervalSinceReferenceDate:))
         runCompletedAt = completedInterval.map(Date.init(timeIntervalSinceReferenceDate:))
+        latestTerminalEvent = try? container.decodeIfPresent(
+            AgentTerminalEvent.self, forKey: .latestTerminalEvent)
+        acknowledgedTerminalSequence = (try? container.decodeIfPresent(
+            UInt64.self, forKey: .acknowledgedTerminalSequence)) ?? 0
+        // A pre-0.5.2 completion has no honest outcome. Leave the event absent;
+        // `isUnread` keeps using its timestamp watermark until a real sequenced
+        // terminal event arrives.
         lastVisitedAt = visitedInterval.map(Date.init(timeIntervalSinceReferenceDate:))
         tileId = try container.decodeIfPresent(UUID.self, forKey: .tileId)
         // Tolerant like the lifecycle dates above: malformed telemetry reads as
@@ -735,6 +755,10 @@ public struct AgentRecord: Codable, Equatable, Sendable {
                                       forKey: .failedAtReferenceInterval)
         try container.encodeIfPresent(runCompletedAt?.timeIntervalSinceReferenceDate,
                                       forKey: .runCompletedAtReferenceInterval)
+        try container.encodeIfPresent(latestTerminalEvent, forKey: .latestTerminalEvent)
+        if acknowledgedTerminalSequence != 0 {
+            try container.encode(acknowledgedTerminalSequence, forKey: .acknowledgedTerminalSequence)
+        }
         try container.encodeIfPresent(lastVisitedAt?.timeIntervalSinceReferenceDate,
                                       forKey: .lastVisitedAtReferenceInterval)
         try container.encodeIfPresent(tileId, forKey: .tileId)

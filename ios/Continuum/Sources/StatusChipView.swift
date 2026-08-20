@@ -9,12 +9,14 @@ import ContinuumRevivedCore
 // StatusChipPresenter output; neither holds any logic.
 struct StatusChipView: View {
     let status: AgentStatus
+    var terminalOutcome: AgentTerminalOutcome? = nil
 
     var body: some View {
         let display = StatusChipPresenter.display(for: status)
+        let terminal = terminalDisplay
         HStack(spacing: 4) {
-            Text(display.glyph)
-            Text(display.label)
+            Text(terminal?.glyph ?? display.glyph)
+            Text(terminal?.label ?? display.label)
         }
         // P1.12: a ROLE, not a size. `.label` is `.caption` on iOS — 12pt at the
         // default Dynamic Type size, which is the size this pill already shipped,
@@ -30,9 +32,19 @@ struct StatusChipView: View {
         .font(Font(role: .label))
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
-        .foregroundColor(Color(chip: display.foreground))
+        .foregroundColor(terminal?.color ?? Color(chip: display.foreground))
         .background(Color(chip: display.background))
         .clipShape(Capsule())
-        .accessibilityLabel(display.label)
+        .accessibilityLabel(terminal?.label ?? display.label)
+    }
+
+    private var terminalDisplay: (glyph: String, label: String, color: Color)? {
+        guard status != .working, status != .needsAttention, let terminalOutcome else { return nil }
+        switch terminalOutcome {
+        case .succeeded: return ("✓", "Done", .green)
+        case .failed, .runtimeError: return ("△", "Failed", .red)
+        case .interrupted: return ("◉", "Stopped", .secondary)
+        case .cancelled: return ("×", "Cancelled", .secondary)
+        }
     }
 }

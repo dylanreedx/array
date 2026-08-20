@@ -29,15 +29,21 @@ public struct AgentActivityEventDraft: Sendable {
     public let tone: ActivityEventTone
     public let kind: String
     public let status: AgentStatus
+    /// Optional because activity written before 0.5.2 only retained the coarse
+    /// operational status. New terminal events carry the same honest outcome as
+    /// the desktop record; non-terminal activity leaves it nil.
+    public let terminalOutcome: AgentTerminalOutcome?
     public let summary: String
     public let occurredAt: Date
     public let approvalRequestId: String?
 
     public init(agentId: UUID, tileId: UUID? = nil, runId: String?, tone: ActivityEventTone,
-                kind: String, status: AgentStatus, summary: String, occurredAt: Date,
+                kind: String, status: AgentStatus, terminalOutcome: AgentTerminalOutcome? = nil,
+                summary: String, occurredAt: Date,
                 approvalRequestId: String? = nil) {
         self.agentId = agentId; self.tileId = tileId; self.runId = runId; self.tone = tone
         self.kind = kind; self.status = status; self.summary = summary
+        self.terminalOutcome = terminalOutcome
         self.occurredAt = occurredAt
         self.approvalRequestId = approvalRequestId
     }
@@ -64,6 +70,7 @@ public struct AgentActivityEvent: Codable, Equatable, Sendable {
     public let tone: ActivityEventTone
     public let kind: String             // "turn.started", "tool.bash", "needs-attention", "exit.clean", …
     public let status: AgentStatus      // the DERIVED status — from TerminalSessionDescriptor.swift:85
+    public let terminalOutcome: AgentTerminalOutcome? // exact terminal result; nil for legacy/non-terminal events
     public let summary: String          // short human label — NEVER a transcript body; I5 enforced here
     public let occurredAt: Date         // wall-clock only for display; ordering uses sequence
     public let approvalRequestId: String? // opaque adapter request id, present only for pending approvals
@@ -78,6 +85,7 @@ public struct AgentActivityEvent: Codable, Equatable, Sendable {
         self.tone = draft.tone
         self.kind = draft.kind
         self.status = draft.status
+        self.terminalOutcome = draft.terminalOutcome
         self.summary = draft.summary
         self.occurredAt = draft.occurredAt
         self.approvalRequestId = draft.approvalRequestId
@@ -108,7 +116,7 @@ public struct AgentActivityEvent: Codable, Equatable, Sendable {
     // `agentId = tileId`, with the tile hint set to the same id. No data is invented:
     // for every event that ever existed under the old key, the tile WAS the agent.
     private enum CodingKeys: String, CodingKey {
-        case sequence, replicaId, agentId, tileId, runId, tone, kind, status, summary, occurredAtReferenceInterval, approvalRequestId
+        case sequence, replicaId, agentId, tileId, runId, tone, kind, status, terminalOutcome, summary, occurredAtReferenceInterval, approvalRequestId
     }
 
     public init(from decoder: Decoder) throws {
@@ -130,6 +138,7 @@ public struct AgentActivityEvent: Codable, Equatable, Sendable {
         tone = try container.decode(ActivityEventTone.self, forKey: .tone)
         kind = try container.decode(String.self, forKey: .kind)
         status = try container.decode(AgentStatus.self, forKey: .status)
+        terminalOutcome = try container.decodeIfPresent(AgentTerminalOutcome.self, forKey: .terminalOutcome)
         summary = try container.decode(String.self, forKey: .summary)
         let referenceInterval = try container.decode(Double.self, forKey: .occurredAtReferenceInterval)
         occurredAt = Date(timeIntervalSinceReferenceDate: referenceInterval)
@@ -146,6 +155,7 @@ public struct AgentActivityEvent: Codable, Equatable, Sendable {
         try container.encode(tone, forKey: .tone)
         try container.encode(kind, forKey: .kind)
         try container.encode(status, forKey: .status)
+        try container.encodeIfPresent(terminalOutcome, forKey: .terminalOutcome)
         try container.encode(summary, forKey: .summary)
         try container.encode(occurredAt.timeIntervalSinceReferenceDate, forKey: .occurredAtReferenceInterval)
         try container.encodeIfPresent(approvalRequestId, forKey: .approvalRequestId)

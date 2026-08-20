@@ -91,89 +91,76 @@ enum SidebarProductionCorpus {
     /// would hide which flow changed.
     static func expectation(for flow: Flow) -> Expectation {
         var expected = Expectation()
+        // Production rows paint a template provider image. The cell witness
+        // reports its accessibility role rather than the retired text glyph.
+        expected.providerGlyph = "mark"
         switch flow {
         case .blankCmdKDraft:
             // §4.1: a draft must not exist as durable work at all.
             expected.titleContains = AgentRecord.defaultAgentName
-            expected.stateLabel = "Unconfirmed"
-            expected.providerGlyph = "◈"
+            expected.stateLabel = ""
         case .firstSendTitleFallback:
             expected.titleContains = "Replace the sidebar identity"
-            expected.stateLabel = ""
-            expected.projectIsEmpty = true      // long title displaces placement
-            expected.providerGlyph = "◈"
+            expected.stateLabel = "0s"
         case .imageOnlyFirstPrompt:
             // §4.2/5 wants a contextual label; today the sentinel survives.
             expected.titleContains = AgentRecord.defaultAgentName
-            expected.stateLabel = ""
-            expected.providerGlyph = "◈"
+            expected.stateLabel = "0s"
         case .generatedTitleLanded:
             expected.titleContains = "Investigate zoom budget"
-            expected.stateLabel = ""
-            expected.projectIsEmpty = true
-            expected.providerGlyph = "◈"
+            expected.stateLabel = "0s"
         case .manualRenameDuringGeneration:
             expected.titleContains = "Human chosen title"
-            expected.stateLabel = ""
-            expected.providerGlyph = "◈"
+            expected.stateLabel = "0s"
         case .generationFailed:
             expected.titleContains = "check the release appcast"
-            expected.stateLabel = ""
-            expected.providerGlyph = "◈"
+            expected.stateLabel = "0s"
         case .working:
             expected.titleContains = "run the matrix"
-            expected.stateLabel = "Working"
+            expected.stateLabel = "Working · 0s"
             expected.elapsedIsEmpty = false     // the ONLY flow that paints elapsed
-            expected.providerGlyph = "◈"
         case .approval, .input:
             // §4.6 wants the distinct words `Approval` and `Input`.
             expected.titleContains = flow == .approval ? "apply the patch" : "pick a provider"
             expected.stateLabel = "Needs attention"
-            expected.providerGlyph = "◈"
-        case .succeeded, .interrupted, .cancelled:
-            // The indictment: three different outcomes, no state word at all.
+        case .succeeded:
             expected.titleContains = "work that ends"
-            expected.stateLabel = ""
-            expected.providerGlyph = "◈"
+            expected.stateLabel = "0s"
+        case .interrupted:
+            expected.titleContains = "work that ends"
+            expected.stateLabel = "Stopped · 0s"
+        case .cancelled:
+            expected.titleContains = "work that ends"
+            expected.stateLabel = "Cancelled · 0s"
         case .failed:
             expected.titleContains = "work that ends failed"
             expected.stateLabel = "Failed"
-            expected.providerGlyph = "◈"
         case .runtimeError:
             expected.titleContains = "touch a missing binary"
             expected.stateLabel = "Failed"      // indistinguishable from a failed turn
-            expected.providerGlyph = "◈"
         case .neverVisitedCompletion:
             expected.titleContains = "finish while nobody is looking"
-            expected.stateLabel = ""
-            expected.providerGlyph = "◈"
+            expected.stateLabel = "Done · 0s"
         case .codexOpenAI:
             expected.titleContains = "Codex on an OpenAI model"
-            expected.stateLabel = "Unconfirmed"
-            expected.providerGlyph = "◈"
+            expected.stateLabel = ""
         case .claudeAnthropic:
             expected.titleContains = "Claude Code on Opus"
-            expected.stateLabel = "Unconfirmed"
-            expected.providerGlyph = "✦"
+            expected.stateLabel = ""
         case .unknownProvider:
             expected.titleContains = "Unknown provider row"
-            expected.stateLabel = "Unconfirmed"
-            expected.providerGlyph = "◇"        // §4.5 wants initials, not a diamond
+            expected.stateLabel = ""
+            expected.providerGlyph = "experimental-7"
         case .longUnicodeRTL:
             expected.titleContains = "تحديث"
-            expected.stateLabel = ""
-            expected.projectIsEmpty = true
-            expected.providerGlyph = "◈"
+            expected.stateLabel = "0s"
         case .piAnthropic:
-            // Pi is invisible: the row shows the PROVIDER glyph, so a Pi agent cannot
-            // be told from Claude Code.
+            // The row intentionally shows the provider mark rather than the harness.
             expected.titleContains = "Pi running Opus"
-            expected.stateLabel = "Unconfirmed"
-            expected.providerGlyph = "✦"
+            expected.stateLabel = ""
         case .piOpenAI:
             expected.titleContains = "Pi running GPT"
-            expected.stateLabel = "Unconfirmed"
-            expected.providerGlyph = "◈"
+            expected.stateLabel = ""
         case .snoozed, .archived:
             // Both leave the displayed list entirely.
             expected.rendersRow = false
@@ -189,30 +176,23 @@ enum SidebarProductionCorpus {
             expected.providerGlyph = ""
         case .nestedChild:
             expected.titleContains = "agent 1"      // parent-derived ordinal, not a task
-            expected.stateLabel = ""
-            expected.providerGlyph = "◈"
+            expected.stateLabel = "0s"
         case .headless:
             expected.titleContains = "headless work"
-            expected.stateLabel = ""
-            expected.providerGlyph = "◈"
+            expected.stateLabel = "0s"
         case .exactPlacement:
             expected.titleContains = "Agent with a real tile"
-            expected.stateLabel = "Unconfirmed"
-            expected.providerGlyph = "◈"
+            expected.stateLabel = ""
         case .ambiguousPlacement:
             // Byte-identical to exactPlacement above — §8.1 wants them distinct.
             expected.titleContains = "Agent in the other zone"
-            expected.stateLabel = "Unconfirmed"
-            expected.providerGlyph = "◈"
+            expected.stateLabel = ""
         case .restoredPendingRequest:
             expected.titleContains = "name generation is still in flight"
-            expected.stateLabel = "Unconfirmed"
-            expected.projectIsEmpty = true
-            expected.providerGlyph = "◈"
+            expected.stateLabel = ""
         case .fiftyActiveWithHistory:
             expected.titleContains = "Bulk agent 50"
-            expected.stateLabel = "Unconfirmed"
-            expected.providerGlyph = "◈"
+            expected.stateLabel = ""
         }
         return expected
     }
@@ -892,10 +872,9 @@ enum SidebarProductionCorpus {
         let outcomeStates = [Flow.succeeded, .interrupted, .cancelled].compactMap { flow in
             results.first { $0.flow == flow }?.row?.stateLabel
         }
-        try expect(outcomeStates.count == 3 && Set(outcomeStates) == [""],
-                   "§4.6: success, interruption and cancellation are pixel-identical today "
-                   + "(all blank). Got \(outcomeStates). When outcomes become honest, flip "
-                   + "this.")
+        try expect(outcomeStates == ["0s", "Stopped · 0s", "Cancelled · 0s"],
+                   "§4.6: success, interruption and cancellation must remain distinct; "
+                   + "got \(outcomeStates)")
 
         // The gate §6/P0.1 names: a declared inventory mapping each production flow
         // to its resulting row and surface. A corpus nobody has written down is a

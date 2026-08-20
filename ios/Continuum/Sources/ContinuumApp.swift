@@ -906,7 +906,7 @@ private struct AgentRowView: View {
             }
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
-                    StatusChipView(status: row.status)
+                    StatusChipView(status: row.status, terminalOutcome: row.terminalOutcome)
                     Spacer(minLength: 8)
                     Text(row.updatedAt, style: .relative)
                         .font(.caption.monospacedDigit())
@@ -990,7 +990,7 @@ private struct DetailHeader: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                StatusChipView(status: row.status)
+                StatusChipView(status: row.status, terminalOutcome: row.terminalOutcome)
                 Spacer()
                 Text(row.updatedAt, style: .relative)
                     .font(.caption.monospacedDigit())

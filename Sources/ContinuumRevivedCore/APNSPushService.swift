@@ -278,7 +278,15 @@ public struct PushFiringRuleTable: Sendable {
 
     public func classify(previous: AgentStatus, event: AgentActivityEvent) -> PushCandidate? {
         let category: PushCategory
-        if event.tone == .error {
+        if event.terminalOutcome == .failed || event.terminalOutcome == .runtimeError {
+            category = .agentFailed
+        } else if event.terminalOutcome == .interrupted || event.terminalOutcome == .cancelled {
+            // Stopping a run is not success and is not a failure notification.
+            return nil
+        } else if event.terminalOutcome == .succeeded {
+            category = .agentFinished
+        } else if event.tone == .error {
+            // Legacy and tool-error events keep the established fail-safe path.
             category = .agentFailed
         } else if event.status == .needsAttention, event.approvalRequestId != nil {
             category = .approvalRequested

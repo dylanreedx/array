@@ -8334,8 +8334,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// derived from the rows could not offer it. `missing` projects are left out: a
     /// checkout whose directory is gone is not open, and scoping to it could only ever
     /// be empty.
-    private func inboxScopeCatalog() -> [InboxScope] {
-        let registry = (try? registryStore?.loadOrEmpty()) ?? Registry.empty()
+    private func inboxScopeCatalog(registry: Registry) -> [InboxScope] {
         return registry.projects.filter { !$0.missing }.map { .project($0.name) }
             + registry.workspaces.map { .workspace($0.name) }
     }
@@ -8349,6 +8348,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if rebuildAgentActivity { rebuildAgentActivitySnapshot() }
         defer { reloadWorkspaceTopBar() }
         guard let sidebar = workspaceSidebarView else { return }
+        let registry = (try? registryStore?.loadOrEmpty()) ?? Registry.empty()
         // P3.6: the inbox is the sidebar's content, so it is fed on the same
         // reload. `applyInbox` and not `reloadInbox` — the change set says which
         // agents moved, and rebuilding every row for one streamed token is what
@@ -8357,7 +8357,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // which row it may not hide, and the popup can offer an open project the rows
         // do not mention.
         sidebar.setInboxOpenAgent(focusedInboxAgentId())
-        sidebar.setInboxScopeCatalog(inboxScopeCatalog())
+        sidebar.setInboxScopeCatalog(inboxScopeCatalog(registry: registry))
+        sidebar.agentInbox.setProjectIconSources(Dictionary(
+            uniqueKeysWithValues: registry.projects.filter { !$0.missing }.map {
+                ($0.id, URL(fileURLWithPath: $0.rootPath, isDirectory: true))
+            }))
         // P3.16: BEFORE the rows too, so the empty state this push may show already
         // knows why it is empty.
         sidebar.setInboxExcludedTerminalAgentCount(inboxExcludedTerminalAgentCount())
@@ -24312,6 +24316,8 @@ extension AppDelegate {
     // Handed in REVERSED, so "the view is in the model's order" cannot be
     // satisfied by the view simply keeping what it was given.
     let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    let inboxCheckNow = Date()
+    inbox.clock = { inboxCheckNow }
     inbox.reload(rows: fixture.reversed())
     try expect(expectedOrder != fixture.reversed().map(\.id),
                "the fixture must not already be in sorted order, or the ordering assertion is vacuous")
@@ -24332,12 +24338,45 @@ extension AppDelegate {
     let byId = Dictionary(uniqueKeysWithValues: sorted.map { ($0.id, $0) })
     try expect(inbox.titlesForQA == sorted.map(\.displayTitle),
                "each row shows its human-facing agent name — got \(inbox.titlesForQA)")
-    try expect(inbox.stateLabelsForQA == sorted.map { $0.label ?? "" },
-               "each row shows its own state's word, and `ready` shows none — got \(inbox.stateLabelsForQA)")
+    let expectedStateLabels = sorted.map { row in
+        let word = AgentInbox96CellView.stateWord(row, now: inboxCheckNow)
+        let age = AgentInbox96CellView.stateAge(row, now: inboxCheckNow)
+            .flatMap(AgentInboxCellView.elapsedText)
+        return [word, age].compactMap { $0 }.joined(separator: " · ")
+    }
+    try expect(inbox.stateLabelsForQA == expectedStateLabels,
+               "each production row must show the approved word/time projection — got \(inbox.stateLabelsForQA), wanted \(expectedStateLabels)")
     // Vacuity: the five states must actually be represented, or the line above is
     // an assertion about one word.
     try expect(Set(sorted.map(\.state)) == Set(InboxState.allCases),
                "the fixture must cover every InboxState — got \(Set(sorted.map(\.state)).count)")
+
+    let terminalWords: [(AgentTerminalOutcome, String?)] = [
+        (.succeeded, "Done"), (.failed, "Failed"), (.runtimeError, "Failed"),
+        (.interrupted, "Stopped"), (.cancelled, "Cancelled"),
+    ]
+    for (offset, pair) in terminalWords.enumerated() {
+        let terminalRow = AgentInboxRow(
+            id: UUID(), title: "Terminal \(pair.0.rawValue)", state: .ready,
+            attention: .unread, lifecycle: .active,
+            lastActiveAt: inboxCheckNow.addingTimeInterval(-60),
+            createdAt: inboxCheckNow.addingTimeInterval(-120),
+            terminalEvent: AgentTerminalEvent(
+                sequence: UInt64(offset + 1), turnID: "terminal-\(offset)",
+                outcome: pair.0, endedAt: inboxCheckNow.addingTimeInterval(-60)),
+            terminalIsUnread: true)
+        try expect(AgentInbox96CellView.stateWord(terminalRow, now: inboxCheckNow) == pair.1,
+                   "\(pair.0.rawValue) must keep its precise terminal word")
+    }
+    let acknowledgedSuccess = AgentInboxRow(
+        id: UUID(), title: "Acknowledged success", state: .ready,
+        lifecycle: .active, lastActiveAt: inboxCheckNow.addingTimeInterval(-60),
+        createdAt: inboxCheckNow.addingTimeInterval(-120),
+        terminalEvent: AgentTerminalEvent(
+            sequence: 1, turnID: "terminal-read", outcome: .succeeded,
+            endedAt: inboxCheckNow.addingTimeInterval(-60)), terminalIsUnread: false)
+    try expect(AgentInbox96CellView.stateWord(acknowledgedSuccess, now: inboxCheckNow) == nil,
+               "an acknowledged success must quiet its word while retaining its age")
 
     // P3.5, PAINTED. Both numbers read off the rendered labels.
     for (index, row) in sorted.enumerated() {
@@ -24374,22 +24413,17 @@ extension AppDelegate {
     _ = inbox.hoverRowForQA(id: nil)
     inbox.layoutForQA()
 
-    // The metadata lines, against the values the row carries — including the
-    // branch line in `BranchChipNSView`'s vocabulary rather than a second one.
+    // The production row keeps branch text compact and uses a painted branch
+    // symbol; the old cell's Unicode prefix must not survive as duplicate prose.
     let isolatedIndex = sorted.firstIndex { $0.isIsolated }!
     let sharedIndex = sorted.firstIndex { $0.branch != nil && !$0.isIsolated }!
-    try expect(inbox.branchLinesForQA[isolatedIndex] == "\(BranchChipNSView.branchGlyph) \(sorted[isolatedIndex].branch!)",
+    try expect(inbox.branchLinesForQA[isolatedIndex] == sorted[isolatedIndex].branch!,
                "an isolated agent's row names its own branch — got '\(inbox.branchLinesForQA[isolatedIndex])'")
-    // P2.4 deliberately moves isolation out of the branch text and removes the
-    // model id from prose; this expected value is outside the packet fence because
-    // the existing app-level assertion is the compile-enforced caller of that move.
-    try expect(inbox.branchLinesForQA[sharedIndex] == "\(BranchChipNSView.branchGlyph) \(sorted[sharedIndex].branch!)",
+    try expect(inbox.branchLinesForQA[sharedIndex] == sorted[sharedIndex].branch!,
                "an agent in the project's own checkout keeps its branch glyph — got '\(inbox.branchLinesForQA[sharedIndex])'")
     let withRole = sorted.firstIndex { $0.role != nil && $0.model != nil }!
-    try expect(inbox.metaLinesForQA[withRole] == AgentInboxCellView.metaText(
-        isIsolated: sorted[withRole].isIsolated,
-        hasBranch: sorted[withRole].branch?.isEmpty == false),
-               "the lower band carries isolation facts, not the model id — got '\(inbox.metaLinesForQA[withRole])'")
+    try expect(inbox.metaLinesForQA[withRole].isEmpty,
+               "the retired isolation band must stay absent from the production row — got '\(inbox.metaLinesForQA[withRole])'")
 
     // P2B.7 · ONE AGENT MOVED, ONE CELL REBUILT.
     let moved = sorted[2]
@@ -25270,7 +25304,7 @@ extension AppDelegate {
     try expect(deep.clickDisclosureForQA(id: childRow.id), "the middle of the chain must fold too")
     deep.layoutForQA()
     let middleIndex = deep.rowIdsForQA.firstIndex(of: childRow.id)!
-    try expect(deep.metaLinesForQA[middleIndex].hasPrefix("2 children · 2 working · "),
+    try expect(deep.metaLinesForQA[middleIndex] == "2 children · 2 working",
                "the middle of the chain counts only what is below it — got '\(deep.metaLinesForQA[middleIndex])'")
     // A LEAF NEVER GAINS A LINE IT HAS NO GROUP FOR, which is what makes the tally a
     // statement rather than decoration on every row.

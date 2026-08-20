@@ -196,6 +196,7 @@ public enum AgentInboxRowBuilder {
             id: boardRow.agentId,
             title: title(for: context),
             projectName: context?.projectName,
+            projectId: context?.projectId,
             // P3.8: the scope dropdown filters by project OR workspace, and the
             // filter is pure, so the row has to carry the name. Nothing draws it.
             workspaceName: context?.workspaceName,
@@ -239,7 +240,11 @@ public enum AgentInboxRowBuilder {
             // DISAGREE, which that collapse deliberately hides.
             zoneName: context?.zoneName,
             harness: context?.harness,
-            checkedOutBranch: mismatchedCheckout(for: context)
+            checkedOutBranch: mismatchedCheckout(for: context),
+            terminalEvent: record?.latestTerminalEvent,
+            terminalIsUnread: record.map {
+                ($0.latestTerminalEvent?.sequence ?? 0) > $0.acknowledgedTerminalSequence
+            } ?? false
         )
     }
 

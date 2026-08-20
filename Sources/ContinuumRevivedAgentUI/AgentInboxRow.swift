@@ -705,6 +705,9 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// A chip. Project is METADATA on the row — never a group header, because
     /// the list order is frozen (P3.4) and grouping would reorder it.
     public let projectName: String?
+    /// Stable local identity used to look up a project icon. The host path never
+    /// enters this Foundation-only row value.
+    public let projectId: UUID?
     // Ticket: docs/38-tickets/90-agent-ux/P3.8-scope-dropdown.md
     /// The workspace the agent's tile is in (`AgentRowContext.workspaceName`), and
     /// NOT DRAWN ANYWHERE: the row shows the project chip and no second one.
@@ -818,6 +821,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// The branch the checkout is actually on, when it differs from the agent's.
     /// Nil when they agree — the disagreement is the whole content.
     public let checkedOutBranch: String?
+    public let terminalEvent: AgentTerminalEvent?
+    public let terminalIsUnread: Bool
     /// Whether the card's upper metadata band has something to draw. These
     /// predicates intentionally inspect only the content slots, never a row's
     /// semantic importance or lifecycle. The AppKit cell uses the same facts to
@@ -902,6 +907,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         id: UUID,
         title: String,
         projectName: String? = nil,
+        projectId: UUID? = nil,
         workspaceName: String? = nil,
         state: InboxState,
         attention: InboxAttention = .none,
@@ -923,11 +929,14 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         settlementBlocked: Bool? = nil,
         zoneName: String? = nil,
         harness: String? = nil,
-        checkedOutBranch: String? = nil
+        checkedOutBranch: String? = nil,
+        terminalEvent: AgentTerminalEvent? = nil,
+        terminalIsUnread: Bool = false
     ) {
         self.id = id
         self.title = title
         self.projectName = projectName
+        self.projectId = projectId
         self.workspaceName = workspaceName
         self.state = state
         self.attention = attention
@@ -950,6 +959,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.zoneName = zoneName
         self.harness = harness
         self.checkedOutBranch = checkedOutBranch
+        self.terminalEvent = terminalEvent
+        self.terminalIsUnread = terminalIsUnread
     }
 
     /// The agent's branch and the checkout's disagree. `checkedOutBranch` is nil
@@ -981,13 +992,15 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         elapsed frozenElapsed: TimeInterval? = nil
     ) -> AgentInboxRow {
         AgentInboxRow(
-            id: id, title: title, projectName: projectName, workspaceName: workspaceName,
+            id: id, title: title, projectName: projectName, projectId: projectId,
+            workspaceName: workspaceName,
             state: state, attention: attention, lifecycle: lifecycle, model: model, role: role,
             branch: branch, isIsolated: isIsolated,
             elapsed: frozenElapsed ?? elapsed, lastActiveAt: lastActiveAt, depth: depth,
             variant: variant, createdAt: createdAt, parentId: parentId,
             isUnconfirmed: value, settlementBlocked: settlementBlocked,
-            zoneName: zoneName, harness: harness, checkedOutBranch: checkedOutBranch)
+            zoneName: zoneName, harness: harness, checkedOutBranch: checkedOutBranch,
+            terminalEvent: terminalEvent, terminalIsUnread: terminalIsUnread)
     }
 
     /// The status words the row may paint. Unconfirmed is a confidence modifier,

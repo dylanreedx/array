@@ -21,7 +21,31 @@ func runAgentRecordChecks() {
     // Ticket: docs/38-tickets/90-agent-ux/P4.1-lifecycle-state.md
     runAgentRecordLifecycleCheck()
     runAgentRecordAttentionCheck()
-    print("AgentRecord checks: exact Date round-trip, decode-forward, headless view binding, I5 taint witness, P4.1 lifecycle persistence, and P6 attention/watermark derivation passed")
+    runAgentRecordTerminalSequenceCheck()
+    print("AgentRecord checks: exact Date round-trip, decode-forward, headless view binding, I5 taint witness, lifecycle persistence, attention, and terminal sequence acknowledgement passed")
+}
+
+private func runAgentRecordTerminalSequenceCheck() {
+    let endedAt = Date(timeIntervalSinceReferenceDate: 806_300_000.75)
+    var record = makeAgentRecordFixture()
+    record.latestTerminalEvent = AgentTerminalEvent(
+        sequence: 7, turnID: "turn-7", outcome: .interrupted, endedAt: endedAt)
+    record.acknowledgedTerminalSequence = 6
+    expect(record.isUnread, "a terminal event newer than its acknowledgement is unread")
+
+    let encoder = JSONCodec.makeEncoder()
+    let decoder = JSONCodec.makeDecoder()
+    guard let data = try? encoder.encode(record),
+          let decoded = try? decoder.decode(AgentRecord.self, from: data) else {
+        fputs("FAIL: terminal event record failed to round-trip\n", stderr)
+        Foundation.exit(1)
+    }
+    expect(decoded == record && decoded.latestTerminalEvent?.endedAt == endedAt,
+           "terminal outcome, sequence, turn id, and exact end time round-trip")
+    var acknowledged = decoded
+    acknowledged.acknowledgedTerminalSequence = 7
+    expect(!acknowledged.isUnread,
+           "acknowledging the exact terminal sequence clears unread without rewriting time")
 }
 
 private func makeAgentRecordFixture(

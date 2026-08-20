@@ -67,6 +67,7 @@ BUILD_DIR="$ROOT_DIR/.build/$CONFIGURATION"
 EXECUTABLE="$BUILD_DIR/Array"
 PLIST_SOURCE="$ROOT_DIR/Packaging/Info.plist"
 ICON_SOURCE="$ROOT_DIR/Packaging/AppIcon.icns"
+BRAND_MARK_SOURCE="$ROOT_DIR/docs/38-tickets/96-agent-sidebar-product-redesign/brand-marks"
 # Sparkle ships as an SPM binary artifact; layout pinned 2026-08-09 (Sparkle
 # 2.9.5): bin/ tools + the xcframework live under .build/artifacts/sparkle.
 SPARKLE_FRAMEWORK="$ROOT_DIR/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
@@ -74,6 +75,7 @@ SPARKLE_FRAMEWORK="$ROOT_DIR/.build/artifacts/sparkle/Sparkle/Sparkle.xcframewor
 [[ -x "$EXECUTABLE" ]] || { echo "built executable not found: $EXECUTABLE" >&2; exit 1; }
 [[ -f "$PLIST_SOURCE" ]] || { echo "Info.plist source not found: $PLIST_SOURCE" >&2; exit 1; }
 [[ -f "$ICON_SOURCE" ]] || { echo "icon source not found: $ICON_SOURCE" >&2; exit 1; }
+[[ -d "$BRAND_MARK_SOURCE" ]] || { echo "brand marks not found: $BRAND_MARK_SOURCE" >&2; exit 1; }
 [[ -d "$SPARKLE_FRAMEWORK" ]] || { echo "Sparkle.framework not found: $SPARKLE_FRAMEWORK (run swift build first)" >&2; exit 1; }
 
 rm -rf "$OUTPUT"
@@ -82,6 +84,11 @@ cp "$EXECUTABLE" "$OUTPUT/Contents/MacOS/Array"
 chmod 0755 "$OUTPUT/Contents/MacOS/Array"
 cp "$PLIST_SOURCE" "$OUTPUT/Contents/Info.plist"
 cp "$ICON_SOURCE" "$OUTPUT/Contents/Resources/AppIcon.icns"
+mkdir -p "$OUTPUT/Contents/Resources/BrandMarks"
+for mark in anthropic.svg gemini.svg openai-light.svg xai-light.svg; do
+  [[ -f "$BRAND_MARK_SOURCE/$mark" ]] || { echo "brand mark not found: $mark" >&2; exit 1; }
+  cp "$BRAND_MARK_SOURCE/$mark" "$OUTPUT/Contents/Resources/BrandMarks/$mark"
+done
 
 # Channel stamping: Packaging/Info.plist carries the PROD identity; the dev
 # channel re-stamps so macOS keys everything (prefs, LaunchServices, the

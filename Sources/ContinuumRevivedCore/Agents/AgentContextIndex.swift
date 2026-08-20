@@ -33,6 +33,7 @@ public struct AgentRowContext: Equatable, Sendable {
     /// nil when the agent has no view, or when its zone's name is unresolvable.
     public let zoneName: String?
     public let projectName: String?
+    public let projectId: UUID?
     /// nil when the agent has no tile rendering it.
     public let tileTitle: String?
     /// P3.1: `AgentRecord.displayName` — the name the AGENT owns, which outlives
@@ -108,6 +109,7 @@ public struct AgentRowContext: Equatable, Sendable {
         workspaceName: String? = nil,
         zoneName: String? = nil,
         projectName: String? = nil,
+        projectId: UUID? = nil,
         tileTitle: String? = nil,
         displayName: String? = nil,
         agentKind: AgentKind,
@@ -122,6 +124,7 @@ public struct AgentRowContext: Equatable, Sendable {
         self.workspaceName = workspaceName
         self.zoneName = zoneName
         self.projectName = projectName
+        self.projectId = projectId
         self.tileTitle = tileTitle
         self.displayName = displayName
         self.agentKind = agentKind
@@ -171,6 +174,7 @@ public enum AgentContextIndex {
                 workspaceName: placement?.workspaceName,
                 zoneName: placement?.zoneName,
                 projectName: placement?.projectId.flatMap { projectNames[$0] },
+                projectId: placement?.projectId,
                 // The builder's title, not the descriptor's: the tile row is what
                 // the sidebar shows, and two names for one tile is a bug waiting.
                 tileTitle: placement?.tileTitle,
@@ -195,6 +199,7 @@ public enum AgentContextIndex {
                 // agent. Falls back to the zone's project so a terminal-shaped
                 // record with no projectId still names one.
                 projectName: (record.projectId ?? placement?.projectId).flatMap { projectNames[$0] },
+                projectId: record.projectId ?? placement?.projectId,
                 tileTitle: placement?.tileTitle,
                 displayName: nonEmpty(record.displayName),
                 // An `AgentRecord` is the managed tier by construction — the

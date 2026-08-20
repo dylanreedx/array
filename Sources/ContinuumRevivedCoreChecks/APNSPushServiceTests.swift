@@ -260,11 +260,19 @@ private func runPushFiringRuleChecks() async throws {
     let input = makePushEvent(tile: tile, status: .needsAttention, tone: .info, summary: "Need input", approvalRequestId: nil)
     let done = makePushEvent(tile: tile, status: .done, tone: .info, summary: "Done", approvalRequestId: nil)
     let error = makePushEvent(tile: tile, status: .working, tone: .error, summary: "HOSTILE-[BODY]-runtimeError", approvalRequestId: nil)
+    let stopped = makePushEvent(tile: tile, status: .done, tone: .info, summary: "Stopped",
+                                approvalRequestId: nil, terminalOutcome: .interrupted)
+    let cancelled = makePushEvent(tile: tile, status: .done, tone: .info, summary: "Cancelled",
+                                  approvalRequestId: nil, terminalOutcome: .cancelled)
     expect(table.classify(previous: .working, event: approval)?.category == .approvalRequested, "working->needsAttention with approval id fires N1")
     expect(table.classify(previous: .working, event: input)?.category == .agentWaitingForInput, "working->needsAttention without approval id fires N2")
     expect(table.classify(previous: .working, event: done)?.category == .agentFinished, "working->done non-error fires N3")
     let errorCandidate = table.classify(previous: .working, event: error)
     expect(errorCandidate?.category == .agentFailed, "error tone fires N4 regardless of status")
+    expect(table.classify(previous: .working, event: stopped) == nil,
+           "interrupted turn must not masquerade as N3 finished or N4 failed")
+    expect(table.classify(previous: .working, event: cancelled) == nil,
+           "cancelled turn must not masquerade as N3 finished or N4 failed")
     let errorJSON = try errorCandidate?.payload.encodedJSONString() ?? ""
     expect(errorJSON.contains("The agent run failed."), "N4 body fixed string")
     let service = APNSPushService(config: APNSConfig(keyPath: "/tmp/missing", keyId: "KID", teamId: "TEAM", deviceToken: "token", environment: .sandbox), httpClient: RecordingAPNSHTTPClient(statuses: [200, 200, 200, 200]), signer: .ephemeralForChecks(teamId: "TEAM", keyId: "KID"))
@@ -344,9 +352,14 @@ private func runRealAPNSEnvJWTGateCheck() throws {
     print("APNS real-env check: keyId=\(config.keyId) teamId=\(config.teamId)")
 }
 
-private func makePushEvent(tile: UUID, status: AgentStatus, tone: ActivityEventTone, summary: String, approvalRequestId: String?) -> AgentActivityEvent {
+private func makePushEvent(tile: UUID, status: AgentStatus, tone: ActivityEventTone,
+                           summary: String, approvalRequestId: String?,
+                           terminalOutcome: AgentTerminalOutcome? = nil) -> AgentActivityEvent {
     AgentActivityEvent(
-        stamping: AgentActivityEventDraft(agentId: tile, runId: "run", tone: tone, kind: tone == .error ? "runtimeError" : "status", status: status, summary: summary, occurredAt: Date(), approvalRequestId: approvalRequestId),
+        stamping: AgentActivityEventDraft(agentId: tile, runId: "run", tone: tone,
+            kind: tone == .error ? "runtimeError" : "status", status: status,
+            terminalOutcome: terminalOutcome, summary: summary, occurredAt: Date(),
+            approvalRequestId: approvalRequestId),
         sequence: UInt64.random(in: 1...1000),
         replicaId: UUID()
     )

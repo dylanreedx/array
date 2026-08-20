@@ -34,15 +34,19 @@ public enum ManagedAgentActivityBridge {
         case .turnCompleted(_, _, let outcome, let errorMessage):
             switch outcome {
             case .completed:
-                return make(agentId, tileId, .info, "turn.completed", status, "Turn complete", now)
+                return make(agentId, tileId, .info, "turn.completed", status, "Turn complete", now,
+                            terminalOutcome: .succeeded)
             case .failed:
                 // I5: NEVER forward the raw error text — it carries the
                 // provider's stderr (file paths, cwd, secrets). Truncation is
                 // not sanitization. The local tile shows the detail; the synced
                 // summary stays generic.
-                return make(agentId, tileId, .error, "turn.failed", status, "Turn failed", now)
+                return make(agentId, tileId, .error, "turn.failed", status, "Turn failed", now,
+                            terminalOutcome: .failed)
             case .interrupted, .cancelled:
-                return make(agentId, tileId, .info, "turn.\(outcome.rawValue)", status, "Turn \(outcome.rawValue)", now)
+                let terminal: AgentTerminalOutcome = outcome == .interrupted ? .interrupted : .cancelled
+                return make(agentId, tileId, .info, "turn.\(outcome.rawValue)", status,
+                            "Turn \(outcome.rawValue)", now, terminalOutcome: terminal)
             }
         case .itemStarted(_, _, let kind, let title):
             // I5 defense-in-depth: the title is a tool NAME by the Pi adapter's
@@ -60,7 +64,8 @@ public enum ManagedAgentActivityBridge {
         case .runtimeError:
             // I5: drop the raw message (provider stderr → paths/secrets). Local
             // tile keeps the detail; the phone gets only that an error occurred.
-            return make(agentId, tileId, .error, "error", status, "Runtime error", now)
+            return make(agentId, tileId, .error, "error", status, "Runtime error", now,
+                        terminalOutcome: .runtimeError)
         case .sessionStateChanged, .contentDelta, .userInputRequested, .userInputResolved,
              .tokenUsageUpdated, .contextWindowUpdated:
             // Status changes ride on the other events' `status` field; content
@@ -91,11 +96,12 @@ public enum ManagedAgentActivityBridge {
     private static func make(
         _ agentId: UUID, _ tileId: UUID?, _ tone: ActivityEventTone, _ kind: String,
         _ status: AgentStatus, _ summary: String, _ now: Date,
+        terminalOutcome: AgentTerminalOutcome? = nil,
         approvalRequestId: String? = nil
     ) -> AgentActivityEventDraft {
         AgentActivityEventDraft(
             agentId: agentId, tileId: tileId, runId: nil, tone: tone, kind: kind,
-            status: status, summary: summary, occurredAt: now,
+            status: status, terminalOutcome: terminalOutcome, summary: summary, occurredAt: now,
             approvalRequestId: approvalRequestId
         )
     }
