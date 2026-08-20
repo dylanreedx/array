@@ -378,6 +378,8 @@ private func runInboxRowElapsedCheck() {
     }
     expect(row.state == .working, "the fixture agent is working, got \(row.state.rawValue)")
     expect(row.elapsed == 100, "elapsed is measured from the start of the working run, got \(String(describing: row.elapsed))")
+    expect(row.elapsedStartedAt == inboxNow.addingTimeInterval(-100),
+           "the row must carry the live run's stamped start so one shared UI clock can advance it")
 
     // NOT STORED: the same snapshot, rendered a minute later, reports a minute
     // more. A stored value would report 100 twice.
@@ -412,8 +414,8 @@ private func runInboxRowElapsedCheck() {
         context: inboxIndex(),
         now: inboxNow
     ).first { $0.id == inboxIsolatedAgentId.rawValue }
-    expect(atRest?.state == .ready && atRest?.elapsed == nil,
-           "elapsed is meaningful only while working, got \(String(describing: atRest?.state))/\(String(describing: atRest?.elapsed))")
+    expect(atRest?.state == .ready && atRest?.elapsed == nil && atRest?.elapsedStartedAt == nil,
+           "elapsed and its start are meaningful only while working, got \(String(describing: atRest?.state))/\(String(describing: atRest?.elapsed))/\(String(describing: atRest?.elapsedStartedAt))")
 
     // A clock from the future: `apply` is a last-writer-wins merge over hosts, so
     // an `occurredAt` ahead of ours is reachable. It must read as 0, never as a
@@ -899,6 +901,8 @@ private func runInboxRowStampedElapsedCheck() {
            "the freshly-prompted restored agent is working — got \(String(describing: fixed?.state))")
     expect(fixed?.elapsed == 30,
            "THE 158-HOUR BUG: a turn stamped 30s ago must read 30s, not the age of the record it was restored from — got \(String(describing: fixed?.elapsed))s")
+    expect(fixed?.elapsedStartedAt == inboxNow.addingTimeInterval(-30),
+           "the owner's turn-start stamp must reach the row for live UI ticking")
 
     // Still measured against the caller's clock, never stored.
     let later = AgentInboxRowBuilder.rows(

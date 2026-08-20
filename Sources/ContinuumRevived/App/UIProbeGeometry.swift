@@ -1512,7 +1512,8 @@ enum UIProbeGeometry {
                 id: row.id, title: row.title, projectName: row.projectName,
                 workspaceName: row.workspaceName, state: .input, attention: row.attention,
                 lifecycle: row.lifecycle, model: row.model, role: row.role, branch: row.branch,
-                isIsolated: row.isIsolated, elapsed: row.elapsed, lastActiveAt: row.lastActiveAt,
+                isIsolated: row.isIsolated, elapsed: row.elapsed,
+                elapsedStartedAt: row.elapsedStartedAt, lastActiveAt: row.lastActiveAt,
                 depth: row.depth, variant: row.variant, createdAt: row.createdAt,
                 parentId: row.parentId, isUnconfirmed: row.isUnconfirmed,
                 settlementBlocked: row.settlementBlocked)
@@ -4990,6 +4991,7 @@ enum UIProbeGeometry {
                 workspaceName: row.workspaceName, state: .ready, attention: row.attention,
                 lifecycle: .settled(at: LabFixtures.inboxNow), model: row.model, role: row.role,
                 branch: row.branch, isIsolated: row.isIsolated, elapsed: row.elapsed,
+                elapsedStartedAt: row.elapsedStartedAt,
                 lastActiveAt: row.lastActiveAt, depth: row.depth, createdAt: row.createdAt,
                 parentId: row.parentId, isUnconfirmed: row.isUnconfirmed,
                 settlementBlocked: row.settlementBlocked)
@@ -5586,6 +5588,12 @@ enum UIProbeGeometry {
                 }
                 tile.layoutSubtreeIfNeeded()
                 transcript.layoutSubtreeIfNeeded()
+                guard tile.chromeSnapshot?.title == "Agent · \(AgentRecord.defaultAgentName)",
+                      tile.chromeSnapshot?.providerModel == tile.qaProviderSettings.model,
+                      tile.chromeSnapshot?.showsProviderMark
+                        == (BrandMark96.mark(forModel: tile.qaProviderSettings.model) != nil) else {
+                    throw fail("\(label): draggable chrome did not use the canonical unattached-agent name/provider mark (chrome=\(String(describing: tile.chromeSnapshot)), provider=\(tile.qaProviderSettings.model))")
+                }
                 guard !tile.qaHasLegacyComposeField, !tile.qaHasPermanentApprovalDock,
                       tile.qaLegacyLocationStatusIsHidden,
                       tile.qaCompactStatusAccessibilityLabel.contains("Home")

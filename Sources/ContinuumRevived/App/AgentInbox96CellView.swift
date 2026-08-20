@@ -425,14 +425,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // branch lane while folded; the exact branch remains in the hover card.
         branchLabel.stringValue = rollupSummary ?? row.branch ?? ""
 
-        // The state WORD and its time, in one string, exactly as the review images
-        // read: `Done · 4m`. The elapsed half comes from the shipped formatter, not
-        // a second one — `AgentInboxCellView.elapsedText` already decides what a
-        // duration looks like on this surface.
-        let word = Self.stateWord(row, now: now)
-        let elapsed = AgentInboxCellView.elapsedText(Self.stateAge(row, now: now))
-        stateLabel.stringValue = [word, elapsed].compactMap { $0 }.joined(separator: " · ")
-        stateLabel.isHidden = stateLabel.stringValue.isEmpty
+        // The state WORD and, only while executing, its live duration. The elapsed
+        // half comes from the shipped formatter, so every surface uses one clock
+        // vocabulary.
+        updateStateLabel(for: row, now: now)
 
         // Mark or name, never a cipher.
         let model = row.model ?? ""
@@ -538,22 +534,32 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         }
     }
 
-    /// The number beside the word.
-    ///
-    /// `row.elapsed` is a LIVE turn's duration and is documented as meaningful only
-    /// while working — which is why every finished row rendered its state with no
-    /// time at all, including the one state whose entire meaning is how long it has
-    /// been sitting there. A finished row's number is its AGE.
-    ///
-    /// Additive by construction: it fills in only where `row.elapsed` was already
-    /// nil. The formatter is the shipped one, so a duration looks the same here as
-    /// it does on every other surface.
+    /// The number beside the word is current execution duration, never age since
+    /// completion. Completion time belongs in hover/history detail; showing it on
+    /// a ready row produces an unexplained bare `5m` after `Done` is acknowledged.
     static func stateAge(_ row: AgentInboxRow, now: Date) -> TimeInterval? {
-        if let elapsed = row.elapsed { return elapsed }
-        guard row.state == .ready, !row.isUnconfirmed,
-              let since = row.terminalEvent?.endedAt ?? row.lastActiveAt
-        else { return nil }
-        return max(0, now.timeIntervalSince(since))
+        guard row.state == .working else { return nil }
+        if let since = row.elapsedStartedAt {
+            return max(0, now.timeIntervalSince(since))
+        }
+        return row.elapsed
+    }
+
+    private func updateStateLabel(for row: AgentInboxRow, now: Date) {
+        let word = Self.stateWord(row, now: now)
+        let elapsed = AgentInboxCellView.elapsedText(Self.stateAge(row, now: now))
+        stateLabel.stringValue = [word, elapsed].compactMap { $0 }.joined(separator: " · ")
+        stateLabel.isHidden = stateLabel.stringValue.isEmpty
+    }
+
+    /// Called by the inbox's one shared clock. This changes and locally reflows
+    /// only the status band; it does not rebuild the row or invalidate transcript/
+    /// canvas layout, and a non-working row is a no-op by construction.
+    func updateElapsedClock(now: Date) {
+        guard let row = shown?.row, row.state == .working else { return }
+        updateStateLabel(for: row, now: now)
+        needsLayout = true
+        applyAccessibility()
     }
 
     /// Three glyphs, and most rows get none.
@@ -1008,9 +1014,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         return shown.rollup?.cappedAttentionSummary ?? ""
     }
     var qaBranch: String { branchLabel.stringValue }
-    /// The elapsed time is part of the state string on this row (`Done · 4m`),
-    /// which is what the review images show, so there is no separate label to read.
-    var qaElapsed: String { AgentInboxCellView.elapsedText(shown?.row.elapsed) ?? "" }
+    /// Elapsed is part of the working state string, so there is no second label.
+    var qaElapsed: String {
+        guard let shown else { return "" }
+        return AgentInboxCellView.elapsedText(Self.stateAge(shown.row, now: shown.now)) ?? ""
+    }
     /// The status is a PAINTED glyph here, not a text label, so it is reported by
     /// its symbol name — the honest answer for a row that draws rather than writes.
     var qaGlyph: String { decorations.isWorking ? "throbber" : (statusGlyph.symbol ?? "") }

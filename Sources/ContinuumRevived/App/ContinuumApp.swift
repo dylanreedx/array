@@ -11423,6 +11423,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             zPosition: .fromLegacyRank(1), runtimeRef: nil,
             metadata: TileMetadata(launchProfileId: "managed")))
         displayTile.frame = NSRect(x: 0, y: 0, width: 520, height: 320)
+        displayTile.applyProviderSettings(.init(model: "openai/gpt-5.6-sol", thinking: "medium"))
+        try expect(displayTile.chromeSnapshot?.title == "Agent · \(AgentRecord.defaultAgentName)",
+                   "managed chrome must use the conversation name, not the model — got \(displayTile.chromeSnapshot?.title ?? "nil")")
+        try expect(displayTile.chromeSnapshot?.showsProviderMark == true
+                   && displayTile.chromeSnapshot?.providerModel == "openai/gpt-5.6-sol",
+                   "managed chrome did not render the bundled provider mark with its exact model metadata")
         displayTile.attach(agentID: displayAgent, supervisor: delegate.agentSupervisor, projectName: "Alpha Project")
         try expect(displayTile.qaLocationText.contains("Alpha Project"),
                    "attach with a project name should show it, got \(displayTile.qaLocationText)")
@@ -11431,6 +11437,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                    "re-attach to a custom folder (nil project) must drop the stale project name, got \(displayTile.qaLocationText)")
         try expect(displayTile.qaLocationText.contains("Alpha-Root"),
                    "re-attach to a custom folder must show the folder name, got \(displayTile.qaLocationText)")
+        try expect(delegate.agentSupervisor.rename(agentID: displayAgent, to: "Investigate tile identity"),
+                   "the chrome identity witness could not rename its attached agent")
+        try expect(displayTile.chromeSnapshot?.title == "Agent · Investigate tile identity",
+                   "record rename did not update the draggable chrome — got \(displayTile.chromeSnapshot?.title ?? "nil")")
     }
 
     /// Records a managed-agent runtime event onto the per-agent syncable
@@ -24334,6 +24344,35 @@ extension AppDelegate {
     window.contentView = inbox
     inbox.layoutForQA()
 
+    let clockStart = inboxCheckNow.addingTimeInterval(-59)
+    let clockRow = AgentInboxRow(
+        id: UUID(), title: "Live clock witness", state: .working,
+        elapsed: 59, elapsedStartedAt: clockStart,
+        createdAt: inboxCheckNow.addingTimeInterval(-120))
+    let clockInbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
+    let clockWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 180),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    clockWindow.contentView = clockInbox
+    clockInbox.reload(rows: [clockRow])
+    clockInbox.layoutForQA()
+    try expect(clockInbox.hasElapsedTickTimerForQA,
+               "one shared elapsed clock must exist while a stamped working row is visible")
+    clockInbox.updateElapsedClockForQA(now: inboxCheckNow.addingTimeInterval(2))
+    try expect(clockInbox.stateLabelsForQA == ["Working · 1m 1s"],
+               "the visible elapsed label did not advance without hover — got \(clockInbox.stateLabelsForQA)")
+
+    let completedClockRow = AgentInboxRow(
+        id: clockRow.id, title: clockRow.title, state: .ready,
+        elapsed: 61, elapsedStartedAt: clockStart,
+        createdAt: clockRow.createdAt)
+    clockInbox.reload(rows: [completedClockRow])
+    clockInbox.layoutForQA()
+    try expect(clockInbox.stateLabelsForQA == [""],
+               "a non-running row must not paint execution elapsed — got \(clockInbox.stateLabelsForQA)")
+    try expect(!clockInbox.hasElapsedTickTimerForQA,
+               "the shared elapsed clock must stop when no visible stamped run exists")
+
     let sorted = InboxSort.sortForInbox(rows: fixture)
     let byId = Dictionary(uniqueKeysWithValues: sorted.map { ($0.id, $0) })
     try expect(inbox.titlesForQA == sorted.map(\.displayTitle),
@@ -24583,7 +24622,8 @@ extension AppDelegate {
             id: row.id, title: row.title, projectName: row.projectName,
             workspaceName: row.projectName, state: row.state, attention: row.attention,
             lifecycle: row.lifecycle, model: row.model, role: row.role, branch: row.branch,
-            isIsolated: row.isIsolated, elapsed: row.elapsed, depth: row.depth,
+            isIsolated: row.isIsolated, elapsed: row.elapsed,
+            elapsedStartedAt: row.elapsedStartedAt, depth: row.depth,
             variant: row.variant, createdAt: row.createdAt, parentId: row.parentId)
     }
     let collides = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))

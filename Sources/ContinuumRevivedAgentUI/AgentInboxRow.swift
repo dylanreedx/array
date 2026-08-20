@@ -735,6 +735,11 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// row is built (`AgentInboxRowBuilder`). Nothing stores it — a stored elapsed
     /// is stale the instant after it is written.
     public let elapsed: TimeInterval?
+    /// The authoritative start of that same live turn. The view uses it only to
+    /// advance a materialized working row between owner pushes; nil for every
+    /// non-working state and for compatibility rows whose source has no stamped
+    /// turn start.
+    public let elapsedStartedAt: Date?
     /// The newest activity stamp known for this agent. This is a fan-out
     /// presentation key only: the desktop list's global order remains frozen on
     /// `createdAt`, while a capped parent's visible survivors can keep the most
@@ -917,6 +922,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         branch: String? = nil,
         isIsolated: Bool = false,
         elapsed: TimeInterval? = nil,
+        elapsedStartedAt: Date? = nil,
         lastActiveAt: Date? = nil,
         depth: Int = 0,
         // Kept as a source-compatible argument for the older row producers. It
@@ -946,6 +952,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.branch = branch
         self.isIsolated = isIsolated
         self.elapsed = elapsed
+        self.elapsedStartedAt = state == .working ? elapsedStartedAt : nil
         self.lastActiveAt = lastActiveAt
         self.depth = depth
         // Derive this at the model boundary so even a legacy caller that passes
@@ -996,7 +1003,9 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             workspaceName: workspaceName,
             state: state, attention: attention, lifecycle: lifecycle, model: model, role: role,
             branch: branch, isIsolated: isIsolated,
-            elapsed: frozenElapsed ?? elapsed, lastActiveAt: lastActiveAt, depth: depth,
+            elapsed: frozenElapsed ?? elapsed,
+            elapsedStartedAt: value ? nil : elapsedStartedAt,
+            lastActiveAt: lastActiveAt, depth: depth,
             variant: variant, createdAt: createdAt, parentId: parentId,
             isUnconfirmed: value, settlementBlocked: settlementBlocked,
             zoneName: zoneName, harness: harness, checkedOutBranch: checkedOutBranch,

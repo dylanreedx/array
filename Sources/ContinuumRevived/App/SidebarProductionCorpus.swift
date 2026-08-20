@@ -101,20 +101,20 @@ enum SidebarProductionCorpus {
             expected.stateLabel = ""
         case .firstSendTitleFallback:
             expected.titleContains = "Replace the sidebar identity"
-            expected.stateLabel = "0s"
+            expected.stateLabel = ""
         case .imageOnlyFirstPrompt:
             // §4.2/5 wants a contextual label; today the sentinel survives.
             expected.titleContains = AgentRecord.defaultAgentName
-            expected.stateLabel = "0s"
+            expected.stateLabel = ""
         case .generatedTitleLanded:
             expected.titleContains = "Investigate zoom budget"
-            expected.stateLabel = "0s"
+            expected.stateLabel = ""
         case .manualRenameDuringGeneration:
             expected.titleContains = "Human chosen title"
-            expected.stateLabel = "0s"
+            expected.stateLabel = ""
         case .generationFailed:
             expected.titleContains = "check the release appcast"
-            expected.stateLabel = "0s"
+            expected.stateLabel = ""
         case .working:
             expected.titleContains = "run the matrix"
             expected.stateLabel = "Working · 0s"
@@ -125,13 +125,13 @@ enum SidebarProductionCorpus {
             expected.stateLabel = "Needs attention"
         case .succeeded:
             expected.titleContains = "work that ends"
-            expected.stateLabel = "0s"
+            expected.stateLabel = ""
         case .interrupted:
             expected.titleContains = "work that ends"
-            expected.stateLabel = "Stopped · 0s"
+            expected.stateLabel = "Stopped"
         case .cancelled:
             expected.titleContains = "work that ends"
-            expected.stateLabel = "Cancelled · 0s"
+            expected.stateLabel = "Cancelled"
         case .failed:
             expected.titleContains = "work that ends failed"
             expected.stateLabel = "Failed"
@@ -140,7 +140,7 @@ enum SidebarProductionCorpus {
             expected.stateLabel = "Failed"      // indistinguishable from a failed turn
         case .neverVisitedCompletion:
             expected.titleContains = "finish while nobody is looking"
-            expected.stateLabel = "Done · 0s"
+            expected.stateLabel = "Done"
         case .codexOpenAI:
             expected.titleContains = "Codex on an OpenAI model"
             expected.stateLabel = ""
@@ -153,7 +153,7 @@ enum SidebarProductionCorpus {
             expected.providerGlyph = "experimental-7"
         case .longUnicodeRTL:
             expected.titleContains = "تحديث"
-            expected.stateLabel = "0s"
+            expected.stateLabel = ""
         case .piAnthropic:
             // The row intentionally shows the provider mark rather than the harness.
             expected.titleContains = "Pi running Opus"
@@ -176,10 +176,10 @@ enum SidebarProductionCorpus {
             expected.providerGlyph = ""
         case .nestedChild:
             expected.titleContains = "agent 1"      // parent-derived ordinal, not a task
-            expected.stateLabel = "0s"
+            expected.stateLabel = ""
         case .headless:
             expected.titleContains = "headless work"
-            expected.stateLabel = "0s"
+            expected.stateLabel = ""
         case .exactPlacement:
             expected.titleContains = "Agent with a real tile"
             expected.stateLabel = ""
@@ -849,8 +849,7 @@ enum SidebarProductionCorpus {
             try expect(row.elapsed.isEmpty == expected.elapsedIsEmpty,
                        "\(label) elapsed: expected "
                        + "\(expected.elapsedIsEmpty ? "EMPTY" : "non-empty") — got "
-                       + "'\(row.elapsed)'. §4.6 wants a time beside every terminal "
-                       + "outcome.")
+                       + "'\(row.elapsed)'. Elapsed is live execution duration only.")
             if let glyph = expected.providerGlyph {
                 try expect(row.providerGlyph == glyph,
                            "\(label) provider mark must be '\(glyph)' today — got "
@@ -872,7 +871,7 @@ enum SidebarProductionCorpus {
         let outcomeStates = [Flow.succeeded, .interrupted, .cancelled].compactMap { flow in
             results.first { $0.flow == flow }?.row?.stateLabel
         }
-        try expect(outcomeStates == ["0s", "Stopped · 0s", "Cancelled · 0s"],
+        try expect(outcomeStates == ["", "Stopped", "Cancelled"],
                    "§4.6: success, interruption and cancellation must remain distinct; "
                    + "got \(outcomeStates)")
 

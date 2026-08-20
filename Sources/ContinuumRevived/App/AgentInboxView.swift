@@ -619,6 +619,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private var settleNudgeTimer: Timer?
     private var settleNudgePhaseVisible = true
     private static let settleNudgePeriod: TimeInterval = 30
+    /// One clock for every materialized live duration. It exists only while a
+    /// visible working row has an authoritative start; cells never schedule work.
+    private var elapsedTickTimer: Timer?
     // P6.3: wake is derived from the stored date. This single timer only asks the
     // list/host to re-render when the earliest shelf entry may have expired; it
     // never writes the record or schedules a daemon wake.
@@ -1557,6 +1560,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// change; without this invalidation a row can keep the old one-/two-line
     /// height until its content changes for an unrelated reason.
     override func layout() {
+        defer { syncElapsedTickTimer() }
         let columnWidthAtLayoutEntry = column.width
         super.layout()
         // `NSScrollView` owns the document view's frame, but does not grow a
@@ -1632,6 +1636,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// frozen desktop order (P3.4) and applying it here is what makes "row N on
     /// screen" and "rows[N]" the same thing for every accessor below.
     func reload(rows newRows: [AgentInboxRow]) {
+        defer { syncElapsedTickTimer() }
         // P6.6: status transitions belong to this row-model boundary, not to
         // `viewFor`, so offscreen rows announce on the push that changed them.
         updateStatusSnapshots(for: newRows)
@@ -1762,6 +1767,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// `Equatable` makes exact rather than a guess. (Found in cross-review; the
     /// change-set-only version showed a stale project name after a rename.)
     func apply(rows newRows: [AgentInboxRow], changed: AgentsBoardChangeSet) {
+        defer { syncElapsedTickTimer() }
         // P6.6: compare/prune before the incremental/full list branch. Cell
         // materialization is a rendering detail and must not decide whether a
         // semantic transition was announced.
@@ -3665,6 +3671,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         guard let window else {
             settleNudgeTimer?.invalidate()
             settleNudgeTimer = nil
+            elapsedTickTimer?.invalidate()
+            elapsedTickTimer = nil
             cancelWakeRerender()
             setHovered(agentId: nil)
             setKeyboardFocus(agentId: nil)
@@ -3678,6 +3686,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.refreshHoverFromPointer()
+                self.syncElapsedTickTimer()
                 self.window?.invalidateCursorRects(for: self.tableView)
             }
         })
@@ -3716,6 +3725,55 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         }
         RunLoop.main.add(timer, forMode: .common)
         settleNudgeTimer = timer
+        syncElapsedTickTimer()
+    }
+
+    private func visibleTimedTableRows() -> [Int] {
+        let range = tableView.rows(in: tableView.visibleRect)
+        guard range.location != NSNotFound, range.length > 0 else { return [] }
+        return (range.location..<(range.location + range.length)).compactMap { tableRow in
+            guard items.indices.contains(tableRow),
+                  let row = items[tableRow].agentRow,
+                  row.state == .working,
+                  row.elapsedStartedAt != nil else { return nil }
+            return tableRow
+        }
+    }
+
+    private func syncElapsedTickTimer() {
+        guard window != nil, !visibleTimedTableRows().isEmpty else {
+            elapsedTickTimer?.invalidate()
+            elapsedTickTimer = nil
+            return
+        }
+        guard elapsedTickTimer == nil else { return }
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.window != nil else {
+                    self?.elapsedTickTimer?.invalidate()
+                    self?.elapsedTickTimer = nil
+                    return
+                }
+                let visible = self.visibleTimedTableRows()
+                guard !visible.isEmpty else {
+                    self.elapsedTickTimer?.invalidate()
+                    self.elapsedTickTimer = nil
+                    return
+                }
+                self.updateVisibleElapsedClock(now: self.clock())
+            }
+        }
+        timer.tolerance = 0.2
+        RunLoop.main.add(timer, forMode: .common)
+        elapsedTickTimer = timer
+    }
+
+    private func updateVisibleElapsedClock(now: Date) {
+        for tableRow in visibleTimedTableRows() {
+            (tableView.view(
+                atColumn: 0, row: tableRow, makeIfNecessary: false
+            ) as? AgentInbox96CellView)?.updateElapsedClock(now: now)
+        }
     }
 
     /// The first visible agent not being changed by an incremental apply. The
@@ -4197,6 +4255,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var titlesForQA: [String] { cells().map(\.qaTitle) }
     var stateLabelsForQA: [String] { cells().map(\.qaStateLabel) }
     var elapsedLabelsForQA: [String] { cells().map(\.qaElapsed) }
+    var hasElapsedTickTimerForQA: Bool { elapsedTickTimer != nil }
+    func updateElapsedClockForQA(now: Date) { updateVisibleElapsedClock(now: now) }
     var metaLinesForQA: [String] { cells().map(\.qaMeta) }
     var branchLinesForQA: [String] { cells().map(\.qaBranch) }
     /// The alpha the row's WORDS are painted at, and the alpha its status accent

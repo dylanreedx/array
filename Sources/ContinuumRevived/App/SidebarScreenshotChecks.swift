@@ -719,7 +719,21 @@ enum SidebarScreenshotChecks {
         // duplicates claims coverage it does not have.
         var digestOwners: [String: [String]] = [:]
         for entry in entries { digestOwners[entry.digest, default: []].append(entry.png) }
-        let duplicates = digestOwners.filter { $0.value.count > 1 }
+        // `dense662@280` and `live96-production` are deliberately the same rows,
+        // viewport and shipped cell reached through two setup paths. Terminal-age
+        // text used to make them accidentally differ because the two paths sampled
+        // different clocks; live-only elapsed correctly removes that false delta.
+        // Keep the pair as a parity witness and refuse every other duplicate.
+        let allowedProductionParity: Set<Set<String>> = Set(appearances.map { appearance in
+            let suffix = shortName(appearance)
+            return Set([
+                "dense662-280x\(Int(denseViewportHeight))-\(suffix).png",
+                "live96-production-280x\(Int(denseViewportHeight))-\(suffix).png",
+            ])
+        })
+        let duplicates = digestOwners.filter {
+            $0.value.count > 1 && !allowedProductionParity.contains(Set($0.value))
+        }
         try expect(duplicates.isEmpty,
                    "byte-identical images under different names: "
                    + duplicates.values.map { $0.sorted().joined(separator: " == ") }
@@ -1421,23 +1435,23 @@ final class SidebarDensityProposalView: NSView {
 
     private static let rows: [(placement: String, state: String, title: String,
                                branch: String, model: String)] = [
-        ("Array › Sidebar", "Done · 4m", "Replace sidebar identity and completion UX",
+        ("Array › Sidebar", "", "Replace sidebar identity and completion UX",
          "agent/sidebar-redesign", "GPT-5.6 Sol"),
         ("Array › Canvas", "Working · 1m 24s", "Stop the camera resizing every tile view",
          "agent/retained-world-plane", "Opus"),
         ("Array › Sidebar", "Approval", "Apply the measured-fit sacrifice order",
          "agent/measured-fit", "GPT-5.6 Sol"),
-        ("Array › Agents", "Failed · 12m", "Persist an honest terminal event",
+        ("Array › Agents", "Failed", "Persist an honest terminal event",
          "agent/terminal-outcomes", "Opus"),
         // Fifth row, not tenth: the last row is clipped by the caption at 662 pt, and
         // this is the row the "mark only" decision has to be judged on.
-        ("Array › Agents", "Stopped · 30m", "Wire acknowledgement to effective focus",
+        ("Array › Agents", "Stopped", "Wire acknowledgement to effective focus",
          "agent/ack-watermark", "Gemini 3 Pro"),
         // A vendor whose mark exists but whose name never appears, and one whose mark
         // does NOT exist. With the model text dropped, that second row is the whole
         // tradeoff in one line: the agent becomes anonymous except for a two-letter
         // badge. Keep both in view so the cost of "mark only" is looked at, not assumed.
-        ("array-scratch", "Cancelled · 1h", "تحديث الشريط الجانبي · סוכן עם שם ארוך",
+        ("array-scratch", "Cancelled", "تحديث الشريط الجانبي · סוכן עם שם ארוך",
          "agent/rtl-truncation", "Grok 4.2"),
         ("Array › Sidebar", "Input", "Choose the provider mark set",
          "agent/brand-marks", "Opus"),
@@ -1445,11 +1459,11 @@ final class SidebarDensityProposalView: NSView {
         // disappearing from the artifact. §4.5's list still leaves OpenRouter, Mistral,
         // Groq and Cerebras unbundled, and the review has to keep showing what one of
         // those rows looks like.
-        ("Array › Docs", "Done · 3h", "Write the S0 density review",
+        ("Array › Docs", "Done", "Write the S0 density review",
          "agent/s0-review", "Mistral Large 3"),
-        ("Array › Canvas", "Done · 5h", "Budget chrome repaints per camera step",
+        ("Array › Canvas", "Done", "Budget chrome repaints per camera step",
          "agent/perf-budgets", "Opus"),
-        ("Array › Agents", "Done · 1d", "Bound restore concurrency",
+        ("Array › Agents", "Done", "Bound restore concurrency",
          "agent/restore-bounds", "Sonnet"),
     ]
 

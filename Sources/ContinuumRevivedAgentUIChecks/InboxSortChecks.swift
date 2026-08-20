@@ -177,6 +177,7 @@ private func withLifecycle(_ row: AgentInboxRow, _ lifecycle: InboxLifecycle) ->
         branch: row.branch,
         isIsolated: row.isIsolated,
         elapsed: row.elapsed,
+        elapsedStartedAt: row.elapsedStartedAt,
         lastActiveAt: row.lastActiveAt,
         depth: row.depth,
         variant: RowVariant.forLifecycle(lifecycle),

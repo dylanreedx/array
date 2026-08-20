@@ -253,6 +253,7 @@ final class ManagedAgentTileNSView: TileNSView {
             statusUpdatedAt: Date()
         )
         super.init(tile: tile)
+        refreshTitleBarIdentity()
         // TileNSView establishes its compatibility border after its polymorphic
         // token call; re-apply once subclass initialization is complete so the
         // fixture shell's quiet perimeter wins deterministically.
@@ -442,10 +443,11 @@ final class ManagedAgentTileNSView: TileNSView {
         // event, and without the tile ever reading a repository itself.
         agentSource = supervisor
         v2Composer?.bindCompletionContext(supervisor.completionContext(for: agentID))
-        headerAgentName = supervisor.records[agentID]?.displayName
+        headerAgentName = supervisor.records[agentID]?.humanDisplayName
         displayNameObserverToken = supervisor.addDisplayNameObserver(for: agentID) { [weak self] name in
             guard let self, self.headerAgentName != name else { return }
             self.headerAgentName = name
+            self.refreshTitleBarIdentity()
             self.applyAgentHeader(status: self.descriptor.status)
         }
         locationProjectName = projectName
@@ -1970,11 +1972,13 @@ final class ManagedAgentTileNSView: TileNSView {
     func applyProviderSettings(_ settings: AgentModelConfig.Resolution) {
         providerSettings = settings
         providerFooter.apply(settings)
+        refreshTitleBarIdentity()
     }
 
     func applyLaunchSelection(_ selection: AgentLaunchSelection) {
         providerSettings = AgentModelConfig.Resolution(model: selection.model, thinking: selection.thinking)
         providerFooter.apply(selection)
+        refreshTitleBarIdentity()
     }
 
     private func writeLaunchSelection(harness: AgentHarness, model: String, thinking: String) -> Bool {
@@ -2008,7 +2012,23 @@ final class ManagedAgentTileNSView: TileNSView {
     private var composeIsBusy: Bool { promptInFlight || descriptor.status == .working }
 
     private func applyHeader(status: AgentStatus) {
+        refreshTitleBarIdentity()
         applyAgentHeader(status: status)
+    }
+
+    private func refreshTitleBarIdentity() {
+        let recordName = attachedAgentID
+            .flatMap { agentSource?.records[$0]?.humanDisplayName }
+        let candidate = recordName ?? headerAgentName ?? AgentRecord.defaultAgentName
+        let name = AgentName.displayTitle(
+            candidate,
+            model: providerSettings.model,
+            id: attachedAgentID?.rawValue
+        )
+        setTitleBarIdentity(
+            title: "Agent · \(name)",
+            providerModel: providerSettings.model
+        )
     }
 
     private func applyAgentHeader(status: AgentStatus) {

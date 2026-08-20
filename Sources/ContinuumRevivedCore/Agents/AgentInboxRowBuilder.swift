@@ -216,6 +216,8 @@ public enum AgentInboxRowBuilder {
             // `record.lastSeenAt`, so the "current working run" starts at the spawn
             // instant however recent the actual prompt was.
             elapsed: elapsed(state: state, turnSnapshot: turnSnapshot, boardRow: boardRow, now: now),
+            elapsedStartedAt: elapsedStart(
+                state: state, turnSnapshot: turnSnapshot, boardRow: boardRow),
             // P6.5 uses the board's canonical latest event stamp only to choose
             // which children survive a bounded inline fan-out. It never reaches
             // the desktop's global frozen comparator.
@@ -326,10 +328,18 @@ public enum AgentInboxRowBuilder {
         boardRow: AgentsBoardRow,
         now: Date
     ) -> TimeInterval? {
-        if let turnSnapshot {
-            return turnSnapshot.turnStartedAt.map { max(0, now.timeIntervalSince($0)) }
-        }
-        return state == .working ? elapsed(in: boardRow, now: now) : nil
+        elapsedStart(state: state, turnSnapshot: turnSnapshot, boardRow: boardRow)
+            .map { max(0, now.timeIntervalSince($0)) }
+    }
+
+    private static func elapsedStart(
+        state: InboxState,
+        turnSnapshot: AgentTileTurnSnapshot?,
+        boardRow: AgentsBoardRow
+    ) -> Date? {
+        guard state == .working else { return nil }
+        if let turnSnapshot { return turnSnapshot.turnStartedAt }
+        return elapsedStart(in: boardRow)
     }
 
     /// How long the current working stretch has been running.
@@ -345,13 +355,12 @@ public enum AgentInboxRowBuilder {
     /// an empty ring has no measurable start) and clamped at 0, because a
     /// last-writer-wins merge can hand us an `occurredAt` from a host whose clock
     /// runs ahead, and a negative duration would render as a count-up backwards.
-    private static func elapsed(in boardRow: AgentsBoardRow, now: Date) -> TimeInterval? {
+    private static func elapsedStart(in boardRow: AgentsBoardRow) -> Date? {
         var start: Date?
         for event in boardRow.recent.reversed() {
             guard AgentInboxRow.state(for: event.status) == .working else { break }
             start = event.occurredAt
         }
-        guard let start else { return nil }
-        return max(0, now.timeIntervalSince(start))
+        return start
     }
 }

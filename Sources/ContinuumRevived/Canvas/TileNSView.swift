@@ -11,6 +11,8 @@ import Foundation
 class TileNSView: NSView, TokenThemed {
     struct ChromeSnapshot: Equatable {
         var title: String
+        var providerModel: String?
+        var showsProviderMark: Bool
         var agentStatus: AgentStatus?
         var agentStatusLabel: String?
         var agentStatusErrorMessage: String?
@@ -62,6 +64,13 @@ class TileNSView: NSView, TokenThemed {
 
     func setTitleBarAccessory(_ accessory: NSView?) {
         titleBar?.setAccessory(accessory)
+    }
+
+    /// Managed agents have an entity-owned conversation name that may change
+    /// after this tile was created. Present it without copying it into `Tile.title`,
+    /// which remains persistence/fallback state for every tile family.
+    func setTitleBarIdentity(title: String?, providerModel: String? = nil) {
+        titleBar?.setIdentity(title: title, providerModel: providerModel)
     }
 
     /// Action vocabulary is tile-kind specific. A managed agent closes by
@@ -1120,12 +1129,20 @@ private final class TitleBarView: NSView, TokenThemed {
     var onStopRunRequested: (() -> Void)?
     var additionalMenuItemsProvider: (() -> [NSMenuItem])?
     private var accessoryView: NSView?
+    private let providerMarkView = NSImageView(frame: .zero)
+    private var displayTitleOverride: String?
     private var closeActionTitle = "Close tile"
     private var stopActionTitle = "Stop run"
 
+    private var displayedTitle: String {
+        displayTitleOverride ?? "\(tile.kind.displayName) · \(tile.title)"
+    }
+
     var snapshot: TileNSView.ChromeSnapshot {
         TileNSView.ChromeSnapshot(
-            title: "\(tile.kind.displayName) · \(tile.title)",
+            title: displayedTitle,
+            providerModel: providerMarkView.toolTip,
+            showsProviderMark: !providerMarkView.isHidden,
             agentStatus: agentStatus,
             agentStatusLabel: agentStatus.map { StatusChipPresenter.display(for: $0).label },
             agentStatusErrorMessage: agentStatusErrorMessage
@@ -1162,6 +1179,10 @@ private final class TitleBarView: NSView, TokenThemed {
 
         super.init(frame: .zero)
         wantsLayer = true
+        providerMarkView.imageScaling = .scaleProportionallyDown
+        providerMarkView.setAccessibilityElement(false)
+        providerMarkView.isHidden = true
+        addSubview(providerMarkView)
         applyTokens()
 
         btn.target = self
@@ -1186,6 +1207,7 @@ private final class TitleBarView: NSView, TokenThemed {
     func applyTokens() {
         layer?.backgroundColor = SurfaceToken.tileChrome.color.cgColor(in: self)
         closeButton.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
+        providerMarkView.contentTintColor = BrandMark96.foreground(in: self)
         needsDisplay = true
     }
 
@@ -1227,6 +1249,13 @@ private final class TitleBarView: NSView, TokenThemed {
             width: size,
             height: size
         )
+        let markSize = 14 * chromeScale
+        providerMarkView.frame = NSRect(
+            x: CGFloat(Space.m) * chromeScale,
+            y: (bounds.height - markSize) / 2,
+            width: markSize,
+            height: markSize
+        )
     }
 
     /// QA: the close button's laid-out frame (world units) so the parent's
@@ -1241,6 +1270,25 @@ private final class TitleBarView: NSView, TokenThemed {
             ? "Detach this view without stopping, archiving, or deleting the agent."
             : "Close this tile.")
         closeButton.toolTip = close
+    }
+
+    func setIdentity(title: String?, providerModel: String?) {
+        let normalized = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        displayTitleOverride = normalized.flatMap { $0.isEmpty ? nil : $0 }
+        if let providerModel, let source = BrandMark96.mark(forModel: providerModel),
+           let image = source.copy() as? NSImage {
+            image.isTemplate = true
+            providerMarkView.image = image
+            providerMarkView.toolTip = providerModel
+            providerMarkView.isHidden = false
+        } else {
+            providerMarkView.image = nil
+            providerMarkView.toolTip = providerModel
+            providerMarkView.isHidden = true
+        }
+        applyTokens()
+        needsLayout = true
+        invalidateChrome()
     }
 
     func setAccessory(_ accessory: NSView?) {
@@ -1364,7 +1412,11 @@ private final class TitleBarView: NSView, TokenThemed {
         let blockedFrom = agentStatus.flatMap { statusPillRect(for: $0, theme: theme)?.minX }
             ?? qaDragHandleLeadingX
         let limit = max(0, blockedFrom - CGFloat(Space.s) * scale)
-        let leading = min(CGFloat(Space.m) * scale, limit)
+        let baseLeading = CGFloat(Space.m) * scale
+        let requestedLeading = providerMarkView.isHidden
+            ? baseLeading
+            : providerMarkView.frame.maxX + CGFloat(Space.s) * scale
+        let leading = min(requestedLeading, limit)
         let available = max(0, limit - leading)
         let height = ("X" as NSString).size(withAttributes: titleAttributes(theme: theme)).height
         return NSRect(
@@ -1384,7 +1436,7 @@ private final class TitleBarView: NSView, TokenThemed {
         let scale = chromeScale
         let theme = effectiveTokenTheme
         let attrs = titleAttributes(theme: theme)
-        let title = "\(tile.kind.displayName) · \(tile.title)" as NSString
+        let title = displayedTitle as NSString
         title.draw(in: titleRect(theme: theme), withAttributes: attrs)
 
         if let agentStatus {

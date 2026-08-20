@@ -376,6 +376,7 @@ enum LabFixtures {
                 workspaceName: row.workspaceName, state: row.state,
                 attention: row.attention, lifecycle: lifecycle, model: row.model, role: row.role,
                 branch: row.branch, isIsolated: row.isIsolated, elapsed: row.elapsed,
+                elapsedStartedAt: row.elapsedStartedAt,
                 depth: row.depth, variant: RowVariant.forLifecycle(lifecycle),
                 createdAt: row.createdAt, parentId: row.parentId)
         }
