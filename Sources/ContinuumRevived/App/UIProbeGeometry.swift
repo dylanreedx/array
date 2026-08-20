@@ -6527,6 +6527,14 @@ enum UIProbeGeometry {
         originalScopeList.bindToolDetailIdentity(capturedIdentity, to: id("capture-entry")) else {
             throw fail("production tool capture did not fail closed into exact agent/thread/turn/provider identity")
         }
+        guard originalScopeList.captureRuntimeEvent(
+            .itemStarted(
+                threadId: "capture-thread", itemId: "capture-write-item",
+                kind: .fileChange, title: "write"
+            )
+        ) != nil else {
+            throw fail("production tool capture excluded file-change/write events")
+        }
         let blockID = id("tool-composition-block")
         let itemID: AgentToolDetailID = "tool-composition-item"
         let compositionAgentID = AgentID(rawValue: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!)
@@ -6654,7 +6662,8 @@ enum UIProbeGeometry {
         let finishedTool = AgentBlock(
             id: id("route-reasoning-finished-tool"), revision: 1, kind: .toolCall,
             payload: .toolCall(.init(
-                name: "Read fixture", summary: "The nested tool returned a deliberately long semantic summary so outer geometry must change.",
+                name: "Read fixture",
+                summary: "Read ToolCallRenderer.swift\nRead: …/Renderers/ToolCallRenderer.swift\nDuration: 1.4s",
                 status: .completed
             ))
         )
@@ -6673,7 +6682,10 @@ enum UIProbeGeometry {
         )
         let removedTool = AgentBlock(
             id: id("route-reasoning-removed-tool"), revision: 1, kind: .toolCall,
-            payload: .toolCall(.init(name: "Removed tool", summary: "This disclosure must be purged with its reasoning parent.", status: .completed))
+            payload: .toolCall(.init(
+                name: "Removed tool",
+                summary: "Read Removed.swift\nRead: …/Fixtures/Removed.swift",
+                status: .completed))
         )
         let removedCommand = AgentBlock(
             id: id("route-reasoning-removed-command"), revision: 1, kind: .commandOutput,
@@ -7059,6 +7071,29 @@ enum UIProbeGeometry {
             throw fail("actual transcript text selection was force-scrolled during insert-above update")
         }
         selectedTextView.setSelectedRange(NSRange(location: 0, length: 0))
+
+        let transcriptSelectionViews = anchorList.richInlineTextViewsInSelectionOrder()
+        guard transcriptSelectionViews.count >= 2 else {
+            throw fail("transcript selection fixture materialized fewer than two prose text views")
+        }
+        let transcriptSource = transcriptSelectionViews[0]
+        let transcriptTarget = transcriptSelectionViews[1]
+        let transcriptSourceLength = (transcriptSource.string as NSString).length
+        let transcriptTargetLength = (transcriptTarget.string as NSString).length
+        transcriptSource.qaExtendSelection(
+            to: transcriptTarget, anchor: min(1, transcriptSourceLength),
+            targetCharacter: min(2, transcriptTargetLength)
+        )
+        guard transcriptSource.selectedRange().length
+                == max(0, transcriptSourceLength - min(1, transcriptSourceLength)),
+              transcriptTarget.selectedRange().length == min(2, transcriptTargetLength) else {
+            throw fail("transcript text selection stopped at a rendered Markdown block boundary")
+        }
+        transcriptSource.copy(nil)
+        guard NSPasteboard.general.string(forType: .string)?.contains("\n") == true else {
+            throw fail("cross-block transcript selection did not copy as one ordered range")
+        }
+        transcriptSelectionViews.forEach { $0.setSelectedRange(NSRange(location: 0, length: 0)) }
 
         // Inspect the order returned by the real accessibilityChildren override;
         // do not pre-sort a QA projection before asserting it.
@@ -7489,7 +7524,7 @@ enum UIProbeGeometry {
             id: toolID, revision: 1, kind: .toolCall,
             payload: .toolCall(.init(
                 name: "Read files\nignored provider detail",
-                summary: "Inspected the semantic renderer files.",
+                summary: "Inspected the semantic renderer files.\nRead: …/Renderers/ToolCallRenderer.swift",
                 arguments: .object(["cwd": .string(secret)]),
                 status: .completed
             ))
@@ -7526,7 +7561,7 @@ enum UIProbeGeometry {
         toolView.layoutSubtreeIfNeeded()
         guard expandedHeight >= collapsedHeight,
               toolHost.measurementCache.cachedMeasurementCount == 1,
-              toolView.summaryLabel.maximumNumberOfLines == 4,
+              toolView.summaryLabel.maximumNumberOfLines == 12,
               toolView.summaryLabel.frame.maxY <= toolView.bounds.maxY + 0.5 else {
             throw fail("live tool disclosure did not remeasure and lay out its expanded summary")
         }
@@ -7554,8 +7589,9 @@ enum UIProbeGeometry {
         )
         let staleView = recreatedView
         try recreatedHost.apply(block: otherTool, context: contextA)
-        guard let otherView = recreatedHost.rendererView as? ToolCallView, !otherView.isExpanded else {
-            throw fail("reused tool host carried disclosure state to another block")
+        guard let otherView = recreatedHost.rendererView as? ToolCallView,
+              !otherView.isExpanded, otherView.disclosureButton.isHidden else {
+            throw fail("one-line tool exposed a fake disclosure or reused another block's state")
         }
         staleView.disclosureButton.performClick(nil)
         guard store.explicitState(for: keyA) == true else {
@@ -7573,10 +7609,11 @@ enum UIProbeGeometry {
         let failedToolHost = AgentBlockHostView()
         try failedToolHost.apply(block: failedTool, context: contextA)
         guard let failedToolView = failedToolHost.rendererView as? ToolCallView,
-              failedToolView.isExpanded,
+              !failedToolView.isExpanded,
+              failedToolView.disclosureButton.isHidden,
               failedToolView.statusLabel.stringValue == "! Failed",
               !failedToolView.summaryLabel.isHidden else {
-            throw fail("failed tool did not expand by default with glyph-and-text status")
+            throw fail("one-line failed tool exposed a fake disclosure or lost glyph-and-text status")
         }
 
         let outputID = id("command-output")

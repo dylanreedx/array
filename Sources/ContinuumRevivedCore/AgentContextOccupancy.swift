@@ -28,14 +28,14 @@ import Foundation
 /// when a turn ends. Callers present it as such.
 public enum AgentContextOccupancy {
     /// The prompt-token total for the observed turn, or nil when the snapshot's
-    /// source has no documented occupancy shape (pi's per-message usage does not
-    /// state whether `input` already includes cache, so it is left alone rather
-    /// than guessed at).
+    /// source has no documented occupancy shape.
     public static func promptTokens(from snapshot: AgentContextWindowSnapshot) -> Int? {
         switch snapshot.source {
-        case .claudeResultUsage:
-            // claude's usage splits the prompt: fresh input, cache reads, and
-            // cache writes are disjoint parts of the same request.
+        case .claudeResultUsage, .piMessageUsage:
+            // Claude and Pi split the prompt into fresh input, cache reads, and
+            // cache writes. Pi's own footer and session stats use this exact
+            // arithmetic for `latestPromptTokens`/context usage; output belongs
+            // to the response and is not part of the prompt occupancy.
             let parts = [snapshot.inputTokens, snapshot.cacheReadTokens, snapshot.cacheWriteTokens]
                 .compactMap { $0 }
             guard !parts.isEmpty else { return nil }
@@ -52,7 +52,7 @@ public enum AgentContextOccupancy {
         case .providerSessionStats:
             // Authoritative occupancy is reported directly when it exists.
             return snapshot.usedTokens
-        case .piMessageUsage, .unknown:
+        case .unknown:
             return nil
         }
     }

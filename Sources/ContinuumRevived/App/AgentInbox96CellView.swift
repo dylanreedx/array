@@ -801,15 +801,6 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let stateWidth = stateLabel.isHidden
             ? 0 : min(card.bounds.width * 0.55, Self.width(of: stateLabel))
         var placementLeft = textLeft
-        if projectIcon.image != nil {
-            let side: CGFloat = 12
-            projectIcon.frame = inCard(NSRect(
-                x: placementLeft, y: bandY + (proposal.bandTop - side) / 2,
-                width: side, height: side))
-            placementLeft += side + 4
-        } else {
-            projectIcon.frame = .zero
-        }
         var trailingIconWidth: CGFloat = 0
         if leadsWithIcon {
             statusSlot = hasIcon
@@ -820,7 +811,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             // made of the icons, which are pinned to one x and aligned to each
             // other; reserving the lane only indents band 1 away from the title and
             // branch below it on every row that has no glyph.
-            if hasIcon { placementLeft = textLeft + iconSide + 4 }
+            if hasIcon { placementLeft += iconSide + 4 }
         } else if hasIcon {
             trailingIconWidth = iconSide + 4
             statusSlot = NSRect(
@@ -829,6 +820,19 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                 width: iconSide, height: iconSide)
         } else {
             statusSlot = nil
+        }
+        // The working/attention glyph and the directory icon are two distinct
+        // leading slots. Directory identity used to be laid out first and then
+        // `placementLeft` was reset to the status slot's trailing edge, putting
+        // the throbber directly on top of the folder/favicon.
+        if projectIcon.image != nil {
+            let side: CGFloat = 12
+            projectIcon.frame = inCard(NSRect(
+                x: placementLeft, y: bandY + (proposal.bandTop - side) / 2,
+                width: side, height: side))
+            placementLeft += side + 4
+        } else {
+            projectIcon.frame = .zero
         }
         statusGlyph.isHidden = statusSlot == nil || decorations.isWorking
         if let slot = statusSlot {
@@ -977,6 +981,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                 "cell": bounds,
                 "card": card.convert(card.bounds, to: self),
                 "project": labels[0].frame,
+                "projectIcon": projectIcon.convert(projectIcon.bounds, to: self),
                 "title": labels[1].frame,
                 "state": labels[2].frame,
                 "branch": labels[3].frame,

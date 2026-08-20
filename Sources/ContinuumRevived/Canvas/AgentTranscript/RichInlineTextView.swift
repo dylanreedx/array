@@ -2,6 +2,15 @@ import AppKit
 import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 
+/// A rendered Markdown surface is made from multiple native text views. AppKit
+/// selects inside one text view natively, but has no document selection spanning
+/// sibling text systems. The owning surface supplies their document order so a
+/// drag that leaves one prose block can continue through the next one.
+@MainActor
+protocol RichInlineTextSelectionContainer: AnyObject {
+    func richInlineTextViewsInSelectionOrder() -> [RichInlineTextView]
+}
+
 /// Native selectable transcript text backed by semantic `AgentInline` runs.
 /// Parsing, URL opening, and agent ownership deliberately remain outside this
 /// view; it reports an authorized semantic action through `AgentRenderContext`.
@@ -56,6 +65,48 @@ final class RichInlineTextView: NSTextView, NSTextViewDelegate {
             .cursor: NSCursor.pointingHand
         ]
         setAccessibilityRole(.staticText)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard event.clickCount == 1,
+              event.modifierFlags.intersection([.shift, .command, .control, .option]).isEmpty,
+              let window,
+              let container = enclosingSelectionContainer(),
+              container.richInlineTextViewsInSelectionOrder().count > 1 else {
+            super.mouseDown(with: event)
+            return
+        }
+        let initialWindowPoint = event.locationInWindow
+        let anchor = characterIndexForSelection(atWindowPoint: initialWindowPoint)
+        container.richInlineTextViewsInSelectionOrder().forEach {
+            if $0 !== self { $0.setSelectedRange(NSRange(location: 0, length: 0)) }
+        }
+        window.makeFirstResponder(self)
+        var dragged = false
+        while let tracked = window.nextEvent(
+            matching: [.leftMouseDragged, .leftMouseUp],
+            until: .distantFuture,
+            inMode: .eventTracking,
+            dequeue: true
+        ) {
+            if tracked.type == .leftMouseUp { break }
+            guard tracked.type == .leftMouseDragged else { continue }
+            dragged = dragged || hypot(
+                tracked.locationInWindow.x - initialWindowPoint.x,
+                tracked.locationInWindow.y - initialWindowPoint.y
+            ) >= 2
+            guard dragged else { continue }
+            _ = autoscroll(with: tracked)
+            updateTrackedSelection(
+                from: anchor, toWindowPoint: tracked.locationInWindow,
+                in: container
+            )
+        }
+        if !dragged {
+            if !activateLink(at: anchor) {
+                setSelectedRange(NSRange(location: anchor, length: 0))
+            }
+        }
     }
 
     func apply(
@@ -198,15 +249,130 @@ final class RichInlineTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func copy(_ sender: Any?) {
+        let selectedViews = enclosingSelectionContainer()?
+            .richInlineTextViewsInSelectionOrder()
+            .filter { $0.selectedRange().length > 0 } ?? []
+        if selectedViews.count > 1 {
+            let plain = selectedViews.map { $0.selectedPlainText }.joined(separator: "\n")
+            let markdown = selectedViews.map { $0.selectedMarkdown }.joined(separator: "\n")
+            writeSelection(plain: plain, markdown: markdown)
+            return
+        }
         let selection = selectedRange()
         guard selection.length > 0 else { return }
-        let plain = (string as NSString).substring(with: selection)
-        let markdown = AgentTextStyleResolver.markdown(for: runs, selectedRange: selection)
+        writeSelection(plain: selectedPlainText, markdown: selectedMarkdown)
+    }
+
+    private var selectedPlainText: String {
+        (string as NSString).substring(with: selectedRange())
+    }
+
+    private var selectedMarkdown: String {
+        AgentTextStyleResolver.markdown(for: runs, selectedRange: selectedRange())
+    }
+
+    private func writeSelection(plain: String, markdown: String) {
         let stringValue = stringPasteboardStyle == .markdown ? markdown : plain
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.declareTypes([.string, Self.markdownPasteboardType], owner: nil)
         pasteboard.setString(stringValue, forType: .string)
         pasteboard.setString(markdown, forType: Self.markdownPasteboardType)
+    }
+
+    private func enclosingSelectionContainer() -> (any RichInlineTextSelectionContainer)? {
+        var ancestor = superview
+        while let current = ancestor {
+            if let container = current as? any RichInlineTextSelectionContainer { return container }
+            ancestor = current.superview
+        }
+        return nil
+    }
+
+    private func characterIndexForSelection(atWindowPoint point: NSPoint) -> Int {
+        let local = convert(point, from: nil)
+        return min(max(0, characterIndexForInsertion(at: local)), (string as NSString).length)
+    }
+
+    private func updateTrackedSelection(
+        from anchor: Int,
+        toWindowPoint point: NSPoint,
+        in container: any RichInlineTextSelectionContainer
+    ) {
+        let views = container.richInlineTextViewsInSelectionOrder().filter { !$0.isHidden && !$0.string.isEmpty }
+        guard let sourceIndex = views.firstIndex(where: { $0 === self }) else { return }
+        let targetIndex = views.enumerated().min { lhs, rhs in
+            selectionDistance(fromWindowPoint: point, to: lhs.element)
+                < selectionDistance(fromWindowPoint: point, to: rhs.element)
+        }?.offset
+        guard let targetIndex else { return }
+        if targetIndex == sourceIndex {
+            let targetCharacter = characterIndexForSelection(atWindowPoint: point)
+            let start = min(anchor, targetCharacter)
+            let end = max(anchor, targetCharacter)
+            for (index, view) in views.enumerated() {
+                view.setSelectedRange(index == sourceIndex
+                    ? NSRange(location: start, length: end - start)
+                    : NSRange(location: 0, length: 0))
+            }
+        } else {
+            let target = views[targetIndex]
+            applyDocumentSelection(
+                views: views, sourceIndex: sourceIndex, targetIndex: targetIndex,
+                anchor: anchor,
+                targetCharacter: target.characterIndexForSelection(atWindowPoint: point)
+            )
+        }
+    }
+
+    /// Deterministic seam for the cross-view range math. Event routing remains
+    /// exercised by `mouseDown`; this lets both document owners pin the resulting
+    /// native NSTextView selections without manufacturing a tracking loop.
+    func qaExtendSelection(to target: RichInlineTextView, anchor: Int, targetCharacter: Int) {
+        guard let container = enclosingSelectionContainer() else { return }
+        let views = container.richInlineTextViewsInSelectionOrder().filter { !$0.isHidden && !$0.string.isEmpty }
+        guard let sourceIndex = views.firstIndex(where: { $0 === self }),
+              let targetIndex = views.firstIndex(where: { $0 === target }),
+              sourceIndex != targetIndex else { return }
+        applyDocumentSelection(
+            views: views, sourceIndex: sourceIndex, targetIndex: targetIndex,
+            anchor: anchor, targetCharacter: targetCharacter
+        )
+    }
+
+    private func applyDocumentSelection(
+        views: [RichInlineTextView], sourceIndex: Int, targetIndex: Int,
+        anchor: Int, targetCharacter: Int
+    ) {
+        for (index, view) in views.enumerated() {
+            let length = (view.string as NSString).length
+            let range: NSRange
+            if sourceIndex < targetIndex {
+                switch index {
+                case sourceIndex: range = NSRange(location: min(anchor, length), length: max(0, length - min(anchor, length)))
+                case (sourceIndex + 1)..<targetIndex: range = NSRange(location: 0, length: length)
+                case targetIndex: range = NSRange(location: 0, length: min(targetCharacter, length))
+                default: range = NSRange(location: 0, length: 0)
+                }
+            } else {
+                switch index {
+                case targetIndex:
+                    let start = min(targetCharacter, length)
+                    range = NSRange(location: start, length: max(0, length - start))
+                case (targetIndex + 1)..<sourceIndex: range = NSRange(location: 0, length: length)
+                case sourceIndex: range = NSRange(location: 0, length: min(anchor, length))
+                default: range = NSRange(location: 0, length: 0)
+                }
+            }
+            view.setSelectedRange(range)
+        }
+    }
+
+    private func selectionDistance(fromWindowPoint point: NSPoint, to view: NSView) -> CGFloat {
+        guard view.window != nil else { return .greatestFiniteMagnitude }
+        let rect = view.convert(view.bounds, to: nil)
+        let dx = max(max(rect.minX - point.x, 0), point.x - rect.maxX)
+        let dy = max(max(rect.minY - point.y, 0), point.y - rect.maxY)
+        return hypot(dx, dy)
     }
 }

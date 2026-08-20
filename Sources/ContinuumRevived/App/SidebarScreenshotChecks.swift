@@ -463,6 +463,16 @@ enum SidebarScreenshotChecks {
                                 cell.qaProviderGlyph))
                         }
                     }
+                    for cell in host.inbox.qaMaterializedRowCells
+                    where cell.qaAgentID != nil {
+                        let frames = cell.qaGeometry.elementFrames
+                        guard let placementIcon = frames["projectIcon"],
+                              let statusGlyph = frames["statusGlyph"] else { continue }
+                        if placementIcon.width > 0, statusGlyph.width > 0,
+                           placementIcon.intersects(statusGlyph) {
+                            throw Failure(description: "live96-\(rowSetID): directory icon and status glyph overlap for '\(cell.qaTitle)' (\(placementIcon) vs \(statusGlyph))")
+                        }
+                    }
                     if rowSetID == "rules" {
                         try assertHoverCardCarriesWhatTheRowCannot(
                             inbox: host.inbox, rows: liveRows, appearance: appearance)

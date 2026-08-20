@@ -48,6 +48,9 @@ final class ToolCallView: NSView {
     private(set) var isExpanded = false
 
     private var blockID: AgentNodeID?
+    private var disclosureText = ""
+    private var compactSummary = ""
+    private var hasDisclosureDetail = false
     private var status: AgentItemStatus = .pending
     private var context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
 
@@ -99,11 +102,17 @@ final class ToolCallView: NSView {
         let presentation = payload.status.agentToolStatusPresentation
         statusLabel.stringValue = "\(presentation.glyph) \(presentation.label)"
         let candidateSummary = payload.summary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        summaryLabel.stringValue = candidateSummary.caseInsensitiveCompare(presentation.label) == .orderedSame
+        disclosureText = candidateSummary.caseInsensitiveCompare(presentation.label) == .orderedSame
             ? "" : candidateSummary
-        summaryLabel.maximumNumberOfLines = isExpanded ? 4 : 1
+        let lines = disclosureText.split(whereSeparator: { $0.isNewline }).map(String.init)
+        compactSummary = lines.first ?? ""
+        hasDisclosureDetail = lines.count > 1
+        if !hasDisclosureDetail { isExpanded = false }
+        summaryLabel.stringValue = isExpanded ? disclosureText : compactSummary
+        summaryLabel.maximumNumberOfLines = isExpanded ? 12 : 1
         summaryLabel.isHidden = summaryLabel.stringValue.isEmpty
-        disclosureButton.isEnabled = !summaryLabel.stringValue.isEmpty
+        disclosureButton.isHidden = !hasDisclosureDetail
+        disclosureButton.isEnabled = hasDisclosureDetail
         disclosureButton.apply(expanded: isExpanded, title: titleLabel.stringValue)
         identifier = NSUserInterfaceItemIdentifier("agent.toolCall.\(blockID.rawValue)")
         applyAccessibility(name: titleLabel.stringValue, status: payload.status)
@@ -114,21 +123,21 @@ final class ToolCallView: NSView {
     func applyAccessibility(name: String, status: AgentItemStatus) {
         let presentation = status.agentToolStatusPresentation
         setAccessibilityLabel("Tool, \(Self.safeSingleLine(name, fallback: "Tool")), \(presentation.label)")
-        setAccessibilityChildren(summaryLabel.isHidden
-            ? [disclosureButton, titleLabel, statusLabel]
-            : [disclosureButton, titleLabel, statusLabel, summaryLabel])
+        var children: [NSView] = disclosureButton.isHidden
+            ? [titleLabel, statusLabel] : [disclosureButton, titleLabel, statusLabel]
+        if !summaryLabel.isHidden { children.append(summaryLabel) }
+        setAccessibilityChildren(children)
     }
 
     override func layout() {
         super.layout()
         let inset = Self.horizontalInset
         let buttonSide = CGFloat(Space.xxl)
-        disclosureButton.frame = NSRect(
+        disclosureButton.frame = disclosureButton.isHidden ? .zero : NSRect(
             x: inset, y: (Self.rowHeight - buttonSide) / 2,
-            width: buttonSide, height: buttonSide
-        )
+            width: buttonSide, height: buttonSide)
         iconView.frame = NSRect(
-            x: disclosureButton.frame.maxX + CGFloat(Space.s),
+            x: disclosureButton.isHidden ? inset : disclosureButton.frame.maxX + CGFloat(Space.s),
             y: (Self.rowHeight - buttonSide) / 2,
             width: buttonSide, height: buttonSide
         )
@@ -173,22 +182,25 @@ final class ToolCallView: NSView {
     static func measuredHeight(summary: String?, width: CGFloat, expanded: Bool) -> CGFloat {
         guard let summary = summary?.trimmingCharacters(in: .whitespacesAndNewlines),
               !summary.isEmpty else { return rowHeight }
+        let lines = summary.split(whereSeparator: { $0.isNewline }).map(String.init)
+        let measuredText = expanded && lines.count > 1 ? summary : (lines.first ?? "")
         let available = max(1, width - horizontalInset * 2)
-        let rect = (summary as NSString).boundingRect(
+        let rect = (measuredText as NSString).boundingRect(
             with: NSSize(width: available, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: [.font: NSFont.token(.body)]
         )
         let lineHeight = CGFloat(Metrics.lineHeight(for: .body))
-        let lines: CGFloat = expanded ? 4 : 1
-        return rowHeight + min(ceil(rect.height), lineHeight * lines) + detailBottomInset
+        let lineLimit: CGFloat = expanded ? 12 : 1
+        return rowHeight + min(ceil(rect.height), lineHeight * lineLimit) + detailBottomInset
     }
 
     @objc private func toggleDisclosure(_ sender: Any?) {
-        guard let blockID else { return }
+        guard let blockID, hasDisclosureDetail else { return }
         isExpanded.toggle()
         context.actions.setExpanded(isExpanded, blockID: blockID)
-        summaryLabel.maximumNumberOfLines = isExpanded ? 4 : 1
+        summaryLabel.stringValue = isExpanded ? disclosureText : compactSummary
+        summaryLabel.maximumNumberOfLines = isExpanded ? 12 : 1
         summaryLabel.isHidden = summaryLabel.stringValue.isEmpty
         disclosureButton.apply(expanded: isExpanded, title: titleLabel.stringValue)
         applyAccessibility(name: titleLabel.stringValue, status: status)

@@ -61,7 +61,7 @@ extension UIProbeGeometry {
             document: document,
             patch: try AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: [blockID])
         )
-        guard boundList.qaPresentedToolSummary(for: blockID)?.contains("Tool") == true else {
+        guard boundList.qaPresentedToolSummary(for: blockID)?.contains("Read file") == true else {
             throw GeometryError(message: "explicit immutable tool identity did not disclose the completed detail")
         }
 
@@ -79,7 +79,8 @@ extension UIProbeGeometry {
         )
         // Store the sanitized record through its normal capture boundary.
         _ = await store.recordStart(AgentToolDetailStart(
-            identity: currentIdentity, toolName: expiringRecord.toolName
+            identity: currentIdentity, toolName: expiringRecord.toolName,
+            affectedFiles: [URL(fileURLWithPath: "/Users/private/project/Sources/Agent.swift")]
         ))
         _ = await store.recordEnd(AgentToolDetailEnd(
             identity: currentIdentity, status: .completed
@@ -91,8 +92,46 @@ extension UIProbeGeometry {
             patch: try AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: [blockID])
         )
         await expiringList.qaWaitForToolDetailRefresh()
-        guard expiringList.qaPresentedToolSummary(for: blockID)?.contains("Tool") == true else {
-            throw GeometryError(message: "fresh store detail was not presentable before expiry")
+        guard let storedDisclosure = expiringList.qaPresentedToolSummary(for: blockID),
+              storedDisclosure.contains("Read Agent.swift"),
+              storedDisclosure.contains("Read: …/Sources/Agent.swift"),
+              !storedDisclosure.contains("/Users/private") else {
+            throw GeometryError(message: "fresh store detail did not disclose its abbreviated affected file before expiry")
+        }
+
+        // File changes use the Changes renderer rather than ToolCallRenderer,
+        // but must receive the same host-local target without mutating/syncing
+        // the semantic diff payload.
+        let writeBlockID = id("write-disclosure-block")
+        let writeEntryID = id("write-disclosure-entry")
+        let writeItemID: AgentToolDetailID = "write-disclosure-check"
+        let writeIdentity = AgentToolDetailKey(scope: turnTwo, providerItemID: writeItemID)
+        let writeBlock = AgentBlock(
+            id: writeBlockID, revision: 1, kind: .diff,
+            payload: .diff(AgentDiffPayload(text: "write", summary: "write"))
+        )
+        let writeEntry = AgentEntry(
+            id: writeEntryID, revision: 1, role: .assistant,
+            provenance: .providerItem(provider: "runtime", itemID: writeItemID.rawValue),
+            blocks: [writeBlock]
+        )
+        _ = await store.recordStart(AgentToolDetailStart(
+            identity: writeIdentity, toolName: "write",
+            affectedFiles: [URL(fileURLWithPath: "/Users/private/project/Sources/Written.swift")]
+        ))
+        _ = await store.recordEnd(AgentToolDetailEnd(identity: writeIdentity, status: .completed))
+        let writeList = AgentTranscriptListView(toolDetailStore: store)
+        writeList.bindToolDetailIdentity(writeIdentity, to: writeEntryID)
+        try writeList.apply(
+            document: AgentDocument(version: 1, entries: [writeEntry]),
+            patch: try AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: [writeBlockID])
+        )
+        await writeList.qaWaitForToolDetailRefresh()
+        guard writeList.qaPresentedDiffFiles(for: writeBlockID)?.map(\.displayName)
+                == ["…/Sources/Written.swift"],
+              case let .diff(semanticWritePayload) = writeBlock.payload,
+              semanticWritePayload.files.isEmpty else {
+            throw GeometryError(message: "file-change card did not compose one abbreviated host-local write target")
         }
         clock.advance(11)
         _ = await store.expireNow()
@@ -116,7 +155,7 @@ extension UIProbeGeometry {
             document: document,
             patch: try AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: [blockID])
         )
-        guard noStoreExpiringList.qaPresentedToolSummary(for: blockID)?.contains("Tool") == true else {
+        guard noStoreExpiringList.qaPresentedToolSummary(for: blockID)?.contains("Read file") == true else {
             throw GeometryError(message: "fresh no-store TTL-bound provider detail was not presentable")
         }
         clock.advance(11)

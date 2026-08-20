@@ -1923,7 +1923,12 @@ final class AgentSupervisor {
             warn("AgentSupervisor.send: \(refusal)")
             return false
         }
-        let firstPromptText = Self.visibleNamingText(from: prompt)
+        let firstPromptText = Self.visibleNamingText(
+            from: prompt,
+            model: record.model,
+            role: record.role,
+            id: record.id.rawValue
+        )
         // Keep only the first local prompt's visible text for the explicit naming
         // action. Local image paths/@path argv capabilities are never copied into
         // this memory-only naming context.
@@ -2049,8 +2054,20 @@ final class AgentSupervisor {
         send(AgentPrompt(prompt), to: id)
     }
 
-    private nonisolated static func visibleNamingText(from prompt: AgentPrompt) -> String? {
+    private nonisolated static func visibleNamingText(
+        from prompt: AgentPrompt,
+        model: String?,
+        role: String?,
+        id: UUID?
+    ) -> String? {
         let bounded = String(prompt.text.prefix(AgentNameOneShot.maximumPromptLength))
+        // Reject identifiers before stripping local-path-shaped text. Model ids
+        // contain a slash, so sanitizing first could turn `provider/model` into
+        // the plausible-looking title `provider` and bypass the shared guard.
+        guard let original = AgentName.normalizedLabel(bounded),
+              !AgentName.isIdentifier(original, model: model, role: role, id: id) else {
+            return nil
+        }
         let visible = SecretRedactor.removeLocalPathReferences(bounded)
         return AgentName.normalizedLabel(visible)
     }
@@ -3060,10 +3077,16 @@ final class AgentSupervisor {
         let effectiveHarness = harness ?? record.harness
         guard let effectiveHarness else { return false }
         let effectiveModel = model ?? record.model
-        let snapshot = AgentModelCatalog.shared.snapshot(for: effectiveHarness)
-        guard snapshot.models.contains(effectiveModel), AgentHarnessConfig.isProviderCompatible(model: effectiveModel, harness: effectiveHarness) else {
-            warn("AgentSupervisor.setProviderSettings: choose a model owned by \(effectiveHarness.rawValue) before switching harness")
-            return false
+        // Validate ownership only when this action changes the model/harness.
+        // A restored record may legitimately retain a model removed from the
+        // current catalogue; changing only its effort must preserve that model,
+        // not become impossible until the user also chooses a replacement.
+        if model != nil || harness != nil {
+            let snapshot = AgentModelCatalog.shared.snapshot(for: effectiveHarness)
+            guard snapshot.models.contains(effectiveModel), AgentHarnessConfig.isProviderCompatible(model: effectiveModel, harness: effectiveHarness) else {
+                warn("AgentSupervisor.setProviderSettings: choose a model owned by \(effectiveHarness.rawValue) before switching harness")
+                return false
+            }
         }
         if let thinking, !AgentModelConfig.thinkingOptions.contains(thinking) { return false }
         var changed = false
@@ -5757,7 +5780,7 @@ func runAgentSupervisorChecks() async throws {
 
     // MARK: 13 · an observed spawn_agent call becomes a child agent (P2D.2)
 
-    let spawnCallReport = try await checkSpawnFromToolCall(config: config, fail: fail)
+    let spawnCallReport = try await checkSpawnFromToolCall(fail: fail)
 
     // MARK: 14 · a turn you did not watch is unread, and looking clears it (P3.3)
 
@@ -6638,6 +6661,11 @@ private func checkAgentNameContract<Failure: Error>(
         role: "operator",
         prompt: nil,
         cwd: cwd,
+        // Project roles live under `.pi/agents` and may override the model to a
+        // provider Pi owns. Keep this witness on that real harness instead of
+        // inheriting the machine's ambient default (often Claude Code), which
+        // would correctly refuse the role's OpenAI model before naming runs.
+        harness: .pi,
         model: config.model,
         thinking: config.thinking
     )
@@ -7512,12 +7540,12 @@ private func checkAgentBlockRendererRegistry<Failure: Error>(
     guard registry.isFrozen else {
         throw fail("production block renderer registry is not frozen after bootstrap")
     }
-    // 18, not 16: `ddbf83d` (Render semantic transcript images) added `.image`
+    // 19, not 16: `ddbf83d` (Render semantic transcript images) added `.image`
     // and `.imageGallery` to the fixture and did not move the number with them,
-    // and this leg halts earlier at the KNOWN-RED naming section so nothing said
-    // so. Both halves are pinned — the exact roster size, and that no kind is
-    // listed twice, which a bare count cannot tell apart from a missing one.
-    guard AgentBlockRendererRegistry.builtInKinds.count == 18,
+    // and `882316d0` later added `.fileReferences`. Both halves are pinned — the
+    // exact roster size, and that no kind is listed twice, which a bare count
+    // cannot tell apart from a missing one.
+    guard AgentBlockRendererRegistry.builtInKinds.count == 19,
           Set(AgentBlockRendererRegistry.builtInKinds).count
             == AgentBlockRendererRegistry.builtInKinds.count else {
         throw fail("block renderer built-in fixture is incomplete or duplicated: \(AgentBlockRendererRegistry.builtInKinds.map(\.rawValue))")
@@ -9477,7 +9505,7 @@ private func checkHeadlessAgents(
     guard headlessBranch.contains("promptForAgentTask("), headlessBranch.contains("prompt: prompt") else {
         throw fail("the headless spawn branch does not collect and pass a first prompt, so it spawns an agent that never runs:\n\(headlessBranch)")
     }
-    let spawnHelper = try paletteAgentSpawnBranch("private func spawnSupervisedAgent(tileId: UUID?, prompt: String? = nil, providerSettings: AgentModelConfig.Resolution? = nil) -> AgentID? {")
+    let spawnHelper = try paletteAgentSpawnBranch("private func spawnSupervisedAgent(tileId: UUID?, prompt: String? = nil, launchSelection: AgentLaunchSelection? = nil) -> AgentID? {")
     guard spawnHelper.contains("prompt: prompt") else {
         throw fail("the app's spawn helper drops the prompt, so the headless agent would not run:\n\(spawnHelper)")
     }
@@ -9601,7 +9629,6 @@ private final class SpawnedRunnerFactory {
 /// assertion.
 @MainActor
 private func checkSpawnFromToolCall(
-    config: AgentModelConfig.Resolution,
     fail: (String) -> Error
 ) async throws -> String {
     let root = FileManager.default.temporaryDirectory
@@ -9616,12 +9643,17 @@ private func checkSpawnFromToolCall(
     // others declare no provider settings, which is where inheritance is asserted.
     // Committed, because the isolated child works in a worktree and only tracked files
     // reach one — which is the property `runnerConfig(for:)` relies on.
-    guard let scoutModel = AgentModelConfig.modelOptions.last else {
+    // `spawn_agent` roles are Pi-owned (`.pi/agents` plus Pi's tool side
+    // channel), so this end-to-end fixture must not inherit the app's ambient
+    // Claude/Codex selection. Resolve both parent and role models from Pi's
+    // deterministic QA catalogue.
+    let piConfig = AgentModelConfig.resolvedFromDefaults(harness: .pi)
+    guard let scoutModel = AgentModelConfig.modelOptions(for: .pi).last else {
         throw fail("AgentModelConfig lists no models, so the role fixture cannot name one")
     }
     let scoutThinking = "xhigh"
     let scoutTools = "read, grep, find"
-    guard scoutModel != config.model, scoutThinking != config.thinking else {
+    guard scoutModel != piConfig.model, scoutThinking != piConfig.thinking else {
         throw fail("the role fixture must differ from the inherited settings, or the resolution assertions are vacuous")
     }
     try writeSpawnCheckRole(in: repo, id: "code-scout", model: scoutModel, reasoning: scoutThinking, tools: scoutTools)
@@ -9666,8 +9698,9 @@ private func checkSpawnFromToolCall(
         role: "orchestrator",
         prompt: nil,
         cwd: repo,
-        model: config.model,
-        thinking: config.thinking,
+        harness: .pi,
+        model: piConfig.model,
+        thinking: piConfig.thinking,
         projectId: projectId
     )
     factory = SpawnedRunnerFactory(parent: (parentId, parentRunner))
@@ -9876,7 +9909,7 @@ private func checkSpawnFromToolCall(
         throw fail("expected \(AgentSupervisor.maxChildrenPerParent - 1) role-only children, got \(workers.count)")
     }
     for worker in workers {
-        guard worker.model == config.model, worker.thinking == config.thinking else {
+        guard worker.model == piConfig.model, worker.thinking == piConfig.thinking else {
             throw fail("\(worker.role ?? "?") did not inherit the parent's provider settings: model \(worker.model), thinking \(worker.thinking)")
         }
         guard AgentSupervisor.runnerConfig(for: worker).extraArgs.isEmpty else {
@@ -11640,6 +11673,27 @@ private func checkPerAgentProviderSettings(
     defer { try? FileManager.default.removeItem(at: root) }
     let store = AgentStore(applicationSupportDirectory: root)
 
+    // This section exercises Pi-only contracts (`--model`, `--thinking`, role
+    // tools, and Pi's full catalogue). Scope the ambient defaults used by the
+    // production tile to Pi, then restore them exactly; otherwise a developer's
+    // selected Claude/Codex harness changes what this deterministic check means.
+    let standardDefaults = UserDefaults.standard
+    let savedHarness = standardDefaults.object(forKey: AgentHarnessConfig.key)
+    let savedModel = standardDefaults.object(forKey: AgentModelConfig.modelKey)
+    let savedThinking = standardDefaults.object(forKey: AgentModelConfig.thinkingKey)
+    AgentHarnessConfig.store(.pi, defaults: standardDefaults)
+    standardDefaults.set(AgentModelConfig.fallbackModelOptions[0], forKey: AgentModelConfig.modelKey)
+    standardDefaults.set(AgentModelConfig.defaultThinking, forKey: AgentModelConfig.thinkingKey)
+    defer {
+        func restore(_ value: Any?, key: String) {
+            if let value { standardDefaults.set(value, forKey: key) }
+            else { standardDefaults.removeObject(forKey: key) }
+        }
+        restore(savedHarness, key: AgentHarnessConfig.key)
+        restore(savedModel, key: AgentModelConfig.modelKey)
+        restore(savedThinking, key: AgentModelConfig.thinkingKey)
+    }
+
     // The picks, chosen to be UNLIKE the defaults in both fields. Guarded, because
     // the whole check turns on that difference.
     let pickedModel = "openai-codex/gpt-5.4-mini"
@@ -11730,6 +11784,7 @@ private func checkPerAgentProviderSettings(
     }
     defaults.set(movedDefault, forKey: AgentModelConfig.modelKey)
     defaults.set("minimal", forKey: AgentModelConfig.thinkingKey)
+    AgentHarnessConfig.store(.pi, defaults: defaults)
     guard AgentModelConfig.resolvedFromDefaults(defaults: defaults).model == movedDefault else {
         throw fail("provider-settings: the isolated defaults suite did not take the moved default, so this section proves nothing")
     }

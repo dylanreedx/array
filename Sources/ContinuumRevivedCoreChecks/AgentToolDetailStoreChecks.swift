@@ -700,6 +700,11 @@ private func runAgentToolDetailPresentationChecks() async throws {
     detail = await store.detail(for: testToolDetailKey("tool-edit-summary"))
     expect(AgentToolDetailPresenter.compact(detail!).summary.hasPrefix("Edited File.swift"),
            "AgentToolDetailPresenter compact: edit summary should use safe basename")
+    let disclosure = AgentToolDetailPresenter.observableDisclosureText(detail!)
+    expect(disclosure.contains("Edited File.swift\nChanged: …/project/File.swift"),
+           "AgentToolDetailPresenter disclosure: expanded edit detail should identify its abbreviated target, got \(disclosure)")
+    expect(!disclosure.contains("/tmp/") && !disclosure.contains("/Users/"),
+           "AgentToolDetailPresenter disclosure: expanded target must not print an absolute host path, got \(disclosure)")
     expect(!AgentToolDetailPresenter.compact(detail!).accessibilitySummary.contains("File.swift"),
            "AgentToolDetailPresenter compact: accessibility summary must not expose raw file names")
 }

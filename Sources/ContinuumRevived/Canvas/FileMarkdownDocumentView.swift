@@ -13,7 +13,7 @@ import ContinuumRevivedCore
 /// classifies it. Unknown constructs (tables, raw HTML) fall through to the
 /// registry's readable-source fallback rather than disappearing.
 @MainActor
-final class FileMarkdownDocumentView: NSView {
+final class FileMarkdownDocumentView: NSView, RichInlineTextSelectionContainer {
     /// Preview renders at most this many semantic blocks; see `BodyView`.
     static var maximumRenderedBlocks: Int { BodyView.maximumRenderedBlocks }
 
@@ -126,6 +126,10 @@ final class FileMarkdownDocumentView: NSView {
         }
         walk(body)
         return found
+    }
+
+    func richInlineTextViewsInSelectionOrder() -> [RichInlineTextView] {
+        qaInlineTextViews()
     }
 
     /// One vertical stack of semantic blocks. Flipped so rows advance from the

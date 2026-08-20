@@ -907,6 +907,35 @@ public enum AgentToolDetailPresenter {
         shortLine(pureSummary(for: detail) ?? safeToolName(detail.toolName))
     }
 
+    /// Host-local disclosure text. The first line is the compact row summary;
+    /// subsequent lines are genuinely additional, already-sanitized facts. File
+    /// locations are abbreviated to their final two components so the operator
+    /// can distinguish targets without printing a home directory or machine path.
+    public static func observableDisclosureText(_ detail: AgentToolDetailRecord) -> String {
+        var lines = [observableSummary(detail)]
+        let fileLabel = observableFileAction(detail.toolName)
+        for fileName in observableAffectedFileNames(detail) {
+            lines.append("\(fileLabel): \(fileName)")
+        }
+        for argument in detail.arguments.prefix(4)
+        where !argument.sensitiveKeyFiltered && !argument.value.redacted {
+            let value = shortLine(argument.value.text)
+            guard !value.isEmpty, !value.contains("[REDACTED]"),
+                  !isPathBearingObservableValue(value) else { continue }
+            lines.append("\(shortLine(argument.key, maxBytes: 48)): \(value)")
+        }
+        if let exitCode = detail.exitCode { lines.append("Exit code: \(exitCode)") }
+        if let duration = detail.duration { lines.append("Duration: \(formatDuration(duration))") }
+        return lines.prefix(12).joined(separator: "\n")
+    }
+
+    /// Display-only host-local file names for transcript composition. These are
+    /// deliberately abbreviated before leaving the presenter so a renderer can
+    /// never accidentally receive an absolute machine path.
+    public static func observableAffectedFileNames(_ detail: AgentToolDetailRecord) -> [String] {
+        detail.affectedFiles.prefix(6).map(abbreviatedFilePath)
+    }
+
     public static func expanded(_ detail: AgentToolDetailRecord) -> AgentToolDetailExpandedPresentation {
         let status = statusText(detail.status)
         let exitText = detail.exitCode.map { "Exit \($0)" }
@@ -984,6 +1013,25 @@ public enum AgentToolDetailPresenter {
         guard let url = detail.affectedFiles.first else { return nil }
         let basename = url.lastPathComponent
         return basename.isEmpty ? nil : basename
+    }
+
+    private static func observableFileAction(_ toolName: String) -> String {
+        let tool = safeToolName(toolName).lowercased().filter { $0.isLetter || $0.isNumber }
+        if ["read", "open", "cat"].contains(where: { tool.contains($0) }) { return "Read" }
+        if ["edit", "write", "patch"].contains(where: { tool.contains($0) }) { return "Changed" }
+        if ["grep", "search", "find", "glob"].contains(where: { tool.contains($0) }) { return "Searched in" }
+        return "File"
+    }
+
+    private static func abbreviatedFilePath(_ file: URL) -> String {
+        let components = file.standardizedFileURL.pathComponents.filter { $0 != "/" }
+        guard let basename = components.last else { return "File" }
+        guard components.count > 1 else { return basename }
+        return "…/" + components.suffix(2).joined(separator: "/")
+    }
+
+    private static func isPathBearingObservableValue(_ value: String) -> Bool {
+        value.contains("/") || value.contains("\\") || value.contains("://") || value.hasPrefix("~")
     }
 
     private static func statusText(_ status: AgentItemStatus) -> String {

@@ -3,8 +3,8 @@ import Foundation
 
 /// Pins the context-occupancy derivation that lets the radial meter show a real
 /// percentage. The per-provider composition is the load-bearing part: claude
-/// splits its prompt across input + cache counters, codex's `input_tokens` is
-/// ALREADY the total, and pi's shape is undocumented so it stays untouched.
+/// splits its prompt across input + cache counters, as does Pi; codex's
+/// per-request `usedTokens` is already the total.
 func runAgentContextOccupancyChecks() {
     let observedAt = Date(timeIntervalSince1970: 1_786_000_000)
 
@@ -71,11 +71,20 @@ func runAgentContextOccupancyChecks() {
     expect(providerWindow.maxTokens == 258_400,
            "a window the provider reported must not be overwritten by the catalogue's, got \(String(describing: providerWindow.maxTokens))")
 
-    // pi's per-message usage does not document whether input includes cache, so
-    // it is deliberately left underived rather than guessed at.
-    let pi = snapshot(source: .piMessageUsage, input: 10_000, output: 500, cacheRead: 5_000)
-    expect(AgentContextOccupancy.promptTokens(from: pi) == nil,
-           "pi per-message usage must not be derived into occupancy")
+    // Pi's own footer computes `latestPromptTokens` as input + cacheRead +
+    // cacheWrite. Pin the Luna-shaped case that used to render an empty solid
+    // ring (and, after restore, an empty dashed ring with a cumulative count).
+    let pi = snapshot(
+        source: .piMessageUsage,
+        input: 3_742,
+        output: 812,
+        cacheRead: 161_280,
+        cacheWrite: 1_024)
+    expect(AgentContextOccupancy.promptTokens(from: pi) == 166_046,
+           "pi occupancy must use input + cache read + cache write, got \(String(describing: AgentContextOccupancy.promptTokens(from: pi)))")
+    let piLuna = AgentContextOccupancy.withDerivedOccupancy(pi, contextWindow: 272_000)
+    expect(piLuna.usedTokens == 166_046 && piLuna.maxTokens == 272_000,
+           "Pi GPT-5.6 Luna must derive a real occupancy pair, got \(String(describing: piLuna.usedTokens))/\(String(describing: piLuna.maxTokens))")
 
     // Enrichment needs BOTH a derivable occupancy and a published window.
     let enriched = AgentContextOccupancy.withDerivedOccupancy(claude, contextWindow: 200_000)
@@ -114,5 +123,5 @@ func runAgentContextOccupancyChecks() {
     expect(AgentModelCatalog.parse(modelsStoreContextWindows: Data("not json".utf8)).isEmpty,
            "an unreadable store must parse to no windows rather than throwing or inventing")
 
-    print("AgentContextOccupancy checks passed: per-provider prompt composition (claude sums cache, codex does not, pi abstains), enrichment only with a published window, authoritative snapshots preserved, and models-store contextWindow parsing")
+    print("AgentContextOccupancy checks passed: per-provider prompt composition (claude/pi sum cache, codex uses per-request occupancy), Pi Luna regression, enrichment only with a published window, authoritative snapshots preserved, and models-store contextWindow parsing")
 }

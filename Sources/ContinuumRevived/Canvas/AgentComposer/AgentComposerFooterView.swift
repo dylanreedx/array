@@ -232,10 +232,15 @@ final class AgentComposerFooterView: NSView, TokenThemed {
         if selectedHarness != recordHarness {
             guard model != nil else { return }
             accepted = onLaunchSelectionWrite?(selectedHarness, next.model, next.thinking) ?? false
+        } else if let writer = onSettingsWrite {
+            // Same-harness picks carry only the field that moved. Re-submitting
+            // the full launch selection would make an effort-only change fail
+            // for a restored agent whose model has left the live catalogue.
+            accepted = writer(model, thinking)
         } else if let writer = onLaunchSelectionWrite {
             accepted = writer(recordHarness, next.model, next.thinking)
         } else {
-            accepted = onSettingsWrite?(model, thinking) ?? true
+            accepted = true
         }
         guard accepted else {
             recordHarness = priorHarness

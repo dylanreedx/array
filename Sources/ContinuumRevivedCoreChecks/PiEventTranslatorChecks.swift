@@ -102,8 +102,12 @@ private func runPiContextWindowTelemetryChecks() {
         source: .piMessageUsage,
         freshness: .live
     ), "Pi usage: context snapshot must preserve usage counters without inventing occupancy; got \(snapshot)")
-    expect(snapshot.occupancyFraction == nil && snapshot.occupancyPercentage == nil,
-           "Pi usage: input+output/cache totals must not be inferred as context occupancy; got \(String(describing: snapshot.occupancyFraction))")
+    // The translator keeps the provider fields losslessly; the tile combines
+    // them with Pi's published model window. Pi defines current prompt usage as
+    // input + cacheRead + cacheWrite (output is not prompt occupancy).
+    let occupied = AgentContextOccupancy.withDerivedOccupancy(snapshot, contextWindow: 272_000)
+    expect(occupied.usedTokens == 1_044 && occupied.maxTokens == 272_000,
+           "Pi usage: published-window enrichment must derive prompt occupancy from input + cache reads/writes; got \(String(describing: occupied.usedTokens))/\(String(describing: occupied.maxTokens))")
     let encoded = String(decoding: try! JSONEncoder().encode(messageEndEvents), as: UTF8.self)
     expect(!encoded.contains("SECRET-TOOL-DETAIL"), "Pi context telemetry I5: raw tool detail crossed in events: \(encoded)")
 

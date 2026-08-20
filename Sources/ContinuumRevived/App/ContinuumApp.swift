@@ -3880,7 +3880,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 }
             }
             workspaceRuntime?.activeController?.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
-            installFocusHistoryHook()
+            installAcceptedTileFocusHook()
 
             installHotkeyMonitor()
             installTileFocusMonitor()
@@ -4774,10 +4774,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    private func installFocusHistoryHook() {
+    private func installAcceptedTileFocusHook() {
         focusBroker.onAcceptedTileFocusWithReason = { [weak self] tileId, reason in
-            self?.recordAcceptedTileFocusInHistory(tileId, reason: reason)
+            guard let self else { return }
+            self.synchronizeAgentFocus(to: tileId)
+            self.recordAcceptedTileFocusInHistory(tileId, reason: reason)
         }
+    }
+
+    /// Keep the supervisor's read watermark on the same tile focus the canvas
+    /// already accepted. Sidebar reveal used to call `focus(agentID:)` explicitly,
+    /// but a direct click in a tile and work-oriented keyboard navigation stopped
+    /// at FocusBroker/CanvasState, leaving a Done row unread until its sidebar card
+    /// was clicked. This is the shared bridge for those routes.
+    ///
+    /// Rebuild only when the focused agent or its attention actually changed. The
+    /// window-level click monitor reports every click inside an already-focused
+    /// transcript/composer; reloading the whole sidebar for each one would turn a
+    /// read-watermark fix into an interaction performance regression.
+    private func synchronizeAgentFocus(to tileId: UUID?) {
+        let previousAgent = agentSupervisor.focusedAgentID
+        let nextAgent = tileId.flatMap { agentSupervisor.agent(forTile: $0) }
+        let previousAttention = nextAgent.map { agentSupervisor.attention(for: $0) }
+        agentSupervisor.focusTile(tileId)
+        let attentionChanged = nextAgent.map {
+            previousAttention != agentSupervisor.attention(for: $0)
+        } ?? false
+        guard previousAgent != agentSupervisor.focusedAgentID || attentionChanged else { return }
+        reloadWorkspaceSidebar(rebuildAgentActivity: false)
     }
 
     private func recordAcceptedTileFocusInHistory(_ tileId: UUID, reason: FocusRequest) {
@@ -4849,7 +4873,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvas.focusBroker = focusBroker
         focusBroker.onAcceptedTileFocus = { [weak canvas] tileId in canvas?.markActive(tileId: tileId) }
         focusBroker.onAcceptedCanvasScope = { [weak canvas] in canvas?.clearFocusBorder() }
-        installFocusHistoryHook()
+        installAcceptedTileFocusHook()
         let viewA = DescriptorTileNSView(tile: tileA)
         let viewB = DescriptorTileNSView(tile: tileB)
         canvas.install(tileView: viewA, for: tileA)
@@ -6770,6 +6794,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             nextId = agentTileIds[0]
         }
         canvasView.markActive(tileId: nextId)
+        synchronizeAgentFocus(to: nextId)
         focusHistory.recordTileFocus(nextId, zoneId: zoneContainingTile(nextId), reason: .directTileActivation)
     }
 
@@ -6937,6 +6962,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 tiles: canvasView.canvasState.tiles
               ) else { return }
         canvasView.markActive(tileId: nextTileId)
+        synchronizeAgentFocus(to: nextTileId)
         focusHistory.recordTileFocus(nextTileId, zoneId: zoneContainingTile(nextTileId), reason: .directTileActivation)
     }
 
@@ -9469,7 +9495,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         app.canvasView = canvas
         app.focusBroker.onAcceptedTileFocus = { [weak canvas] tileId in canvas?.markActive(tileId: tileId) }
         app.focusBroker.onAcceptedCanvasScope = { [weak canvas] in canvas?.clearFocusBorder() }
-        app.installFocusHistoryHook()
+        app.installAcceptedTileFocusHook()
         try runtime.install(into: canvas, appRegistry: registry)
         canvas.layoutSubtreeIfNeeded()
 
@@ -25958,6 +25984,10 @@ extension AppDelegate {
     // left over from section B would hide the ones it is about to click.
     WorkspaceSidebarConfig.setScope(.all, defaults: standardDefaults)
     revealApp.configureWorkspaceSidebar(revealSidebar)
+    // Production installs this immediately after the active controller wires the
+    // broker. This check needs the same app-level focus→read bridge so a tile click
+    // is not accidentally proven only by the sidebar's explicit reveal call.
+    revealApp.installAcceptedTileFocusHook()
 
     // The unread mark, earned: establish one real visit before looking away, so
     // the durable watermark gives this completion a deterministic baseline. (`--agent-
@@ -26019,6 +26049,23 @@ extension AppDelegate {
                "an agent that has a tile is revealed IN it — its binding moved to \(String(describing: revealSupervisor.records[hereAgent]?.tileId))")
     try expect(revealCanvas.canvasState.tiles.count == tilesAfterFirstClick,
                "…and no second tile was spawned for it — \(revealCanvas.canvasState.tiles.count) tiles, was \(tilesAfterFirstClick)")
+
+    // 2b · DIRECT TILE FOCUS: no sidebar reveal callback participates. Rewind the
+    // read watermark, then drive the same accepted-focus notification emitted by
+    // the window click router. The supervisor and the already-rendered row must
+    // both quiet immediately.
+    try expect(revealSupervisor.markUnread(agentID: hereAgent),
+               "setup: direct-focus witness could not make the completed agent unread")
+    revealApp.refreshAgentSurfaces(notify: false)
+    try expect(row(hereAgent)?.attention == .unread,
+               "setup: direct-focus witness row did not carry the rewound unread mark")
+    try expect(revealApp.focusBroker.enterScope(.tile(hereTile), reason: .userClick),
+               "a direct click could not re-enter the managed tile's accepted focus scope")
+    try expect(revealSupervisor.attention(for: hereAgent) == .none,
+               "direct tile focus did not acknowledge the agent's completed state")
+    revealSidebar.inboxForQA.layoutForQA()
+    try expect(row(hereAgent)?.attention == InboxAttention.none,
+               "direct tile focus cleared supervisor attention but left the sidebar row unread")
 
     // 3 · HEADLESS: the click gives it a tile and lands on it, without inventing a
     //     second agent to put in the tile.

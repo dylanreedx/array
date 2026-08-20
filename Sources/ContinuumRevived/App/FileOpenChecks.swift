@@ -292,6 +292,69 @@ enum FileOpenChecks {
         try expect(view.qaVisibleText().contains("perf-sentinel"),
                    "the performance fixture must actually render its content")
 
+        // Rendered Markdown is many native text systems. A document selection
+        // must bridge them and copy as one ordered range, rather than stopping at
+        // the first paragraph boundary.
+        let selectionViews = view.richInlineTextViewsInSelectionOrder()
+        try expect(selectionViews.count >= 3, "Markdown selection fixture rendered fewer than three prose rows")
+        let selectionSource = selectionViews[0]
+        let selectionMiddle = selectionViews[1]
+        let selectionTarget = selectionViews[2]
+        let sourceLength = (selectionSource.string as NSString).length
+        let targetLength = (selectionTarget.string as NSString).length
+        selectionSource.qaExtendSelection(
+            to: selectionTarget, anchor: min(1, sourceLength),
+            targetCharacter: min(2, targetLength)
+        )
+        try expect(selectionSource.selectedRange().length == max(0, sourceLength - min(1, sourceLength))
+                   && selectionMiddle.selectedRange().length == (selectionMiddle.string as NSString).length
+                   && selectionTarget.selectedRange().length == min(2, targetLength),
+                   "Markdown document selection did not cross sibling text views")
+        selectionSource.copy(nil)
+        let copiedSelection = NSPasteboard.general.string(forType: .string) ?? ""
+        try expect(copiedSelection.contains("\n") && !copiedSelection.isEmpty,
+                   "Markdown document-wide selection did not copy as one ordered range")
+        selectionViews.forEach { $0.setSelectedRange(NSRange(location: 0, length: 0)) }
+
+        // Exercise the real AppKit tracking path. NSTextView consumes the drag
+        // inside `mouseDown`; RichInlineTextView must resume after that loop and
+        // extend the selection into the sibling under the release point.
+        let eventWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 260),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        let eventDocument = FileMarkdownDocumentView(frame: eventWindow.contentView?.bounds ?? .zero)
+        eventWindow.contentView = eventDocument
+        eventDocument.apply(markdown: "First selectable paragraph.\n\nSecond selectable paragraph.", theme: .dark)
+        eventWindow.contentView?.layoutSubtreeIfNeeded()
+        eventDocument.layoutSubtreeIfNeeded()
+        let eventViews = eventDocument.richInlineTextViewsInSelectionOrder()
+        try expect(eventViews.count == 2, "event selection fixture did not render two Markdown paragraphs")
+        let downPoint = eventViews[0].convert(
+            NSPoint(x: min(8, eventViews[0].bounds.maxX), y: eventViews[0].bounds.midY), to: nil
+        )
+        let targetPoint = eventViews[1].convert(
+            NSPoint(x: max(8, eventViews[1].bounds.maxX * 0.6), y: eventViews[1].bounds.midY), to: nil
+        )
+        func mouseEvent(_ type: NSEvent.EventType, point: NSPoint, number: Int) throws -> NSEvent {
+            guard let event = NSEvent.mouseEvent(
+                with: type, location: point, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: eventWindow.windowNumber, context: nil,
+                eventNumber: number, clickCount: 1,
+                pressure: type == .leftMouseUp ? 0 : 1
+            ) else { throw Failure(message: "could not create Markdown selection event \(type)") }
+            return event
+        }
+        let down = try mouseEvent(.leftMouseDown, point: downPoint, number: 1)
+        let drag = try mouseEvent(.leftMouseDragged, point: targetPoint, number: 2)
+        let up = try mouseEvent(.leftMouseUp, point: targetPoint, number: 3)
+        NSApplication.shared.postEvent(drag, atStart: false)
+        NSApplication.shared.postEvent(up, atStart: false)
+        eventViews[0].mouseDown(with: down)
+        try expect(eventViews.allSatisfy({ $0.selectedRange().length > 0 }),
+                   "real Markdown mouse drag still stopped at the first rendered paragraph")
+
         // What a canvas pan/zoom actually does to a tile: reposition it and lay it
         // out again. The document did not change and its width did not change, so
         // this must cost no measurement at all.

@@ -104,7 +104,7 @@ private final class AgentTranscriptCollectionItem: NSCollectionViewItem {
 /// list every managed-agent tile renders. The legacy card-stack transcript and
 /// its fixture flag were deleted at that gate.
 @MainActor
-final class AgentTranscriptListView: NSView {
+final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     enum UpdateError: Error, CustomStringConvertible {
         case versionMismatch(expected: UInt64, actual: UInt64)
         case documentPatchMismatch(document: UInt64, patch: UInt64)
@@ -1118,7 +1118,10 @@ final class AgentTranscriptListView: NSView {
         var ids = Set<AgentNodeID>()
         var pendingBlocks = entry.blocks
         while let block = pendingBlocks.popLast() {
-            if case .toolCall = block.payload { ids.insert(block.id) }
+            switch block.payload {
+            case .toolCall, .diff: ids.insert(block.id)
+            default: break
+            }
             pendingBlocks.append(contentsOf: block.children)
         }
         return ids
@@ -1345,21 +1348,41 @@ final class AgentTranscriptListView: NSView {
         return (newRows, owners, toolDetails, rowPositions, entryIndexByID)
     }
 
-    /// Applies only a sanitized compact summary to a terminal tool block. Active
-    /// work deliberately stays on the semantic activity/status path and never
-    /// reads local detail. The document and its Codable payload remain unchanged.
+    /// Composes sanitized host-local detail into a terminal tool or file-change
+    /// block. Active work stays on the semantic activity/status path. The source
+    /// document and its Codable payload remain unchanged.
     private func presentedToolBlock(_ block: AgentBlock) -> AgentBlock {
-        guard case let .toolCall(payload) = block.payload,
-              payload.status != .pending,
-              payload.status != .inProgress,
-              let providerID = toolDetailIDByBlockID[block.id] else { return block }
+        switch block.payload {
+        case let .toolCall(payload) where payload.status == .pending || payload.status == .inProgress:
+            return block
+        case .toolCall, .diff:
+            break
+        default:
+            return block
+        }
+        guard let providerID = toolDetailIDByBlockID[block.id] else { return block }
         if let cached = toolDetailsByID[providerID],
            let timeToLive = toolDetailTimeToLive,
            (timeToLive <= 0 || toolDetailClock().timeIntervalSince(cached.updatedAt) >= timeToLive) {
             toolDetailsByID.removeValue(forKey: providerID)
         }
-        guard let candidate = toolDetailProvider?(providerID) ?? toolDetailsByID[providerID],
-              candidate.identity == providerID else { return block }
+        let candidate: AgentToolDetailRecord
+        let detail: AgentToolDetailRecord
+        if let providerCandidate = toolDetailProvider?(providerID) {
+            guard providerCandidate.identity == providerID,
+                  let sanitized = AgentToolDetailPresenter.sanitizedProviderRecord(providerCandidate)
+            else { return block }
+            candidate = providerCandidate
+            detail = sanitized
+        } else {
+            guard let stored = toolDetailsByID[providerID], stored.identity == providerID else { return block }
+            // Actor-store snapshots have already crossed the sanitizer that
+            // validates affected file URLs. Preserve those host-local paths;
+            // applying the untrusted-provider boundary again erased the exact
+            // file the disclosure exists to reveal.
+            candidate = stored
+            detail = stored
+        }
         let candidateIsFresh: Bool
         if let timeToLive = toolDetailTimeToLive {
             candidateIsFresh = timeToLive > 0 &&
@@ -1369,14 +1392,27 @@ final class AgentTranscriptListView: NSView {
         }
         guard candidateIsFresh,
               candidate.status != .pending,
-              candidate.status != .inProgress,
-              let detail = AgentToolDetailPresenter.sanitizedProviderRecord(candidate) else { return block }
+              candidate.status != .inProgress else { return block }
         var presented = block
-        var presentedPayload = payload
-        // The observable summary may include a sanitized basename or command
-        // query. Opaque semantic arguments still never enter this presentation.
-        presentedPayload.summary = AgentToolDetailPresenter.observableSummary(detail)
-        presented.payload = .toolCall(presentedPayload)
+        switch block.payload {
+        case var .toolCall(payload):
+            // The observable summary may include a sanitized basename or command
+            // query. Opaque semantic arguments still never enter this presentation.
+            payload.summary = AgentToolDetailPresenter.observableDisclosureText(detail)
+            presented.payload = .toolCall(payload)
+        case var .diff(payload):
+            // A provider-authored semantic file list wins. Otherwise, compose
+            // abbreviated host-local targets into this ephemeral presentation.
+            // No filesystem capability or absolute path enters AgentDocument.
+            if payload.files.isEmpty {
+                payload.files = AgentToolDetailPresenter.observableAffectedFileNames(detail).map {
+                    AgentDiffFileSummary(displayName: $0)
+                }
+            }
+            presented.payload = .diff(payload)
+        default:
+            return block
+        }
         return presented
     }
 
@@ -1400,10 +1436,9 @@ final class AgentTranscriptListView: NSView {
         toolDetailRefreshTask = Task { [weak self, toolDetailStore] in
             let details = await toolDetailStore.allDetails()
             guard !Task.isCancelled, let self else { return }
-            self.toolDetailsByID = Dictionary(uniqueKeysWithValues: details.compactMap { detail in
-                guard let sanitized = AgentToolDetailPresenter.sanitizedProviderRecord(detail) else { return nil }
-                return (sanitized.identity, sanitized)
-            })
+            // `AgentToolDetailStore` owns the sanitizer. Keeping its records
+            // intact here is what preserves approved affected-file observations.
+            self.toolDetailsByID = Dictionary(uniqueKeysWithValues: details.map { ($0.identity, $0) })
             self.refreshVisibleToolDetails()
         }
     }
@@ -1530,8 +1565,8 @@ final class AgentTranscriptListView: NSView {
 
     private static func isToolDetailKind(_ kind: ItemKind) -> Bool {
         switch kind {
-        case .commandExecution, .mcpToolCall, .webSearch: return true
-        case .fileChange, .assistantMessage, .reasoning, .plan, .error: return false
+        case .commandExecution, .fileChange, .mcpToolCall, .webSearch: return true
+        case .assistantMessage, .reasoning, .plan, .error: return false
         }
     }
 
@@ -1581,6 +1616,25 @@ final class AgentTranscriptListView: NSView {
         guard let block = rows.compactMap(\.block).first(where: { $0.id == blockID }),
               case let .toolCall(payload) = presentedToolBlock(block).payload else { return nil }
         return payload.summary
+    }
+    func qaPresentedDiffFiles(for blockID: AgentNodeID) -> [AgentDiffFileSummary]? {
+        guard let block = rows.compactMap(\.block).first(where: { $0.id == blockID }),
+              case let .diff(payload) = presentedToolBlock(block).payload else { return nil }
+        return payload.files
+    }
+    func richInlineTextViewsInSelectionOrder() -> [RichInlineTextView] {
+        var found: [RichInlineTextView] = []
+        func collect(_ view: NSView) {
+            if let text = view as? RichInlineTextView { found.append(text) }
+            view.subviews.forEach(collect)
+        }
+        collect(collectionView)
+        return found.sorted { lhs, rhs in
+            let left = lhs.convert(lhs.bounds, to: collectionView)
+            let right = rhs.convert(rhs.bounds, to: collectionView)
+            if abs(left.minY - right.minY) > 0.5 { return left.minY < right.minY }
+            return left.minX < right.minX
+        }
     }
     var qaLiveHostCount: Int {
         trackedHosts = trackedHosts.filter { $0.value.value != nil }
