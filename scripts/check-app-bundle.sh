@@ -5,6 +5,7 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 CONFIGURATION=debug
 OUTPUT_DIR=""
 BUNDLE_PATH=""
+BUNDLE_WAS_SUPPLIED=0
 CHANNEL=dev
 
 usage() {
@@ -71,6 +72,9 @@ case "$CHANNEL" in
 esac
 
 cd "$ROOT_DIR"
+if [[ -n "$BUNDLE_PATH" ]]; then
+  BUNDLE_WAS_SUPPLIED=1
+fi
 if [[ -z "$OUTPUT_DIR" ]]; then
   stamp=$(date -u +%Y%m%dT%H%M%SZ)
   OUTPUT_DIR="$ROOT_DIR/qa-runs/$stamp/app-bundle"
@@ -226,10 +230,16 @@ done
 
 set +e
 {
-  echo "==> codesign --force --deep --sign - $BUNDLE_PATH"
-  codesign --force --deep --sign - "$BUNDLE_PATH"
-  sign_status=$?
-  echo "<== codesign sign exit $sign_status"
+  if [[ "$BUNDLE_WAS_SUPPLIED" == "1" ]]; then
+    echo "==> preserve supplied bundle signature"
+    sign_status=0
+    echo "<== codesign sign skipped (supplied bundle)"
+  else
+    echo "==> codesign --force --deep --sign - $BUNDLE_PATH"
+    codesign --force --deep --sign - "$BUNDLE_PATH"
+    sign_status=$?
+    echo "<== codesign sign exit $sign_status"
+  fi
   echo "==> codesign --verify --deep --strict --verbose=2 $BUNDLE_PATH"
   codesign --verify --deep --strict --verbose=2 "$BUNDLE_PATH"
   verify_status=$?
