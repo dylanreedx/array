@@ -472,6 +472,11 @@ enum SidebarScreenshotChecks {
                            placementIcon.intersects(statusGlyph) {
                             throw Failure(description: "live96-\(rowSetID): directory icon and status glyph overlap for '\(cell.qaTitle)' (\(placementIcon) vs \(statusGlyph))")
                         }
+                        if let cell = cell as? AgentInbox96CellView,
+                           placementIcon.width > 0,
+                           abs(cell.qaProjectBaselineDeltaForQA) > 0.5 {
+                            throw Failure(description: "live96-\(rowSetID): directory icon and label baselines differ for '\(cell.qaTitle)' by \(cell.qaProjectBaselineDeltaForQA)pt")
+                        }
                     }
                     if rowSetID == "rules" {
                         try assertHoverCardCarriesWhatTheRowCannot(
@@ -1041,21 +1046,25 @@ private func assertHoverCardCarriesWhatTheRowCannot(
 /// placeholder visibly hangs low inside the otherwise symmetric search row.
 @MainActor
 private func assertSearchPlaceholderIsVerticallyCentered(inbox: AgentInboxView) throws {
-    inbox.headerStyleOverride = AgentInboxHeaderStyleOverride()
-    defer { inbox.headerStyleOverride = nil }
     inbox.layoutForQA()
 
     let field = inbox.searchFieldViewForQA
     let drawing = inbox.searchTextDrawingRectForQA
     let measuredHeight = ceil(inbox.searchTextMeasuredHeightForQA)
+    let icon = inbox.searchIconFrameInFieldForQA
+    let scope = inbox.scopeControlFrameForQA
     guard abs(drawing.midY - field.bounds.midY) <= 0.5,
           abs(drawing.height - measuredHeight) <= 0.5,
-          drawing.height < field.bounds.height else {
+          drawing.height < field.bounds.height,
+          inbox.searchLeadingInsetForQA > 0,
+          drawing.minX >= icon.maxX + CGFloat(Space.s) - 0.5,
+          field.frame.width > scope.width + 40 else {
         throw SidebarScreenshotChecks.Failure(description:
-            "the 96 search placeholder is not centred in its field "
-            + "(field \(field.bounds), drawing \(drawing), measured height \(measuredHeight))")
+            "the production 96 search header is not stacked, centred, or clear of its icon "
+            + "(field \(field.frame), scope \(scope), drawing \(drawing), icon \(icon), "
+            + "leading inset \(inbox.searchLeadingInsetForQA), measured height \(measuredHeight))")
     }
-    print("SidebarScreenshotChecks: 96 search placeholder uses a centred \(Int(drawing.height))pt line in a \(Int(field.bounds.height))pt field")
+    print("SidebarScreenshotChecks: production 96 search is stacked and its centred placeholder clears the magnifier by \(Int(drawing.minX - icon.maxX))pt")
 }
 
 /// The 96 status is quiet, fixed-width telemetry; provider silhouettes need the

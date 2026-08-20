@@ -1362,6 +1362,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             undoToast.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.s),
             undoToast.bottomAnchor.constraint(equalTo: bulkBar.topAnchor, constant: -Space.xs),
         ])
+
+        // Property observers do not run for a property's declaration-time value.
+        // Production is born with the 96 header override already installed, so
+        // without this call the magnifier becomes visible when tokens apply while
+        // the field keeps the legacy one-row constraints and a zero text inset.
+        // The result is the exact overlap this style exists to prevent.
+        applyHeaderStyle()
     }
 
     required init?(coder: NSCoder) { return nil }
@@ -1448,8 +1455,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // after it — otherwise the placeholder sits underneath the magnifier.
         let chrome = headerStyleOverride?.fieldChrome == true
         let cell = searchField.cell as? InsetTextFieldCell
-        cell?.leadingInset = chrome ? Self.searchIconSide + CGFloat(Space.s) * 2 : 0
-        cell?.trailingInset = chrome ? Self.searchIconSide + CGFloat(Space.s) * 2 : 0
+        // One `s` places the control, one spans its nominal box, and one remains
+        // as breathing room before the text. Two gaps only clear the symbol's
+        // FRAME by ~1.5pt because NSTextField's alignment rect adds its own inset.
+        cell?.leadingInset = chrome ? Self.searchIconSide + CGFloat(Space.s) * 3 : 0
+        cell?.trailingInset = chrome ? Self.searchIconSide + CGFloat(Space.s) * 3 : 0
         applyTokens()
         needsLayout = true
     }
@@ -4322,6 +4332,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var searchTextMeasuredHeightForQA: CGFloat {
         searchField.cell?.cellSize(forBounds: searchField.bounds).height ?? 0
     }
+    var searchIconFrameInFieldForQA: NSRect {
+        searchIcon.convert(searchIcon.bounds, to: searchField)
+    }
+    var searchLeadingInsetForQA: CGFloat {
+        (searchField.cell as? InsetTextFieldCell)?.leadingInset ?? 0
+    }
+    var scopeControlFrameForQA: NSRect { scopeButton.frame }
     var scopePopoverItemsForQA: [ChoiceItem] { scopeButton.qaPresentedItems }
     var scopePopoverWidthForQA: CGFloat? { scopeButton.qaPopoverWidth }
     var isScopePopoverPresentedForQA: Bool { scopeButton.qaIsPopoverPresented }

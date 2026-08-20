@@ -4046,10 +4046,16 @@ enum UIProbeGeometry {
                       searchField.focusRingType == .none else {
                     throw fail("\(label): visible stock popup/search chrome remains in the live filter band")
                 }
-                guard abs(probe.inbox.scopeControlWidthForQA - 124) < 0.5,
-                      probe.inbox.searchFieldFrameForQA.width > 0,
-                      probe.inbox.searchFieldFrameForQA.minX > probe.inbox.scopeControlWidthForQA else {
-                    throw fail("\(label): fixed trigger/search sibling geometry escaped the 124pt band contract")
+                let searchFrame = probe.inbox.searchFieldFrameForQA
+                let scopeFrame = probe.inbox.scopeControlFrameForQA
+                let searchDrawing = probe.inbox.searchTextDrawingRectForQA
+                let searchIcon = probe.inbox.searchIconFrameInFieldForQA
+                guard searchFrame.width > scopeFrame.width + 40,
+                      abs(searchFrame.minX - scopeFrame.minX) <= 2,
+                      !searchFrame.intersects(scopeFrame),
+                      probe.inbox.searchLeadingInsetForQA > 0,
+                      searchDrawing.minX >= searchIcon.maxX + CGFloat(Space.s) - 0.5 else {
+                    throw fail("\(label): production stacked scope/search geometry or magnifier clearance escaped (search=\(searchFrame), scope=\(scopeFrame), drawing=\(searchDrawing), icon=\(searchIcon))")
                 }
                 let acceptedSearchFocus = probe.window.makeFirstResponder(searchField)
                 let searchHasFocus = probe.window.firstResponder === searchField || searchField.currentEditor() != nil
@@ -4073,7 +4079,7 @@ enum UIProbeGeometry {
                 scopeButton.keyDown(with: returnKey)
                 let keyboardItems = probe.inbox.scopePopoverItemsForQA
                 guard probe.inbox.isScopePopoverPresentedForQA,
-                      abs((probe.inbox.scopePopoverWidthForQA ?? -1) - probe.inbox.scopeControlWidthForQA) < 0.5,
+                      abs((probe.inbox.scopePopoverWidthForQA ?? -1) - 124) < 0.5,
                       keyboardItems.contains(where: {
                           $0.id == InboxScope.project(longestProject).storageValue && $0.title == longestProject
                       }) else {

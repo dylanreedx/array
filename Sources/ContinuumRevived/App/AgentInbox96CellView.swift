@@ -825,11 +825,12 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // leading slots. Directory identity used to be laid out first and then
         // `placementLeft` was reset to the status slot's trailing edge, putting
         // the throbber directly on top of the folder/favicon.
+        var projectIconFrame: NSRect?
         if projectIcon.image != nil {
             let side: CGFloat = 12
-            projectIcon.frame = inCard(NSRect(
+            projectIconFrame = NSRect(
                 x: placementLeft, y: bandY + (proposal.bandTop - side) / 2,
-                width: side, height: side))
+                width: side, height: side)
             placementLeft += side + 4
         } else {
             projectIcon.frame = .zero
@@ -842,10 +843,21 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                 statusGlyph.frame = inCard(slot)
             }
         }
-        placementLabel.frame = inCard(NSRect(
+        let placementFrame = NSRect(
             x: placementLeft, y: bandY,
             width: max(0, textRight - stateWidth - trailingIconWidth - 6 - placementLeft),
-            height: proposal.bandTop))
+            height: proposal.bandTop)
+        placementLabel.frame = inCard(placementFrame)
+        if var iconFrame = projectIconFrame {
+            // A folder symbol and an NSTextField report different baselines inside
+            // equally centred boxes. Align the baselines AppKit exposes instead of
+            // aligning the boxes; otherwise the folder sits a point away from the
+            // directory word even though their frame midpoints are identical.
+            iconFrame.origin.y = placementFrame.minY
+                + placementLabel.firstBaselineOffsetFromTop
+                - projectIcon.firstBaselineOffsetFromTop
+            projectIcon.frame = inCard(iconFrame)
+        }
         stateLabel.frame = inCard(NSRect(
             x: textRight - stateWidth, y: bandY,
             width: stateWidth, height: proposal.bandTop))
@@ -1036,6 +1048,14 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         return modelLabel.isHidden ? "" : modelLabel.stringValue
     }
     var qaProject: String { placementLabel.stringValue }
+    var qaProjectBaselineDeltaForQA: CGFloat {
+        guard projectIcon.frame.width > 0 else { return 0 }
+        let labelBaseline = placementLabel.frame.maxY
+            - placementLabel.firstBaselineOffsetFromTop
+        let iconBaseline = projectIcon.frame.maxY
+            - projectIcon.firstBaselineOffsetFromTop
+        return iconBaseline - labelBaseline
+    }
     var qaTextAlpha: Double { Double(titleLabel.alphaValue) }
     var qaAccentAlpha: Double { Double(stateLabel.alphaValue) }
     var qaGlyphAlpha: Double { Double(statusGlyph.alphaValue) }
