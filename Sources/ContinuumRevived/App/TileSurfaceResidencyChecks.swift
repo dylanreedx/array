@@ -468,7 +468,20 @@ enum TileSurfaceResidencyChecks {
         // 2.1 s), not the single convergence.
         world.settle()
         world.advance(world.canvas.residencyTuning.contentQuietDelay + 0.05)
-        world.evaluateResidency(passes: 12)
+        // THREE passes, not twelve. Dylan's report (2026-08-19): "seeing a tile
+        // focus, blurry to hi res is [not] the best". The blur->sharp pops were
+        // real and the parade was the artifact: promote 2/pass + bake 4/pass
+        // sharpened a 20-tile view as seconds of individual pops. The contract is
+        // ONE beat: the settle edge promotes every soft visible tile at once, and
+        // the next pass re-bakes them all under the visible budget.
+        world.evaluateResidency(passes: 3)
+        for tile in world.tiles {
+            guard let view = world.agentViews[tile.id],
+                  view.frame.intersects(world.canvas.qaVisibleWorldRect) else { continue }
+            try expect(view.surfaceResidency == .surfaced,
+                       "\(gesture): a visible tile is still mid-sharpen three passes after "
+                       + "settle — the parade of pops is back")
+        }
 
         let promoted = world.canvas.qaSurfacePromotionCount
         let demoted = world.canvas.qaSurfaceDemotionCount
@@ -988,31 +1001,27 @@ enum TileSurfaceResidencyChecks {
         try expect(world.canvas.qaSurfaceDemotionCount == 0,
                    "the heartbeat demoted \(world.canvas.qaSurfaceDemotionCount) tiles mid-gesture")
 
-        // 4. Settle: the heartbeat catches the deferred tiles up, ALSO capped per
-        // pass — a storm moved to the settle edge is still a storm — and the
-        // too-soft re-bake returns every quiet tile to a surface sharp at the new
-        // zoom. Without that, one zoom-in turned residency off for good: every
-        // pass found a matching revision, skipped the bake, failed the sharpness
-        // gate, and left the tile native — a real session measured 0 of 8
-        // surfaced for 36 seconds until the user happened to zoom back out.
-        let passCap = world.canvas.residencyTuning.maxSharpnessCatchUpPromotionsPerPass
-        var beforePass = world.canvas.qaSurfacePromotionCount
-        world.settle() // fires cameraGestureDidSettle, which is itself one pass
-        try expect(world.canvas.qaSurfacePromotionCount - beforePass <= passCap,
-                   "the settle pass promoted \(world.canvas.qaSurfacePromotionCount - beforePass), "
-                   + "over the per-pass catch-up cap of \(passCap)")
+        // 4. Settle: every deferred tile sharpens in ONE beat. This REVERSES the
+        // clause that stood here ("a storm moved to the settle edge is still a
+        // storm", cap 2 per pass): rationing the recovery turned one gesture's
+        // sharpen into seconds of one-by-one blur->sharp pops, which is exactly
+        // what Dylan rejected (2026-08-19, "blurry to hi res is [not] the best").
+        // The settle edge now promotes every soft in-lead tile together, and the
+        // visible bake budget returns them together — so the allowance is THREE
+        // passes, total, before every tile is surfaced sharp again. The old
+        // anti-storm concern survives as the crossing bound: one promote and one
+        // demote per tile per gesture, never more (asserted below and in the
+        // zoom-crossing witness).
+        world.settle() // fires cameraGestureDidSettle: the sweep plus one pass
         world.advance(world.canvas.residencyTuning.contentQuietDelay + 0.05)
-        for _ in 0..<12 {
-            beforePass = world.canvas.qaSurfacePromotionCount
-            world.evaluateResidency()
-            try expect(world.canvas.qaSurfacePromotionCount - beforePass <= passCap,
-                       "one settled pass promoted \(world.canvas.qaSurfacePromotionCount - beforePass), "
-                       + "over the per-pass catch-up cap of \(passCap)")
-            if world.canvas.qaSurfacedTileViews.count == world.tiles.count { break }
-        }
+        world.evaluateResidency(passes: 2)
         try expect(world.canvas.qaSurfacedTileViews.count == world.tiles.count,
-                   "after settling zoomed IN, quiet tiles must re-bake at the new zoom and surface again: "
-                   + "\(world.canvas.qaSurfacedTileViews.count) of \(world.tiles.count) surfaced")
+                   "after settling zoomed IN, every quiet tile must be re-baked and surfaced within "
+                   + "three passes of the settle edge: \(world.canvas.qaSurfacedTileViews.count) of "
+                   + "\(world.tiles.count) surfaced — the one-by-one pop parade is back")
+        try expect(world.canvas.qaSurfacePromotionCount <= world.tiles.count,
+                   "\(world.canvas.qaSurfacePromotionCount) promotions to sharpen \(world.tiles.count) "
+                   + "tiles — more than one per tile is a flap, which is the storm that matters")
         let backingNow = world.window.backingScaleFactor
         for tile in world.tiles {
             guard let rebaked = world.canvas.tileSurfaceStore.surface(for: tile.id) else {
@@ -1456,9 +1465,12 @@ enum TileSurfaceResidencyChecks {
         for tile in frames(inLead: true) {
             guard world.agentViews[tile.id]?.surfaceResidency == .surfaced else { continue }
             let scale = world.canvas.tileSurfaceStore.surface(for: tile.id)?.bakedScale ?? 0
-            try expect(scale + 0.01 >= nowNeeded,
+            // Within one sharpness band of the requirement, not exactly at it:
+            // the band exists so a nudge does not re-bake the world, and this
+            // clause must not pin the exactness the band deliberately removed.
+            try expect(scale * TileSurface.sharpnessTolerance + 0.01 >= nowNeeded,
                        "a tile that entered the lead at y=\(tile.frame.y) is showing \(scale) "
-                       + "against a needed \(nowNeeded) — the upgrade path did not re-bake it")
+                       + "against a needed \(nowNeeded) — beyond the band, and never re-baked")
         }
 
         // The other half of the budget holding: surfaces DENSER than their tile's

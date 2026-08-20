@@ -67,8 +67,16 @@ struct TileSurface {
     /// budget, so off-screen tiles stranded native (measured live 2026-08-19:
     /// surfaced bled 83 -> 59 while refusedMemory climbed 2 -> 225, evictions 0).
     func isSharpEnough(forScale required: CGFloat) -> Bool {
-        bakedScale + 0.0001 >= required
+        bakedScale * Self.sharpnessTolerance + 0.0001 >= required
     }
+
+    /// One chrome bucket (2^(1/4), ~19%) of slack before a surface counts as too
+    /// soft. Without a band the comparison is exact, so ANY zoom-in invalidates
+    /// every surface at once and the whole canvas re-sharpens for a nudge nobody
+    /// can see — matched to the chrome buckets so this band is never the most
+    /// visible quantum on screen. Bakes still ASK for full density; the band only
+    /// decides when an existing surface must be replaced.
+    static let sharpnessTolerance: CGFloat = 1.1892
 }
 
 /// Holds one surface per tile and produces them from live bodies.

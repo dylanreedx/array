@@ -348,6 +348,10 @@ final class CanvasNSView: NSView, TokenThemed {
 
     /// Tile views currently rendering from a surface rather than their real body,
     /// read from the view tree.
+    /// The world-space rect the viewport currently shows — the "visible" the
+    /// residency witnesses mean when they say a tile must be sharp on screen.
+    var qaVisibleWorldRect: CGRect { worldPlane.bounds }
+
     var qaSurfacedTileViews: [TileNSView] {
         tileViewsInVisualOrder.filter { $0.surfaceResidency == .surfaced }
     }
@@ -1581,6 +1585,14 @@ final class CanvasNSView: NSView, TokenThemed {
         // they belong on the far side of everything that makes the canvas
         // interactive again. Under Option A a settle is simply the first moment
         // demotions are allowed again, so the ordinary pass does the work.
+        //
+        // The sweep FIRST, and at the settle edge on purpose: it is the only
+        // caller that promotes every soft in-lead tile in the same beat. Without
+        // it the catch-up rationed promotions 2 per pass and bakes 4 per pass,
+        // and a 20-tile view sharpened as seconds of one-by-one blur->sharp pops
+        // — Dylan's "seeing a tile focus, blurry to hi res" report (2026-08-19).
+        // Sharp on screen is ONE transition per gesture, together.
+        enforceSurfaceSharpness()
         evaluateTileResidency()
         logGestureCost()
     }
@@ -1829,11 +1841,22 @@ final class CanvasNSView: NSView, TokenThemed {
             dx: -visibleWorld.width * 0.25, dy: -visibleWorld.height * 0.25
         )
 
-        // Visible first: if the bake budget runs out, it should run out on tiles
-        // nobody can see. One rect test per tile against a value already to hand.
+        // Visible first, nearest the gesture anchor first among the visible: if
+        // any budget runs out it runs out on tiles nobody can see, and what does
+        // sharpen radiates outward from where the user is looking.
+        var visibleBakeBudget =
+            cameraDriver.isSettled ? residencyTuning.maxVisibleSharpenBakesPerSettledPass : 0
+        let anchorWorld = worldPlane.convert(cameraDriver.anchor, from: self)
         let visible = Set(visibleTileViews.map { ObjectIdentifier($0) })
+        func anchorDistance(_ view: TileNSView) -> CGFloat {
+            hypot(view.frame.midX - anchorWorld.x, view.frame.midY - anchorWorld.y)
+        }
         let ordered = tileViewsInVisualOrder.sorted { lhs, rhs in
-            visible.contains(ObjectIdentifier(lhs)) && !visible.contains(ObjectIdentifier(rhs))
+            let lhsVisible = visible.contains(ObjectIdentifier(lhs))
+            let rhsVisible = visible.contains(ObjectIdentifier(rhs))
+            if lhsVisible != rhsVisible { return lhsVisible }
+            guard lhsVisible else { return false }
+            return anchorDistance(lhs) < anchorDistance(rhs)
         }
         for tileView in ordered {
             guard tileView.surfaceableBody != nil else { continue }
@@ -1983,10 +2006,21 @@ final class CanvasNSView: NSView, TokenThemed {
                 let requiredScale = requiredSurfaceScale(
                     for: tileView, zoom: zoom, backingScale: backingScale,
                     inLead: tileView.frame.intersects(catchUpLead))
-                if surfaceIfAdmissible(
-                    tileView, bakeBudget: &bakeBudget,
-                    requiredScale: requiredScale, backingScale: backingScale
-                ) {
+                // A visible tile mid-sharpen draws from its own, larger budget:
+                // it is a pop the user is waiting on, not background housekeeping.
+                let surfacedNow: Bool
+                if visibleBakeBudget > 0, visible.contains(ObjectIdentifier(tileView)) {
+                    surfacedNow = surfaceIfAdmissible(
+                        tileView, bakeBudget: &visibleBakeBudget,
+                        requiredScale: requiredScale, backingScale: backingScale
+                    )
+                } else {
+                    surfacedNow = surfaceIfAdmissible(
+                        tileView, bakeBudget: &bakeBudget,
+                        requiredScale: requiredScale, backingScale: backingScale
+                    )
+                }
+                if surfacedNow {
                     demotionBudget -= 1
                 }
             }

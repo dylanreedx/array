@@ -67,6 +67,14 @@ enum TileResidencyPolicy {
         /// over. At 10 Hz a worst-case storm of ~20 sharpens in about a second,
         /// with no single frame paying for more than two reparents.
         var maxSharpnessCatchUpPromotionsPerPass: Int = 2
+        /// Bakes per SETTLED pass for tiles inside the viewport itself. Separate
+        /// from `maxBakesPerPass` (which off-screen work still pays) because a
+        /// visible tile mid-sharpen is a visible pop waiting to happen: the
+        /// settle edge promotes every soft visible tile in one beat, and this
+        /// budget is what lets the very next pass give them all back at once.
+        /// Zooming in shrinks the visible set, so 12 covers a real viewport;
+        /// zoom-out never softens, so it cannot be asked to cover 80.
+        var maxVisibleSharpenBakesPerSettledPass: Int = 12
 
         static let `default` = Tuning()
     }
