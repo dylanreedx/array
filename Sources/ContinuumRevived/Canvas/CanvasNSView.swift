@@ -327,6 +327,8 @@ final class CanvasNSView: NSView, TokenThemed {
         qaSurfaceStalePromotionCount = 0
         qaSurfaceEvictionCount = 0
         qaSurfaceRefusedMemoryCount = 0
+        qaSurfaceDegradedBakeCount = 0
+        qaSurfaceSlimCount = 0
         qaSurfaceSharpnessDeferredCount = 0
         qaSurfaceRefusedBlankCount = 0
         qaSurfaceRefusedOccludedCount = 0
@@ -1726,6 +1728,8 @@ final class CanvasNSView: NSView, TokenThemed {
     private(set) var qaSurfaceStalePromotionCount = 0
     private(set) var qaSurfaceEvictionCount = 0
     private(set) var qaSurfaceRefusedMemoryCount = 0
+    private(set) var qaSurfaceDegradedBakeCount = 0
+    private(set) var qaSurfaceSlimCount = 0
 
     /// What a surface for this body would cost, before paying for it. Four bytes a
     /// device pixel, which is what `bitmapImageRepForCachingDisplay` produces — and
@@ -1817,6 +1821,9 @@ final class CanvasNSView: NSView, TokenThemed {
         // spend is the per-step cap's, and only the per-step cap's.
         var sharpnessCatchUpBudget =
             cameraDriver.isSettled ? residencyTuning.maxSharpnessCatchUpPromotionsPerPass : 0
+        // Slims are byte housekeeping, not correctness: two per settled pass keeps
+        // the downscale draws (a few ms on a dense image) out of any one frame.
+        var slimBudget = 2
         let visibleWorld = worldPlane.bounds
         let catchUpLead = visibleWorld.insetBy(
             dx: -visibleWorld.width * 0.25, dy: -visibleWorld.height * 0.25
@@ -1926,11 +1933,42 @@ final class CanvasNSView: NSView, TokenThemed {
                        sharpnessCatchUpBudget > 0,
                        tileView.frame.intersects(catchUpLead),
                        let surface = tileSurfaceStore.surface(for: tileId),
-                       !surface.isSharpEnough(forZoom: zoom, backingScale: backingScale) {
+                       case let catchUpNeed = requiredSurfaceScale(
+                           for: tileView, zoom: zoom, backingScale: backingScale, inLead: true),
+                       !surface.isSharpEnough(forScale: catchUpNeed),
+                       // A deliberately-degraded surface stays: promoting it for a
+                       // softness the budget cannot afford to fix just strands it
+                       // native (or flaps it), which is strictly worse than soft.
+                       bakeWouldFit(tileView, tileId: tileId, at: catchUpNeed) {
                         tileView.promoteBodyToNative()
                         surfacedTiles.removeValue(forKey: tileId)
                         qaSurfacePromotionCount += 1
                         sharpnessCatchUpBudget -= 1
+                    }
+                    // A surface denser than its tile's CURRENT requirement is
+                    // pure byte waste: it was baked for a zoom the tile is no
+                    // longer seen at, and one deep zoom-in left enough of them to
+                    // pin the whole budget after the zoom back out (measured live
+                    // 2026-08-19: 261 MB held, refusedMemory in the thousands,
+                    // every refused tile stranded native — and the stranded
+                    // natives were the lag). Slim it IN PLACE — same picture,
+                    // fewer bytes, no promote, no flip, no body needed because
+                    // the dense image is already held. In-lead tiles too: after a
+                    // zoom-out everything is in the lead and over-sharp, and both
+                    // the dense image and its slim are downsampled to the same
+                    // displayed size, so the swap is not visible.
+                    if cameraDriver.isSettled, slimBudget > 0,
+                       tileView.surfaceResidency == .surfaced,
+                       let surface = tileSurfaceStore.surface(for: tileId) {
+                        let wantedScale = requiredSurfaceScale(
+                            for: tileView, zoom: zoom, backingScale: backingScale,
+                            inLead: tileView.frame.intersects(catchUpLead))
+                        if surface.bakedScale > wantedScale * 1.26,
+                           let slimmed = tileSurfaceStore.slim(tileId: tileId, to: wantedScale) {
+                            tileView.adoptSlimmedSurface(slimmed, backingScale: backingScale)
+                            qaSurfaceSlimCount += 1
+                            slimBudget -= 1
+                        }
                     }
                     continue
                 }
@@ -1942,10 +1980,9 @@ final class CanvasNSView: NSView, TokenThemed {
                 // rect, capped at rest density outside it. The lead-rect catch-up
                 // above is the upgrade path — a capped tile entering the lead is
                 // promoted, and this re-bakes it at the full requirement.
-                let fullScale = CGFloat(max(0.0001, zoom)) * backingScale
-                let requiredScale = tileView.frame.intersects(catchUpLead)
-                    ? fullScale
-                    : min(fullScale, CGFloat(residencyTuning.offscreenBakeZoomCap) * backingScale)
+                let requiredScale = requiredSurfaceScale(
+                    for: tileView, zoom: zoom, backingScale: backingScale,
+                    inLead: tileView.frame.intersects(catchUpLead))
                 if surfaceIfAdmissible(
                     tileView, bakeBudget: &bakeBudget,
                     requiredScale: requiredScale, backingScale: backingScale
@@ -2046,6 +2083,7 @@ final class CanvasNSView: NSView, TokenThemed {
             + " suppressedDemotes \(qaResidencySuppressedDemotionCount),"
             + " evictions \(qaSurfaceEvictionCount),"
             + " refusedMemory \(qaSurfaceRefusedMemoryCount),"
+            + " degraded \(qaSurfaceDegradedBakeCount), slims \(qaSurfaceSlimCount),"
             + " refusedBudget \(qaSurfaceRefusedBudgetCount)"
             + " | camera \(cameraDriver.isSettled ? "settled" : "moving")"
         Logger(subsystem: "continuum.canvas", category: "residency").notice("\(line, privacy: .public)")
@@ -2067,6 +2105,45 @@ final class CanvasNSView: NSView, TokenThemed {
     /// the transcript's `visibleRect` degenerates once no ancestor places it in the
     /// visible area. Native is the only faithful state to bake from.
     @discardableResult
+    /// The ONE place a tile's wanted surface density is decided, used by the
+    /// bake, the admission gate, the sharpness catch-up, and the per-step
+    /// sharpness sweep — if any of those computed it separately, a tile could be
+    /// refused for a softness no bake is allowed to fix, and it would flap
+    /// forever between native and surfaced.
+    ///
+    /// Full zoom density in the lead, `offscreenBakeZoomCap` outside it, and
+    /// never more than `maxBytesPerBakedSurface` can hold for THIS body — but
+    /// never less than rest density, which is always allowed.
+    /// Would a bake of `tileView`'s body at `scale` fit the byte budget? The
+    /// bake REPLACES the tile's existing surface, so those bytes are credited
+    /// back — without that, a tile's own picture blocks its own re-bake (found
+    /// by the degrade witness: refusedMemory with more headroom than the ask).
+    private func bakeWouldFit(_ tileView: TileNSView, tileId: UUID, at scale: CGFloat) -> Bool {
+        guard let body = tileView.surfaceableBody else { return false }
+        let existing = tileSurfaceStore.surface(for: tileId)?.byteCount ?? 0
+        return tileSurfaceStore.totalBytes - existing
+            + Self.estimatedSurfaceBytes(of: body, scale: scale)
+            <= residencySurfaceByteBudget
+    }
+
+    private func requiredSurfaceScale(
+        for tileView: TileNSView, zoom: Double, backingScale: CGFloat, inLead: Bool
+    ) -> CGFloat {
+        let full = CGFloat(max(0.0001, zoom)) * backingScale
+        var required = inLead
+            ? full
+            : min(full, CGFloat(residencyTuning.offscreenBakeZoomCap) * backingScale)
+        if let body = tileView.surfaceableBody {
+            let area = body.bounds.width * body.bounds.height
+            if area > 0 {
+                let capScale = (CGFloat(residencyTuning.maxBytesPerBakedSurface) / (4 * area))
+                    .squareRoot()
+                required = min(required, max(capScale, backingScale))
+            }
+        }
+        return required
+    }
+
     private func surfaceIfAdmissible(
         _ tileView: TileNSView, bakeBudget: inout Int, requiredScale: CGFloat, backingScale: CGFloat
     ) -> Bool {
@@ -2090,16 +2167,29 @@ final class CanvasNSView: NSView, TokenThemed {
         // its body is in the world plane, so its scroll position is real. A parked
         // body's is not, and comparing that one thrashes every tile.
         let scrollMoved = surface.map { $0.bakedScrollOffsets != tileView.surfaceScrollOffsets } ?? false
+        // What this pass actually asked the bake for; degraded below under budget
+        // pressure, and the admission gate at the bottom judges against it.
+        var admittedScale = requiredScale
         if surface?.revision != wanted || tooSoft || scrollMoved {
             // **Refuse BEFORE baking, not after.** Evicting after the fact thrashes:
             // the pass bakes eight surfaces, the budget evicts the farthest four, and
             // 100 ms later the same four are still quiet and get baked again —
             // forever, at ~2 ms a bake and ~5 ms a reparent. Prevention costs one
             // multiplication.
-            let projected = tileSurfaceStore.totalBytes + Self.estimatedSurfaceBytes(
-                of: body, scale: requiredScale
-            )
-            guard projected <= residencySurfaceByteBudget else {
+            // Under budget pressure, degrade the ASK before refusing residency:
+            // a refused tile stays native, and stranded natives are what the lag
+            // is made of (~4.5 ms per native tile per camera step — 20 of them
+            // was a 90 ms frame, measured live 2026-08-19). A rest-density bake
+            // is a fraction of the bytes and visibly soft only until the slim
+            // pass frees room; native is the strictly worse state on both axes.
+            if !bakeWouldFit(tileView, tileId: tileId, at: admittedScale),
+               backingScale < requiredScale {
+                admittedScale = backingScale
+                if bakeWouldFit(tileView, tileId: tileId, at: admittedScale) {
+                    qaSurfaceDegradedBakeCount += 1
+                }
+            }
+            guard bakeWouldFit(tileView, tileId: tileId, at: admittedScale) else {
                 qaSurfaceRefusedMemoryCount += 1
                 return false
             }
@@ -2127,7 +2217,7 @@ final class CanvasNSView: NSView, TokenThemed {
             bakeBudget -= 1
             surface = tileSurfaceStore.bake(
                 tileId: tileId, body: body, revision: wanted,
-                scrollOffsets: tileView.surfaceScrollOffsets, maxScale: requiredScale
+                scrollOffsets: tileView.surfaceScrollOffsets, maxScale: admittedScale
             )
             guard let baked = surface else {
                 qaSurfaceRefusedStaleCount += 1
@@ -2146,7 +2236,10 @@ final class CanvasNSView: NSView, TokenThemed {
             }
         }
         guard let admissible = surface else { return false }
-        guard admissible.isSharpEnough(forScale: requiredScale) else {
+        // Judged against what was ADMITTED, not what was wanted: a bake this
+        // function just degraded under budget pressure is deliberately soft, and
+        // refusing it here would re-strand the tile the degradation exists to save.
+        guard admissible.isSharpEnough(forScale: min(requiredScale, admittedScale)) else {
             qaSurfaceRefusedSharpnessCount += 1
             return false
         }
@@ -2327,7 +2420,12 @@ final class CanvasNSView: NSView, TokenThemed {
                 qaSurfacePromotionCount += 1
                 continue
             }
-            if surface.isSharpEnough(forZoom: zoom, backingScale: backingScale) { continue }
+            let sweepNeed = requiredSurfaceScale(
+                for: tileView, zoom: zoom, backingScale: backingScale, inLead: true)
+            if surface.isSharpEnough(forScale: sweepNeed) { continue }
+            // Soft the budget cannot fix is the deliberate state, not a defect —
+            // promoting it strands the tile native (the lag), fixes nothing.
+            if !bakeWouldFit(tileView, tileId: tileId, at: sweepNeed) { continue }
             let mid = CGPoint(x: tileView.frame.midX, y: tileView.frame.midY)
             soft.append((
                 view: tileView,

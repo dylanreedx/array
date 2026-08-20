@@ -218,9 +218,33 @@ final class TileSurfaceStore {
     /// pixel-equivalence gate. A fidelity gate that cannot be made to fail proves
     /// nothing, and `--tile-surface-residency-check` must go red under
     /// `TILE_SURFACE_HALF_SCALE=1`.
+    /// Downscale a HELD surface in place: same picture, fewer bytes, no body
+    /// needed — the dense image is already here. This is how a surface baked for
+    /// a zoom the tile is no longer seen at gives its bytes back without the
+    /// promote/re-bake round trip (a visible flip) that eviction costs.
+    func slim(tileId: UUID, to maxScale: CGFloat) -> TileSurface? {
+        guard let surface = surfaces[tileId], surface.bakedScale > maxScale * 1.001,
+              let smaller = Self.scaled(surface.image, by: maxScale / surface.bakedScale)
+        else { return nil }
+        let slimmed = TileSurface(
+            image: smaller, revision: surface.revision,
+            bakedScale: surface.bakedScale
+                * (CGFloat(smaller.width) / CGFloat(surface.image.width)),
+            bakedScrollOffsets: surface.bakedScrollOffsets, isUniform: surface.isUniform
+        )
+        surfaces[tileId] = slimmed
+        return slimmed
+    }
+
     private static func scaled(_ image: CGImage, by factor: CGFloat) -> CGImage? {
-        let width = max(1, Int(CGFloat(image.width) * factor))
-        let height = max(1, Int(CGFloat(image.height) * factor))
+        // CEIL, not truncate: the result's measured scale must come out AT OR
+        // ABOVE the requested one, or a capped bake lands a quantum softer than
+        // the requirement it was built for and fails its own admission test —
+        // measured: a 900 pt whale asked for 2.787 produced 2508 px (2.7867) and
+        // stranded native forever. The same hazard is documented at the epsilon
+        // in `isSharpEnough`: the pixel quantum dwarfs the 0.0001 slack.
+        let width = max(1, Int(ceil(CGFloat(image.width) * factor)))
+        let height = max(1, Int(ceil(CGFloat(image.height) * factor)))
         guard let context = CGContext(
             data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
             space: CGColorSpaceCreateDeviceRGB(),

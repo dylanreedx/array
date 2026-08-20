@@ -336,6 +336,8 @@ enum TileSurfaceResidencyChecks {
         // (5.0-5.2 vs 4.5) purely through heap state — measured both orders,
         // same binary, 2026-08-19. Timing legs run on a clean heap.
         try checkOffscreenBakesAreCappedSoTheBudgetHoldsAtAnyZoom()
+        try checkAWhaleBodyBakesBoundedAndNeverFlaps()
+        try checkBudgetPressureDegradesInsteadOfStranding()
         print("tile-surface-residency check: ok")
     }
 
@@ -1432,6 +1434,8 @@ enum TileSurfaceResidencyChecks {
                        + "density for a tile nobody can see is what fills the budget")
         }
 
+        let bytesAtDenseConvergence = world.canvas.tileSurfaceStore.totalBytes
+
         // The arithmetic the budget depends on: bytes scale with the VISIBLE set.
         let denseBytes = world.tiles.count
             * Int(420 * full) * Int(300 * full) * 4
@@ -1456,6 +1460,127 @@ enum TileSurfaceResidencyChecks {
                        "a tile that entered the lead at y=\(tile.frame.y) is showing \(scale) "
                        + "against a needed \(nowNeeded) — the upgrade path did not re-bake it")
         }
+
+        // The other half of the budget holding: surfaces DENSER than their tile's
+        // current requirement give the bytes back, in place, with zero flips.
+        // One deep zoom-in left enough over-dense survivors to pin the budget
+        // after the zoom back out (261 MB held, refusedMemory in the thousands,
+        // measured live 2026-08-19). The slims run as the requirement falls, so
+        // the count is read across the whole zoom-out and the no-flip clause is
+        // pinned on fresh counters over settled housekeeping passes.
+        try expect(world.canvas.qaSurfaceSlimCount > 0,
+                   "no surface was slimmed though the zoom-out dropped every tile's requirement")
+        for step in 1...2 {
+            _ = world.cameraStep(toZoom: 1.1 - 0.05 * Double(step))
+            world.pump()
+        }
+        world.settle()
+        world.advance(0.3)
+        world.canvas.qaResetSurfaceResidencyCounters()
+        world.evaluateResidency(passes: 14)
+        try expect(world.canvas.qaSurfacePromotionCount == 0,
+                   "\(world.canvas.qaSurfacePromotionCount) promotions during byte housekeeping — "
+                   + "a slim must never flip a tile")
+        let bytesAfterSlim = world.canvas.tileSurfaceStore.totalBytes
+        try expect(bytesAfterSlim < bytesAtDenseConvergence * 6 / 10,
+                   "slims reclaimed too little: \(bytesAtDenseConvergence) -> \(bytesAfterSlim) bytes")
+        let restNeed = CGFloat(1.0) * backing
+        for tile in world.tiles {
+            try expect(world.agentViews[tile.id]?.surfaceResidency == .surfaced,
+                       "a tile ended native after slimming — housekeeping changed residency")
+            let scale = world.canvas.tileSurfaceStore.surface(for: tile.id)?.bakedScale ?? 0
+            try expect(scale <= restNeed * 1.30,
+                       "a tile at y=\(tile.frame.y) still holds \(scale) against a zoom-1.0 "
+                       + "requirement of \(restNeed) — its dense bytes were never given back")
+        }
+    }
+
+    /// **A huge body's bake is byte-bounded, and the bound never causes a flap.**
+    ///
+    /// The lead test is binary and a bake is whole-body, so at deep zoom a
+    /// barely-on-screen 900x900 body would bake tens of MB for pixels mostly
+    /// nobody sees. `maxBytesPerBakedSurface` caps the scale such a bake is asked
+    /// for — and the cap MUST flow through the same `requiredSurfaceScale` the
+    /// sharpness catch-up judges by, or a capped tile fails a sharpness test no
+    /// bake is allowed to fix and flaps native<->surfaced forever.
+    private static func checkAWhaleBodyBakesBoundedAndNeverFlaps() throws {
+        let world = World(tileCount: 4, tileSize: CGSize(width: 900, height: 900))
+        defer { world.teardown() }
+        world.canvas.surfaceResidencyEnabled = true
+        world.quiesceAndSurface()
+        for step in 1...8 {
+            _ = world.cameraStep(toZoom: 1.0 + 0.125 * Double(step))
+            world.pump()
+        }
+        world.settle()
+        world.advance(0.3)
+        world.evaluateResidency(passes: 10)
+
+        let cap = world.canvas.residencyTuning.maxBytesPerBakedSurface
+        for tile in world.tiles {
+            guard let surface = world.canvas.tileSurfaceStore.surface(for: tile.id) else {
+                throw Failure(message: "a whale tile has no surface at all after convergence")
+            }
+            try expect(surface.byteCount <= cap * 105 / 100,
+                       "a whale bake holds \(surface.byteCount) bytes against a \(cap) cap")
+            try expect(world.agentViews[tile.id]?.surfaceResidency == .surfaced,
+                       "a whale tile is stranded native — the cap must bound bytes, not residency")
+        }
+
+        // The flap guard: converged means CONVERGED. If the catch-up judged by
+        // uncapped zoom sharpness, every pass would promote a tile whose best
+        // allowed bake it just refused.
+        world.canvas.qaResetSurfaceResidencyCounters()
+        for _ in 0..<6 {
+            world.advance(0.15)
+            world.evaluateResidency()
+        }
+        try expect(world.canvas.qaSurfacePromotionCount == 0,
+                   "\(world.canvas.qaSurfacePromotionCount) promotions on a converged canvas — "
+                   + "a byte-capped tile is flapping against a sharpness test it can never pass")
+    }
+
+    /// **Budget pressure degrades the bake, never the residency.** A refused tile
+    /// stays native, and stranded natives are what the lag is made of (~4.5 ms per
+    /// native tile per camera step, measured live 2026-08-19). Under pressure the
+    /// ask drops to rest density — a fraction of the bytes, soft only until the
+    /// slim pass frees room — and the tile still surfaces.
+    private static func checkBudgetPressureDegradesInsteadOfStranding() throws {
+        let world = World(tileCount: 6)
+        defer { world.teardown() }
+        world.canvas.surfaceResidencyEnabled = true
+        world.quiesceAndSurface()
+        let backing = world.window.backingScaleFactor
+        for step in 1...8 {
+            _ = world.cameraStep(toZoom: 1.0 + 0.125 * Double(step))
+            world.pump()
+        }
+        world.settle()
+        world.advance(0.3)
+        world.evaluateResidency(passes: 8)
+
+        // Room for a rest-density bake of one tile, but nowhere near a dense one.
+        let tile = world.tiles[0]
+        guard let view = world.agentViews[tile.id] else {
+            throw Failure(message: "the degrade witness lost its tile view")
+        }
+        view.promoteBodyToNative()
+        world.canvas.tileSurfaceStore.drop(tile.id)
+        world.canvas.residencySurfaceByteBudget =
+            world.canvas.tileSurfaceStore.totalBytes + (3 << 20)
+        world.canvas.qaResetSurfaceResidencyCounters()
+        world.advance(0.3)
+        world.evaluateResidency(passes: 4)
+
+        try expect(view.surfaceResidency == .surfaced,
+                   "under budget pressure the tile stranded native instead of degrading its bake")
+        try expect(world.canvas.qaSurfaceDegradedBakeCount > 0,
+                   "the tile surfaced but no degraded bake was counted — the budget was not actually tight")
+        try expect(world.canvas.qaSurfaceRefusedMemoryCount == 0,
+                   "memory refusals under a budget a rest bake fits — degradation did not engage")
+        let scale = world.canvas.tileSurfaceStore.surface(for: tile.id)?.bakedScale ?? 0
+        try expect(scale <= backing * 1.01,
+                   "a degraded bake claims scale \(scale), denser than rest (\(backing))")
     }
 
     /// **Resident surface memory is bounded, and bounding it costs nothing a user

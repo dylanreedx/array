@@ -172,6 +172,20 @@ class TileNSView: NSView, TokenThemed {
     /// is safe — already surfaced, no surfaceable body, or a body that is not
     /// actually the current content view. Callers treat false as "stay native".
     @discardableResult
+    /// Swap the shown picture for a slimmed copy of itself WITHOUT leaving the
+    /// surfaced state: no promote, no park round trip, no flip. The old host held
+    /// the only other reference to the dense image, so replacing it is what
+    /// actually frees the bytes the slim exists to reclaim.
+    func adoptSlimmedSurface(_ surface: TileSurface, backingScale: CGFloat) {
+        guard surfaceResidency == .surfaced else { return }
+        let host = TileSurfaceHostView(
+            surface: surface.image, bakedScale: surface.bakedScale, backingScale: backingScale
+        )
+        retainedSurfaceHost = host
+        setContentView(host)
+        surfaceHost = host
+    }
+
     func demoteBodyToSurface(_ surface: TileSurface, park: NSView, backingScale: CGFloat) -> Bool {
         guard surfaceResidency == .native,
               let body = surfaceableBody,

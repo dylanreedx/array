@@ -45,6 +45,15 @@ enum TileResidencyPolicy {
         /// 256 MB budget. 1.0 = rest density; the lead-rect sharpening re-bakes a
         /// tile at full density just before it arrives on screen.
         var offscreenBakeZoomCap: Double = 1.0
+        /// Hard ceiling on ONE surface's bytes, enforced by capping the scale a
+        /// bake is asked for. The lead test is binary and a bake is whole-body,
+        /// so at deep zoom a 760x900 body 10% on screen would bake ~98 MB for
+        /// pixels mostly nobody sees — measured live (2026-08-19) as the budget
+        /// pinned at its cap with refusedMemory in the thousands and every
+        /// refused tile stranded native. Rest density is always allowed, whale
+        /// or not: a soft tile at rest is a visible defect, a capped one at
+        /// deep zoom is a slightly-soft neighbour of the tile being read.
+        var maxBytesPerBakedSurface: Int = 24 << 20
         /// Sharpness promotions allowed in ONE camera step. Promoting every
         /// too-soft surfaced tile at once was the zoom-in storm: 19 promotions in
         /// a single step and a 1.65 s frame gap, in a real 89-tile session

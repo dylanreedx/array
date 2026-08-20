@@ -124,9 +124,16 @@ final class TileSurfaceHostView: NSView {
 /// drawn into the region above the canvas and left renderable in the window's
 /// composited layer tree (`checkParkedBodiesPaintNoPixels` is the pixel
 /// witness). Clipping bounds drawing and compositing only — never layout,
-/// timers, or semantic work — which is exactly why `isHidden` remains wrong
-/// here: it would stop the layout, and with it the streaming this design
-/// exists to preserve. And opaque to accessibility, because a parked body
+/// timers, or semantic work. The park is ALSO hidden (bb321f1) — a reversal
+/// of this comment's earlier position that hiding would stop the layout a
+/// streaming body needs. Two things changed the call: a 20 s sample of a real
+/// 83-tile session showed AppKit's display-cycle machinery (tracking areas,
+/// constraint passes, deep layout walks) recursing through parked subtrees
+/// every frame of a gesture, and the streaming concern is bounded by policy —
+/// a parked tile whose content changes is promoted native within one
+/// residency pass (`checkContentWhileSurfacedPromotesAndSurvives` is the
+/// witness), so at most ~100 ms of un-laid-out ingest ever accumulates, and
+/// the body lays out on promotion. And opaque to accessibility, because a parked body
 /// IS still in the window's view tree: measured, VoiceOver reached a parked
 /// transcript at `{{0, 1132}, {420, 90}}` while its tile sat at
 /// `{{40, 640}, {420, 300}}` — wrong place, wrong size, detached from its owner.
