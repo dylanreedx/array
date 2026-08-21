@@ -3775,7 +3775,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self?.persistMovedZone(placement)
             }
             canvasView.onLayoutCommitted = { [weak self] transaction in
-                self?.persistLayoutTransaction(transaction)
+                self?.persistLayoutTransaction(transaction) ?? false
             }
             canvasView.onZoneCloseRequested = { [weak self] zoneId in
                 self?.presentZoneCloseConfirm(zoneId)
@@ -12102,11 +12102,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    /// One solver gesture may move an entire contact chain. Persist all zone
-    /// placements and workspace-owned tile frames from one document snapshot;
-    /// project-canvas tiles are flushed by `canvasDidChange` immediately after.
-    private func persistLayoutTransaction(_ transaction: CanvasLayoutTransaction) {
-        guard let registryStore else { return }
+    /// One solver gesture may move an entire contact chain. Project canvases and
+    /// the workspace document are saved synchronously from one snapshot. If any
+    /// write fails, already-written project canvases are restored before the
+    /// caller rolls the preview back in memory.
+    private func persistLayoutTransaction(_ transaction: CanvasLayoutTransaction) -> Bool {
+        guard let registryStore else { return false }
         do {
             let workspaceId: UUID
             if let id = workspaceRuntime?.workspaceId {
@@ -12115,7 +12116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 workspaceId = id
             } else {
                 fputs("persistLayoutTransaction: no active workspace\n", stderr)
-                return
+                return false
             }
             let appSupport = registryStore.registryFile.deletingLastPathComponent()
             let store = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
@@ -12134,12 +12135,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     document.ambientTiles[index].frame = worldFrame
                 }
             }
-            let saveController = WorkspaceDocumentSaveController(store: store)
-            saveController.scheduleZoneLayoutSave(document)
-            try saveController.flushPendingSave()
+
+            let registry = try registryStore.loadOrEmpty()
+            var projectZones: [UUID: ZonePlacement] = [:]
+            for zone in document.zones {
+                if let projectId = zone.projectId { projectZones[projectId] = zone }
+            }
+            var projectWrites: [(store: ProjectStore, original: CanvasState, updated: CanvasState)] = []
+            for (projectId, zone) in projectZones.sorted(by: { $0.key.uuidString < $1.key.uuidString }) {
+                guard let entry = registry.projects.first(where: { $0.id == projectId }) else { continue }
+                let projectStore = ProjectStore(projectRoot: URL(fileURLWithPath: entry.rootPath, isDirectory: true))
+                guard let original = try projectStore.tryLoadCanvas() else { continue }
+                var updated = original
+                var changed = false
+                for index in updated.tiles.indices {
+                    guard let worldFrame = transaction.tileFrames[updated.tiles[index].id] else { continue }
+                    let owningZone = updated.tiles[index].zoneId.flatMap { tileZoneId in
+                        document.zones.first(where: { $0.zoneId == tileZoneId })
+                    } ?? zone
+                    updated.tiles[index].frame = CanvasEngine.worldToZoneLocal(worldFrame, zoneOrigin: owningZone.origin)
+                    changed = true
+                }
+                if changed { projectWrites.append((projectStore, original, updated)) }
+            }
+
+            var savedProjectWrites: [(store: ProjectStore, original: CanvasState)] = []
+            do {
+                for write in projectWrites {
+                    try write.store.saveCanvas(write.updated)
+                    savedProjectWrites.append((write.store, write.original))
+                }
+                let saveController = WorkspaceDocumentSaveController(store: store)
+                saveController.scheduleZoneLayoutSave(document)
+                try saveController.flushPendingSave()
+            } catch {
+                for saved in savedProjectWrites.reversed() {
+                    do { try saved.store.saveCanvas(saved.original) }
+                    catch { fputs("persistLayoutTransaction rollback failed: \(error)\n", stderr) }
+                }
+                throw error
+            }
             workspaceRuntime?.replaceDocument(document, for: workspaceId)
+            return true
         } catch {
             fputs("persistLayoutTransaction failed: \(error)\n", stderr)
+            return false
         }
     }
 

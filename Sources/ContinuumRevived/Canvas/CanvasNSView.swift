@@ -230,7 +230,9 @@ final class CanvasNSView: NSView, TokenThemed {
 
     /// Atomic geometry handoff used when one manipulation displaces multiple
     /// tiles/zones. Preview frames never reach this callback.
-    var onLayoutCommitted: ((CanvasLayoutTransaction) -> Void)?
+    /// Returns true only after every backing store durably accepted the solve.
+    /// A false result restores the gesture baseline in memory.
+    var onLayoutCommitted: ((CanvasLayoutTransaction) -> Bool)?
 
     private func autoLayoutScene() -> CanvasAutoLayoutEngine.Scene {
         var layoutTiles = canvasState.tiles.map {
@@ -351,7 +353,17 @@ final class CanvasNSView: NSView, TokenThemed {
         for tile in current.tiles where oldTiles[tile.id] != tile.frame { transaction.tileFrames[tile.id] = tile.frame }
         for zone in current.zones where oldZones[zone.zoneId] != zone { transaction.zonePlacements[zone.zoneId] = zone }
         guard !transaction.tileFrames.isEmpty || !transaction.zonePlacements.isEmpty else { return nil }
-        onLayoutCommitted?(transaction)
+        if onLayoutCommitted?(transaction) == false {
+            var rollback = CanvasLayoutTransaction()
+            for tile in baseline.tiles where current.tiles.first(where: { $0.id == tile.id })?.frame != tile.frame {
+                rollback.tileFrames[tile.id] = tile.frame
+            }
+            for zone in baseline.zones where current.zones.first(where: { $0.zoneId == zone.zoneId }) != zone {
+                rollback.zonePlacements[zone.zoneId] = zone
+            }
+            applyLayoutTransaction(rollback)
+            return nil
+        }
         return transaction
     }
 
@@ -415,7 +427,16 @@ final class CanvasNSView: NSView, TokenThemed {
         dismissAutoLayoutUndo()
         guard !transaction.tileFrames.isEmpty || !transaction.zonePlacements.isEmpty else { return }
         applyLayoutTransaction(transaction)
-        onLayoutCommitted?(transaction)
+        if onLayoutCommitted?(transaction) == false {
+            var rollback = CanvasLayoutTransaction()
+            for tile in current.tiles where scene.tiles.first(where: { $0.id == tile.id })?.frame != tile.frame {
+                rollback.tileFrames[tile.id] = tile.frame
+            }
+            for zone in current.zones where scene.zones.first(where: { $0.zoneId == zone.zoneId }) != zone {
+                rollback.zonePlacements[zone.zoneId] = zone
+            }
+            applyLayoutTransaction(rollback)
+        }
         delegate?.canvasDidChange(self)
     }
 
@@ -5859,7 +5880,7 @@ final class CanvasNSView: NSView, TokenThemed {
         canvas.layoutSubtreeIfNeeded()
 
         var commits: [CanvasLayoutTransaction] = []
-        canvas.onLayoutCommitted = { commits.append($0) }
+        canvas.onLayoutCommitted = { commits.append($0); return true }
         try drag(canvas, from: win(332, 190), to: win(304, 190), window: window)
         try expect(commits.count == 1, "one zone-resize gesture must commit one transaction; got \(commits.count)")
         guard let squeezed = canvas.qaLiveZonePlacement(zoneId) else { throw CheckError.failed("zone disappeared") }
@@ -5905,6 +5926,11 @@ final class CanvasNSView: NSView, TokenThemed {
         try expect(canvas.qaClickAutoLayoutUndo(), "Tidy Undo must be actionable")
         try expect(canvas.canvasState.tiles.first { $0.id == secondId }!.frame.x == restoredA.x,
                    "Undo must restore the exact captured pre-tidy frame")
+        let durableFrames = Dictionary(uniqueKeysWithValues: canvas.canvasState.tiles.map { ($0.id, $0.frame) })
+        canvas.onLayoutCommitted = { _ in false }
+        canvas.tidyAutoLayout()
+        try expect(Dictionary(uniqueKeysWithValues: canvas.canvasState.tiles.map { ($0.id, $0.frame) }) == durableFrames,
+                   "a rejected cross-store transaction must restore the last durable geometry")
         let fm = FileManager.default
         let root = URL(fileURLWithPath: fm.currentDirectoryPath)
             .appendingPathComponent("qa-runs", isDirectory: true)
