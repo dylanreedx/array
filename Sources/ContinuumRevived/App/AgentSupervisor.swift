@@ -1126,7 +1126,15 @@ final class AgentSupervisor {
             thinking: record.thinking,
             cwd: cwd,
             sessionId: sessionId(for: record.id),
-            extraArgs: RoleRegistry(projectRoot: cwd).toolsArguments(roleId: record.role)
+            // Only scan for roles when this agent HAS one. `toolsArguments(roleId:)`
+            // returns [] for nil, so building a registry first was a directory
+            // enumeration plus a frontmatter parse of every role file — on the main
+            // actor, on every turn — to compute an empty array for the common case.
+            // Array's own project has 12 role files; a roleless agent read all of
+            // them before each prompt.
+            extraArgs: record.role.map {
+                RoleRegistry(projectRoot: cwd).toolsArguments(roleId: $0)
+            } ?? []
         )
     }
 
