@@ -4039,6 +4039,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             } else {
                 startDesktopCompanionSyncService()
                 presentOnboardingIfFirstRun(registryWasEmpty: registryWasEmpty)
+                if ProcessInfo.processInfo.environment["CONTINUUM_AUTO_PAIR_PHONE"] == "1" {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.issueObserverPairingTokenFromMenu(nil)
+                    }
+                }
             }
         } catch {
             presentFatalError(error)
