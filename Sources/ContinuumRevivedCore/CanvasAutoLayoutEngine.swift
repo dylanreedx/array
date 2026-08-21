@@ -5,11 +5,17 @@ public struct CanvasLayoutTransaction: Equatable, Sendable {
     public var tileFrames: [UUID: TileFrame]
     public var zonePlacements: [UUID: ZonePlacement]
     public var blockedZoneIds: Set<UUID>
+    /// The sibling the active move gesture is currently exchanging slots with.
+    /// Gesture state: the caller feeds it back into the next frame's solve as
+    /// `latchedSwapTarget` so the exchange is hysteretic instead of re-derived
+    /// from jittery per-frame geometry.
+    public var swapTargetTileId: UUID?
 
-    public init(tileFrames: [UUID: TileFrame] = [:], zonePlacements: [UUID: ZonePlacement] = [:], blockedZoneIds: Set<UUID> = []) {
+    public init(tileFrames: [UUID: TileFrame] = [:], zonePlacements: [UUID: ZonePlacement] = [:], blockedZoneIds: Set<UUID> = [], swapTargetTileId: UUID? = nil) {
         self.tileFrames = tileFrames
         self.zonePlacements = zonePlacements
         self.blockedZoneIds = blockedZoneIds
+        self.swapTargetTileId = swapTargetTileId
     }
 }
 
@@ -46,9 +52,17 @@ public enum CanvasAutoLayoutEngine {
         case tile(id: UUID, frame: TileFrame)
         case zone(id: UUID, placement: ZonePlacement)
         case tidy(zoneId: UUID?)
+        /// Rest-state magnetism: pull every member of `zoneId` into exact
+        /// gap-contact with the cluster. `anchor` is a just-moved tile that
+        /// settles LAST, so the composition it was dropped into wins over its
+        /// exact drop point. `pin` marks the anchor's position authoritative
+        /// (a completed slot exchange): the anchor never relocates — residents
+        /// it presses on are pushed aside instead, so a horizontal exchange can
+        /// never resolve into a different lane.
+        case settle(zoneId: UUID, anchor: UUID?, pin: Bool)
     }
 
-    public static func solve(scene: Scene, mutation: Mutation, gap preferredGap: Double, zonePadding preferredPadding: Double, headerHeight: Double) -> CanvasLayoutTransaction {
+    public static func solve(scene: Scene, mutation: Mutation, gap preferredGap: Double, zonePadding preferredPadding: Double, headerHeight: Double, latchedSwapTarget: UUID? = nil) -> CanvasLayoutTransaction {
         let gap = max(0, preferredGap.isFinite ? preferredGap : 0)
         let padding = max(0, preferredPadding.isFinite ? preferredPadding : 0)
         let header = max(0, headerHeight.isFinite ? headerHeight : 0)
@@ -56,7 +70,6 @@ public enum CanvasAutoLayoutEngine {
         var zones = Dictionary(uniqueKeysWithValues: scene.zones.map { ($0.zoneId, $0) })
         var activeTile: UUID?
         var activeZone: UUID?
-        var vector = CGVector(dx: 1, dy: 0)
         var activeZoneOnlyTranslated = false
         var activeTileResizeIsHorizontal: Bool?
         var activeTileOriginalFrame: TileFrame?
@@ -66,13 +79,12 @@ public enum CanvasAutoLayoutEngine {
         case let .tile(id, frame):
             if var tile = tiles[id] {
                 activeTileOriginalFrame = tile.frame
-                vector = CGVector(dx: frame.x - tile.frame.x, dy: frame.y - tile.frame.y)
                 let widthDelta = abs(frame.width - tile.frame.width)
                 let heightDelta = abs(frame.height - tile.frame.height)
                 if widthDelta > 0.001 || heightDelta > 0.001 {
                     activeTileResizeIsHorizontal = widthDelta >= heightDelta
                 } else {
-                    activeTileMovedWithoutResize = abs(vector.dx) > 0.001 || abs(vector.dy) > 0.001
+                    activeTileMovedWithoutResize = abs(frame.x - tile.frame.x) > 0.001 || abs(frame.y - tile.frame.y) > 0.001
                 }
                 tile.frame = frame
                 tiles[id] = tile
@@ -90,23 +102,23 @@ public enum CanvasAutoLayoutEngine {
                         tiles[tileId]?.frame.y += originDY
                     }
                 }
-                vector = CGVector(dx: placement.origin.x - previous.origin.x + placement.size.width - previous.size.width,
-                                  dy: placement.origin.y - previous.origin.y + placement.size.height - previous.size.height)
             }
             zones[id] = placement
             activeZone = id
-        case .tidy:
+        case .tidy, .settle:
             break
         }
 
         let targetZoneIds: [UUID]
         switch mutation {
         case let .tidy(zoneId): targetZoneIds = zoneId.map { [$0] } ?? zones.keys.sorted(by: uuidLess)
+        case let .settle(zoneId, _, _): targetZoneIds = [zoneId]
         case let .zone(id, _): targetZoneIds = [id]
         case let .tile(id, _): targetZoneIds = tiles[id]?.zoneId.map { [$0] } ?? []
         }
 
         var blocked: Set<UUID> = []
+        var newSwapTarget: UUID?
         for zoneId in targetZoneIds {
             guard var zone = zones[zoneId], !zone.collapsed,
                   zone.autoLayoutMode.resolves(globalEnabled: scene.globalEnabled) else { continue }
@@ -117,21 +129,42 @@ public enum CanvasAutoLayoutEngine {
             let memberIds = tiles.values.filter { $0.zoneId == zoneId }.map(\.id).sorted(by: uuidLess)
             guard !memberIds.isEmpty else { continue }
 
+            // Rest-state magnetism: tidy and settle pull members into exact
+            // gap-contact with the cluster instead of running the packer.
+            var settleMover: (mover: UUID?, pin: Bool)?
+            if case let .settle(_, anchor, pin) = mutation { settleMover = (anchor, pin) }
+            if case .tidy = mutation { settleMover = (nil, false) }
+            if let (mover, pin) = settleMover {
+                let settled = settleMembers(
+                    memberIds: memberIds, tiles: tiles, zone: zone,
+                    gap: gap, padding: padding, header: header, mover: mover, pinMover: pin)
+                for (id, frame) in settled { tiles[id]?.frame = frame }
+                continue
+            }
+
+            // A member MOVE never repacks the zone. The active tile is
+            // pointer-owned; siblings only ever receive minimal single-axis
+            // pushes or take part in an explicit, latched slot exchange.
             if activeTileMovedWithoutResize,
                let activeTile, let original = activeTileOriginalFrame,
-               tiles[activeTile]?.zoneId == zoneId,
-               applySlotSwapIfTargeted(
+               tiles[activeTile]?.zoneId == zoneId {
+                let outcome = solveMemberMove(
                     activeTile: activeTile, originalFrame: original,
-                    memberIds: memberIds, tiles: &tiles, vector: vector,
-                    zone: zone, padding: padding, header: header) {
-                // A slot exchange is already a complete, collision-free layout.
-                // Feeding it through the general packer can reinterpret unequal
-                // tile sizes as a different lane and create a diagonal jump.
+                    memberIds: memberIds, tiles: tiles, zone: zone,
+                    gap: gap, padding: padding, header: header,
+                    latched: latchedSwapTarget)
+                for (id, frame) in outcome.frames { tiles[id]?.frame = frame }
+                newSwapTarget = outcome.latch
                 continue
             }
 
             let activeResizeHere = activeTileResizeIsHorizontal != nil
                 && activeTile.map { tiles[$0]?.zoneId == zoneId } == true
+            // Zones are never affected by tiles except through resize pressure:
+            // a .tile mutation that isn't a resize here (a no-op update; moves
+            // already returned above) must not reach the packer, whose zone
+            // clamp could reshape the zone.
+            if case .tile = mutation, !activeResizeHere { continue }
             if !activeResizeHere {
                 let minimum = minimumFeasibleSize(memberIds: memberIds, tiles: tiles, proposed: zone, header: header)
                 if zone.size.width < minimum.width || zone.size.height < minimum.height {
@@ -212,9 +245,9 @@ public enum CanvasAutoLayoutEngine {
             }
         }
 
-        resolveOuterCollisions(tiles: &tiles, zones: &zones, activeTile: activeTile, activeZone: activeZone, preferredGap: gap, vector: vector)
+        resolveOuterCollisions(tiles: &tiles, zones: &zones, scene: scene, activeZone: activeZone, preferredGap: gap)
 
-        var result = CanvasLayoutTransaction(blockedZoneIds: blocked)
+        var result = CanvasLayoutTransaction(blockedZoneIds: blocked, swapTargetTileId: newSwapTarget)
         for original in scene.tiles where tiles[original.id]?.frame != original.frame {
             result.tileFrames[original.id] = tiles[original.id]?.frame
         }
@@ -224,88 +257,261 @@ public enum CanvasAutoLayoutEngine {
         return result
     }
 
-    private static func applySlotSwapIfTargeted(
-        activeTile: UUID, originalFrame: TileFrame,
-        memberIds: [UUID], tiles: inout [UUID: LayoutTile], vector: CGVector,
-        zone: ZonePlacement, padding: Double, header: Double
-    ) -> Bool {
-        guard var active = tiles[activeTile] else { return false }
-        let center = CGPoint(x: active.frame.x + active.frame.width / 2, y: active.frame.y + active.frame.height / 2)
-        let originalCenter = CGPoint(
-            x: originalFrame.x + originalFrame.width / 2,
-            y: originalFrame.y + originalFrame.height / 2)
-        let horizontal = abs(vector.dx) >= abs(vector.dy)
-        let candidates = memberIds.compactMap { id -> (UUID, TileFrame)? in
-            guard id != activeTile, let frame = tiles[id]?.frame else { return nil }
-            let frameCenter = CGPoint(x: frame.x + frame.width / 2, y: frame.y + frame.height / 2)
-            let sharesLane: Bool
-            let crossedMidpoint: Bool
-            if horizontal {
-                let overlap = min(originalFrame.y + originalFrame.height, frame.y + frame.height)
-                    - max(originalFrame.y, frame.y)
-                sharesLane = overlap >= min(originalFrame.height, frame.height) * 0.5
-                let inDirection = vector.dx < 0 ? frameCenter.x < originalCenter.x : frameCenter.x > originalCenter.x
-                crossedMidpoint = inDirection && (vector.dx < 0 ? center.x <= frameCenter.x : center.x >= frameCenter.x)
-            } else {
-                let overlap = min(originalFrame.x + originalFrame.width, frame.x + frame.width)
-                    - max(originalFrame.x, frame.x)
-                sharesLane = overlap >= min(originalFrame.width, frame.width) * 0.5
-                let inDirection = vector.dy < 0 ? frameCenter.y < originalCenter.y : frameCenter.y > originalCenter.y
-                crossedMidpoint = inDirection && (vector.dy < 0 ? center.y <= frameCenter.y : center.y >= frameCenter.y)
-            }
-            guard sharesLane, crossedMidpoint else { return nil }
-            return (id, frame)
-        }
-        guard let target = candidates.min(by: { lhs, rhs in
-            let lhsCenter = CGPoint(x: lhs.1.x + lhs.1.width / 2, y: lhs.1.y + lhs.1.height / 2)
-            let rhsCenter = CGPoint(x: rhs.1.x + rhs.1.width / 2, y: rhs.1.y + rhs.1.height / 2)
-            let lhsDistance = pow(center.x - lhsCenter.x, 2) + pow(center.y - lhsCenter.y, 2)
-            let rhsDistance = pow(center.x - rhsCenter.x, 2) + pow(center.y - rhsCenter.y, 2)
-            if lhsDistance != rhsDistance { return lhsDistance < rhsDistance }
-            return uuidLess(lhs.0, rhs.0)
-        }), var displaced = tiles[target.0] else { return false }
+    /// True when the two frames sit edge-to-edge at approximately `gap` on one
+    /// axis with real overlap on the other — the canvas's definition of
+    /// "attached". Attaching a tile to a zone member is what adopts it and what
+    /// entitles the zone to grow around it.
+    public static func isGapAdjacent(_ a: TileFrame, _ b: TileFrame, gap: Double, tolerance: Double = 0.26) -> Bool {
+        let sepX = max(a.x - (b.x + b.width), b.x - (a.x + a.width))
+        let sepY = max(a.y - (b.y + b.height), b.y - (a.y + a.height))
+        return (abs(sepX - gap) <= tolerance && sepY < 0) || (abs(sepY - gap) <= tolerance && sepX < 0)
+    }
 
-        // Exchange positions only on the drag axis. Pointer jitter must never
-        // turn a horizontal swap into a diagonal lane change (or vice versa).
-        if horizontal {
-            active.frame.y = originalFrame.y
-            if target.1.x < originalFrame.x {
-                let existingGap = max(0, originalFrame.x - (target.1.x + target.1.width))
-                active.frame.x = target.1.x
-                displaced.frame.x = active.frame.x + active.frame.width + existingGap
-            } else {
-                let existingGap = max(0, target.1.x - (originalFrame.x + originalFrame.width))
-                displaced.frame.x = originalFrame.x
-                active.frame.x = displaced.frame.x + displaced.frame.width + existingGap
+    private static func contentRect(zone: ZonePlacement, padding: Double, header: Double) -> CGRect {
+        CGRect(x: zone.origin.x + padding, y: zone.origin.y + header + padding,
+               width: max(0, zone.size.width - 2 * padding),
+               height: max(0, zone.size.height - header - 2 * padding))
+    }
+
+    private static func clampIntoContent(_ frame: TileFrame, content: CGRect) -> TileFrame {
+        TileFrame(x: min(max(frame.x, content.minX), max(content.minX, content.maxX - frame.width)),
+                  y: min(max(frame.y, content.minY), max(content.minY, content.maxY - frame.height)),
+                  width: frame.width, height: frame.height)
+    }
+
+    private enum PushAxis { case horizontal, vertical }
+
+    /// The axis a pair pushes along for the WHOLE gesture: if their baseline
+    /// frames were separated on exactly one axis they are lane-mates on that
+    /// axis (row-mates push horizontally, stack-mates vertically). Diagonal
+    /// baseline neighbors fall back to whichever current penetration is smaller.
+    private static func pushAxis(baselineA: TileFrame, baselineB: TileFrame, currentA a: TileFrame, currentB b: TileFrame, gap: Double) -> PushAxis {
+        let xSeparated = baselineA.x + baselineA.width <= baselineB.x + 0.5 || baselineB.x + baselineB.width <= baselineA.x + 0.5
+        let ySeparated = baselineA.y + baselineA.height <= baselineB.y + 0.5 || baselineB.y + baselineB.height <= baselineA.y + 0.5
+        if xSeparated != ySeparated { return xSeparated ? .horizontal : .vertical }
+        let penX = b.x + b.width / 2 >= a.x + a.width / 2
+            ? a.x + a.width + gap - b.x
+            : b.x + b.width + gap - a.x
+        let penY = b.y + b.height / 2 >= a.y + a.height / 2
+            ? a.y + a.height + gap - b.y
+            : b.y + b.height + gap - a.y
+        return penX <= penY ? .horizontal : .vertical
+    }
+
+    /// Minimal single-axis push propagation. Each pushed tile moves exactly far
+    /// enough to restore the gap, along one axis, and stops at the zone content
+    /// wall instead of wrapping to a new lane. Solved fresh from the gesture
+    /// baseline every frame, so retreating the drag relaxes every push.
+    private static func propagatePushes(
+        from sourceId: UUID, frames: inout [UUID: TileFrame], baseline: [UUID: TileFrame],
+        exclude: Set<UUID>, content: CGRect, gap: Double
+    ) {
+        let ids = frames.keys.sorted(by: uuidLess)
+        var queue = [sourceId]
+        var visits = 0
+        while !queue.isEmpty, visits < max(64, ids.count * ids.count * 4) {
+            visits += 1
+            let pusher = queue.removeFirst()
+            guard let a = frames[pusher] else { continue }
+            for id in ids where id != pusher && id != sourceId && !exclude.contains(id) {
+                guard let b = frames[id], overlapsOrUnderGap(a, b, gap: gap) else { continue }
+                let axis = pushAxis(
+                    baselineA: baseline[pusher] ?? a, baselineB: baseline[id] ?? b,
+                    currentA: a, currentB: b, gap: gap)
+                var moved = b
+                switch axis {
+                case .horizontal:
+                    let positive = b.x + b.width / 2 >= a.x + a.width / 2
+                    moved.x = positive ? a.x + a.width + gap : a.x - gap - b.width
+                    moved.x = min(max(moved.x, content.minX), max(content.minX, content.maxX - b.width))
+                case .vertical:
+                    let positive = b.y + b.height / 2 >= a.y + a.height / 2
+                    moved.y = positive ? a.y + a.height + gap : a.y - gap - b.height
+                    moved.y = min(max(moved.y, content.minY), max(content.minY, content.maxY - b.height))
+                }
+                if moved.x != b.x || moved.y != b.y {
+                    frames[id] = moved
+                    queue.append(id)
+                }
             }
+        }
+    }
+
+    /// The member-move solver: the active tile always keeps its pointer frame;
+    /// siblings receive minimal single-axis pushes; entering a sibling's
+    /// baseline frame latches an origin exchange that persists until the pointer
+    /// returns home or crosses into a different sibling.
+    private static func solveMemberMove(
+        activeTile: UUID, originalFrame: TileFrame, memberIds: [UUID],
+        tiles: [UUID: LayoutTile], zone: ZonePlacement,
+        gap: Double, padding: Double, header: Double, latched: UUID?
+    ) -> (frames: [UUID: TileFrame], latch: UUID?) {
+        guard let requested = tiles[activeTile]?.frame else { return ([:], nil) }
+        let content = contentRect(zone: zone, padding: padding, header: header)
+        var baseline: [UUID: TileFrame] = [:]
+        for id in memberIds { baseline[id] = tiles[id]?.frame }
+        baseline[activeTile] = originalFrame
+
+        let center = CGPoint(x: requested.x + requested.width / 2, y: requested.y + requested.height / 2)
+        func contains(_ frame: TileFrame, _ point: CGPoint) -> Bool {
+            point.x >= frame.x && point.x <= frame.x + frame.width
+                && point.y >= frame.y && point.y <= frame.y + frame.height
+        }
+
+        // Latch state machine: enter a sibling's BASELINE frame (stable — a
+        // pushed sibling can't run away from its own swap) to latch; release
+        // when the pointer returns home OR clearly leaves the latched slot's
+        // neighborhood (the hysteresis band keeps edge jitter from oscillating
+        // the topology, while a drag that moves on can't drop a stale exchange
+        // somewhere surprising); entering a different sibling re-latches.
+        let releaseBand = max(24, gap * 1.5)
+        var latch: UUID? = latched.flatMap { memberIds.contains($0) && $0 != activeTile ? $0 : nil }
+        if let current = latch, let frame = baseline[current] {
+            let expanded = TileFrame(
+                x: frame.x - releaseBand, y: frame.y - releaseBand,
+                width: frame.width + 2 * releaseBand, height: frame.height + 2 * releaseBand)
+            if !contains(expanded, center) { latch = nil }
+        }
+        if contains(originalFrame, center) {
+            latch = nil
+        } else if let entered = memberIds.first(where: { id in
+            id != activeTile && baseline[id].map { contains($0, center) } == true
+        }) {
+            latch = entered
+        }
+
+        var frames = baseline
+        frames[activeTile] = requested
+
+        if let latch, var displaced = frames[latch] {
+            displaced.x = originalFrame.x
+            displaced.y = originalFrame.y
+            frames[latch] = clampIntoContent(displaced, content: content)
+            // An exchanged tile larger than the slot it inherits may press on
+            // other siblings; resolve that minimally, never against the active.
+            propagatePushes(
+                from: latch, frames: &frames, baseline: baseline,
+                exclude: [activeTile], content: content, gap: gap)
         } else {
-            active.frame.x = originalFrame.x
-            if target.1.y < originalFrame.y {
-                let existingGap = max(0, originalFrame.y - (target.1.y + target.1.height))
-                active.frame.y = target.1.y
-                displaced.frame.y = active.frame.y + active.frame.height + existingGap
+            propagatePushes(
+                from: activeTile, frames: &frames, baseline: baseline,
+                exclude: [], content: content, gap: gap)
+        }
+        return (frames, latch)
+    }
+
+    /// Rest-state magnetism: greedily grow a gap-contact cluster from the
+    /// top-left-most stationary member, absorbing whichever tile can join with
+    /// the least movement; a just-moved tile joins last. Tiles already at exact
+    /// gap-contact never move.
+    private static func settleMembers(
+        memberIds: [UUID], tiles: [UUID: LayoutTile], zone: ZonePlacement,
+        gap: Double, padding: Double, header: Double, mover: UUID?, pinMover: Bool
+    ) -> [UUID: TileFrame] {
+        let content = contentRect(zone: zone, padding: padding, header: header)
+        guard content.width > 0, content.height > 0 else { return [:] }
+        var result: [UUID: TileFrame] = [:]
+        for id in memberIds { if let tile = tiles[id] { result[id] = clampIntoContent(tile.frame, content: content) } }
+        guard result.count > 1 else { return result }
+        var pending = memberIds.filter { result[$0] != nil }
+        // A pinned mover (completed slot exchange) is authoritative: it seeds
+        // the cluster at its exact frame, residents it presses on are pushed
+        // aside along one axis, and everyone else magnetizes onto that. It can
+        // never relocate — in particular never to a different lane.
+        if pinMover, let mover, result[mover] != nil {
+            propagatePushes(from: mover, frames: &result, baseline: result, exclude: [], content: content, gap: gap)
+            var cluster: [TileFrame] = [result[mover]!]
+            pending.removeAll { $0 == mover }
+            absorb(pending: &pending, cluster: &cluster, result: &result, mover: nil, content: content, gap: gap)
+            return result
+        }
+        let anchorPool = pending.contains { $0 != mover } ? pending.filter { $0 != mover } : pending
+        let anchor = anchorPool.min { lhs, rhs in
+            let a = result[lhs]!, b = result[rhs]!
+            if a.y != b.y { return a.y < b.y }
+            if a.x != b.x { return a.x < b.x }
+            return uuidLess(lhs, rhs)
+        }!
+        var cluster: [TileFrame] = [result[anchor]!]
+        pending.removeAll { $0 == anchor }
+        absorb(pending: &pending, cluster: &cluster, result: &result, mover: mover, content: content, gap: gap)
+        // A mover that found no contact placement (e.g. dropped against the
+        // wall where its exchanged slot needs the row to shift) may still press
+        // on the cluster: resolve it with the same minimal single-axis pushes
+        // the live drag uses, never with a reflow.
+        if let mover, let moved = result[mover],
+           result.contains(where: { $0.key != mover && overlapsOrUnderGap(moved, $0.value, gap: gap - 0.26) }) {
+            var frames = result
+            propagatePushes(from: mover, frames: &frames, baseline: result, exclude: [], content: content, gap: gap)
+            result = frames
+        }
+        return result
+    }
+
+    /// The greedy magnetism loop: repeatedly absorb whichever pending tile can
+    /// join the gap-contact cluster with the least movement; `mover` (if any)
+    /// always joins last.
+    private static func absorb(
+        pending: inout [UUID], cluster: inout [TileFrame], result: inout [UUID: TileFrame],
+        mover: UUID?, content: CGRect, gap: Double
+    ) {
+        while !pending.isEmpty {
+            let wave = pending.contains { $0 != mover } ? pending.filter { $0 != mover } : pending
+            var best: (id: UUID, frame: TileFrame, cost: Double)?
+            for id in wave {
+                guard let frame = result[id] else { continue }
+                guard let placement = contactPlacement(for: frame, cluster: cluster, content: content, gap: gap) else { continue }
+                let cost = squaredDistance(placement, frame)
+                if best == nil || cost < best!.cost || (cost == best!.cost && uuidLess(id, best!.id)) {
+                    best = (id, placement, cost)
+                }
+            }
+            if let best {
+                result[best.id] = best.frame
+                cluster.append(best.frame)
+                pending.removeAll { $0 == best.id }
             } else {
-                let existingGap = max(0, target.1.y - (originalFrame.y + originalFrame.height))
-                displaced.frame.y = originalFrame.y
-                active.frame.y = displaced.frame.y + displaced.frame.height + existingGap
+                // The zone cannot host a contact placement (too small). Leave
+                // the nearest pending tile where it is rather than flinging it.
+                let id = wave.first!
+                cluster.append(result[id]!)
+                pending.removeAll { $0 == id }
             }
         }
+    }
 
-        let content = CGRect(
-            x: zone.origin.x + padding, y: zone.origin.y + header + padding,
-            width: max(0, zone.size.width - 2 * padding),
-            height: max(0, zone.size.height - header - 2 * padding))
-        let pair = [activeTile: active.frame, target.0: displaced.frame]
-        let untouched = memberIds.compactMap { id -> TileFrame? in
-            guard id != activeTile, id != target.0 else { return nil }
-            return tiles[id]?.frame
+    /// The nearest position where `frame` sits at exact gap-contact with the
+    /// cluster without overlapping or under-gapping any settled tile. Returns
+    /// the frame unchanged (cost 0) when it already touches.
+    private static func contactPlacement(for frame: TileFrame, cluster: [TileFrame], content: CGRect, gap: Double) -> TileFrame? {
+        let tolerance = 0.26
+        func isValid(_ candidate: TileFrame) -> Bool {
+            valid(candidate, in: content, against: cluster, gap: gap - tolerance)
         }
-        guard pair.values.allSatisfy({ valid($0, in: content, against: untouched, gap: 0) }),
-              !overlapsOrUnderGap(active.frame, displaced.frame, gap: 0) else { return false }
+        let touching = cluster.contains { isGapAdjacent(frame, $0, gap: gap, tolerance: tolerance) }
+        if touching, isValid(frame) { return frame }
 
-        tiles[activeTile] = active
-        tiles[target.0] = displaced
-        return true
+        func aligned(_ value: Double, edge: Double, edgeLength: Double, length: Double) -> [Double] {
+            let far = edge + edgeLength - length
+            return [min(max(value, min(edge, far)), max(edge, far)), edge, far]
+        }
+        var candidates: [TileFrame] = []
+        for other in cluster {
+            for y in aligned(frame.y, edge: other.y, edgeLength: other.height, length: frame.height) {
+                candidates.append(TileFrame(x: other.x + other.width + gap, y: y, width: frame.width, height: frame.height))
+                candidates.append(TileFrame(x: other.x - frame.width - gap, y: y, width: frame.width, height: frame.height))
+            }
+            for x in aligned(frame.x, edge: other.x, edgeLength: other.width, length: frame.width) {
+                candidates.append(TileFrame(x: x, y: other.y + other.height + gap, width: frame.width, height: frame.height))
+                candidates.append(TileFrame(x: x, y: other.y - frame.height - gap, width: frame.width, height: frame.height))
+            }
+        }
+        return candidates.filter(isValid).min { lhs, rhs in
+            let a = squaredDistance(lhs, frame), b = squaredDistance(rhs, frame)
+            if a != b { return a < b }
+            if lhs.y != rhs.y { return lhs.y < rhs.y }
+            return lhs.x < rhs.x
+        }
     }
 
     private static func shrinkNeighborsAndPack(
@@ -483,17 +689,29 @@ public enum CanvasAutoLayoutEngine {
         return attempt(preserveExisting: true) ?? attempt(preserveExisting: false)
     }
 
-    private static func resolveOuterCollisions(tiles: inout [UUID: LayoutTile], zones: inout [UUID: ZonePlacement], activeTile: UUID?, activeZone: UUID?, preferredGap: Double, vector: CGVector) {
+    private static func resolveOuterCollisions(tiles: inout [UUID: LayoutTile], zones: inout [UUID: ZonePlacement], scene: Scene, activeZone: UUID?, preferredGap: Double) {
         enum Peer: Hashable { case zone(UUID), tile(UUID) }
         var peers = zones.keys.map(Peer.zone) + tiles.values.filter { $0.zoneId == nil }.map { Peer.tile($0.id) }
         peers.sort { String(describing: $0) < String(describing: $1) }
-        let active = activeZone.map(Peer.zone) ?? activeTile.flatMap { tiles[$0]?.zoneId == nil ? Peer.tile($0) : nil }
-        guard let active else { return }
-        let horizontal = abs(vector.dx) >= abs(vector.dy), positive = horizontal ? vector.dx >= 0 : vector.dy >= 0
+        // Only a directly moved/resized ZONE projects force onto the outer
+        // canvas. Tiles never do: a dragged bare tile is freeform (it may cross
+        // anything and settles by the drop policy), and a member tile's world
+        // ends at its zone. "Zones push tiles; tiles never push zones."
+        guard let active = activeZone.map(Peer.zone) else { return }
+        let baselineTiles = Dictionary(uniqueKeysWithValues: scene.tiles.map { ($0.id, $0.frame) })
+        let baselineZones = Dictionary(uniqueKeysWithValues: scene.zones.map { placement in
+            (placement.zoneId, TileFrame(x: placement.origin.x, y: placement.origin.y, width: placement.size.width, height: placement.size.height))
+        })
         func frame(_ peer: Peer) -> TileFrame? {
             switch peer {
             case let .zone(id): return zones[id].map { TileFrame(x: $0.origin.x, y: $0.origin.y, width: $0.size.width, height: $0.size.height) }
             case let .tile(id): return tiles[id]?.frame
+            }
+        }
+        func baselineFrame(_ peer: Peer) -> TileFrame? {
+            switch peer {
+            case let .zone(id): return baselineZones[id]
+            case let .tile(id): return baselineTiles[id]
             }
         }
         func translate(_ peer: Peer, _ dx: Double, _ dy: Double) {
@@ -510,16 +728,25 @@ public enum CanvasAutoLayoutEngine {
             let source = queue.removeFirst()
             guard let a = frame(source) else { continue }
             for other in peers where other != source && other != active {
-                // Zone boundaries are intentionally one-way during direct tile
-                // manipulation. A bare tile must be able to cross a zone boundary
-                // so the canvas's existing drop policy can adopt/re-home it on
-                // mouse-up. The inverse remains solid: an actively moved/resized
-                // zone still pushes bare tiles, and any indirectly pushed tile
-                // still treats a zone as an obstacle.
-                if source == active, activeTile != nil, case .zone = other { continue }
                 guard let b = frame(other), overlapsOrUnderGap(a, b, gap: preferredGap) else { continue }
-                let dx = horizontal ? (positive ? a.x + a.width + preferredGap - b.x : a.x - preferredGap - b.x - b.width) : 0
-                let dy = horizontal ? 0 : (positive ? a.y + a.height + preferredGap - b.y : a.y - preferredGap - b.y - b.height)
+                // Push along the pair's own relation axis (how they were
+                // separated before the gesture), not a global drag axis: a
+                // corner graze must not shove a diagonal neighbor a full body
+                // length sideways.
+                let axis = pushAxis(
+                    baselineA: baselineFrame(source) ?? a, baselineB: baselineFrame(other) ?? b,
+                    currentA: a, currentB: b, gap: preferredGap)
+                var dx = 0.0, dy = 0.0
+                switch axis {
+                case .horizontal:
+                    dx = b.x + b.width / 2 >= a.x + a.width / 2
+                        ? a.x + a.width + preferredGap - b.x
+                        : a.x - preferredGap - b.x - b.width
+                case .vertical:
+                    dy = b.y + b.height / 2 >= a.y + a.height / 2
+                        ? a.y + a.height + preferredGap - b.y
+                        : a.y - preferredGap - b.y - b.height
+                }
                 if abs(dx) > 0.0001 || abs(dy) > 0.0001 { translate(other, dx, dy); queue.append(other) }
             }
         }

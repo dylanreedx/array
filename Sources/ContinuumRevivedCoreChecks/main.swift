@@ -58,6 +58,39 @@ if CommandLine.arguments.contains("--agent-context-gravity-check") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--jelly-trajectory-probe") {
+    runJellyTrajectoryProbe()
+    Foundation.exit(0)
+}
+
+// Manual-QA helper, not a witness: seed a disposable project root with three
+// unequal note tiles so an isolated preview app boots straight into a zone
+// worth dragging around. Usage: --jelly-seed-project <project root>
+if let seedIndex = CommandLine.arguments.firstIndex(of: "--jelly-seed-project"),
+   CommandLine.arguments.count > seedIndex + 1 {
+    let root = URL(fileURLWithPath: CommandLine.arguments[seedIndex + 1], isDirectory: true)
+    let store = ProjectStore(projectRoot: root)
+    let now = Date()
+    try store.saveProject(Project(
+        name: root.lastPathComponent, rootPath: root.path, createdAt: now, updatedAt: now,
+        defaultLaunchProfileId: "shell", editorPreference: .auto,
+        settings: ProjectSettings(
+            restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject,
+            terminalClosePolicy: .askWhenRunning)))
+    let tiles = [
+        Tile(id: UUID(), kind: .note, title: "Left", frame: TileFrame(x: 8, y: 40, width: 360, height: 300),
+             zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata()),
+        Tile(id: UUID(), kind: .note, title: "Middle", frame: TileFrame(x: 384, y: 52, width: 420, height: 360),
+             zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata()),
+        Tile(id: UUID(), kind: .note, title: "Right", frame: TileFrame(x: 820, y: 40, width: 340, height: 320),
+             zPosition: .fromLegacyRank(3), runtimeRef: nil, metadata: TileMetadata()),
+    ]
+    try store.saveCanvas(CanvasState(
+        viewport: CanvasViewport(x: -100, y: -150, zoom: 1), tiles: tiles, groups: [], lastActiveTileId: nil))
+    print("seeded \(root.path)")
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--canvas-entity-index-p7-check") {
     runCanvasEntityIndexP7Checks()
     Foundation.exit(0)
@@ -10973,6 +11006,120 @@ func runStatusVocabularyUnificationChecks() {
 
 // Ticket: docs/38-tickets/90-agent-ux/P1.4-type-scale.md — the type scale held
 // against the REAL ReadabilityPolicy band boundary (AgentUIChecks cannot see Core).
+/// Investigation harness (not a witness): replays scripted pointer drags
+/// through CanvasAutoLayoutEngine.solve exactly the way CanvasNSView does —
+/// one fixed baseline scene per gesture, one solve per pointer frame — and
+/// prints every intermediate tile frame plus detected trajectory anomalies:
+/// ORTHO (a passive tile moved on the axis orthogonal to the drag),
+/// FLIP (a passive tile's displacement direction reversed mid-drag),
+/// TELEPORT (a passive tile jumped more than half its size in one frame),
+/// STUCK (the drag retreated but a pushed tile did not relax back).
+func runJellyTrajectoryProbe() {
+    struct Fixture {
+        var name: String
+        var tiles: [CanvasAutoLayoutEngine.LayoutTile]
+        var zone: ZonePlacement
+        var activeId: UUID
+        var steps: [CGVector]  // cumulative pointer displacement per frame
+    }
+
+    let zoneId = UUID(uuidString: "B2200000-0000-4000-8000-000000000001")!
+    let leftId = UUID(uuidString: "B2200000-0000-4000-8000-000000000011")!
+    let midId = UUID(uuidString: "B2200000-0000-4000-8000-000000000012")!
+    let rightId = UUID(uuidString: "B2200000-0000-4000-8000-000000000013")!
+    let names: [UUID: String] = [leftId: "L", midId: "M", rightId: "R"]
+    let zone = ZonePlacement(
+        zoneId: zoneId, projectId: nil, origin: ZonePoint(x: 100, y: 100),
+        size: ZoneSize(width: 1_000, height: 560), color: "teal", collapsed: false,
+        hydrationPolicy: .automatic)
+    // Unequal sizes and a slight y offset — the case the handoff says was never
+    // covered. Baseline must be LEGAL for gap 16 / padding 16 / header 32:
+    // content rect starts at (116, 148) inside the zone at (100, 100).
+    let unequalRow = [
+        CanvasAutoLayoutEngine.LayoutTile(id: leftId, frame: TileFrame(x: 116, y: 148, width: 260, height: 220), zoneId: zoneId),
+        CanvasAutoLayoutEngine.LayoutTile(id: midId, frame: TileFrame(x: 392, y: 160, width: 340, height: 260), zoneId: zoneId),
+        CanvasAutoLayoutEngine.LayoutTile(id: rightId, frame: TileFrame(x: 748, y: 148, width: 300, height: 240), zoneId: zoneId),
+    ]
+
+    func rampSteps(dx: Double, dy: Double, frames: Int, jitterY: Double = 0) -> [CGVector] {
+        (1...frames).map { i in
+            let t = Double(i) / Double(frames)
+            let jitter = jitterY * sin(Double(i) * 1.3)
+            return CGVector(dx: dx * t, dy: dy * t + jitter)
+        }
+    }
+
+    let fixtures = [
+        Fixture(name: "drag M left onto L (horizontal intent, 6px y jitter)",
+                tiles: unequalRow, zone: zone, activeId: midId,
+                steps: rampSteps(dx: -280, dy: 0, frames: 28, jitterY: 6)),
+        Fixture(name: "drag M right onto R (horizontal intent, 6px y jitter)",
+                tiles: unequalRow, zone: zone, activeId: midId,
+                steps: rampSteps(dx: 360, dy: 0, frames: 28, jitterY: 6)),
+        Fixture(name: "nudge M 40px left into L's gap then retreat to start",
+                tiles: unequalRow, zone: zone, activeId: midId,
+                steps: rampSteps(dx: -48, dy: 0, frames: 8) + rampSteps(dx: -48, dy: 0, frames: 8).reversed().dropFirst() + [CGVector(dx: 0, dy: 0)]),
+        Fixture(name: "diagonal-ish drag M mostly left, drifting 40px down",
+                tiles: unequalRow, zone: zone, activeId: midId,
+                steps: rampSteps(dx: -280, dy: 40, frames: 28)),
+    ]
+
+    for fixture in fixtures {
+        print("=== \(fixture.name) ===")
+        let baseline = CanvasAutoLayoutEngine.Scene(tiles: fixture.tiles, zones: [fixture.zone])
+        let original = Dictionary(uniqueKeysWithValues: fixture.tiles.map { ($0.id, $0.frame) })
+        guard let activeStart = original[fixture.activeId] else { continue }
+        var previous: [UUID: TileFrame] = original
+        var previousRequestedDX = 0.0
+        var latch: UUID?
+        for (index, step) in fixture.steps.enumerated() {
+            let requested = TileFrame(
+                x: activeStart.x + step.dx, y: activeStart.y + step.dy,
+                width: activeStart.width, height: activeStart.height)
+            let transaction = CanvasAutoLayoutEngine.solve(
+                scene: baseline, mutation: .tile(id: fixture.activeId, frame: requested),
+                gap: 16, zonePadding: 16, headerHeight: 32, latchedSwapTarget: latch)
+            let latchChanged = transaction.swapTargetTileId != latch
+            latch = transaction.swapTargetTileId
+            var current = original
+            for (id, frame) in transaction.tileFrames { current[id] = frame }
+            var line = String(format: "f%02d req(%+7.1f,%+6.1f)", index, step.dx, step.dy)
+            if let latch { line += " ⇄" + (names[latch] ?? "?") } else { line += "   " }
+            for id in [leftId, midId, rightId] {
+                guard let f = current[id], let start = original[id] else { continue }
+                line += String(format: "  %@(%+7.1f,%+6.1f)", names[id] ?? "?", f.x - start.x, f.y - start.y)
+            }
+            var anomalies: [String] = []
+            let horizontalDrag = abs(step.dx) >= abs(step.dy)
+            // A latch transition IS a deliberate one-frame exchange; the jump is
+            // the feature, not an anomaly.
+            for id in [leftId, midId, rightId] where id != fixture.activeId && id != latch && !latchChanged {
+                guard let now = current[id], let before = previous[id], let start = original[id] else { continue }
+                let orthoDelta = horizontalDrag ? abs(now.y - start.y) : abs(now.x - start.x)
+                if orthoDelta > 0.5 { anomalies.append("ORTHO \(names[id] ?? "?") \(String(format: "%.1f", orthoDelta))") }
+                let axisNow = horizontalDrag ? now.x - start.x : now.y - start.y
+                let axisBefore = horizontalDrag ? before.x - start.x : before.y - start.y
+                if axisNow * axisBefore < -0.25 { anomalies.append("FLIP \(names[id] ?? "?")") }
+                let jump = max(abs(now.x - before.x), abs(now.y - before.y))
+                if jump > min(now.width, now.height) / 2 { anomalies.append("TELEPORT \(names[id] ?? "?") \(String(format: "%.1f", jump))") }
+                // Retreating drag (this frame's |dx| smaller than last) should relax pushes.
+                if abs(step.dx) < abs(previousRequestedDX) - 0.25 {
+                    let pushedBefore = abs(axisBefore), pushedNow = abs(axisNow)
+                    if pushedBefore > 0.5, pushedNow > pushedBefore - 0.1, pushedNow > 0.5 {
+                        anomalies.append("STUCK \(names[id] ?? "?") \(String(format: "%.1f", pushedNow))")
+                    }
+                }
+            }
+            if !anomalies.isEmpty { line += "   !! " + anomalies.joined(separator: ", ") }
+            print(line)
+            previous = current
+            previousRequestedDX = step.dx
+        }
+        print("")
+    }
+    print("jelly trajectory probe complete")
+}
+
 func runCanvasAutoLayoutChecks() {
     let zoneId = UUID(uuidString: "A1100000-0000-4000-8000-000000000001")!
     let neighborZoneId = UUID(uuidString: "A1100000-0000-4000-8000-000000000002")!
@@ -11031,6 +11178,8 @@ func runCanvasAutoLayoutChecks() {
            "jelly: a directly dragged bare tile may cross a zone without pushing the zone")
     expect(entering.tileFrames[enteringId] == enteringFrame,
            "jelly: the zone-entry tile keeps its pointer-requested frame until adoption")
+    expect(entering.tileFrames.count == 1,
+           "jelly: a dragged bare tile pushes nothing — tiles interact only inside zones")
 
     let outsideId = UUID(uuidString: "A1100000-0000-4000-8000-000000000015")!
     let outsideTile = CanvasAutoLayoutEngine.LayoutTile(
@@ -11112,23 +11261,78 @@ func runCanvasAutoLayoutChecks() {
         CanvasAutoLayoutEngine.LayoutTile(
             id: swapRightId, frame: TileFrame(x: 764, y: 140, width: 320, height: 240), zoneId: swapZoneId),
     ]
+    let swapScene = CanvasAutoLayoutEngine.Scene(tiles: swapTiles, zones: [swapZone])
+
+    // Minimal single-axis push: encroaching the gap toward a row-mate moves it
+    // by exactly the encroachment, never orthogonally, never past the wall.
+    let movePushed = CanvasAutoLayoutEngine.solve(
+        scene: swapScene, mutation: .tile(id: swapMiddleId, frame: TileFrame(x: 466, y: 146, width: 320, height: 240)),
+        gap: 8, zonePadding: 8, headerHeight: 32)
+    let pushedRight = movePushed.tileFrames[swapRightId] ?? swapTiles[2].frame
+    expect(pushedRight.x == 772 && pushedRight.y == swapTiles[2].frame.y,
+           "jelly move push is single-axis and stops at the zone content wall; got \(pushedRight)")
+    expect(movePushed.tileFrames[swapLeftId] == nil,
+           "jelly move push never disturbs the member on the far side")
+    expect(movePushed.zonePlacements.isEmpty,
+           "jelly: a member move never moves or resizes any zone — zones push tiles, tiles never push zones")
+    let relaxed = CanvasAutoLayoutEngine.solve(
+        scene: swapScene, mutation: .tile(id: swapMiddleId, frame: TileFrame(x: 440, y: 140, width: 320, height: 240)),
+        gap: 8, zonePadding: 8, headerHeight: 32)
+    expect((relaxed.tileFrames[swapRightId] ?? swapTiles[2].frame).x == 768,
+           "jelly push is minimal and relaxes with the drag: 4px of encroachment moves the neighbor exactly 4px")
+
+    // Latched exchange: the active tile stays pointer-owned; the sibling whose
+    // baseline frame the pointer center entered takes the active's old origin.
     let requestedSwap = TileFrame(x: 100, y: 140, width: 320, height: 240)
     let swapped = CanvasAutoLayoutEngine.solve(
-        scene: .init(tiles: swapTiles, zones: [swapZone]),
-        mutation: .tile(id: swapMiddleId, frame: requestedSwap),
+        scene: swapScene, mutation: .tile(id: swapMiddleId, frame: requestedSwap),
         gap: 8, zonePadding: 8, headerHeight: 32)
-    let swappedMiddle = swapped.tileFrames[swapMiddleId] ?? swapTiles[1].frame
+    expect(swapped.swapTargetTileId == swapLeftId,
+           "jelly: dragging a member's center into a sibling latches that sibling")
+    expect(swapped.tileFrames[swapMiddleId] == requestedSwap,
+           "jelly: the active tile stays pointer-owned through a latched exchange")
     let swappedLeft = swapped.tileFrames[swapLeftId] ?? swapTiles[0].frame
-    let swappedRight = swapped.tileFrames[swapRightId] ?? swapTiles[2].frame
-    expect(swappedMiddle.x == swapTiles[0].frame.x && swappedMiddle.y == swapTiles[0].frame.y,
-           "jelly: dragging a member into a sibling's center claims that sibling's slot")
     expect(swappedLeft.x == swapTiles[1].frame.x && swappedLeft.y == swapTiles[1].frame.y,
            "jelly: the displaced sibling moves into the active tile's previous slot")
-    expect(swappedRight == swapTiles[2].frame,
+    expect(swapped.tileFrames[swapRightId] == nil,
            "jelly: a two-tile slot exchange leaves unrelated members stable")
     expect(swapped.zonePlacements.isEmpty,
            "jelly: a valid slot exchange never pushes or resizes its containing zone")
 
+    // Hysteresis: between the latched sibling and home the latch persists;
+    // returning home releases it and everything returns to baseline.
+    let held = CanvasAutoLayoutEngine.solve(
+        scene: swapScene, mutation: .tile(id: swapMiddleId, frame: TileFrame(x: 272, y: 143, width: 320, height: 240)),
+        gap: 8, zonePadding: 8, headerHeight: 32, latchedSwapTarget: swapLeftId)
+    expect(held.swapTargetTileId == swapLeftId
+               && (held.tileFrames[swapLeftId]?.x ?? 0) == swapTiles[1].frame.x,
+           "jelly: the swap latch persists while the pointer sits between the exchange and home")
+    let released = CanvasAutoLayoutEngine.solve(
+        scene: swapScene, mutation: .tile(id: swapMiddleId, frame: TileFrame(x: 436, y: 141, width: 320, height: 240)),
+        gap: 8, zonePadding: 8, headerHeight: 32, latchedSwapTarget: swapLeftId)
+    expect(released.swapTargetTileId == nil && released.tileFrames[swapLeftId] == nil,
+           "jelly: returning home releases the latch and the displaced sibling returns to baseline")
+
+    // Rest-state magnetism: settling after the drop compacts the zone into a
+    // gap-contact cluster in the new order without reflowing lanes.
+    let droppedTiles = [
+        CanvasAutoLayoutEngine.LayoutTile(id: swapLeftId, frame: TileFrame(x: 436, y: 140, width: 320, height: 240), zoneId: swapZoneId),
+        CanvasAutoLayoutEngine.LayoutTile(id: swapMiddleId, frame: TileFrame(x: 100, y: 140, width: 320, height: 240), zoneId: swapZoneId),
+        CanvasAutoLayoutEngine.LayoutTile(id: swapRightId, frame: TileFrame(x: 764, y: 140, width: 320, height: 240), zoneId: swapZoneId),
+    ]
+    let settled = CanvasAutoLayoutEngine.solve(
+        scene: .init(tiles: droppedTiles, zones: [swapZone]),
+        mutation: .settle(zoneId: swapZoneId, anchor: swapMiddleId, pin: true),
+        gap: 8, zonePadding: 8, headerHeight: 32)
+    let settledMiddle = settled.tileFrames[swapMiddleId] ?? droppedTiles[1].frame
+    expect(settledMiddle.x == 108 && settledMiddle.y == 140,
+           "jelly settle magnetizes the dropped tile into exact gap-contact with the cluster; got \(settledMiddle)")
+    expect(settled.tileFrames[swapLeftId] == nil && settled.tileFrames[swapRightId] == nil,
+           "jelly settle never moves members already at gap-contact")
+
+    // Unequal sizes: the exchange is still origin-for-origin, and the drop
+    // settle shifts the row minimally when the bigger tile inherits a slot at
+    // the wall — pushes, never a lane reflow.
     let unequalLeft = CanvasAutoLayoutEngine.LayoutTile(
         id: swapLeftId, frame: TileFrame(x: 108, y: 140, width: 260, height: 220), zoneId: swapZoneId)
     let unequalMiddle = CanvasAutoLayoutEngine.LayoutTile(
@@ -11141,17 +11345,37 @@ func runCanvasAutoLayoutChecks() {
             id: swapMiddleId,
             frame: TileFrame(x: 60, y: 164, width: 340, height: 260)),
         gap: 8, zonePadding: 8, headerHeight: 32)
-    let unequalActive = unequalSwap.tileFrames[swapMiddleId] ?? unequalMiddle.frame
     let unequalDisplaced = unequalSwap.tileFrames[swapLeftId] ?? unequalLeft.frame
-    expect(unequalActive.x == unequalLeft.frame.x && unequalActive.y == unequalMiddle.frame.y,
-           "jelly: horizontal slot exchange ignores vertical pointer jitter")
-    expect(unequalDisplaced.x == unequalLeft.frame.x + unequalMiddle.frame.width + 8
-            && unequalDisplaced.y == unequalLeft.frame.y,
-           "jelly: unequal tiles exchange row order without overlapping or changing lanes")
-    expect((unequalSwap.tileFrames[swapRightId] ?? unequalRight.frame) == unequalRight.frame,
+    expect(unequalSwap.swapTargetTileId == swapLeftId
+               && unequalDisplaced.x == unequalMiddle.frame.x && unequalDisplaced.y == unequalMiddle.frame.y,
+           "jelly: unequal tiles exchange origins without changing lanes; got \(unequalDisplaced)")
+    expect(unequalSwap.tileFrames[swapRightId] == nil,
            "jelly: unequal slot exchange does not reflow an unrelated neighbor")
     expect(unequalSwap.zonePlacements.isEmpty,
            "jelly: unequal slot exchange does not resize its zone")
+
+    let unequalDropped = [
+        CanvasAutoLayoutEngine.LayoutTile(id: swapLeftId, frame: TileFrame(x: 376, y: 140, width: 260, height: 220), zoneId: swapZoneId),
+        CanvasAutoLayoutEngine.LayoutTile(id: swapMiddleId, frame: TileFrame(x: 60, y: 164, width: 340, height: 260), zoneId: swapZoneId),
+        CanvasAutoLayoutEngine.LayoutTile(id: swapRightId, frame: TileFrame(x: 724, y: 140, width: 300, height: 240), zoneId: swapZoneId),
+    ]
+    let unequalSettle = CanvasAutoLayoutEngine.solve(
+        scene: .init(tiles: unequalDropped, zones: [swapZone]),
+        mutation: .settle(zoneId: swapZoneId, anchor: swapMiddleId, pin: true),
+        gap: 8, zonePadding: 8, headerHeight: 32)
+    var unequalFinal = Dictionary(uniqueKeysWithValues: unequalDropped.map { ($0.id, $0.frame) })
+    for (id, frame) in unequalSettle.tileFrames { unequalFinal[id] = frame }
+    let finalFrames = [swapLeftId, swapMiddleId, swapRightId].compactMap { unequalFinal[$0] }
+    for (index, frame) in finalFrames.enumerated() {
+        expect(!finalFrames.dropFirst(index + 1).contains { other in
+            frame.x < other.x + other.width && frame.x + frame.width > other.x
+                && frame.y < other.y + other.height && frame.y + frame.height > other.y
+        }, "jelly settle after an unequal exchange must leave no overlap; frames=\(finalFrames)")
+    }
+    expect(unequalFinal[swapMiddleId]!.x == 108,
+           "jelly settle keeps the dropped tile against the wall it was dropped at; got \(unequalFinal[swapMiddleId]!)")
+    expect(unequalFinal[swapLeftId]!.x >= 456 - 0.5,
+           "jelly settle shifts the displaced row-mate right to make room instead of reflowing; got \(unequalFinal[swapLeftId]!)")
 
     var disabled = zone
     disabled.autoLayoutMode = .disabled

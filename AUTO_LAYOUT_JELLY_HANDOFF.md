@@ -1,5 +1,50 @@
 # Auto Layout Jelly — Rejected Implementation Handoff
 
+> **2026-08-21 — SUPERSEDED by the interaction redesign (uncommitted in this
+> worktree).** The rejected swap heuristic and the general packer's role in
+> member moves are gone. The new model, all verified by trajectory
+> instrumentation (`ContinuumRevivedCoreChecks --jelly-trajectory-probe`, zero
+> anomalies), rewritten core checks, the `--jelly-auto-layout-check` AppKit leg,
+> and a scripted CGEvent drag on an isolated preview app:
+>
+> 1. **Move**: the active tile is pointer-owned, always. Siblings receive
+>    minimal single-axis pushes (axis fixed per pair by their baseline
+>    relation — row-mates horizontal, stack-mates vertical), stop at the zone
+>    wall instead of wrapping, and relax as the drag retreats (every frame is
+>    solved from the gesture baseline; `applyAutoLayout` now applies the
+>    solved scene absolutely, fixing pushes that never relaxed).
+> 2. **Swap**: entering a sibling's BASELINE frame with the pointer center
+>    latches an origin exchange (`latchedSwapTarget` in/`swapTargetTileId` out
+>    of `solve`, held in `CanvasNSView.autoLayoutSwapLatch`). The latch
+>    persists until the pointer returns home or enters a different sibling —
+>    no per-frame axis guessing, no oscillation. On drop the exchange
+>    completes EXACTLY (mover pre-snapped to the latched sibling's pre-gesture
+>    origin, settled with `pin: true` so it can never resolve into another
+>    lane — a computer-use run caught the mover jumping below the row before
+>    this).
+> 3. **Rest magnetism**: `.settle`/`.tidy` pull every member into exact
+>    gap-contact with the cluster (greedy least-movement absorption; the just
+>    moved tile joins last; pinned movers push residents instead).
+> 4. **Zones vs tiles (Dylan's rule, verbatim)**: zones push tiles; tiles
+>    never move/resize/push zones. A dragged bare tile pushes NOTHING. Only a
+>    member RESIZE (pressure order unchanged), adopting/spawning a new member,
+>    or an ATTACH may grow a zone.
+> 5. **Attach**: dropping a tile gap-flush against a zone member
+>    (`isGapAdjacent`, 6px tolerance) appends it — a bare tile is adopted even
+>    with its center outside the zone, and the zone GROWS around the appended
+>    member instead of clamping it back inside (Dylan's live-preview
+>    regression, now witnessed in `--jelly-auto-layout-check`). Settle
+>    membership resolves via `autoLayoutScene()` because ZoneLayer members are
+>    absent from `tileZoneMembership`. The swap latch releases outside a 24px
+>    band around the latched slot, so a drag that moves on can never drop a
+>    stale exchange.
+>
+> The spawn-placement check's anchored-file expectation moved from the legacy
+> 24px `anchoredFileGap` to the configured gap (8) — settle compacts zone
+> members to the configured gap by design. Matrix not yet run end-to-end for
+> this redesign; Dylan has not yet hand-accepted. The sections below describe
+> the OLD rejected implementation and its lessons.
+
 ## Read this first
 
 This branch is **not approved and should not be integrated as-is**.

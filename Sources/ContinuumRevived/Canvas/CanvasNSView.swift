@@ -138,6 +138,7 @@ final class CanvasNSView: NSView, TokenThemed {
     var autoLayoutDefaults: UserDefaults = .standard
     private var lastAutoLayoutEnabled = CanvasAutoLayoutConfig.enabled()
     private var autoLayoutGestureBaseline: CanvasAutoLayoutEngine.Scene?
+    private var autoLayoutSwapLatch: UUID?
     private var autoLayoutDeferredUntilEdit = false
     private let autoLayoutUndoToast = InboxUndoToast()
     private var autoLayoutUndoTimer: Timer?
@@ -260,7 +261,10 @@ final class CanvasNSView: NSView, TokenThemed {
     func beginAutoLayoutGesture() {
         guard CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) else { return }
         if autoLayoutDeferredUntilEdit { autoLayoutDeferredUntilEdit = false }
-        if autoLayoutGestureBaseline == nil { autoLayoutGestureBaseline = autoLayoutScene() }
+        if autoLayoutGestureBaseline == nil {
+            autoLayoutGestureBaseline = autoLayoutScene()
+            autoLayoutSwapLatch = nil
+        }
     }
 
     var isAutoLayoutEnabled: Bool { CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) }
@@ -272,22 +276,37 @@ final class CanvasNSView: NSView, TokenThemed {
 
     private func applyAutoLayout(_ mutation: CanvasAutoLayoutEngine.Mutation, baseline: CanvasAutoLayoutEngine.Scene? = nil) {
         guard CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) else { return }
+        let scene = baseline ?? autoLayoutScene()
         let transaction = CanvasAutoLayoutEngine.solve(
-            scene: baseline ?? autoLayoutScene(),
+            scene: scene,
             mutation: mutation,
             gap: TileGapResolver.resolvedGap(defaults: autoLayoutDefaults),
             zonePadding: ZoneBoundsConfig.padding(defaults: autoLayoutDefaults),
-            headerHeight: Double(ZoneChromeNSView.headerHeight)
+            headerHeight: Double(ZoneChromeNSView.headerHeight),
+            latchedSwapTarget: autoLayoutSwapLatch
         )
         autoLayoutBlockedZoneIds = transaction.blockedZoneIds
+        if case .tile = mutation { autoLayoutSwapLatch = transaction.swapTargetTileId }
         let activeTileId: UUID?
         let activeZoneId: UUID?
         switch mutation {
         case let .tile(id, _): activeTileId = id; activeZoneId = nil
         case let .zone(id, _): activeTileId = nil; activeZoneId = id
-        case .tidy: activeTileId = nil; activeZoneId = nil
+        case .tidy, .settle: activeTileId = nil; activeZoneId = nil
         }
-        applyLayoutTransaction(transaction, activeTileId: activeTileId, activeZoneId: activeZoneId)
+        // The solver reports frames that differ from the SCENE it was given.
+        // Mid-gesture the live views hold the PREVIOUS frame's solve, so a tile
+        // whose solved position returned to its baseline (a relaxed push) would
+        // otherwise keep its stale pushed frame. Apply the solved scene
+        // absolutely: every scene entry lands, unlisted means "at baseline".
+        var absolute = transaction
+        for tile in scene.tiles where absolute.tileFrames[tile.id] == nil {
+            absolute.tileFrames[tile.id] = tile.frame
+        }
+        for zone in scene.zones where absolute.zonePlacements[zone.zoneId] == nil {
+            absolute.zonePlacements[zone.zoneId] = zone
+        }
+        applyLayoutTransaction(absolute, activeTileId: activeTileId, activeZoneId: activeZoneId)
     }
 
     private func applyLayoutTransaction(
@@ -349,6 +368,7 @@ final class CanvasNSView: NSView, TokenThemed {
     func finishAutoLayoutGesture() -> CanvasLayoutTransaction? {
         guard let baseline = autoLayoutGestureBaseline else { return nil }
         autoLayoutGestureBaseline = nil
+        autoLayoutSwapLatch = nil
         let current = autoLayoutScene()
         let oldTiles = Dictionary(uniqueKeysWithValues: baseline.tiles.map { ($0.id, $0.frame) })
         let oldZones = Dictionary(uniqueKeysWithValues: baseline.zones.map { ($0.zoneId, $0) })
@@ -1100,9 +1120,22 @@ final class CanvasNSView: NSView, TokenThemed {
         let cx = tile.frame.x + tile.frame.width / 2
         let cy = tile.frame.y + tile.frame.height / 2
         let current = tileZoneMembership[tileId]
-        let containing = liveZones.reversed().first { z in
+        var containing = liveZones.reversed().first { z in
             let f = CanvasEngine.zoneWorldFrame(z)
             return cx >= f.x && cx <= f.x + f.width && cy >= f.y && cy <= f.y + f.height
+        }
+        if containing == nil, isAutoLayoutEnabled {
+            // Attach-adoption: dropping a tile gap-flush against a zone member
+            // appends it to that zone even though its center is outside the
+            // zone frame (the zone then grows around it in the settle pass).
+            let gap = TileGapResolver.resolvedGap(defaults: autoLayoutDefaults)
+            let sceneTiles = autoLayoutScene().tiles
+            containing = liveZones.reversed().first { z in
+                sceneTiles.contains { member in
+                    member.zoneId == z.zoneId && member.id != tileId
+                        && CanvasAutoLayoutEngine.isGapAdjacent(tile.frame, member.frame, gap: gap, tolerance: 6)
+                }
+            }
         }
         var changed = false
         if let containing {
@@ -1121,19 +1154,61 @@ final class CanvasNSView: NSView, TokenThemed {
             }
         }
         if changed {
-            if isAutoLayoutEnabled,
-               let moved = canvasState.tiles.first(where: { $0.id == tileId }) {
-                // Membership is decided only by this direct drop. Now solve the
-                // destination scene so the adopted tile remains pointer-owned and
-                // the destination zone's existing members make room around it.
-                let membershipScene = autoLayoutScene()
-                applyAutoLayout(.tile(id: tileId, frame: moved.frame), baseline: membershipScene)
+            if isAutoLayoutEnabled {
+                // Membership is decided only by this direct drop. The zone the
+                // tile LEFT closes ranks (magnetism keeps its members touching);
+                // the destination zone settles in settleAutoLayoutAfterMove once
+                // the caller's drop position is final.
+                if let departed = current, departed != tileZoneMembership[tileId] {
+                    applyAutoLayout(.settle(zoneId: departed, anchor: nil, pin: false), baseline: autoLayoutScene())
+                }
             } else {
                 layoutAllTiles()
             }
             if notifyChange { delegate?.canvasDidChange(self) }
         }
         return changed
+    }
+
+    /// Rest-state magnetism after a committed tile MOVE: the moved tile's zone
+    /// settles so every member sits at exact gap-contact with the cluster, the
+    /// moved tile joining last (the composition wins over its raw drop point).
+    /// Membership is resolved through the scene so ZoneLayer-owned members
+    /// settle too, not just flat-canvas tiles.
+    func settleAutoLayoutAfterMove(tileId: UUID) {
+        guard isAutoLayoutEnabled else { return }
+        var scene = autoLayoutScene()
+        guard let member = scene.tiles.first(where: { $0.id == tileId }),
+              let zoneId = member.zoneId else { return }
+        // A latched exchange completes EXACTLY: the mover takes the displaced
+        // sibling's pre-gesture origin, so pointer jitter at the drop can never
+        // skew the inherited slot, and it settles PINNED — residents are pushed
+        // aside, never the mover into a different lane. (The latch and gesture
+        // baseline are still alive here — the gesture finishes in
+        // commitGeometryGesture.)
+        var pinned = false
+        if let latch = autoLayoutSwapLatch,
+           scene.tiles.first(where: { $0.id == latch })?.zoneId == zoneId,
+           let slot = autoLayoutGestureBaseline?.tiles.first(where: { $0.id == latch })?.frame {
+            applyLayoutTransaction(CanvasLayoutTransaction(
+                tileFrames: [tileId: TileFrame(x: slot.x, y: slot.y, width: member.frame.width, height: member.frame.height)]))
+            pinned = true
+            scene = autoLayoutScene()
+        }
+        // Appending to an edge: a member dropped gap-attached to a sibling is
+        // an append, and the zone GROWS to absorb it — it is never clamped
+        // back inside (the one sanctioned tile→zone size effect besides
+        // resize pressure).
+        let gap = TileGapResolver.resolvedGap(defaults: autoLayoutDefaults)
+        if let frame = scene.tiles.first(where: { $0.id == tileId })?.frame,
+           scene.tiles.contains(where: {
+               $0.zoneId == zoneId && $0.id != tileId
+                   && CanvasAutoLayoutEngine.isGapAdjacent(frame, $0.frame, gap: gap, tolerance: 6)
+           }) {
+            expandZoneToContainMembers(zoneId)
+            scene = autoLayoutScene()
+        }
+        applyAutoLayout(.settle(zoneId: zoneId, anchor: tileId, pin: pinned), baseline: scene)
     }
 
     /// Close a zone (zone-unify P5). `keepTiles` (the user's choice) spills the
@@ -6137,6 +6212,38 @@ final class CanvasNSView: NSView, TokenThemed {
                    "a valid member swap must not move or resize the zone")
         try expect(swapCommits.count == 2,
                    "spawn arrangement and slot swap must each commit exactly once")
+
+        // Appending to an edge: drag the right member so it attaches gap-flush
+        // BELOW the (post-swap) middle tile, sticking out past the zone's
+        // bottom edge. The zone must GROW to absorb the appended member — the
+        // member keeps its appended slot and its membership; it is never
+        // clamped back inside or reflowed elsewhere.
+        let preAppendMiddle = swapCanvas.canvasState.tiles.first { $0.id == swapMiddleId }!.frame
+        let preAppendRight = swapCanvas.canvasState.tiles.first { $0.id == swapRightId }!.frame
+        let appendTarget = TileFrame(
+            x: preAppendMiddle.x, y: preAppendMiddle.y + preAppendMiddle.height + 8,
+            width: preAppendRight.width, height: preAppendRight.height)
+        let preAppendZone = swapCanvas.qaLiveZonePlacement(swapZoneId)!
+        try expect(appendTarget.y + appendTarget.height > preAppendZone.origin.y + preAppendZone.size.height,
+                   "precondition: the appended slot must stick out past the zone's bottom edge")
+        guard let appendView = swapCanvas.tileView(for: swapRightId) else {
+            throw CheckError.failed("append tile view disappeared")
+        }
+        try dragTile(
+            appendView,
+            worldDX: appendTarget.x - preAppendRight.x,
+            worldDY: appendTarget.y - preAppendRight.y,
+            window: swapWindow)
+        let appendedRight = swapCanvas.canvasState.tiles.first { $0.id == swapRightId }!.frame
+        try expect(appendedRight == appendTarget,
+                   "an appended member keeps its gap-attached slot; wanted \(appendTarget), got \(appendedRight)")
+        let grownForAppend = swapCanvas.qaLiveZonePlacement(swapZoneId)!
+        try expect(grownForAppend.origin.y + grownForAppend.size.height >= appendedRight.y + appendedRight.height + 8,
+                   "the zone must grow to absorb a member appended past its edge; zone=\(grownForAppend), member=\(appendedRight)")
+        try expect(swapCanvas.qaZoneMembership(of: swapRightId) == swapZoneId,
+                   "an appended member keeps its zone membership")
+        try expect(swapCommits.count == 3,
+                   "the append gesture must add exactly one final commit")
 
         let fm = FileManager.default
         let root = URL(fileURLWithPath: fm.currentDirectoryPath)

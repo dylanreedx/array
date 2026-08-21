@@ -3945,8 +3945,10 @@ final class TileSpawner {
                         "the persisted frame must be the zone-local one, so a relaunch reproduces the same world position")
 
         // An explicit anchor keeps its relationship, in the layer's own space, and is
-        // untouched by the centre policy: exactly `anchoredFileGap` to the right of the
-        // anchor, top-aligned. File default size is 320x480.
+        // untouched by the centre policy: to the right of the anchor, top-aligned.
+        // File default size is 320x480. Under auto layout, post-spawn settle
+        // magnetizes zone members to the CONFIGURED gap (8), so the legacy
+        // `anchoredFileGap` (24) is compacted: x = 680 + 640 + 8.
         let anchoredFilePath = layerFixture.root.appendingPathComponent("anchored.txt")
         try Data("anchored".utf8).write(to: anchoredFilePath)
         let anchoredFileId: UUID
@@ -3957,7 +3959,7 @@ final class TileSpawner {
         case let .failure(error): throw CheckError.failed("spawnFile beside anchor failed: \(error)")
         }
         try expectFrame(try placedFrame(layerFixture, anchoredFileId),
-                        TileFrame(x: 1344, y: 300, width: 320, height: 480),
+                        TileFrame(x: 1328, y: 300, width: 320, height: 480),
                         "an explicitly anchored file stays gap-adjacent to its anchor")
 
         // A file opened with no anchor and no point is an automatic spawn: it takes the

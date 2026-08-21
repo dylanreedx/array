@@ -842,6 +842,7 @@ class TileNSView: NSView, TokenThemed {
         // into a zone to adopt it, or pull a member far past the edge to break out.
         if case .move = completedDragKind, !wasClick {
             canvas?.reevaluateZoneMembership(forMovedTile: tile.id, notifyChange: false)
+            canvas?.settleAutoLayoutAfterMove(tileId: tile.id)
         }
 
         if !wasClick, case .move = completedDragKind { _ = canvas?.finishAutoLayoutGesture() }
