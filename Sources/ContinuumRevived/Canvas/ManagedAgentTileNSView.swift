@@ -1045,6 +1045,12 @@ final class ManagedAgentTileNSView: TileNSView {
                 compactStatusSession = .init(state: .running)
                 compactStatusTurn = .active(
                     startedAt: snapshot.turnStartedAt, stream: nil, streamStartedAt: nil)
+            case .starting:
+                // The compact row already had a word for this window; the tile just
+                // had no state that could reach it.
+                compactStatusSession = .init(state: .starting)
+                compactStatusTurn = .active(
+                    startedAt: snapshot.submittedAt, stream: nil, streamStartedAt: nil)
             case .queued:
                 compactStatusSession = .init(state: .starting)
             case .needsAction:

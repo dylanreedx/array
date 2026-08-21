@@ -7386,6 +7386,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return (AgentStatusVocabulary.label(for: .needsAttention), attention)
         case .failed: return (AgentStatusVocabulary.failed, nil)
         case .restored: return ("Restored", nil)
+        case .starting: return (AgentStatusVocabulary.starting, nil)
         }
     }
 
@@ -28902,7 +28903,12 @@ static func checkRowStatusIsTurnState(
 
     supervisor.send("a simple prompt", to: agentId)
     guard await waitUntil(timeout: 10, pollInterval: 0.02, {
-        supervisor.isRunning(agentId) && tile.currentAgentStatus == .working
+        // Wait for the PROVIDER turn, not merely for motion on the tile: since the
+        // `.starting` state was added, `currentAgentStatus` reads `.working`
+        // during the spawn window too, so this predicate would pass before any
+        // event had been ingested and leave the assertions below racing the runner.
+        supervisor.turnSnapshot(for: agentId)?.state == .working
+            && supervisor.isRunning(agentId) && tile.currentAgentStatus == .working
     }) else {
         throw fail("row-status: the turn never started — isRunning \(supervisor.isRunning(agentId)), tile \(tile.currentAgentStatus)")
     }
@@ -29055,7 +29061,12 @@ static func checkRowStatusIsTurnState(
     }
     supervisor.send("a second prompt", to: agentId)
     guard await waitUntil(timeout: 10, pollInterval: 0.02, {
-        supervisor.isRunning(agentId) && tile.currentAgentStatus == .working
+        // Wait for the PROVIDER turn, not merely for motion on the tile: since the
+        // `.starting` state was added, `currentAgentStatus` reads `.working`
+        // during the spawn window too, so this predicate would pass before any
+        // event had been ingested and leave the assertions below racing the runner.
+        supervisor.turnSnapshot(for: agentId)?.state == .working
+            && supervisor.isRunning(agentId) && tile.currentAgentStatus == .working
     }) else {
         throw fail("row-status: the second turn never started — isRunning \(supervisor.isRunning(agentId)), tile \(tile.currentAgentStatus)")
     }

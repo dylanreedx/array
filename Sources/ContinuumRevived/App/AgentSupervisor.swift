@@ -941,6 +941,14 @@ final class AgentSupervisor {
         /// restored agent is a synthetic draft stamped at the SPAWN instant (the
         /// 158-hour reading). Non-nil exactly while `execution == .working`.
         var turnStartedAt: Date?
+        /// When the prompt was accepted here, before any provider event.
+        ///
+        /// The spawn window (`submittedAt` set, `turnStartedAt` still nil) is the
+        /// dead-air interval nothing in this app used to record: `turnStartedAt` is
+        /// stamped from the provider's `.turnStarted`, so the process spawn, session
+        /// resume and CLI cold start fell in a gap. Cleared by the same transitions
+        /// that clear `turnStartedAt`.
+        var submittedAt: Date?
     }
     private var turnFacts: [AgentID: TurnFacts] = [:]
     /// Latest provider-reported context-window telemetry per agent. The replay
@@ -1968,6 +1976,11 @@ final class AgentSupervisor {
         clearSettleOnActivity(&record)
         records[id] = record
         persist(record)
+
+        // Stamp the spawn-window anchor BEFORE the runner is built, so the
+        // interval covers makeRunner (which for pi walks `.pi/agents`) and the
+        // dispatch, not just the provider's silence.
+        turnFacts[id, default: TurnFacts()].submittedAt = now
 
         let runner = makeRunner(record)
         runners[id] = runner
@@ -3140,8 +3153,21 @@ final class AgentSupervisor {
             state = .failed(message: facts.failureMessage)
         } else if restoredIDs.contains(id) && (history[id]?.isEmpty ?? true) {
             state = .restored
+        } else if facts.execution == .working {
+            state = .working
+        } else if runners[id] != nil, facts.submittedAt != nil {
+            // A runner is bound, a prompt was accepted, and the provider has not
+            // reported a turn yet. This used to fall through to `.ready`, which is
+            // why the tile said "idle" with a disabled composer while `canStop` was
+            // already true.
+            //
+            // `submittedAt != nil` is load-bearing, not belt-and-braces: a runner
+            // can still be bound while a finished turn drains (`clearRunner` runs
+            // after `.turnCompleted`), and that window must read `.ready`, not
+            // "Starting" — the settle transitions clear both anchors together.
+            state = .starting
         } else {
-            state = facts.execution == .working ? .working : .ready
+            state = .ready
         }
 
         let occupied = runners[id] != nil
@@ -3159,7 +3185,8 @@ final class AgentSupervisor {
             // P3.3: carried, never derived here. A consumer that wanted an elapsed
             // reading had to reach for the event ring instead, which is why the
             // sidebar and the tile header measured different durations for one turn.
-            turnStartedAt: facts.turnStartedAt
+            turnStartedAt: facts.turnStartedAt,
+            submittedAt: facts.submittedAt
         )
     }
 
@@ -3846,6 +3873,7 @@ final class AgentSupervisor {
             facts.didFail = outcome == .failed
             facts.failureMessage = outcome == .failed ? errorMessage : nil
             facts.turnStartedAt = nil
+            facts.submittedAt = nil
             if var record = records[id] {
                 // P6.3/P6.4: completion is both a possible raised hand and the
                 // durable source for the unread axis. It is stamped at the actual
@@ -3875,6 +3903,8 @@ final class AgentSupervisor {
                 facts.execution = .ready
                 facts.didFail = true
                 facts.turnStartedAt = nil
+                facts.submittedAt = nil
+            facts.submittedAt = nil
                 if var record = records[id] {
                     record.failedAt = max(record.failedAt ?? .distantPast, now)
                     records[id] = record
@@ -3882,6 +3912,8 @@ final class AgentSupervisor {
             } else if state == .stopped || state == .ready {
                 facts.execution = .ready
                 facts.turnStartedAt = nil
+                facts.submittedAt = nil
+            facts.submittedAt = nil
             }
         case let .requestOpened(_, requestID, kind):
             let request = AgentPendingRequest(
@@ -3918,6 +3950,7 @@ final class AgentSupervisor {
             facts.didFail = true
             facts.failureMessage = message
             facts.turnStartedAt = nil
+            facts.submittedAt = nil
             if var record = records[id] {
                 record.failedAt = max(record.failedAt ?? .distantPast, now)
                 record.runCompletedAt = max(record.runCompletedAt ?? .distantPast, now)
@@ -3997,7 +4030,7 @@ private extension AgentTileOperationalState {
     var acceptsNewTurn: Bool {
         switch self {
         case .ready, .failed, .restored: return true
-        case .working, .queued, .needsAction: return false
+        case .starting, .working, .queued, .needsAction: return false
         }
     }
 }
@@ -12683,13 +12716,13 @@ func checkInboxStateAgreesWithTilePresenter<Failure: Error>(fail: (String) -> Fa
     )
     // Hand-listed because `AgentTileOperationalState` carries associated values and
     // cannot be `CaseIterable` (design C8). `kindName` is the table the count below
-    // is asserted against, so a seventh case cannot be added without appearing here.
+    // is asserted against, so an eighth case cannot be added without appearing here.
     let states: [AgentTileOperationalState] = [
-        .ready, .working, .queued, .needsAction(approval), .needsAction(input),
+        .ready, .starting, .working, .queued, .needsAction(approval), .needsAction(input),
         .failed(message: "provider failed"), .restored
     ]
-    guard Set(states.map(\.kindName)).count == 6 else {
-        throw fail("presenter-agreement: the case table covers \(Set(states.map(\.kindName)).count) of AgentTileOperationalState's 6 kinds — \(Set(states.map(\.kindName)).sorted())")
+    guard Set(states.map(\.kindName)).count == 7 else {
+        throw fail("presenter-agreement: the case table covers \(Set(states.map(\.kindName)).count) of AgentTileOperationalState's 7 kinds — \(Set(states.map(\.kindName)).sorted())")
     }
 
     // P3.5 migrates this existing row/tile agreement gate from state-only proof
@@ -12709,17 +12742,21 @@ func checkInboxStateAgreesWithTilePresenter<Failure: Error>(fail: (String) -> Fa
     let now = Date(timeIntervalSince1970: 1_900_000_000)
     var rows: [String] = []
     for state in states {
+        // `.starting` has no provider turn by invariant, so it carries the
+        // submission anchor instead — and both surfaces must still read 30s.
+        let isStarting = state.kindName == "starting"
         let snapshot = AgentTileTurnSnapshot(
             state: state,
             capabilities: .sendStop(canSend: true, canStop: true),
-            turnStartedAt: now.addingTimeInterval(-30)
+            turnStartedAt: isStarting ? nil : now.addingTimeInterval(-30),
+            submittedAt: isStarting ? now.addingTimeInterval(-30) : nil
         )
         let mine = InboxState.state(forSnapshot: snapshot)
         let presented = AgentTileStatePresenter.present(
             name: "Agreement",
             snapshot: snapshot,
             branchContext: nil,
-            startedAt: now.addingTimeInterval(-30),
+            startedAt: isStarting ? nil : now.addingTimeInterval(-30),
             now: now
         )
         // The tile's fold, given everything the tile knows — including WHICH request
@@ -12737,6 +12774,8 @@ func checkInboxStateAgreesWithTilePresenter<Failure: Error>(fail: (String) -> Fa
             expectedHeaderLabel = AgentStatusVocabulary.label(for: .needsAttention)
         case .failed:
             expectedHeaderLabel = AgentStatusVocabulary.failed
+        case .starting:
+            expectedHeaderLabel = AgentStatusVocabulary.starting
         }
         guard presented.stateLabel == expectedHeaderLabel else {
             throw fail("presenter-agreement: \(snapshot.state.kindName) reads \(presented.stateLabel) in the real tile header, expected \(expectedHeaderLabel)")
@@ -12744,6 +12783,17 @@ func checkInboxStateAgreesWithTilePresenter<Failure: Error>(fail: (String) -> Fa
         if snapshot.state.kindName == "ready" || snapshot.state.kindName == "restored" {
             guard mine.label == nil else {
                 throw fail("presenter-agreement: the named \(snapshot.state.kindName) fold must keep the established unlabeled ready row while the tile says \(expectedHeaderLabel)")
+            }
+        } else if snapshot.state.kindName == "starting" {
+            // THE SECOND NAMED DIVERGENCE, deliberate. The tile is the surface the
+            // user is staring at during the spawn window, so it earns the precise
+            // word ("Starting"); the sidebar keeps `InboxState`'s five-state
+            // vocabulary, where the only honest reading is motion. The row is not
+            // lying — it says working and carries a live clock anchored on the
+            // submission — it is simply less specific than the tile, which is the
+            // established relationship between these two surfaces.
+            guard mine.label == AgentStatusVocabulary.label(for: .working) else {
+                throw fail("presenter-agreement: starting reads \(mine.label ?? "nil") in the sidebar, expected the working label")
             }
         } else {
             guard mine.label == expectedHeaderLabel else {
@@ -12759,6 +12809,14 @@ func checkInboxStateAgreesWithTilePresenter<Failure: Error>(fail: (String) -> Fa
         } else {
             guard mine == theirs else {
                 throw fail("presenter-agreement: \(snapshot.state.kindName) reads \(mine.rawValue) on the row and \(theirs.rawValue) through the tile's presentation — two surfaces telling a human different things about one agent")
+            }
+        }
+        // The spawn window must be measurable on BOTH surfaces, or the dead-air
+        // interval is still unreported where it matters. This is the assertion that
+        // fails if `submittedAt` ever stops reaching a presenter.
+        if snapshot.state.kindName == "starting" {
+            guard presented.elapsedSeconds == 30 else {
+                throw fail("presenter-agreement: the starting window measures \(String(describing: presented.elapsedSeconds))s in the tile header, expected 30 from the submission anchor")
             }
         }
         rows.append("\(snapshot.state.kindName)=\(mine.rawValue)\(isTheDivergence ? "(tile \(theirs.rawValue), documented)" : "")")
@@ -12777,7 +12835,7 @@ func checkInboxStateAgreesWithTilePresenter<Failure: Error>(fail: (String) -> Fa
     guard workingPresentation.elapsedSeconds == 30 else {
         throw fail("presenter-agreement: the tile header measures \(String(describing: workingPresentation.elapsedSeconds))s from the stamped turn start, expected 30")
     }
-    return "row/tile state agreement over \(states.count) snapshots (\(rows.joined(separator: ", "))), one documented divergence, 30s elapsed from the stamped start on both surfaces"
+    return "row/tile state agreement over \(states.count) snapshots (\(rows.joined(separator: ", "))), two documented divergences (failed, starting), 30s elapsed from the stamped start on both surfaces and from the submission in the spawn window"
 }
 
 // MARK: - P3.2 · no surface may list managed records ungated

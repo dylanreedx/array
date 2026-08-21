@@ -32,10 +32,20 @@ struct AgentTileStatePresenter {
         let resolved = presentationState(for: snapshot)
         let isTimed: Bool
         switch snapshot.state {
-        case .working, .queued, .needsAction: isTimed = true
+        case .starting, .working, .queued, .needsAction: isTimed = true
         case .ready, .failed, .restored: isTimed = false
         }
-        let effectiveStart = isTimed ? startedAt : nil
+        // `.starting` has no provider turn yet, so `turnStartedAt` (and therefore
+        // the caller's `startedAt`) is nil by invariant. Anchor the spawn clock on
+        // the submission instead — otherwise the one window the user actually
+        // complains about is the one window with no elapsed reading.
+        let anchor: Date?
+        if case .starting = snapshot.state {
+            anchor = snapshot.submittedAt ?? startedAt
+        } else {
+            anchor = startedAt
+        }
+        let effectiveStart = isTimed ? anchor : nil
         let elapsed = effectiveStart.map { max(0, Int(now.timeIntervalSince($0))) }
         let accessibleState = elapsed.map { "\(resolved.accessibility), \($0) seconds elapsed" }
             ?? resolved.accessibility
@@ -90,6 +100,10 @@ struct AgentTileStatePresenter {
             let action = snapshot.capabilities.canSend ? "Send a prompt" : "No turn action available"
             let label = AgentStatusVocabulary.label(for: .idle)
             return (.idle, label, "Agent is \(label.lowercased()). \(action)", nil, action)
+        case .starting:
+            let action = snapshot.capabilities.canStop ? "Stop starting turn" : "No turn action available"
+            return (.working, AgentStatusVocabulary.starting,
+                    "Agent is starting. \(action)", nil, action)
         case .working:
             let action = snapshot.capabilities.canStop ? "Stop current turn" : "No turn action available"
             let label = AgentStatusVocabulary.label(for: .working)

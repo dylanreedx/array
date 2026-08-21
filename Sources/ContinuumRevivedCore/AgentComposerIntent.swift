@@ -100,6 +100,12 @@ public enum AgentTurnExecutionState: Equatable, Sendable {
 /// represented by an orphan attention badge.
 public enum AgentTileOperationalState: Equatable, Sendable {
     case ready
+    /// A prompt has been accepted and a runner is bound, but the provider has not
+    /// yet reported `.turnStarted`. THE dead-air window: process spawn, session
+    /// resume, CLI cold start. Previously this presented as `.ready` — the tile
+    /// said "idle" with a disabled composer while `canStop` was already true, a
+    /// contradiction the supervisor's own comments acknowledged.
+    case starting
     case working
     case queued
     case needsAction(AgentPendingRequest)
@@ -108,13 +114,14 @@ public enum AgentTileOperationalState: Equatable, Sendable {
 
     /// One word per case, hand-listed because `needsAction` and `failed` carry
     /// associated values and the enum therefore cannot be `CaseIterable` (design
-    /// C8). This switch has NO `default`, so a seventh case is a compile error
+    /// C8). This switch has NO `default`, so an eighth case is a compile error
     /// here as well as in `InboxState.state(forSnapshot:)` — and the check that
     /// counts these names is what catches a case added to this table without being
     /// given a row meaning.
     public var kindName: String {
         switch self {
         case .ready: return "ready"
+        case .starting: return "starting"
         case .working: return "working"
         case .queued: return "queued"
         case .needsAction: return "needsAction"
@@ -144,19 +151,31 @@ public struct AgentTileTurnSnapshot: Equatable, Sendable {
     /// presenter reads (§5.2).
     public var turnStartedAt: Date?
 
+    /// When the user's prompt was accepted, independent of whether the provider
+    /// has started a turn yet.
+    ///
+    /// Deliberately NOT folded into `turnStartedAt`: that field's invariant
+    /// (non-nil exactly while execution is working) is load-bearing and asserted,
+    /// and it is what makes an elapsed reading honest. This is the anchor for the
+    /// `.starting` clock only — the interval the app previously did not record at
+    /// all, because `turnStartedAt` is stamped from the provider's first event.
+    public var submittedAt: Date?
+
     public init(
         state: AgentTileOperationalState,
         capabilities: AgentTurnCapabilities,
-        turnStartedAt: Date?
+        turnStartedAt: Date?,
+        submittedAt: Date? = nil
     ) {
         self.state = state
         self.capabilities = capabilities
         self.turnStartedAt = turnStartedAt
+        self.submittedAt = submittedAt
     }
 
     public var executionState: AgentTurnExecutionState {
         switch state {
-        case .working, .queued, .needsAction:
+        case .starting, .working, .queued, .needsAction:
             return .working
         case .ready, .failed, .restored:
             return .ready

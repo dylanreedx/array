@@ -247,6 +247,10 @@ public enum AgentStatusVocabulary {
     /// beside the shared status vocabulary instead of being duplicated by either
     /// surface.
     public static let failed = "Failed"
+    /// The spawn window: prompt accepted, provider has not reported a turn yet.
+    /// Like `failed` this is an operational snapshot state rather than an
+    /// `AgentStatus`, so it lives beside the shared vocabulary.
+    public static let starting = "Starting"
     public static let unconfirmed = "Unconfirmed"
     /// What a row in History says (.plans/05-close-to-history.md). A closed agent
     /// has no tile by definition, so the word is about the TILE, not the agent's

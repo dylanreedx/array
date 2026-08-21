@@ -62,6 +62,9 @@ public extension InboxState {
             }
         case .failed: return .failed
         case .restored: return .ready
+        // The spawn window is motion, not rest: the sidebar must not read "ready"
+        // for an agent that is already occupied and cannot accept a prompt.
+        case .starting: return .working
         }
     }
 }
@@ -166,7 +169,10 @@ public enum AgentInboxRowBuilder {
             || pending != nil
         if let turnSnapshot {
             switch turnSnapshot.state {
-            case .working, .queued: observedFacts.hasLiveRunner = true
+            // `.starting` means a runner is already bound — it is a live runner by
+            // definition, so it must hold the row out of the settled tail exactly
+            // as `.working` does.
+            case .starting, .working, .queued: observedFacts.hasLiveRunner = true
             case .needsAction: observedFacts.attentionIsYours = true
             case .ready, .failed, .restored: break
             }
@@ -339,7 +345,14 @@ public enum AgentInboxRowBuilder {
         boardRow: AgentsBoardRow
     ) -> Date? {
         guard state == .working else { return nil }
-        if let turnSnapshot { return turnSnapshot.turnStartedAt }
+        if let turnSnapshot {
+            // The spawn window has no provider turn, so `turnStartedAt` is nil by
+            // invariant — but the row already reads "working" (a runner is bound and
+            // the agent cannot accept a prompt). Falling through to nil would print
+            // motion with no clock for exactly the interval the user experiences as
+            // dead air, so anchor on the submission when that is all we have.
+            return turnSnapshot.turnStartedAt ?? turnSnapshot.submittedAt
+        }
         return elapsedStart(in: boardRow)
     }
 
