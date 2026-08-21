@@ -101,24 +101,89 @@ enum SidebarProductionCorpus {
             expected.stateLabel = ""
         case .firstSendTitleFallback:
             expected.titleContains = "Replace the sidebar identity"
-            expected.stateLabel = ""
+            // §4.6: a SENT prompt is durable work, and the spawn window now says so.
+            // Before the `.starting` state existed this row was blank until the
+            // provider reported a turn, so an agent whose CLI was still launching
+            // looked idle in the sidebar. `blankCmdKDraft` below still expects "",
+            // which is the boundary that matters: a draft is not work, a send is.
+            expected.stateLabel = "Working · 0s"
+            // Elapsed is still live execution duration only — what changed is that
+            // "live" no longer means "the PROVIDER confirmed a turn". A bound runner
+            // launching a CLI is live execution; the old reading conflated the two and
+            // left the spawn window unclocked, which is what made an agent whose
+            // process was starting indistinguishable from one that had hung. The
+            // anchor is the submission (P3.3's lesson: a wrong anchor is the 158-hour
+            // bug), and it clears with the same transitions as turnStartedAt.
+            expected.elapsedIsEmpty = false
         case .imageOnlyFirstPrompt:
             // §4.2/5 wants a contextual label; today the sentinel survives.
             expected.titleContains = AgentRecord.defaultAgentName
-            expected.stateLabel = ""
+            // §4.6: a SENT prompt is durable work, and the spawn window now says so.
+            // Before the `.starting` state existed this row was blank until the
+            // provider reported a turn, so an agent whose CLI was still launching
+            // looked idle in the sidebar. `blankCmdKDraft` below still expects "",
+            // which is the boundary that matters: a draft is not work, a send is.
+            expected.stateLabel = "Working · 0s"
+            // Elapsed is still live execution duration only — what changed is that
+            // "live" no longer means "the PROVIDER confirmed a turn". A bound runner
+            // launching a CLI is live execution; the old reading conflated the two and
+            // left the spawn window unclocked, which is what made an agent whose
+            // process was starting indistinguishable from one that had hung. The
+            // anchor is the submission (P3.3's lesson: a wrong anchor is the 158-hour
+            // bug), and it clears with the same transitions as turnStartedAt.
+            expected.elapsedIsEmpty = false
         case .generatedTitleLanded:
             expected.titleContains = "Investigate zoom budget"
-            expected.stateLabel = ""
+            // §4.6: a SENT prompt is durable work, and the spawn window now says so.
+            // Before the `.starting` state existed this row was blank until the
+            // provider reported a turn, so an agent whose CLI was still launching
+            // looked idle in the sidebar. `blankCmdKDraft` below still expects "",
+            // which is the boundary that matters: a draft is not work, a send is.
+            expected.stateLabel = "Working · 0s"
+            // Elapsed is still live execution duration only — what changed is that
+            // "live" no longer means "the PROVIDER confirmed a turn". A bound runner
+            // launching a CLI is live execution; the old reading conflated the two and
+            // left the spawn window unclocked, which is what made an agent whose
+            // process was starting indistinguishable from one that had hung. The
+            // anchor is the submission (P3.3's lesson: a wrong anchor is the 158-hour
+            // bug), and it clears with the same transitions as turnStartedAt.
+            expected.elapsedIsEmpty = false
         case .manualRenameDuringGeneration:
             expected.titleContains = "Human chosen title"
-            expected.stateLabel = ""
+            // §4.6: a SENT prompt is durable work, and the spawn window now says so.
+            // Before the `.starting` state existed this row was blank until the
+            // provider reported a turn, so an agent whose CLI was still launching
+            // looked idle in the sidebar. `blankCmdKDraft` below still expects "",
+            // which is the boundary that matters: a draft is not work, a send is.
+            expected.stateLabel = "Working · 0s"
+            // Elapsed is still live execution duration only — what changed is that
+            // "live" no longer means "the PROVIDER confirmed a turn". A bound runner
+            // launching a CLI is live execution; the old reading conflated the two and
+            // left the spawn window unclocked, which is what made an agent whose
+            // process was starting indistinguishable from one that had hung. The
+            // anchor is the submission (P3.3's lesson: a wrong anchor is the 158-hour
+            // bug), and it clears with the same transitions as turnStartedAt.
+            expected.elapsedIsEmpty = false
         case .generationFailed:
             expected.titleContains = "check the release appcast"
-            expected.stateLabel = ""
+            // §4.6: a SENT prompt is durable work, and the spawn window now says so.
+            // Before the `.starting` state existed this row was blank until the
+            // provider reported a turn, so an agent whose CLI was still launching
+            // looked idle in the sidebar. `blankCmdKDraft` below still expects "",
+            // which is the boundary that matters: a draft is not work, a send is.
+            expected.stateLabel = "Working · 0s"
+            // Elapsed is still live execution duration only — what changed is that
+            // "live" no longer means "the PROVIDER confirmed a turn". A bound runner
+            // launching a CLI is live execution; the old reading conflated the two and
+            // left the spawn window unclocked, which is what made an agent whose
+            // process was starting indistinguishable from one that had hung. The
+            // anchor is the submission (P3.3's lesson: a wrong anchor is the 158-hour
+            // bug), and it clears with the same transitions as turnStartedAt.
+            expected.elapsedIsEmpty = false
         case .working:
             expected.titleContains = "run the matrix"
             expected.stateLabel = "Working · 0s"
-            expected.elapsedIsEmpty = false     // the ONLY flow that paints elapsed
+            expected.elapsedIsEmpty = false
         case .approval, .input:
             // §4.6 wants the distinct words `Approval` and `Input`.
             expected.titleContains = flow == .approval ? "apply the patch" : "pick a provider"
@@ -156,7 +221,20 @@ enum SidebarProductionCorpus {
             expected.providerGlyph = "experimental-7"
         case .longUnicodeRTL:
             expected.titleContains = "تحديث"
-            expected.stateLabel = ""
+            // §4.6: a SENT prompt is durable work, and the spawn window now says so.
+            // Before the `.starting` state existed this row was blank until the
+            // provider reported a turn, so an agent whose CLI was still launching
+            // looked idle in the sidebar. `blankCmdKDraft` below still expects "",
+            // which is the boundary that matters: a draft is not work, a send is.
+            expected.stateLabel = "Working · 0s"
+            // Elapsed is still live execution duration only — what changed is that
+            // "live" no longer means "the PROVIDER confirmed a turn". A bound runner
+            // launching a CLI is live execution; the old reading conflated the two and
+            // left the spawn window unclocked, which is what made an agent whose
+            // process was starting indistinguishable from one that had hung. The
+            // anchor is the submission (P3.3's lesson: a wrong anchor is the 158-hour
+            // bug), and it clears with the same transitions as turnStartedAt.
+            expected.elapsedIsEmpty = false
         case .piAnthropic:
             // The row intentionally shows the provider mark rather than the harness.
             expected.titleContains = "Pi running Opus"
@@ -179,10 +257,36 @@ enum SidebarProductionCorpus {
             expected.providerGlyph = ""
         case .nestedChild:
             expected.titleContains = "agent 1"      // parent-derived ordinal, not a task
-            expected.stateLabel = ""
+            // §4.6: a SENT prompt is durable work, and the spawn window now says so.
+            // Before the `.starting` state existed this row was blank until the
+            // provider reported a turn, so an agent whose CLI was still launching
+            // looked idle in the sidebar. `blankCmdKDraft` below still expects "",
+            // which is the boundary that matters: a draft is not work, a send is.
+            expected.stateLabel = "Working · 0s"
+            // Elapsed is still live execution duration only — what changed is that
+            // "live" no longer means "the PROVIDER confirmed a turn". A bound runner
+            // launching a CLI is live execution; the old reading conflated the two and
+            // left the spawn window unclocked, which is what made an agent whose
+            // process was starting indistinguishable from one that had hung. The
+            // anchor is the submission (P3.3's lesson: a wrong anchor is the 158-hour
+            // bug), and it clears with the same transitions as turnStartedAt.
+            expected.elapsedIsEmpty = false
         case .headless:
             expected.titleContains = "headless work"
-            expected.stateLabel = ""
+            // §4.6: a SENT prompt is durable work, and the spawn window now says so.
+            // Before the `.starting` state existed this row was blank until the
+            // provider reported a turn, so an agent whose CLI was still launching
+            // looked idle in the sidebar. `blankCmdKDraft` below still expects "",
+            // which is the boundary that matters: a draft is not work, a send is.
+            expected.stateLabel = "Working · 0s"
+            // Elapsed is still live execution duration only — what changed is that
+            // "live" no longer means "the PROVIDER confirmed a turn". A bound runner
+            // launching a CLI is live execution; the old reading conflated the two and
+            // left the spawn window unclocked, which is what made an agent whose
+            // process was starting indistinguishable from one that had hung. The
+            // anchor is the submission (P3.3's lesson: a wrong anchor is the 158-hour
+            // bug), and it clears with the same transitions as turnStartedAt.
+            expected.elapsedIsEmpty = false
         case .exactPlacement:
             expected.titleContains = "Agent with a real tile"
             expected.stateLabel = ""
