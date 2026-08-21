@@ -40,6 +40,8 @@ private final class ManagedAgentTileActionAdapter: AgentTileActionSink {
                 tile?.appendUserPrompt(text)
             case .sendPrompt(let prompt):
                 tile?.appendUserPrompt(prompt)
+            case .providerCommand:
+                break
             default:
                 break
             }
@@ -227,7 +229,10 @@ final class ManagedAgentTileNSView: TileNSView {
     ) {
         let fileIndex = AgentFileIndex()
         self.v2DefaultCompletionRegistry = AgentCompletionProviderRegistry(
-            providers: AgentCompletionFixtures.providers().filter { $0.providerID != "fixture.files" }
+            providers: AgentCompletionFixtures.providers().filter {
+                $0.providerID != "fixture.files" && $0.providerID != "fixture.commands"
+            }
+                + [AgentCommandCompletionProvider()]
                 + [AgentFileCompletionProvider(index: fileIndex)]
         )
         self.threadId = threadId
@@ -473,6 +478,14 @@ final class ManagedAgentTileNSView: TileNSView {
             let adapter = ManagedAgentTileActionAdapter(tile: self, supervisor: supervisor)
             v2ActionAdapter = adapter
             composer.bindActionSink(adapter, agentID: agentID, snapshot: snapshot)
+            composer.onCompletionAction = { [weak adapter] payload in
+                guard case let .command(invocation) = payload else { return false }
+                guard invocation.surface != .cli else { return false }
+                Task { @MainActor [weak adapter] in
+                    _ = await adapter?.accept(.providerCommand(invocation), for: agentID)
+                }
+                return true
+            }
             if let v2AttachmentStore { composer.bindAttachmentStore(v2AttachmentStore, agentID: agentID) }
             if let v2DraftStore { composer.bindDraftStore(v2DraftStore, agentID: agentID) }
             if let v2PromptHistory { composer.bindPromptHistory(v2PromptHistory, agentID: agentID) }
