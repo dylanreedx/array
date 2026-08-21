@@ -547,12 +547,35 @@ private func checkEmitAllStopsAtFirstFailureAndSuccessPathLandsInOrder() async t
     print("emitAll checks: stop-on-failure storeNewOps=0 opSendAttempts=1 revertedByteIdentical=true; success-path ordered=[setTileFrame,setTileZone] converged=true")
 }
 
+/// A relay broadcasts a publisher's message back to that publisher. The desktop
+/// spatial sender therefore sees its own rebroadcast after accepting a phone op.
+/// The op log is the idempotence boundary: the same CRDT OpId must fan out once,
+/// otherwise sender -> relay echo -> append -> sender becomes an infinite loop.
+private func checkSpatialStoreDeduplicatesRelayEcho() async {
+    let replica = UUID(uuidString: "61B10000-0000-4000-8000-0000000000EE")!
+    let tile = UUID(uuidString: "61B10000-0000-4000-8000-0000000000EF")!
+    let echoed = spatialLogged(
+        1,
+        replica,
+        .setTileTitle(id: tile, title: "relay echo")
+    )
+    let store = MemorySpatialOpLogStore()
+
+    await store.append(echoed)
+    await store.append(echoed)
+
+    let stored = await store.allOps()
+    expect(stored == [echoed], "relay echo dedupe: identical OpId is stored and fanned exactly once, got \(stored.count)")
+    print("relay echo dedupe: duplicate OpId stored=1")
+}
+
 func runSpatialSyncChecks() async throws {
+    await checkSpatialStoreDeduplicatesRelayEcho()
     await checkFreshSpatialSubscribeWaitsForRemoteDesktopState()
     try await checkSpatialOpSyncRealPathAtOperatorScope()
     try await checkObserverScopeEmissionIsDroppedAtTheSender()
     try await checkReceiverRevertsOptimisticApplyOnSendFailure()
     try await checkReceiverPreservesUnfoldedLocalTailAcrossAStaleSnapshot()
     try await checkEmitAllStopsAtFirstFailureAndSuccessPathLandsInOrder()
-    print("ContinuumRevivedSyncChecks passed: spatial op sync — snapshot-then-tail, operator-scope move/membership/bring-to-front convergence + lamport allocation + order-independence, observer-scope drop, send-failure revert, stale-snapshot tail preservation, emitAll stop-on-first-failure + ordered success path")
+    print("ContinuumRevivedSyncChecks passed: spatial op sync — relay-echo dedupe, snapshot-then-tail, operator-scope move/membership/bring-to-front convergence + lamport allocation + order-independence, observer-scope drop, send-failure revert, stale-snapshot tail preservation, emitAll stop-on-first-failure + ordered success path")
 }

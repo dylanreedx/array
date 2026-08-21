@@ -43,13 +43,17 @@ public protocol SpatialOpLogStore: Actor {
 /// wiring ticket to swap in a durable conformance behind the same protocol.
 public actor MemorySpatialOpLogStore: SpatialOpLogStore {
     private var ops: [LoggedOp] = []
+    private var seenOpIds: Set<OpId> = []
     private var observers: [UUID: AsyncStream<SyncMessage>.Continuation] = [:]
 
     public init(seeding initialOps: [LoggedOp] = []) {
-        ops = initialOps
+        for op in initialOps where seenOpIds.insert(op.opId).inserted {
+            ops.append(op)
+        }
     }
 
     public func append(_ op: LoggedOp) async {
+        guard seenOpIds.insert(op.opId).inserted else { return }
         ops.append(op)
         for continuation in observers.values {
             continuation.yield(.op(op))
