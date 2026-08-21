@@ -1,5 +1,6 @@
 import AVFoundation
 import CloudKit
+import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import ContinuumRevivedSync
@@ -151,6 +152,9 @@ private final class AgentsBoardModel: ObservableObject {
     @Published var snapshot: ActivityLogSnapshot = .empty
     @Published var rows: [AgentsBoardRow] = []
     @Published var lastApprovalAck: ApprovalResponseAck?
+    @Published var lastStopAck: AgentStopAck?
+    @Published var transcripts: [UUID: AgentDocument] = [:]
+    @Published var parentByChild: [UUID: UUID] = [:]
     @Published var apnsDeviceToken: String?
     @Published var freshnessNow = Date()
     @Published var pairingStatusMessage: String?
@@ -195,6 +199,7 @@ private final class AgentsBoardModel: ObservableObject {
     /// Set in relay mode (D4-R1, ticket 86); the transport owns its poll loop.
     private var relayTransport: RelaySyncTransport?
     private var relayStateTask: Task<Void, Never>?
+    private var transcriptControlTask: Task<Void, Never>?
     private static let relayCursorDefaultsKey = "continuum.relay.cursor"
     private var freshnessSequence: Int64 = 0
     private let pairedSessionStore: any PairedCompanionSessionStoring = KeychainPairedCompanionSessionStore()
@@ -330,6 +335,22 @@ private final class AgentsBoardModel: ObservableObject {
         // uses (ticket 61b banner (c).7), never a second transport.
         let demux = SyncMessageDemux(transport: transport)
         self.demux = demux
+        transcriptControlTask = Task { [weak self] in
+            let stream = await demux.subscribe()
+            for await message in stream {
+                guard !Task.isCancelled else { return }
+                switch message {
+                case .childLifecycle(let update):
+                    await MainActor.run { self?.parentByChild[update.agentID] = update.parentAgentID }
+                case .transcriptHistoryResponse(let response):
+                    // Decryption is installed when transcript keys are negotiated.
+                    // Until then the UI remains explicitly activity-only.
+                    if response.envelope == nil { continue }
+                default:
+                    continue
+                }
+            }
+        }
 
         let receiver = ActivityProjectionReceiver(demux: demux, scope: capability.scope)
         self.receiver = receiver
@@ -445,11 +466,13 @@ private final class AgentsBoardModel: ObservableObject {
         spatialTask?.cancel()
         fetchTask?.cancel()
         relayStateTask?.cancel()
+        transcriptControlTask?.cancel()
         relayTransport?.stop()
         task = nil
         spatialTask = nil
         fetchTask = nil
         relayStateTask = nil
+        transcriptControlTask = nil
         relayTransport = nil
         receiver = nil
         self.spatialReceiver = nil
@@ -511,6 +534,34 @@ private final class AgentsBoardModel: ObservableObject {
         } catch {
             ackTask.cancel()
             throw error
+        }
+    }
+
+    func stopAgent(agentId: UUID) async throws -> AgentStopOutcome {
+        guard grantedScope.contains(.agentStop) else { return .unauthorized }
+        guard canMutateFromFreshness, let demux else { return .stale }
+        let request = AgentStopRequest(agentID: agentId)
+        let stream = await demux.subscribe()
+        let ackTask = Task<AgentStopOutcome, Error> {
+            for await message in stream {
+                guard case .agentStopAck(let ack) = message,
+                      ack.requestID == request.requestID else { continue }
+                await MainActor.run { self.lastStopAck = ack }
+                return ack.outcome
+            }
+            throw ApprovalSendError.unavailable
+        }
+        defer { ackTask.cancel() }
+        try await demux.send(.agentStopRequest(request))
+        return try await withThrowingTaskGroup(of: AgentStopOutcome.self) { group in
+            group.addTask { try await ackTask.value }
+            group.addTask {
+                try await Task.sleep(for: Self.approvalAckTimeout)
+                throw ApprovalSendError.ackTimedOut
+            }
+            guard let result = try await group.next() else { return .stale }
+            group.cancelAll()
+            return result
         }
     }
 
@@ -928,6 +979,8 @@ private struct AgentDetailView: View {
     // view hint on the row — which is why "Show on canvas" below is conditional.
     let agentId: UUID
     @Binding var selectedTab: ContinuumTab
+    @State private var stopNote: String?
+    @State private var stopping = false
 
     private var row: AgentsBoardRow? {
         model.rows.first { $0.agentId == agentId }
@@ -942,6 +995,18 @@ private struct AgentDetailView: View {
             VStack(alignment: .leading, spacing: 16) {
                 if let row, let activity {
                     DetailHeader(row: row)
+                    if let parentID = model.parentByChild[agentId] {
+                        NavigationLink(value: parentID) {
+                            Label("Parent agent", systemImage: "arrow.turn.up.left")
+                                .font(.subheadline)
+                        }
+                    }
+                    if let document = model.transcripts[agentId] {
+                        MobileSemanticTranscriptView(document: document)
+                    } else {
+                        TranscriptAvailabilityCard(
+                            hasPermission: model.grantedScope.contains(.transcriptRead))
+                    }
                     if row.status == .needsAttention {
                         PendingAttentionCard(activity: activity, grantedScope: model.grantedScope, freshness: model.freshness) { target, decision in
                             try await model.respondToApproval(
@@ -965,6 +1030,29 @@ private struct AgentDetailView: View {
                         .tint(.orange)
                     }
 
+                    if model.grantedScope.contains(.agentStop) {
+                        Button(role: .destructive) {
+                            stopping = true
+                            Task {
+                                do {
+                                    let outcome = try await model.stopAgent(agentId: agentId)
+                                    stopNote = outcome == .stopped ? "Stopped this agent." : "Stop unavailable: \(outcome.rawValue)."
+                                } catch {
+                                    stopNote = error.localizedDescription
+                                }
+                                stopping = false
+                            }
+                        } label: {
+                            Label(stopping ? "Stopping…" : "Stop agent", systemImage: "stop.circle")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(stopping || !model.canMutateFromFreshness)
+                    }
+                    if let stopNote {
+                        Text(stopNote).font(.caption).foregroundStyle(.secondary)
+                    }
+
                     TimelineView(
                         events: AgentsBoardProjection.timelineEvents(for: activity),
                         showsActiveIndicator: DualPlaneGyroIndicatorModel.isActive(status: row.status)
@@ -981,6 +1069,96 @@ private struct AgentDetailView: View {
         .tokenBackground(.canvas, ignoringSafeArea: true)
         .navigationTitle("Agent")
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct TranscriptAvailabilityCard: View {
+    let hasPermission: Bool
+
+    var body: some View {
+        Label(
+            hasPermission
+                ? "Full transcript is waiting for encrypted channel negotiation. Activity remains available."
+                : "This paired device has activity-only access. Re-pair with transcript permission to read conversations.",
+            systemImage: hasPermission ? "lock.rotation" : "lock"
+        )
+        .font(.subheadline)
+        .foregroundStyle(.secondary)
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .tokenBackground(.panel)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct MobileSemanticTranscriptView: View {
+    let document: AgentDocument
+
+    var body: some View {
+        LazyVStack(alignment: .leading, spacing: 14) {
+            ForEach(document.entries, id: \.id.rawValue) { entry in
+                VStack(alignment: entry.role == .user ? .trailing : .leading, spacing: 8) {
+                    ForEach(entry.blocks, id: \.id.rawValue) { block in
+                        MobileSemanticBlockView(block: block)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: entry.role == .user ? .trailing : .leading)
+                .padding(entry.role == .user ? 10 : 0)
+                .background(entry.role == .user ? Color.secondary.opacity(0.10) : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Agent transcript")
+    }
+}
+
+private struct MobileSemanticBlockView: View {
+    let block: AgentBlock
+
+    var body: some View {
+        switch block.payload {
+        case .paragraph(let inline), .heading(_, let inline):
+            Text(Self.text(inline))
+                .font(block.kind == .heading ? .headline : .body)
+                .textSelection(.enabled)
+        case .agentReference(let reference):
+            NavigationLink(value: reference.agentID) {
+                Label(reference.displayNameAtSpawn, systemImage: "person.crop.circle.badge.arrow.forward")
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Open subagent \(reference.displayNameAtSpawn)")
+        case .toolCall(let tool):
+            Label(tool.summary ?? tool.name, systemImage: "wrench.and.screwdriver")
+                .font(.subheadline).foregroundStyle(.secondary)
+        case .commandOutput(let command):
+            Text(command.text).font(.caption.monospaced()).textSelection(.enabled)
+        case .error(let error):
+            Label(error.message, systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.red)
+        case .notice(let notice):
+            Text(Self.text(notice.message)).font(.subheadline).foregroundStyle(.secondary)
+        default:
+            if !block.children.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(block.children, id: \.id.rawValue) { child in
+                        MobileSemanticBlockView(block: child)
+                    }
+                }
+            }
+        }
+    }
+
+    private static func text(_ inline: [AgentInline]) -> String {
+        inline.map { value in
+            switch value {
+            case .text(let value), .code(let value): return value
+            case .emphasis(let children), .strong(let children): return text(children)
+            case .link(_, _, let children): return text(children)
+            case .softBreak: return " "
+            case .hardBreak: return "\n"
+            }
+        }.joined()
     }
 }
 
