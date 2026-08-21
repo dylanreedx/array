@@ -1,8 +1,8 @@
 import Foundation
 
 public enum CanvasAutoLayoutActivation: String, Codable, Equatable, Sendable, CaseIterable {
-    case immediately
-    case onFirstEdit
+    case immediately = "Immediately"
+    case onFirstEdit = "On First Edit"
 }
 
 public enum CanvasAutoLayoutConfig {

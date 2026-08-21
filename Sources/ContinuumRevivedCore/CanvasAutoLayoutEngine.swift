@@ -55,6 +55,7 @@ public enum CanvasAutoLayoutEngine {
         var activeTile: UUID?
         var activeZone: UUID?
         var vector = CGVector(dx: 1, dy: 0)
+        var activeZoneOnlyTranslated = false
 
         switch mutation {
         case let .tile(id, frame):
@@ -68,6 +69,8 @@ public enum CanvasAutoLayoutEngine {
             if let previous = zones[id] {
                 let originDX = placement.origin.x - previous.origin.x
                 let originDY = placement.origin.y - previous.origin.y
+                activeZoneOnlyTranslated = placement.size == previous.size
+                    && (originDX != 0 || originDY != 0)
                 if originDX != 0 || originDY != 0 {
                     for tileId in tiles.keys where tiles[tileId]?.zoneId == id {
                         tiles[tileId]?.frame.x += originDX
@@ -94,6 +97,10 @@ public enum CanvasAutoLayoutEngine {
         for zoneId in targetZoneIds {
             guard var zone = zones[zoneId], !zone.collapsed,
                   zone.autoLayoutMode.resolves(globalEnabled: scene.globalEnabled) else { continue }
+            // A zone is a rigid body while it is moved. Its members already received
+            // the exact origin delta above; repacking here would make a simple move
+            // unexpectedly alter the composition inside the zone.
+            if zoneId == activeZone, activeZoneOnlyTranslated { continue }
             let memberIds = tiles.values.filter { $0.zoneId == zoneId }.map(\.id).sorted(by: uuidLess)
             guard !memberIds.isEmpty else { continue }
 
@@ -106,11 +113,26 @@ public enum CanvasAutoLayoutEngine {
 
             var packed = pack(memberIds: memberIds, tiles: tiles, zone: zone, gap: gap, padding: padding, header: header, pinned: activeTile)
             if packed == nil {
+                // Restore the configured inter-tile gap whenever the current
+                // topology has room for it, even if a perpendicular zone edge
+                // still requires compressed padding. Only then compress the gap.
                 var low = 0.0, high = gap
                 packed = pack(memberIds: memberIds, tiles: tiles, zone: zone, gap: 0, padding: 0, header: header, pinned: activeTile)
                 for _ in 0..<12 {
                     let middle = (low + high) / 2
-                    if let result = pack(memberIds: memberIds, tiles: tiles, zone: zone, gap: middle, padding: min(padding, middle), header: header, pinned: activeTile) {
+                    if let result = pack(memberIds: memberIds, tiles: tiles, zone: zone, gap: middle, padding: 0, header: header, pinned: activeTile) {
+                        packed = result
+                        low = middle
+                    } else {
+                        high = middle
+                    }
+                }
+                let resolvedGap = low
+                low = 0
+                high = padding
+                for _ in 0..<12 {
+                    let middle = (low + high) / 2
+                    if let result = pack(memberIds: memberIds, tiles: tiles, zone: zone, gap: resolvedGap, padding: middle, header: header, pinned: activeTile) {
                         packed = result
                         low = middle
                     } else {
@@ -197,6 +219,16 @@ public enum CanvasAutoLayoutEngine {
             var placed: [UUID: TileFrame] = [:]
             for id in ordered {
                 guard let source = tiles[id]?.frame, source.width <= content.width + 0.001, source.height <= content.height + 0.001 else { return nil }
+                if id == pinned {
+                    // Direct manipulation owns its requested geometry. In-bounds it
+                    // becomes the fixed obstacle that neighbors pack around; outside
+                    // the zone it stays untouched so the existing breakout/re-home
+                    // policy can make the membership decision on mouse-up.
+                    if valid(source, in: content, against: Array(placed.values), gap: gap) {
+                        placed[id] = source
+                    }
+                    continue
+                }
                 let clamped = TileFrame(x: min(max(source.x, content.minX), content.maxX - source.width),
                                         y: min(max(source.y, content.minY), content.maxY - source.height), width: source.width, height: source.height)
                 if preserveExisting && valid(clamped, in: content, against: Array(placed.values), gap: gap) {

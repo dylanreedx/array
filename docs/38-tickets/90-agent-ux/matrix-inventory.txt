@@ -55,6 +55,7 @@ check --focus-broker-activation-check
 check --focus-mode-check
 check --focus-scope-dispatch-check
 check --input-gate-check
+check --jelly-auto-layout-check
 check --keybind-edit-check
 check --leader-activation-check
 check --leader-jump-check
@@ -222,6 +223,7 @@ leg run_app_check .build/debug/Array --focus-broker-activation-check
 leg run_app_check .build/debug/Array --focus-mode-check
 leg run_app_check .build/debug/Array --focus-scope-dispatch-check
 leg run_app_check .build/debug/Array --input-gate-check
+leg run_app_check .build/debug/Array --jelly-auto-layout-check
 leg run_app_check .build/debug/Array --keybind-edit-check
 leg run_app_check .build/debug/Array --leader-activation-check
 leg run_app_check .build/debug/Array --leader-jump-check
@@ -349,7 +351,7 @@ bundle-check --palette-duplicate-root-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 21
 count ContinuumRevivedAgentUIChecks 19
-count ContinuumRevivedCoreChecks 79
+count ContinuumRevivedCoreChecks 80
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

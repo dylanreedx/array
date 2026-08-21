@@ -296,6 +296,17 @@ final class CanvasNSView: NSView, TokenThemed {
         let oldZoneOrigins = Dictionary(uniqueKeysWithValues: transaction.zonePlacements.keys.compactMap { id in
             zoneChromeViews[id].map { (id, $0.frame.origin) }
         })
+        // Placements must land first: ZoneLayer stores member frames locally, so
+        // converting a solver's world target against the previous origin would
+        // apply a zone move twice.
+        for (id, placement) in transaction.zonePlacements {
+            if let index = liveZones.firstIndex(where: { $0.zoneId == id }) { liveZones[index] = placement }
+            if let layer = zoneLayers.first(where: { $0.placement.zoneId == id }) { layer.placement = placement }
+            if var model = zoneDisplayByZoneId[id] {
+                model.placement = placement
+                zoneDisplayByZoneId[id] = model
+            }
+        }
         for (id, frame) in transaction.tileFrames {
             if let index = canvasState.tiles.firstIndex(where: { $0.id == id }) {
                 canvasState.tiles[index].frame = frame
@@ -303,14 +314,6 @@ final class CanvasNSView: NSView, TokenThemed {
             if let layer = zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == id }) }),
                let index = layer.tiles.firstIndex(where: { $0.id == id }) {
                 layer.tiles[index].frame = CanvasEngine.worldToZoneLocal(frame, zoneOrigin: layer.placement.origin)
-            }
-        }
-        for (id, placement) in transaction.zonePlacements {
-            if let index = liveZones.firstIndex(where: { $0.zoneId == id }) { liveZones[index] = placement }
-            if let layer = zoneLayers.first(where: { $0.placement.zoneId == id }) { layer.placement = placement }
-            if var model = zoneDisplayByZoneId[id] {
-                model.placement = placement
-                zoneDisplayByZoneId[id] = model
             }
         }
         layoutAllTiles()
@@ -5436,6 +5439,10 @@ final class CanvasNSView: NSView, TokenThemed {
         let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
         canvas.zoneGestureDefaults = defaults
+        // This check pins the legacy adoption contract. Auto-layout-on spawn
+        // behavior is exercised by runJellyAutoLayoutSelfCheck instead.
+        defaults.set(false, forKey: CanvasAutoLayoutConfig.enabledKey)
+        canvas.autoLayoutDefaults = defaults
         defer { defaults.removePersistentDomain(forName: suite) }
 
         try expect(canvas.qaZoneMembership(of: in1Id) == nil && canvas.qaZoneMembership(of: outId) == nil, "pre-create: all tiles bare")
@@ -5526,7 +5533,9 @@ final class CanvasNSView: NSView, TokenThemed {
         canvas.breakoutDefaults = defaults
         let noSnap = UserDefaults(suiteName: "zone-breakout-nosnap-\(UUID().uuidString)")!
         noSnap.set(false, forKey: DragMagnetizeConfig.enabledKey)
+        noSnap.set(false, forKey: CanvasAutoLayoutConfig.enabledKey)
         canvas.dragMagnetizeDefaults = noSnap
+        canvas.autoLayoutDefaults = noSnap
         defer { defaults.removePersistentDomain(forName: suite) }
         canvas.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -5870,7 +5879,7 @@ final class CanvasNSView: NSView, TokenThemed {
         let restoredA = canvas.canvasState.tiles.first { $0.id == firstId }!.frame
         let restoredB = canvas.canvasState.tiles.first { $0.id == secondId }!.frame
         try expect(abs(restoredB.x - restoredA.x - restoredA.width - 8) < 0.1,
-                   "expansion must restore the configured tile gap")
+                   "expansion must restore the configured tile gap; A=\(restoredA), B=\(restoredB), zone=\(expanded)")
         let pushedBare = canvas.canvasState.tiles.first { $0.id == bareId }!.frame
         try expect(pushedBare.x >= expanded.origin.x + expanded.size.width + 8,
                    "expanding a zone must push a bare tile through the external rigid-body solver")
@@ -8396,7 +8405,9 @@ final class CanvasNSView: NSView, TokenThemed {
         let suiteNameB = "T19-check-B-\(UUID().uuidString)"
         let gestureDefaultsB = UserDefaults(suiteName: suiteNameB)!
         gestureDefaultsB.removePersistentDomain(forName: suiteNameB)
+        gestureDefaultsB.set(false, forKey: CanvasAutoLayoutConfig.enabledKey)
         canvasB.zoneGestureDefaults = gestureDefaultsB
+        canvasB.autoLayoutDefaults = gestureDefaultsB
         defer { gestureDefaultsB.removePersistentDomain(forName: suiteNameB) }
 
         var movedPlacements: [ZonePlacement] = []
