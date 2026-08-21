@@ -11112,7 +11112,7 @@ func runCanvasAutoLayoutChecks() {
         CanvasAutoLayoutEngine.LayoutTile(
             id: swapRightId, frame: TileFrame(x: 764, y: 140, width: 320, height: 240), zoneId: swapZoneId),
     ]
-    let requestedSwap = TileFrame(x: 120, y: 140, width: 320, height: 240)
+    let requestedSwap = TileFrame(x: 100, y: 140, width: 320, height: 240)
     let swapped = CanvasAutoLayoutEngine.solve(
         scene: .init(tiles: swapTiles, zones: [swapZone]),
         mutation: .tile(id: swapMiddleId, frame: requestedSwap),
@@ -11128,6 +11128,30 @@ func runCanvasAutoLayoutChecks() {
            "jelly: a two-tile slot exchange leaves unrelated members stable")
     expect(swapped.zonePlacements.isEmpty,
            "jelly: a valid slot exchange never pushes or resizes its containing zone")
+
+    let unequalLeft = CanvasAutoLayoutEngine.LayoutTile(
+        id: swapLeftId, frame: TileFrame(x: 108, y: 140, width: 260, height: 220), zoneId: swapZoneId)
+    let unequalMiddle = CanvasAutoLayoutEngine.LayoutTile(
+        id: swapMiddleId, frame: TileFrame(x: 376, y: 140, width: 340, height: 260), zoneId: swapZoneId)
+    let unequalRight = CanvasAutoLayoutEngine.LayoutTile(
+        id: swapRightId, frame: TileFrame(x: 724, y: 140, width: 300, height: 240), zoneId: swapZoneId)
+    let unequalSwap = CanvasAutoLayoutEngine.solve(
+        scene: .init(tiles: [unequalLeft, unequalMiddle, unequalRight], zones: [swapZone]),
+        mutation: .tile(
+            id: swapMiddleId,
+            frame: TileFrame(x: 60, y: 164, width: 340, height: 260)),
+        gap: 8, zonePadding: 8, headerHeight: 32)
+    let unequalActive = unequalSwap.tileFrames[swapMiddleId] ?? unequalMiddle.frame
+    let unequalDisplaced = unequalSwap.tileFrames[swapLeftId] ?? unequalLeft.frame
+    expect(unequalActive.x == unequalLeft.frame.x && unequalActive.y == unequalMiddle.frame.y,
+           "jelly: horizontal slot exchange ignores vertical pointer jitter")
+    expect(unequalDisplaced.x == unequalLeft.frame.x + unequalMiddle.frame.width + 8
+            && unequalDisplaced.y == unequalLeft.frame.y,
+           "jelly: unequal tiles exchange row order without overlapping or changing lanes")
+    expect((unequalSwap.tileFrames[swapRightId] ?? unequalRight.frame) == unequalRight.frame,
+           "jelly: unequal slot exchange does not reflow an unrelated neighbor")
+    expect(unequalSwap.zonePlacements.isEmpty,
+           "jelly: unequal slot exchange does not resize its zone")
 
     var disabled = zone
     disabled.autoLayoutMode = .disabled

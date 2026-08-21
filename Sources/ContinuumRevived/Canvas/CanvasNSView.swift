@@ -6086,11 +6086,11 @@ final class CanvasNSView: NSView, TokenThemed {
             hydrationPolicy: .automatic, name: "Swap Jelly", navKey: nil)
         let swapLeft = Tile(
             id: swapLeftId, kind: .managedAgent, title: "Left",
-            frame: TileFrame(x: 108, y: 140, width: 320, height: 240),
+            frame: TileFrame(x: 108, y: 140, width: 260, height: 220),
             zPosition: .fromLegacyRank(1), zoneId: swapZoneId, runtimeRef: nil, metadata: TileMetadata())
         let swapMiddle = Tile(
             id: swapMiddleId, kind: .managedAgent, title: "Middle",
-            frame: TileFrame(x: 436, y: 140, width: 320, height: 240),
+            frame: TileFrame(x: 376, y: 140, width: 340, height: 260),
             zPosition: .fromLegacyRank(2), zoneId: swapZoneId, runtimeRef: nil, metadata: TileMetadata())
         let swapCanvas = CanvasNSView(
             canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [swapLeft, swapMiddle], groups: [], lastActiveTileId: nil),
@@ -6111,7 +6111,7 @@ final class CanvasNSView: NSView, TokenThemed {
         swapCanvas.onLayoutCommitted = { swapCommits.append($0); return true }
         let swapRight = Tile(
             id: swapRightId, kind: .managedAgent, title: "Spawned",
-            frame: TileFrame(x: 764, y: 140, width: 320, height: 240),
+            frame: TileFrame(x: 724, y: 140, width: 300, height: 240),
             zPosition: .fromLegacyRank(3), zoneId: swapZoneId, runtimeRef: nil, metadata: TileMetadata())
         swapCanvas.install(tileView: DescriptorTileNSView(tile: swapRight), for: swapRight)
         swapCanvas.arrangeAutoLayoutAfterSpawn(zoneId: swapZoneId)
@@ -6124,15 +6124,15 @@ final class CanvasNSView: NSView, TokenThemed {
         let preSwapMiddle = swapCanvas.canvasState.tiles.first { $0.id == swapMiddleId }!.frame
         try dragTile(
             swapMiddleView,
-            worldDX: preSwapLeft.x - preSwapMiddle.x,
-            worldDY: preSwapLeft.y - preSwapMiddle.y,
+            worldDX: (preSwapLeft.x + preSwapLeft.width / 2) - (preSwapMiddle.x + preSwapMiddle.width / 2) - 4,
+            worldDY: 12,
             window: swapWindow)
         let postSwapLeft = swapCanvas.canvasState.tiles.first { $0.id == swapLeftId }!.frame
         let postSwapMiddle = swapCanvas.canvasState.tiles.first { $0.id == swapMiddleId }!.frame
         try expect(postSwapMiddle.x == preSwapLeft.x && postSwapMiddle.y == preSwapLeft.y,
-                   "dragging the middle member onto the left member must claim the left slot")
-        try expect(postSwapLeft.x == preSwapMiddle.x && postSwapLeft.y == preSwapMiddle.y,
-                   "the displaced left member must move into the middle slot")
+                   "horizontal swap must claim the left slot without following vertical pointer jitter")
+        try expect(postSwapLeft.x == preSwapLeft.x + preSwapMiddle.width + 8 && postSwapLeft.y == preSwapLeft.y,
+                   "unequal tiles must exchange row order without a diagonal reflow")
         try expect(swapCanvas.qaLiveZonePlacement(swapZoneId) == preSwapZone,
                    "a valid member swap must not move or resize the zone")
         try expect(swapCommits.count == 2,

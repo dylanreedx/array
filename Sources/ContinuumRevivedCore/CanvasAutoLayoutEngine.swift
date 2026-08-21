@@ -119,10 +119,15 @@ public enum CanvasAutoLayoutEngine {
 
             if activeTileMovedWithoutResize,
                let activeTile, let original = activeTileOriginalFrame,
-               tiles[activeTile]?.zoneId == zoneId {
-                applySlotSwapIfTargeted(
+               tiles[activeTile]?.zoneId == zoneId,
+               applySlotSwapIfTargeted(
                     activeTile: activeTile, originalFrame: original,
-                    memberIds: memberIds, tiles: &tiles)
+                    memberIds: memberIds, tiles: &tiles, vector: vector,
+                    zone: zone, padding: padding, header: header) {
+                // A slot exchange is already a complete, collision-free layout.
+                // Feeding it through the general packer can reinterpret unequal
+                // tile sizes as a different lane and create a diagonal jump.
+                continue
             }
 
             let activeResizeHere = activeTileResizeIsHorizontal != nil
@@ -221,14 +226,34 @@ public enum CanvasAutoLayoutEngine {
 
     private static func applySlotSwapIfTargeted(
         activeTile: UUID, originalFrame: TileFrame,
-        memberIds: [UUID], tiles: inout [UUID: LayoutTile]
-    ) {
-        guard var active = tiles[activeTile] else { return }
+        memberIds: [UUID], tiles: inout [UUID: LayoutTile], vector: CGVector,
+        zone: ZonePlacement, padding: Double, header: Double
+    ) -> Bool {
+        guard var active = tiles[activeTile] else { return false }
         let center = CGPoint(x: active.frame.x + active.frame.width / 2, y: active.frame.y + active.frame.height / 2)
+        let originalCenter = CGPoint(
+            x: originalFrame.x + originalFrame.width / 2,
+            y: originalFrame.y + originalFrame.height / 2)
+        let horizontal = abs(vector.dx) >= abs(vector.dy)
         let candidates = memberIds.compactMap { id -> (UUID, TileFrame)? in
-            guard id != activeTile, let frame = tiles[id]?.frame,
-                  center.x >= frame.x, center.x <= frame.x + frame.width,
-                  center.y >= frame.y, center.y <= frame.y + frame.height else { return nil }
+            guard id != activeTile, let frame = tiles[id]?.frame else { return nil }
+            let frameCenter = CGPoint(x: frame.x + frame.width / 2, y: frame.y + frame.height / 2)
+            let sharesLane: Bool
+            let crossedMidpoint: Bool
+            if horizontal {
+                let overlap = min(originalFrame.y + originalFrame.height, frame.y + frame.height)
+                    - max(originalFrame.y, frame.y)
+                sharesLane = overlap >= min(originalFrame.height, frame.height) * 0.5
+                let inDirection = vector.dx < 0 ? frameCenter.x < originalCenter.x : frameCenter.x > originalCenter.x
+                crossedMidpoint = inDirection && (vector.dx < 0 ? center.x <= frameCenter.x : center.x >= frameCenter.x)
+            } else {
+                let overlap = min(originalFrame.x + originalFrame.width, frame.x + frame.width)
+                    - max(originalFrame.x, frame.x)
+                sharesLane = overlap >= min(originalFrame.width, frame.width) * 0.5
+                let inDirection = vector.dy < 0 ? frameCenter.y < originalCenter.y : frameCenter.y > originalCenter.y
+                crossedMidpoint = inDirection && (vector.dy < 0 ? center.y <= frameCenter.y : center.y >= frameCenter.y)
+            }
+            guard sharesLane, crossedMidpoint else { return nil }
             return (id, frame)
         }
         guard let target = candidates.min(by: { lhs, rhs in
@@ -238,14 +263,49 @@ public enum CanvasAutoLayoutEngine {
             let rhsDistance = pow(center.x - rhsCenter.x, 2) + pow(center.y - rhsCenter.y, 2)
             if lhsDistance != rhsDistance { return lhsDistance < rhsDistance }
             return uuidLess(lhs.0, rhs.0)
-        }), var displaced = tiles[target.0] else { return }
+        }), var displaced = tiles[target.0] else { return false }
 
-        active.frame.x = target.1.x
-        active.frame.y = target.1.y
-        displaced.frame.x = originalFrame.x
-        displaced.frame.y = originalFrame.y
+        // Exchange positions only on the drag axis. Pointer jitter must never
+        // turn a horizontal swap into a diagonal lane change (or vice versa).
+        if horizontal {
+            active.frame.y = originalFrame.y
+            if target.1.x < originalFrame.x {
+                let existingGap = max(0, originalFrame.x - (target.1.x + target.1.width))
+                active.frame.x = target.1.x
+                displaced.frame.x = active.frame.x + active.frame.width + existingGap
+            } else {
+                let existingGap = max(0, target.1.x - (originalFrame.x + originalFrame.width))
+                displaced.frame.x = originalFrame.x
+                active.frame.x = displaced.frame.x + displaced.frame.width + existingGap
+            }
+        } else {
+            active.frame.x = originalFrame.x
+            if target.1.y < originalFrame.y {
+                let existingGap = max(0, originalFrame.y - (target.1.y + target.1.height))
+                active.frame.y = target.1.y
+                displaced.frame.y = active.frame.y + active.frame.height + existingGap
+            } else {
+                let existingGap = max(0, target.1.y - (originalFrame.y + originalFrame.height))
+                displaced.frame.y = originalFrame.y
+                active.frame.y = displaced.frame.y + displaced.frame.height + existingGap
+            }
+        }
+
+        let content = CGRect(
+            x: zone.origin.x + padding, y: zone.origin.y + header + padding,
+            width: max(0, zone.size.width - 2 * padding),
+            height: max(0, zone.size.height - header - 2 * padding))
+        let pair = [activeTile: active.frame, target.0: displaced.frame]
+        let untouched = memberIds.compactMap { id -> TileFrame? in
+            guard id != activeTile, id != target.0 else { return nil }
+            return tiles[id]?.frame
+        }
+        guard pair.values.allSatisfy({ valid($0, in: content, against: untouched, gap: 0) }),
+              !overlapsOrUnderGap(active.frame, displaced.frame, gap: 0) else { return false }
+
         tiles[activeTile] = active
         tiles[target.0] = displaced
+        return true
     }
 
     private static func shrinkNeighborsAndPack(
