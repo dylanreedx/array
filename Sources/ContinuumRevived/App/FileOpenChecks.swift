@@ -715,9 +715,12 @@ enum FileOpenChecks {
         try expect(tile.zoneId == agentTile.zoneId || tile.zoneId == harness.zone,
                    "the file tile must inherit the responding agent tile's zone")
 
-        // 3. Placement: top-aligned, exactly 24pt to the right of the agent.
-        try expect(tile.frame.x == agentFrame.x + agentFrame.width + TileSpawner.anchoredFileGap,
-                   "the file tile must sit exactly \(TileSpawner.anchoredFileGap)pt right of the agent tile; got x=\(tile.frame.x) against agent \(agentFrame)")
+        // 3. Placement: top-aligned and gap-adjacent to the agent. The spawner's
+        // legacy 24pt seed is intentionally compacted by schema-v6 auto layout to
+        // the configured/default canvas gap after installation.
+        let settledGap = TileGapResolver.defaultGap
+        try expect(tile.frame.x == agentFrame.x + agentFrame.width + settledGap,
+                   "the file tile must settle exactly \(settledGap)pt right of the agent tile; got x=\(tile.frame.x) against agent \(agentFrame)")
         try expect(tile.frame.y == agentFrame.y,
                    "the file tile must be top-aligned with the agent tile; got y=\(tile.frame.y) against \(agentFrame.y)")
         try expect(harness.focusBroker.activeSurface == .tile(fileTileId),
