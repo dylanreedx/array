@@ -38,6 +38,15 @@ public enum AgentHarnessCommandRunner {
             )
         }
 
+        // Every validation above is pure and belongs on both platforms — the shape
+        // refusals are part of this seam's contract, and Core is shared with the
+        // phone. Only the SPAWN is macOS-only: `Process` does not exist on iOS, and
+        // naming it unconditionally broke the iOS build of Core (which a macOS
+        // `swift build` cannot see — the matrix's own iOS leg names this exact
+        // hazard). The same shape as `AgentModelCatalog`'s probe seam: the platform
+        // that cannot execute refuses, rather than the symbol disappearing and
+        // taking its callers with it.
+        #if os(macOS)
         return await Task.detached(priority: .userInitiated) {
             Self.runBlocking(
                 executable: executable,
@@ -46,8 +55,15 @@ public enum AgentHarnessCommandRunner {
                 environment: Self.sanitizedEnvironment(environment)
             )
         }.value
+        #else
+        return AgentCommandExecutionResult(
+            status: .refused("Running commands is not available on this device"),
+            summary: "Array runs harness commands on the Mac that owns the checkout."
+        )
+        #endif
     }
 
+    #if os(macOS)
     private static func runBlocking(
         executable: String,
         arguments: [String],
@@ -127,4 +143,5 @@ public enum AgentHarnessCommandRunner {
             return nil
         }
     }
+    #endif
 }
