@@ -1,5 +1,10 @@
 # Phone live-sync dogfood — handoff (2026-07-17 session, Dylan + agent)
 
+> Current continuation: read
+> `99-transcript-subagents-renovation-handoff.md`. It records the 2026-08-20 relay
+> dogfood, the fixed spatial echo loop, the still-broken mobile mutation convergence,
+> and why encrypted transcript content is not yet wired into the companion app.
+
 The goal of the session: manually QA ticket 85 ("phone shows real desktop agent state").
 End state: **every Mac-side gate is green and provably publishing to CloudKit; the phone
 still shows nothing, and the next debugging step is to iterate against the iOS SIMULATOR
