@@ -24,6 +24,7 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
 
         let tv = NSTextView()
         tv.isEditable = true
+        tv.allowsUndo = true
         tv.isRichText = false
         tv.font = NSFont.token(.bodyMono)
         tv.isAutomaticQuoteSubstitutionEnabled = false

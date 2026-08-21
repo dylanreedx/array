@@ -804,6 +804,18 @@ enum ContinuumApp {
 
     @MainActor
     static func main() {
+        if CommandLine.arguments.contains("--canvas-undo-check") {
+            do {
+                _ = NSApplication.shared
+                try CanvasNSView.runCanvasUndoSelfCheck()
+                print("ContinuumRevivedCanvasUndoChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--companion-sync-health-check") {
             do {
                 try runCompanionSyncHealthCheck()
@@ -3778,6 +3790,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     browserEngine: browserEngine
                 )
             }
+            if let workspaceId = self.workspaceRuntime?.workspaceId {
+                canvasView.activateUndoWorkspace(workspaceId)
+            }
 
             let spawner = TileSpawner(
                 canvasView: canvasView,
@@ -6580,6 +6595,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             focusBroker.closeModal(.leader)
         }
         canvasView?.setLeaderOverlayVisible(false)
+        _ = canvasView?.commitGeometryEdit()
         clearLeaderSnapSession()
     }
 
@@ -6658,6 +6674,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             leaderSnapOriginalFrame = tile.frame
             leaderSnapDirection = direction
             leaderSnapIndex = 0
+            canvas.beginGeometryEdit(.dockTile, tileIds: [tileId], includeAllZones: true)
         } else if leaderSnapDirection == direction {
             leaderSnapIndex += 1
         } else if leaderSnapDirection == direction.opposite {
@@ -6680,18 +6697,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let dest = TileArrangement.dockDestination(original, direction: dir, against: candidates[index], gap: TileGapResolver.resolvedGap())
         var moved = tile
         moved.frame = dest
-        canvas.updateTile(moved)
+        canvas.updateTile(moved, recalculateZoneBounds: false, notifyChange: false)
     }
 
     /// Esc during a dock: restore the focused tile to where the session began.
     private func cancelLeaderSnap() {
-        if let canvas = canvasView,
-           let tileId = leaderSnapTileId,
-           let original = leaderSnapOriginalFrame,
-           var tile = canvas.canvasState.tiles.first(where: { $0.id == tileId }) {
-            tile.frame = original
-            canvas.updateTile(tile)
-        }
+        canvasView?.cancelGeometryEdit()
         clearLeaderSnapSession()
     }
 
@@ -7222,7 +7233,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let scale = Self.resizeScale(for: preset)
             tile.frame = TileFrame(x: tile.frame.x, y: tile.frame.y, width: Double(base.width) * scale, height: Double(base.height) * scale)
         }
-        canvasView.updateTile(tile)
+        _ = canvasView.performGeometryEdit(
+            .resizeTileToPreset,
+            tileIds: [tile.id],
+            includeAllZones: true
+        ) {
+            canvasView.updateTile(tile, notifyChange: false)
+        }
         return true
     }
 

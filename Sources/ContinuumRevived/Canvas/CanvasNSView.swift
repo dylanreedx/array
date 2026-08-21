@@ -63,6 +63,15 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     private(set) var canvasState: CanvasState
+    private struct PendingGeometryEdit {
+        var action: CanvasGeometryAction
+        var tileIds: Set<UUID>
+        var zoneIds: Set<UUID>
+        var before: CanvasGeometrySnapshot
+    }
+    private var pendingGeometryEdit: PendingGeometryEdit?
+    private var canvasHistories: [UUID: CanvasHistoryController] = [:]
+    private var activeUndoWorkspaceId: UUID?
     /// Active single-zone placement for stage-2 integration. Tile frames remain
     /// persisted zone-local; layout/hit-testing consume world frames through
     /// CanvasEngine. With the default origin (0,0), this is behavior-neutral.
@@ -552,6 +561,71 @@ final class CanvasNSView: NSView, TokenThemed {
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
+    /// Kept separate from `NSResponder.undoManager`: editable descendants ask
+    /// their responder chain for an undo manager while registering keystrokes.
+    /// Exposing geometry history there would mix typing into the canvas stack.
+    private var activeCanvasUndoManager: UndoManager? {
+        guard let workspaceId = activeUndoWorkspaceId else { return nil }
+        return canvasHistories[workspaceId]?.undoManager
+    }
+
+    private var focusedTextUndoManager: UndoManager? {
+        guard let editor = window?.firstResponder as? NSTextView,
+              editor.isEditable else { return nil }
+        return editor.undoManager
+    }
+
+    /// Custom views must expose the standard responder actions explicitly.
+    /// Editors nested inside tiles implement these actions themselves and win
+    /// first; canvas chrome falls through here.
+    @objc func undo(_ sender: Any?) {
+        if let focusedTextUndoManager {
+            focusedTextUndoManager.undo()
+            return
+        }
+        activeCanvasUndoManager?.undo()
+    }
+
+    @objc func redo(_ sender: Any?) {
+        if let focusedTextUndoManager {
+            focusedTextUndoManager.redo()
+            return
+        }
+        activeCanvasUndoManager?.redo()
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(undo(_:)) {
+            if let focusedTextUndoManager {
+                menuItem.title = focusedTextUndoManager.undoMenuItemTitle
+                return focusedTextUndoManager.canUndo
+            }
+            menuItem.title = activeCanvasUndoManager?.undoMenuItemTitle ?? "Undo"
+            return activeCanvasUndoManager?.canUndo ?? false
+        }
+        if menuItem.action == #selector(redo(_:)) {
+            if let focusedTextUndoManager {
+                menuItem.title = focusedTextUndoManager.redoMenuItemTitle
+                return focusedTextUndoManager.canRedo
+            }
+            menuItem.title = activeCanvasUndoManager?.redoMenuItemTitle ?? "Redo"
+            return activeCanvasUndoManager?.canRedo ?? false
+        }
+        return true
+    }
+
+    func activateUndoWorkspace(_ workspaceId: UUID) {
+        activeUndoWorkspaceId = workspaceId
+        if canvasHistories[workspaceId] == nil {
+            canvasHistories[workspaceId] = CanvasHistoryController(canvas: self)
+        }
+    }
+
+    func clearActiveCanvasHistory() {
+        guard let workspaceId = activeUndoWorkspaceId else { return }
+        canvasHistories[workspaceId]?.removeAllActions()
+    }
+
     init(
         canvasState: CanvasState,
         activeZone: ZonePlacement? = nil,
@@ -708,7 +782,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Grow a zone's stored frame to contain its members (union + padding +
     /// header), never shrinking. Called on tile resize (not move). Persists the
     /// new placement via `onZoneMoved` so the grown size survives relaunch.
-    private func growZoneToFitMembers(_ zoneId: UUID) {
+    private func growZoneToFitMembers(_ zoneId: UUID, notifyChange: Bool = true) {
         guard let idx = liveZones.firstIndex(where: { $0.zoneId == zoneId }) else { return }
         let members = canvasState.tiles.filter { tileZoneMembership[$0.id] == zoneId }
         guard !members.isEmpty else { return }
@@ -732,7 +806,7 @@ final class CanvasNSView: NSView, TokenThemed {
         p.origin = grown
         p.size = grownSize
         liveZones[idx] = p
-        onZoneMoved?(p)
+        if notifyChange { onZoneMoved?(p) }
     }
 
     /// After a tile MOVE commits, re-evaluate its zone membership (zone-unify P4):
@@ -740,7 +814,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// zones too); dragging a member so its center sits more than the break-out
     /// distance beyond its zone detaches it to bare canvas. Returns true if changed.
     @discardableResult
-    func reevaluateZoneMembership(forMovedTile tileId: UUID) -> Bool {
+    func reevaluateZoneMembership(forMovedTile tileId: UUID, notifyChange: Bool = true) -> Bool {
         guard let tile = canvasState.tiles.first(where: { $0.id == tileId }) else { return false }
         let cx = tile.frame.x + tile.frame.width / 2
         let cy = tile.frame.y + tile.frame.height / 2
@@ -753,7 +827,7 @@ final class CanvasNSView: NSView, TokenThemed {
         if let containing {
             if containing.zoneId != current {
                 setTileZone(tileId, zoneId: containing.zoneId)   // adopt / re-home
-                growZoneToFitMembers(containing.zoneId)
+                growZoneToFitMembers(containing.zoneId, notifyChange: notifyChange)
                 changed = true
             }
         } else if let current, let zone = liveZones.first(where: { $0.zoneId == current }) {
@@ -767,7 +841,7 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         if changed {
             layoutAllTiles()
-            delegate?.canvasDidChange(self)
+            if notifyChange { delegate?.canvasDidChange(self) }
         }
         return changed
     }
@@ -953,7 +1027,171 @@ final class CanvasNSView: NSView, TokenThemed {
         }
     }
 
-    func updateTile(_ tile: Tile, recalculateZoneBounds: Bool = true) {
+    // MARK: - Transactional geometry editing
+
+    @discardableResult
+    func beginGeometryEdit(
+        _ action: CanvasGeometryAction,
+        tileIds: Set<UUID> = [],
+        zoneIds: Set<UUID> = [],
+        includeAllZones: Bool = false
+    ) -> Bool {
+        guard pendingGeometryEdit == nil else { return false }
+        let capturedZoneIds = includeAllZones ? Set(allZonePlacements().map(\.zoneId)) : zoneIds
+        pendingGeometryEdit = PendingGeometryEdit(
+            action: action,
+            tileIds: tileIds,
+            zoneIds: capturedZoneIds,
+            before: captureGeometry(tileIds: tileIds, zoneIds: capturedZoneIds)
+        )
+        return true
+    }
+
+    @discardableResult
+    func commitGeometryEdit() -> CanvasGeometryTransaction? {
+        guard let pending = pendingGeometryEdit else { return nil }
+        pendingGeometryEdit = nil
+        let after = captureGeometry(tileIds: pending.tileIds, zoneIds: pending.zoneIds)
+        let transaction = CanvasGeometryTransaction(action: pending.action, before: pending.before, after: after)
+        guard !transaction.isNoOp else { return nil }
+        if let workspaceId = activeUndoWorkspaceId {
+            canvasHistories[workspaceId]?.record(transaction)
+        }
+        notifyGeometryCommit(transaction)
+        return transaction
+    }
+
+    func cancelGeometryEdit() {
+        guard let pending = pendingGeometryEdit else { return }
+        pendingGeometryEdit = nil
+        applyGeometrySnapshot(pending.before, notifyCommit: false)
+    }
+
+    @discardableResult
+    func performGeometryEdit(
+        _ action: CanvasGeometryAction,
+        tileIds: Set<UUID> = [],
+        zoneIds: Set<UUID> = [],
+        includeAllZones: Bool = false,
+        mutation: () -> Void
+    ) -> CanvasGeometryTransaction? {
+        guard beginGeometryEdit(
+            action,
+            tileIds: tileIds,
+            zoneIds: zoneIds,
+            includeAllZones: includeAllZones
+        ) else { return nil }
+        mutation()
+        return commitGeometryEdit()
+    }
+
+    private func allZonePlacements() -> [ZonePlacement] {
+        var byId = Dictionary(uniqueKeysWithValues: zoneLayers.map { ($0.placement.zoneId, $0.placement) })
+        for placement in liveZones { byId[placement.zoneId] = placement }
+        return Array(byId.values)
+    }
+
+    private func geometryTileIds(inZone zoneId: UUID) -> Set<UUID> {
+        var ids = Set(canvasState.tiles.filter { $0.zoneId == zoneId || tileZoneMembership[$0.id] == zoneId }.map(\.id))
+        if let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) {
+            ids.formUnion(layer.tiles.map(\.id))
+        }
+        return ids
+    }
+
+    private func captureGeometry(tileIds: Set<UUID>, zoneIds: Set<UUID>) -> CanvasGeometrySnapshot {
+        var tilesById: [UUID: CanvasTileGeometry] = [:]
+        for tile in canvasState.tiles where tileIds.contains(tile.id) {
+            tilesById[tile.id] = CanvasTileGeometry(tileId: tile.id, frame: tile.frame, zoneId: tile.zoneId)
+        }
+        for layer in zoneLayers {
+            for tile in layer.tiles where tileIds.contains(tile.id) {
+                tilesById[tile.id] = CanvasTileGeometry(tileId: tile.id, frame: tile.frame, zoneId: tile.zoneId)
+            }
+        }
+        let zones = allZonePlacements().compactMap { placement -> CanvasZoneGeometry? in
+            guard zoneIds.contains(placement.zoneId) else { return nil }
+            return CanvasZoneGeometry(zoneId: placement.zoneId, origin: placement.origin, size: placement.size)
+        }
+        return CanvasGeometrySnapshot(tiles: Array(tilesById.values), zones: zones)
+    }
+
+    func geometryMatches(_ snapshot: CanvasGeometrySnapshot) -> Bool {
+        captureGeometry(
+            tileIds: Set(snapshot.tiles.map(\.tileId)),
+            zoneIds: Set(snapshot.zones.map(\.zoneId))
+        ) == snapshot
+    }
+
+    func applyGeometrySnapshot(
+        _ snapshot: CanvasGeometrySnapshot,
+        previous: CanvasGeometrySnapshot? = nil,
+        notifyCommit: Bool = true
+    ) {
+        let tileValues = Dictionary(uniqueKeysWithValues: snapshot.tiles.map { ($0.tileId, $0) })
+        for index in canvasState.tiles.indices {
+            guard let value = tileValues[canvasState.tiles[index].id] else { continue }
+            canvasState.tiles[index].frame = value.frame
+            canvasState.tiles[index].zoneId = value.zoneId
+            if let zoneId = value.zoneId {
+                tileZoneMembership[value.tileId] = zoneId
+            } else {
+                tileZoneMembership.removeValue(forKey: value.tileId)
+            }
+        }
+        for layer in zoneLayers {
+            for index in layer.tiles.indices {
+                guard let value = tileValues[layer.tiles[index].id] else { continue }
+                layer.tiles[index].frame = value.frame
+                layer.tiles[index].zoneId = value.zoneId
+            }
+        }
+
+        let zoneValues = Dictionary(uniqueKeysWithValues: snapshot.zones.map { ($0.zoneId, $0) })
+        for index in liveZones.indices {
+            guard let value = zoneValues[liveZones[index].zoneId] else { continue }
+            liveZones[index].origin = value.origin
+            liveZones[index].size = value.size
+            if var model = zoneDisplayByZoneId[value.zoneId] {
+                model.placement.origin = value.origin
+                model.placement.size = value.size
+                zoneDisplayByZoneId[value.zoneId] = model
+                zoneChromeViews[value.zoneId]?.update(model: model)
+            }
+        }
+        for layer in zoneLayers {
+            guard let value = zoneValues[layer.placement.zoneId] else { continue }
+            layer.placement.origin = value.origin
+            layer.placement.size = value.size
+            layer.renderModel.placement.origin = value.origin
+            layer.renderModel.placement.size = value.size
+        }
+        layoutAllTiles()
+        reorderTileSubviewsByZIndex()
+
+        if notifyCommit {
+            notifyGeometrySnapshotApplied(snapshot, previous: previous)
+        }
+    }
+
+    private func notifyGeometryCommit(_ transaction: CanvasGeometryTransaction) {
+        notifyGeometrySnapshotApplied(transaction.after, previous: transaction.before)
+    }
+
+    private func notifyGeometrySnapshotApplied(
+        _ snapshot: CanvasGeometrySnapshot,
+        previous: CanvasGeometrySnapshot?
+    ) {
+        for zone in snapshot.zones {
+            guard let before = previous?.zones.first(where: { $0.zoneId == zone.zoneId }),
+                  before != zone,
+                  let placement = allZonePlacements().first(where: { $0.zoneId == zone.zoneId }) else { continue }
+            onZoneMoved?(placement)
+        }
+        delegate?.canvasDidChange(self)
+    }
+
+    func updateTile(_ tile: Tile, recalculateZoneBounds: Bool = true, notifyChange: Bool = true) {
         if let layer = zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == tile.id }) }),
            let index = layer.tiles.firstIndex(where: { $0.id == tile.id }) {
             let previous = layer.tiles[index]
@@ -964,6 +1202,7 @@ final class CanvasNSView: NSView, TokenThemed {
             if previous.title != installed.title || previous.kind != installed.kind {
                 delegate?.canvasSidebarModelDidChange(self)
             }
+            if notifyChange { delegate?.canvasDidChange(self) }
             return
         }
         guard let idx = canvasState.tiles.firstIndex(where: { $0.id == tile.id }) else { return }
@@ -972,14 +1211,14 @@ final class CanvasNSView: NSView, TokenThemed {
         // zone-unify P3: only a RESIZE grows the owning zone; a MOVE leaves the
         // zone frame fixed (the caller passes recalculateZoneBounds: false).
         if recalculateZoneBounds, let zoneId = tileZoneMembership[tile.id] {
-            growZoneToFitMembers(zoneId)
+            growZoneToFitMembers(zoneId, notifyChange: notifyChange)
         }
         layoutTile(tile)
         layoutZoneChromeViews()
         if previousTile.title != tile.title || previousTile.kind != tile.kind {
             delegate?.canvasSidebarModelDidChange(self)
         }
-        delegate?.canvasDidChange(self)
+        if notifyChange { delegate?.canvasDidChange(self) }
     }
 
     /// UserDefaults the drag-snap toggle resolves from (`DragMagnetizeConfig`).
@@ -1202,6 +1441,19 @@ final class CanvasNSView: NSView, TokenThemed {
     @objc private func appDidResignActiveForOverlays() {
         appIsActiveForOverlayAnimation = false
         applyOverlayAnimationSuspension()
+        // A lost mouse-up must never leave preview geometry half-committed. Roll
+        // the model back and clear per-view gesture state before focus returns.
+        if pendingGeometryEdit != nil {
+            cancelGeometryEdit()
+            zoneGesture = .none
+            pendingMovedPlacement = nil
+            hideDragGhost()
+            hideResizeDimensions()
+            for view in tileViews.values { view.cancelActiveGeometryGesture() }
+            for layer in zoneLayers {
+                for view in layer.tileViews.values { view.cancelActiveGeometryGesture() }
+            }
+        }
     }
 
     private func focusBorderOverlayView() -> FocusBorderOverlayView {
@@ -3512,6 +3764,7 @@ final class CanvasNSView: NSView, TokenThemed {
         if let (zoneId, edge) = zoneResizeEdge(at: point) {
             pendingMovedPlacement = nil
             zoneGesture = .resizingZone(zoneId: zoneId, edge: edge, lastWindowPoint: event.locationInWindow)
+            beginGeometryEdit(.resizeZone, zoneIds: [zoneId])
             return
         }
         // Zone gesture classification (T19): check chrome header → move; empty canvas → create.
@@ -3519,6 +3772,7 @@ final class CanvasNSView: NSView, TokenThemed {
         pendingMovedPlacement = nil
         if let zoneId = _zoneHeaderZoneId(at: point) {
             zoneGesture = .movingZone(zoneId: zoneId, lastWindowPoint: event.locationInWindow)
+            beginGeometryEdit(.moveZone, tileIds: geometryTileIds(inZone: zoneId), zoneIds: [zoneId])
             return
         }
         if tileId(at: point) == nil && _zoneId(at: point) == nil {
@@ -3690,24 +3944,12 @@ final class CanvasNSView: NSView, TokenThemed {
             return
         case .movingZone(let zoneId, _):
             hideDragGhost()
-            // Commit: fire onZoneMoved so callers can persist.
-            // ZoneLayer path: placement was updated live via setZonePlacement.
-            // Render-model path: accumulated in pendingMovedPlacement during mouseDragged.
-            if let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) {
-                onZoneMoved?(layer.placement)
-            } else if let pending = pendingMovedPlacement {
-                onZoneMoved?(pending)
-                // Persist the members' translated world frames (canvas save).
-                delegate?.canvasDidChange(self)
-            }
+            _ = zoneId // identity is captured by the pending transaction
+            _ = commitGeometryEdit()
             pendingMovedPlacement = nil
             return
         case .resizingZone:
-            // Commit the resized frame (origin + size) via the same persist path.
-            if let pending = pendingMovedPlacement {
-                onZoneMoved?(pending)
-                delegate?.canvasDidChange(self)
-            }
+            _ = commitGeometryEdit()
             pendingMovedPlacement = nil
             return
         }
@@ -4036,6 +4278,237 @@ final class CanvasNSView: NSView, TokenThemed {
             view.invalidateForCanvasLayout()
         }
         repositionFocusBorderIfNeeded(for: tile.id)
+    }
+
+    /// Exercises the user-visible history contract without depending on pointer
+    /// timing: one semantic edit, exact undo/redo, atomic membership + zone
+    /// geometry, redo invalidation, workspace isolation, and stale-entry safety.
+    static func runCanvasUndoSelfCheck() throws {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(message): return message } }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func frameX(_ canvas: CanvasNSView, _ tileId: UUID) -> Double? {
+            canvas.canvasState.tiles.first(where: { $0.id == tileId })?.frame.x
+        }
+
+        let workspaceA = UUID(uuidString: "00000000-0000-0000-0000-00000000A001")!
+        let workspaceB = UUID(uuidString: "00000000-0000-0000-0000-00000000B001")!
+        let workspaceC = UUID(uuidString: "00000000-0000-0000-0000-00000000C001")!
+        let workspaceD = UUID(uuidString: "00000000-0000-0000-0000-00000000D002")!
+        let projectId = UUID(uuidString: "00000000-0000-0000-0000-00000000D001")!
+        let zoneId = UUID(uuidString: "00000000-0000-0000-0000-00000000E001")!
+        let tileId = UUID(uuidString: "00000000-0000-0000-0000-00000000F001")!
+        let originalFrame = TileFrame(x: 100, y: 100, width: 220, height: 160)
+        let finalFrame = TileFrame(x: 540, y: 120, width: 220, height: 160)
+        let originalZoneSize = ZoneSize(width: 400, height: 320)
+        let grownZoneSize = ZoneSize(width: 640, height: 420)
+        let zone = ZonePlacement(
+            zoneId: zoneId,
+            projectId: projectId,
+            origin: ZonePoint(x: 500, y: 80),
+            size: originalZoneSize,
+            color: "teal",
+            collapsed: false,
+            hydrationPolicy: .automatic,
+            name: "History",
+            navKey: nil
+        )
+        let tile = Tile(
+            id: tileId,
+            kind: .note,
+            title: "Undo probe",
+            frame: originalFrame,
+            zPosition: .fromLegacyRank(1),
+            runtimeRef: nil,
+            metadata: TileMetadata()
+        )
+        let canvas = CanvasNSView(
+            canvasState: CanvasState(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                tiles: [tile],
+                groups: [],
+                lastActiveTileId: nil
+            ),
+            zoneRenderModels: [ZoneRenderModel(placement: zone, displayName: "History")]
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = canvas
+        window.makeKeyAndOrderFront(nil)
+        try expect(window.makeFirstResponder(canvas), "canvas should accept first responder for command routing")
+        let delegate = CanvasUndoSelfCheckDelegate()
+        canvas.delegate = delegate
+        var zoneCommitCount = 0
+        canvas.onZoneMoved = { _ in zoneCommitCount += 1 }
+        canvas.activateUndoWorkspace(workspaceA)
+
+        // Several live previews, membership adoption, and zone growth become one entry.
+        canvas.beginGeometryEdit(.moveTile, tileIds: [tileId], includeAllZones: true)
+        for x in [240.0, 360.0, finalFrame.x] {
+            var changed = canvas.canvasState.tiles[0]
+            changed.frame.x = x
+            canvas.updateTile(changed, recalculateZoneBounds: false, notifyChange: false)
+        }
+        canvas.setTileZone(tileId, zoneId: zoneId)
+        canvas.liveZones[0].size = grownZoneSize
+        let transaction = canvas.commitGeometryEdit()
+        try expect(transaction != nil, "semantic edit should create a transaction")
+        if let transaction {
+            let encoded = try JSONEncoder().encode(transaction)
+            let decoded = try JSONDecoder().decode(CanvasGeometryTransaction.self, from: encoded)
+            try expect(decoded == transaction, "geometry transaction should round-trip losslessly")
+        }
+        try expect(canvas.activeCanvasUndoManager?.undoActionName == "Move Tile", "Undo menu should name the action")
+        try expect(delegate.changeCount == 1 && zoneCommitCount == 1, "commit should persist exactly once")
+
+        // A no-op gesture must not add a second history step.
+        canvas.beginGeometryEdit(.moveTile, tileIds: [tileId], includeAllZones: true)
+        try expect(canvas.commitGeometryEdit() == nil, "no-op gesture should be omitted")
+        canvas.activeCanvasUndoManager?.undo()
+        try expect(frameX(canvas, tileId) == originalFrame.x, "undo should restore the exact original frame")
+        try expect(canvas.qaZoneMembership(of: tileId) == nil, "undo should restore ambient membership")
+        try expect(canvas.qaLiveZonePlacement(zoneId)?.size == originalZoneSize, "undo should restore zone growth atomically")
+        try expect(canvas.activeCanvasUndoManager?.canUndo == false, "coalesced gesture should consume exactly one undo step")
+        try expect(canvas.activeCanvasUndoManager?.redoActionName == "Move Tile", "Redo menu should name the action")
+
+        canvas.activeCanvasUndoManager?.redo()
+        try expect(frameX(canvas, tileId) == finalFrame.x, "redo should restore the exact committed frame")
+        try expect(canvas.qaZoneMembership(of: tileId) == zoneId, "redo should restore zone membership")
+        try expect(canvas.qaLiveZonePlacement(zoneId)?.size == grownZoneSize, "redo should restore zone growth")
+        try expect(delegate.changeCount == 3 && zoneCommitCount == 3, "undo and redo should each persist once")
+
+        // New work after undo forks history and clears the redo branch.
+        canvas.activeCanvasUndoManager?.undo()
+        canvas.beginGeometryEdit(.moveTile, tileIds: [tileId])
+        var forked = canvas.canvasState.tiles[0]
+        forked.frame.x = 250
+        canvas.updateTile(forked, recalculateZoneBounds: false, notifyChange: false)
+        _ = canvas.commitGeometryEdit()
+        try expect(canvas.activeCanvasUndoManager?.canRedo == false, "new edit after undo should clear redo")
+
+        // A second workspace has an independent manager; switching back preserves A.
+        canvas.activateUndoWorkspace(workspaceB)
+        try expect(canvas.activeCanvasUndoManager?.canUndo == false, "new workspace should start with empty history")
+        canvas.beginGeometryEdit(.moveTile, tileIds: [tileId])
+        var workspaceBTile = canvas.canvasState.tiles[0]
+        workspaceBTile.frame.x = 700
+        canvas.updateTile(workspaceBTile, recalculateZoneBounds: false, notifyChange: false)
+        _ = canvas.commitGeometryEdit()
+        try expect(canvas.activeCanvasUndoManager?.canUndo == true, "workspace B should own its edit")
+        canvas.applyGeometrySnapshot(
+            CanvasGeometrySnapshot(
+                tiles: [CanvasTileGeometry(tileId: tileId, frame: forked.frame, zoneId: nil)],
+                zones: []
+            ),
+            notifyCommit: false
+        )
+        canvas.activateUndoWorkspace(workspaceA)
+        // `sendAction(to:nil)` requires the command-line check process itself to
+        // be the active macOS app. Drive the exact key-window responder path
+        // directly; the separate menu contract check proves Cmd-Z maps to undo:.
+        let commandZWasRouted = window.firstResponder?.tryToPerform(
+            Selector(("undo:")),
+            with: nil
+        ) ?? false
+        try expect(commandZWasRouted, "Edit > Undo / Cmd-Z should route through the canvas responder")
+        try expect(frameX(canvas, tileId) == originalFrame.x, "workspace A should resume its own history")
+
+        // If geometry changed outside the transaction pipeline, fail closed instead
+        // of applying an undo snapshot to surprising state.
+        canvas.activateUndoWorkspace(workspaceC)
+        canvas.beginGeometryEdit(.moveTile, tileIds: [tileId])
+        var recorded = canvas.canvasState.tiles[0]
+        recorded.frame.x = 320
+        canvas.updateTile(recorded, recalculateZoneBounds: false, notifyChange: false)
+        _ = canvas.commitGeometryEdit()
+        var external = recorded
+        external.frame.x = 999
+        canvas.updateTile(external, recalculateZoneBounds: false, notifyChange: false)
+        canvas.activeCanvasUndoManager?.undo()
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01))
+        try expect(frameX(canvas, tileId) == 999, "stale undo must not overwrite out-of-band geometry")
+        try expect(canvas.activeCanvasUndoManager?.canUndo == false && canvas.activeCanvasUndoManager?.canRedo == false,
+                   "stale history should be invalidated")
+
+        // Losing app activation can suppress mouse-up. Preview geometry rolls
+        // back and does not enter history.
+        canvas.activateUndoWorkspace(workspaceD)
+        canvas.beginGeometryEdit(.resizeTile, tileIds: [tileId])
+        var interrupted = external
+        interrupted.frame.width = 777
+        canvas.updateTile(interrupted, notifyChange: false)
+        NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: nil)
+        try expect(canvas.canvasState.tiles[0].frame == external.frame,
+                   "interrupted gesture should restore its pre-gesture frame")
+        try expect(canvas.activeCanvasUndoManager?.canUndo == false, "interrupted gesture should not create history")
+
+        // Editable tile content owns Cmd-Z while it is first responder. Its text
+        // undo must not consume or execute the canvas geometry history beneath it.
+        let inputWorkspace = UUID(uuidString: "00000000-0000-0000-0000-00000000D003")!
+        let inputTileId = UUID(uuidString: "00000000-0000-0000-0000-00000000F002")!
+        let inputFrame = TileFrame(x: 40, y: 40, width: 320, height: 240)
+        let inputTile = Tile(
+            id: inputTileId,
+            kind: .note,
+            title: "Text undo probe",
+            frame: inputFrame,
+            zPosition: .fromLegacyRank(1),
+            runtimeRef: nil,
+            metadata: TileMetadata()
+        )
+        let inputCanvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [inputTile],
+            groups: [],
+            lastActiveTileId: inputTileId
+        ))
+        let noteView = NoteTileNSView(tile: inputTile, noteId: UUID(), initialBody: "a")
+        inputCanvas.install(tileView: noteView, for: inputTile)
+        inputCanvas.activateUndoWorkspace(inputWorkspace)
+        window.contentView = inputCanvas
+        var movedInputTile = inputTile
+        movedInputTile.frame.x = 200
+        _ = inputCanvas.performGeometryEdit(.moveTile, tileIds: [inputTileId]) {
+            inputCanvas.updateTile(movedInputTile, recalculateZoneBounds: false, notifyChange: false)
+        }
+        try expect(inputCanvas.activeCanvasUndoManager?.canUndo == true, "setup should leave a canvas edit available")
+        try expect(window.makeFirstResponder(noteView.textView), "note editor should accept first responder")
+        noteView.textView.setSelectedRange(NSRange(location: 1, length: 0))
+        noteView.textView.insertText("b", replacementRange: noteView.textView.selectedRange())
+        noteView.textView.breakUndoCoalescing()
+        // Programmatic insertion does not get AppKit's normal end-of-key-event
+        // checkpoint in this command-line check, so close that implicit group.
+        while let textUndoManager = noteView.textView.undoManager,
+              textUndoManager.groupingLevel > 0 {
+            textUndoManager.endUndoGrouping()
+        }
+        try expect(noteView.textView.string == "ab", "setup should insert note text")
+        try expect(noteView.textView.undoManager?.canUndo == true, "note input should own a native undo step")
+        try expect(noteView.textView.undoManager !== inputCanvas.activeCanvasUndoManager,
+                   "text and canvas must use separate undo managers")
+        let textUndoWasRouted = window.firstResponder?.tryToPerform(Selector(("undo:")), with: nil) ?? false
+        try expect(textUndoWasRouted && noteView.textView.string == "a",
+                   "Cmd-Z in a note should undo typing (routed=\(textUndoWasRouted), text=\(noteView.textView.string))")
+        try expect(inputCanvas.canvasState.tiles[0].frame == movedInputTile.frame,
+                   "text undo must not move or resize the tile")
+        try expect(inputCanvas.activeCanvasUndoManager?.canUndo == true,
+                   "text undo must leave canvas history available")
+        let textRedoWasRouted = window.firstResponder?.tryToPerform(Selector(("redo:")), with: nil) ?? false
+        try expect(textRedoWasRouted && noteView.textView.string == "ab", "Cmd-Shift-Z in a note should redo typing")
+        try expect(inputCanvas.canvasState.tiles[0].frame == movedInputTile.frame,
+                   "text redo must not alter tile geometry")
+        try expect(window.makeFirstResponder(inputCanvas), "canvas chrome should regain first responder")
+        let canvasUndoWasRouted = window.firstResponder?.tryToPerform(Selector(("undo:")), with: nil) ?? false
+        try expect(canvasUndoWasRouted && inputCanvas.canvasState.tiles[0].frame == inputFrame,
+                   "Cmd-Z should resume canvas undo after focus leaves the input")
     }
 
     static func runZIndexRelaunchHitTestSelfCheck() throws -> URL {
@@ -7685,6 +8158,12 @@ protocol CanvasNSViewDelegate: AnyObject {
 
 extension CanvasNSViewDelegate {
     func canvasSidebarModelDidChange(_ canvas: CanvasNSView) {}
+}
+
+@MainActor
+private final class CanvasUndoSelfCheckDelegate: CanvasNSViewDelegate {
+    private(set) var changeCount = 0
+    func canvasDidChange(_ canvas: CanvasNSView) { changeCount += 1 }
 }
 
 /// Canvas-owned marching-ants focus border. A `CAShapeLayer` strokes a dashed

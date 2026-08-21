@@ -744,10 +744,12 @@ class TileNSView: NSView, TokenThemed {
         let local = convert(event.locationInWindow, from: nil)
         if let edge = resizeEdge(at: local) {
             dragKind = .resize(edge)
+            canvas?.beginGeometryEdit(.resizeTile, tileIds: [tile.id], includeAllZones: true)
             return
         }
         if local.y < grabHeightInLocalCoordinates {
             dragKind = .move
+            canvas?.beginGeometryEdit(.moveTile, tileIds: [tile.id], includeAllZones: true)
             return
         }
         // Below the grab strip: defer to subclass / content view.
@@ -774,7 +776,7 @@ class TileNSView: NSView, TokenThemed {
             // toggle the whole behavior in Settings ("Drag Snapping").
             let next = CanvasEngine.tile(tile, draggedByScreenDelta: delta, viewport: canvas.viewport)
             // zone-unify P3: a move must not reshape the owning zone.
-            canvas.updateTile(next, recalculateZoneBounds: false)
+            canvas.updateTile(next, recalculateZoneBounds: false, notifyChange: false)
             updateDragGhost(candidate: canvas.snapTarget(for: next.frame, excludingTileId: tile.id), on: canvas)
         case .resize(let edge):
             // Live resize: the tile previews itself as it sizes. Accumulate the raw,
@@ -792,7 +794,7 @@ class TileNSView: NSView, TokenThemed {
             if let snapped = canvas.resizeSnapTarget(for: resizedFree.frame, edge: edge, kind: tile.kind, excludingTileId: tile.id) {
                 next.frame = snapped
             }
-            canvas.updateTile(next)
+            canvas.updateTile(next, notifyChange: false)
             // Live "W × H" readout near the cursor (sense of scale). Pixels =
             // the tile's CONTENT size (world frame minus the chrome bar), uniform
             // for every tile kind — e.g. a browser sized to 1280×720 reads as that.
@@ -819,7 +821,7 @@ class TileNSView: NSView, TokenThemed {
         if case .move = completedDragKind, let target = dragSnapTarget {
             var snapped = tile
             snapped.frame = target
-            canvas?.updateTile(snapped)
+            canvas?.updateTile(snapped, recalculateZoneBounds: false, notifyChange: false)
         }
         if let canvas { cancelDragGhost(on: canvas) } else { teardownDragGhostState() }
 
@@ -829,6 +831,7 @@ class TileNSView: NSView, TokenThemed {
         }
 
         if case .move = completedDragKind, wasClick {
+            _ = canvas?.commitGeometryEdit()
             canvas?.focusBroker?.enterScope(.tile(tile.id), reason: .userClick)
             return
         }
@@ -836,10 +839,24 @@ class TileNSView: NSView, TokenThemed {
         // zone-unify P4: a committed move can change zone membership — drop a tile
         // into a zone to adopt it, or pull a member far past the edge to break out.
         if case .move = completedDragKind, !wasClick {
-            canvas?.reevaluateZoneMembership(forMovedTile: tile.id)
+            canvas?.reevaluateZoneMembership(forMovedTile: tile.id, notifyChange: false)
         }
 
+        if case .move = completedDragKind { _ = canvas?.commitGeometryEdit() }
+        if case .resize = completedDragKind { _ = canvas?.commitGeometryEdit() }
+
         super.mouseUp(with: event)
+    }
+
+    /// Called when the app loses activation mid-drag and AppKit may not deliver
+    /// the matching mouse-up. The canvas restores the model snapshot; the tile
+    /// clears gesture-only state so a later event cannot recommit the preview.
+    func cancelActiveGeometryGesture() {
+        dragKind = .none
+        mouseDraggedSinceDown = false
+        resizeFreeFrame = nil
+        canvas?.hideResizeDimensions()
+        if let canvas { cancelDragGhost(on: canvas) } else { teardownDragGhostState() }
     }
 
     /// Drive the dwell-gated snap phantom from the current drag candidate.

@@ -177,6 +177,7 @@ final class WorkspaceRuntime {
     /// get a controller acquired.
     func install(into canvasView: CanvasNSView, appRegistry: Registry) throws {
         self.canvasView = canvasView
+        canvasView.activateUndoWorkspace(workspaceId)
 
         // Plan hydration tiers using the configurable budget.
         let plan = ZoneHydrationOrchestrator.plan(
@@ -693,6 +694,7 @@ final class WorkspaceRuntime {
         document = targetDocument
         acquiredProjectIds = newlyAcquired
         refreshDocumentRelationships()
+        canvasView?.activateUndoWorkspace(targetWorkspaceId)
 
         // Attach UI to the new active controller.
         if let canvas = canvasView {
