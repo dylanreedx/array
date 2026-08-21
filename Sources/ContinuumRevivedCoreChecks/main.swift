@@ -11571,6 +11571,10 @@ runAgentTranscriptProjectionChecks()
 // Ticket: docs/38-tickets/91-agent-tile-ux/P1.6-local-user-notice-nodes.md —
 // local authorship, caller-owned stable IDs, retries, and provider-history isolation.
 runLocalTranscriptNodeChecks()
+runAgentReferenceProjectionChecks()
+try runAsyncCheck {
+    try await runAgentTranscriptStoreChecks()
+}
 
 // Plan: .plans/15-file-opening-markdown-preview.md — resolving an agent's
 // local-file link inside its own checkout, and the file-kind classification the
