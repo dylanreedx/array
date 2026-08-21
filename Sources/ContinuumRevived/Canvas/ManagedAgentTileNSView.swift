@@ -18,35 +18,28 @@ final class FlippedStackView: NSStackView {
     }
 }
 
-/// View-side intent adapter: the supervisor remains the sole execution owner,
-/// while the tile adds the accepted local prompt to its one transcript projection.
+/// View-side intent adapter: the supervisor remains the sole execution owner.
 /// The adapter is cancelled on detach and never owns a runner.
+///
+/// It no longer holds the tile. Echoing the accepted prompt was its only reason to,
+/// and that moved to the composer's synchronous submission seam.
 @MainActor
 private final class ManagedAgentTileActionAdapter: AgentTileActionSink {
-    weak var tile: ManagedAgentTileNSView?
     weak var supervisor: AgentSupervisor?
 
-    init(tile: ManagedAgentTileNSView, supervisor: AgentSupervisor) {
-        self.tile = tile
+    init(supervisor: AgentSupervisor) {
         self.supervisor = supervisor
     }
 
     func accept(_ intent: AgentComposerIntent, for agentID: AgentID) async -> IntentAcceptance {
         guard let supervisor else { return .refused(.unknownAgent) }
-        let result = await supervisor.accept(intent, for: agentID)
-        if result == .accepted {
-            switch intent {
-            case .send(let text):
-                tile?.appendUserPrompt(text)
-            case .sendPrompt(let prompt):
-                tile?.appendUserPrompt(prompt)
-            case .providerCommand:
-                break
-            default:
-                break
-            }
-        }
-        return result
+        // The prompt echo used to happen HERE, after this await returned. That put
+        // the user's own words behind an actor hop, a draft-journal read and write,
+        // a cross-process flock and (for pi) a role-directory scan — so the first
+        // visible response to a keystroke was gated on local IO. The composer now
+        // paints it synchronously in the submit frame via `onSubmissionStarted` and
+        // resolves it with `onSubmissionFinished`.
+        return await supervisor.accept(intent, for: agentID)
     }
 }
 
@@ -189,6 +182,9 @@ final class ManagedAgentTileNSView: TileNSView {
     /// when the semantic projection resets/rebinds, never merely because the view
     /// stops following the running agent.
     private var transcriptAttachmentOwnerAgentID: AgentID?
+    /// Non-nil between the optimistic paint and its resolution. Guards against a
+    /// second echo and against resolving an echo this tile never painted.
+    private var pendingOptimisticSubmissionID: AgentNodeID?
     var onUserInputSubmit: ((String, UserInputAnswers) -> Void)?
     /// Explicit provider response transport for v2 request blocks. Production
     /// binds nothing today because no compiled `AgentAdapter` response conformer
@@ -281,6 +277,12 @@ final class ManagedAgentTileNSView: TileNSView {
         agentHeader.onDetachView = { [weak self] in self?.onClose?() }
         v2Composer?.onDraftChange = { [weak self] _ in self?.updateV2ComposerPresentation() }
         v2Composer?.onSubmitPrompt = { [weak self] prompt in self?.onSubmitPrompt?(prompt) }
+        v2Composer?.onSubmissionStarted = { [weak self] prompt in
+            self?.beginOptimisticSubmission(prompt)
+        }
+        v2Composer?.onSubmissionFinished = { [weak self] accepted in
+            self?.finishOptimisticSubmission(accepted: accepted)
+        }
         v2ActionButton?.target = self
         v2ActionButton?.action = #selector(performV2PrimaryAction)
         setContentView(makeV2ContentView())
@@ -475,7 +477,7 @@ final class ManagedAgentTileNSView: TileNSView {
         if let composer = v2Composer,
            let snapshot = supervisor.turnSnapshot(for: agentID) {
             v2TurnSnapshot = snapshot
-            let adapter = ManagedAgentTileActionAdapter(tile: self, supervisor: supervisor)
+            let adapter = ManagedAgentTileActionAdapter(supervisor: supervisor)
             v2ActionAdapter = adapter
             composer.bindActionSink(adapter, agentID: agentID, snapshot: snapshot)
             composer.onCompletionAction = { [weak adapter] payload in
@@ -941,7 +943,43 @@ final class ManagedAgentTileNSView: TileNSView {
         synchronizeV2Transcript(final: true)
     }
 
+    /// Paints the submitted prompt in the SAME frame as the keystroke, before the
+    /// composer performs any await.
+    ///
+    /// This is the first half of the dead-air fix: acknowledgement is a function of
+    /// the user's action, not of how long the local draft journal, the agent-store
+    /// flock and the provider handshake take. If the submission is later refused,
+    /// `finishOptimisticSubmission(accepted: false)` says so explicitly rather than
+    /// leaving a prompt on screen that never ran.
+    private func beginOptimisticSubmission(_ prompt: AgentPrompt) {
+        guard pendingOptimisticSubmissionID == nil,
+              let id = AgentNodeID(rawValue: "local-prompt-\(UUID().uuidString)") else { return }
+        pendingOptimisticSubmissionID = id
+        cancelStreamingMarkupParseTimer()
+        model.appendUserPrompt(id: id, prompt: prompt)
+        // final: true — the user's own words must not wait on the 30Hz streaming gate.
+        synchronizeV2Transcript(final: true)
+        transcriptCollectionFixture?.setThinkingStatusText("Sending")
+        transcriptCollectionFixture?.setThinkingIndicatorVisible(true)
+    }
+
+    private func finishOptimisticSubmission(accepted: Bool) {
+        guard pendingOptimisticSubmissionID != nil else { return }
+        pendingOptimisticSubmissionID = nil
+        guard accepted else {
+            transcriptCollectionFixture?.setThinkingIndicatorVisible(false)
+            showSendRefusedNotice("Message was not sent. Your draft was restored; retry when ready.")
+            return
+        }
+        // One word with the header and the sidebar, not a third vocabulary.
+        transcriptCollectionFixture?.setThinkingStatusText(AgentStatusVocabulary.starting)
+        transcriptCollectionFixture?.setThinkingIndicatorVisible(true)
+    }
+
     /// Shows the prompt the user just submitted as its own "you" entry.
+    ///
+    /// No longer on the production submit path — `beginOptimisticSubmission` owns
+    /// that. Retained for ComponentLab, the UI tour and the app's own seeding.
     func appendUserPrompt(_ text: String) {
         appendUserPrompt(AgentPrompt(text))
     }

@@ -91,6 +91,10 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     /// text intact and never degrades into literal prompt text.
     var onCompletionAction: ((AgentCompletionPayload) -> Bool)?
     var onDismissSuggestions: (() -> Void)?
+    /// Synchronous visual acknowledgement seam. Fired before draft-journal or
+    /// attachment awaits so the transcript can respond in the submit frame.
+    var onSubmissionStarted: ((AgentPrompt) -> Void)?
+    var onSubmissionFinished: ((Bool) -> Void)?
     private(set) var draft: AgentComposerDraft = .empty
     private let completionController = CompletionPopoverController()
     // Keep an unbound composer useful as a real surface too. Managed tiles bind
@@ -892,12 +896,23 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         let generation = bindingGeneration
         let isPromptSubmission: Bool
         if case .sendPrompt = intent { isPromptSubmission = true } else { isPromptSubmission = false }
+        let previewPrompt: AgentPrompt?
+        switch intent {
+        case let .send(text): previewPrompt = AgentPrompt(text)
+        case let .sendPrompt(prompt): previewPrompt = prompt
+        default: previewPrompt = nil
+        }
+        if let previewPrompt { onSubmissionStarted?(previewPrompt) }
         actionTask = Task { @MainActor [weak self, weak actionSink] in
+            var reportedResolution = false
             // Install this before any actor await. An exclusive-lease rejection,
             // cancellation, or bind change must never strand this composer latch.
             defer {
                 if let self, self.isCurrentBinding(agentID: agentID, generation: generation) {
                     self.actionTask = nil
+                    if previewPrompt != nil, !reportedResolution {
+                        self.onSubmissionFinished?(false)
+                    }
                 }
             }
             guard let self, self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
@@ -950,6 +965,10 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
             // cancellation/rebind can no longer undo a handoff already in flight.
             self.submissionLease = nil
             let acceptance = await sink.accept(intent, for: agentID)
+            if previewPrompt != nil {
+                reportedResolution = true
+                self.onSubmissionFinished?(acceptance == .accepted)
+            }
             guard acceptance == .accepted else {
                 if let lease, let draftStore {
                     // The sink may have suspended after this task cleared
