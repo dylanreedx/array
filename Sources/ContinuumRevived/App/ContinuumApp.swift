@@ -7550,7 +7550,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 let service = try ensureCompanionAuthService()
                 let ttl: TimeInterval = 300
                 let instance = try await service.instance()
-                let grant = try await service.issuePairingCredential(scopes: .observer, ttl: ttl, label: "Debug Observer")
+                let companionTestScopes: Scope = [.operator, .transcriptRead, .agentStop]
+                let grant = try await service.issuePairingCredential(
+                    scopes: companionTestScopes,
+                    ttl: ttl,
+                    label: "Debug Transcript Operator")
                 let expiresAt = grant.expiresAt ?? Date().addingTimeInterval(ttl)
                 localPairingListener?.stop()
                 let listener = try LocalPairingEndpointListener.start(
