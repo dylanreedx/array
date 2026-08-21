@@ -2,9 +2,21 @@
 
 Written 2026-08-20 after the first macOS + iPhone relay dogfood pass.
 
-This is the authoritative handoff for branch `array/transcript-subagents`. It is
-deliberately candid about the difference between contracts that exist, UI that can
-render data, and production wiring that actually supplies that data.
+> **0.5.7 integration closure (2026-08-21):** The lifecycle and correctness gaps
+> recorded below were closed after the original handoff. macOS now persists semantic
+> transcript snapshots and starts one encrypted projection sender per authorized paired
+> session; iOS derives the matching transcript-only channel, starts a receiver, retries
+> subscriptions, and publishes decrypted documents into the semantic renderer. Stop is
+> handled by the desktop supervisor. Pairing-session keys are derived with a
+> transcript-specific HKDF context and never cross the relay in plaintext. Until the
+> authoritative desktop mutation/ack path exists, iPhone canvas mutation is explicitly
+> disabled instead of claiming a divergent edit is Live. The historical findings below
+> remain as the audit trail that motivated these release fixes.
+
+This was the authoritative pre-integration handoff for branch
+`array/transcript-subagents`. It is deliberately candid about the difference between
+contracts that existed at that point, UI that could render data, and production wiring
+that still had to supply that data. The closure note above records the release state.
 
 ## Executive status
 
@@ -13,7 +25,7 @@ transcript, durable subagent references, encrypted transcript transport contract
 an iPhone semantic transcript renderer. It also adds immediate visual acknowledgement
 for desktop prompt submission and contextual parent-child canvas lineage.
 
-It does **not** complete the original product goal yet.
+At handoff time, it did **not** complete the original product goal yet.
 
 - The desktop transcript received useful behavioral infrastructure, but it has not had
   the large visual-design and interaction pass the original request called for.

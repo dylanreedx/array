@@ -3595,6 +3595,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var suppressTerminateOnWindowCloseForQA = false
     private let focusBroker = FocusBroker()
     private var companionAuthService: CompanionAuthService?
+    private lazy var agentTranscriptStore = AgentTranscriptStore(
+        root: RegistryStore.defaultApplicationSupportDirectory()
+            .appendingPathComponent("agent-transcripts", isDirectory: true)
+    )
+    private var transcriptPersistenceTasks: [AgentID: Task<Void, Never>] = [:]
     private var localPairingListener: LocalPairingEndpointListener?
     private var companionSyncService: DesktopCompanionSyncService?
     /// Set when the service runs in relay mode (D4-R1); used to register
@@ -7899,7 +7904,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         fetchChanges: @escaping @Sendable () async throws -> Void,
         ensureSubscription: @escaping @Sendable () async throws -> Void
     ) -> DesktopCompanionSyncService {
-        DesktopCompanionSyncService(
+        let authService = companionAuthService
+        let transcriptStore = agentTranscriptStore
+        let supervisor = agentSupervisor
+        return DesktopCompanionSyncService(
             configuration: configuration,
             transport: transport,
             pairingSnapshot: { [weak self] in
@@ -7947,6 +7955,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                         throw CompanionSyncAppError.managedSessionsUnreconciled
                     }
                     return self.agentActivity.snapshot
+                }
+            },
+            transcriptChannels: {
+                guard let auth = authService,
+                      let instance = try? await auth.instance() else { return [] }
+                return await auth.activeSessionTokens().compactMap { session in
+                    guard session.scopes.contains(.transcriptRead) else { return nil }
+                    return TranscriptSyncCrypto.derivePairedSessionChannel(
+                        token: session.token,
+                        pairingID: instance.id
+                    )
+                }
+            },
+            transcriptDocument: { rawAgentID in
+                let agentID = AgentID(rawValue: rawAgentID)
+                guard let document = try? await transcriptStore.load(
+                    agentID: agentID,
+                    sessionID: "thread-main"
+                ) else { return nil }
+                return (sessionID: "thread-main", document: document)
+            },
+            stopAgent: { rawAgentID in
+                await MainActor.run {
+                    let agentID = AgentID(rawValue: rawAgentID)
+                    guard supervisor.records[agentID] != nil else { return .notFound }
+                    supervisor.stop(agentID)
+                    return .stopped
                 }
             },
             freshnessPublisher: DesktopCompanionLogFreshnessPublisher(),
@@ -11153,6 +11188,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         view.onRevealAgent = { [weak self] childID, _ in
             _ = self?.revealAgentFromInbox(childID.rawValue)
+        }
+        view.onSemanticTranscriptUpdated = { [weak self] persistedAgentID, sessionID, document, final in
+            guard let self else { return }
+            self.transcriptPersistenceTasks[persistedAgentID]?.cancel()
+            self.transcriptPersistenceTasks[persistedAgentID] = Task { [weak self] in
+                if !final { try? await Task.sleep(for: .milliseconds(200)) }
+                guard !Task.isCancelled, let self else { return }
+                try? await self.agentTranscriptStore.saveSnapshot(
+                    agentID: persistedAgentID,
+                    sessionID: sessionID,
+                    document: document
+                )
+                self.transcriptPersistenceTasks.removeValue(forKey: persistedAgentID)
+            }
         }
         // Replays the agent's history, then follows the tail; re-wiring the same
         // tile to the same agent is a no-op inside `attach`, so none of the three

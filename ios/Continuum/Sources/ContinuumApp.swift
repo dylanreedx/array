@@ -139,6 +139,10 @@ private struct ContinuumRootView: View {
 private final class AgentsBoardModel: ObservableObject {
     private static let approvalAckTimeout: Duration = .seconds(5)
     private static let pairingRetryDelays: [Duration] = [.milliseconds(350), .seconds(1)]
+    /// Inbound mobile spatial ops are not yet acknowledged by the canonical Mac
+    /// workspace revision. Keep the mirror read-only rather than reporting a
+    /// transport-fresh but divergent edit as Live.
+    static let authoritativeCanvasMutationEnabled = false
 
     enum State: Equatable {
         case loading
@@ -200,6 +204,8 @@ private final class AgentsBoardModel: ObservableObject {
     private var relayTransport: RelaySyncTransport?
     private var relayStateTask: Task<Void, Never>?
     private var transcriptControlTask: Task<Void, Never>?
+    private var transcriptReceiver: TranscriptProjectionReceiver?
+    private var transcriptTask: Task<Void, Never>?
     private static let relayCursorDefaultsKey = "continuum.relay.cursor"
     private var freshnessSequence: Int64 = 0
     private let pairedSessionStore: any PairedCompanionSessionStoring = KeychainPairedCompanionSessionStore()
@@ -352,6 +358,28 @@ private final class AgentsBoardModel: ObservableObject {
             }
         }
 
+        if relayTransport != nil,
+           capability.scope.contains(.transcriptRead),
+           case .paired(let pairedSession) = pairedSessionState {
+            let channel = TranscriptSyncCrypto.derivePairedSessionChannel(
+                token: pairedSession.token,
+                pairingID: pairedSession.instanceId
+            )
+            let transcriptReceiver = TranscriptProjectionReceiver(
+                demux: demux,
+                scope: capability.scope,
+                channelKeys: [channel.keyID: channel.key]
+            )
+            self.transcriptReceiver = transcriptReceiver
+            transcriptTask = Task { [weak self] in
+                let stream = await transcriptReceiver.subscribe()
+                for await (agentID, document) in stream {
+                    guard !Task.isCancelled else { return }
+                    await MainActor.run { self?.transcripts[agentID] = document }
+                }
+            }
+        }
+
         let receiver = ActivityProjectionReceiver(demux: demux, scope: capability.scope)
         self.receiver = receiver
         task = Task { [weak self] in
@@ -467,15 +495,19 @@ private final class AgentsBoardModel: ObservableObject {
         fetchTask?.cancel()
         relayStateTask?.cancel()
         transcriptControlTask?.cancel()
+        transcriptTask?.cancel()
         relayTransport?.stop()
         task = nil
         spatialTask = nil
         fetchTask = nil
         relayStateTask = nil
         transcriptControlTask = nil
+        transcriptTask = nil
         relayTransport = nil
         receiver = nil
         self.spatialReceiver = nil
+        let transcript = transcriptReceiver
+        transcriptReceiver = nil
         demux = nil
         syncTransport = nil
         if let activityReceiver {
@@ -483,6 +515,9 @@ private final class AgentsBoardModel: ObservableObject {
         }
         if let spatial {
             await spatial.stop()
+        }
+        if let transcript {
+            await transcript.stop()
         }
     }
 
@@ -726,6 +761,10 @@ private final class AgentsBoardModel: ObservableObject {
             snapshot = AgentsBoardProjection.applyEvent(event, to: snapshot)
         }
         rows = AgentsBoardProjection.rows(from: snapshot)
+        if let transcriptReceiver {
+            let agentIDs = rows.map(\.agentId)
+            Task { await transcriptReceiver.connect(agentIDs: agentIDs) }
+        }
         latestActivityFreshness = syntheticFreshnessSample(
             spatialWatermark: nil,
             activityWatermark: "activity-\(snapshot.snapshotSequence)"
@@ -758,6 +797,10 @@ private final class AgentsBoardModel: ObservableObject {
     /// `consumeSpatial`, so `canvasScene` snaps back automatically) — this
     /// only surfaces a non-blocking error.
     func emitCanvasOp(_ op: Op) async {
+        guard Self.authoritativeCanvasMutationEnabled else {
+            canvasEditError = "Canvas editing is read-only until the Mac acknowledges synced changes."
+            return
+        }
         guard canMutateFromFreshness else {
             canvasEditError = freshness.actionBlocker ?? "Reconnect to act"
             return
@@ -775,6 +818,10 @@ private final class AgentsBoardModel: ObservableObject {
     /// at the first failure — surfaces the same non-blocking error `emitCanvasOp`
     /// does, never emits a membership change after a failed move.
     func emitCanvasOps(_ ops: [Op]) async {
+        guard Self.authoritativeCanvasMutationEnabled else {
+            canvasEditError = "Canvas editing is read-only until the Mac acknowledges synced changes."
+            return
+        }
         guard canMutateFromFreshness else {
             canvasEditError = freshness.actionBlocker ?? "Reconnect to act"
             return
@@ -793,7 +840,12 @@ private final class AgentsBoardModel: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(30))
                 await MainActor.run {
-                    self?.freshnessNow = Date()
+                    guard let self else { return }
+                    self.freshnessNow = Date()
+                    if let transcriptReceiver = self.transcriptReceiver {
+                        let agentIDs = self.rows.map(\.agentId)
+                        Task { await transcriptReceiver.connect(agentIDs: agentIDs) }
+                    }
                 }
             }
         }
@@ -1775,7 +1827,11 @@ private struct CanvasTabView: View {
     @GestureState private var resizeTranslation: CGSize = .zero
     @State private var hoveredZoneId: UUID?
 
-    private var canEdit: Bool { model.canMutateFromFreshness && CanvasEditIntent.isEditingPermitted(scope: model.grantedScope) }
+    private var canEdit: Bool {
+        AgentsBoardModel.authoritativeCanvasMutationEnabled
+            && model.canMutateFromFreshness
+            && CanvasEditIntent.isEditingPermitted(scope: model.grantedScope)
+    }
     // Hard-blocks the camera (pan/zoom) from moving while a tile drag or
     // resize is in progress — the editor contract requires gesture-end edits
     // to be evaluated against a fixed camera, never a camera that shifted

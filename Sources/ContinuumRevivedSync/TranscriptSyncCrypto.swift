@@ -72,7 +72,38 @@ public enum TranscriptCryptoError: Error, Equatable, Sendable {
     case unsupportedProtocol(Int)
 }
 
+public struct TranscriptChannelKey: Sendable {
+    public var keyID: UUID
+    public var key: SymmetricKey
+
+    public init(keyID: UUID, key: SymmetricKey) {
+        self.keyID = keyID
+        self.key = key
+    }
+}
+
 public enum TranscriptSyncCrypto {
+    /// The pairing session token is already a random, per-device secret stored in
+    /// Keychain on the phone and in the desktop auth database. Derive a distinct
+    /// transcript-only key from it so relay/cloud transports see ciphertext only,
+    /// without introducing a second pairing ceremony.
+    public static func derivePairedSessionChannel(
+        token: String,
+        pairingID: UUID
+    ) -> TranscriptChannelKey {
+        let input = SymmetricKey(data: Data(token.utf8))
+        let key = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: input,
+            salt: Data(pairingID.uuidString.utf8),
+            info: Data("array.transcript.paired-session.v1".utf8),
+            outputByteCount: 32
+        )
+        let digest = SHA256.hash(data: Data("\(pairingID.uuidString)|\(token)|transcript-key-id".utf8))
+        let hex = digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+        let uuidText = "\(hex.prefix(8))-\(hex.dropFirst(8).prefix(4))-\(hex.dropFirst(12).prefix(4))-\(hex.dropFirst(16).prefix(4))-\(hex.dropFirst(20).prefix(12))"
+        return TranscriptChannelKey(keyID: UUID(uuidString: uuidText)!, key: key)
+    }
+
     public static func generatePrivateKey() -> Data {
         Curve25519.KeyAgreement.PrivateKey().rawRepresentation
     }

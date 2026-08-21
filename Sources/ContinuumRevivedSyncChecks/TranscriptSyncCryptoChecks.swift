@@ -18,6 +18,12 @@ func runTranscriptSyncCryptoChecks() throws {
         localPrivateKey: privateA, remotePublicKey: publicB, pairingID: pairingID)
     let keyB = try TranscriptSyncCrypto.deriveChannelKey(
         localPrivateKey: privateB, remotePublicKey: publicA, pairingID: pairingID)
+    let pairedChannelA = TranscriptSyncCrypto.derivePairedSessionChannel(
+        token: "high-entropy-pairing-session-token", pairingID: pairingID)
+    let pairedChannelB = TranscriptSyncCrypto.derivePairedSessionChannel(
+        token: "high-entropy-pairing-session-token", pairingID: pairingID)
+    expect(pairedChannelA.keyID == pairedChannelB.keyID,
+           "the two app lifecycles must derive the same transcript key identity from pairing")
 
     let sentinel = "PLAINTEXT-TRANSCRIPT-SENTINEL-" + String(repeating: "x", count: 768)
     let entryID = AgentNodeID(rawValue: "sync.entry")!
@@ -57,6 +63,17 @@ func runTranscriptSyncCryptoChecks() throws {
     let decrypted = try TranscriptSyncCrypto.decrypt(encrypted, key: keyB)
     expect(decrypted == plaintext,
            "paired devices must derive interoperable transcript keys")
+    let pairedEncrypted = try TranscriptSyncCrypto.encrypt(
+        plaintext, key: pairedChannelA.key, keyID: pairedChannelA.keyID)
+    let pairedDecrypted = try TranscriptSyncCrypto.decrypt(pairedEncrypted, key: pairedChannelB.key)
+    expect(pairedDecrypted == plaintext,
+           "the persisted pairing session must establish an interoperable encrypted transcript channel")
+    let wrongPairedChannel = TranscriptSyncCrypto.derivePairedSessionChannel(
+        token: "different-pairing-session-token", pairingID: pairingID)
+    expectDecryptFailure(
+        pairedEncrypted,
+        key: wrongPairedChannel.key,
+        "another pairing session must not decrypt this device's transcript")
 
     let wrongPrivate = TranscriptSyncCrypto.generatePrivateKey()
     let wrongKey = try TranscriptSyncCrypto.deriveChannelKey(

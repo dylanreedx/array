@@ -45,7 +45,8 @@ public actor TranscriptProjectionSender {
             switch message {
             case .transcriptSubscribe(let request):
                 guard authorizedScope.contains(.transcriptRead),
-                      request.supportedProtocolVersions.contains(TranscriptSyncProtocol.version) else { continue }
+                      request.supportedProtocolVersions.contains(TranscriptSyncProtocol.version),
+                      request.supportedKeyIDs?.contains(keyID) != false else { continue }
                 for agentID in request.agentIDs {
                     guard let source = await documentProvider(agentID),
                           request.knownDocumentVersions[agentID] != source.document.version,
@@ -54,6 +55,7 @@ public actor TranscriptProjectionSender {
                 }
             case .transcriptHistoryRequest(let request):
                 guard authorizedScope.contains(.transcriptRead),
+                      request.supportedKeyIDs?.contains(keyID) != false,
                       let source = await documentProvider(request.agentID),
                       let envelope = try? makeEnvelope(agentID: request.agentID, source: source) else {
                     try? await demux.send(.transcriptHistoryResponse(TranscriptHistoryResponse(

@@ -203,6 +203,9 @@ final class ManagedAgentTileNSView: TileNSView {
     /// path. A tile never creates another agent; it asks the app to reveal or
     /// attach the existing identity.
     var onRevealAgent: ((_ agentID: AgentID, _ parentAgentID: AgentID) -> Void)?
+    /// App-owned durable semantic transcript sink. The view supplies only the
+    /// provider-neutral document and stable identities; storage stays out of UI.
+    var onSemanticTranscriptUpdated: ((_ agentID: AgentID, _ sessionID: String, _ document: AgentDocument, _ final: Bool) -> Void)?
     /// Fired after this tile ingests an event, so the app can mirror the stream
     /// onto the syncable activity timeline (88.4c) without owning the subscription.
     var onIngestedEvent: ((AgentRuntimeEvent) -> Void)?
@@ -1911,6 +1914,9 @@ final class ManagedAgentTileNSView: TileNSView {
             )
             v2RenderedDocument = next
             v2RenderError = nil
+            if let attachedAgentID {
+                onSemanticTranscriptUpdated?(attachedAgentID, threadId, next, final)
+            }
             if case .needsAction = v2TurnSnapshot?.state {
                 // A pending request is an interaction boundary, not a streaming
                 // frame: present it before scrolling so the anchor resolves

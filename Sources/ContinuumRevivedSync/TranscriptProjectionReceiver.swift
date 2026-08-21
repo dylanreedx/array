@@ -39,6 +39,7 @@ public actor TranscriptProjectionReceiver {
         }
         let versions = documents.mapValues(\.version)
         try? await demux.send(.transcriptSubscribe(TranscriptSubscribeRequest(
+            supportedKeyIDs: channelKeys.keys.sorted { $0.uuidString < $1.uuidString },
             agentIDs: Array(subscribedAgentIDs).sorted { $0.uuidString < $1.uuidString },
             knownDocumentVersions: versions)))
     }

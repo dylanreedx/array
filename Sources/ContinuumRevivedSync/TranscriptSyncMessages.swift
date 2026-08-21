@@ -3,15 +3,18 @@ import Foundation
 
 public struct TranscriptSubscribeRequest: Codable, Sendable, Equatable {
     public var supportedProtocolVersions: [Int]
+    public var supportedKeyIDs: [UUID]?
     public var agentIDs: [UUID]
     public var knownDocumentVersions: [UUID: UInt64]
 
     public init(
         supportedProtocolVersions: [Int] = [TranscriptSyncProtocol.version],
+        supportedKeyIDs: [UUID]? = nil,
         agentIDs: [UUID],
         knownDocumentVersions: [UUID: UInt64] = [:]
     ) {
         self.supportedProtocolVersions = supportedProtocolVersions
+        self.supportedKeyIDs = supportedKeyIDs
         self.agentIDs = agentIDs
         self.knownDocumentVersions = knownDocumentVersions
     }
@@ -21,11 +24,13 @@ public struct TranscriptHistoryRequest: Codable, Sendable, Equatable {
     public var requestID: UUID
     public var agentID: UUID
     public var knownDocumentVersion: UInt64?
+    public var supportedKeyIDs: [UUID]?
 
-    public init(requestID: UUID = UUID(), agentID: UUID, knownDocumentVersion: UInt64? = nil) {
+    public init(requestID: UUID = UUID(), agentID: UUID, knownDocumentVersion: UInt64? = nil, supportedKeyIDs: [UUID]? = nil) {
         self.requestID = requestID
         self.agentID = agentID
         self.knownDocumentVersion = knownDocumentVersion
+        self.supportedKeyIDs = supportedKeyIDs
     }
 }
 

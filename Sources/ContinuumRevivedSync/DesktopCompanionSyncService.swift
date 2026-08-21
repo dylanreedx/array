@@ -1,4 +1,5 @@
 import ContinuumRevivedAgentUI
+import ContinuumRevivedAgentContent
 import ContinuumRevivedCore
 import Foundation
 
@@ -253,6 +254,9 @@ public actor DesktopCompanionSyncService {
     public typealias PairingSnapshotProvider = @Sendable () async -> DesktopCompanionPairingSnapshot
     public typealias CanvasSnapshotProvider = @Sendable () async throws -> (CanvasState, WorkspaceDocument)
     public typealias ActivitySnapshotProvider = @Sendable () async throws -> ActivityLogSnapshot
+    public typealias TranscriptChannelProvider = @Sendable () async -> [TranscriptChannelKey]
+    public typealias TranscriptDocumentProvider = TranscriptProjectionSender.DocumentProvider
+    public typealias AgentStopHandler = AgentStopResponder.StopHandler
     public typealias FetchChangesHook = @Sendable () async throws -> Void
     public typealias SubscriptionHook = @Sendable () async throws -> Void
 
@@ -262,6 +266,9 @@ public actor DesktopCompanionSyncService {
     private var pairingSnapshotProvider: PairingSnapshotProvider
     private let canvasSnapshotProvider: CanvasSnapshotProvider
     private let activitySnapshotProvider: ActivitySnapshotProvider
+    private let transcriptChannelProvider: TranscriptChannelProvider
+    private let transcriptDocumentProvider: TranscriptDocumentProvider
+    private let agentStopHandler: AgentStopHandler
     private let freshnessPublisher: any CompanionLifecycleHintPublishing
     private let fetchChangesHook: FetchChangesHook
     private let ensureSubscriptionHook: SubscriptionHook
@@ -274,6 +281,8 @@ public actor DesktopCompanionSyncService {
     private var activitySender: ActivityProjectionSender?
     private var spatialSender: SpatialOpSender?
     private var approvalResponder: ApprovalResponder?
+    private var agentStopResponder: AgentStopResponder?
+    private var transcriptSenders: [UUID: TranscriptProjectionSender] = [:]
     private var activityStore: ActivityStore?
     private var spatialStore: MemorySpatialOpLogStore?
 
@@ -285,6 +294,9 @@ public actor DesktopCompanionSyncService {
         pairingSnapshot: @escaping PairingSnapshotProvider,
         canvasSnapshot: @escaping CanvasSnapshotProvider,
         activitySnapshot: @escaping ActivitySnapshotProvider,
+        transcriptChannels: @escaping TranscriptChannelProvider = { [] },
+        transcriptDocument: @escaping TranscriptDocumentProvider = { _ in nil },
+        stopAgent: @escaping AgentStopHandler = { _ in .unsupported },
         freshnessPublisher: any CompanionLifecycleHintPublishing,
         fetchChanges: @escaping FetchChangesHook = {},
         ensureSubscription: @escaping SubscriptionHook = {},
@@ -298,6 +310,9 @@ public actor DesktopCompanionSyncService {
         self.pairingSnapshotProvider = pairingSnapshot
         self.canvasSnapshotProvider = canvasSnapshot
         self.activitySnapshotProvider = activitySnapshot
+        self.transcriptChannelProvider = transcriptChannels
+        self.transcriptDocumentProvider = transcriptDocument
+        self.agentStopHandler = stopAgent
         self.freshnessPublisher = freshnessPublisher
         self.fetchChangesHook = fetchChanges
         self.ensureSubscriptionHook = ensureSubscription
@@ -342,16 +357,25 @@ public actor DesktopCompanionSyncService {
                     await self?.recordApprovalAck(ack)
                 }
             )
+            let stopResponder = AgentStopResponder(
+                demux: demux,
+                authorizedScope: pairing.authorizedScope,
+                stopHandler: agentStopHandler
+            )
             await activity.start()
             await spatialSender.start()
             await responder.start()
+            await stopResponder.start()
             activityStore = store
             spatialStore = spatial
             activitySender = activity
             self.spatialSender = spatialSender
             approvalResponder = responder
+            agentStopResponder = stopResponder
             started = true
         }
+
+        await refreshTranscriptSenders(scope: pairing.authorizedScope)
 
         try await ensureSubscriptionHook()
         try await publishHeartbeat(pairing: pairing, spatialWatermark: "startup", activityWatermark: "startup")
@@ -363,12 +387,38 @@ public actor DesktopCompanionSyncService {
         await activitySender?.stop()
         await spatialSender?.stop()
         await approvalResponder?.stop()
+        await agentStopResponder?.stop()
+        for sender in transcriptSenders.values { await sender.stop() }
         activitySender = nil
         spatialSender = nil
         approvalResponder = nil
+        agentStopResponder = nil
+        transcriptSenders = [:]
         activityStore = nil
         spatialStore = nil
         started = false
+    }
+
+    private func refreshTranscriptSenders(scope: Scope) async {
+        let channels = scope.contains(.transcriptRead) ? await transcriptChannelProvider() : []
+        let wanted = Set(channels.map(\.keyID))
+        let obsolete = transcriptSenders.keys.filter { !wanted.contains($0) }
+        for keyID in obsolete {
+            guard let sender = transcriptSenders[keyID] else { continue }
+            await sender.stop()
+            transcriptSenders.removeValue(forKey: keyID)
+        }
+        for channel in channels where transcriptSenders[channel.keyID] == nil {
+            let sender = TranscriptProjectionSender(
+                demux: demux,
+                authorizedScope: scope,
+                channelKey: channel.key,
+                keyID: channel.keyID,
+                documentProvider: transcriptDocumentProvider
+            )
+            await sender.start()
+            transcriptSenders[channel.keyID] = sender
+        }
     }
 
     public func publishCurrentDesktopSnapshot(reason: DesktopCompanionPublishReason) async throws {
