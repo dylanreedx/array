@@ -7557,9 +7557,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     label: "Debug Transcript Operator")
                 let expiresAt = grant.expiresAt ?? Date().addingTimeInterval(ttl)
                 localPairingListener?.stop()
+                let pairingHost = ProcessInfo.processInfo.environment["CONTINUUM_PAIRING_ADVERTISED_HOST"]
+                    .flatMap { $0.isEmpty ? nil : $0 }
+                    ?? LocalPairingEndpointListener.preferredAdvertisedHost()
                 let listener = try LocalPairingEndpointListener.start(
                     authService: service,
-                    advertisedHost: LocalPairingEndpointListener.preferredAdvertisedHost(),
+                    advertisedHost: pairingHost,
                     expiresAt: expiresAt,
                     acceptedCredential: grant.credential,
                     onExchangeSuccess: { [weak self] exchange in
@@ -7573,7 +7576,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     scopes: grant.scopes,
                     instanceId: instance.id,
                     endpoint: listener.endpointURL,
-                    relay: Self.advertisedRelayURL(advertisedHost: LocalPairingEndpointListener.preferredAdvertisedHost())
+                    relay: Self.advertisedRelayURL(advertisedHost: pairingHost)
                 )
                 let cameraURL = PairingURL.cameraBootstrapURL(pairingURL: url, endpoint: listener.endpointURL)
                 copyPairingURLToPasteboard(cameraURL)
