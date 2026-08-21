@@ -65,15 +65,21 @@ func runDocumentLocationChecks() {
            "workspace document links must dedupe by agent/tile and refresh updatedAt")
     let data = try! JSONEncoder().encode(workspace)
     let decoded = try! JSONDecoder().decode(WorkspaceDocument.self, from: data)
-    expect(decoded.schemaVersion == 5 && decoded.documentLinks == workspace.documentLinks,
-           "workspace v5 must round-trip document links")
-    var v4Object = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+    expect(decoded.schemaVersion == 6 && decoded.documentLinks == workspace.documentLinks,
+           "workspace v6 must round-trip document links")
+    var v5Object = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+    v5Object["schemaVersion"] = 5
+    let v5Data = try! JSONSerialization.data(withJSONObject: v5Object)
+    let migratedV5 = try! JSONDecoder().decode(WorkspaceDocument.self, from: v5Data)
+    expect(migratedV5.schemaVersion == 6 && migratedV5.documentLinks == workspace.documentLinks,
+           "workspace v5 must migrate to v6 without losing document links")
+    var v4Object = v5Object
     v4Object["schemaVersion"] = 4
     v4Object.removeValue(forKey: "documentLinks")
     let v4Data = try! JSONSerialization.data(withJSONObject: v4Object)
     let migratedV4 = try! JSONDecoder().decode(WorkspaceDocument.self, from: v4Data)
-    expect(migratedV4.schemaVersion == 5 && migratedV4.documentLinks.isEmpty,
-           "workspace v4 must migrate to v5 with an empty relationship list")
+    expect(migratedV4.schemaVersion == 6 && migratedV4.documentLinks.isEmpty,
+           "workspace v4 must migrate through v5 to v6 with an empty relationship list")
     workspace.removeDocumentLinks(agentId: agent)
     expect(workspace.documentLinks.isEmpty, "agent deletion must remove its document relationships")
     workspace.linkDocument(tile, to: agent, at: first)
