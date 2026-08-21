@@ -220,3 +220,4 @@ try await runDesktopCompanionSyncPublisherChecks()
 try runCompanionDogfoodKitChecks()
 
 try runTranscriptSyncCryptoChecks()
+try await runTranscriptProjectionTransportChecks()

@@ -78,6 +78,56 @@ func runTranscriptSyncCryptoChecks() throws {
     print("Transcript sync crypto checks passed: E2EE round-trip, long text, semantic child reference, tamper/wrong-device/AAD rejection, explicit scopes")
 }
 
+func runTranscriptProjectionTransportChecks() async throws {
+    let fake = ContinuumRevivedSync.FakeSyncTransport(seed: 710)
+    let (hostID, hostInbound) = await fake.makeReplica()
+    let (phoneID, phoneInbound) = await fake.makeReplica()
+    let hostDemux = SyncMessageDemux(transport: FakeReplicaSyncTransport(
+        fake: fake, replicaId: hostID, inbound: hostInbound))
+    let phoneDemux = SyncMessageDemux(transport: FakeReplicaSyncTransport(
+        fake: fake, replicaId: phoneID, inbound: phoneInbound))
+    let keyID = UUID(uuidString: "72000000-0000-4000-8000-000000000001")!
+    let agentID = UUID(uuidString: "72000000-0000-4000-8000-000000000002")!
+    let key = SymmetricKey(size: .bits256)
+    let entryID = AgentNodeID(rawValue: "transport.entry")!
+    let document = AgentDocument(version: 1, entries: [AgentEntry(
+        id: entryID,
+        role: .assistant,
+        provenance: .localNotice(reason: "transport-check"),
+        lifecycle: .finished,
+        blocks: [AgentBlock(
+            id: AgentNodeID(rawValue: "transport.block")!,
+            kind: .paragraph,
+            payload: .paragraph([.text("encrypted end to end")]))]
+    )])
+    let sender = TranscriptProjectionSender(
+        demux: hostDemux,
+        authorizedScope: [.transcriptRead],
+        channelKey: key,
+        keyID: keyID,
+        documentProvider: { requested in
+            requested == agentID ? ("private-session", document) : nil
+        })
+    let receiver = TranscriptProjectionReceiver(
+        demux: phoneDemux,
+        scope: [.transcriptRead],
+        channelKeys: [keyID: key])
+    await sender.start()
+    await receiver.connect(agentIDs: [agentID])
+    let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+    while ContinuousClock.now < deadline,
+          await receiver.currentDocument(agentID: agentID) == nil {
+        await fake.tick()
+        try? await Task.sleep(for: .milliseconds(2))
+    }
+    let received = await receiver.currentDocument(agentID: agentID)
+    expect(received == document,
+           "negotiated encrypted transcript must converge through the real demux/transport seam")
+    await sender.stop()
+    await receiver.stop()
+    print("Transcript projection transport checks passed: subscribe → encrypted snapshot → authenticated semantic document")
+}
+
 private func expectDecryptFailure(
     _ envelope: EncryptedTranscriptEnvelope,
     key: SymmetricKey,
