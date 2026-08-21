@@ -14,6 +14,7 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     case openFileTree
     case newDiffReview
     case fitCanvasToAll
+    case tidyCanvas
     /// Reveal the already-current tile for work — the searchable twin of
     /// hold-⌥ Return. Same helper, same framing; this row exists so the action
     /// is discoverable without knowing the chord.
@@ -55,6 +56,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return "New Diff Review"
         case .fitCanvasToAll:
             return "Fit Canvas to All"
+        case .tidyCanvas:
+            return "Tidy Canvas"
         case .focusCurrentTile:
             return "Focus Current Tile"
         case .previousView:
@@ -112,6 +115,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return ["new", "diff", "review", "git"]
         case .fitCanvasToAll:
             return ["fit", "zoom", "all", "canvas"]
+        case .tidyCanvas:
+            return ["tidy", "arrange", "layout", "canvas", "jelly"]
         case .focusCurrentTile:
             return ["focus", "current", "tile", "reveal", "work", "activate"]
         case .previousView:
@@ -702,6 +707,7 @@ public enum LaunchPaletteModel {
         case let .jumpToTile(id): return item(row, .agentsAndTiles, "Tile", nil, "rectangle.on.rectangle", ["jump"], false, true, "tile:\(id.uuidString)")
         case let .jumpToZone(id): return item(row, .agentsAndTiles, "Zone", nil, "square.dashed", ["jump"], false, true, "zone:\(id.uuidString)")
         case .createZone: return item(row, .create, "Zone", "Group related canvas work", "square.dashed", ["new", "create"], true, true, "action:create-zone")
+        case .tidyCanvas: return item(row, .actions, "Tidy canvas", "Restore spacing without changing tile sizes", "rectangle.3.group", ["tidy", "arrange", "layout"], true, true, "action:tidy-canvas")
         }
     }
 

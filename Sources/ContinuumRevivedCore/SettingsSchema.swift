@@ -88,6 +88,17 @@ public enum SettingsSchema {
                 title: "Canvas",
                 iconSystemName: "macwindow",
                 fields: [
+                    .toggle(
+                        key: CanvasAutoLayoutConfig.enabledKey,
+                        label: "Auto Layout",
+                        default: CanvasAutoLayoutConfig.defaultEnabled
+                    ),
+                    .choice(
+                        key: CanvasAutoLayoutConfig.activationKey,
+                        label: "When Enabling Auto Layout",
+                        options: CanvasAutoLayoutActivation.allCases.map(\.rawValue),
+                        default: CanvasAutoLayoutConfig.defaultActivation.rawValue
+                    ),
                     .text(key: TileGapResolver.userDefaultsKey, label: "Tile Gap", default: String(Int(TileGapResolver.defaultGap))),
                     .toggle(key: DragMagnetizeConfig.enabledKey, label: "Drag Snapping", default: DragMagnetizeConfig.defaultEnabled),
                 ]

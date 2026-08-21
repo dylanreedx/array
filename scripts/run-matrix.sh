@@ -492,6 +492,7 @@ run_app_check .build/debug/Array --zone-breakout-check
 run_app_check .build/debug/Array --zone-close-keep-delete-check
 run_app_check .build/debug/Array --zone-chrome-zorder-check
 run_app_check .build/debug/Array --zone-resize-check
+run_app_check .build/debug/Array --jelly-auto-layout-check
 run_app_check .build/debug/Array --zone-adaptive-bounds-check
 run_app_check .build/debug/Array --agent-status-check
 run_app_check .build/debug/Array --tile-world-bounds-check
