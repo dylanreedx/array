@@ -998,29 +998,6 @@ final class ManagedAgentTileNSView: TileNSView {
         scheduleStreamingMarkupParseTimerIfNeeded()
     }
 
-    private func beginOptimisticSubmission(_ prompt: AgentPrompt) {
-        guard pendingOptimisticSubmissionID == nil,
-              let id = AgentNodeID(rawValue: "local-prompt-\(UUID().uuidString)") else { return }
-        pendingOptimisticSubmissionID = id
-        cancelStreamingMarkupParseTimer()
-        model.appendUserPrompt(id: id, prompt: prompt)
-        synchronizeV2Transcript(final: true)
-        transcriptCollectionFixture?.setThinkingStatusText("Sending")
-        transcriptCollectionFixture?.setThinkingIndicatorVisible(true)
-    }
-
-    private func finishOptimisticSubmission(accepted: Bool) {
-        guard pendingOptimisticSubmissionID != nil else { return }
-        pendingOptimisticSubmissionID = nil
-        if accepted {
-            transcriptCollectionFixture?.setThinkingStatusText("Starting agent")
-            transcriptCollectionFixture?.setThinkingIndicatorVisible(true)
-        } else {
-            transcriptCollectionFixture?.setThinkingIndicatorVisible(false)
-            showSendRefusedNotice("Message was not sent. Your draft was restored; retry when ready.")
-        }
-    }
-
     func ingest(_ event: AgentRuntimeEvent, originalEvent: AgentRuntimeEvent? = nil) {
         switch event {
         case let .turnCompleted(_, _, outcome, _):
