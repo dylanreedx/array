@@ -329,6 +329,9 @@ run_leg scripts/check-color-hygiene.sh
 run swift build
 run_ios_build
 run_leg swift run ContinuumRevivedCoreChecks
+# Directory-aware document identity, symlink-safe/longest-root classification,
+# workspace-v5 migration, and durable agent-document relationship cleanup.
+run_leg .build/debug/ContinuumRevivedCoreChecks --document-location-check
 # Ticket P1.1: the shared agent-UI module's own leg. It links AgentUI alone, so
 # it also proves the dependency direction — a token that reaches back into Core
 # cannot compile here. StatusChip's assertions moved here from
@@ -543,6 +546,7 @@ run_app_check .build/debug/Array --workspace-sidebar-actions-check
 run_app_check .build/debug/Array --workspace-sidebar-live-status-check
 run_app_check .build/debug/Array --workspace-top-bar-check
 run_app_check .build/debug/Array --browser-profile-persistence-check
+# Hidden note autosave plus Preview/Edit and same-identity Save-as-Markdown conversion.
 run_app_check .build/debug/Array --note-file-tile-spawn-check
 run_app_check .build/debug/Array --run-artifacts-tile-check
 run_app_check .build/debug/Array --zone-hydration-lifecycle-check
@@ -557,11 +561,11 @@ run_app_check .build/debug/Array --workspace-switch-check
 # time. Before the repair, an open after an in-process workspace switch installed
 # into the departed zone's model and persisted through the boot project's store.
 run_app_check .build/debug/Array --file-open-active-context-check
-# .plans/15: a .md/.markdown tile renders natively and keeps a Preview/Source
-# switch; every other file keeps the monospaced horizontally scrolling source view.
+# Directory-aware Markdown: a real title-bar mouse click reaches Preview/Edit;
+# unsaved preview, explicit atomic save, clean reload, and conflict overwrite are witnessed.
 run_app_check .build/debug/Array --file-markdown-preview-check
-# .plans/15: an explicit local-file link in an agent's answer opens beside that
-# agent, resolved against ITS checkout — and cannot reach outside it.
+# A transcript file link resolves against its source checkout/zone, canonicalizes
+# to one tile, preserves line reveal, and records/draws multiple referring agents.
 run_app_check .build/debug/Array --agent-local-file-link-check
 # .plans/15: one AppKit view per semantic block is ruinous for a big file — 546 KB
 # of Markdown built 12,000 TextKit stacks, 1.39 GB resident, and the process died.

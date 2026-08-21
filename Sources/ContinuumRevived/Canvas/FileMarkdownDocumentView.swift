@@ -58,7 +58,11 @@ final class FileMarkdownDocumentView: NSView, RichInlineTextSelectionContainer {
     /// Parses and renders a complete Markdown document. Cheap to call again: the
     /// tile keeps one loaded-text snapshot and only re-renders on a theme change.
     func apply(markdown: String, theme: TokenTheme) {
+        let priorOffset = scrollView.contentView.bounds.origin
         body.apply(markdown: markdown, theme: theme)
+        body.layoutSubtreeIfNeeded()
+        scrollView.contentView.scroll(to: priorOffset)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
     func applyTheme(_ theme: TokenTheme) {

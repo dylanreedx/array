@@ -11,7 +11,7 @@ import Foundation
 /// `cwd`; nothing here consults the process working directory or the active project.
 @MainActor
 struct AgentLocalFileOpener {
-    let openFile: (String, WorkspaceRuntime.FileOpenPlacement) -> WorkspaceRuntime.FileOpenOutcome
+    let openDocument: (WorkspaceRuntime.DocumentOpenRequest) -> WorkspaceRuntime.FileOpenOutcome
     let fileTile: (UUID) -> FileTileNSView?
 
     enum Result: Equatable {
@@ -23,12 +23,27 @@ struct AgentLocalFileOpener {
     }
 
     @discardableResult
-    func open(destination: String, checkoutRoot: URL, sourceTileId: UUID) -> Result {
+    func open(
+        destination: String,
+        checkoutRoot: URL,
+        sourceTileId: UUID,
+        sourceAgentId: AgentID? = nil,
+        projectId: UUID? = nil
+    ) -> Result {
         switch AgentLocalFileLinkResolver.resolve(destination: destination, checkoutRoot: checkoutRoot) {
         case let .failure(reason):
             return .refused("\(destination): \(reason)")
         case let .success(link):
-            let outcome = openFile(link.path, .beside(tileId: sourceTileId))
+            let location = DocumentLocationResolver.resolve(
+                fileURL: URL(fileURLWithPath: link.path),
+                explicitRoot: DocumentLocationRoot(rootURL: checkoutRoot, projectId: projectId)
+            )
+            let outcome = openDocument(.init(
+                location: location,
+                placement: .beside(tileId: sourceTileId),
+                sourceAgentId: sourceAgentId,
+                sourceTileId: sourceTileId
+            ))
             switch outcome {
             case let .opened(tileId):
                 revealIfNeeded(link, in: tileId)

@@ -435,6 +435,13 @@ final class WorkspaceRuntime {
     /// wire its app-owned handlers onto the arriving spawner instead of only onto
     /// the one it built at boot.
     var onSpawnerCreated: ((TileSpawner) -> Void)?
+    var documentAgentTileIdsProvider: (() -> [AgentID: UUID])? {
+        didSet { refreshDocumentRelationships() }
+    }
+
+    func refreshDocumentRelationships() {
+        canvasView?.setDocumentRelationships(document.documentLinks, agentTileIds: documentAgentTileIdsProvider?() ?? [:])
+    }
 
     /// Builds the arriving active project's spawner and hands it to that
     /// controller, which now owns it strongly (see `ZoneRuntimeController.tileSpawner`).
@@ -471,6 +478,76 @@ final class WorkspaceRuntime {
         case failure(String)
     }
 
+    struct DocumentOpenRequest: Sendable {
+        var location: DocumentLocation
+        var placement: FileOpenPlacement
+        var sourceAgentId: AgentID?
+        var sourceTileId: UUID?
+
+        init(
+            location: DocumentLocation,
+            placement: FileOpenPlacement = .automatic,
+            sourceAgentId: AgentID? = nil,
+            sourceTileId: UUID? = nil
+        ) {
+            self.location = location
+            self.placement = placement
+            self.sourceAgentId = sourceAgentId
+            self.sourceTileId = sourceTileId
+        }
+    }
+
+    @discardableResult
+    func openDocument(_ request: DocumentOpenRequest) -> FileOpenOutcome {
+        let title = URL(fileURLWithPath: request.location.path).lastPathComponent
+        let sourceZoneId = request.sourceTileId.flatMap { canvasView?.zoneId(containing: $0) }
+        let sourceProjectId = sourceZoneId.flatMap { zoneId in
+            document.zones.first(where: { $0.zoneId == zoneId })?.projectId
+        }
+        let spawner = sourceProjectId.flatMap { registry.controller(for: $0)?.tileSpawner }
+            ?? activeController?.tileSpawner
+        guard let spawner else {
+            return .failure("No project is open, so there is nowhere to put the file.")
+        }
+        let anchor: UUID?
+        let worldPoint: CGPoint?
+        switch request.placement {
+        case let .beside(tileId): anchor = tileId; worldPoint = nil
+        case let .at(point): anchor = request.sourceTileId; worldPoint = point
+        case .automatic: anchor = request.sourceTileId; worldPoint = nil
+        }
+        let outcome = spawner.spawnFile(
+            location: request.location,
+            title: title,
+            at: worldPoint,
+            beside: anchor,
+            targetZoneId: sourceZoneId
+        )
+        let mapped: FileOpenOutcome
+        switch outcome {
+        case let .spawned(tileId): mapped = .opened(tileId: tileId)
+        case let .alreadyOpen(tileId): mapped = .revealed(tileId: tileId)
+        case .invalidPath: mapped = .failure("Couldn't open \(title): that path isn't a file Array can show.")
+        case let .failure(error): mapped = .failure("Couldn't open \(title): \(error.localizedDescription)")
+        }
+        if let agentId = request.sourceAgentId {
+            switch mapped {
+            case let .opened(tileId), let .revealed(tileId):
+                document.linkDocument(tileId, to: agentId)
+                do { try persistWorkspaceDocument() }
+                catch { return .failure("Opened \(title), but couldn't save its agent relationship: \(error.localizedDescription)") }
+                refreshDocumentRelationships()
+            case .failure: break
+            }
+        }
+        switch mapped {
+        case let .opened(tileId), let .revealed(tileId):
+            _ = focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
+        case .failure: break
+        }
+        return mapped
+    }
+
     /// The single route for opening a project file as an Array tile. Command
     /// Center, file-tree activation, canvas file drop, and agent local-file links
     /// all come through here so the active project/zone is resolved at invocation
@@ -479,33 +556,28 @@ final class WorkspaceRuntime {
     func openProjectFile(path: String, placement: FileOpenPlacement = .automatic) -> FileOpenOutcome {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .failure("That file path is empty.") }
-        guard let spawner = activeController?.tileSpawner else {
+        guard let active = activeController, active.tileSpawner != nil else {
             return .failure("No active project is open, so there is nowhere to put the file.")
         }
+        let location = DocumentLocationResolver.resolve(
+            fileURL: URL(fileURLWithPath: trimmed),
+            knownRoots: [DocumentLocationRoot(
+                rootURL: URL(fileURLWithPath: active.project.rootPath, isDirectory: true),
+                projectId: active.project.id
+            )]
+        )
+        return openDocument(DocumentOpenRequest(location: location, placement: placement))
+    }
 
-        let title = URL(fileURLWithPath: trimmed).lastPathComponent
-        let outcome: TileSpawner.FileOutcome
-        switch placement {
-        case .automatic:
-            outcome = spawner.spawnFile(path: trimmed, title: title)
-        case let .at(worldPoint):
-            outcome = spawner.spawnFile(path: trimmed, title: title, at: worldPoint)
-        case let .beside(tileId):
-            outcome = spawner.spawnFile(path: trimmed, title: title, beside: tileId)
-        }
+    func removeDocumentLinks(agentId: AgentID? = nil, tileId: UUID? = nil) throws {
+        document.removeDocumentLinks(agentId: agentId, tileId: tileId)
+        try persistWorkspaceDocument()
+        refreshDocumentRelationships()
+    }
 
-        switch outcome {
-        case let .spawned(tileId):
-            _ = focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
-            return .opened(tileId: tileId)
-        case let .alreadyOpen(tileId):
-            _ = focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
-            return .revealed(tileId: tileId)
-        case .invalidPath:
-            return .failure("Couldn't open \(title): that path isn't a file Array can show.")
-        case let .failure(error):
-            return .failure("Couldn't open \(title): \(error.localizedDescription)")
-        }
+    private func persistWorkspaceDocument() throws {
+        let appSupport = registryStore.registryFile.deletingLastPathComponent()
+        try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport).save(document)
     }
 
     // MARK: - Workspace Switch (T09)
@@ -620,6 +692,7 @@ final class WorkspaceRuntime {
         workspaceId = targetWorkspaceId
         document = targetDocument
         acquiredProjectIds = newlyAcquired
+        refreshDocumentRelationships()
 
         // Attach UI to the new active controller.
         if let canvas = canvasView {

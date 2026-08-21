@@ -6,12 +6,18 @@ import Foundation
 /// Tile view that hosts an editable plain-text NSTextView for note content.
 @MainActor
 final class NoteTileNSView: TileNSView, NSTextViewDelegate {
+    enum Mode { case preview, edit }
     private(set) var textView: NSTextView
     private let scrollView: NSScrollView
     let noteId: UUID
+    private(set) var mode: Mode = .edit
+    private var markdownView: FileMarkdownDocumentView?
+    private var modeControl: NSSegmentedControl?
+    private var activeBody: NSView?
 
     /// Fires whenever text changes; the app wires this to debounced persistence.
     var onTextChange: (() -> Void)?
+    var onSaveAsMarkdownRequested: ((URL) -> Void)?
 
     init(tile: Tile, noteId: UUID, initialBody: String) {
         self.noteId = noteId
@@ -48,7 +54,9 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
         super.init(tile: tile)
 
         setContentView(sv)
+        activeBody = sv
         tv.delegate = self
+        installModeControl()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -56,6 +64,7 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
     override func applyTokens() {
         super.applyTokens()
         applyDocumentTokens(to: textView)
+        markdownView?.applyTheme(effectiveTokenTheme)
     }
 
     override func acquireFocus(reason: FocusRequest) -> Bool {
@@ -63,13 +72,63 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
         // While surfaced, `textView` is parked; focusing it there would send every
         // keystroke into a view clipped out of every draw.
         promoteForIncomingFocus()
-        window?.makeFirstResponder(textView)
+        window?.makeFirstResponder(mode == .preview ? (markdownView ?? textView) : textView)
         return true
     }
 
     func textDidChange(_ notification: Notification) {
         surfaceEpoch &+= 1
         onTextChange?()
+    }
+
+    func setMode(_ newMode: Mode) {
+        guard newMode != mode else { return }
+        promoteForIncomingFocus()
+        mode = newMode
+        modeControl?.selectedSegment = newMode == .preview ? 0 : 1
+        if newMode == .preview {
+            let view = markdownView ?? FileMarkdownDocumentView(frame: bounds)
+            markdownView = view
+            view.apply(markdown: textView.string, theme: effectiveTokenTheme)
+            setContentView(view)
+            activeBody = view
+        } else {
+            setContentView(scrollView)
+            activeBody = scrollView
+        }
+        surfaceEpoch &+= 1
+    }
+
+    @objc private func modeChanged(_ sender: NSSegmentedControl) {
+        setMode(sender.selectedSegment == 0 ? .preview : .edit)
+    }
+
+    private func installModeControl() {
+        let control = NSSegmentedControl(labels: ["Preview", "Edit"], trackingMode: .selectOne, target: self, action: #selector(modeChanged(_:)))
+        control.controlSize = .small
+        control.font = NSFont.systemFont(ofSize: 10, weight: .medium)
+        control.selectedSegment = 1
+        control.setAccessibilityLabel("Note Markdown display mode")
+        modeControl = control
+        setTitleBarAccessory(control)
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "s" {
+            saveAsMarkdown()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    func saveAsMarkdown() {
+        let panel = NSSavePanel()
+        let base = tile.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        panel.nameFieldStringValue = "\(base.isEmpty ? "note" : base).md"
+        panel.title = "Save Note as Markdown"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        onSaveAsMarkdownRequested?(url)
     }
 
     // MARK: - Surface residency (Option A, `.plans/38`)
@@ -79,9 +138,12 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
     /// keeps native. `textDidChange` bumps the epoch so a note edited moments ago
     /// re-bakes before it is next surfaced.
     private var surfaceEpoch: UInt64 = 1
-    override var surfaceableBody: NSView? { scrollView }
+    override var surfaceableBody: NSView? { activeBody }
     override var surfaceContentRevision: UInt64? { surfaceEpoch }
-    override var surfaceScrollOffsets: [CGPoint] { [scrollView.contentView.bounds.origin] }
+    override var surfaceScrollOffsets: [CGPoint] {
+        if let scroll = activeBody as? NSScrollView { return [scroll.contentView.bounds.origin] }
+        return activeBody?.subviews.compactMap { ($0 as? NSScrollView)?.contentView.bounds.origin } ?? []
+    }
 
     // MARK: - Export (A4)
 

@@ -5,7 +5,8 @@ public struct WorkspaceDocument: Equatable, Sendable {
     /// membership on each tile's `zoneId` LWW register (ticket 03).
     /// v4: zone stacking on `ZonePlacement.zPosition` fractional index; the
     /// `zoneZOrder` array is a decode-only legacy migration key (ticket 04).
-    public static let currentSchemaVersion = 4
+    /// v5: durable agent-to-document relationships.
+    public static let currentSchemaVersion = 5
 
     public let schemaVersion: Int
     public var viewport: CanvasViewport
@@ -16,6 +17,7 @@ public struct WorkspaceDocument: Equatable, Sendable {
     /// ambient tiles — they have no project `CanvasState`. Membership is derived
     /// from each tile's `zoneId` register, never from a per-zone list.
     public var ambientTiles: [Tile]
+    public var documentLinks: [DocumentAgentLink]
 
     /// `zoneZOrder` is a RANK-STAMPING convenience mirroring the decoder's
     /// legacy migration: zones listed in it receive evenly distributed
@@ -29,13 +31,42 @@ public struct WorkspaceDocument: Equatable, Sendable {
         zones: [ZonePlacement],
         zoneZOrder: [UUID] = [],
         lastActiveZoneId: UUID?,
-        ambientTiles: [Tile] = []
+        ambientTiles: [Tile] = [],
+        documentLinks: [DocumentAgentLink] = []
     ) {
         self.schemaVersion = schemaVersion
         self.viewport = viewport
         self.zones = Self.stampingZonePositions(zones, fromLegacyOrder: zoneZOrder)
         self.lastActiveZoneId = lastActiveZoneId
         self.ambientTiles = ambientTiles
+        self.documentLinks = Self.deduplicated(documentLinks)
+    }
+
+    public mutating func linkDocument(_ tileId: UUID, to agentId: AgentID, at date: Date = Date()) {
+        if let index = documentLinks.firstIndex(where: { $0.agentId == agentId && $0.documentTileId == tileId }) {
+            documentLinks[index].updatedAt = date
+        } else {
+            documentLinks.append(DocumentAgentLink(agentId: agentId, documentTileId: tileId, createdAt: date, updatedAt: date))
+        }
+    }
+
+    public mutating func removeDocumentLinks(agentId: AgentID? = nil, tileId: UUID? = nil) {
+        documentLinks.removeAll { link in
+            (agentId == nil || link.agentId == agentId) && (tileId == nil || link.documentTileId == tileId)
+        }
+    }
+
+    private static func deduplicated(_ links: [DocumentAgentLink]) -> [DocumentAgentLink] {
+        var result: [DocumentAgentLink] = []
+        for link in links {
+            if let index = result.firstIndex(where: { $0.agentId == link.agentId && $0.documentTileId == link.documentTileId }) {
+                result[index].createdAt = min(result[index].createdAt, link.createdAt)
+                result[index].updatedAt = max(result[index].updatedAt, link.updatedAt)
+            } else {
+                result.append(link)
+            }
+        }
+        return result
     }
 
     /// Zones back-to-front: the (zPosition, zoneId) sort every render/hit-test
@@ -189,7 +220,7 @@ extension WorkspaceDocument: Codable {
     private enum CodingKeys: String, CodingKey {
         // `groupZoneTiles` (pre-v3) and `zoneZOrder` (pre-v4) are decode-only
         // legacy migration keys. Never re-emitted.
-        case schemaVersion, viewport, zones, zoneZOrder, lastActiveZoneId, ambientTiles, groupZoneTiles
+        case schemaVersion, viewport, zones, zoneZOrder, lastActiveZoneId, ambientTiles, groupZoneTiles, documentLinks
     }
 
     /// Decode-only parse of the pre-v3 grouped shape. Not public API; exists
@@ -228,6 +259,7 @@ extension WorkspaceDocument: Codable {
             }
         }
         ambientTiles = tiles
+        documentLinks = Self.deduplicated(try container.decodeIfPresent([DocumentAgentLink].self, forKey: .documentLinks) ?? [])
 
         // Migrate-forward-on-load: supported older versions decode into the current
         // in-memory shape and are stamped current. Future versions keep their stamp
@@ -250,6 +282,7 @@ extension WorkspaceDocument: Codable {
         try container.encodeIfPresent(lastActiveZoneId, forKey: .lastActiveZoneId)
         // Only the flat register-carrying list; the legacy grouped key is never re-emitted.
         try container.encode(ambientTiles, forKey: .ambientTiles)
+        try container.encode(documentLinks, forKey: .documentLinks)
     }
 }
 

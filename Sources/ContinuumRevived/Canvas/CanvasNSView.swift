@@ -270,6 +270,10 @@ final class CanvasNSView: NSView, TokenThemed {
     /// are its children at WORLD frames; screen-fixed overlays stay direct
     /// children of the canvas. See `CanvasWorldPlaneView`.
     let worldPlane = CanvasWorldPlaneView()
+    private let documentRelationshipOverlay = DocumentRelationshipOverlayView()
+    private var documentLinks: [DocumentAgentLink] = []
+    private var documentAgentTileIds: [AgentID: UUID] = [:]
+    private var hoveredRelationshipEndpointId: UUID?
 
     /// Where a surfaced tile's real body lives while the camera moves: in the
     /// window, outside the world plane, clipped out of every draw. See the comment
@@ -382,6 +386,7 @@ final class CanvasNSView: NSView, TokenThemed {
             zoom: viewport.zoom
         )
         qaCameraLayoutStats.cameraMutations += writes
+        updateDocumentRelationshipOverlay()
     }
 
     /// Every installed tile view in BACK-TO-FRONT paint order, read from the view
@@ -573,6 +578,8 @@ final class CanvasNSView: NSView, TokenThemed {
         // above all world content without any further ordering work.
         worldPlane.frame = bounds
         addSubview(worldPlane, positioned: .below, relativeTo: nil)
+        documentRelationshipOverlay.frame = worldPlane.bounds
+        worldPlane.addSubview(documentRelationshipOverlay, positioned: .below, relativeTo: nil)
         // The park is a SIBLING of the world plane, which is the entire mechanism:
         // a camera step writes `worldPlane.bounds.size`, and that cascade reaches
         // descendants only. A parked body keeps its window, its appearance, its
@@ -843,6 +850,7 @@ final class CanvasNSView: NSView, TokenThemed {
         tileView.onStopRun = { [weak self] in
             self?.onTileStopRunRequested?(tileId)
         }
+        wireRelationshipHover(for: tileView, tileId: tileId)
         worldPlane.addSubview(tileView)
         focusBroker?.register(tileView)
         layoutTile(tile)
@@ -894,7 +902,70 @@ final class CanvasNSView: NSView, TokenThemed {
         return nil
     }
 
+    func setDocumentRelationships(_ links: [DocumentAgentLink], agentTileIds: [AgentID: UUID]) {
+        documentLinks = links
+        documentAgentTileIds = agentTileIds
+        let agentTilesByDocument = Dictionary(grouping: links, by: \.documentTileId).mapValues { documentLinks in
+            documentLinks.compactMap { agentTileIds[$0.agentId] }
+        }
+        for tile in allWorkspaceTiles() {
+            guard let fileView = tileView(for: tile.id) as? FileTileNSView else { continue }
+            fileView.onRevealReferencedAgentTile = { [weak self] agentTileId in
+                guard let self else { return }
+                self.bringToFront(tileId: agentTileId)
+                _ = self.focusBroker?.requestFocus(.tile(agentTileId), reason: .userClick)
+            }
+            fileView.setReferencedAgentTiles(agentTilesByDocument[tile.id, default: []])
+        }
+        updateDocumentRelationshipOverlay()
+    }
+
+    var qaDocumentRelationshipSegmentCount: Int { documentRelationshipOverlay.segments.count }
+
+    private func updateDocumentRelationshipOverlay() {
+        documentRelationshipOverlay.frame = worldPlane.bounds
+        let visible = worldPlane.bounds
+        let focused = canvasState.lastActiveTileId
+        documentRelationshipOverlay.segments = documentLinks.compactMap { link in
+            guard let agentTileId = documentAgentTileIds[link.agentId],
+                  let source = tileView(for: agentTileId), !source.isHidden,
+                  let target = tileView(for: link.documentTileId), !target.isHidden,
+                  source.frame.union(target.frame).intersects(visible) else { return nil }
+            return .init(
+                source: source.frame,
+                target: target.frame,
+                emphasized: focused == agentTileId || focused == link.documentTileId
+                    || hoveredRelationshipEndpointId == agentTileId
+                    || hoveredRelationshipEndpointId == link.documentTileId
+            )
+        }
+    }
+
+    private func wireRelationshipHover(for tileView: TileNSView, tileId: UUID) {
+        tileView.onHoverChanged = { [weak self] hovered in
+            guard let self else { return }
+            if hovered {
+                self.hoveredRelationshipEndpointId = tileId
+            } else if self.hoveredRelationshipEndpointId == tileId {
+                self.hoveredRelationshipEndpointId = nil
+            }
+            self.updateDocumentRelationshipOverlay()
+        }
+    }
+
     func updateTile(_ tile: Tile, recalculateZoneBounds: Bool = true) {
+        if let layer = zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == tile.id }) }),
+           let index = layer.tiles.firstIndex(where: { $0.id == tile.id }) {
+            let previous = layer.tiles[index]
+            var installed = tile
+            installed.zoneId = layer.placement.zoneId
+            layer.tiles[index] = installed
+            _layoutLayerTile(installed, in: layer)
+            if previous.title != installed.title || previous.kind != installed.kind {
+                delegate?.canvasSidebarModelDidChange(self)
+            }
+            return
+        }
         guard let idx = canvasState.tiles.firstIndex(where: { $0.id == tile.id }) else { return }
         let previousTile = canvasState.tiles[idx]
         canvasState.tiles[idx] = tile
@@ -1060,6 +1131,7 @@ final class CanvasNSView: NSView, TokenThemed {
             updateFocusBorder(borderedTileId: nil)
         }
         attentionTileIds.remove(id)
+        if hoveredRelationshipEndpointId == id { hoveredRelationshipEndpointId = nil }
         attentionBorderOverlays[id]?.removeFromSuperview()
         attentionBorderOverlays.removeValue(forKey: id)
         delegate?.canvasSidebarModelDidChange(self)
@@ -1069,6 +1141,7 @@ final class CanvasNSView: NSView, TokenThemed {
     func markActive(tileId: UUID) {
         canvasState.lastActiveTileId = tileId
         updateFocusBorder(borderedTileId: tileId)
+        updateDocumentRelationshipOverlay()
         delegate?.canvasDidChange(self)
     }
 
@@ -3132,6 +3205,9 @@ final class CanvasNSView: NSView, TokenThemed {
             chrome.removeFromSuperview()
             worldPlane.addSubview(chrome, positioned: .below, relativeTo: nil)
         }
+        documentRelationshipOverlay.removeFromSuperview()
+        worldPlane.addSubview(documentRelationshipOverlay, positioned: .below, relativeTo: nil)
+        updateDocumentRelationshipOverlay()
         // Keep the focus-border overlay above everything so a brought-to-front
         // tile (or the chrome reordering above) never buries it.
         if let overlay = focusBorderOverlay, !overlay.isHidden {
@@ -3848,6 +3924,18 @@ final class CanvasNSView: NSView, TokenThemed {
         return canvasState.tiles
     }
 
+    /// Every currently installed tile model across the compatibility canvas and
+    /// all zone layers. Document identity is workspace-wide, not active-zone-only.
+    func allWorkspaceTiles() -> [Tile] {
+        var seen = Set<UUID>()
+        return (canvasState.tiles + zoneLayers.flatMap(\.tiles)).filter { seen.insert($0.id).inserted }
+    }
+
+    func zoneId(containing tileId: UUID) -> UUID? {
+        zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == tileId }) })?.placement.zoneId
+            ?? canvasState.tiles.first(where: { $0.id == tileId })?.zoneId
+    }
+
     /// Where `installProjectTile` actually put a tile. Callers persist through the
     /// matching model: the flat path saves `canvasState`, the layer path saves the
     /// layer's tiles into that project's own store.
@@ -3870,8 +3958,8 @@ final class CanvasNSView: NSView, TokenThemed {
     /// stale flat `canvasState` and laid the tile out against the DEPARTED zone's
     /// placement, so it never appeared in the zone the user was looking at.
     @discardableResult
-    func installProjectTile(tileView: TileNSView, for tile: Tile) -> ProjectTileTarget {
-        guard let zoneId = activeProjectZoneId,
+    func installProjectTile(tileView: TileNSView, for tile: Tile, targetZoneId: UUID? = nil) -> ProjectTileTarget {
+        guard let zoneId = targetZoneId ?? activeProjectZoneId,
               let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId })
         else {
             install(tileView: tileView, for: tile)
@@ -3894,6 +3982,7 @@ final class CanvasNSView: NSView, TokenThemed {
         let tileId = tile.id
         tileView.onClose = { [weak self] in self?.onTileCloseRequested?(tileId) }
         tileView.onStopRun = { [weak self] in self?.onTileStopRunRequested?(tileId) }
+        wireRelationshipHover(for: tileView, tileId: tileId)
         worldPlane.addSubview(tileView)
         focusBroker?.register(tileView)
         _layoutLayerTile(installed, in: layer)

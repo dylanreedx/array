@@ -19,11 +19,18 @@ enum AgentContextGravityCanvasAdapter {
         }
     }
 
+    struct DocumentWorldSnapshot: Equatable, Sendable {
+        var tileId: UUID
+        var frame: TileFrame
+        var location: DocumentLocation
+    }
+
     static func makeInput(
         newTileFrame: TileFrame,
         workspaceId: UUID,
         projectZones: [ZonePlacement],
         managedAgents: [ManagedAgentWorldSnapshot],
+        documents: [DocumentWorldSnapshot] = [],
         registry: Registry,
         newAgentCheckoutRoot: URL,
         newAgentCheckoutRootsByProjectId: [UUID: URL] = [:],
@@ -59,6 +66,17 @@ enum AgentContextGravityCanvasAdapter {
                 relativeDirectory: snapshot.location.workingLocation.relativePath)
         }
 
+        let documentSignals = documents.compactMap { snapshot -> AgentScopeSignal? in
+            guard case let .checkout(projectId, _, _) = snapshot.location.scope,
+                  let projectId,
+                  let project = projectEntries[projectId] else { return nil }
+            return AgentScopeSignal(
+                provenance: .file(entityId: snapshot.tileId.uuidString),
+                frame: AgentWorldRect(snapshot.frame),
+                home: home(for: project, checkoutRoot: safeCheckoutRoots[projectId]),
+                relativeDirectory: snapshot.location.relativeDirectory)
+        }
+
         let workspaceDefault = workspaceDefaultProjectId
             .flatMap { projectEntries[$0] }
             .map { project in home(for: project, checkoutRoot: safeCheckoutRoots[project.id]) }
@@ -69,6 +87,7 @@ enum AgentContextGravityCanvasAdapter {
             newAgentCheckoutRootsByProjectId: safeCheckoutRoots,
             projectZones: zoneSignals,
             managedAgents: agentSignals,
+            documents: documentSignals,
             workspaceDefault: workspaceDefault,
             workspaceId: workspaceId.uuidString)
     }

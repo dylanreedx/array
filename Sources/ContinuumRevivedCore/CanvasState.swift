@@ -230,6 +230,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
     public var url: String?
     public var noteId: UUID?
     public var filePath: String?
+    public var documentLocation: DocumentLocation?
     public var browserProfileId: UUID?
     public var linearTeamKey: String?
     public var linearTeamId: String?
@@ -245,6 +246,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         url: String? = nil,
         noteId: UUID? = nil,
         filePath: String? = nil,
+        documentLocation: DocumentLocation? = nil,
         browserProfileId: UUID? = nil,
         linearTeamKey: String? = nil,
         linearTeamId: String? = nil,
@@ -259,6 +261,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         self.url = url
         self.noteId = noteId
         self.filePath = filePath
+        self.documentLocation = documentLocation
         self.browserProfileId = browserProfileId
         self.linearTeamKey = linearTeamKey
         self.linearTeamId = linearTeamId
@@ -275,6 +278,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         case url
         case noteId
         case filePath
+        case documentLocation
         case browserProfileId
         case linearTeamKey
         case linearTeamId
@@ -292,6 +296,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         try container.encodeIfPresent(url, forKey: .url)
         try container.encodeIfPresent(noteId, forKey: .noteId)
         try container.encodeIfPresent(filePath, forKey: .filePath)
+        try container.encodeIfPresent(documentLocation, forKey: .documentLocation)
         try container.encodeIfPresent(browserProfileId, forKey: .browserProfileId)
         try container.encodeIfPresent(linearTeamKey, forKey: .linearTeamKey)
         try container.encodeIfPresent(linearTeamId, forKey: .linearTeamId)

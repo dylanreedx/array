@@ -11,6 +11,7 @@ public enum AgentScopeSignalProvenance: Equatable, Sendable {
     case managedAgent(agentId: String)
     case terminal(entityId: String)
     case fileTree(entityId: String)
+    case file(entityId: String)
     case workspaceDefault(workspaceId: String)
 }
 
@@ -141,6 +142,9 @@ public struct AgentContextGravityInput: Equatable, Sendable {
     public let newAgentCheckoutRootsByProjectId: [UUID: URL]
     public let projectZones: [AgentScopeSignal]
     public let managedAgents: [AgentScopeSignal]
+    /// Checkout-scoped file tiles. Standalone documents are intentionally never
+    /// represented here, so they cannot retarget an agent.
+    public let documents: [AgentScopeSignal]
     public let workspaceDefault: AgentHome?
     public let workspaceId: String
 
@@ -150,6 +154,7 @@ public struct AgentContextGravityInput: Equatable, Sendable {
         newAgentCheckoutRootsByProjectId: [UUID: URL] = [:],
         projectZones: [AgentScopeSignal] = [],
         managedAgents: [AgentScopeSignal] = [],
+        documents: [AgentScopeSignal] = [],
         workspaceDefault: AgentHome? = nil,
         workspaceId: String
     ) {
@@ -160,6 +165,7 @@ public struct AgentContextGravityInput: Equatable, Sendable {
         }
         self.projectZones = projectZones
         self.managedAgents = managedAgents
+        self.documents = documents
         self.workspaceDefault = workspaceDefault
         self.workspaceId = workspaceId
     }
@@ -199,7 +205,7 @@ public enum AgentContextGravityEngine: Sendable {
                 forcedRelativeDirectory: agreed.relativeDirectory)
         }
 
-        if let nearest = input.managedAgents.min(by: { lhs, rhs in
+        if let nearest = (input.managedAgents + input.documents).min(by: { lhs, rhs in
             compareSignals(lhs, rhs, relativeTo: input.newAgentFrame)
         }) {
             return binding(
@@ -348,6 +354,7 @@ public enum AgentContextGravityEngine: Sendable {
         case .managedAgent(let agentId): return "managedAgent:\(agentId)"
         case .terminal(let entityId): return "terminal:\(entityId)"
         case .fileTree(let entityId): return "fileTree:\(entityId)"
+        case .file(let entityId): return "file:\(entityId)"
         case .workspaceDefault(let workspaceId): return "workspaceDefault:\(workspaceId)"
         }
     }

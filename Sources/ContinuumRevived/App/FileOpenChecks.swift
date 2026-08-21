@@ -619,15 +619,40 @@ enum FileOpenChecks {
         agentView.frame = NSRect(x: 0, y: 0, width: 460, height: 360)
         harness.canvas.installProjectTile(tileView: agentView, for: agentTile)
         agentView.layoutSubtreeIfNeeded()
+        let firstAgentId = AgentID(rawValue: UUID())
+        harness.runtime.documentAgentTileIdsProvider = { [agentTileId = agentTile.id] in
+            [firstAgentId: agentTileId]
+        }
+
+        // Make another zone the canvas's active spawn target. Transcript opens
+        // must still be owned and persisted by the source agent's zone.
+        let decoyZone = ZonePlacement(
+            zoneId: UUID(), projectId: nil,
+            origin: ZonePoint(x: 1_600, y: 0), size: ZoneSize(width: 800, height: 700),
+            color: "purple", collapsed: false, hydrationPolicy: .automatic,
+            name: "Active Decoy", navKey: nil, zPosition: .after(.first)
+        )
+        harness.canvas.upsertZoneLayer(.init(
+            placement: decoyZone,
+            renderModel: .init(placement: decoyZone, displayName: decoyZone.name),
+            tiles: []
+        ))
+        harness.canvas.setActiveProjectZone(decoyZone.zoneId)
 
         var refusals: [String] = []
         var opens: [AgentLocalFileOpener.Result] = []
         let opener = AgentLocalFileOpener(
-            openFile: { path, placement in harness.runtime.openProjectFile(path: path, placement: placement) },
+            openDocument: { request in harness.runtime.openDocument(request) },
             fileTile: { [weak canvas = harness.canvas] tileId in canvas?.tileView(for: tileId) as? FileTileNSView }
         )
         agentView.onOpenLocalFile = { (destination: String) in
-            let result = opener.open(destination: destination, checkoutRoot: checkout, sourceTileId: agentTile.id)
+            let result = opener.open(
+                destination: destination,
+                checkoutRoot: checkout,
+                sourceTileId: agentTile.id,
+                sourceAgentId: firstAgentId,
+                projectId: harness.runtime.activeController?.project.id
+            )
             opens.append(result)
             if case let .refused(reason) = result { refusals.append(reason) }
         }
@@ -684,6 +709,9 @@ enum FileOpenChecks {
         }
         try expect(tile.metadata.filePath == sourceFile.standardizedFileURL.resolvingSymlinksInPath().path,
                    "persisted metadata must be the canonical path without :line:column; got \(String(describing: tile.metadata.filePath))")
+        try expect(tile.metadata.documentLocation?.checkoutRootPath == checkout.resolvingSymlinksInPath().path
+                    && tile.metadata.documentLocation?.relativePath == "Sources/App.swift",
+                   "the document must persist its source checkout and relative path")
         try expect(tile.zoneId == agentTile.zoneId || tile.zoneId == harness.zone,
                    "the file tile must inherit the responding agent tile's zone")
 
@@ -703,11 +731,43 @@ enum FileOpenChecks {
         guard case .revealed = opens[1] else {
             throw Failure(message: "the second activation must reveal the existing tile; got \(opens[1])")
         }
+        try expect(harness.runtime.document.documentLinks.count == 1,
+                   "repeat opens from one agent must deduplicate the relationship")
+
+        // A second agent reveals the same canonical document and contributes a
+        // second persistent relationship (and therefore a second connector).
+        let secondAgentId = AgentID(rawValue: UUID())
+        let secondTile = Tile(
+            id: UUID(), kind: .managedAgent, title: "second agent",
+            frame: TileFrame(x: 100, y: 520, width: 460, height: 360),
+            zPosition: .fromLegacyRank(2), runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")
+        )
+        harness.canvas.installProjectTile(
+            tileView: ManagedAgentTileNSView(tile: secondTile, threadId: "thread-link-2"),
+            for: secondTile
+        )
+        harness.runtime.documentAgentTileIdsProvider = {
+            [firstAgentId: agentTile.id, secondAgentId: secondTile.id]
+        }
+        let secondResult = opener.open(
+            destination: "Sources/App.swift:3:5", checkoutRoot: checkout,
+            sourceTileId: secondTile.id, sourceAgentId: secondAgentId,
+            projectId: harness.runtime.activeController?.project.id
+        )
+        guard case let .revealed(secondTileDocumentId, _) = secondResult,
+              secondTileDocumentId == fileTileId else {
+            throw Failure(message: "a second agent must reveal the canonical document; got \(secondResult)")
+        }
+        try expect(harness.runtime.document.documentLinks.count == 2,
+                   "a second agent must add a relationship to the same document")
+        try expect(harness.canvas.qaDocumentRelationshipSegmentCount == 2,
+                   "both visible agent relationships must render connector geometry")
 
         // 5. The absolute and file:// spellings of the same file reveal that tile too.
         try activate(sourceFile.path)
         try activate("file://\(sourceFile.path)")
-        try expect(harness.canvas.tileIds(inZone: harness.zone).count == before,
+        try expect(harness.canvas.allWorkspaceTiles().filter { $0.kind == .file }.count == 1,
                    "absolute and file:// spellings of an open file must reveal, not duplicate")
         for index in 2...3 {
             guard case let .revealed(tileId, _) = opens[index], tileId == fileTileId else {
@@ -805,7 +865,7 @@ enum FileOpenChecks {
                                     browserEngine: browserEngine, zone: zoneId)
     }
 
-    // MARK: - Section 2: Markdown preview / source presentation
+    // MARK: - Section 2: Markdown preview / editing
 
     static func runMarkdownPreviewCheck() throws {
         let fileManager = FileManager.default
@@ -895,25 +955,81 @@ enum FileOpenChecks {
         try expect(lightColor != nil && darkColor != nil && lightColor != darkColor,
                    "the Markdown document must repaint through appearance tokens (light \(String(describing: lightColor)) vs dark \(String(describing: darkColor)))")
 
-        // Source shows the exact Markdown, in the same tile, without reloading.
+        // A real mouse event reaches the segmented control through the draggable
+        // title bar and Edit shows the exact Markdown in the same tile.
         let identityBefore = markdownTile.tile.id
         let loadedBefore = markdownTile.loadedText
-        markdownTile.setMode(.source)
+        guard let modeControl = markdownTile.qaModeControl else {
+            throw Failure(message: "a markdown tile must offer a Preview/Edit control")
+        }
+        window.orderFrontRegardless()
+        host.layoutSubtreeIfNeeded()
         markdownTile.layoutSubtreeIfNeeded()
-        try expect(markdownTile.mode == .source, "the mode control must switch the tile to Source")
+        let editPoint = modeControl.convert(
+            NSPoint(x: modeControl.bounds.width * 0.75, y: modeControl.bounds.midY), to: nil
+        )
+        func modeMouse(_ type: NSEvent.EventType, number: Int) throws -> NSEvent {
+            guard let event = NSEvent.mouseEvent(
+                with: type, location: editPoint, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil,
+                eventNumber: number, clickCount: 1,
+                pressure: type == .leftMouseUp ? 0 : 1
+            ) else { throw Failure(message: "could not create Preview/Edit mouse event") }
+            return event
+        }
+        NSApplication.shared.postEvent(try modeMouse(.leftMouseUp, number: 2), atStart: false)
+        modeControl.mouseDown(with: try modeMouse(.leftMouseDown, number: 1))
+        markdownTile.layoutSubtreeIfNeeded()
+        try expect(markdownTile.mode == .source, "a real click on the mode control must switch the tile to Edit")
         try expect(markdownTile.textView.string == sentinelMarkdown,
-                   "Source must show the exact decoded Markdown")
+                   "Edit must show the exact decoded Markdown")
         try expect(markdownTile.hasVisibleTextLayout(containing: "# Sentinel Report"),
-                   "Source must lay the raw Markdown out visibly")
+                   "Edit must lay the raw Markdown out visibly")
         try expect(markdownTile.tile.id == identityBefore, "switching modes must not change tile identity")
         try expect(markdownTile.loadedText == loadedBefore, "switching modes must reuse the one loaded snapshot")
+
+        // Editing is a draft: Preview reflects it immediately, but only an
+        // explicit save mutates disk.
+        let draft = sentinelMarkdown + "\n\n## Unsaved Draft\n"
+        markdownTile.textView.string = draft
+        markdownTile.textView.didChangeText()
+        try expect(markdownTile.isDirty, "editing Markdown must mark the tile dirty")
+        let diskBeforeSave = try String(contentsOf: markdownURL, encoding: .utf8)
+        try expect(diskBeforeSave == sentinelMarkdown,
+                   "editing and mode changes must not save implicitly")
         markdownTile.setMode(.preview)
         markdownTile.layoutSubtreeIfNeeded()
         try expect(markdownTile.mode == .preview && markdownTile.qaMarkdownDocument === document,
                    "switching back to Preview must reuse the same document view")
+        try expect(document.qaVisibleText().contains("Unsaved Draft"),
+                   "Preview must render the current unsaved draft")
+        try expect(markdownTile.save(), "explicit Markdown save must succeed")
+        let diskAfterSave = try String(contentsOf: markdownURL, encoding: .utf8)
+        try expect(!markdownTile.isDirty && diskAfterSave == draft,
+                   "explicit save must atomically write the draft and clear dirty state")
+
+        // Clean external edits reload; dirty ones become a conflict and cannot
+        // be overwritten without an explicit overwrite choice.
+        let external = draft + "\nexternal clean edit\n"
+        try external.write(to: markdownURL, atomically: true, encoding: .utf8)
+        markdownTile.refreshFromDisk()
+        try expect(markdownTile.loadedText == external && !markdownTile.isDirty,
+                   "a clean tile must reload external changes")
+        markdownTile.setMode(.source)
+        markdownTile.textView.string = external + "\nlocal conflict edit\n"
+        markdownTile.textView.didChangeText()
+        let secondExternal = external + "\nsecond external edit\n"
+        try secondExternal.write(to: markdownURL, atomically: true, encoding: .utf8)
+        markdownTile.refreshFromDisk()
+        try expect(markdownTile.hasExternalConflict && markdownTile.isDirty,
+                   "an external edit must preserve and mark a dirty local draft")
+        try expect(!markdownTile.save(), "a conflicted draft must refuse an ordinary save")
+        try expect(markdownTile.save(overwriteExternalChanges: true) && !markdownTile.isDirty,
+                   "an explicit overwrite must save the local draft and clear the conflict")
 
         // The control exists only for Markdown.
-        try expect(markdownTile.qaModeControl != nil, "a markdown tile must offer a Preview/Source control")
+        try expect(markdownTile.qaModeControl != nil, "a markdown tile must offer a Preview/Edit control")
         let swiftTile = makeTile(path: swiftURL.path)
         try expect(swiftTile.presentation == .sourceText, "a .swift tile must stay source-only")
         try expect(swiftTile.qaModeControl == nil, "a non-Markdown tile must have no mode control")

@@ -22,6 +22,12 @@ if CommandLine.arguments.contains("--command-center-check") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--document-location-check") {
+    runDocumentLocationChecks()
+    print("DocumentLocationChecks passed")
+    Foundation.exit(0)
+}
+
 private final class AtomicWriterOpenFaultState: @unchecked Sendable {
     var failTempOpen = false
     var failDirectoryOpen = false
@@ -10157,7 +10163,9 @@ do {
     // that changes deterministic transport RNG consumption while preserving
     // the oracle check (`canonicalEncode(materialize(all generated ops))`),
     // so the seed-1 baseline is updated with the seam-level route in place.
-    let expectedSeed1CanonicalBytes = 1500
+    // Workspace v5 adds the canonical `documentLinks` field to materialized
+    // workspace output; seed 1 grows by the field's 19-byte empty encoding.
+    let expectedSeed1CanonicalBytes = 1519
     expect(i4Stats.seed1CanonicalBytes == expectedSeed1CanonicalBytes,
            "seed-1 regression (arm64-only): canonical byte count drifted from the pinned baseline (\(expectedSeed1CanonicalBytes)) to \(i4Stats.seed1CanonicalBytes) — update the baseline deliberately if an Op/materialize change intentionally changed the output")
 }
@@ -11053,5 +11061,6 @@ runLocalTranscriptNodeChecks()
 // local-file link inside its own checkout, and the file-kind classification the
 // file tile presents from.
 runAgentLocalFileLinkChecks()
+runDocumentLocationChecks()
 
 print("ContinuumRevivedCoreChecks passed")

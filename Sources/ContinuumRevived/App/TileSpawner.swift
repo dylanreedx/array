@@ -73,6 +73,8 @@ final class TileSpawner {
     var browserProfileCreateHandler: ((UUID) -> Void)?
     var browserProfileRenameHandler: ((UUID, UUID) -> Void)?
     var browserProfileDeleteHandler: ((UUID, UUID) -> Void)?
+    var documentLocationProvider: ((URL) -> DocumentLocation)?
+    var noteConvertedHandler: ((UUID, UUID) -> Void)?
 
     /// Called right after a new terminal session descriptor is persisted, so
     /// the owning `ZoneRuntimeController` can hand it to its
@@ -1845,6 +1847,9 @@ final class TileSpawner {
         }
         let view = NoteTileNSView(tile: tile, noteId: noteId, initialBody: "")
         view.onTextChange = { [weak self] in self?.notePersistenceHandler?() }
+        view.onSaveAsMarkdownRequested = { [weak self] url in
+            self?.handleNoteConversion(self?.convertNoteToDocument(noteId: noteId, tileId: tileId, destination: url))
+        }
         let target = canvasView.installProjectTile(tileView: view, for: tile)
         do {
             try persistProjectCanvas(after: target, in: canvasView)
@@ -1877,7 +1882,125 @@ final class TileSpawner {
         let initialBody = projectStore.tryLoadNoteBody(id: noteId) ?? ""
         let view = NoteTileNSView(tile: activeTile, noteId: noteId, initialBody: initialBody)
         view.onTextChange = { [weak self] in self?.notePersistenceHandler?() }
+        view.onSaveAsMarkdownRequested = { [weak self] url in
+            self?.handleNoteConversion(self?.convertNoteToDocument(noteId: noteId, tileId: activeTile.id, destination: url))
+        }
         canvasView.install(tileView: view, for: activeTile)
+    }
+
+    enum NoteConversionOutcome: Equatable {
+        case converted(tileId: UUID)
+        case reusedExisting(tileId: UUID)
+        case failure(String)
+    }
+
+    @discardableResult
+    func convertNoteToDocument(noteId: UUID, tileId: UUID, destination: URL) -> NoteConversionOutcome {
+        guard let canvasView,
+              let noteView = canvasView.tileView(for: tileId) as? NoteTileNSView else {
+            return .failure("The note is no longer open.")
+        }
+        let location = documentLocationProvider?(destination) ?? DocumentLocationResolver.resolve(
+            fileURL: destination,
+            knownRoots: [DocumentLocationRoot(rootURL: URL(fileURLWithPath: project.rootPath, isDirectory: true), projectId: project.id)]
+        )
+        let canonical = location.path
+        let existing = canvasView.allWorkspaceTiles().first {
+            $0.id != tileId && $0.kind == .file && ($0.metadata.documentLocation?.path ?? $0.metadata.filePath) == canonical
+        }
+        if let existing,
+           let existingView = canvasView.tileView(for: existing.id) as? FileTileNSView,
+           existingView.isDirty {
+            return .failure("That document is already open with unsaved changes.")
+        }
+        do {
+            try noteView.textView.string.write(to: URL(fileURLWithPath: canonical), atomically: true, encoding: .utf8)
+        } catch {
+            return .failure(error.localizedDescription)
+        }
+
+        let originalTile = noteView.tile
+        let sourceZoneId = canvasView.zoneId(containing: tileId)
+        if let existing {
+            (canvasView.tileView(for: existing.id) as? FileTileNSView)?.refreshFromDisk()
+            canvasView.removeTile(id: tileId)
+            do { try persistCanvasForCurrentModel(zoneId: sourceZoneId, canvasView: canvasView) }
+            catch {
+                restoreNoteView(
+                    originalTile, noteId: noteId, body: noteView.textView.string,
+                    zoneId: sourceZoneId, canvasView: canvasView
+                )
+                return .failure("The file was written, but the note could not be converted: \(error.localizedDescription)")
+            }
+            cleanupNote(noteId: noteId, tileId: tileId)
+            return .reusedExisting(tileId: existing.id)
+        }
+
+        var converted = originalTile
+        converted.kind = .file
+        converted.title = URL(fileURLWithPath: canonical).lastPathComponent
+        converted.metadata = TileMetadata(filePath: canonical, documentLocation: location)
+        let fileView = FileTileNSView(tile: converted)
+        let target = canvasView.installProjectTile(tileView: fileView, for: converted, targetZoneId: sourceZoneId)
+        do {
+            try persistProjectCanvas(after: target, in: canvasView)
+        } catch {
+            restoreNoteView(
+                originalTile, noteId: noteId, body: noteView.textView.string,
+                zoneId: sourceZoneId, canvasView: canvasView
+            )
+            return .failure("The file was written, but the tile could not be converted: \(error.localizedDescription)")
+        }
+        cleanupNote(noteId: noteId, tileId: tileId)
+        return .converted(tileId: tileId)
+    }
+
+    private func restoreNoteView(
+        _ tile: Tile, noteId: UUID, body: String, zoneId: UUID?, canvasView: CanvasNSView
+    ) {
+        let restored = NoteTileNSView(tile: tile, noteId: noteId, initialBody: body)
+        restored.onTextChange = { [weak self] in self?.notePersistenceHandler?() }
+        restored.onSaveAsMarkdownRequested = { [weak self] url in
+            self?.handleNoteConversion(self?.convertNoteToDocument(
+                noteId: noteId, tileId: tile.id, destination: url
+            ))
+        }
+        _ = canvasView.installProjectTile(tileView: restored, for: tile, targetZoneId: zoneId)
+    }
+
+    private func cleanupNote(noteId: UUID, tileId: UUID) {
+        if var state = try? projectStore.tryLoadNoteState() {
+            state.tiles.removeAll { $0.id == noteId || $0.tileId == tileId }
+            try? projectStore.saveNoteState(state)
+        }
+        try? projectStore.deleteNoteBody(id: noteId)
+        noteConvertedHandler?(noteId, tileId)
+    }
+
+    private func handleNoteConversion(_ outcome: NoteConversionOutcome?) {
+        guard let outcome else { return }
+        switch outcome {
+        case let .converted(tileId), let .reusedExisting(tileId):
+            _ = canvasView?.focusBroker?.enterScope(.tile(tileId), reason: .tileSpawned)
+        case let .failure(message):
+            let alert = NSAlert()
+            alert.messageText = "Couldn't save this note as Markdown"
+            alert.informativeText = message
+            alert.alertStyle = .warning
+            alert.runModal()
+        }
+    }
+
+    private func persistCanvasForCurrentModel(zoneId: UUID?, canvasView: CanvasNSView) throws {
+        if let zoneId, let tiles = canvasView.tiles(inZone: zoneId) {
+            var state = ((try? projectStore.tryLoadCanvas()) ?? nil) ?? CanvasState(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil
+            )
+            state.tiles = tiles
+            try projectStore.saveCanvas(state)
+        } else {
+            try projectStore.saveCanvas(canvasView.canvasState)
+        }
     }
 
     /// Writes the current text body and updates the note's `updatedAt` timestamp.
@@ -1919,33 +2042,53 @@ final class TileSpawner {
 
     /// Spawns a read-only file preview tile and persists the canvas state.
     func spawnFile(path: String, title: String? = nil, at worldPoint: CGPoint? = nil) -> FileOutcome {
-        spawnFile(path: path, title: title, at: worldPoint, beside: nil)
+        let location = DocumentLocationResolver.resolve(
+            fileURL: URL(fileURLWithPath: path),
+            knownRoots: [DocumentLocationRoot(rootURL: URL(fileURLWithPath: project.rootPath, isDirectory: true), projectId: project.id)]
+        )
+        return spawnFileImpl(location: location, title: title, at: worldPoint, beside: nil, targetZoneId: nil)
     }
 
     /// Opens the file gap-adjacent to an existing tile, or focuses it in place when
     /// it is already open.
     func spawnFile(path: String, title: String? = nil, beside anchorTileId: UUID) -> FileOutcome {
-        spawnFile(path: path, title: title, at: nil, beside: anchorTileId)
+        let location = DocumentLocationResolver.resolve(
+            fileURL: URL(fileURLWithPath: path),
+            knownRoots: [DocumentLocationRoot(rootURL: URL(fileURLWithPath: project.rootPath, isDirectory: true), projectId: project.id)]
+        )
+        return spawnFileImpl(location: location, title: title, at: nil, beside: anchorTileId, targetZoneId: nil)
+    }
+
+    func spawnFile(
+        location: DocumentLocation,
+        title: String? = nil,
+        at worldPoint: CGPoint? = nil,
+        beside anchorTileId: UUID? = nil,
+        targetZoneId: UUID? = nil
+    ) -> FileOutcome {
+        spawnFileImpl(location: location, title: title, at: worldPoint, beside: anchorTileId, targetZoneId: targetZoneId)
     }
 
     /// Gap between an anchor tile and the file tile docked beside it.
     static let anchoredFileGap: Double = 24
 
-    private func spawnFile(
-        path: String,
+    private func spawnFileImpl(
+        location: DocumentLocation,
         title: String?,
         at worldPoint: CGPoint?,
-        beside anchorTileId: UUID?
+        beside anchorTileId: UUID?,
+        targetZoneId: UUID?
     ) -> FileOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
-        let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedPath = location.path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedPath.isEmpty else { return .invalidPath }
         // One canonical spelling per file, so "already open" is decidable and the
         // persisted metadata does not depend on how the path was authored.
         let canonicalPath = URL(fileURLWithPath: trimmedPath).standardizedFileURL.resolvingSymlinksInPath().path
 
-        let siblings = canvasView.projectTiles()
-        if let existing = siblings.first(where: { $0.kind == .file && $0.metadata.filePath == canonicalPath }) {
+        let siblings = targetZoneId.flatMap { canvasView.tiles(inZone: $0) } ?? canvasView.projectTiles()
+        let workspaceTiles = canvasView.allWorkspaceTiles()
+        if let existing = workspaceTiles.first(where: { $0.kind == .file && ($0.metadata.documentLocation?.path ?? $0.metadata.filePath) == canonicalPath }) {
             return .alreadyOpen(tileId: existing.id)
         }
 
@@ -1966,10 +2109,13 @@ final class TileSpawner {
             zPosition: CanvasEngine.zPositionAbove(siblings),
             zoneId: anchor?.zoneId,
             runtimeRef: nil,
-            metadata: TileMetadata(filePath: canonicalPath)
+            metadata: TileMetadata(
+                filePath: canonicalPath,
+                documentLocation: DocumentLocation(path: canonicalPath, scope: location.scope)
+            )
         )
         let view = FileTileNSView(tile: tile)
-        let target = canvasView.installProjectTile(tileView: view, for: tile)
+        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
 
         do {
             try persistProjectCanvas(after: target, in: canvasView)
@@ -3322,7 +3468,11 @@ final class TileSpawner {
         guard let noteView = canvas.tileView(for: noteTileId) as? NoteTileNSView else {
             throw CheckError.failed("spawnNote did not install NoteTileNSView")
         }
-        noteView.textView.string = "note body ok"
+        try expect(noteView.mode == .edit, "new notes should open in Edit mode")
+        noteView.textView.string = "# note body ok"
+        noteView.setMode(.preview)
+        try expect(noteView.mode == .preview, "notes should render their working Markdown draft in Preview")
+        noteView.setMode(.edit)
         spawner.writeNoteSnapshot(noteId: noteId, tileId: noteTileId, text: noteView.textView.string)
 
         let fileTileId: UUID
@@ -3347,7 +3497,7 @@ final class TileSpawner {
         let fileTile = canvasOnDisk.tiles.first(where: { $0.id == fileTileId })
         let noteIndex = noteState.tiles.first(where: { $0.id == noteId })
 
-        let manifest: [String: Any] = [
+        var manifest: [String: Any] = [
             "check": "note-file-tile-spawn",
             "tempProjectRoot": tempRoot.path,
             "noteId": noteId.uuidString,
@@ -3373,10 +3523,54 @@ final class TileSpawner {
         try expect(noteTile?.kind == .note, "canvas should persist note tile")
         try expect(noteTile?.metadata.noteId == noteId, "canvas note metadata should persist noteId")
         try expect(noteIndex?.tileId == noteTileId, "note index should point at spawned tile")
-        try expect(noteBody == "note body ok", "writeNoteSnapshot should persist note body")
+        try expect(noteBody == "# note body ok", "writeNoteSnapshot should persist the hidden note body")
         try expect(fileTile?.kind == .file, "canvas should persist file tile")
         try expect(fileTile?.metadata.filePath == sampleFile.path, "file tile metadata should persist selected path")
         try expect(fileView.textView.string == "file tile ok", "FileTileNSView should load UTF-8 preview text")
+
+        // Saving as Markdown converts in place: identity and geometry survive,
+        // ordinary file metadata becomes authoritative, and hidden note storage
+        // is removed only after the canvas conversion persists.
+        let originalFrame = noteView.tile.frame
+        let destination = tempRoot.appendingPathComponent("Saved Note.md")
+        spawner.documentLocationProvider = { url in
+            DocumentLocationResolver.resolve(
+                fileURL: url,
+                knownRoots: [DocumentLocationRoot(rootURL: tempRoot, projectId: project.id)]
+            )
+        }
+        let conversion = spawner.convertNoteToDocument(
+            noteId: noteId, tileId: noteTileId, destination: destination
+        )
+        try expect(conversion == .converted(tileId: noteTileId),
+                   "Save as Markdown should convert the note using the same tile id; got \(conversion)")
+        guard let convertedView = canvas.tileView(for: noteTileId) as? FileTileNSView else {
+            throw CheckError.failed("converted note did not become FileTileNSView")
+        }
+        let convertedCanvas = try store.loadCanvas()
+        let convertedTile = convertedCanvas.tiles.first(where: { $0.id == noteTileId })
+        try expect(convertedTile?.kind == .file && convertedTile?.frame == originalFrame,
+                   "note conversion must preserve tile identity and frame")
+        try expect(convertedTile?.title == "Saved Note.md",
+                   "note conversion must rename the tile to the destination filename")
+        try expect(convertedTile?.metadata.documentLocation?.projectId == project.id
+                    && convertedTile?.metadata.documentLocation?.relativePath == "Saved Note.md",
+                   "a saved note inside the project must become checkout-scoped")
+        let convertedDiskText = try String(contentsOf: destination, encoding: .utf8)
+        try expect(convertedDiskText == "# note body ok",
+                   "Save as Markdown must atomically write the note as UTF-8")
+        try expect(store.tryLoadNoteBody(id: noteId) == nil,
+                   "successful conversion must delete the hidden note body")
+        let cleanedNoteState = try store.loadNoteState()
+        try expect(cleanedNoteState.tiles.allSatisfy { $0.id != noteId && $0.tileId != noteTileId },
+                   "successful conversion must remove the hidden note index entry")
+        try expect(convertedView.presentation == .markdown,
+                   "the converted tile must use the Markdown Preview/Edit surface")
+        manifest["conversion"] = "same-tile"
+        manifest["convertedPath"] = destination.path
+        manifest["convertedScope"] = "checkout"
+        let convertedManifest = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try convertedManifest.write(to: artifact, options: .atomic)
 
         return artifact
     }

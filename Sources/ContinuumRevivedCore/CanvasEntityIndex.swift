@@ -27,6 +27,7 @@ public enum CanvasEntityKind: Hashable, Sendable, Comparable {
     case note
     case terminal
     case fileTree
+    case file
     case browser
     case artifact(String)
 
@@ -38,6 +39,7 @@ public enum CanvasEntityKind: Hashable, Sendable, Comparable {
         case .note: return "note"
         case .terminal: return "terminal"
         case .fileTree: return "fileTree"
+        case .file: return "file"
         case .browser: return "browser"
         case .artifact(let value): return "artifact:\(value)"
         }
@@ -476,6 +478,7 @@ public extension CanvasEntityIndex {
         case .terminal: kind = .terminal
         case .note: kind = .note
         case .fileTree: kind = .fileTree
+        case .file: kind = .file
         case .browser, .browserInspector: kind = .browser
         case .runArtifacts: kind = .artifact("runArtifacts")
         default: kind = .tile
@@ -485,7 +488,7 @@ public extension CanvasEntityIndex {
         // but it must not alias to the stable agent entity when that agent ID is
         // known; detached/authoritative agent records are registered separately.
         let id = CanvasEntityStableID.tile(tile.id)
-        let role = scopeRole ?? ((kind == .terminal || kind == .fileTree) && projectId != nil ? .emitsScope(projectId: projectId!, relativeWorkingDirectory: nil, checkoutHandle: nil) : .contextOnly)
+        let role = scopeRole ?? ((kind == .terminal || kind == .fileTree || kind == .file) && projectId != nil ? .emitsScope(projectId: projectId!, relativeWorkingDirectory: nil, checkoutHandle: nil) : .contextOnly)
         return CanvasEntity(
             id: id,
             kind: kind,

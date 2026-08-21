@@ -3,11 +3,10 @@ import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
-/// Tile view that hosts a read-only preview of a single file: the monospaced
-/// source viewer for text and code, and — for `.md`/`.markdown` — a native
-/// rendered document with a tile-local Preview/Source switch.
+/// Tile view for a single file: non-Markdown files are read-only, while
+/// `.md`/`.markdown` documents have a native Preview/Edit surface.
 @MainActor
-final class FileTileNSView: TileNSView {
+final class FileTileNSView: TileNSView, NSTextViewDelegate {
     enum Mode: Equatable {
         case preview
         case source
@@ -26,6 +25,15 @@ final class FileTileNSView: TileNSView {
     private(set) var loadedText: String?
     private var markdownView: FileMarkdownDocumentView?
     private var modeControl: NSSegmentedControl?
+    private let dirtyLabel = NSTextField(labelWithString: "")
+    private let referenceLabel = NSTextField(labelWithString: "")
+    private var titleAccessoryStack: NSStackView?
+    var onRevealReferencedAgentTile: ((UUID) -> Void)?
+    private(set) var isDirty = false
+    private(set) var hasExternalConflict = false
+    private var savedText: String?
+    private var externalChangeTimer: Timer?
+    var onSaveFailure: ((String) -> Void)?
     private var pendingReveal: (line: Int, column: Int?)?
     /// The "file unavailable" placeholder, built lazily by `showMessage`. Held so
     /// `applyTokens()` can re-paint it — it is a content view like any other, and
@@ -34,7 +42,7 @@ final class FileTileNSView: TileNSView {
     private var messageContainer: NSView?
 
     override init(tile: Tile) {
-        self.filePath = tile.metadata.filePath
+        self.filePath = tile.metadata.documentLocation?.path ?? tile.metadata.filePath
 
         let tv = NSTextView()
         tv.isEditable = false
@@ -80,10 +88,21 @@ final class FileTileNSView: TileNSView {
 
         setContentView(sv)
         activeBody = sv
+        tv.delegate = self
         loadFile()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            externalChangeTimer?.invalidate()
+            externalChangeTimer = nil
+        } else if presentation == .markdown {
+            startExternalChangeMonitoring()
+        }
+    }
 
     override func applyTokens() {
         super.applyTokens()
@@ -144,19 +163,136 @@ final class FileTileNSView: TileNSView {
         showBody()
     }
 
+    func textDidChange(_ notification: Notification) {
+        guard presentation == .markdown else { return }
+        loadedText = textView.string
+        setDirty(savedText != loadedText)
+        bumpSurfaceEpoch()
+    }
+
+    @discardableResult
+    func save(overwriteExternalChanges: Bool = false) -> Bool {
+        guard presentation == .markdown, let filePath, let savedText else { return false }
+        let currentDisk = FilePreview.load(path: filePath)
+        if case let .text(diskText) = currentDisk, diskText != savedText, !overwriteExternalChanges {
+            hasExternalConflict = true
+            dirtyLabel.stringValue = "!"
+            dirtyLabel.toolTip = "The file changed on disk"
+            return false
+        }
+        do {
+            try textView.string.write(to: URL(fileURLWithPath: filePath), atomically: true, encoding: .utf8)
+            self.savedText = textView.string
+            loadedText = textView.string
+            hasExternalConflict = false
+            setDirty(false)
+            return true
+        } catch {
+            onSaveFailure?(error.localizedDescription)
+            return false
+        }
+    }
+
+    /// Reloads external edits only while the tile has no local draft. A dirty
+    /// draft is never overwritten; it is marked conflicted for the next save.
+    func refreshFromDisk() {
+        guard presentation == .markdown, let filePath,
+              case let .text(diskText) = FilePreview.load(path: filePath),
+              diskText != savedText else { return }
+        if isDirty {
+            hasExternalConflict = true
+            dirtyLabel.stringValue = "!"
+            dirtyLabel.toolTip = "The file changed on disk"
+        } else {
+            savedText = diskText
+            loadedText = diskText
+            textView.string = diskText
+            showBody()
+        }
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "s",
+           presentation == .markdown {
+            if hasExternalConflict {
+                let alert = NSAlert()
+                alert.messageText = "This file changed on disk"
+                alert.informativeText = "Reload the disk version, overwrite it with your draft, or keep editing."
+                alert.addButton(withTitle: "Reload")
+                alert.addButton(withTitle: "Overwrite")
+                alert.addButton(withTitle: "Cancel")
+                switch alert.runModal() {
+                case .alertFirstButtonReturn:
+                    setDirty(false)
+                    hasExternalConflict = false
+                    refreshFromDisk()
+                case .alertSecondButtonReturn:
+                    _ = save(overwriteExternalChanges: true)
+                default: break
+                }
+            } else {
+                _ = save()
+            }
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    private func setDirty(_ dirty: Bool) {
+        isDirty = dirty
+        dirtyLabel.stringValue = dirty ? "•" : ""
+        dirtyLabel.toolTip = dirty ? "Unsaved Markdown changes" : nil
+        dirtyLabel.setAccessibilityLabel(dirty ? "Unsaved changes" : "Saved")
+    }
+
     @objc private func modeControlChanged(_ sender: NSSegmentedControl) {
         setMode(sender.selectedSegment == 0 ? .preview : .source)
     }
 
     private func installModeControl() {
         guard modeControl == nil else { return }
-        let control = NSSegmentedControl(labels: ["Preview", "Source"], trackingMode: .selectOne, target: self, action: #selector(modeControlChanged(_:)))
+        let control = NSSegmentedControl(labels: ["Preview", "Edit"], trackingMode: .selectOne, target: self, action: #selector(modeControlChanged(_:)))
         control.controlSize = .small
         control.font = NSFont.systemFont(ofSize: 10, weight: .medium)
         control.selectedSegment = mode == .preview ? 0 : 1
         control.setAccessibilityLabel("Markdown display mode")
         modeControl = control
-        setTitleBarAccessory(control)
+        dirtyLabel.font = NSFont.systemFont(ofSize: 11, weight: .bold)
+        dirtyLabel.textColor = NSColor.systemOrange
+        dirtyLabel.alignment = .center
+        referenceLabel.font = NSFont.systemFont(ofSize: 10, weight: .medium)
+        referenceLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        referenceLabel.isHidden = true
+        let stack = NSStackView(views: [referenceLabel, dirtyLabel, control])
+        stack.orientation = .horizontal
+        stack.spacing = 4
+        titleAccessoryStack = stack
+        setTitleBarAccessory(stack)
+    }
+
+    func setReferencedAgentTiles(_ agentTileIds: [UUID]) {
+        let count = agentTileIds.count
+        referenceLabel.stringValue = count == 1 ? "1 reference" : "\(count) references"
+        referenceLabel.toolTip = count == 0 ? nil : "Referenced by \(count) agent\(count == 1 ? "" : "s")"
+        referenceLabel.isHidden = count == 0
+        guard count > 0 else {
+            referenceLabel.menu = nil
+            return
+        }
+        let menu = NSMenu(title: "Referenced by")
+        for (index, tileId) in agentTileIds.enumerated() {
+            let item = NSMenuItem(title: "Reveal agent \(index + 1)", action: #selector(revealReferencedAgent(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = tileId.uuidString
+            menu.addItem(item)
+        }
+        referenceLabel.menu = menu
+    }
+
+    @objc private func revealReferencedAgent(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let tileId = UUID(uuidString: raw) else { return }
+        onRevealReferencedAgentTile?(tileId)
     }
 
     /// Installs the body for the current mode from the loaded snapshot.
@@ -175,7 +311,7 @@ final class FileTileNSView: TileNSView {
             setContentView(view)
             activeBody = view
         default:
-            textView.string = loadedText
+            if textView.string != loadedText { textView.string = loadedText }
             setContentView(scrollView)
             activeBody = scrollView
             applyPendingReveal()
@@ -409,15 +545,37 @@ final class FileTileNSView: TileNSView {
         switch result {
         case let .text(content):
             loadedText = content
+            savedText = content
             presentation = filePath.map { FilePreview.presentation(forPath: $0) } ?? .sourceText
             if presentation == .markdown {
+                configureMarkdownEditor()
                 installModeControl()
+                startExternalChangeMonitoring()
             }
             showBody()
         case let .unavailable(message):
             loadedText = nil
             showMessage(message)
         }
+    }
+
+    private func configureMarkdownEditor() {
+        textView.isEditable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.lineBreakMode = .byWordWrapping
+        scrollView.hasHorizontalScroller = false
+    }
+
+    private func startExternalChangeMonitoring() {
+        guard window != nil, externalChangeTimer == nil else { return }
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshFromDisk() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        externalChangeTimer = timer
     }
 
     private func showMessage(_ message: String) {

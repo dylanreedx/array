@@ -105,6 +105,7 @@ public struct CanvasEntityIndexTileSnapshot: Sendable, Equatable {
 public enum CanvasEntityIndexTileKind: String, Codable, Sendable, Hashable, Comparable {
     case terminal
     case fileTree
+    case file
     case note
     case browser
     case managedAgent
@@ -121,6 +122,7 @@ public enum CanvasEntityIndexTileKind: String, Codable, Sendable, Hashable, Comp
         case .fileTree: return .fileTree
         case .note: return .note
         case .browser: return .browser
+        case .file: return .file
         case .managedAgent, .tile: return .tile
         case .runArtifacts: return .artifact("runArtifacts")
         }
@@ -219,7 +221,7 @@ public enum CanvasEntityIndexSnapshotAdapter {
     ) -> CanvasEntity {
         let entityKind = tile.kind.entityKind
         let scopeRole: CanvasScopeRole
-        if entityKind == .terminal || entityKind == .fileTree {
+        if entityKind == .terminal || entityKind == .fileTree || entityKind == .file {
             if let projectId = tile.projectId {
                 scopeRole = .emitsScope(
                     projectId: projectId,

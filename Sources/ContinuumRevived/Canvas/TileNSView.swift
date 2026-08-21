@@ -90,6 +90,28 @@ class TileNSView: NSView, TokenThemed {
     /// this to its tile-delete orchestrator at install time.
     var onClose: (() -> Void)?
     var onStopRun: (() -> Void)?
+    var onHoverChanged: ((Bool) -> Void)?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas where area.owner === self { removeTrackingArea(area) }
+        addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        onHoverChanged?(true)
+        super.mouseEntered(with: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onHoverChanged?(false)
+        super.mouseExited(with: event)
+    }
 
     private var titleBar: TitleBarView?
     private var cornerOverlay: CornerOverlayView?

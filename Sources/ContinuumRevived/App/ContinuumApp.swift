@@ -3848,6 +3848,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self?.configureFileOpenRoute(on: arriving)
                 self?.wireBrowserRuntimeRegistration(on: arriving)
             }
+            workspaceRuntime?.documentAgentTileIdsProvider = { [weak self] in
+                guard let self else { return [:] }
+                return Dictionary(uniqueKeysWithValues: agentSupervisor.records.values.compactMap { record in
+                    record.tileId.map { (record.id, $0) }
+                })
+            }
             installSettingsChangeObserver()
             workspaceRuntime?.activeController?.onBrowserRuntimeHydrated = { [weak self] runtime in
                 self?.wireContentProcessTerminationHandler(runtime)
@@ -5316,7 +5322,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
         case .file:
             // No on-disk descriptor to purge — file tiles only carry metadata.
-            break
+            try? workspaceRuntime?.removeDocumentLinks(tileId: id)
         case .fileTree:
             fileTreeViews.removeValue(forKey: id)
             if let projectStore,
@@ -8808,16 +8814,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 "\(verb) canceled; \(countedAgents(targets.count)) kept.")
             return false
         }
-        // The tile is NOT deleted — closing or keeping a tile is P2A.4/P2A.5's decision
-        // and not an inbox action's to make — but the tile is why a deleted record comes
-        // back: wire-up mints a new agent for a `managedAgent` tile it finds none for.
-        // So the tile is marked BEFORE the record goes, and `wireManagedAgentTile` reads
-        // the mark. Measured on the owner's machine: without this, three deleted records
-        // returned on the next launch with brand-new ids.
+        // Delete is the destructive pair operation: unlike closing/detaching or
+        // reversible Archive, it removes both the durable agent and its canvas
+        // view binding. Documents the agent referenced remain; only the workspace
+        // relationship edges are removed.
         var reports: [AgentSupervisor.ArchiveReport] = []
         for record in targets {
             if let tileId = record.tileId { agentSupervisor.suppressAgentRespawn(forTile: tileId) }
-            reports.append(agentSupervisor.archive(record.id))
+            let report = agentSupervisor.archive(record.id)
+            reports.append(report)
+            guard report.recordDeleted else { continue }
+            try? workspaceRuntime?.removeDocumentLinks(agentId: record.id)
+            if let tileId = record.tileId { deleteTile(id: tileId) }
         }
         setWorkspaceManagementMessage(
             agentArchiveMessage(verb: verb, targets: targets, reports: reports, ignored: ignored))
@@ -12492,7 +12500,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let result = agentLocalFileOpener().open(
             destination: destination,
             checkoutRoot: URL(fileURLWithPath: record.cwd, isDirectory: true),
-            sourceTileId: sourceTileId
+            sourceTileId: sourceTileId,
+            sourceAgentId: agentID,
+            projectId: record.projectId
         )
         if case let .refused(reason) = result {
             // A link that resolves to nothing is content, not an error worth a
@@ -12505,9 +12515,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     func agentLocalFileOpener() -> AgentLocalFileOpener {
         AgentLocalFileOpener(
-            openFile: { [weak self] path, placement in
-                self?.openProjectFile(path: path, placement: placement)
-                    ?? .failure("No project is open yet.")
+            openDocument: { [weak self] request in
+                guard let self, let runtime = workspaceRuntime else { return .failure("No project is open yet.") }
+                let outcome = runtime.openDocument(request)
+                switch outcome {
+                case let .opened(tileId), let .revealed(tileId): focusSpawnedTile(tileId)
+                case let .failure(message): presentFileOpenFailure(message)
+                }
+                return outcome
             },
             fileTile: { [weak self] tileId in
                 self?.canvasView?.tileView(for: tileId) as? FileTileNSView
@@ -12522,6 +12537,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let placement: WorkspaceRuntime.FileOpenPlacement = worldPoint.map { .at($0) } ?? .automatic
             openProjectFile(path: path, placement: placement)
         }
+        spawner.documentLocationProvider = { [weak self] url in
+            self?.resolveDocumentLocation(url) ?? DocumentLocation(path: url.standardizedFileURL.resolvingSymlinksInPath().path, scope: .standalone)
+        }
+        spawner.noteConvertedHandler = { [weak self] noteId, _ in
+            self?.noteViews.removeValue(forKey: noteId)
+        }
+    }
+
+    private func resolveDocumentLocation(_ url: URL) -> DocumentLocation {
+        let registryRoots: [DocumentLocationRoot] = ((try? registryStore?.loadOrEmpty().projects) ?? []).map {
+            DocumentLocationRoot(rootURL: URL(fileURLWithPath: $0.rootPath, isDirectory: true), projectId: $0.id)
+        }
+        let agentRoots = agentSupervisor.records.values.map {
+            DocumentLocationRoot(rootURL: URL(fileURLWithPath: $0.cwd, isDirectory: true), projectId: $0.projectId)
+        }
+        return DocumentLocationResolver.resolve(fileURL: url, knownRoots: registryRoots + agentRoots)
     }
 
     private func spawnDiffReviewFromPalette() {
@@ -27570,11 +27601,8 @@ extension AppDelegate {
     try expect(afterDelete.records[noTileAgent] == nil,
                "a deleted agent stays deleted across a relaunch — got \(afterDelete.records.count) restored records")
 
-    // H5 · A DELETED AGENT'S TILE DOES NOT MINT A REPLACEMENT. This is the case measured
-    // on the owner's machine: the record is derived from the tile, so deleting it alone
-    // made three agents come back on the next launch under brand-new ids. The tile is
-    // NOT deleted (that is not an inbox action's decision, the inverse of P2A.5) — it is
-    // marked, and the mark is durable.
+    // H5 · DELETE REMOVES THE MANAGED TILE TOO, and a stale restored copy still
+    // cannot mint a replacement. Closing/detaching remains non-destructive.
     guard let doomedTile = revealSupervisor.records[elsewhereAgent]?.tileId,
           revealApp.canvasView?.tileView(for: doomedTile) is ManagedAgentTileNSView else {
         throw CheckError.failed("setup: the agent being deleted must hold a managed-agent tile that is really on the canvas — section D spawned one for it")
@@ -27583,8 +27611,8 @@ extension AppDelegate {
     try expect(revealApp.performInboxRowAction(.delete, on: [elsewhereAgent.rawValue]),
                "delete the tiled agent")
     try expect(!recordFileOnDisk(elsewhereAgent), "its record leaves disk too")
-    try expect(revealApp.canvasView?.tileView(for: doomedTile) != nil,
-               "THE TILE IS STILL THERE — deleting an agent must not silently destroy a tile you can see")
+    try expect(revealApp.canvasView?.tileView(for: doomedTile) == nil,
+               "confirmed deletion must remove the managed-agent tile")
     // The mark is on disk, readable by a store this process did not write it through.
     try expect(AgentStore(applicationSupportDirectory: revealAgentsSupport)
                 .loadDeletedAgentTiles().contains(doomedTile),
@@ -27605,17 +27633,9 @@ extension AppDelegate {
                "re-wiring a deleted agent's tile must not mint a replacement — got \(String(describing: revealSupervisor.agent(forTile: doomedTile)))")
     try expect(revealSupervisor.records.count == recordsBeforeTiled - 1,
                "…and no agent anywhere took its place — \(revealSupervisor.records.count) records, expected \(recordsBeforeTiled - 1)")
-    // The one gesture that undoes it: asking that tile for work is asking for an agent.
-    if let revivedView = revealApp.canvasView?.tileView(for: doomedTile) as? ManagedAgentTileNSView {
-        revivedView.onSubmitPrompt?("back to work")
-        try expect(revealSupervisor.agent(forTile: doomedTile) != nil,
-                   "submitting a prompt in that tile is a deliberate request for an agent there")
-        try expect(!AgentStore(applicationSupportDirectory: revealAgentsSupport)
-                    .loadDeletedAgentTiles().contains(doomedTile),
-                   "…and it clears the mark, so the new agent is not suppressed on the next launch")
-    } else {
-        throw CheckError.failed("setup: the deleted agent's tile must still be a managed-agent view")
-    }
+    // The synthetic stale restore above may install a view, but suppression keeps
+    // it inert. Remove it so the rest of the witness observes post-delete state.
+    revealApp.canvasView?.removeTile(id: doomedTile)
 
     // …and the boot walk is what calls it. Source-scanned for the same reason H2 is: a
     // launch needs a window, a workspace runtime and a real canvas, so "the restored tile
@@ -28675,7 +28695,7 @@ extension AppDelegate {
     fadeWindows.removeAll()
 
     NSApplication.shared.dockTile.badgeLabel = nil
-    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; a FOLDED parent still naming what it hid, transitively and ahead of its own role ('\(foldedTopLine)' at the top of the chain, '\(waitingLine)' over an approval), with the line gone the moment the group is open and the card's height unmoved at \(AgentInboxView.rowHeight)pt, and SETTLE REFUSED on that parent by the same predicates the bar and the menu use ('\(settleReason ?? "")'), offered again once only a failed child is left, and swept over all \(InboxState.allCases.count) states with \(holdsOpenStates.count) of them holding a parent open; and through the app, the sidebar's default content is \(ids.count) agent rows — a headless one, a tiled one and an orchestrator child — with the plain shell filtered out, the terminal-hosted agent listed for every other surface but not here (P3.16, force-included as the focused tile and still not a row), a legacy managed session no AgentRecord claims left out too, the count of the terminal-hosted ones reaching the list's empty state, and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle, Snooze and Mark Unread, a running one removing Archive and Delete, the two together leaving no bulk action, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a CUSTOM ROW CONTEXT MENU showing \(expectedQuietMenu.count) live capabilities through the tile's choice family, both right-click and Control-click taking the production event path, a background click offering nothing, a click outside a selection retargeting to that row and one inside preserving all selected targets, plural Open and blocked Settle absent rather than dead, Open live through P3.9's callback, Rename opening the targeted inline editor, stale actions refused after a push, keyboard focus announced to VoiceOver, and dismissal returning focus to the originating table; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary; and the DESTRUCTIVE ACTIONS WIRED (P3.15): the gate is per-action, so \(AppDelegate.wiredInboxRowActions.count) row items and \(AppDelegate.wiredInboxBulkActions.count) bar items are live with Phase 6 lifecycle/read actions reaching the custom row menu and bulk bar, the shipped sidebar's own list agrees and the production configureWorkspaceSidebar is source-scanned for the assignment that was missing for eleven tickets, a cancelled confirmation leaves the record file on disk, a confirmed one takes it off disk and off the list and a relaunched supervisor does not restore it, a deleted agent's TILE survives while its respawn is durably suppressed so re-wiring mints nothing (and a prompt in that tile deliberately revives it), a mid-turn delete stops the runner first and the record stays gone, a selection holding a row that is not a managed agent performs on the ones that are and says the other was left alone, and a kept branch is named in what the user is told ('\(strandedMessage)'); and a PAGED settled tail (P4.8): \(InboxSort.settledPageSize) of 30 finished agents on screen under a footer reading '\(pagedFooterTitle)', one press bringing the rest and taking the footer away, and the agent open in the focused tile drawn at 27 of 30 where the page would have ended; and READING IS FREE (P4.9): a settled agent opened by a real click keeps its override, its clear reason, its settle date and its stored record, and survives a second open — while a prompt through the tile's own closure un-settles it in memory and on disk; its SECTION is read from the shipped row list through `InboxSort.partition` after the builder derives lifecycle at read time, tail \(afterOpening.settled.count) / active \(afterOpening.active.count) while open, still drawn with the page closed because it is the one you have open, and active \(afterPrompt.active.count) after the prompt; and the POST-ACTION ADVANCE (P4.10): \(advancingRowActions.count) of \(InboxRowAction.allCases.count) row verbs move the cursor, settling row 2 of 5 through its own menu lands on the row that was 3 — with an unrelated push landing first, moving nothing and leaving the advance armed for the one that files — settling the last row falls back to the previous one, a pair settled together clears the whole affected set rather than stopping after the first, a one-row list lands on no selection, Mark Unread arms nothing, a refused action leaves the cursor where it was and is spent rather than firing on the next push, an action on a row that is NOT the cursor arms nothing, a cancelled one whose row merely ticked over is not read as completed, a partial completion that left one target unfiled moves nothing, and — the witness — a person who selected another row while the settle was in flight is left exactly there; and an UNDO TOAST (P4.11): \(undoableRowActions.count) of \(InboxRowAction.allCases.count) row verbs may raise one, a snooze on a keep-active PINNED agent saying '\(undoToastText)' and putting all four stored facts back exactly as captured (the pin included, which a reconstructed undo flattens), a bulk snooze of 3 reporting its count and undoing as ONE call with an already-settled member settled again on its own date, no toast for a refused action, for an archive whose record is gone, for a verb that moves no lifecycle fact, or for a host with no restore path, the second action replacing the first rather than queueing behind it, the card dismissing itself and taking the restore with it, a later lifecycle action retiring a stale card even when it earns none of its own while a non-lifecycle one leaves it alone, and toast and bulk bar laid out clear of each other; and a LIFECYCLE MOVE CROSSFADING IN PLACE (P4.12): a settle holding the outgoing card at the exact rect it was drawn at (\(fadeWasAt)) while the slim row arrives at its settled position and fades up, one view per id:variant throughout, no orphaned card once the \(AgentInboxView.crossfadeDuration)s fade ends, three moves in a row replacing the ghost rather than stacking, Reduce Motion swapping instantly with nothing lifted, and neither a full reload, a first render nor a row that merely ticked over animating anything")
+    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; a FOLDED parent still naming what it hid, transitively and ahead of its own role ('\(foldedTopLine)' at the top of the chain, '\(waitingLine)' over an approval), with the line gone the moment the group is open and the card's height unmoved at \(AgentInboxView.rowHeight)pt, and SETTLE REFUSED on that parent by the same predicates the bar and the menu use ('\(settleReason ?? "")'), offered again once only a failed child is left, and swept over all \(InboxState.allCases.count) states with \(holdsOpenStates.count) of them holding a parent open; and through the app, the sidebar's default content is \(ids.count) agent rows — a headless one, a tiled one and an orchestrator child — with the plain shell filtered out, the terminal-hosted agent listed for every other surface but not here (P3.16, force-included as the focused tile and still not a row), a legacy managed session no AgentRecord claims left out too, the count of the terminal-hosted ones reaching the list's empty state, and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle, Snooze and Mark Unread, a running one removing Archive and Delete, the two together leaving no bulk action, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a CUSTOM ROW CONTEXT MENU showing \(expectedQuietMenu.count) live capabilities through the tile's choice family, both right-click and Control-click taking the production event path, a background click offering nothing, a click outside a selection retargeting to that row and one inside preserving all selected targets, plural Open and blocked Settle absent rather than dead, Open live through P3.9's callback, Rename opening the targeted inline editor, stale actions refused after a push, keyboard focus announced to VoiceOver, and dismissal returning focus to the originating table; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary; and the DESTRUCTIVE ACTIONS WIRED (P3.15): the gate is per-action, so \(AppDelegate.wiredInboxRowActions.count) row items and \(AppDelegate.wiredInboxBulkActions.count) bar items are live with Phase 6 lifecycle/read actions reaching the custom row menu and bulk bar, the shipped sidebar's own list agrees and the production configureWorkspaceSidebar is source-scanned for the assignment that was missing for eleven tickets, a cancelled confirmation leaves the record file on disk, a confirmed one takes it off disk and off the list and a relaunched supervisor does not restore it, a deleted agent's managed TILE is removed while durable suppression keeps a stale restored copy from minting a replacement, a mid-turn delete stops the runner first and the record stays gone, a selection holding a row that is not a managed agent performs on the ones that are and says the other was left alone, and a kept branch is named in what the user is told ('\(strandedMessage)'); and a PAGED settled tail (P4.8): \(InboxSort.settledPageSize) of 30 finished agents on screen under a footer reading '\(pagedFooterTitle)', one press bringing the rest and taking the footer away, and the agent open in the focused tile drawn at 27 of 30 where the page would have ended; and READING IS FREE (P4.9): a settled agent opened by a real click keeps its override, its clear reason, its settle date and its stored record, and survives a second open — while a prompt through the tile's own closure un-settles it in memory and on disk; its SECTION is read from the shipped row list through `InboxSort.partition` after the builder derives lifecycle at read time, tail \(afterOpening.settled.count) / active \(afterOpening.active.count) while open, still drawn with the page closed because it is the one you have open, and active \(afterPrompt.active.count) after the prompt; and the POST-ACTION ADVANCE (P4.10): \(advancingRowActions.count) of \(InboxRowAction.allCases.count) row verbs move the cursor, settling row 2 of 5 through its own menu lands on the row that was 3 — with an unrelated push landing first, moving nothing and leaving the advance armed for the one that files — settling the last row falls back to the previous one, a pair settled together clears the whole affected set rather than stopping after the first, a one-row list lands on no selection, Mark Unread arms nothing, a refused action leaves the cursor where it was and is spent rather than firing on the next push, an action on a row that is NOT the cursor arms nothing, a cancelled one whose row merely ticked over is not read as completed, a partial completion that left one target unfiled moves nothing, and — the witness — a person who selected another row while the settle was in flight is left exactly there; and an UNDO TOAST (P4.11): \(undoableRowActions.count) of \(InboxRowAction.allCases.count) row verbs may raise one, a snooze on a keep-active PINNED agent saying '\(undoToastText)' and putting all four stored facts back exactly as captured (the pin included, which a reconstructed undo flattens), a bulk snooze of 3 reporting its count and undoing as ONE call with an already-settled member settled again on its own date, no toast for a refused action, for an archive whose record is gone, for a verb that moves no lifecycle fact, or for a host with no restore path, the second action replacing the first rather than queueing behind it, the card dismissing itself and taking the restore with it, a later lifecycle action retiring a stale card even when it earns none of its own while a non-lifecycle one leaves it alone, and toast and bulk bar laid out clear of each other; and a LIFECYCLE MOVE CROSSFADING IN PLACE (P4.12): a settle holding the outgoing card at the exact rect it was drawn at (\(fadeWasAt)) while the slim row arrives at its settled position and fades up, one view per id:variant throughout, no orphaned card once the \(AgentInboxView.crossfadeDuration)s fade ends, three moves in a row replacing the ghost rather than stacking, Reduce Motion swapping instantly with nothing lifted, and neither a full reload, a first render nor a row that merely ticked over animating anything")
     }
 }
 
