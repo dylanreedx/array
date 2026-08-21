@@ -59,15 +59,20 @@ public enum CanvasAutoLayoutEngine {
         var vector = CGVector(dx: 1, dy: 0)
         var activeZoneOnlyTranslated = false
         var activeTileResizeIsHorizontal: Bool?
+        var activeTileOriginalFrame: TileFrame?
+        var activeTileMovedWithoutResize = false
 
         switch mutation {
         case let .tile(id, frame):
             if var tile = tiles[id] {
+                activeTileOriginalFrame = tile.frame
                 vector = CGVector(dx: frame.x - tile.frame.x, dy: frame.y - tile.frame.y)
                 let widthDelta = abs(frame.width - tile.frame.width)
                 let heightDelta = abs(frame.height - tile.frame.height)
                 if widthDelta > 0.001 || heightDelta > 0.001 {
                     activeTileResizeIsHorizontal = widthDelta >= heightDelta
+                } else {
+                    activeTileMovedWithoutResize = abs(vector.dx) > 0.001 || abs(vector.dy) > 0.001
                 }
                 tile.frame = frame
                 tiles[id] = tile
@@ -111,6 +116,14 @@ public enum CanvasAutoLayoutEngine {
             if zoneId == activeZone, activeZoneOnlyTranslated { continue }
             let memberIds = tiles.values.filter { $0.zoneId == zoneId }.map(\.id).sorted(by: uuidLess)
             guard !memberIds.isEmpty else { continue }
+
+            if activeTileMovedWithoutResize,
+               let activeTile, let original = activeTileOriginalFrame,
+               tiles[activeTile]?.zoneId == zoneId {
+                applySlotSwapIfTargeted(
+                    activeTile: activeTile, originalFrame: original,
+                    memberIds: memberIds, tiles: &tiles)
+            }
 
             let activeResizeHere = activeTileResizeIsHorizontal != nil
                 && activeTile.map { tiles[$0]?.zoneId == zoneId } == true
@@ -204,6 +217,35 @@ public enum CanvasAutoLayoutEngine {
             result.zonePlacements[original.zoneId] = zones[original.zoneId]
         }
         return result
+    }
+
+    private static func applySlotSwapIfTargeted(
+        activeTile: UUID, originalFrame: TileFrame,
+        memberIds: [UUID], tiles: inout [UUID: LayoutTile]
+    ) {
+        guard var active = tiles[activeTile] else { return }
+        let center = CGPoint(x: active.frame.x + active.frame.width / 2, y: active.frame.y + active.frame.height / 2)
+        let candidates = memberIds.compactMap { id -> (UUID, TileFrame)? in
+            guard id != activeTile, let frame = tiles[id]?.frame,
+                  center.x >= frame.x, center.x <= frame.x + frame.width,
+                  center.y >= frame.y, center.y <= frame.y + frame.height else { return nil }
+            return (id, frame)
+        }
+        guard let target = candidates.min(by: { lhs, rhs in
+            let lhsCenter = CGPoint(x: lhs.1.x + lhs.1.width / 2, y: lhs.1.y + lhs.1.height / 2)
+            let rhsCenter = CGPoint(x: rhs.1.x + rhs.1.width / 2, y: rhs.1.y + rhs.1.height / 2)
+            let lhsDistance = pow(center.x - lhsCenter.x, 2) + pow(center.y - lhsCenter.y, 2)
+            let rhsDistance = pow(center.x - rhsCenter.x, 2) + pow(center.y - rhsCenter.y, 2)
+            if lhsDistance != rhsDistance { return lhsDistance < rhsDistance }
+            return uuidLess(lhs.0, rhs.0)
+        }), var displaced = tiles[target.0] else { return }
+
+        active.frame.x = target.1.x
+        active.frame.y = target.1.y
+        displaced.frame.x = originalFrame.x
+        displaced.frame.y = originalFrame.y
+        tiles[activeTile] = active
+        tiles[target.0] = displaced
     }
 
     private static func shrinkNeighborsAndPack(

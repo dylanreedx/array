@@ -1445,6 +1445,7 @@ final class TileSpawner {
             title: spawnModelName,
             frame: frame,
             zPosition: nextZ,
+            zoneId: canvasView.activeProjectZonePlacement == nil ? canvasView.activeZone?.zoneId : nil,
             runtimeRef: nil,
             metadata: TileMetadata(launchProfileId: "managed-agent", projectRelativeCwd: ".")
         )
@@ -1458,6 +1459,7 @@ final class TileSpawner {
         view.ingest(.sessionStateChanged(.ready))
         view.ingest(.contentDelta(threadId: threadId, turnId: "bootstrap", streamKind: .assistant, delta: "Ready. Type a prompt below to run \(spawnModelName) in this tile."))
         canvasView.install(tileView: view, for: tile)
+        canvasView.arrangeAutoLayoutAfterSpawn(zoneId: tile.zoneId)
 
         do {
             try managedSessionStore.upsert(ManagedAgentSessionRecord(

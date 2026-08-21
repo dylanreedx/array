@@ -382,6 +382,46 @@ final class CanvasNSView: NSView, TokenThemed {
         }
     }
 
+    func arrangeAutoLayoutAfterSpawn(zoneId: UUID?) {
+        guard isAutoLayoutEnabled else { return }
+        let baseline = autoLayoutScene()
+        autoLayoutGestureBaseline = baseline
+        if let zoneId { expandZoneToContainMembers(zoneId) }
+        applyAutoLayout(.tidy(zoneId: zoneId), baseline: autoLayoutScene())
+        _ = finishAutoLayoutGesture()
+        delegate?.canvasDidChange(self)
+    }
+
+    private func expandZoneToContainMembers(_ zoneId: UUID) {
+        let scene = autoLayoutScene()
+        guard var zone = scene.zones.first(where: { $0.zoneId == zoneId }) else { return }
+        let members = scene.tiles.filter { $0.zoneId == zoneId }
+        guard !members.isEmpty else { return }
+        let padding = ZoneBoundsConfig.padding(defaults: autoLayoutDefaults)
+        let header = Double(ZoneChromeNSView.headerHeight)
+        let minX = members.map(\.frame.x).min()!
+        let minY = members.map(\.frame.y).min()!
+        let maxX = members.map { $0.frame.x + $0.frame.width }.max()!
+        let maxY = members.map { $0.frame.y + $0.frame.height }.max()!
+        let newX = min(zone.origin.x, minX - padding)
+        let newY = min(zone.origin.y, minY - header - padding)
+        let newRight = max(zone.origin.x + zone.size.width, maxX + padding)
+        let newBottom = max(zone.origin.y + zone.size.height, maxY + padding)
+        let expanded = ZonePlacement(
+            zoneId: zone.zoneId, projectId: zone.projectId,
+            origin: ZonePoint(x: newX, y: newY),
+            size: ZoneSize(width: newRight - newX, height: newBottom - newY),
+            color: zone.color, collapsed: zone.collapsed,
+            hydrationPolicy: zone.hydrationPolicy, autoLayoutMode: zone.autoLayoutMode,
+            name: zone.name, navKey: zone.navKey, zPosition: zone.zPosition)
+        guard expanded != zone else { return }
+        zone = expanded
+        applyLayoutTransaction(CanvasLayoutTransaction(
+            tileFrames: Dictionary(uniqueKeysWithValues: members.map { ($0.id, $0.frame) }),
+            zonePlacements: [zoneId: zone]
+        ))
+    }
+
     func setZoneAutoLayoutMode(_ mode: ZoneAutoLayoutMode, zoneId: UUID) {
         var placement: ZonePlacement?
         if let index = liveZones.firstIndex(where: { $0.zoneId == zoneId }) {
@@ -4580,6 +4620,7 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         reorderTileSubviewsByZIndex()
         delegate?.canvasSidebarModelDidChange(self)
+        arrangeAutoLayoutAfterSpawn(zoneId: zoneId)
         return .zoneLayer(zoneId)
     }
 
@@ -6033,6 +6074,70 @@ final class CanvasNSView: NSView, TokenThemed {
         try expect(layerCommits.count == 1,
                    "one ZoneLayer tile resize must produce one final geometry transaction")
 
+        // Spawn a third member beyond the old right edge, then swap the middle
+        // member into the left member's slot through a real title-bar drag.
+        let swapZoneId = UUID(uuidString: "A1300000-0000-4000-8000-000000000031")!
+        let swapLeftId = UUID(uuidString: "A1300000-0000-4000-8000-000000000032")!
+        let swapMiddleId = UUID(uuidString: "A1300000-0000-4000-8000-000000000033")!
+        let swapRightId = UUID(uuidString: "A1300000-0000-4000-8000-000000000034")!
+        let swapZone = ZonePlacement(
+            zoneId: swapZoneId, projectId: nil, origin: ZonePoint(x: 100, y: 100),
+            size: ZoneSize(width: 664, height: 500), color: "teal", collapsed: false,
+            hydrationPolicy: .automatic, name: "Swap Jelly", navKey: nil)
+        let swapLeft = Tile(
+            id: swapLeftId, kind: .managedAgent, title: "Left",
+            frame: TileFrame(x: 108, y: 140, width: 320, height: 240),
+            zPosition: .fromLegacyRank(1), zoneId: swapZoneId, runtimeRef: nil, metadata: TileMetadata())
+        let swapMiddle = Tile(
+            id: swapMiddleId, kind: .managedAgent, title: "Middle",
+            frame: TileFrame(x: 436, y: 140, width: 320, height: 240),
+            zPosition: .fromLegacyRank(2), zoneId: swapZoneId, runtimeRef: nil, metadata: TileMetadata())
+        let swapCanvas = CanvasNSView(
+            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [swapLeft, swapMiddle], groups: [], lastActiveTileId: nil),
+            activeZone: swapZone, zoneRenderModels: [ZoneRenderModel(placement: swapZone, displayName: "Swap Jelly")],
+            showsZoneChrome: true)
+        swapCanvas.autoLayoutDefaults = defaults
+        swapCanvas.dragMagnetizeDefaults = defaults
+        swapCanvas.autoLayoutReduceMotionProvider = { true }
+        swapCanvas.frame = NSRect(x: 0, y: 0, width: 1_300, height: 700)
+        let swapWindow = NSWindow(contentRect: swapCanvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        swapWindow.contentView = swapCanvas
+        swapWindow.orderFrontRegardless()
+        let swapLeftView = DescriptorTileNSView(tile: swapLeft)
+        let swapMiddleView = DescriptorTileNSView(tile: swapMiddle)
+        swapCanvas.install(tileView: swapLeftView, for: swapLeft)
+        swapCanvas.install(tileView: swapMiddleView, for: swapMiddle)
+        var swapCommits: [CanvasLayoutTransaction] = []
+        swapCanvas.onLayoutCommitted = { swapCommits.append($0); return true }
+        let swapRight = Tile(
+            id: swapRightId, kind: .managedAgent, title: "Spawned",
+            frame: TileFrame(x: 764, y: 140, width: 320, height: 240),
+            zPosition: .fromLegacyRank(3), zoneId: swapZoneId, runtimeRef: nil, metadata: TileMetadata())
+        swapCanvas.install(tileView: DescriptorTileNSView(tile: swapRight), for: swapRight)
+        swapCanvas.arrangeAutoLayoutAfterSpawn(zoneId: swapZoneId)
+        let expandedSwapZone = swapCanvas.qaLiveZonePlacement(swapZoneId)!
+        let spawnedFrame = swapCanvas.canvasState.tiles.first { $0.id == swapRightId }!.frame
+        try expect(expandedSwapZone.origin.x + expandedSwapZone.size.width >= spawnedFrame.x + spawnedFrame.width + 8,
+                   "adding a member must expand its zone to contain the tile with configured padding")
+        let preSwapZone = expandedSwapZone
+        let preSwapLeft = swapCanvas.canvasState.tiles.first { $0.id == swapLeftId }!.frame
+        let preSwapMiddle = swapCanvas.canvasState.tiles.first { $0.id == swapMiddleId }!.frame
+        try dragTile(
+            swapMiddleView,
+            worldDX: preSwapLeft.x - preSwapMiddle.x,
+            worldDY: preSwapLeft.y - preSwapMiddle.y,
+            window: swapWindow)
+        let postSwapLeft = swapCanvas.canvasState.tiles.first { $0.id == swapLeftId }!.frame
+        let postSwapMiddle = swapCanvas.canvasState.tiles.first { $0.id == swapMiddleId }!.frame
+        try expect(postSwapMiddle.x == preSwapLeft.x && postSwapMiddle.y == preSwapLeft.y,
+                   "dragging the middle member onto the left member must claim the left slot")
+        try expect(postSwapLeft.x == preSwapMiddle.x && postSwapLeft.y == preSwapMiddle.y,
+                   "the displaced left member must move into the middle slot")
+        try expect(swapCanvas.qaLiveZonePlacement(swapZoneId) == preSwapZone,
+                   "a valid member swap must not move or resize the zone")
+        try expect(swapCommits.count == 2,
+                   "spawn arrangement and slot swap must each commit exactly once")
+
         let fm = FileManager.default
         let root = URL(fileURLWithPath: fm.currentDirectoryPath)
             .appendingPathComponent("qa-runs", isDirectory: true)
@@ -6043,6 +6148,7 @@ final class CanvasNSView: NSView, TokenThemed {
             "check": "jelly-auto-layout", "transactions": commits.count,
             "minimumWidth": squeezed.size.width, "expandedWidth": expanded.size.width,
             "reduceMotion": true, "zoneLayerResizeCommits": layerCommits.count,
+            "spawnAndSwapCommits": swapCommits.count,
         ], options: [.sortedKeys]).write(to: artifact, options: .atomic)
         return artifact
     }

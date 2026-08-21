@@ -11096,6 +11096,39 @@ func runCanvasAutoLayoutChecks() {
     expect((exhaustedPressure.zonePlacements[pressureZoneId]?.size.width ?? pressureZone.size.width) > pressureZone.size.width,
            "jelly expands the zone only after neighbor shrink capacity is exhausted")
 
+    let swapZoneId = UUID(uuidString: "A1100000-0000-4000-8000-000000000030")!
+    let swapLeftId = UUID(uuidString: "A1100000-0000-4000-8000-000000000031")!
+    let swapMiddleId = UUID(uuidString: "A1100000-0000-4000-8000-000000000032")!
+    let swapRightId = UUID(uuidString: "A1100000-0000-4000-8000-000000000033")!
+    let swapZone = ZonePlacement(
+        zoneId: swapZoneId, projectId: nil, origin: ZonePoint(x: 100, y: 100),
+        size: ZoneSize(width: 1_000, height: 500), color: "teal", collapsed: false,
+        hydrationPolicy: .automatic)
+    let swapTiles = [
+        CanvasAutoLayoutEngine.LayoutTile(
+            id: swapLeftId, frame: TileFrame(x: 108, y: 140, width: 320, height: 240), zoneId: swapZoneId),
+        CanvasAutoLayoutEngine.LayoutTile(
+            id: swapMiddleId, frame: TileFrame(x: 436, y: 140, width: 320, height: 240), zoneId: swapZoneId),
+        CanvasAutoLayoutEngine.LayoutTile(
+            id: swapRightId, frame: TileFrame(x: 764, y: 140, width: 320, height: 240), zoneId: swapZoneId),
+    ]
+    let requestedSwap = TileFrame(x: 120, y: 140, width: 320, height: 240)
+    let swapped = CanvasAutoLayoutEngine.solve(
+        scene: .init(tiles: swapTiles, zones: [swapZone]),
+        mutation: .tile(id: swapMiddleId, frame: requestedSwap),
+        gap: 8, zonePadding: 8, headerHeight: 32)
+    let swappedMiddle = swapped.tileFrames[swapMiddleId] ?? swapTiles[1].frame
+    let swappedLeft = swapped.tileFrames[swapLeftId] ?? swapTiles[0].frame
+    let swappedRight = swapped.tileFrames[swapRightId] ?? swapTiles[2].frame
+    expect(swappedMiddle.x == swapTiles[0].frame.x && swappedMiddle.y == swapTiles[0].frame.y,
+           "jelly: dragging a member into a sibling's center claims that sibling's slot")
+    expect(swappedLeft.x == swapTiles[1].frame.x && swappedLeft.y == swapTiles[1].frame.y,
+           "jelly: the displaced sibling moves into the active tile's previous slot")
+    expect(swappedRight == swapTiles[2].frame,
+           "jelly: a two-tile slot exchange leaves unrelated members stable")
+    expect(swapped.zonePlacements.isEmpty,
+           "jelly: a valid slot exchange never pushes or resizes its containing zone")
+
     var disabled = zone
     disabled.autoLayoutMode = .disabled
     let disabledResult = CanvasAutoLayoutEngine.solve(
