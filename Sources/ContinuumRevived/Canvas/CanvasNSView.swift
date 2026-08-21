@@ -1024,7 +1024,7 @@ final class CanvasNSView: NSView, TokenThemed {
         guard let idx = liveZones.firstIndex(where: { $0.zoneId == zoneId }) else { return }
         let members = canvasState.tiles.filter { tileZoneMembership[$0.id] == zoneId }
         guard !members.isEmpty else { return }
-        let pad = ZoneBoundsConfig.padding()
+        let pad = ZoneBoundsConfig.padding(defaults: autoLayoutDefaults)
         let hh = Double(ZoneChromeNSView.headerHeight)
         var minX = Double.greatestFiniteMagnitude, minY = Double.greatestFiniteMagnitude
         var maxX = -Double.greatestFiniteMagnitude, maxY = -Double.greatestFiniteMagnitude
@@ -1078,7 +1078,16 @@ final class CanvasNSView: NSView, TokenThemed {
             }
         }
         if changed {
-            layoutAllTiles()
+            if isAutoLayoutEnabled,
+               let moved = canvasState.tiles.first(where: { $0.id == tileId }) {
+                // Membership is decided only by this direct drop. Now solve the
+                // destination scene so the adopted tile remains pointer-owned and
+                // the destination zone's existing members make room around it.
+                let membershipScene = autoLayoutScene()
+                applyAutoLayout(.tile(id: tileId, frame: moved.frame), baseline: membershipScene)
+            } else {
+                layoutAllTiles()
+            }
             if notifyChange { delegate?.canvasDidChange(self) }
         }
         return changed
@@ -5846,6 +5855,13 @@ final class CanvasNSView: NSView, TokenThemed {
             canvas.mouseDragged(with: try event(.leftMouseDragged, to, window: window))
             canvas.mouseUp(with: try event(.leftMouseUp, to, window: window))
         }
+        func dragTile(_ view: TileNSView, worldDX: Double, worldDY: Double, window: NSWindow) throws {
+            let start = view.convert(NSPoint(x: view.bounds.midX, y: TileNSView.titleBarHeight / 2), to: nil)
+            let end = NSPoint(x: start.x + CGFloat(worldDX), y: start.y - CGFloat(worldDY))
+            view.mouseDown(with: try event(.leftMouseDown, start, window: window))
+            view.mouseDragged(with: try event(.leftMouseDragged, end, window: window))
+            view.mouseUp(with: try event(.leftMouseUp, end, window: window))
+        }
 
         let zoneId = UUID(uuidString: "A1300000-0000-4000-8000-000000000001")!
         let firstId = UUID(uuidString: "A1300000-0000-4000-8000-000000000011")!
@@ -5866,9 +5882,11 @@ final class CanvasNSView: NSView, TokenThemed {
         let suite = "jelly-layout-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defaults.set(true, forKey: CanvasAutoLayoutConfig.enabledKey)
+        defaults.set(false, forKey: DragMagnetizeConfig.enabledKey)
         defaults.set(8.0, forKey: TileGapResolver.userDefaultsKey)
         defaults.set(8.0, forKey: ZoneBoundsConfig.paddingKey)
         canvas.autoLayoutDefaults = defaults
+        canvas.dragMagnetizeDefaults = defaults
         canvas.resizeHUDDefaults = defaults
         canvas.autoLayoutReduceMotionProvider = { true }
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -5904,6 +5922,24 @@ final class CanvasNSView: NSView, TokenThemed {
         let pushedBare = canvas.canvasState.tiles.first { $0.id == bareId }!.frame
         try expect(pushedBare.x >= expanded.origin.x + expanded.size.width + 8,
                    "expanding a zone must push a bare tile through the external rigid-body solver")
+
+        let zoneBeforeEntry = canvas.qaLiveZonePlacement(zoneId)!
+        guard let bareView = canvas.tileView(for: bareId) else { throw CheckError.failed("bare tile view disappeared") }
+        try dragTile(bareView, worldDX: 120 - pushedBare.x, worldDY: 140 - pushedBare.y, window: window)
+        try expect(canvas.qaZoneMembership(of: bareId) == zoneId,
+                   "auto layout must allow a directly dragged bare tile to enter and join a zone")
+        let zoneAfterEntry = canvas.qaLiveZonePlacement(zoneId)!
+        try expect(abs(zoneAfterEntry.origin.x - zoneBeforeEntry.origin.x) <= 8
+                       && abs(zoneAfterEntry.origin.y - zoneBeforeEntry.origin.y) <= 8,
+                   "a tile entering a zone must not push the destination zone away; before=\(zoneBeforeEntry), after=\(zoneAfterEntry)")
+        try expect(commits.count == 3, "zone entry must add one final geometry transaction")
+        let adoptedFrames = canvas.canvasState.tiles.filter { canvas.qaZoneMembership(of: $0.id) == zoneId }.map(\.frame)
+        for (index, frame) in adoptedFrames.enumerated() {
+            try expect(!adoptedFrames.dropFirst(index + 1).contains { other in
+                frame.x < other.x + other.width && frame.x + frame.width > other.x
+                    && frame.y < other.y + other.height && frame.y + frame.height > other.y
+            }, "adoption must reflow destination members around the directly dropped tile")
+        }
 
         let rightClick = try event(.rightMouseDown, win(160, 115), window: window)
         let zoneMenu = canvas.menu(for: rightClick)

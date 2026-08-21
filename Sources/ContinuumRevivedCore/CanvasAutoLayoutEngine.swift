@@ -281,6 +281,13 @@ public enum CanvasAutoLayoutEngine {
             let source = queue.removeFirst()
             guard let a = frame(source) else { continue }
             for other in peers where other != source && other != active {
+                // Zone boundaries are intentionally one-way during direct tile
+                // manipulation. A bare tile must be able to cross a zone boundary
+                // so the canvas's existing drop policy can adopt/re-home it on
+                // mouse-up. The inverse remains solid: an actively moved/resized
+                // zone still pushes bare tiles, and any indirectly pushed tile
+                // still treats a zone as an obstacle.
+                if source == active, activeTile != nil, case .zone = other { continue }
                 guard let b = frame(other), overlapsOrUnderGap(a, b, gap: preferredGap) else { continue }
                 let dx = horizontal ? (positive ? a.x + a.width + preferredGap - b.x : a.x - preferredGap - b.x - b.width) : 0
                 let dy = horizontal ? 0 : (positive ? a.y + a.height + preferredGap - b.y : a.y - preferredGap - b.y - b.height)

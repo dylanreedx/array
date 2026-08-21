@@ -11019,6 +11019,31 @@ func runCanvasAutoLayoutChecks() {
     expect((movedMember?.x ?? tiles[2].frame.x) == tiles[2].frame.x + neighborDelta,
            "jelly: a pushed zone carries its member without changing membership")
 
+    let enteringId = UUID(uuidString: "A1100000-0000-4000-8000-000000000014")!
+    let enteringTile = CanvasAutoLayoutEngine.LayoutTile(
+        id: enteringId, frame: TileFrame(x: 500, y: 40, width: 80, height: 60), zoneId: nil)
+    let enteringFrame = TileFrame(x: 120, y: 120, width: 80, height: 60)
+    let entering = CanvasAutoLayoutEngine.solve(
+        scene: .init(tiles: tiles + [enteringTile], zones: [zone, neighbor]),
+        mutation: .tile(id: enteringId, frame: enteringFrame),
+        gap: 8, zonePadding: 8, headerHeight: 20)
+    expect(entering.zonePlacements.isEmpty,
+           "jelly: a directly dragged bare tile may cross a zone without pushing the zone")
+    expect(entering.tileFrames[enteringId] == enteringFrame,
+           "jelly: the zone-entry tile keeps its pointer-requested frame until adoption")
+
+    let outsideId = UUID(uuidString: "A1100000-0000-4000-8000-000000000015")!
+    let outsideTile = CanvasAutoLayoutEngine.LayoutTile(
+        id: outsideId, frame: TileFrame(x: 240, y: 100, width: 80, height: 60), zoneId: nil)
+    var zoneThroughTile = zone
+    zoneThroughTile.size.width = 280
+    let zoneBlockedByTile = CanvasAutoLayoutEngine.solve(
+        scene: .init(tiles: Array(tiles.dropLast()) + [outsideTile], zones: [zone]),
+        mutation: .zone(id: zoneId, placement: zoneThroughTile),
+        gap: 8, zonePadding: 8, headerHeight: 20)
+    expect((zoneBlockedByTile.tileFrames[outsideId]?.x ?? outsideTile.frame.x) >= 288,
+           "jelly: the inverse stays solid — an expanding zone pushes an outside tile")
+
     var disabled = zone
     disabled.autoLayoutMode = .disabled
     let disabledResult = CanvasAutoLayoutEngine.solve(
