@@ -319,11 +319,29 @@ public final class AgentModelCatalog: @unchecked Sendable {
     // surface above stays cross-platform for the shared Core and the matrix.
     #if os(macOS)
     private func startProbe(timeout: TimeInterval = 5.0) {
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            defer { self?.finishRefresh() }
-            self?.probePi(timeout: timeout)
-            self?.probeClaudeBackend(timeout: timeout)
-            self?.probeCodexBackend(timeout: timeout)
+        // CONCURRENTLY, and the ordering was costing real seconds. These three
+        // probes are independent by design (each applies only its own harness's
+        // readiness, and every mutation goes through `lock`), but they used to run
+        // one after another on a single queue with a `timeout` cap EACH. On a
+        // machine where a CLI is missing or slow to answer, worst-case readiness
+        // took 3x the cap — and while readiness is `.checking`, `sendRefusal`
+        // rejects prompts outright. So the serial ordering did not merely delay the
+        // catalogue: it widened the window in which a user's message was dropped
+        // with "still starting up".
+        let group = DispatchGroup()
+        let probes: [(AgentModelCatalog, TimeInterval) -> Void] = [
+            { $0.probePi(timeout: $1) },
+            { $0.probeClaudeBackend(timeout: $1) },
+            { $0.probeCodexBackend(timeout: $1) },
+        ]
+        for probe in probes {
+            DispatchQueue.global(qos: .utility).async(group: group) { [weak self] in
+                guard let self else { return }
+                probe(self, timeout)
+            }
+        }
+        group.notify(queue: .global(qos: .utility)) { [weak self] in
+            self?.finishRefresh()
         }
     }
 

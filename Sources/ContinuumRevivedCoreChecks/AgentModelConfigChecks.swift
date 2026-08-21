@@ -254,5 +254,51 @@ func runAgentModelCatalogChecks() {
         lastStartedAt: Date(timeIntervalSince1970: 80), minimumInterval: 15, now: Date(timeIntervalSince1970: 100)),
         "a refresh past the minimum interval is due again")
 
-    print("AgentModelCatalog checks passed: table parse (header/ANSI/order), non-empty-replace semantics, live options drive resolution with first-usable fallback, models-store display names, QA-inert throttled refresh")
+    // THE PROBES MUST OVERLAP, and this is provable rather than assertable: give
+    // every probe an executor that will not return until all three have arrived.
+    // Serial probing can only ever get one of them in, so it hits the barrier
+    // timeout and the counter below is short — which is exactly the shape of the
+    // bug. Three 5s-capped probes in a row meant readiness could take ~15s, and
+    // while readiness is `.checking`, `AgentSupervisor.sendRefusal` REJECTS the
+    // user's prompt with "still starting up". Serial ordering therefore widened a
+    // window in which a message was silently dropped.
+    #if os(macOS)
+    final class ProbeOverlapCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var inFlight = 0
+        private(set) var peak = 0
+        func arrive() -> Int {
+            lock.withLock {
+                inFlight += 1
+                peak = max(peak, inFlight)
+                return inFlight
+            }
+        }
+        var observedPeak: Int { lock.withLock { peak } }
+    }
+    let counter = ProbeOverlapCounter()
+    let allThreeArrived = DispatchSemaphore(value: 0)
+    let overlapping = AgentModelCatalog(probeExecutor: { _, _, _ in
+        if counter.arrive() == 3 {
+            // Release everyone once the third probe proves the overlap.
+            for _ in 0..<3 { allThreeArrived.signal() }
+        }
+        // Bounded so a serial regression fails the count instead of hanging a leg.
+        _ = allThreeArrived.wait(timeout: .now() + 5)
+        return nil
+    })
+    let finished = DispatchGroup()
+    finished.enter()
+    DispatchQueue.global().async {
+        overlapping.enableLiveRefresh()
+        finished.leave()
+    }
+    _ = finished.wait(timeout: .now() + 20)
+    Thread.sleep(forTimeInterval: 0.5)
+    let observed = counter.observedPeak
+    expect(observed == 3,
+           "AgentModelCatalog: peak \(observed) of 3 readiness probes in flight together — they are running serially, so worst-case readiness costs 3x the per-probe cap and widens the window where a prompt is refused as \"still starting up\"")
+    #endif
+
+    print("AgentModelCatalog checks passed: table parse (header/ANSI/order), non-empty-replace semantics, live options drive resolution with first-usable fallback, models-store display names, QA-inert throttled refresh, and all three readiness probes run concurrently")
 }
