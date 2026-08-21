@@ -78,6 +78,8 @@ final class CanvasNSView: NSView, TokenThemed {
     let activeZone: ZonePlacement?
     private(set) var zoneRenderModels: [ZoneRenderModel]
     private var tileViews: [UUID: TileNSView] = [:]
+    private var agentLineageOverlay: AgentLineageOverlayView?
+    private var contextualAgentLineage: (parentTileID: UUID, childTileID: UUID)?
     private let showsZoneChrome: Bool
     private var zoneChromeViews: [UUID: ZoneChromeNSView] = [:]
     private var navModeOverlayView: NavModeOverlayNSView?
@@ -662,6 +664,7 @@ final class CanvasNSView: NSView, TokenThemed {
         )
         qaCameraLayoutStats.cameraMutations += writes
         updateDocumentRelationshipOverlay()
+        updateContextualAgentLineageGeometry()
     }
 
     /// Every installed tile view in BACK-TO-FRONT paint order, read from the view
@@ -1320,6 +1323,47 @@ final class CanvasNSView: NSView, TokenThemed {
         return nil
     }
 
+    /// Shows one contextual direct edge. No lineage is persisted here; callers
+    /// derive it from `AgentRecord.parentAgentID` and current tile bindings.
+    func showContextualAgentLineage(parentTileID: UUID, childTileID: UUID) {
+        guard parentTileID != childTileID,
+              let parent = tileView(for: parentTileID),
+              tileView(for: childTileID) != nil else {
+            clearContextualAgentLineage()
+            return
+        }
+        contextualAgentLineage = (parentTileID, childTileID)
+        let overlay = agentLineageOverlay ?? AgentLineageOverlayView()
+        agentLineageOverlay = overlay
+        if overlay.superview == nil {
+            worldPlane.addSubview(overlay, positioned: .below, relativeTo: parent)
+        }
+        overlay.reducesMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        updateContextualAgentLineageGeometry()
+    }
+
+    func clearContextualAgentLineage() {
+        contextualAgentLineage = nil
+        agentLineageOverlay?.removeFromSuperview()
+    }
+
+    private func updateContextualAgentLineageGeometry() {
+        guard let relation = contextualAgentLineage,
+              let parent = tileView(for: relation.parentTileID),
+              let child = tileView(for: relation.childTileID),
+              let overlay = agentLineageOverlay else { return }
+        overlay.frame = worldPlane.bounds
+        let parentRect = overlay.convert(parent.bounds, from: parent)
+        let childRect = overlay.convert(child.bounds, from: child)
+        let travelsRight = childRect.midX >= parentRect.midX
+        overlay.startPoint = CGPoint(
+            x: travelsRight ? parentRect.maxX : parentRect.minX,
+            y: parentRect.midY)
+        overlay.endPoint = CGPoint(
+            x: travelsRight ? childRect.minX : childRect.maxX,
+            y: childRect.midY)
+    }
+
     func setDocumentRelationships(_ links: [DocumentAgentLink], agentTileIds: [AgentID: UUID]) {
         documentLinks = links
         documentAgentTileIds = agentTileIds
@@ -1606,6 +1650,7 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         if !CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) { layoutAllTiles() }
         layoutZoneChromeViews()
+        updateContextualAgentLineageGeometry()
         if previousTile.title != tile.title || previousTile.kind != tile.kind {
             delegate?.canvasSidebarModelDidChange(self)
         }
@@ -1726,6 +1771,9 @@ final class CanvasNSView: NSView, TokenThemed {
     /// WKWebView, flush note save, purge descriptor) is the caller's
     /// responsibility — `removeTile` is the canvas-side teardown only.
     func removeTile(id: UUID) {
+        if contextualAgentLineage?.parentTileID == id || contextualAgentLineage?.childTileID == id {
+            clearContextualAgentLineage()
+        }
         if let view = tileViews[id] {
             focusBroker?.unregister(view.focusSurfaceID)
             releaseSurfaceResidency(of: view)

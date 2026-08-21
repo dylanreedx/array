@@ -8551,6 +8551,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// settles, un-settles, stops, starts or archives anything.
     @discardableResult
     func revealAgentFromInbox(_ rowId: UUID) -> Bool {
+        canvasView?.clearContextualAgentLineage()
         let agentId = AgentID(rawValue: rowId)
         guard let record = agentSupervisor.records[agentId] else {
             // A terminal-session agent: the row's id IS its tile. `focusTile` resolves
@@ -8589,6 +8590,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // reveal landed — arming focus on an agent you failed to reach would suppress
         // the next mark for a row you never saw.
         agentSupervisor.focus(agentID: agentId)
+        if let parentAgentID = agentSupervisor.records[agentId]?.parentAgentID,
+           let parentTileID = agentSupervisor.records[parentAgentID]?.tileId,
+           canvasView?.tileView(for: parentTileID) != nil {
+            canvasView?.showContextualAgentLineage(
+                parentTileID: parentTileID,
+                childTileID: tileId)
+        }
         // The mark is a fact the rows carry, so the list has to be told; a
         // cross-workspace reveal has already reloaded, and a same-workspace one has
         // not.
