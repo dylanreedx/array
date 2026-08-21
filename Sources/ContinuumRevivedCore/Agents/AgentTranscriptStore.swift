@@ -48,17 +48,11 @@ public actor AgentTranscriptStore {
     public static let defaultCompactionMutationCount = 128
 
     private let root: URL
-    private let writer: AtomicWriter
     private let compactionMutationCount: Int
 
     public init(root: URL, compactionMutationCount: Int = defaultCompactionMutationCount) {
         self.root = root
         self.compactionMutationCount = max(1, compactionMutationCount)
-        self.writer = AtomicWriter(
-            backupsDirectory: root.appendingPathComponent("backups", isDirectory: true),
-            retainedBackups: 2,
-            prettyPrint: false
-        )
     }
 
     public func saveSnapshot(
@@ -67,6 +61,7 @@ public actor AgentTranscriptStore {
         document: AgentDocument,
         at date: Date = Date()
     ) throws {
+        let writer = writer(agentID: agentID, sessionID: sessionID)
         try document.validateIdentityInvariants()
         try writer.write(
             AgentTranscriptArchive(agentID: agentID, sessionID: sessionID, document: document, savedAt: date),
@@ -92,6 +87,7 @@ public actor AgentTranscriptStore {
         recovered = reducer.document
 
         let url = journalURL(agentID: agentID, sessionID: sessionID)
+        let writer = writer(agentID: agentID, sessionID: sessionID)
         let existingJournal: AgentTranscriptJournal? = try? writer.read(at: url)
         var journal = existingJournal
             ?? AgentTranscriptJournal(agentID: agentID, sessionID: sessionID, baseVersion: recovered.version - 1)
@@ -110,6 +106,7 @@ public actor AgentTranscriptStore {
     /// Recover the newest valid snapshot and replay the longest valid journal
     /// prefix. A torn or invalid final mutation is ignored; prior history remains.
     public func load(agentID: AgentID, sessionID: String) throws -> AgentDocument? {
+        let writer = writer(agentID: agentID, sessionID: sessionID)
         let archive: AgentTranscriptArchive? = try? writer.read(
             at: snapshotURL(agentID: agentID, sessionID: sessionID)
         )
@@ -139,10 +136,18 @@ public actor AgentTranscriptStore {
     }
 
     public func remove(agentID: AgentID, sessionID: String) throws {
-        for url in [snapshotURL(agentID: agentID, sessionID: sessionID), journalURL(agentID: agentID, sessionID: sessionID)]
-        where FileManager.default.fileExists(atPath: url.path) {
+        let url = directory(agentID: agentID, sessionID: sessionID)
+        if FileManager.default.fileExists(atPath: url.path) {
             try FileManager.default.removeItem(at: url)
         }
+    }
+
+    private func writer(agentID: AgentID, sessionID: String) -> AtomicWriter {
+        AtomicWriter(
+            backupsDirectory: directory(agentID: agentID, sessionID: sessionID)
+                .appendingPathComponent("backups", isDirectory: true),
+            retainedBackups: 2,
+            prettyPrint: false)
     }
 
     private func snapshotURL(agentID: AgentID, sessionID: String) -> URL {
