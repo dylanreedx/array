@@ -12,14 +12,14 @@ public struct AgentFileIndexEntry: Equatable, Sendable {
     }
 }
 
-/// Checkout-scoped, bounded file discovery for managed-agent `@` completion.
-/// The cache key includes the immutable agent/backend/root identity so a tile
-/// rebind cannot reuse another agent's view of an otherwise similar checkout.
+/// Bounded file discovery for managed-agent `@` completion. Browsing begins at
+/// the checkout but may move to an explicit host-local directory outside it.
+/// Cache keys include agent/backend/root identity so scopes never cross tiles.
 public actor AgentFileIndex {
     private struct CacheKey: Hashable {
         let agentID: AgentID
         let backend: AgentBackend
-        let checkoutRoot: String
+        let root: String
     }
 
     private struct Ranked {
@@ -42,14 +42,23 @@ public actor AgentFileIndex {
             cache.removeAll()
             return
         }
-        cache.removeValue(forKey: cacheKey(for: context))
+        cache = cache.filter { key, _ in
+            key.agentID != context.agentID || key.backend != context.backend
+        }
     }
 
     public func entries(for context: AgentCompletionContext) async -> [AgentFileIndexEntry] {
         guard context.trustState == .trusted, !Task.isCancelled else { return [] }
-        let key = cacheKey(for: context)
+        return await entries(for: context, root: context.checkoutRoot.standardizedFileURL)
+    }
+
+    private func entries(
+        for context: AgentCompletionContext,
+        root: URL
+    ) async -> [AgentFileIndexEntry] {
+        let root = root.standardizedFileURL
+        let key = cacheKey(for: context, root: root)
         if let cached = cache[key] { return cached }
-        let root = context.checkoutRoot.standardizedFileURL
         guard isDirectory(root), !isSymbolicLink(root) else { return [] }
 
         let paths = gitPaths(root: root) ?? fallbackPaths(root: root)
@@ -63,14 +72,36 @@ public actor AgentFileIndex {
     public func suggestions(for query: AgentCompletionQuery) async -> [AgentCompletion] {
         guard query.trigger == "@", let context = query.context,
               context.trustState == .trusted, !Task.isCancelled else { return [] }
-        let root = context.checkoutRoot.standardizedFileURL
-        let scope = normalizedRelativePath(query.navigationPath ?? "")
-        guard let scopeURL = containedURL(relativePath: scope, root: root),
-              isDirectory(scopeURL), !isSymbolicLink(scopeURL) else { return [] }
+        let checkoutRoot = context.checkoutRoot.standardizedFileURL
+        let scopeURL: URL
+        if let navigationPath = query.navigationPath, navigationPath.hasPrefix("/") {
+            scopeURL = URL(fileURLWithPath: navigationPath, isDirectory: true).standardizedFileURL
+        } else if let navigationPath = query.navigationPath, !navigationPath.isEmpty {
+            scopeURL = checkoutRoot.appendingPathComponent(
+                navigationPath,
+                isDirectory: true
+            ).standardizedFileURL
+        } else {
+            scopeURL = checkoutRoot
+        }
+        guard isDirectory(scopeURL), !isSymbolicLink(scopeURL) else { return [] }
 
-        let indexed = await entries(for: context)
-        guard !Task.isCancelled else { return [] }
         let needle = canonical(query.text)
+        let isInsideCheckout = scopeURL.path == checkoutRoot.path
+            || scopeURL.path.hasPrefix(checkoutRoot.path + "/")
+        let indexRoot = isInsideCheckout ? checkoutRoot : scopeURL
+        let scope = isInsideCheckout && scopeURL.path != checkoutRoot.path
+            ? String(scopeURL.path.dropFirst(checkoutRoot.path.count + 1))
+            : ""
+        // Outside the checkout, act like shell path completion: filter the
+        // current directory's immediate children. Recursively indexing a broad
+        // parent such as the user's home or Documents directory makes a typed
+        // relative path appear to hang and searches far beyond the requested
+        // scope. Checkout-local fuzzy search keeps its existing recursive index.
+        let indexed = !isInsideCheckout
+            ? immediateEntries(root: scopeURL)
+            : await entries(for: context, root: indexRoot)
+        guard !Task.isCancelled else { return [] }
         let visible = indexed.filter { entry in
             guard FileManager.default.fileExists(atPath: entry.fileURL.path) else { return false }
             guard entry.isDirectory || AgentFileReferenceRules.referenceableContentType(for: entry.fileURL) != nil else { return false }
@@ -81,7 +112,9 @@ public actor AgentFileIndex {
         if needle.isEmpty {
             selected = visible.compactMap { entry in
                 let local = localPath(entry.relativePath, inside: scope)
-                guard !local.isEmpty, !local.dropLast(entry.isDirectory ? 1 : 0).contains("/") else { return nil }
+                guard !local.isEmpty,
+                      !local.dropLast(entry.isDirectory ? 1 : 0).contains("/")
+                else { return nil }
                 return Ranked(entry: entry, tier: entry.isDirectory ? 0 : 1, gap: 0)
             }
         } else {
@@ -94,7 +127,29 @@ public actor AgentFileIndex {
 
         return selected.sorted(by: rankedBefore)
             .prefix(resultLimit)
-            .compactMap { completion(for: $0, context: context, root: root, scope: scope) }
+            .compactMap { completion(for: $0, context: context, root: indexRoot, scope: scope) }
+    }
+
+    private func immediateEntries(root: URL) -> [AgentFileIndexEntry] {
+        let excluded = Set([".git", ".array", ".build", "build", "DerivedData", "node_modules", ".cache"])
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey, .isHiddenKey]
+        let children = (try? FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsPackageDescendants]
+        )) ?? []
+        return children.compactMap { child in
+            guard let values = try? child.resourceValues(forKeys: keys),
+                  values.isHidden != true,
+                  values.isSymbolicLink != true,
+                  !excluded.contains(child.lastPathComponent) else { return nil }
+            let isDirectory = values.isDirectory == true
+            return AgentFileIndexEntry(
+                relativePath: child.lastPathComponent + (isDirectory ? "/" : ""),
+                fileURL: child.standardizedFileURL,
+                isDirectory: isDirectory
+            )
+        }
     }
 
     private func completion(
@@ -105,10 +160,17 @@ public actor AgentFileIndex {
     ) -> AgentCompletion? {
         let entry = ranked.entry
         let local = localPath(entry.relativePath, inside: scope).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let checkoutRoot = context.checkoutRoot.standardizedFileURL
+        let displayPath: String
+        if let checkoutRelative = relativePath(of: entry.fileURL, root: checkoutRoot) {
+            displayPath = checkoutRelative
+        } else {
+            displayPath = entry.fileURL.standardizedFileURL.path
+        }
         let provenance = AgentCompletionProvenance(
             backend: context.backend,
             scope: .project,
-            sourceIdentifier: entry.relativePath,
+            sourceIdentifier: displayPath,
             invocationName: local
         )
         let payload: AgentCompletionPayload
@@ -123,10 +185,10 @@ public actor AgentFileIndex {
             ))
         }
         return AgentCompletion(
-            id: "checkout:\(entry.relativePath)",
+            id: "file:\(entry.fileURL.standardizedFileURL.path)",
             title: entry.fileURL.lastPathComponent + (entry.isDirectory ? "/" : ""),
-            detail: entry.relativePath,
-            insertionText: "@" + entry.relativePath,
+            detail: displayPath,
+            insertionText: "@" + displayPath,
             score: max(0, 10_000 - ranked.tier * 1_000 - min(ranked.gap, 999)),
             payload: payload,
             provenance: provenance
@@ -249,11 +311,11 @@ public actor AgentFileIndex {
         return lhs.entry.relativePath < rhs.entry.relativePath
     }
 
-    private func cacheKey(for context: AgentCompletionContext) -> CacheKey {
+    private func cacheKey(for context: AgentCompletionContext, root: URL) -> CacheKey {
         CacheKey(
             agentID: context.agentID,
             backend: context.backend,
-            checkoutRoot: context.checkoutRoot.standardizedFileURL.path
+            root: root.standardizedFileURL.path
         )
     }
 

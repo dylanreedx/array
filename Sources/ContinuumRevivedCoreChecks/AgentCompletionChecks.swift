@@ -90,6 +90,12 @@ func runAgentCompletionChecks() async throws {
         .skill(ResolvedSkillInvocation(name: "review", providerHandle: "skill.review")),
         .promptTemplate(ResolvedPromptTemplate(name: "handoff", prompt: "Prepare a handoff")),
         .runtimeCommand(ResolvedRuntimeCommand(name: "compact", providerHandle: "runtime.compact")),
+        .command(AgentCommandInvocation(
+            descriptorID: "codex:review",
+            name: "review",
+            harness: .codex,
+            surface: .providerSlash
+        )),
         .directory(DirectoryNavigationTarget(
             directoryURL: URL(fileURLWithPath: "/tmp/array-completion-check/Sources", isDirectory: true)
         )),
@@ -101,12 +107,42 @@ func runAgentCompletionChecks() async throws {
         case .skill: return "skill"
         case .promptTemplate: return "template"
         case .runtimeCommand: return "runtime"
+        case .command: return "command"
         case .directory: return "directory"
         }
     })
     expect(
-        semanticPayloadKinds == ["text", "file", "skill", "template", "runtime", "directory"],
+        semanticPayloadKinds == ["text", "file", "skill", "template", "runtime", "command", "directory"],
         "AgentCompletion: typed contract does not exercise every semantic acceptance path"
+    )
+
+    let baselineCommands = AgentCommandCatalog.allBaselines()
+    expect(
+        baselineCommands.contains(where: { $0.id == "array:plan" && $0.name == "plan" })
+            && baselineCommands.contains(where: { $0.harness == .claudeCode && $0.name == "batch" && $0.surface == .skill })
+            && baselineCommands.contains(where: { $0.harness == .codex && $0.name == "review" })
+            && baselineCommands.contains(where: { $0.harness == .codex && $0.name == "worktree" && $0.surface == .providerSlash })
+            && baselineCommands.contains(where: { $0.harness == .codex && $0.name == "cloud" && $0.surface == .cli })
+            && baselineCommands.contains(where: { $0.harness == .pi && $0.name == "settings" }),
+        "AgentCommandCatalog: provider baselines did not retain Array, Claude, Codex, and Pi command families"
+    )
+    let destructive = baselineCommands.first(where: { $0.id == "codex:delete" })
+    expect(
+        destructive?.capabilities.contains(.destructive) == true
+            && destructive?.capabilities.contains(.localWrite) == true,
+        "AgentCommandCatalog: destructive provider commands lost their capability classification"
+    )
+    let codexInvocation = AgentCommandInvocation(
+        descriptorID: "codex:review",
+        name: "review",
+        arguments: "--base main",
+        harness: .codex,
+        surface: .providerSlash
+    )
+    expect(
+        codexInvocation.nativeSlashText == "/review --base main"
+            && codexInvocation.id == "codex:review",
+        "AgentCommandInvocation: native serialization or stable identity was not preserved"
     )
 
     let checkoutRoot = URL(fileURLWithPath: "/tmp/array-completion-checkout", isDirectory: true)
@@ -118,6 +154,126 @@ func runAgentCompletionChecks() async throws {
         arrayProjectRoot: URL(fileURLWithPath: "/tmp/array-project", isDirectory: true),
         trustState: .trusted
     )
+    let commandProvider = AgentCommandCompletionProvider()
+    let commandContext = AgentCompletionContext(
+        agentID: context.agentID,
+        backend: .codex,
+        checkoutRoot: checkoutRoot,
+        gitRoot: checkoutRoot,
+        arrayProjectRoot: context.arrayProjectRoot,
+        trustState: .trusted
+    )
+    let commandRows = await commandProvider.suggestions(for: AgentCompletionQuery(
+        trigger: "/",
+        text: "review",
+        replacementRange: NSRange(location: 0, length: 7),
+        context: commandContext
+    ))
+    expect(
+        commandRows.contains(where: { $0.id == "codex:review" && $0.payload == .command(AgentCommandInvocation(
+            descriptorID: "codex:review", name: "review", harness: .codex, surface: .providerSlash
+        )) })
+            && commandRows.contains(where: { $0.id == "claude-code:code-review" && !$0.isEnabled }),
+        "AgentCommandCompletionProvider: active-provider command payloads or disabled other-provider rows were not surfaced"
+    )
+    let harnessRows = await commandProvider.suggestions(for: AgentCompletionQuery(
+        trigger: "/",
+        text: "qa",
+        replacementRange: NSRange(location: 0, length: 3),
+        context: commandContext
+    ))
+    expect(
+        harnessRows.contains(where: {
+            $0.id == "array:qa"
+                && !$0.isEnabled
+                && $0.disabledReason == "Run from Array Command Center"
+        }),
+        "AgentCommandCompletionProvider: CLI/harness actions bypassed the approval surface"
+    )
+    let encodedDescriptor = try JSONEncoder().encode(AgentCommandCatalog.baseline(for: .codex).first!)
+    let decodedDescriptor = try JSONDecoder().decode(AgentCommandDescriptor.self, from: encodedDescriptor)
+    expect(
+        decodedDescriptor == AgentCommandCatalog.baseline(for: .codex).first,
+        "AgentCommandDescriptor: metadata-only cache encoding lost descriptor identity"
+    )
+
+    let fileManager = FileManager.default
+    let resourceRoot = fileManager.temporaryDirectory
+        .appendingPathComponent("array-command-resources-\(UUID().uuidString)", isDirectory: true)
+    let resourceCheckout = resourceRoot.appendingPathComponent("checkout", isDirectory: true)
+    let resourceHome = resourceRoot.appendingPathComponent("home", isDirectory: true)
+    try fileManager.createDirectory(at: resourceCheckout.appendingPathComponent(".claude/skills/review", isDirectory: true), withIntermediateDirectories: true)
+    try fileManager.createDirectory(at: resourceRoot.appendingPathComponent(".claude/skills/inherited", isDirectory: true), withIntermediateDirectories: true)
+    try fileManager.createDirectory(at: resourceCheckout.appendingPathComponent(".claude/commands", isDirectory: true), withIntermediateDirectories: true)
+    try fileManager.createDirectory(at: resourceCheckout.appendingPathComponent(".pi/extensions", isDirectory: true), withIntermediateDirectories: true)
+    try fileManager.createDirectory(at: resourceCheckout.appendingPathComponent(".array/commands", isDirectory: true), withIntermediateDirectories: true)
+    defer { try? fileManager.removeItem(at: resourceRoot) }
+    try Data("---\nname: review\ndescription: Review staged changes\narguments: <scope>\ncontext: fork\n---\nprivate body\n".utf8)
+        .write(to: resourceCheckout.appendingPathComponent(".claude/skills/review/SKILL.md"))
+    try Data("---\nname: inherited\ndescription: Parent project skill\n---\nparent body\n".utf8)
+        .write(to: resourceRoot.appendingPathComponent(".claude/skills/inherited/SKILL.md"))
+    try Data("---\nname: legacy-check\ndescription: Legacy command\nuser-invocable: false\n---\nbody\n".utf8)
+        .write(to: resourceCheckout.appendingPathComponent(".claude/commands/legacy-check.md"))
+    try Data("export default function command() {}".utf8)
+        .write(to: resourceCheckout.appendingPathComponent(".pi/extensions/demo.ts"))
+    let manifestJSON = """
+    {"name":"qa-flow","description":"Run the checked-in QA flow","executable":"swift","arguments":["run","Array","--qa"],"workingDirectory":".","capabilities":["processControl"],"approval":"confirm","supportsArguments":false}
+    """
+    try Data(manifestJSON.utf8).write(to: resourceCheckout.appendingPathComponent(".array/commands/qa-flow.json"))
+    let resourceContext = AgentCompletionContext(
+        agentID: context.agentID,
+        backend: .claudeCode,
+        checkoutRoot: resourceCheckout,
+        gitRoot: resourceCheckout,
+        arrayProjectRoot: context.arrayProjectRoot,
+        trustState: .trusted
+    )
+    let discoveredResources = AgentCommandResourceDiscovery.discover(context: resourceContext, homeDirectory: resourceHome)
+    expect(
+        discoveredResources.contains(where: { $0.name == "review" && $0.contextFork && $0.supportsArguments && $0.scope == .project })
+            && discoveredResources.contains(where: { $0.name == "legacy-check" && !$0.userInvocable })
+            && discoveredResources.contains(where: { $0.name == "inherited" && $0.scope == .project })
+            && discoveredResources.contains(where: { $0.surface == .extensionCommand && !$0.isEnabled && $0.availability == .requiresTrust("Trust this extension before loading executable code") }),
+        "AgentCommandResourceDiscovery: provider frontmatter, legacy commands, or extension trust metadata was lost"
+    )
+    let discoveredManifest = AgentHarnessCommandManifestDiscovery.discover(context: resourceContext)
+    expect(
+        discoveredManifest.count == 1 && discoveredManifest[0].name == "qa-flow"
+            && discoveredManifest[0].surface == .cli
+            && discoveredManifest[0].capabilities.contains(.processControl),
+        "AgentHarnessCommandManifestDiscovery: safe argv manifest was not indexed"
+    )
+    expect(
+        AgentHarnessExecutableProbe.locate(harness: .codex, environment: ["PATH": "/definitely/missing"]) == nil,
+        "AgentHarnessExecutableProbe: missing provider executable was incorrectly reported as available"
+    )
+    let runnerRoot = resourceRoot.appendingPathComponent("runner-root", isDirectory: true)
+    try fileManager.createDirectory(at: runnerRoot, withIntermediateDirectories: true)
+    let runnerResult = await AgentHarnessCommandRunner.run(
+        executable: "/bin/echo",
+        arguments: ["$(touch SHOULD_NOT_EXIST)", "argv-safe"],
+        workingDirectory: runnerRoot,
+        checkoutRoot: runnerRoot
+    )
+    expect(
+        runnerResult.status == .completed
+            && runnerResult.summary.contains("$(touch SHOULD_NOT_EXIST)")
+            && runnerResult.artifactURL.map { fileManager.fileExists(atPath: $0.path) } == true
+            && !fileManager.fileExists(atPath: runnerRoot.appendingPathComponent("SHOULD_NOT_EXIST").path),
+        "AgentHarnessCommandRunner: argv execution or artifact capture was not shell-free"
+    )
+    if let artifactURL = runnerResult.artifactURL { try? fileManager.removeItem(at: artifactURL) }
+    let refusedRunner = await AgentHarnessCommandRunner.run(
+        executable: "/bin/echo",
+        arguments: [],
+        workingDirectory: resourceRoot,
+        checkoutRoot: runnerRoot
+    )
+    expect(
+        refusedRunner.status == .refused("Working directory must remain inside the checkout"),
+        "AgentHarnessCommandRunner: checkout cwd containment was not enforced"
+    )
+
     let contextualQuery = AgentCompletionQuery(
         trigger: "@",
         text: "Source",
@@ -131,7 +287,6 @@ func runAgentCompletionChecks() async throws {
         "AgentCompletion: one query did not retain its immutable agent/backend/checkout context"
     )
 
-    let fileManager = FileManager.default
     let fileIndexRoot = fileManager.temporaryDirectory
         .appendingPathComponent("array-agent-file-index-\(UUID().uuidString)", isDirectory: true)
     let falconOuter = fileIndexRoot.appendingPathComponent("falcon-platform", isDirectory: true)
@@ -223,6 +378,18 @@ func runAgentCompletionChecks() async throws {
     expect(
         sourcesTarget.directoryURL == falconRoot.appendingPathComponent("Sources", isDirectory: true),
         "AgentCompletion: directory payload did not resolve inside Falcon's exact checkout"
+    )
+    let externalFiles = await fileIndex.suggestions(for: AgentCompletionQuery(
+        trigger: "@", text: "outer", replacementRange: NSRange(location: 0, length: 6),
+        context: falconContext, navigationPath: falconOuter.path
+    ))
+    guard case let .file(externalReference) = externalFiles.first?.payload else {
+        expect(false, "AgentCompletion: explicit external scope did not produce a file payload")
+        return
+    }
+    expect(
+        externalReference.fileURL == falconOuter.appendingPathComponent("OUTER.md"),
+        "AgentCompletion: external navigation did not preserve the selected absolute file"
     )
     let boundedChildren = await fileIndex.suggestions(for: AgentCompletionQuery(
         trigger: "@", text: "", replacementRange: NSRange(location: 0, length: 1),
@@ -405,5 +572,5 @@ func runAgentCompletionChecks() async throws {
     expect(output.contains(expected), "AgentCompletion: negative witness missed the named compiled assertion")
 
     print("Agent completion negative witness observed red (exit \(witness.terminationStatus)): \(expected)")
-    print("Agent completion checks passed: semantic payloads/context, bounded checkout file index/root/ignore/symlink/deletion/fuzzy/navigation/acceptance behavior, quote/escape/middle-caret detection, replacement registry, deterministic dedupe/rank/provenance, trigger isolation, and stale cancellation")
+    print("Agent completion checks passed: semantic payloads/context, checkout-aware and explicit external file index/root/ignore/symlink/deletion/fuzzy/navigation/acceptance behavior, quote/escape/middle-caret detection, replacement registry, deterministic dedupe/rank/provenance, trigger isolation, and stale cancellation")
 }

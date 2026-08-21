@@ -211,7 +211,12 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate {
 
     private func handleCompletionKey(_ event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        guard suggestionsAreVisible,
+        // A directory transition dismisses the old rows while the replacement
+        // query is in flight. Keep Backspace/Return in the composer-owned path
+        // during that short window so an immediate ascent cannot delete `@` or
+        // submit the draft before the new picker rows arrive.
+        let isNavigationFallbackKey = event.keyCode == 51 || [36, 76].contains(event.keyCode)
+        guard (suggestionsAreVisible || isNavigationFallbackKey),
               !hasMarkedText(),
               modifiers.intersection([.shift, .control, .option, .command]).isEmpty
         else { return false }

@@ -56,6 +56,12 @@ struct ChoiceItem: Identifiable, Equatable {
 enum ChoiceListPresentation {
     case choices
     case commands
+    case completions
+}
+
+enum ChoiceListChrome {
+    case standalone
+    case embedded
 }
 
 enum ChoiceListCommand {
@@ -73,6 +79,7 @@ final class ChoiceListView: NSView, TokenThemed {
     var onDismiss: (() -> Void)?
     private(set) var lastAccessibilityAnnouncementForQA: String?
     let presentation: ChoiceListPresentation
+    let chrome: ChoiceListChrome
 
     private var rows: [ChoiceRowView] = []
     private let destructiveSeparator = NSView(frame: .zero)
@@ -90,10 +97,12 @@ final class ChoiceListView: NSView, TokenThemed {
 
     init(
         items: [ChoiceItem], selectedID: String?,
-        presentation: ChoiceListPresentation = .choices
+        presentation: ChoiceListPresentation = .choices,
+        chrome: ChoiceListChrome = .standalone
     ) {
         self.items = items
         self.presentation = presentation
+        self.chrome = chrome
         self.selectedID = items.contains(where: { $0.id == selectedID }) ? selectedID : nil
         self.focusedID = items.first(where: { $0.id == selectedID && $0.enabled })?.id
             ?? items.first(where: \.enabled)?.id
@@ -123,19 +132,19 @@ final class ChoiceListView: NSView, TokenThemed {
             } ?? 0
             return max(title, detail)
         }.max() ?? 0
-        let hasLeadingSlot = presentation == .choices || items.contains { $0.icon != nil }
+        let hasLeadingSlot = presentation != .commands || items.contains { $0.icon != nil }
         let leadingWidth: CGFloat = hasLeadingSlot ? 26 : 0
         let minimumWidth = presentation == .commands ? 184 : Self.minimumWidth
         return NSSize(
             width: max(minimumWidth, textWidth + Self.horizontalPadding * 2 + leadingWidth),
-            height: CGFloat(items.count) * renderedRowHeight + Self.verticalPadding * 2
+            height: CGFloat(items.count) * renderedRowHeight + renderedVerticalPadding * 2
                 + destructiveSeparatorGap
         )
     }
 
     override func layout() {
         super.layout()
-        var y = bounds.height - Self.verticalPadding - renderedRowHeight
+        var y = bounds.height - renderedVerticalPadding - renderedRowHeight
         for (index, row) in rows.enumerated() {
             if index == destructiveSeparatorIndex {
                 y -= destructiveSeparatorGap
@@ -157,6 +166,10 @@ final class ChoiceListView: NSView, TokenThemed {
 
     private var renderedRowHeight: CGFloat {
         presentation == .commands ? Self.commandRowHeight : Self.rowHeight
+    }
+
+    private var renderedVerticalPadding: CGFloat {
+        presentation == .completions ? 4 : Self.verticalPadding
     }
 
     private var destructiveSeparatorIndex: Int? {
@@ -198,14 +211,17 @@ final class ChoiceListView: NSView, TokenThemed {
             let base = current ?? (delta > 0 ? -1 : enabled.count)
             focusedID = enabled[(base + delta + enabled.count) % enabled.count].id
             updateRows()
+            scrollFocusedRowToVisible()
             announceFocusedChoice()
         case .first:
             focusedID = enabled.first?.id
             updateRows()
+            scrollFocusedRowToVisible()
             announceFocusedChoice()
         case .last:
             focusedID = enabled.last?.id
             updateRows()
+            scrollFocusedRowToVisible()
             announceFocusedChoice()
         case .accept, .open:
             guard let item = items.first(where: { $0.id == focusedID && $0.enabled }) else { return }
@@ -234,8 +250,24 @@ final class ChoiceListView: NSView, TokenThemed {
             row.qaLeadingImageHidden ? nil : item.id
         })
     }
+    var qaAccessibilityLabels: [String] {
+        rows.compactMap { $0.accessibilityLabel() }
+    }
     var qaHasDestructiveSeparator: Bool { !destructiveSeparator.isHidden }
     var qaRenderedRowHeight: CGFloat { renderedRowHeight }
+    var qaFocusedRowIsVisible: Bool {
+        guard let focusedID,
+              let row = rows.first(where: { $0.item.id == focusedID }),
+              let scrollView = enclosingScrollView else { return true }
+        return scrollView.documentVisibleRect.contains(row.frame)
+    }
+
+    func scrollFocusedRowToVisible() {
+        guard let focusedID,
+              let row = rows.first(where: { $0.item.id == focusedID }) else { return }
+        layoutSubtreeIfNeeded()
+        row.scrollToVisible(row.bounds)
+    }
 
     var qaRowStates: [(id: String, selected: Bool, focused: Bool, enabled: Bool, checkVisible: Bool, borderWidth: CGFloat)] {
         rows.map {
@@ -250,9 +282,11 @@ final class ChoiceListView: NSView, TokenThemed {
 
     func applyTokens() {
         let theme = effectiveTokenTheme
-        layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: theme)
-        layer?.borderWidth = Self.panelBorderWidth
-        layer?.borderColor = AgentLineRole.decorativeHairline.color.cgColor(for: theme)
+        layer?.backgroundColor = chrome == .standalone
+            ? SurfaceToken.overlay.color.cgColor(for: theme) : nil
+        layer?.borderWidth = chrome == .standalone ? Self.panelBorderWidth : 0
+        layer?.borderColor = chrome == .standalone
+            ? AgentLineRole.decorativeHairline.color.cgColor(for: theme) : nil
         destructiveSeparator.layer?.backgroundColor = AgentLineRole.decorativeHairline.color.cgColor(for: theme)
         destructiveSeparator.isHidden = destructiveSeparatorIndex == nil
         updateRows()
@@ -294,7 +328,7 @@ final class ChoiceListView: NSView, TokenThemed {
 
     private func rebuildRows() {
         rows.forEach { $0.removeFromSuperview() }
-        let reservesLeadingSlot = presentation == .choices || items.contains { $0.icon != nil }
+        let reservesLeadingSlot = presentation != .commands || items.contains { $0.icon != nil }
         rows = items.map { item in
             let row = ChoiceRowView(
                 item: item, presentation: presentation,
@@ -304,6 +338,7 @@ final class ChoiceListView: NSView, TokenThemed {
                 guard let self, self.items.contains(where: { $0.id == id && $0.enabled }) else { return }
                 self.focusedID = id
                 self.updateRows()
+                self.scrollFocusedRowToVisible()
             }
             addSubview(row)
             return row
@@ -356,18 +391,18 @@ private final class ChoiceRowView: NSControl, TokenThemed {
         titleLabel.lineBreakMode = .byTruncatingTail
         detailLabel.stringValue = item.detail ?? ""
         detailLabel.font = .token(.caption)
-        detailLabel.lineBreakMode = .byTruncatingTail
+        detailLabel.lineBreakMode = presentation == .completions
+            ? .byTruncatingMiddle : .byTruncatingTail
         detailLabel.isHidden = item.detail == nil
         leadingImageView.image = presentation == .choices
-            ? CanvasSymbolImage.image(named: "checkmark")
-            : item.icon?.image()
+            ? CanvasSymbolImage.image(named: "checkmark") : item.icon?.image()
         leadingImageView.imageScaling = .scaleProportionallyDown
         leadingImageView.setAccessibilityElement(false)
         addSubview(leadingImageView)
         addSubview(titleLabel)
         addSubview(detailLabel)
         setAccessibilityRole(.row)
-        setAccessibilityLabel(item.title)
+        setAccessibilityLabel([item.title, item.detail].compactMap { $0 }.joined(separator: ", "))
         let help = item.destructive ? "Destructive action. \(item.detail ?? "")" : item.detail
         setAccessibilityHelp(help)
         setAccessibilityEnabled(item.enabled)
@@ -436,8 +471,7 @@ private final class ChoiceRowView: NSControl, TokenThemed {
             layer?.backgroundColor = nil
         }
         layer?.borderWidth = 0
-        leadingImageView.isHidden = presentation == .choices
-            ? !selected : item.icon == nil
+        leadingImageView.isHidden = presentation == .choices ? !selected : item.icon == nil
         // Keep destructive copy calm, but tint its icon with the established failure
         // accent: native command-menu hierarchy without turning a whole row into an
         // alarm before the person has even chosen it.

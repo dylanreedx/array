@@ -93,8 +93,12 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     var onDismissSuggestions: (() -> Void)?
     private(set) var draft: AgentComposerDraft = .empty
     private let completionController = CompletionPopoverController()
+    // Keep an unbound composer useful as a real surface too. Managed tiles bind
+    // their checkout-aware registry later, while palette/component surfaces can
+    // still discover Array/provider commands without a separate wiring step.
     private var completionSource: any AgentCompletionSuggestionSource =
-        AgentCompletionProviderRegistry(providers: AgentCompletionFixtures.providers())
+        AgentCompletionProviderRegistry(providers: [AgentCommandCompletionProvider()]
+            + AgentCompletionFixtures.providers().filter { $0.providerID != "fixture.commands" })
     private var completionContext: AgentCompletionContext?
     /// `@` browsing state belongs to the live composer surface, never the draft.
     private var completionNavigationPath: String?
@@ -634,17 +638,96 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         command: ChoiceListCommand
     ) -> Bool {
         if command == .ascend {
-            guard let active = AgentCompletionQueryDetector.activeQuery(
-                in: textView.string,
-                selection: textView.selectedRange()
-            ), active.trigger == "@", active.text.isEmpty,
-                  let current = completionNavigationPath, !current.isEmpty else { return false }
-            let parent = (current as NSString).deletingLastPathComponent
-            completionNavigationPath = parent == "." || parent.isEmpty ? nil : parent
-            refreshCompletionSuggestions()
-            return true
+            return ascendCompletionNavigation(in: textView)
+        }
+        if command == .accept,
+           let active = AgentCompletionQueryDetector.activeQuery(
+               in: textView.string,
+               selection: textView.selectedRange()
+           ), active.trigger == "@", active.text.isEmpty,
+              let root = completionContext?.checkoutRoot.standardizedFileURL,
+              let current = completionNavigationURL(checkoutRoot: root),
+              current.path != "/" {
+            // Return can arrive during the same refresh gap as Backspace. The
+            // synthetic `../` row is always first in a nested empty-query scope,
+            // so accepting it while the replacement panel is still loading is
+            // equivalent to selecting that row. A stale panel can still expose
+            // the previous scope's focused directory for one event; its
+            // breadcrumb cannot match the current navigation path.
+            let expectedBreadcrumb = completionBreadcrumb(
+                directory: current,
+                checkoutRoot: root
+            )
+            let panelIsCurrent = completionController.isPresented
+                && completionController.qaBreadcrumb == expectedBreadcrumb
+            let focusedTitle = completionController.qaFocusedTitle
+            if !panelIsCurrent || focusedTitle == "../" {
+                return ascendCompletionNavigation(in: textView)
+            }
         }
         return completionController.perform(command)
+    }
+
+    private func ascendCompletionNavigation(in textView: ComposerTextView) -> Bool {
+        guard let active = AgentCompletionQueryDetector.activeQuery(
+            in: textView.string,
+            selection: textView.selectedRange()
+        ), active.trigger == "@", active.text.isEmpty,
+              let root = completionContext?.checkoutRoot.standardizedFileURL,
+              let current = completionNavigationURL(checkoutRoot: root),
+              current.path != "/" else { return false }
+        let parent = current.deletingLastPathComponent().standardizedFileURL
+        completionNavigationPath = completionNavigationPath(
+            for: parent,
+            checkoutRoot: root
+        )
+        refreshCompletionSuggestions()
+        return true
+    }
+
+    private func completionNavigationURL(checkoutRoot: URL) -> URL? {
+        guard let path = completionNavigationPath, !path.isEmpty else { return checkoutRoot }
+        if path.hasPrefix("/") {
+            return URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        }
+        return checkoutRoot.appendingPathComponent(path, isDirectory: true).standardizedFileURL
+    }
+
+    private func completionNavigationPath(
+        for directory: URL,
+        checkoutRoot: URL
+    ) -> String? {
+        let directory = directory.standardizedFileURL
+        if directory.path == checkoutRoot.path { return nil }
+        if directory.path.hasPrefix(checkoutRoot.path + "/") {
+            return String(directory.path.dropFirst(checkoutRoot.path.count + 1))
+        }
+        return directory.path
+    }
+
+    private func completionBreadcrumb(directory: URL, checkoutRoot: URL) -> String {
+        if directory.path == checkoutRoot.path
+            || directory.path.hasPrefix(checkoutRoot.path + "/") {
+            let relative = directory.path == checkoutRoot.path
+                ? ""
+                : String(directory.path.dropFirst(checkoutRoot.path.count + 1))
+            return (["Home"] + relative
+                .split(separator: "/").map(String.init)).joined(separator: "  ›  ")
+        }
+        let homeComponents = checkoutRoot.pathComponents
+        let directoryComponents = directory.pathComponents
+        var commonCount = 0
+        while commonCount < min(homeComponents.count, directoryComponents.count),
+              homeComponents[commonCount] == directoryComponents[commonCount] {
+            commonCount += 1
+        }
+        let ascents = Array(
+            repeating: "..",
+            count: max(0, homeComponents.count - commonCount)
+        )
+        let descendants = directoryComponents.dropFirst(commonCount)
+            .filter { $0 != "/" }
+        return (["Home"] + ascents + descendants).joined(separator: "  ›  ")
     }
 
     func composerRequestedDismissSuggestions(_ textView: ComposerTextView) {
@@ -688,11 +771,20 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         case let .directory(target):
             guard let root = completionContext?.checkoutRoot.standardizedFileURL else { return }
             let directory = target.directoryURL.standardizedFileURL
-            guard directory.path.hasPrefix(root.path + "/") else { return }
-            completionNavigationPath = String(directory.path.dropFirst(root.path.count + 1))
+            guard directory.isFileURL else { return }
+            let nextNavigationPath = completionNavigationPath(
+                for: directory,
+                checkoutRoot: root
+            )
+            // TextKit reports replacement and selection changes synchronously.
+            // Those callbacks refresh completion state, and can clear a newly
+            // assigned navigation path while the query is between its old text
+            // and the replacement `@`. Commit the target only after that native
+            // replacement cycle completes.
             textView.insertCompletion("@", replacementRange: replacementRange)
+            completionNavigationPath = nextNavigationPath
             DispatchQueue.main.async { [weak self] in self?.refreshCompletionSuggestions() }
-        case .skill, .promptTemplate, .runtimeCommand:
+        case .skill, .promptTemplate, .runtimeCommand, .command:
             guard onCompletionAction?(completion.payload) == true else { return }
             textView.insertCompletion("", replacementRange: replacementRange)
         }
@@ -1132,8 +1224,12 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     var qaHeightMeasurement: ComposerHeightController.Measurement? { heightController.measurement }
     var qaCompletionIsPresented: Bool { completionController.isPresented }
     var qaCompletionTitles: [String] { completionController.qaTitles }
+    var qaCompletionDetails: [String?] { completionController.qaDetails }
     var qaCompletionFocusedTitle: String? { completionController.qaFocusedTitle }
     var qaCompletionPanelFrame: NSRect? { completionController.qaPanelFrame }
+    var qaCompletionBreadcrumb: String? { completionController.qaBreadcrumb }
+    var qaCompletionFooter: String? { completionController.qaFooter }
+    var qaCompletionFocusedRowIsVisible: Bool { completionController.qaFocusedRowIsVisible }
     var qaCompletionRequestStartCount: Int { completionController.qaRequestStartCount }
     var qaCompletionContext: AgentCompletionContext? { completionContext }
 

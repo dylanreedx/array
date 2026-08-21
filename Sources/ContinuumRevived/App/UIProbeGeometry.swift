@@ -6101,6 +6101,62 @@ enum UIProbeGeometry {
         try presentAndCheck(windowY: visible.maxY - windowSize.height, expectedBelow: true)
         try presentAndCheck(windowY: visible.minY, expectedBelow: false)
 
+        // File completion keeps all ranked results in one scroll document while
+        // exposing at most eight rows between fixed breadcrumb/footer chrome.
+        let completionItems = (0..<50).map { index in
+            ChoiceItem(
+                id: "file-\(index)",
+                title: "File-\(index).swift",
+                detail: "Sources/Feature/\(index)/",
+                icon: .system("doc.text")
+            )
+        }
+        controller.present(
+            items: completionItems,
+            selectedID: nil,
+            presentation: .completions,
+            layout: .completion(CompletionPopoverLayout(
+                breadcrumb: "Array  ›  Sources  ›  Feature",
+                footer: "↑↓ Navigate   →/Tab Open   ←/⌫ Up   ↵ Select   Esc Close"
+            )),
+            anchor: anchor.bounds,
+            relativeTo: anchor,
+            takesFocus: false
+        ) { _ in }
+        guard let completionPanel = controller.panel,
+              let completionList = controller.listView,
+              visible.insetBy(dx: 8, dy: 8).contains(completionPanel.frame),
+              completionPanel.frame.width >= 360,
+              completionPanel.frame.width <= 520,
+              completionPanel.frame.height <= 356,
+              let viewportHeight = controller.qaCompletionViewportHeight,
+              viewportHeight <= ChoiceListView.rowHeight * 8 + 8,
+              let documentHeight = controller.qaCompletionDocumentHeight,
+              documentHeight > viewportHeight,
+              controller.qaCompletionBreadcrumb == "Array  ›  Sources  ›  Feature",
+              controller.qaCompletionFooter == "↑↓ Navigate   →/Tab Open   ←/⌫ Up   ↵ Select   Esc Close",
+              completionList.qaVisibleIconIDs.count == 50,
+              completionList.qaAccessibilityLabels.first == "File-0.swift, Sources/Feature/0/",
+              completionList.qaRowStates.allSatisfy({ !$0.checkVisible }) else {
+            throw fail("choice popover: bounded file completion lost its screen cap, fixed chrome, scroll document, or file-row anatomy")
+        }
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            completionPanel.appearance = NSAppearance(named: appearance)
+            guard completionPanel.contentView?.layer?.backgroundColor != nil,
+                  completionPanel.contentView?.layer?.borderWidth == ChoiceListView.panelBorderWidth else {
+                throw fail("choice popover: bounded file completion lost its token-painted chrome in \(appearance.rawValue)")
+            }
+        }
+        completionList.perform(.last)
+        guard completionList.focusedID == "file-49", completionList.qaFocusedRowIsVisible else {
+            throw fail("choice popover: End did not scroll the final completion row into view")
+        }
+        completionList.perform(.first)
+        guard completionList.focusedID == "file-0", completionList.qaFocusedRowIsVisible else {
+            throw fail("choice popover: Home did not scroll the first completion row back into view")
+        }
+        controller.dismiss()
+
         controller.present(
             items: items, selectedID: "balanced", anchor: anchor.bounds, relativeTo: anchor
         ) { _ in }

@@ -3213,6 +3213,16 @@ final class AgentSupervisor {
             }
             stop(agentID)
             return .accepted
+        case .providerCommand(let invocation):
+            guard invocation.surface != .cli else { return .refused(.unsupported) }
+            let native = invocation.nativeSlashText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !native.isEmpty else { return .refused(.emptyDraft) }
+            guard snapshot.capabilities.canSend else { return .refused(.turnNotReady) }
+            guard sendPrepared(
+                PreparedAgentPrompt(prompt: AgentPrompt(native), expectedAgentID: agentID),
+                to: agentID
+            ) else { return .refused(.invalidAttachment) }
+            return .accepted
         case .steer, .queue, .command:
             // Today's compiled runner has none of these RPCs. Never simulate one by
             // replaying send or retaining text in a local queue.
@@ -4560,6 +4570,17 @@ private struct CompletionProbeSource: AgentCompletionSuggestionSource {
                 ))
             )]
         }
+        if query.trigger == "@", query.text.isEmpty, query.navigationPath == nil {
+            return [AgentCompletion(
+                id: "sources-directory",
+                title: "Sources/",
+                detail: "Sources/",
+                insertionText: "@Sources",
+                payload: .directory(DirectoryNavigationTarget(
+                    directoryURL: URL(fileURLWithPath: "/tmp/array-context-a/Sources", isDirectory: true)
+                ))
+            )]
+        }
         if query.trigger == "@", query.text.isEmpty, query.navigationPath == "Sources" {
             return [AgentCompletion(
                 id: "nested-file",
@@ -4874,18 +4895,95 @@ func runAgentCompletionSemanticChecks() async throws {
     guard await waitUntil(timeout: 1, pollInterval: 0.01, {
         textView.string == "@"
             && state.observedNavigationPaths.last == "Sources"
-            && composer.qaCompletionTitles == ["array-context-a  ›  Sources", "Nested.swift"]
+            && composer.qaCompletionTitles == ["../", "Nested.swift"]
+            && composer.qaCompletionDetails == ["Go to array-context-a", "Sources/"]
+            && composer.qaCompletionBreadcrumb == "Home  ›  Sources"
     }) else {
-        throw fail("directory acceptance mutated the draft with a path or failed to show scoped breadcrumbs")
+        throw fail("directory acceptance mutated the draft with a path or failed to show scoped breadcrumbs: text=\(textView.string), paths=\(state.observedNavigationPaths), titles=\(composer.qaCompletionTitles), details=\(composer.qaCompletionDetails), breadcrumb=\(String(describing: composer.qaCompletionBreadcrumb))")
     }
+    guard composer.qaCompletionFooter == "↑↓ Navigate   →/Tab Open   ←/⌫ Up   ↵ Select   Esc Close" else {
+        throw fail("file completion lost its fixed keyboard footer")
+    }
+
+    // Literal relative-path syntax is browsing input, not fuzzy-search text.
+    // It previews the resolved parent without persisting any navigation state or
+    // mutating the native draft until a result is accepted.
+    replaceText("@../")
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, {
+        textView.string == "@../"
+            && state.observedQueries.last == ""
+            && state.observedNavigationPaths.last! == nil
+            && composer.qaCompletionIsPresented
+            && composer.qaCompletionTitles == ["../", "Sources/"]
+            && composer.qaCompletionBreadcrumb == "Home"
+    }) else {
+        throw fail("typed @../ did not preview the parent scope: text=\(textView.string), queries=\(state.observedQueries), paths=\(state.observedNavigationPaths), titles=\(composer.qaCompletionTitles)")
+    }
+    replaceText("@../../Nest")
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, {
+        textView.string == "@../../Nest"
+            && state.observedQueries.last == "Nest"
+            && state.observedNavigationPaths.last == "/tmp"
+    }) else {
+        throw fail("typed @../../query did not escape the checkout and preserve the fuzzy remainder")
+    }
+    replaceText("@../Sibling/Needle")
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, {
+        textView.string == "@../Sibling/Needle"
+            && state.observedQueries.last == "Needle"
+            && state.observedNavigationPaths.last == "Sibling"
+    }) else {
+        throw fail("typed relative directory components did not resolve like a path from the current scope: text=\(textView.string), queries=\(state.observedQueries), paths=\(state.observedNavigationPaths)")
+    }
+
+    replaceText("@")
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, {
+        composer.qaCompletionTitles == ["../", "Nested.swift"]
+            && composer.qaCompletionBreadcrumb == "Home  ›  Sources"
+    }) else { throw fail("nested scope did not restore after typed traversal coverage") }
+
+    // The synthetic parent row uses the same typed directory payload path as a
+    // real folder. At the checkout root it remains available for external ascent.
+    window.sendEvent(try event(keyCode: 36, characters: "\r", windowNumber: window.windowNumber))
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, {
+        textView.string == "@"
+            && state.observedNavigationPaths.last! == nil
+            && composer.qaCompletionIsPresented
+            && composer.qaCompletionTitles == ["../", "Sources/"]
+            && composer.qaCompletionBreadcrumb == "Home"
+    }) else {
+        throw fail("selecting ../ did not keep the checkout-root list open without mutating the draft: text=\(textView.string), paths=\(state.observedNavigationPaths), titles=\(composer.qaCompletionTitles), presented=\(composer.qaCompletionIsPresented)")
+    }
+
+    window.sendEvent(try event(keyCode: 36, characters: "\r", windowNumber: window.windowNumber))
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, {
+        textView.string == "@"
+            && state.observedNavigationPaths.last == "/tmp"
+            && composer.qaCompletionIsPresented
+            && composer.qaCompletionTitles == ["../"]
+            && composer.qaCompletionBreadcrumb == "Home  ›  .."
+    }) else {
+        throw fail("checkout-root ../ did not ascend into the external parent directory")
+    }
+
+    replaceText("@dir")
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, {
+        composer.qaCompletionTitles == ["Sources/"]
+    }) else { throw fail("directory result did not reopen for keyboard-ascent coverage") }
+    window.sendEvent(try event(keyCode: 124, characters: "", windowNumber: window.windowNumber))
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, {
+        composer.qaCompletionTitles == ["../", "Nested.swift"]
+    }) else { throw fail("nested scope did not reopen for keyboard-ascent coverage") }
     let observationsBeforeAscend = state.observedNavigationPaths.count
     window.sendEvent(try event(keyCode: 51, characters: "\u{8}", windowNumber: window.windowNumber))
     guard await waitUntil(timeout: 1, pollInterval: 0.01, {
         textView.string == "@"
             && state.observedNavigationPaths.count > observationsBeforeAscend
             && state.observedNavigationPaths.last! == nil
+            && composer.qaCompletionIsPresented
+            && composer.qaCompletionTitles == ["../", "Sources/"]
     }) else {
-        throw fail("empty-query Backspace did not ascend without mutating draft text")
+        throw fail("empty-query Backspace did not ascend to a visible root list without mutating draft text")
     }
 
     replaceText("/he")

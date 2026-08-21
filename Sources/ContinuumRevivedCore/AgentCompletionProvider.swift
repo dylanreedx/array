@@ -1,6 +1,6 @@
 import Foundation
 
-public enum AgentCompletionScope: String, Equatable, Sendable {
+public enum AgentCompletionScope: String, Codable, Equatable, Sendable {
     case system
     case personal
     case project
@@ -82,6 +82,7 @@ public enum AgentCompletionPayload: Equatable, Sendable {
     case skill(ResolvedSkillInvocation)
     case promptTemplate(ResolvedPromptTemplate)
     case runtimeCommand(ResolvedRuntimeCommand)
+    case command(AgentCommandInvocation)
     case directory(DirectoryNavigationTarget)
 }
 
@@ -95,6 +96,8 @@ public struct AgentCompletion: Equatable, Sendable, Identifiable {
     public let score: Int
     public let payload: AgentCompletionPayload
     public let provenance: AgentCompletionProvenance
+    public let isEnabled: Bool
+    public let disabledReason: String?
     /// Every provider that returned this deduplicated result, in stable order.
     public let providerIDs: [String]
 
@@ -106,7 +109,9 @@ public struct AgentCompletion: Equatable, Sendable, Identifiable {
         score: Int = 0,
         providerIDs: [String] = [],
         payload: AgentCompletionPayload? = nil,
-        provenance: AgentCompletionProvenance = .fixture
+        provenance: AgentCompletionProvenance = .fixture,
+        isEnabled: Bool = true,
+        disabledReason: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -116,6 +121,8 @@ public struct AgentCompletion: Equatable, Sendable, Identifiable {
         self.providerIDs = providerIDs
         self.payload = payload ?? .insertText(insertionText)
         self.provenance = provenance
+        self.isEnabled = isEnabled
+        self.disabledReason = disabledReason
     }
 }
 
@@ -276,7 +283,9 @@ public actor AgentCompletionProviderRegistry: AgentCompletionSuggestionSource {
                 score: value.completion.score,
                 providerIDs: value.providerIDs.sorted(),
                 payload: value.completion.payload,
-                provenance: value.completion.provenance
+                provenance: value.completion.provenance,
+                isEnabled: value.completion.isEnabled,
+                disabledReason: value.completion.disabledReason
             )
         }.sorted { lhs, rhs in
             let leftRank = matchRank(lhs, query: query)

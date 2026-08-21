@@ -7,6 +7,225 @@ private final class ChoicePanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+struct CompletionPopoverLayout: Equatable {
+    let breadcrumb: String
+    let footer: String
+    var maximumVisibleRows = 8
+    var minimumWidth: CGFloat = 360
+    var maximumWidth: CGFloat = 520
+}
+
+struct CommandPopoverLayout: Equatable {
+    var maximumVisibleRows = 12
+    var minimumWidth: CGFloat = 300
+    var maximumWidth: CGFloat = 560
+}
+
+enum ChoicePopoverLayout: Equatable {
+    case intrinsic
+    case completion(CompletionPopoverLayout)
+    case commands(CommandPopoverLayout)
+}
+
+@MainActor
+private final class CompletionPopoverContentView: NSView, TokenThemed {
+    static let headerHeight: CGFloat = 32
+    static let footerHeight: CGFloat = 28
+
+    let listView: ChoiceListView
+    let scrollView = NSScrollView(frame: .zero)
+    fileprivate let breadcrumbLabel = NSTextField(labelWithString: "")
+    fileprivate let footerLabel = NSTextField(labelWithString: "")
+    private let locationIcon = NSImageView(frame: .zero)
+    private let breadcrumbText: String
+    private let headerSeparator = NSView(frame: .zero)
+    private let footerSeparator = NSView(frame: .zero)
+    private var positionedInitialScroll = false
+
+    init(listView: ChoiceListView, layout: CompletionPopoverLayout) {
+        self.listView = listView
+        self.breadcrumbText = layout.breadcrumb
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = CGFloat(Radius.container)
+        layer?.masksToBounds = true
+
+        breadcrumbLabel.lineBreakMode = .byTruncatingMiddle
+        breadcrumbLabel.setAccessibilityLabel("Current folder: \(layout.breadcrumb)")
+
+        // Use the same frozen symbol representation as result rows so the root
+        // glyph has identical optical bounds instead of AppKit's baseline-heavy
+        // live SF Symbol metrics.
+        locationIcon.image = CanvasSymbolImage.image(named: "folder")
+        locationIcon.imageScaling = .scaleProportionallyDown
+        locationIcon.setAccessibilityElement(false)
+
+        footerLabel.stringValue = layout.footer
+        footerLabel.font = .token(.caption)
+        footerLabel.alignment = .center
+        footerLabel.lineBreakMode = .byTruncatingTail
+
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
+        scrollView.documentView = listView
+
+        for view in [headerSeparator, footerSeparator] { view.wantsLayer = true }
+        addSubview(scrollView)
+        addSubview(locationIcon)
+        addSubview(breadcrumbLabel)
+        addSubview(footerLabel)
+        addSubview(headerSeparator)
+        addSubview(footerSeparator)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("File suggestions")
+        applyTokens()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layout() {
+        super.layout()
+        let hairline = LineWidth.hairline
+        footerLabel.frame = NSRect(x: 10, y: 0, width: max(0, bounds.width - 20), height: Self.footerHeight)
+        footerSeparator.frame = NSRect(x: 0, y: Self.footerHeight, width: bounds.width, height: hairline)
+        scrollView.frame = NSRect(
+            x: 0,
+            y: Self.footerHeight,
+            width: bounds.width,
+            height: max(0, bounds.height - Self.headerHeight - Self.footerHeight)
+        )
+        headerSeparator.frame = NSRect(x: 0, y: bounds.height - Self.headerHeight, width: bounds.width, height: hairline)
+        let headerOriginY = bounds.height - Self.headerHeight
+        let headerCenterY = headerOriginY + Self.headerHeight / 2
+        locationIcon.frame = NSRect(
+            x: 12,
+            y: floor(headerCenterY - 14 / 2),
+            width: 14,
+            height: 14
+        )
+        let breadcrumbHeight = ceil(breadcrumbLabel.intrinsicContentSize.height)
+        breadcrumbLabel.frame = NSRect(
+            x: 36,
+            y: floor(headerCenterY - breadcrumbHeight / 2),
+            width: max(0, bounds.width - 48),
+            height: breadcrumbHeight
+        )
+
+        let documentHeight = listView.intrinsicContentSize.height
+        listView.frame = NSRect(
+            x: 0, y: 0,
+            width: max(0, scrollView.contentSize.width),
+            height: documentHeight
+        )
+        listView.layoutSubtreeIfNeeded()
+        if !positionedInitialScroll {
+            positionedInitialScroll = true
+            listView.scrollFocusedRowToVisible()
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
+    }
+
+    func applyTokens() {
+        let theme = effectiveTokenTheme
+        layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: theme)
+        layer?.borderWidth = ChoiceListView.panelBorderWidth
+        layer?.borderColor = AgentLineRole.decorativeHairline.color.cgColor(for: theme)
+        locationIcon.contentTintColor = TextToken.textSecondary.color.nsColor(for: theme)
+        applyBreadcrumb(theme: theme)
+        footerLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)
+        let separator = AgentLineRole.decorativeHairline.color.cgColor(for: theme)
+        headerSeparator.layer?.backgroundColor = separator
+        footerSeparator.layer?.backgroundColor = separator
+        listView.applyTokens()
+    }
+
+    private func applyBreadcrumb(theme: TokenTheme) {
+        let segments = breadcrumbText.components(separatedBy: "  ›  ")
+        let result = NSMutableAttributedString()
+        let secondary = TextToken.textSecondary.color.nsColor(for: theme)
+        let primary = TextToken.textPrimary.color.nsColor(for: theme)
+        let regular = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
+        let current = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        for (index, segment) in segments.enumerated() {
+            if index > 0 {
+                result.append(NSAttributedString(
+                    string: "  ›  ",
+                    attributes: [.font: regular, .foregroundColor: secondary]
+                ))
+            }
+            result.append(NSAttributedString(
+                string: segment,
+                attributes: [
+                    .font: index == segments.count - 1 ? current : regular,
+                    .foregroundColor: index == segments.count - 1 ? primary : secondary,
+                ]
+            ))
+        }
+        breadcrumbLabel.attributedStringValue = result
+    }
+}
+
+@MainActor
+private final class CommandPopoverContentView: NSView, TokenThemed {
+    let listView: ChoiceListView
+    let scrollView = NSScrollView(frame: .zero)
+
+    init(listView: ChoiceListView) {
+        self.listView = listView
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = CGFloat(Radius.container)
+        layer?.masksToBounds = true
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
+        scrollView.documentView = listView
+        addSubview(scrollView)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("Commands")
+        applyTokens()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layout() {
+        super.layout()
+        scrollView.frame = bounds
+        listView.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: max(0, scrollView.contentSize.width),
+            height: listView.intrinsicContentSize.height
+        )
+        listView.layoutSubtreeIfNeeded()
+        listView.scrollFocusedRowToVisible()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
+    }
+
+    func applyTokens() {
+        let theme = effectiveTokenTheme
+        layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: theme)
+        layer?.borderWidth = ChoiceListView.panelBorderWidth
+        layer?.borderColor = AgentLineRole.decorativeHairline.color.cgColor(for: theme)
+        listView.applyTokens()
+    }
+}
+
 /// Owns the anchored panel and all dismissal observers. Closures capture the
 /// controller weakly so presenting a choice never extends a tile's lifetime.
 @MainActor
@@ -14,6 +233,7 @@ final class ChoicePopoverController {
     private(set) var panel: NSPanel?
     private(set) var listView: ChoiceListView?
     private(set) var lastAccessibilityAnnouncementForQA: String?
+    private weak var completionContentView: CompletionPopoverContentView?
 
     private weak var anchorView: NSView?
     private weak var focusReturnView: NSView?
@@ -40,6 +260,7 @@ final class ChoicePopoverController {
         items: [ChoiceItem],
         selectedID: String?,
         presentation: ChoiceListPresentation = .choices,
+        layout: ChoicePopoverLayout = .intrinsic,
         anchor: NSRect,
         relativeTo view: NSView,
         takesFocus: Bool = true,
@@ -53,11 +274,52 @@ final class ChoicePopoverController {
         // probes can exercise the exact rendered contents while the host window is
         // not yet attached; a missing panel must not make that seam vacuous.
         let list = ChoiceListView(
-            items: items, selectedID: selectedID, presentation: presentation)
+            items: items,
+            selectedID: selectedID,
+            presentation: presentation,
+            chrome: layout == .intrinsic ? .standalone : .embedded
+        )
         listView = list
         guard let window = view.window else { return }
 
-        let contentSize = list.intrinsicContentSize
+        let visibleFrame = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? window.frame
+        let windowAnchor = view.convert(anchor, to: nil)
+        let screenAnchor = window.convertToScreen(windowAnchor)
+        let contentView: NSView
+        let contentSize: NSSize
+        let placementFrame: NSRect
+        switch layout {
+        case .intrinsic:
+            contentView = list
+            contentSize = list.intrinsicContentSize
+            placementFrame = visibleFrame
+        case .completion(let configuration):
+            let safeFrame = visibleFrame.insetBy(dx: 8, dy: 8)
+            let container = CompletionPopoverContentView(listView: list, layout: configuration)
+            completionContentView = container
+            contentView = container
+            contentSize = Self.completionContentSize(
+                list: list,
+                configuration: configuration,
+                screenAnchor: screenAnchor,
+                visibleFrame: safeFrame
+            )
+            container.frame = NSRect(origin: .zero, size: contentSize)
+            container.layoutSubtreeIfNeeded()
+            placementFrame = safeFrame
+        case .commands(let configuration):
+            let safeFrame = visibleFrame.insetBy(dx: 8, dy: 8)
+            let container = CommandPopoverContentView(listView: list)
+            contentView = container
+            contentSize = Self.commandContentSize(
+                list: list,
+                configuration: configuration,
+                visibleFrame: safeFrame
+            )
+            container.frame = NSRect(origin: .zero, size: contentSize)
+            container.layoutSubtreeIfNeeded()
+            placementFrame = safeFrame
+        }
         let panel = ChoicePanel(
             contentRect: NSRect(origin: .zero, size: contentSize),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -69,12 +331,12 @@ final class ChoicePopoverController {
         panel.hasShadow = true
         panel.level = .popUpMenu
         panel.collectionBehavior = [.transient, .moveToActiveSpace]
-        panel.contentView = list
+        panel.contentView = contentView
         panel.setFrame(Self.panelFrame(
             contentSize: contentSize,
             anchor: anchor,
             relativeTo: view,
-            visibleFrame: window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? window.frame
+            visibleFrame: placementFrame
         ), display: false)
 
         self.panel = panel
@@ -82,8 +344,14 @@ final class ChoicePopoverController {
         anchorView = view
         self.focusReturnView = focusReturnView
         parentWindow = window
-        list.setAccessibilityLabel("Agent actions")
-        panel.setAccessibilityLabel("Agent actions")
+        let accessibilityLabel: String
+        switch layout {
+        case .intrinsic: accessibilityLabel = "Agent actions"
+        case .completion: accessibilityLabel = "File suggestions"
+        case .commands: accessibilityLabel = "Commands"
+        }
+        list.setAccessibilityLabel(accessibilityLabel)
+        panel.setAccessibilityLabel(accessibilityLabel)
         anchorWasPostingFrameChanges = view.postsFrameChangedNotifications
 
         list.onSelection = { [weak self] item in
@@ -99,7 +367,12 @@ final class ChoicePopoverController {
             panel.makeKey()
             panel.makeFirstResponder(list)
         }
-        let announcement = "Agent actions menu"
+        let announcement: String
+        switch layout {
+        case .intrinsic: announcement = "Agent actions menu"
+        case .completion: announcement = "File suggestions"
+        case .commands: announcement = "Commands"
+        }
         // Keep the observable value on the same path as the real VoiceOver post;
         // checks do not claim an announcement merely because a label exists.
         lastAccessibilityAnnouncementForQA = announcement
@@ -128,6 +401,7 @@ final class ChoicePopoverController {
         let window = parentWindow
         panel = nil
         listView = nil
+        completionContentView = nil
         anchorView = nil
         focusReturnView = nil
         parentWindow = nil
@@ -158,6 +432,48 @@ final class ChoicePopoverController {
         origin.x = min(max(origin.x, visibleFrame.minX), max(visibleFrame.minX, visibleFrame.maxX - contentSize.width))
         origin.y = min(max(origin.y, visibleFrame.minY), max(visibleFrame.minY, visibleFrame.maxY - contentSize.height))
         return NSRect(origin: origin, size: contentSize)
+    }
+
+    private static func completionContentSize(
+        list: ChoiceListView,
+        configuration: CompletionPopoverLayout,
+        screenAnchor: NSRect,
+        visibleFrame: NSRect
+    ) -> NSSize {
+        let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.token(.caption)]
+        let breadcrumbWidth = ceil((configuration.breadcrumb as NSString).size(withAttributes: attributes).width) + 24
+        let footerWidth = ceil((configuration.footer as NSString).size(withAttributes: attributes).width) + 24
+        let availableWidth = max(1, visibleFrame.width)
+        let upperWidth = min(configuration.maximumWidth, availableWidth)
+        let lowerWidth = min(configuration.minimumWidth, upperWidth)
+        let width = min(upperWidth, max(lowerWidth, list.intrinsicContentSize.width, breadcrumbWidth, footerWidth))
+
+        let visibleRows = min(max(1, configuration.maximumVisibleRows), max(1, list.items.count))
+        let desiredListHeight = CGFloat(visibleRows) * ChoiceListView.rowHeight + 8
+        let desiredHeight = CompletionPopoverContentView.headerHeight
+            + desiredListHeight
+            + CompletionPopoverContentView.footerHeight
+        let gap = CGFloat(Space.s)
+        let roomBelow = screenAnchor.minY - visibleFrame.minY
+        let roomAbove = visibleFrame.maxY - screenAnchor.maxY
+        let availableHeight = max(1, max(roomBelow, roomAbove) - gap)
+        return NSSize(width: width, height: min(desiredHeight, availableHeight))
+    }
+
+    private static func commandContentSize(
+        list: ChoiceListView,
+        configuration: CommandPopoverLayout,
+        visibleFrame: NSRect
+    ) -> NSSize {
+        let width = min(
+            visibleFrame.width,
+            max(configuration.minimumWidth, min(configuration.maximumWidth, list.intrinsicContentSize.width))
+        )
+        let rowHeight = ChoiceListView.commandRowHeight
+        let maxHeight = CGFloat(configuration.maximumVisibleRows) * rowHeight
+            + ChoiceListView.verticalPadding * 2
+        let height = min(maxHeight, max(1, list.intrinsicContentSize.height))
+        return NSSize(width: max(1, width), height: max(1, height))
     }
 
     private func installDismissalObservers(
@@ -215,4 +531,9 @@ final class ChoicePopoverController {
         }
         anchorWasPostingFrameChanges = nil
     }
+
+    var qaCompletionBreadcrumb: String? { completionContentView?.breadcrumbLabel.stringValue }
+    var qaCompletionFooter: String? { completionContentView?.footerLabel.stringValue }
+    var qaCompletionViewportHeight: CGFloat? { completionContentView?.scrollView.contentSize.height }
+    var qaCompletionDocumentHeight: CGFloat? { completionContentView?.listView.frame.height }
 }

@@ -16,6 +16,9 @@ public enum AgentComposerIntent: Equatable, Sendable {
     case steer(String)
     case queue(String)
     case command(String)
+    /// A completion-selected provider or harness command. The invocation stays
+    /// typed until the supervisor/adapter serializes it for the active runtime.
+    case providerCommand(AgentCommandInvocation)
 }
 
 /// The sink owns execution and reports whether it actually took responsibility
