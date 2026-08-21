@@ -491,6 +491,9 @@ public enum AgentRuntimeEvent: Codable, Equatable, Sendable {
     case userInputResolved(threadId: String, requestId: String)
     case tokenUsageUpdated(threadId: String, snapshot: TokenUsageSnapshot)
     case contextWindowUpdated(threadId: String, snapshot: AgentContextWindowSnapshot)
+    /// Safe semantic identity for a child created by a local or provider spawn.
+    /// Prompt/tool arguments are deliberately absent.
+    case childAgentSpawned(threadId: String, childAgentID: UUID, parentAgentID: UUID, displayName: String, sourceItemID: String?, provider: String, spawnedAt: Date)
     case runtimeError(threadId: String?, message: String) // [BODY]
 
     private enum CodingKeys: String, CodingKey {
@@ -511,6 +514,12 @@ public enum AgentRuntimeEvent: Codable, Equatable, Sendable {
         case questions
         case snapshot
         case message
+        case childAgentID
+        case parentAgentID
+        case displayName
+        case sourceItemID
+        case provider
+        case spawnedAt
     }
 
     private enum Discriminator: String, Codable {
@@ -526,6 +535,7 @@ public enum AgentRuntimeEvent: Codable, Equatable, Sendable {
         case userInputResolved
         case tokenUsageUpdated
         case contextWindowUpdated
+        case childAgentSpawned
         case runtimeError
     }
 
@@ -600,6 +610,16 @@ public enum AgentRuntimeEvent: Codable, Equatable, Sendable {
                 threadId: try container.decode(String.self, forKey: .threadId),
                 snapshot: try container.decode(AgentContextWindowSnapshot.self, forKey: .snapshot)
             )
+        case .childAgentSpawned:
+            self = .childAgentSpawned(
+                threadId: try container.decode(String.self, forKey: .threadId),
+                childAgentID: try container.decode(UUID.self, forKey: .childAgentID),
+                parentAgentID: try container.decode(UUID.self, forKey: .parentAgentID),
+                displayName: try container.decode(String.self, forKey: .displayName),
+                sourceItemID: try container.decodeIfPresent(String.self, forKey: .sourceItemID),
+                provider: try container.decode(String.self, forKey: .provider),
+                spawnedAt: try container.decode(Date.self, forKey: .spawnedAt)
+            )
         case .runtimeError:
             self = .runtimeError(
                 threadId: try container.decodeIfPresent(String.self, forKey: .threadId),
@@ -669,6 +689,15 @@ public enum AgentRuntimeEvent: Codable, Equatable, Sendable {
             try container.encode(Discriminator.contextWindowUpdated, forKey: .type)
             try container.encode(threadId, forKey: .threadId)
             try container.encode(snapshot, forKey: .snapshot)
+        case let .childAgentSpawned(threadId, childAgentID, parentAgentID, displayName, sourceItemID, provider, spawnedAt):
+            try container.encode(Discriminator.childAgentSpawned, forKey: .type)
+            try container.encode(threadId, forKey: .threadId)
+            try container.encode(childAgentID, forKey: .childAgentID)
+            try container.encode(parentAgentID, forKey: .parentAgentID)
+            try container.encode(displayName, forKey: .displayName)
+            try container.encodeIfPresent(sourceItemID, forKey: .sourceItemID)
+            try container.encode(provider, forKey: .provider)
+            try container.encode(spawnedAt, forKey: .spawnedAt)
         case .runtimeError(let threadId, let message):
             try container.encode(Discriminator.runtimeError, forKey: .type)
             try container.encodeIfPresent(threadId, forKey: .threadId)

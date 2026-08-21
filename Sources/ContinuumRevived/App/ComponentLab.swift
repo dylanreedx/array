@@ -2213,6 +2213,7 @@ enum LabCatalog {
         case .userInputResolved: return "userInputResolved"
         case .tokenUsageUpdated: return "tokenUsageUpdated"
         case .contextWindowUpdated: return "contextWindowUpdated"
+        case .childAgentSpawned: return "childAgentSpawned"
         case .runtimeError: return "runtimeError"
         }
     }

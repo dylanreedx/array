@@ -330,3 +330,33 @@ func runLocalTranscriptNodeChecks() {
 
     print("Local transcript node checks passed: caller IDs, semantic roles/provenance, notice title, idempotent retries, and provider-history isolation")
 }
+
+func runAgentReferenceProjectionChecks() {
+    let thread = "agent-reference-thread"
+    let child = UUID(uuidString: "A3000000-0000-4000-8000-000000000001")!
+    let parent = UUID(uuidString: "A3000000-0000-4000-8000-000000000002")!
+    let event = AgentRuntimeEvent.childAgentSpawned(
+        threadId: thread,
+        childAgentID: child,
+        parentAgentID: parent,
+        displayName: "Stats review",
+        sourceItemID: "spawn-call-1",
+        provider: "pi",
+        spawnedAt: Date(timeIntervalSince1970: 1_700_000_000)
+    )
+    var projection = AgentTranscriptProjection(threadId: thread)
+    projection.ingest(event)
+    projection.ingest(event)
+    let references = projection.document.entries.flatMap(\.blocks).compactMap { block -> AgentReferencePayload? in
+        guard case let .agentReference(payload) = block.payload else { return nil }
+        return payload
+    }
+    expect(references.count == 1, "duplicate child lifecycle events must produce one transcript milestone")
+    expect(references.first?.agentID == child && references.first?.parentAgentID == parent,
+           "agent-reference milestone must preserve durable parent/child identity")
+    expect(references.first?.sourceItemID == "spawn-call-1",
+           "agent-reference milestone must retain its safe provider correlation")
+    let roundTrip = try! JSONDecoder().decode(AgentRuntimeEvent.self, from: JSONEncoder().encode(event))
+    expect(roundTrip == event, "safe child lifecycle events must round-trip for encrypted transcript sync")
+    print("Agent reference projection checks passed: stable identity, source correlation, Codable, and replay deduplication")
+}

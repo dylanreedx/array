@@ -153,6 +153,51 @@ public struct AgentLifecycleFacts: Equatable, Sendable {
     }
 }
 
+public enum AgentTranscriptAvailability: String, Codable, Equatable, Sendable {
+    case unavailable
+    case readOnly
+    case full
+}
+
+/// Honest feature negotiation for local and provider-observed agents. These
+/// flags describe what Array can do now; adapters may upgrade the same record
+/// later without changing its durable `AgentID`.
+public struct AgentCapabilities: Codable, Equatable, Sendable {
+    public var transcript: AgentTranscriptAvailability
+    public var observesStatus: Bool
+    public var canStop: Bool
+    public var providerObserved: Bool
+    public var locallyManaged: Bool
+
+    public init(
+        transcript: AgentTranscriptAvailability,
+        observesStatus: Bool,
+        canStop: Bool,
+        providerObserved: Bool,
+        locallyManaged: Bool
+    ) {
+        self.transcript = transcript
+        self.observesStatus = observesStatus
+        self.canStop = canStop
+        self.providerObserved = providerObserved
+        self.locallyManaged = locallyManaged
+    }
+
+    public static let managed = AgentCapabilities(
+        transcript: .full,
+        observesStatus: true,
+        canStop: true,
+        providerObserved: false,
+        locallyManaged: true)
+
+    public static let observedReadOnly = AgentCapabilities(
+        transcript: .readOnly,
+        observesStatus: true,
+        canStop: false,
+        providerObserved: true,
+        locallyManaged: false)
+}
+
 public struct AgentRecord: Codable, Equatable, Sendable {
     public static let currentSchemaVersion = 1
     /// Compatibility spelling for callers that need the sentinel beside the
@@ -187,6 +232,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     public var projectId: UUID?
     /// Set by the orchestrator when this agent was spawned by another (P2D).
     public var parentAgentID: AgentID?
+    public var capabilities: AgentCapabilities
     /// The durable slot this child owns in its parent's name space. It is
     /// assigned at spawn, including for children whose final name uses a higher
     /// precedence rung, so a later ordinal fallback can never reuse a learned
@@ -467,6 +513,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         worktreeBranch: String? = nil,
         projectId: UUID? = nil,
         parentAgentID: AgentID? = nil,
+        capabilities: AgentCapabilities = .managed,
         sourceItemId: String? = nil,
         parentRelativeOrdinal: Int? = nil,
         nextChildOrdinal: Int = 1,
@@ -501,6 +548,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         self.worktreeBranch = worktreeBranch
         self.projectId = projectId
         self.parentAgentID = parentAgentID
+        self.capabilities = capabilities
         self.sourceItemId = sourceItemId
         self.parentRelativeOrdinal = parentRelativeOrdinal
         self.nextChildOrdinal = max(1, nextChildOrdinal)
@@ -614,7 +662,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     // conversion happens and the round-trip is exact.
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, id, displayName, displayNameSource, namingRequest, role, harness, model, thinking, cwd
-        case worktreeBranch, projectId, parentAgentID, sourceItemId
+        case worktreeBranch, projectId, parentAgentID, capabilities, sourceItemId
         case parentRelativeOrdinal, nextChildOrdinal
         case createdAtReferenceInterval, lastActivityAtReferenceInterval
         case latestPromptAtReferenceInterval, latestTurnAtReferenceInterval
@@ -668,6 +716,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         worktreeBranch = try container.decodeIfPresent(String.self, forKey: .worktreeBranch)
         projectId = try container.decodeIfPresent(UUID.self, forKey: .projectId)
         parentAgentID = try container.decodeIfPresent(AgentID.self, forKey: .parentAgentID)
+        capabilities = (try? container.decodeIfPresent(
+            AgentCapabilities.self, forKey: .capabilities)) ?? .managed
         sourceItemId = try container.decodeIfPresent(String.self, forKey: .sourceItemId)
         parentRelativeOrdinal = try container.decodeIfPresent(Int.self, forKey: .parentRelativeOrdinal)
         nextChildOrdinal = max(1, try container.decodeIfPresent(Int.self, forKey: .nextChildOrdinal) ?? 1)
@@ -740,6 +790,9 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         try container.encodeIfPresent(worktreeBranch, forKey: .worktreeBranch)
         try container.encodeIfPresent(projectId, forKey: .projectId)
         try container.encodeIfPresent(parentAgentID, forKey: .parentAgentID)
+        if capabilities != .managed {
+            try container.encode(capabilities, forKey: .capabilities)
+        }
         try container.encodeIfPresent(sourceItemId, forKey: .sourceItemId)
         try container.encodeIfPresent(parentRelativeOrdinal, forKey: .parentRelativeOrdinal)
         if nextChildOrdinal != 1 {

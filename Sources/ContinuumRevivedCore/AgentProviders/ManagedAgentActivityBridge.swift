@@ -66,6 +66,10 @@ public enum ManagedAgentActivityBridge {
             // tile keeps the detail; the phone gets only that an error occurred.
             return make(agentId, tileId, .error, "error", status, "Runtime error", now,
                         terminalOutcome: .runtimeError)
+        case .childAgentSpawned:
+            // Identity details travel only in the encrypted transcript channel;
+            // the legacy activity projection receives a generic safe milestone.
+            return make(agentId, tileId, .info, "agent.spawned", status, "Subagent started", now)
         case .sessionStateChanged, .contentDelta, .userInputRequested, .userInputResolved,
              .tokenUsageUpdated, .contextWindowUpdated:
             // Status changes ride on the other events' `status` field; content

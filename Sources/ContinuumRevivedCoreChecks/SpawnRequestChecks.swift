@@ -73,8 +73,8 @@ func runSpawnRequestChecks() {
         fputs("FAIL: SpawnRequest: the captured spawn_agent call produced no request at all\n", stderr)
         Foundation.exit(1)
     }
-    expect(request == SpawnRequest(role: capturedRole, prompt: capturedPrompt, isolated: true),
-           "SpawnRequest: the captured call parsed as role \(String(describing: request.role)), isolated \(request.isolated), prompt \(request.prompt.count) chars — expected role \(capturedRole), isolated true, the captured prompt")
+    expect(request.role == capturedRole && request.prompt == capturedPrompt && request.isolated && request.sourceItemID != nil,
+           "SpawnRequest: the captured call must preserve role/prompt/isolation plus the safe source item correlation")
 
     // MARK: 2 · the channel is a side channel
 

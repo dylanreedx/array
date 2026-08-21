@@ -384,6 +384,7 @@ public struct AgentDocumentReducer: Sendable {
         case .image: return block.kind == .image
         case .imageGallery: return block.kind == .imageGallery
         case .fileReferences: return block.kind == .fileReferences
+        case .agentReference: return block.kind == .agentReference
         case .error: return block.kind == .error
         case .notice: return block.kind == .notice
         case .opaque: return block.kind == .unknown || !builtInKinds.contains(block.kind)
@@ -392,7 +393,7 @@ public struct AgentDocumentReducer: Sendable {
 
     private var builtInKinds: Set<AgentBlockKind> {
         [.paragraph, .heading, .list, .listItem, .quote, .thematicBreak, .fencedCode, .toolCall,
-         .commandOutput, .plan, .diff, .approval, .question, .image, .imageGallery, .fileReferences, .error, .notice, .unknown]
+         .commandOutput, .plan, .diff, .approval, .question, .image, .imageGallery, .fileReferences, .agentReference, .error, .notice, .unknown]
     }
 
     private func normalizedNew(_ block: AgentBlock) -> AgentBlock {

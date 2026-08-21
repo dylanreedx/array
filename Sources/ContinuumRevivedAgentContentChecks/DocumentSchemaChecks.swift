@@ -85,6 +85,14 @@ func runDocumentSchemaChecks() {
                 ]))),
                 AgentBlock(id: nodeID("block.error.1"), kind: .error, payload: .error(.init(message: "Runner stopped", code: "runner.exit", isRecoverable: true))),
                 AgentBlock(id: nodeID("block.notice.1"), kind: .notice, payload: .notice(.init(message: [.text("Detached")], status: .interrupted))),
+                AgentBlock(id: nodeID("block.agent.1"), kind: .agentReference, payload: .agentReference(.init(
+                    agentID: UUID(uuidString: "A1000000-0000-4000-8000-000000000001")!,
+                    parentAgentID: UUID(uuidString: "A1000000-0000-4000-8000-000000000002")!,
+                    displayNameAtSpawn: "Stats review",
+                    spawnedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                    sourceItemID: "call-1",
+                    provider: "pi"
+                ))),
                 AgentBlock(id: nodeID("block.unknown.1"), kind: AgentBlockKind(rawValue: "provider.future-card")!, payload: .opaque(.init(debugLabel: "future-card", value: .object(["version": .integer(2), "enabled": .bool(true), "ratio": .number(0.5), "items": .array([.null, .string("value")])]))))
             ]
         ),
@@ -106,9 +114,9 @@ func runDocumentSchemaChecks() {
 
     let builtIns: [AgentBlockKind] = [
         .paragraph, .heading, .list, .listItem, .quote, .thematicBreak, .fencedCode,
-        .toolCall, .commandOutput, .plan, .diff, .approval, .question, .image, .imageGallery, .error, .notice, .unknown
+        .toolCall, .commandOutput, .plan, .diff, .approval, .question, .image, .imageGallery, .agentReference, .error, .notice, .unknown
     ]
-    expect(Set(builtIns.map(\.rawValue)).count == 18, "all 18 built-in semantic block kinds must be distinct")
+    expect(Set(builtIns.map(\.rawValue)).count == 19, "all 19 built-in semantic block kinds must be distinct")
     expect(AgentBlockKind(rawValue: "extension.vendor-card.v2") != nil, "namespaced future block kind must be accepted")
 
     let invalidKinds = ["", "Paragraph", "tool call", "tool..call", "tool-", "_tool", "éclair"]
@@ -125,5 +133,5 @@ func runDocumentSchemaChecks() {
                "AgentBlockKind Codable accepted invalid semantic key \(invalidJSON)")
     }
 
-    print("Document schema checks passed: 4 entry roles, 18 built-in block kinds, 17 typed built-in payloads plus an opaque fallback, 7 inline forms, image/gallery payloads, validated IDs/kinds/ranges, and exact mixed-document JSON round-trip")
+    print("Document schema checks passed: 4 entry roles, 19 built-in block kinds including durable agent references, typed built-in payloads plus an opaque fallback, validated IDs/kinds/ranges, and exact mixed-document JSON round-trip")
 }

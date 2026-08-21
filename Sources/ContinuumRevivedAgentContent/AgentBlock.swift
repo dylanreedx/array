@@ -62,6 +62,7 @@ public struct AgentBlockKind: RawRepresentable, Codable, Equatable, Hashable, Se
     public static let image = Self(rawValue: "image")!
     public static let imageGallery = Self(rawValue: "image-gallery")!
     public static let fileReferences = Self(rawValue: "file-references")!
+    public static let agentReference = Self(rawValue: "agent-reference")!
     public static let error = Self(rawValue: "error")!
     public static let notice = Self(rawValue: "notice")!
     public static let unknown = Self(rawValue: "unknown")!
@@ -265,6 +266,42 @@ public struct AgentNoticePayload: Codable, Equatable, Sendable {
     }
 }
 
+/// A durable, portable reference to an agent that participated in this
+/// conversation. Runtime status and controls are deliberately resolved by the
+/// host from `agentID`; keeping them out of the document prevents every status
+/// tick from rewriting transcript history.
+public struct AgentReferencePayload: Codable, Equatable, Sendable {
+    public enum Relationship: String, Codable, Equatable, Sendable {
+        case child
+    }
+
+    public var agentID: UUID
+    public var parentAgentID: UUID
+    public var relationship: Relationship
+    public var displayNameAtSpawn: String
+    public var spawnedAt: Date
+    public var sourceItemID: String?
+    public var provider: String
+
+    public init(
+        agentID: UUID,
+        parentAgentID: UUID,
+        relationship: Relationship = .child,
+        displayNameAtSpawn: String,
+        spawnedAt: Date,
+        sourceItemID: String? = nil,
+        provider: String
+    ) {
+        self.agentID = agentID
+        self.parentAgentID = parentAgentID
+        self.relationship = relationship
+        self.displayNameAtSpawn = displayNameAtSpawn
+        self.spawnedAt = spawnedAt
+        self.sourceItemID = sourceItemID
+        self.provider = provider
+    }
+}
+
 /// Typed built-in content. Container block structure lives in `children`, so
 /// list items and quotes do not encode nested blocks into strings.
 public enum AgentBlockPayload: Codable, Equatable, Sendable {
@@ -284,6 +321,7 @@ public enum AgentBlockPayload: Codable, Equatable, Sendable {
     case image(AgentImagePayload)
     case imageGallery(AgentImageGalleryPayload)
     case fileReferences(AgentFileReferencePayload)
+    case agentReference(AgentReferencePayload)
     case error(AgentErrorPayload)
     case notice(AgentNoticePayload)
     case opaque(AgentOpaquePayload)

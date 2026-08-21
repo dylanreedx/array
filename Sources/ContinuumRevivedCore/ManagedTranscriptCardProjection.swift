@@ -187,6 +187,7 @@ public enum ManagedTranscriptCardProjection {
         case .approval(let payload), .question(let payload): own = plainText(payload.prompt)
         // Legacy structured cards displayed their title but no body.
         case .toolCall, .plan, .diff, .error, .image, .imageGallery, .fileReferences: own = ""
+        case .agentReference(let payload): own = payload.displayNameAtSpawn
         case .thematicBreak: own = "\n"
         case .list, .listItem, .quote, .opaque: own = ""
         }

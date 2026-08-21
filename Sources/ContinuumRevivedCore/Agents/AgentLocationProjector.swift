@@ -148,7 +148,7 @@ public struct AgentLocationProjector: Sendable {
         case .runtimeError:
             setLifecycle(.failed, at: now)
 
-        case .tokenUsageUpdated, .contextWindowUpdated:
+        case .tokenUsageUpdated, .contextWindowUpdated, .childAgentSpawned:
             break
         }
     }

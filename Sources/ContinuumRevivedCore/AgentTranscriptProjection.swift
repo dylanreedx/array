@@ -37,6 +37,7 @@ public struct AgentTranscriptProjection: Sendable {
     private var rawMarkupSourcesByEntryID: [AgentNodeID: String] = [:]
     private var requestEntries: [String: AgentNodeID] = [:]
     private var requestBlocks: [String: AgentNodeID] = [:]
+    private var referencedAgentIDs = Set<UUID>()
     private var localSequence = 0
     private var runtimeErrorSequence = 0
     private let markupParser = MarkdownAgentMarkupParser()
@@ -157,6 +158,33 @@ public struct AgentTranscriptProjection: Sendable {
                 result.append(.completeBlock(id: blockID, status: semanticStatus(status)))
             }
             result.append(.finishEntry(id: entryID))
+            return result
+
+        case let .childAgentSpawned(tid, childAgentID, parentAgentID, displayName, sourceItemID, provider, spawnedAt) where tid == threadId:
+            guard referencedAgentIDs.insert(childAgentID).inserted else { return [] }
+            var result = closeStreamingRun()
+            let entryID = makeID(scope: "agent-reference", providerID: childAgentID.uuidString)
+            let blockID = childID(of: entryID, key: "content")
+            result += [
+                .beginEntry(
+                    id: entryID,
+                    role: .system,
+                    provenance: .providerItem(provider: provider, itemID: sourceItemID)
+                ),
+                .upsertStructured(entryID: entryID, block: AgentBlock(
+                    id: blockID,
+                    kind: .agentReference,
+                    payload: .agentReference(.init(
+                        agentID: childAgentID,
+                        parentAgentID: parentAgentID,
+                        displayNameAtSpawn: displayName,
+                        spawnedAt: spawnedAt,
+                        sourceItemID: sourceItemID,
+                        provider: provider
+                    ))
+                )),
+                .finishEntry(id: entryID)
+            ]
             return result
 
         case .turnCompleted(let tid, let turnID, _, let errorMessage) where tid == threadId:

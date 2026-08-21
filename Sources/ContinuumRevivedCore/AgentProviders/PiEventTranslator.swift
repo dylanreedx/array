@@ -107,7 +107,7 @@ public struct PiEventTranslator {
             // by construction, so this is the only line worth reading.
             if let args = object["args"] as? [String: Any] {
                 if let onSpawnRequest,
-                   let request = SpawnRequest.parse(toolName: toolName, args: args) {
+                   let request = SpawnRequest.parse(toolName: toolName, args: args, sourceItemID: toolCallId) {
                     onSpawnRequest(request)
                 }
                 if let onRuntimeObservation,

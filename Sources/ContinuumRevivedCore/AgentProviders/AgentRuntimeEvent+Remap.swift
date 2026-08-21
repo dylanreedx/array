@@ -36,6 +36,8 @@ extension AgentRuntimeEvent {
             return .tokenUsageUpdated(threadId: threadId, snapshot: snapshot)
         case let .contextWindowUpdated(_, snapshot):
             return .contextWindowUpdated(threadId: threadId, snapshot: snapshot)
+        case let .childAgentSpawned(_, childAgentID, parentAgentID, displayName, sourceItemID, provider, spawnedAt):
+            return .childAgentSpawned(threadId: threadId, childAgentID: childAgentID, parentAgentID: parentAgentID, displayName: displayName, sourceItemID: sourceItemID, provider: provider, spawnedAt: spawnedAt)
         case let .runtimeError(_, message):
             return .runtimeError(threadId: threadId, message: message)
         }

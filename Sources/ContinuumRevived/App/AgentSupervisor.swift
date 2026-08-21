@@ -2215,7 +2215,7 @@ final class AgentSupervisor {
             return refuseSpawn(.roleUnresolved, for: parentId)
         }
         do {
-            return try spawn(
+            let childID = try spawn(
                 role: request.role,
                 prompt: request.prompt,
                 cwd: projectRoot,
@@ -2226,6 +2226,17 @@ final class AgentSupervisor {
                 parentAgentID: parentId,
                 isolated: request.isolated
             )
+            let childName = records[childID]?.humanDisplayName ?? "Subagent"
+            deliver(.childAgentSpawned(
+                threadId: Self.threadId(for: parentId),
+                childAgentID: childID.rawValue,
+                parentAgentID: parentId.rawValue,
+                displayName: childName,
+                sourceItemID: request.sourceItemID,
+                provider: parentHarness.rawValue,
+                spawnedAt: Date()
+            ), to: parentId)
+            return childID
         } catch {
             // The isolated spawn refuses to fall back to the shared checkout (P2C.2),
             // so a failed worktree is a failed spawn — reported, not downgraded.
@@ -3438,7 +3449,8 @@ final class AgentSupervisor {
             return true
         case .sessionStateChanged, .turnCompleted, .itemStarted, .itemCompleted,
              .contentDelta, .requestOpened, .requestResolved, .userInputRequested,
-             .userInputResolved, .tokenUsageUpdated, .contextWindowUpdated, .runtimeError:
+             .userInputResolved, .tokenUsageUpdated, .contextWindowUpdated,
+             .childAgentSpawned, .runtimeError:
             return false
         }
     }
@@ -3460,6 +3472,8 @@ final class AgentSupervisor {
             return true
         case .turnCompleted, .itemStarted, .itemCompleted, .contentDelta,
              .requestResolved, .userInputResolved, .tokenUsageUpdated, .contextWindowUpdated, .runtimeError:
+            return false
+        case .childAgentSpawned:
             return false
         }
     }
@@ -3976,7 +3990,8 @@ final class AgentSupervisor {
                 }
                 records[id] = record
             }
-        case .itemStarted, .itemCompleted, .contentDelta, .tokenUsageUpdated, .contextWindowUpdated:
+        case .itemStarted, .itemCompleted, .contentDelta, .tokenUsageUpdated,
+             .contextWindowUpdated, .childAgentSpawned:
             break
         }
         // The invariant this file owns, asserted in `--agent-supervisor-check`: a
@@ -3989,7 +4004,7 @@ final class AgentSupervisor {
 
     nonisolated static func isPersistWorthy(_ event: AgentRuntimeEvent) -> Bool {
         switch event {
-        case .sessionStateChanged, .turnStarted, .turnCompleted, .runtimeError:
+        case .sessionStateChanged, .turnStarted, .turnCompleted, .childAgentSpawned, .runtimeError:
             return true
         case .itemStarted, .itemCompleted, .contentDelta, .requestOpened,
              .requestResolved, .userInputRequested, .userInputResolved, .tokenUsageUpdated,
@@ -12260,6 +12275,8 @@ private func eventLabel(_ event: AgentRuntimeEvent) -> String {
     case let .userInputResolved(threadId, requestId): return "userInputResolved:\(requestId)@\(threadId)"
     case let .tokenUsageUpdated(threadId, snapshot): return "tokenUsage:\(snapshot.inputTokens)/\(snapshot.outputTokens)@\(threadId)"
     case let .contextWindowUpdated(threadId, snapshot): return "contextWindow:\(String(describing: snapshot.occupancyPercentage))@\(threadId)"
+    case let .childAgentSpawned(threadId, childAgentID, _, _, sourceItemID, _, _):
+        return "childAgentSpawned:\(childAgentID.uuidString)@\(sourceItemID):\(threadId)"
     case let .runtimeError(threadId, message): return "runtimeError:\(message)@\(threadId ?? "-")"
     }
 }

@@ -22,7 +22,25 @@ func runAgentRecordChecks() {
     runAgentRecordLifecycleCheck()
     runAgentRecordAttentionCheck()
     runAgentRecordTerminalSequenceCheck()
-    print("AgentRecord checks: exact Date round-trip, decode-forward, headless view binding, I5 taint witness, lifecycle persistence, attention, and terminal sequence acknowledgement passed")
+    runAgentRecordCapabilityCheck()
+    print("AgentRecord checks: exact Date round-trip, decode-forward, headless view binding, I5 taint witness, lifecycle persistence, attention, terminal sequence acknowledgement, and provider capability upgrades passed")
+}
+
+private func runAgentRecordCapabilityCheck() {
+    var observed = makeAgentRecordFixture()
+    observed.capabilities = .observedReadOnly
+    let encoder = JSONCodec.makeEncoder()
+    let decoder = JSONCodec.makeDecoder()
+    guard let encoded = try? encoder.encode(observed),
+          var decoded = try? decoder.decode(AgentRecord.self, from: encoded) else {
+        expect(false, "provider-observed capabilities must round-trip")
+        return
+    }
+    expect(decoded.id == observed.id && decoded.capabilities == .observedReadOnly,
+           "read-only provider children retain identity and honest controls")
+    decoded.capabilities = .managed
+    expect(decoded.id == observed.id && decoded.capabilities.canStop,
+           "a capability upgrade updates the same AgentRecord instead of duplicating it")
 }
 
 private func runAgentRecordTerminalSequenceCheck() {

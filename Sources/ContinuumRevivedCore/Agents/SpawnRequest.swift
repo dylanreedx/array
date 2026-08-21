@@ -27,11 +27,15 @@ public struct SpawnRequest: Equatable, Sendable {
     public let prompt: String
     /// Whether the child gets its own git worktree (P2C.2's isolated spawn).
     public let isolated: Bool
+    /// Opaque provider item identity used only to position the resulting child
+    /// milestone beside the tool call that created it.
+    public let sourceItemID: String?
 
-    public init(role: String?, prompt: String, isolated: Bool) {
+    public init(role: String?, prompt: String, isolated: Bool, sourceItemID: String? = nil) {
         self.role = role
         self.prompt = prompt
         self.isolated = isolated
+        self.sourceItemID = sourceItemID
     }
 
     /// Parses the `args` object of an observed tool call, as JSON text.
@@ -51,7 +55,7 @@ public struct SpawnRequest: Equatable, Sendable {
     /// The already-deserialized form, for `PiEventTranslator` — it has parsed the
     /// stream line and re-encoding the args just to re-parse them would put a
     /// second `JSONSerialization` pass in a per-token path.
-    static func parse(toolName: String, args: [String: Any]) -> SpawnRequest? {
+    static func parse(toolName: String, args: [String: Any], sourceItemID: String? = nil) -> SpawnRequest? {
         guard toolName == SpawnRequest.toolName else { return nil }
         guard let prompt = args["prompt"] as? String,
               !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -67,6 +71,6 @@ public struct SpawnRequest: Equatable, Sendable {
         // something else, and guessing which way to read it would silently put an
         // agent in the shared checkout the flag exists to keep it out of.
         let isolated = (args["isolated"] as? Bool) ?? false
-        return SpawnRequest(role: role, prompt: prompt, isolated: isolated)
+        return SpawnRequest(role: role, prompt: prompt, isolated: isolated, sourceItemID: sourceItemID)
     }
 }
