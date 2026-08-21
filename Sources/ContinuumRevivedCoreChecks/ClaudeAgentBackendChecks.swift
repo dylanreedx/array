@@ -221,7 +221,38 @@ private func runClaudeRunnerArgvChecks() {
     expect(!ClaudeCLIBackend.isUnknownSessionFailure(stderr: "Invalid API key"),
            "ClaudeCLIBackend: unrelated failures must not trigger the session retry")
 
-    print("ClaudeAgentRunner argv checks passed: both session modes pinned, resolution mirrors pi, failure predicates match the captured stderr")
+    // THE ORDERING, and why it is a check rather than a comment: an agent with no
+    // recorded turn used to spawn a whole `claude --resume` process purely to be
+    // told the conversation did not exist, in front of the user's first prompt. A
+    // regression here is invisible — the turn still works, it just wastes a CLI
+    // launch — so the decision is pinned instead of observed.
+    let fresh = ClaudeCLIBackend.sessionModeOrder(conversationMayExist: false)
+    expect(fresh == (.start, .resume),
+           "ClaudeCLIBackend: an agent with no conversation must CREATE first, got \(fresh)")
+    let established = ClaudeCLIBackend.sessionModeOrder(conversationMayExist: true)
+    expect(established == (.resume, .start),
+           "ClaudeCLIBackend: an established conversation must RESUME first, got \(established)")
+
+    // Self-healing in both directions: each mode retries on exactly the failure
+    // that means the belief was wrong, and on nothing else.
+    expect(ClaudeCLIBackend.retryIsWarranted(
+        after: .resume, stderr: "No conversation found with session ID: \(claudeSID)\n"),
+        "ClaudeCLIBackend: a resume of a missing conversation must retry as create")
+    expect(ClaudeCLIBackend.retryIsWarranted(
+        after: .start, stderr: "Error: Session ID \(claudeSID) is already in use.\n"),
+        "ClaudeCLIBackend: a create over an existing conversation must retry as resume")
+    expect(!ClaudeCLIBackend.retryIsWarranted(
+        after: .start, stderr: "No conversation found with session ID: \(claudeSID)\n"),
+        "ClaudeCLIBackend: a create must not retry on the resume failure — that would spawn a second doomed process")
+    expect(!ClaudeCLIBackend.retryIsWarranted(
+        after: .resume, stderr: "Error: Session ID \(claudeSID) is already in use.\n"),
+        "ClaudeCLIBackend: a resume must not retry on the create failure")
+    for mode in [ClaudeSessionMode.resume, .start] {
+        expect(!ClaudeCLIBackend.retryIsWarranted(after: mode, stderr: "Invalid API key"),
+               "ClaudeCLIBackend: \(mode) must treat an auth failure as terminal, not retry it")
+    }
+
+    print("ClaudeAgentRunner argv checks passed: both session modes pinned, resolution mirrors pi, failure predicates match the captured stderr, fresh agents create before resuming and each direction retries only its own failure")
 }
 
 private func runClaudeBackendPolicyChecks() {

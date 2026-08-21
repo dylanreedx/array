@@ -13,12 +13,19 @@ import Foundation
 //
 // Session continuity mirrors the pi design: the id is DERIVED, not stored.
 // Claude requires a literal UUID, so the agent record's own UUID is the
-// session id (`ClaudeAgentRunner.sessionId(for:)` in AgentSupervisor). Every
-// run tries `--resume <uuid>` first; the very first turn of an agent fails
-// that instantly ("No conversation found", no API call, verified live on
-// claude 2.1.226) and is retried once with `--session-id <uuid>`, which
-// creates the conversation. Stateless and self-healing in both directions —
-// no record field, no session file path coupling.
+// session id (`ClaudeAgentRunner.sessionId(for:)` in AgentSupervisor). A run
+// tries the mode its config believes in and retries the other on the matching
+// failure ("No conversation found" / "is already in use"), so it stays
+// self-healing in both directions with no session file path coupling. The belief
+// is an ordering hint: an agent with no recorded turn starts with
+// `--session-id <uuid>`, everything else resumes. A wrong guess costs one extra
+// CLI launch and still succeeds.
+/// Whether a claude run continues an existing conversation or creates it.
+public enum ClaudeSessionMode: Sendable, Equatable {
+    case resume
+    case start
+}
+
 public enum ClaudeCLIBackend {
     /// Which runtime a managed agent's model routes to. Pure so the matrix can
     /// pin the policy. Anthropic models prefer the claude CLI when the machine
@@ -82,6 +89,31 @@ public enum ClaudeCLIBackend {
         stripANSI(stderr).contains("is already in use")
     }
 
+    /// Which session mode to try first, and which is then the retry.
+    ///
+    /// Pure so the ordering has an offline witness: the alternative is a witness
+    /// that must spawn a real `claude`, which is exactly the kind of gate that
+    /// never runs in the matrix.
+    public static func sessionModeOrder(
+        conversationMayExist: Bool
+    ) -> (first: ClaudeSessionMode, retry: ClaudeSessionMode) {
+        conversationMayExist ? (.resume, .start) : (.start, .resume)
+    }
+
+    /// Whether a failed attempt in `mode` should be retried in the other mode.
+    ///
+    /// Each direction has exactly one retryable failure, and it is the one that
+    /// means "your belief about the conversation was wrong": a resume that found
+    /// no conversation, or a create that found one already there. Anything else is
+    /// terminal — retrying an auth or network failure in the other mode would only
+    /// spawn a second doomed process.
+    public static func retryIsWarranted(after mode: ClaudeSessionMode, stderr: String) -> Bool {
+        switch mode {
+        case .resume: return isUnknownSessionFailure(stderr: stderr)
+        case .start: return isSessionInUseFailure(stderr: stderr)
+        }
+    }
+
     static func stripANSI(_ text: String) -> String {
         text.replacingOccurrences(
             of: "\u{1B}\\[[0-9;]*m", with: "", options: .regularExpression)
@@ -103,27 +135,39 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         public var sessionId: String
         /// Extra args before the prompt.
         public var extraArgs: [String]
+        /// Whether the conversation behind `sessionId` is believed to exist.
+        ///
+        /// Only an ordering hint — both directions still self-heal — but it earns a
+        /// field because getting it wrong costs a whole wasted CLI launch at the
+        /// most visible moment there is. An agent that has never had a turn cannot
+        /// have a conversation, so resuming one is a guaranteed-failing process
+        /// spawn in front of the user's first prompt.
+        ///
+        /// Defaults to true, which is the historical resume-first behavior.
+        public var conversationMayExist: Bool
 
         public init(
             model: String,
             effort: String? = nil,
             cwd: URL,
             sessionId: String,
-            extraArgs: [String] = []
+            extraArgs: [String] = [],
+            conversationMayExist: Bool = true
         ) {
             self.model = model
             self.effort = effort
             self.cwd = cwd
             self.sessionId = sessionId
             self.extraArgs = extraArgs
+            self.conversationMayExist = conversationMayExist
         }
     }
 
     /// Whether this run continues the conversation or creates it.
-    public enum SessionMode: Sendable, Equatable {
-        case resume
-        case start
-    }
+    ///
+    /// Platform-neutral so the ordering policy can live beside the other pure
+    /// claude policy in `ClaudeCLIBackend` and be witnessed without a process.
+    public typealias SessionMode = ClaudeSessionMode
 
     /// The claude args after the executable. `--verbose` is required by the
     /// CLI for stream-json in print mode. `--dangerously-skip-permissions`
@@ -225,18 +269,30 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
 
     /// Runs claude with `prompt`, streaming events to `onEvent` until it
     /// exits. Blocking; call off the main thread. `onEvent` is invoked on the
-    /// runner's serial queue. Resume-first: the failed first-ever resume
-    /// streams nothing (the translator gates on init, and the failure emits
-    /// none) and is retried once as `--session-id`.
+    /// runner's serial queue.
+    ///
+    /// Two orderings, one mechanism. `config.conversationMayExist` picks which mode
+    /// is tried first and the other becomes the retry, so the pair self-heals in
+    /// BOTH directions: a resume of a conversation that does not exist retries as
+    /// `--session-id`, and a `--session-id` for one that already exists retries as
+    /// `--resume`. A failing attempt streams nothing (the translator gates on init,
+    /// and the failure emits no events), so a retry cannot duplicate content.
+    ///
+    /// Why the hint matters: this was resume-first unconditionally, so the first
+    /// turn of every claude agent spawned a whole `claude --resume <uuid>` process,
+    /// waited for it to fail, and only then spawned the real one — a guaranteed
+    /// wasted CLI launch in front of the user's very first prompt.
     public func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
-        let first = try runOnce(mode: .resume, prompt: prompt, onEvent: onEvent)
+        let order = ClaudeCLIBackend.sessionModeOrder(
+            conversationMayExist: config.conversationMayExist)
+        let first = try runOnce(mode: order.first, prompt: prompt, onEvent: onEvent)
         if first.exitCode == 0 { return }
-        guard ClaudeCLIBackend.isUnknownSessionFailure(stderr: first.stderr) else {
+        guard ClaudeCLIBackend.retryIsWarranted(after: order.first, stderr: first.stderr) else {
             throw RunError.claudeFailed(exitCode: first.exitCode, stderr: first.stderr)
         }
         let shouldRetry: Bool = queue.sync { !stopRequested }
         guard shouldRetry else { return }
-        let second = try runOnce(mode: .start, prompt: prompt, onEvent: onEvent)
+        let second = try runOnce(mode: order.retry, prompt: prompt, onEvent: onEvent)
         if second.exitCode != 0 {
             throw RunError.claudeFailed(exitCode: second.exitCode, stderr: second.stderr)
         }

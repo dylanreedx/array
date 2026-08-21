@@ -1076,7 +1076,12 @@ final class AgentSupervisor {
             model: ClaudeCLIBackend.modelArgument(forCatalogId: record.model),
             effort: ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
             cwd: URL(fileURLWithPath: record.cwd, isDirectory: true),
-            sessionId: claudeSessionId(for: record.id)
+            sessionId: claudeSessionId(for: record.id),
+            // An agent that has never had a turn cannot have a conversation to
+            // resume, so resume-first would spawn a CLI process purely to be told
+            // so. `latestTurnAt` is stamped on `.turnStarted` and persisted, which
+            // makes it the durable answer across relaunches.
+            conversationMayExist: record.latestTurnAt != nil
         )
     }
 
