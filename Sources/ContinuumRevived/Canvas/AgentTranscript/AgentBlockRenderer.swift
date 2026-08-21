@@ -20,6 +20,7 @@ enum AgentRenderAction {
     case copyImage(blockID: AgentNodeID, attachmentID: AgentImageAttachmentID)
     case saveImageAs(blockID: AgentNodeID, attachmentID: AgentImageAttachmentID)
     case revealImage(blockID: AgentNodeID, attachmentID: AgentImageAttachmentID)
+    case revealAgent(blockID: AgentNodeID, agentID: UUID, parentAgentID: UUID)
 }
 
 struct AgentRenderActions {

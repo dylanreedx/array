@@ -199,6 +199,10 @@ final class ManagedAgentTileNSView: TileNSView {
     /// binds it with this tile's id and agent id so resolution happens against the
     /// responding agent's own checkout.
     var onOpenLocalFile: ((String) -> Void)?
+    /// Resolves a durable transcript agent reference through the app-owned reveal
+    /// path. A tile never creates another agent; it asks the app to reveal or
+    /// attach the existing identity.
+    var onRevealAgent: ((_ agentID: AgentID, _ parentAgentID: AgentID) -> Void)?
     /// Fired after this tile ingests an event, so the app can mirror the stream
     /// onto the syncable activity timeline (88.4c) without owning the subscription.
     var onIngestedEvent: ((AgentRuntimeEvent) -> Void)?
@@ -994,6 +998,29 @@ final class ManagedAgentTileNSView: TileNSView {
         scheduleStreamingMarkupParseTimerIfNeeded()
     }
 
+    private func beginOptimisticSubmission(_ prompt: AgentPrompt) {
+        guard pendingOptimisticSubmissionID == nil,
+              let id = AgentNodeID(rawValue: "local-prompt-\(UUID().uuidString)") else { return }
+        pendingOptimisticSubmissionID = id
+        cancelStreamingMarkupParseTimer()
+        model.appendUserPrompt(id: id, prompt: prompt)
+        synchronizeV2Transcript(final: true)
+        transcriptCollectionFixture?.setThinkingStatusText("Sending")
+        transcriptCollectionFixture?.setThinkingIndicatorVisible(true)
+    }
+
+    private func finishOptimisticSubmission(accepted: Bool) {
+        guard pendingOptimisticSubmissionID != nil else { return }
+        pendingOptimisticSubmissionID = nil
+        if accepted {
+            transcriptCollectionFixture?.setThinkingStatusText("Starting agent")
+            transcriptCollectionFixture?.setThinkingIndicatorVisible(true)
+        } else {
+            transcriptCollectionFixture?.setThinkingIndicatorVisible(false)
+            showSendRefusedNotice("Message was not sent. Your draft was restored; retry when ready.")
+        }
+    }
+
     func ingest(_ event: AgentRuntimeEvent, originalEvent: AgentRuntimeEvent? = nil) {
         switch event {
         case let .turnCompleted(_, _, outcome, _):
@@ -1160,7 +1187,7 @@ final class ManagedAgentTileNSView: TileNSView {
             compactStatusTurn = .completed(outcome: .failed, phaseStartedAt: nil)
             compactStatusSession = .init(state: .error, startedAt: nil)
             compactStatusInteraction = .clear
-        case .itemStarted, .itemCompleted, .tokenUsageUpdated:
+        case .itemStarted, .itemCompleted, .tokenUsageUpdated, .childAgentSpawned:
             break
         case let .contextWindowUpdated(_, snapshot):
             compactContextWindow = withDerivedOccupancy(snapshot)
@@ -1932,6 +1959,9 @@ final class ManagedAgentTileNSView: TileNSView {
             // app owns resolution: only it knows this tile's agent, and only that
             // agent's live cwd may resolve a relative path.
             onOpenLocalFile?(destination)
+            return
+        case let .revealAgent(_, agentID, parentAgentID):
+            onRevealAgent?(AgentID(rawValue: agentID), AgentID(rawValue: parentAgentID))
             return
         case .submitResponse:
             break

@@ -54,6 +54,8 @@ struct AgentTranscriptCopyController {
             return gallery.images.map { $0.attachment.displayName ?? "Image" }.joined(separator: "\n")
         case let .fileReferences(references):
             return references.files.map(\.displayName).joined(separator: "\n")
+        case let .agentReference(reference):
+            return reference.displayNameAtSpawn
         case .list, .listItem, .quote, .thematicBreak, .opaque: return block.children.map(plainText(for:)).joined(separator: "\n")
         }
     }

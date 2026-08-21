@@ -11131,6 +11131,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         view.onOpenLocalFile = { [weak self] destination in
             self?.openAgentLocalFile(destination, agentID: agentId, sourceTileId: tileId)
         }
+        view.onRevealAgent = { [weak self] childID, _ in
+            _ = self?.revealAgentFromInbox(childID.rawValue)
+        }
         // Replays the agent's history, then follows the tail; re-wiring the same
         // tile to the same agent is a no-op inside `attach`, so none of the three
         // call sites can double-ingest. Project NAME is supplied by the app's
