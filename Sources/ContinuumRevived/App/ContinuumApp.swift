@@ -2204,6 +2204,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--jelly-auto-layout-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try CanvasNSView.runJellyAutoLayoutSelfCheck()
+                print("ContinuumRevivedJellyAutoLayoutChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--multi-zone-render-check") {
             do {
                 _ = NSApplication.shared
@@ -3761,6 +3773,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             canvasView.onZoneMoved = { [weak self] placement in
                 self?.persistMovedZone(placement)
+            }
+            canvasView.onLayoutCommitted = { [weak self] transaction in
+                self?.persistLayoutTransaction(transaction)
             }
             canvasView.onZoneCloseRequested = { [weak self] zoneId in
                 self?.presentZoneCloseConfirm(zoneId)
@@ -11689,6 +11704,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let canvasView, let viewport = canvasView.fitAllToViewport() else { return false }
             canvasView.setViewport(viewport)
             return true
+        case .tidyCanvas:
+            canvasView?.tidyAutoLayout()
+            return canvasView != nil
         case .focusCurrentTile:
             // Same helper as hold-⌥ Return; `.tileSpawned` only because the
             // palette is the modal being dismissed here.
@@ -12081,6 +12099,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             workspaceRuntime?.replaceDocument(document, for: workspaceId)
         } catch {
             fputs("persistMovedZone failed: \(error)\n", stderr)
+        }
+    }
+
+    /// One solver gesture may move an entire contact chain. Persist all zone
+    /// placements and workspace-owned tile frames from one document snapshot;
+    /// project-canvas tiles are flushed by `canvasDidChange` immediately after.
+    private func persistLayoutTransaction(_ transaction: CanvasLayoutTransaction) {
+        guard let registryStore else { return }
+        do {
+            let workspaceId: UUID
+            if let id = workspaceRuntime?.workspaceId {
+                workspaceId = id
+            } else if let id = (try? registryStore.loadOrEmpty())?.lastActiveWorkspaceId {
+                workspaceId = id
+            } else {
+                fputs("persistLayoutTransaction: no active workspace\n", stderr)
+                return
+            }
+            let appSupport = registryStore.registryFile.deletingLastPathComponent()
+            let store = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
+            var document = try store.load()
+            for (zoneId, placement) in transaction.zonePlacements {
+                if let index = document.zones.firstIndex(where: { $0.zoneId == zoneId }) {
+                    document.zones[index] = placement
+                }
+            }
+            for (tileId, worldFrame) in transaction.tileFrames {
+                guard let index = document.ambientTiles.firstIndex(where: { $0.id == tileId }) else { continue }
+                if let zoneId = document.ambientTiles[index].zoneId,
+                   let zone = document.zones.first(where: { $0.zoneId == zoneId }) {
+                    document.ambientTiles[index].frame = CanvasEngine.worldToZoneLocal(worldFrame, zoneOrigin: zone.origin)
+                } else {
+                    document.ambientTiles[index].frame = worldFrame
+                }
+            }
+            let saveController = WorkspaceDocumentSaveController(store: store)
+            saveController.scheduleZoneLayoutSave(document)
+            try saveController.flushPendingSave()
+            workspaceRuntime?.replaceDocument(document, for: workspaceId)
+        } catch {
+            fputs("persistLayoutTransaction failed: \(error)\n", stderr)
         }
     }
 

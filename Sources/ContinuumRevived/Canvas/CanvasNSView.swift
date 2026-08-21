@@ -134,6 +134,18 @@ final class CanvasNSView: NSView, TokenThemed {
     /// every mutation goes through `setTileZone(_:zoneId:)`, which stamps the
     /// register in `canvasState` so membership persists with the canvas.
     private var tileZoneMembership: [UUID: UUID] = [:]
+    /// Preference source is injectable for deterministic AppKit checks.
+    var autoLayoutDefaults: UserDefaults = .standard
+    private var lastAutoLayoutEnabled = CanvasAutoLayoutConfig.enabled()
+    private var autoLayoutGestureBaseline: CanvasAutoLayoutEngine.Scene?
+    private var autoLayoutDeferredUntilEdit = false
+    private let autoLayoutUndoToast = InboxUndoToast()
+    private var autoLayoutUndoTimer: Timer?
+    private var autoLayoutUndoScene: CanvasAutoLayoutEngine.Scene?
+    private var autoLayoutBlockedZoneIds: Set<UUID> = []
+    var autoLayoutReduceMotionProvider: () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+    var qaAutoLayoutUndoText: String { autoLayoutUndoToast.qaText }
+    @discardableResult func qaClickAutoLayoutUndo() -> Bool { autoLayoutUndoToast.clickUndoForQA() }
 
     /// Production membership write: the single sink every canvas membership
     /// change flows through. Writes ONLY the tile's `zoneId` register (plus the
@@ -215,6 +227,194 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Fired after a zone is renamed (inline edit committed) so the caller can
     /// persist the new name. Carries (zoneId, newName).
     var onZoneRenamed: ((UUID, String) -> Void)?
+
+    /// Atomic geometry handoff used when one manipulation displaces multiple
+    /// tiles/zones. Preview frames never reach this callback.
+    var onLayoutCommitted: ((CanvasLayoutTransaction) -> Void)?
+
+    private func autoLayoutScene() -> CanvasAutoLayoutEngine.Scene {
+        var layoutTiles = canvasState.tiles.map {
+            CanvasAutoLayoutEngine.LayoutTile(id: $0.id, frame: $0.frame, zoneId: tileZoneMembership[$0.id])
+        }
+        let known = Set(layoutTiles.map(\.id))
+        for layer in zoneLayers {
+            for tile in layer.tiles where !known.contains(tile.id) {
+                layoutTiles.append(.init(
+                    id: tile.id,
+                    frame: CanvasEngine.worldFrame(tile: tile, in: layer.placement),
+                    zoneId: layer.placement.zoneId
+                ))
+            }
+        }
+        var placements = liveZones
+        let liveIds = Set(placements.map(\.zoneId))
+        placements += zoneLayers.map(\.placement).filter { !liveIds.contains($0.zoneId) }
+        return .init(tiles: layoutTiles, zones: placements, globalEnabled: CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults))
+    }
+
+    func beginAutoLayoutGesture() {
+        guard CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) else { return }
+        if autoLayoutDeferredUntilEdit { autoLayoutDeferredUntilEdit = false }
+        if autoLayoutGestureBaseline == nil { autoLayoutGestureBaseline = autoLayoutScene() }
+    }
+
+    var isAutoLayoutEnabled: Bool { CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) }
+
+    func commitGeometryGesture() {
+        _ = finishAutoLayoutGesture()
+        delegate?.canvasDidChange(self)
+    }
+
+    private func applyAutoLayout(_ mutation: CanvasAutoLayoutEngine.Mutation, baseline: CanvasAutoLayoutEngine.Scene? = nil) {
+        guard CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) else { return }
+        let transaction = CanvasAutoLayoutEngine.solve(
+            scene: baseline ?? autoLayoutScene(),
+            mutation: mutation,
+            gap: TileGapResolver.resolvedGap(defaults: autoLayoutDefaults),
+            zonePadding: ZoneBoundsConfig.padding(defaults: autoLayoutDefaults),
+            headerHeight: Double(ZoneChromeNSView.headerHeight)
+        )
+        autoLayoutBlockedZoneIds = transaction.blockedZoneIds
+        let activeTileId: UUID?
+        let activeZoneId: UUID?
+        switch mutation {
+        case let .tile(id, _): activeTileId = id; activeZoneId = nil
+        case let .zone(id, _): activeTileId = nil; activeZoneId = id
+        case .tidy: activeTileId = nil; activeZoneId = nil
+        }
+        applyLayoutTransaction(transaction, activeTileId: activeTileId, activeZoneId: activeZoneId)
+    }
+
+    private func applyLayoutTransaction(
+        _ transaction: CanvasLayoutTransaction,
+        activeTileId: UUID? = nil,
+        activeZoneId: UUID? = nil
+    ) {
+        let oldTileOrigins = Dictionary(uniqueKeysWithValues: transaction.tileFrames.keys.compactMap { id in
+            tileView(for: id).map { (id, $0.frame.origin) }
+        })
+        let oldZoneOrigins = Dictionary(uniqueKeysWithValues: transaction.zonePlacements.keys.compactMap { id in
+            zoneChromeViews[id].map { (id, $0.frame.origin) }
+        })
+        for (id, frame) in transaction.tileFrames {
+            if let index = canvasState.tiles.firstIndex(where: { $0.id == id }) {
+                canvasState.tiles[index].frame = frame
+            }
+            if let layer = zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == id }) }),
+               let index = layer.tiles.firstIndex(where: { $0.id == id }) {
+                layer.tiles[index].frame = CanvasEngine.worldToZoneLocal(frame, zoneOrigin: layer.placement.origin)
+            }
+        }
+        for (id, placement) in transaction.zonePlacements {
+            if let index = liveZones.firstIndex(where: { $0.zoneId == id }) { liveZones[index] = placement }
+            if let layer = zoneLayers.first(where: { $0.placement.zoneId == id }) { layer.placement = placement }
+            if var model = zoneDisplayByZoneId[id] {
+                model.placement = placement
+                zoneDisplayByZoneId[id] = model
+            }
+        }
+        layoutAllTiles()
+
+        guard !autoLayoutReduceMotionProvider() else { return }
+        let activeZoneMembers: Set<UUID> = activeZoneId.map { zoneId in
+            Set(autoLayoutScene().tiles.lazy.filter { $0.zoneId == zoneId }.map(\.id))
+        } ?? []
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.14
+            context.allowsImplicitAnimation = true
+            for (id, oldOrigin) in oldTileOrigins where id != activeTileId && !activeZoneMembers.contains(id) {
+                guard let view = tileView(for: id), view.frame.origin != oldOrigin else { continue }
+                let target = view.frame.origin
+                view.setFrameOrigin(oldOrigin)
+                view.animator().setFrameOrigin(target)
+            }
+            for (id, oldOrigin) in oldZoneOrigins where id != activeZoneId {
+                guard let view = zoneChromeViews[id], view.frame.origin != oldOrigin else { continue }
+                let target = view.frame.origin
+                view.setFrameOrigin(oldOrigin)
+                view.animator().setFrameOrigin(target)
+            }
+        }
+    }
+
+    @discardableResult
+    func finishAutoLayoutGesture() -> CanvasLayoutTransaction? {
+        guard let baseline = autoLayoutGestureBaseline else { return nil }
+        autoLayoutGestureBaseline = nil
+        let current = autoLayoutScene()
+        let oldTiles = Dictionary(uniqueKeysWithValues: baseline.tiles.map { ($0.id, $0.frame) })
+        let oldZones = Dictionary(uniqueKeysWithValues: baseline.zones.map { ($0.zoneId, $0) })
+        var transaction = CanvasLayoutTransaction()
+        for tile in current.tiles where oldTiles[tile.id] != tile.frame { transaction.tileFrames[tile.id] = tile.frame }
+        for zone in current.zones where oldZones[zone.zoneId] != zone { transaction.zonePlacements[zone.zoneId] = zone }
+        guard !transaction.tileFrames.isEmpty || !transaction.zonePlacements.isEmpty else { return nil }
+        onLayoutCommitted?(transaction)
+        return transaction
+    }
+
+    func tidyAutoLayout(zoneId: UUID? = nil, commit: Bool = true, offerUndo: Bool = true) {
+        let baseline = autoLayoutScene()
+        autoLayoutGestureBaseline = baseline
+        applyAutoLayout(.tidy(zoneId: zoneId), baseline: baseline)
+        if commit {
+            if let transaction = finishAutoLayoutGesture(), offerUndo {
+                showAutoLayoutUndo(for: baseline, changedCount: transaction.tileFrames.count + transaction.zonePlacements.count)
+            }
+            delegate?.canvasDidChange(self)
+        }
+    }
+
+    func setZoneAutoLayoutMode(_ mode: ZoneAutoLayoutMode, zoneId: UUID) {
+        var placement: ZonePlacement?
+        if let index = liveZones.firstIndex(where: { $0.zoneId == zoneId }) {
+            liveZones[index].autoLayoutMode = mode
+            placement = liveZones[index]
+        }
+        if let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) {
+            layer.placement.autoLayoutMode = mode
+            placement = layer.placement
+        }
+        guard let placement else { return }
+        if var model = zoneDisplayByZoneId[zoneId] { model.placement.autoLayoutMode = mode; zoneDisplayByZoneId[zoneId] = model }
+        onZoneMoved?(placement)
+        if mode.resolves(globalEnabled: CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults)),
+           CanvasAutoLayoutConfig.activation(defaults: autoLayoutDefaults) == .immediately {
+            tidyAutoLayout(zoneId: zoneId)
+        }
+    }
+
+    private func showAutoLayoutUndo(for scene: CanvasAutoLayoutEngine.Scene, changedCount: Int) {
+        guard changedCount > 0 else { return }
+        autoLayoutUndoTimer?.invalidate()
+        autoLayoutUndoScene = scene
+        let noun = changedCount == 1 ? "item" : "items"
+        autoLayoutUndoToast.show("Auto layout arranged \(changedCount) \(noun)")
+        autoLayoutUndoTimer = Timer.scheduledTimer(withTimeInterval: 6, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.dismissAutoLayoutUndo() }
+        }
+    }
+
+    private func dismissAutoLayoutUndo() {
+        autoLayoutUndoTimer?.invalidate()
+        autoLayoutUndoTimer = nil
+        autoLayoutUndoScene = nil
+        autoLayoutUndoToast.hide()
+    }
+
+    @objc private func undoAutoLayout() {
+        guard let scene = autoLayoutUndoScene else { return }
+        let current = autoLayoutScene()
+        let currentTiles = Dictionary(uniqueKeysWithValues: current.tiles.map { ($0.id, $0.frame) })
+        let currentZones = Dictionary(uniqueKeysWithValues: current.zones.map { ($0.zoneId, $0) })
+        var transaction = CanvasLayoutTransaction()
+        for tile in scene.tiles where currentTiles[tile.id] != tile.frame { transaction.tileFrames[tile.id] = tile.frame }
+        for zone in scene.zones where currentZones[zone.zoneId] != zone { transaction.zonePlacements[zone.zoneId] = zone }
+        dismissAutoLayoutUndo()
+        guard !transaction.tileFrames.isEmpty || !transaction.zonePlacements.isEmpty else { return }
+        applyLayoutTransaction(transaction)
+        onLayoutCommitted?(transaction)
+        delegate?.canvasDidChange(self)
+    }
 
     // MARK: - Inline zone rename (double-click the header)
     private var zoneRenameField: NSTextField?
@@ -668,6 +868,14 @@ final class CanvasNSView: NSView, TokenThemed {
         surfaceParkView.frame = .zero
         surfaceParkView.identifier = NSUserInterfaceItemIdentifier("canvas.surfacePark")
         addSubview(surfaceParkView, positioned: .below, relativeTo: nil)
+        autoLayoutUndoToast.onUndo = { [weak self] in self?.undoAutoLayout() }
+        autoLayoutUndoToast.setAccessibilityIdentifier("ContinuumCanvasAutoLayoutUndoToast")
+        addSubview(autoLayoutUndoToast, positioned: .above, relativeTo: nil)
+        NSLayoutConstraint.activate([
+            autoLayoutUndoToast.centerXAnchor.constraint(equalTo: centerXAnchor),
+            autoLayoutUndoToast.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Space.l),
+            autoLayoutUndoToast.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -(Space.l * 2)),
+        ])
         syncWorldPlaneToCamera()
         if CanvasFrameRecorder.isHUDEnabled {
             let hud = CanvasFrameHUDView(frame: .zero)
@@ -694,6 +902,12 @@ final class CanvasNSView: NSView, TokenThemed {
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(focusBorderConfigDidChange),
+            name: .continuumSettingsChanged,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(autoLayoutSettingsDidChange),
             name: .continuumSettingsChanged,
             object: nil
         )
@@ -1196,6 +1410,7 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     func updateTile(_ tile: Tile, recalculateZoneBounds: Bool = true, notifyChange: Bool = true) {
+        let baseline = autoLayoutGestureBaseline ?? autoLayoutScene()
         if let layer = zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == tile.id }) }),
            let index = layer.tiles.firstIndex(where: { $0.id == tile.id }) {
             let previous = layer.tiles[index]
@@ -1203,6 +1418,14 @@ final class CanvasNSView: NSView, TokenThemed {
             installed.zoneId = layer.placement.zoneId
             layer.tiles[index] = installed
             _layoutLayerTile(installed, in: layer)
+            if CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) {
+                applyAutoLayout(
+                    .tile(id: installed.id, frame: CanvasEngine.worldFrame(tile: installed, in: layer.placement)),
+                    baseline: baseline
+                )
+            } else if recalculateZoneBounds {
+                growZoneToFitMembers(layer.placement.zoneId, notifyChange: false)
+            }
             if previous.title != installed.title || previous.kind != installed.kind {
                 delegate?.canvasSidebarModelDidChange(self)
             }
@@ -1214,10 +1437,12 @@ final class CanvasNSView: NSView, TokenThemed {
         canvasState.tiles[idx] = tile
         // zone-unify P3: only a RESIZE grows the owning zone; a MOVE leaves the
         // zone frame fixed (the caller passes recalculateZoneBounds: false).
-        if recalculateZoneBounds, let zoneId = tileZoneMembership[tile.id] {
-            growZoneToFitMembers(zoneId, notifyChange: notifyChange)
+        if CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) {
+            applyAutoLayout(.tile(id: tile.id, frame: tile.frame), baseline: baseline)
+        } else if recalculateZoneBounds, let zoneId = tileZoneMembership[tile.id] {
+            growZoneToFitMembers(zoneId, notifyChange: false)
         }
-        layoutTile(tile)
+        if !CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) { layoutTile(tile) }
         layoutZoneChromeViews()
         if previousTile.title != tile.title || previousTile.kind != tile.kind {
             delegate?.canvasSidebarModelDidChange(self)
@@ -1704,6 +1929,18 @@ final class CanvasNSView: NSView, TokenThemed {
     /// border in Settings reflects immediately (docs/29 §1 live update).
     @objc func focusBorderConfigDidChange() {
         applyFocusBorder()
+    }
+
+    @objc private func autoLayoutSettingsDidChange() {
+        let enabled = CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults)
+        defer { lastAutoLayoutEnabled = enabled }
+        guard enabled && !lastAutoLayoutEnabled else { return }
+        switch CanvasAutoLayoutConfig.activation(defaults: autoLayoutDefaults) {
+        case .immediately:
+            tidyAutoLayout()
+        case .onFirstEdit:
+            autoLayoutDeferredUntilEdit = true
+        }
     }
 
     /// Renders a lazy-resume failure on its tile: the gray hollow `.stale`
@@ -3741,6 +3978,46 @@ final class CanvasNSView: NSView, TokenThemed {
         }
     }
 
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        guard let zoneId = _zoneHeaderZoneId(at: point),
+              let placement = liveZones.first(where: { $0.zoneId == zoneId })
+                ?? zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.placement else { return nil }
+
+        let menu = NSMenu(title: "Zone")
+        let autoLayoutItem = NSMenuItem(title: "Auto Layout", action: nil, keyEquivalent: "")
+        let modes = NSMenu(title: "Auto Layout")
+        for (title, mode) in [("Use Global", ZoneAutoLayoutMode.inherit), ("On", .enabled), ("Off", .disabled)] {
+            let item = NSMenuItem(title: title, action: #selector(setZoneAutoLayoutModeFromMenu(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = ["zoneId": zoneId.uuidString, "mode": mode.rawValue]
+            item.state = placement.autoLayoutMode == mode ? .on : .off
+            modes.addItem(item)
+        }
+        menu.setSubmenu(modes, for: autoLayoutItem)
+        menu.addItem(autoLayoutItem)
+        menu.addItem(.separator())
+        let tidy = NSMenuItem(title: "Tidy Zone Now", action: #selector(tidyZoneFromMenu(_:)), keyEquivalent: "")
+        tidy.target = self
+        tidy.representedObject = zoneId.uuidString
+        tidy.isEnabled = placement.autoLayoutMode.resolves(globalEnabled: isAutoLayoutEnabled)
+        menu.addItem(tidy)
+        return menu
+    }
+
+    @objc private func setZoneAutoLayoutModeFromMenu(_ sender: NSMenuItem) {
+        guard let payload = sender.representedObject as? [String: String],
+              let idString = payload["zoneId"], let zoneId = UUID(uuidString: idString),
+              let rawMode = payload["mode"], let mode = ZoneAutoLayoutMode(rawValue: rawMode) else { return }
+        setZoneAutoLayoutMode(mode, zoneId: zoneId)
+    }
+
+    @objc private func tidyZoneFromMenu(_ sender: NSMenuItem) {
+        guard let idString = sender.representedObject as? String,
+              let zoneId = UUID(uuidString: idString) else { return }
+        tidyAutoLayout(zoneId: zoneId)
+    }
+
     override func mouseDown(with event: NSEvent) {
         if pointerPanRequested(for: event) {
             beginPointerPan(with: event)
@@ -3767,6 +4044,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // Checked before the header so the top edge resizes and the band below moves.
         if let (zoneId, edge) = zoneResizeEdge(at: point) {
             pendingMovedPlacement = nil
+            beginAutoLayoutGesture()
             zoneGesture = .resizingZone(zoneId: zoneId, edge: edge, lastWindowPoint: event.locationInWindow)
             beginGeometryEdit(.resizeZone, zoneIds: [zoneId])
             return
@@ -3775,6 +4053,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // A press that reaches a tile falls through to TileNSView, which owns tile drag.
         pendingMovedPlacement = nil
         if let zoneId = _zoneHeaderZoneId(at: point) {
+            beginAutoLayoutGesture()
             zoneGesture = .movingZone(zoneId: zoneId, lastWindowPoint: event.locationInWindow)
             beginGeometryEdit(.moveZone, tileIds: geometryTileIds(inZone: zoneId), zoneIds: [zoneId])
             return
@@ -3842,6 +4121,27 @@ final class CanvasNSView: NSView, TokenThemed {
             zoneGesture = .movingZone(zoneId: zoneId, lastWindowPoint: event.locationInWindow)
             let vp = canvasState.viewport
             let screenDelta = CGSize(width: dx, height: dy)
+            if isAutoLayoutEnabled,
+               let current = liveZones.first(where: { $0.zoneId == zoneId })
+                    ?? zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.placement {
+                let newPlacement = CanvasEngine.zone(current, draggedByScreenDelta: screenDelta, viewport: vp)
+                applyAutoLayout(.zone(id: zoneId, placement: newPlacement), baseline: autoLayoutGestureBaseline)
+                pendingMovedPlacement = liveZones.first(where: { $0.zoneId == zoneId })
+                    ?? zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.placement
+                if let final = pendingMovedPlacement {
+                    showResizeDimensions(
+                        widthPx: Int(final.size.width.rounded()),
+                        heightPx: Int(final.size.height.rounded()),
+                        atWindowPoint: event.locationInWindow
+                    )
+                    if autoLayoutBlockedZoneIds.contains(zoneId) {
+                        showDragGhost(at: CanvasEngine.zoneWorldFrame(final))
+                    } else {
+                        hideDragGhost()
+                    }
+                }
+                return
+            }
             // Update the zone layer placement live so chrome + tiles repaint.
             if let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) {
                 let newPlacement = CanvasEngine.zone(layer.placement, draggedByScreenDelta: screenDelta, viewport: vp)
@@ -3867,6 +4167,15 @@ final class CanvasNSView: NSView, TokenThemed {
             let dx = event.locationInWindow.x - lastWindowPoint.x
             let dy = -(event.locationInWindow.y - lastWindowPoint.y)
             zoneGesture = .resizingZone(zoneId: zoneId, edge: edge, lastWindowPoint: event.locationInWindow)
+            if isAutoLayoutEnabled,
+               let current = liveZones.first(where: { $0.zoneId == zoneId })
+                    ?? zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.placement {
+                let newPlacement = resizedZonePlacement(current, edge: edge, screenDelta: CGSize(width: dx, height: dy))
+                applyAutoLayout(.zone(id: zoneId, placement: newPlacement), baseline: autoLayoutGestureBaseline)
+                pendingMovedPlacement = liveZones.first(where: { $0.zoneId == zoneId })
+                    ?? zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.placement
+                return
+            }
             if let idx = liveZones.firstIndex(where: { $0.zoneId == zoneId }) {
                 let newPlacement = resizedZonePlacement(liveZones[idx], edge: edge, screenDelta: CGSize(width: dx, height: dy))
                 liveZones[idx] = newPlacement
@@ -3944,15 +4253,20 @@ final class CanvasNSView: NSView, TokenThemed {
                 layoutAllTiles()
                 reorderTileSubviewsByZIndex()
                 onZoneCreated?(placement)
+                if isAutoLayoutEnabled { tidyAutoLayout(zoneId: newZoneId, offerUndo: false) }
             }
             return
         case .movingZone(let zoneId, _):
             hideDragGhost()
             _ = zoneId // identity is captured by the pending transaction
+            if isAutoLayoutEnabled { _ = finishAutoLayoutGesture() }
             _ = commitGeometryEdit()
             pendingMovedPlacement = nil
             return
         case .resizingZone:
+            hideDragGhost()
+            hideResizeDimensions()
+            if isAutoLayoutEnabled { _ = finishAutoLayoutGesture() }
             _ = commitGeometryEdit()
             pendingMovedPlacement = nil
             return
@@ -5437,6 +5751,11 @@ final class CanvasNSView: NSView, TokenThemed {
         let canvas = CanvasNSView(
             canvasState: CanvasState(viewport: vp, tiles: [member], groups: [], lastActiveTileId: nil),
             activeZone: zone, zoneRenderModels: [ZoneRenderModel(placement: zone, displayName: "Z")], showsZoneChrome: true)
+        let legacySuite = "zone-resize-legacy-\(UUID().uuidString)"
+        let legacyDefaults = UserDefaults(suiteName: legacySuite)!
+        legacyDefaults.set(false, forKey: CanvasAutoLayoutConfig.enabledKey)
+        canvas.autoLayoutDefaults = legacyDefaults
+        defer { legacyDefaults.removePersistentDomain(forName: legacySuite) }
         canvas.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = canvas
@@ -5473,6 +5792,121 @@ final class CanvasNSView: NSView, TokenThemed {
         try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
         let artifact = tempRoot.appendingPathComponent("manifest.json")
         try JSONSerialization.data(withJSONObject: ["check": "zone-resize", "finalWidth": 550, "finalHeight": 350], options: [.sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    static func runJellyAutoLayoutSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(message): return message } }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func win(_ x: CGFloat, _ y: CGFloat) -> NSPoint { NSPoint(x: x, y: 700 - y) }
+        func event(_ type: NSEvent.EventType, _ point: NSPoint, window: NSWindow) throws -> NSEvent {
+            guard let value = NSEvent.mouseEvent(
+                with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
+                pressure: type == .leftMouseUp ? 0 : 1) else { throw CheckError.failed("could not synthesize \(type)") }
+            return value
+        }
+        func drag(_ canvas: CanvasNSView, from: NSPoint, to: NSPoint, window: NSWindow) throws {
+            canvas.mouseDown(with: try event(.leftMouseDown, from, window: window))
+            canvas.mouseDragged(with: try event(.leftMouseDragged, to, window: window))
+            canvas.mouseUp(with: try event(.leftMouseUp, to, window: window))
+        }
+
+        let zoneId = UUID(uuidString: "A1300000-0000-4000-8000-000000000001")!
+        let firstId = UUID(uuidString: "A1300000-0000-4000-8000-000000000011")!
+        let secondId = UUID(uuidString: "A1300000-0000-4000-8000-000000000012")!
+        let bareId = UUID(uuidString: "A1300000-0000-4000-8000-000000000013")!
+        let zone = ZonePlacement(
+            zoneId: zoneId, projectId: nil, origin: ZonePoint(x: 100, y: 100),
+            size: ZoneSize(width: 232, height: 120), color: "teal", collapsed: false,
+            hydrationPolicy: .automatic, name: "Jelly", navKey: nil)
+        let tiles = [
+            Tile(id: firstId, kind: .note, title: "A", frame: TileFrame(x: 108, y: 140, width: 100, height: 72), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: secondId, kind: .note, title: "B", frame: TileFrame(x: 216, y: 140, width: 100, height: 72), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: bareId, kind: .note, title: "Bare", frame: TileFrame(x: 340, y: 140, width: 80, height: 72), zPosition: .fromLegacyRank(3), runtimeRef: nil, metadata: TileMetadata()),
+        ]
+        let canvas = CanvasNSView(
+            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: tiles, groups: [], lastActiveTileId: nil),
+            activeZone: zone, zoneRenderModels: [ZoneRenderModel(placement: zone, displayName: "Jelly")], showsZoneChrome: true)
+        let suite = "jelly-layout-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.set(true, forKey: CanvasAutoLayoutConfig.enabledKey)
+        defaults.set(8.0, forKey: TileGapResolver.userDefaultsKey)
+        defaults.set(8.0, forKey: ZoneBoundsConfig.paddingKey)
+        canvas.autoLayoutDefaults = defaults
+        canvas.resizeHUDDefaults = defaults
+        canvas.autoLayoutReduceMotionProvider = { true }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        canvas.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+        for tile in tiles { canvas.install(tileView: DescriptorTileNSView(tile: tile), for: tile) }
+        canvas.layoutSubtreeIfNeeded()
+
+        var commits: [CanvasLayoutTransaction] = []
+        canvas.onLayoutCommitted = { commits.append($0) }
+        try drag(canvas, from: win(332, 190), to: win(304, 190), window: window)
+        try expect(commits.count == 1, "one zone-resize gesture must commit one transaction; got \(commits.count)")
+        guard let squeezed = canvas.qaLiveZonePlacement(zoneId) else { throw CheckError.failed("zone disappeared") }
+        try expect(squeezed.size.width >= 200 && squeezed.size.width <= 205,
+                   "zone should stop at feasible fixed-size packing; got \(squeezed.size.width)")
+        let first = canvas.canvasState.tiles.first { $0.id == firstId }!.frame
+        let second = canvas.canvasState.tiles.first { $0.id == secondId }!.frame
+        try expect(first.width == 100 && second.width == 100 && first.x + first.width <= second.x,
+                   "squeeze must preserve tile dimensions and avoid overlap")
+        try expect(canvas.qaZoneMembership(of: firstId) == zoneId && canvas.qaZoneMembership(of: secondId) == zoneId,
+                   "solver displacement must not change membership")
+
+        let squeezedRight = squeezed.origin.x + squeezed.size.width
+        try drag(canvas, from: win(squeezedRight, 190), to: win(450, 190), window: window)
+        try expect(commits.count == 2, "the expansion gesture must add exactly one final commit")
+        let expanded = canvas.qaLiveZonePlacement(zoneId)!
+        let restoredA = canvas.canvasState.tiles.first { $0.id == firstId }!.frame
+        let restoredB = canvas.canvasState.tiles.first { $0.id == secondId }!.frame
+        try expect(abs(restoredB.x - restoredA.x - restoredA.width - 8) < 0.1,
+                   "expansion must restore the configured tile gap")
+        let pushedBare = canvas.canvasState.tiles.first { $0.id == bareId }!.frame
+        try expect(pushedBare.x >= expanded.origin.x + expanded.size.width + 8,
+                   "expanding a zone must push a bare tile through the external rigid-body solver")
+
+        let rightClick = try event(.rightMouseDown, win(160, 115), window: window)
+        let zoneMenu = canvas.menu(for: rightClick)
+        try expect(zoneMenu?.items.contains(where: { $0.title == "Tidy Zone Now" }) == true,
+                   "zone header context menu must expose Tidy Zone Now")
+        try expect(zoneMenu?.items.first(where: { $0.title == "Auto Layout" })?.submenu?.items.map(\.title) == ["Use Global", "On", "Off"],
+                   "zone menu must expose all override states")
+        canvas.setZoneAutoLayoutMode(.disabled, zoneId: zoneId)
+        try expect(canvas.qaLiveZonePlacement(zoneId)?.autoLayoutMode == .disabled,
+                   "per-zone Off override must update the live persisted placement")
+        canvas.setZoneAutoLayoutMode(.enabled, zoneId: zoneId)
+
+        if let index = canvas.canvasState.tiles.firstIndex(where: { $0.id == secondId }) {
+            canvas.canvasState.tiles[index].frame.x = restoredA.x
+        }
+        canvas.layoutAllTiles()
+        canvas.tidyAutoLayout()
+        try expect(canvas.qaAutoLayoutUndoText.contains("Auto layout arranged") && canvas.qaAutoLayoutUndoText.contains("Undo"),
+                   "explicit Tidy must show the six-second Undo notice")
+        try expect(canvas.qaClickAutoLayoutUndo(), "Tidy Undo must be actionable")
+        try expect(canvas.canvasState.tiles.first { $0.id == secondId }!.frame.x == restoredA.x,
+                   "Undo must restore the exact captured pre-tidy frame")
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: fm.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent("jelly-auto-layout-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        let artifact = root.appendingPathComponent("manifest.json")
+        try JSONSerialization.data(withJSONObject: [
+            "check": "jelly-auto-layout", "transactions": commits.count,
+            "minimumWidth": squeezed.size.width, "expandedWidth": expanded.size.width,
+            "reduceMotion": true,
+        ], options: [.sortedKeys]).write(to: artifact, options: .atomic)
         return artifact
     }
 

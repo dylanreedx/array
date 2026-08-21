@@ -745,11 +745,13 @@ class TileNSView: NSView, TokenThemed {
         if let edge = resizeEdge(at: local) {
             dragKind = .resize(edge)
             canvas?.beginGeometryEdit(.resizeTile, tileIds: [tile.id], includeAllZones: true)
+            canvas?.beginAutoLayoutGesture()
             return
         }
         if local.y < grabHeightInLocalCoordinates {
             dragKind = .move
             canvas?.beginGeometryEdit(.moveTile, tileIds: [tile.id], includeAllZones: true)
+            canvas?.beginAutoLayoutGesture()
             return
         }
         // Below the grab strip: defer to subclass / content view.
@@ -842,6 +844,8 @@ class TileNSView: NSView, TokenThemed {
             canvas?.reevaluateZoneMembership(forMovedTile: tile.id, notifyChange: false)
         }
 
+        if !wasClick, case .move = completedDragKind { _ = canvas?.finishAutoLayoutGesture() }
+        if case .resize = completedDragKind { _ = canvas?.finishAutoLayoutGesture() }
         if case .move = completedDragKind { _ = canvas?.commitGeometryEdit() }
         if case .resize = completedDragKind { _ = canvas?.commitGeometryEdit() }
 
