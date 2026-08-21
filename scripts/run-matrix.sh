@@ -80,7 +80,6 @@ run_leg() {
 MATRIX_KNOWN_RED=(
   --component-lab-check
   --ui-baseline-check
-  --agent-supervisor-check
   --nav-mode-check
   --palette-first-responder-restore-check
   # RE-RED on 2026-08-14, and it is the witness that changed, not the code. This

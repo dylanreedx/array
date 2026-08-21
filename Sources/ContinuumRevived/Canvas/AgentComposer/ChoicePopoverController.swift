@@ -28,7 +28,7 @@ enum ChoicePopoverLayout: Equatable {
 }
 
 @MainActor
-private final class CompletionPopoverContentView: NSView, TokenThemed {
+final class CompletionPopoverContentView: NSView, TokenThemed {
     static let headerHeight: CGFloat = 32
     static let footerHeight: CGFloat = 28
 
@@ -174,7 +174,7 @@ private final class CompletionPopoverContentView: NSView, TokenThemed {
 }
 
 @MainActor
-private final class CommandPopoverContentView: NSView, TokenThemed {
+final class CommandPopoverContentView: NSView, TokenThemed {
     let listView: ChoiceListView
     let scrollView = NSScrollView(frame: .zero)
 

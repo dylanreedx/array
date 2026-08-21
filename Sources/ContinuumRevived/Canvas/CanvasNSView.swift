@@ -1086,8 +1086,12 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     private func allZonePlacements() -> [ZonePlacement] {
-        var byId = Dictionary(uniqueKeysWithValues: zoneLayers.map { ($0.placement.zoneId, $0.placement) })
-        for placement in liveZones { byId[placement.zoneId] = placement }
+        // A ZoneLayer is the mutable owner whenever one is installed. `liveZones`
+        // still carries the boot-time copy for hit testing, so letting it win here
+        // makes a layer drag appear unchanged to the transaction and suppresses
+        // both undo registration and `onZoneMoved`.
+        var byId = Dictionary(uniqueKeysWithValues: liveZones.map { ($0.zoneId, $0) })
+        for layer in zoneLayers { byId[layer.placement.zoneId] = layer.placement }
         return Array(byId.values)
     }
 

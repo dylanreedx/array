@@ -416,6 +416,32 @@ enum UIProbeAppearance {
                 root.addSubview(list)
                 return root
             }),
+            // The completion and command layouts wrap the shared choice list in
+            // their own token-painted containers. Keep both in the appearance
+            // census so their overlay fill and border are exercised by a live
+            // theme flip as well as the rows they host.
+            ("appearance.completionPopover", NSSize(width: 420, height: 260), {
+                let items = [
+                    ChoiceItem(id: "file-a", title: "AgentComposerView.swift", detail: "Sources/ContinuumRevived/Canvas"),
+                    ChoiceItem(id: "file-b", title: "WorkspaceRuntime.swift", detail: "Sources/ContinuumRevived/App"),
+                ]
+                let list = ChoiceListView(items: items, selectedID: "file-a")
+                return CompletionPopoverContentView(
+                    listView: list,
+                    layout: CompletionPopoverLayout(
+                        breadcrumb: "Array  ›  Sources  ›  ContinuumRevived",
+                        footer: "Return to insert · Esc to close"
+                    )
+                )
+            }),
+            ("appearance.commandPopover", NSSize(width: 360, height: 220), {
+                let items = [
+                    ChoiceItem(id: "model", title: "/model", detail: "Choose provider and model"),
+                    ChoiceItem(id: "effort", title: "/effort", detail: "Choose reasoning effort"),
+                ]
+                let list = ChoiceListView(items: items, selectedID: "model")
+                return CommandPopoverContentView(listView: list)
+            }),
             // Provider>model picker (t3 port): render the two-pane surface so
             // the container and its private rail buttons can never keep a
             // stale token CGColor unobserved.
