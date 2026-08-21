@@ -321,6 +321,10 @@ public struct CloudKitSyncTransport: SyncTransport, Sendable {
             throw SyncTransportError.sendFailed(reason: "approvalResponse over CloudKit is publisher-owed; desktop inbound pump is not built")
         case .approvalResponseAck:
             throw SyncTransportError.sendFailed(reason: "approvalResponseAck over CloudKit is publisher-owed; desktop inbound pump is not built")
+        case .transcriptSubscribe, .transcriptEnvelope, .transcriptHistoryRequest,
+             .transcriptHistoryResponse, .transcriptDetailRequest, .transcriptDetailResponse,
+             .childLifecycle, .agentStopRequest, .agentStopAck:
+            throw SyncTransportError.sendFailed(reason: "negotiated transcript/control messages require the encrypted companion channel")
         }
     }
 

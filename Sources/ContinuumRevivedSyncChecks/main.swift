@@ -218,3 +218,5 @@ try await runDesktopCompanionSyncPublisherChecks()
 
 // Ticket: docs/38-tickets/76-morning-companion-dogfood-kit.md
 try runCompanionDogfoodKitChecks()
+
+try runTranscriptSyncCryptoChecks()

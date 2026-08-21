@@ -452,6 +452,24 @@ public actor DesktopCompanionSyncService {
         case .approvalResponseAck(let ack):
             diagnostics.lastInboundMessageKind = "approvalResponseAck"
             diagnostics.lastApprovalResponseOutcome = ack.outcome
+        case .transcriptSubscribe:
+            diagnostics.lastInboundMessageKind = "transcriptSubscribe"
+        case .transcriptEnvelope:
+            diagnostics.lastInboundMessageKind = "transcriptEnvelope"
+        case .transcriptHistoryRequest:
+            diagnostics.lastInboundMessageKind = "transcriptHistoryRequest"
+        case .transcriptHistoryResponse:
+            diagnostics.lastInboundMessageKind = "transcriptHistoryResponse"
+        case .transcriptDetailRequest:
+            diagnostics.lastInboundMessageKind = "transcriptDetailRequest"
+        case .transcriptDetailResponse:
+            diagnostics.lastInboundMessageKind = "transcriptDetailResponse"
+        case .childLifecycle:
+            diagnostics.lastInboundMessageKind = "childLifecycle"
+        case .agentStopRequest:
+            diagnostics.lastInboundMessageKind = "agentStopRequest"
+        case .agentStopAck:
+            diagnostics.lastInboundMessageKind = "agentStopAck"
         }
     }
 

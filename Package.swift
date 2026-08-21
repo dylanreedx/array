@@ -67,7 +67,7 @@ let package = Package(
         // explicit link since it doesn't inherit the app target's link phase.
         .target(
             name: "ContinuumRevivedSync",
-            dependencies: ["ContinuumRevivedAgentUI", "ContinuumRevivedCore"],
+            dependencies: ["ContinuumRevivedAgentContent", "ContinuumRevivedAgentUI", "ContinuumRevivedCore"],
             linkerSettings: [
                 .linkedFramework("CloudKit")
             ]
@@ -156,7 +156,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "ContinuumRevivedSyncChecks",
-            dependencies: ["ContinuumRevivedAgentUI", "ContinuumRevivedSync", "ContinuumRevivedCore"]
+            dependencies: ["ContinuumRevivedAgentContent", "ContinuumRevivedAgentUI", "ContinuumRevivedSync", "ContinuumRevivedCore"]
         ),
         .executableTarget(
             name: "ContinuumRevivedRelayChecks",

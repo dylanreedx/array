@@ -50,6 +50,15 @@ public enum SyncMessage: Codable, Sendable, Equatable {
     case spatialSubscribe(SpatialSubscribeRequest)
     case approvalResponse(ApprovalResponseRequest)
     case approvalResponseAck(ApprovalResponseAck)
+    case transcriptSubscribe(TranscriptSubscribeRequest)
+    case transcriptEnvelope(EncryptedTranscriptEnvelope)
+    case transcriptHistoryRequest(TranscriptHistoryRequest)
+    case transcriptHistoryResponse(TranscriptHistoryResponse)
+    case transcriptDetailRequest(TranscriptDetailRequest)
+    case transcriptDetailResponse(TranscriptDetailResponse)
+    case childLifecycle(ChildLifecycleUpdate)
+    case agentStopRequest(AgentStopRequest)
+    case agentStopAck(AgentStopAck)
 }
 
 /// P2A.8: addressed by AGENT, not by tile. The phone reads this id off an

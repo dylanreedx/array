@@ -12,10 +12,15 @@ public struct Scope: OptionSet, Codable, Hashable, Sendable {
     public static let terminalOperate = Scope(rawValue: 1 << 2)
     public static let accessRead = Scope(rawValue: 1 << 3)
     public static let accessWrite = Scope(rawValue: 1 << 4)
+    /// Grants decrypted semantic transcript contents. Deliberately separate
+    /// from orchestrationRead so existing observers do not gain conversation data.
+    public static let transcriptRead = Scope(rawValue: 1 << 5)
+    /// Narrow remote stop authority; does not imply send/steer/queue.
+    public static let agentStop = Scope(rawValue: 1 << 6)
 
     public static let observer: Scope = [.orchestrationRead]
     public static let `operator`: Scope = [.orchestrationRead, .orchestrationOperate, .terminalOperate]
-    public static let admin: Scope = [.operator, .accessRead, .accessWrite]
+    public static let admin: Scope = [.operator, .accessRead, .accessWrite, .transcriptRead, .agentStop]
 
     public func isSubset(of ceiling: Scope) -> Bool {
         ceiling.intersection(self) == self
