@@ -9,6 +9,8 @@ public enum CanvasGeometryAction: String, Codable, Equatable, Sendable {
     case resizeTileToPreset
     case moveZone
     case resizeZone
+    case tidy
+    case autoLayout
 
     public var displayName: String {
         switch self {
@@ -18,6 +20,8 @@ public enum CanvasGeometryAction: String, Codable, Equatable, Sendable {
         case .resizeTileToPreset: return "Resize Tile"
         case .moveZone: return "Move Zone"
         case .resizeZone: return "Resize Zone"
+        case .tidy: return "Tidy Canvas"
+        case .autoLayout: return "Auto Layout"
         }
     }
 }
@@ -81,4 +85,12 @@ public struct CanvasGeometryTransaction: Codable, Equatable, Sendable {
     }
 
     public var isNoOp: Bool { before == after }
+
+    public var changedEntityCount: Int {
+        let beforeTiles = Dictionary(uniqueKeysWithValues: before.tiles.map { ($0.tileId, $0) })
+        let beforeZones = Dictionary(uniqueKeysWithValues: before.zones.map { ($0.zoneId, $0) })
+        let changedTiles = after.tiles.lazy.filter { beforeTiles[$0.tileId] != $0 }.count
+        let changedZones = after.zones.lazy.filter { beforeZones[$0.zoneId] != $0 }.count
+        return changedTiles + changedZones
+    }
 }

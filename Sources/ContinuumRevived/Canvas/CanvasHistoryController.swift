@@ -56,7 +56,10 @@ final class CanvasHistoryController: NSObject {
             invalidateAfterReplay()
             return
         }
-        canvas.applyGeometrySnapshot(destination, previous: expected)
+        guard canvas.applyGeometrySnapshot(destination, previous: expected) else {
+            invalidateAfterReplay()
+            return
+        }
         register(transaction, direction: direction == .undo ? .redo : .undo)
     }
 

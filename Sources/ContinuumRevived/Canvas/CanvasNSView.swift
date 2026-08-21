@@ -142,7 +142,6 @@ final class CanvasNSView: NSView, TokenThemed {
     private var autoLayoutDeferredUntilEdit = false
     private let autoLayoutUndoToast = InboxUndoToast()
     private var autoLayoutUndoTimer: Timer?
-    private var autoLayoutUndoScene: CanvasAutoLayoutEngine.Scene?
     private var autoLayoutBlockedZoneIds: Set<UUID> = []
     var autoLayoutReduceMotionProvider: () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
     var qaAutoLayoutUndoText: String { autoLayoutUndoToast.qaText }
@@ -271,7 +270,7 @@ final class CanvasNSView: NSView, TokenThemed {
 
     func commitGeometryGesture() {
         _ = finishAutoLayoutGesture()
-        delegate?.canvasDidChange(self)
+        _ = commitGeometryEdit()
     }
 
     private func applyAutoLayout(_ mutation: CanvasAutoLayoutEngine.Mutation, baseline: CanvasAutoLayoutEngine.Scene? = nil) {
@@ -376,40 +375,41 @@ final class CanvasNSView: NSView, TokenThemed {
         for tile in current.tiles where oldTiles[tile.id] != tile.frame { transaction.tileFrames[tile.id] = tile.frame }
         for zone in current.zones where oldZones[zone.zoneId] != zone { transaction.zonePlacements[zone.zoneId] = zone }
         guard !transaction.tileFrames.isEmpty || !transaction.zonePlacements.isEmpty else { return nil }
-        if onLayoutCommitted?(transaction) == false {
-            var rollback = CanvasLayoutTransaction()
-            for tile in baseline.tiles where current.tiles.first(where: { $0.id == tile.id })?.frame != tile.frame {
-                rollback.tileFrames[tile.id] = tile.frame
-            }
-            for zone in baseline.zones where current.zones.first(where: { $0.zoneId == zone.zoneId }) != zone {
-                rollback.zonePlacements[zone.zoneId] = zone
-            }
-            applyLayoutTransaction(rollback)
-            return nil
-        }
         return transaction
     }
 
     func tidyAutoLayout(zoneId: UUID? = nil, commit: Bool = true, offerUndo: Bool = true) {
         let baseline = autoLayoutScene()
+        _ = beginGeometryEdit(
+            .tidy,
+            tileIds: Set(baseline.tiles.map(\.id)),
+            zoneIds: Set(baseline.zones.map(\.zoneId))
+        )
         autoLayoutGestureBaseline = baseline
         applyAutoLayout(.tidy(zoneId: zoneId), baseline: baseline)
         if commit {
-            if let transaction = finishAutoLayoutGesture(), offerUndo {
-                showAutoLayoutUndo(for: baseline, changedCount: transaction.tileFrames.count + transaction.zonePlacements.count)
+            _ = finishAutoLayoutGesture()
+            if let transaction = commitGeometryEdit(), offerUndo {
+                showAutoLayoutUndo(
+                    changedCount: transaction.changedEntityCount
+                )
             }
-            delegate?.canvasDidChange(self)
         }
     }
 
     func arrangeAutoLayoutAfterSpawn(zoneId: UUID?) {
         guard isAutoLayoutEnabled else { return }
         let baseline = autoLayoutScene()
+        _ = beginGeometryEdit(
+            .autoLayout,
+            tileIds: Set(baseline.tiles.map(\.id)),
+            zoneIds: Set(baseline.zones.map(\.zoneId))
+        )
         autoLayoutGestureBaseline = baseline
         if let zoneId { expandZoneToContainMembers(zoneId) }
         applyAutoLayout(.tidy(zoneId: zoneId), baseline: autoLayoutScene())
         _ = finishAutoLayoutGesture()
-        delegate?.canvasDidChange(self)
+        _ = commitGeometryEdit()
     }
 
     private func expandZoneToContainMembers(_ zoneId: UUID) {
@@ -461,10 +461,9 @@ final class CanvasNSView: NSView, TokenThemed {
         }
     }
 
-    private func showAutoLayoutUndo(for scene: CanvasAutoLayoutEngine.Scene, changedCount: Int) {
+    private func showAutoLayoutUndo(changedCount: Int) {
         guard changedCount > 0 else { return }
         autoLayoutUndoTimer?.invalidate()
-        autoLayoutUndoScene = scene
         let noun = changedCount == 1 ? "item" : "items"
         autoLayoutUndoToast.show("Auto layout arranged \(changedCount) \(noun)")
         autoLayoutUndoTimer = Timer.scheduledTimer(withTimeInterval: 6, repeats: false) { [weak self] _ in
@@ -475,32 +474,12 @@ final class CanvasNSView: NSView, TokenThemed {
     private func dismissAutoLayoutUndo() {
         autoLayoutUndoTimer?.invalidate()
         autoLayoutUndoTimer = nil
-        autoLayoutUndoScene = nil
         autoLayoutUndoToast.hide()
     }
 
     @objc private func undoAutoLayout() {
-        guard let scene = autoLayoutUndoScene else { return }
-        let current = autoLayoutScene()
-        let currentTiles = Dictionary(uniqueKeysWithValues: current.tiles.map { ($0.id, $0.frame) })
-        let currentZones = Dictionary(uniqueKeysWithValues: current.zones.map { ($0.zoneId, $0) })
-        var transaction = CanvasLayoutTransaction()
-        for tile in scene.tiles where currentTiles[tile.id] != tile.frame { transaction.tileFrames[tile.id] = tile.frame }
-        for zone in scene.zones where currentZones[zone.zoneId] != zone { transaction.zonePlacements[zone.zoneId] = zone }
         dismissAutoLayoutUndo()
-        guard !transaction.tileFrames.isEmpty || !transaction.zonePlacements.isEmpty else { return }
-        applyLayoutTransaction(transaction)
-        if onLayoutCommitted?(transaction) == false {
-            var rollback = CanvasLayoutTransaction()
-            for tile in current.tiles where scene.tiles.first(where: { $0.id == tile.id })?.frame != tile.frame {
-                rollback.tileFrames[tile.id] = tile.frame
-            }
-            for zone in current.zones where scene.zones.first(where: { $0.zoneId == zone.zoneId }) != zone {
-                rollback.zonePlacements[zone.zoneId] = zone
-            }
-            applyLayoutTransaction(rollback)
-        }
-        delegate?.canvasDidChange(self)
+        activeCanvasUndoManager?.undo()
     }
 
     // MARK: - Inline zone rename (double-click the header)
@@ -1399,15 +1378,20 @@ final class CanvasNSView: NSView, TokenThemed {
         _ action: CanvasGeometryAction,
         tileIds: Set<UUID> = [],
         zoneIds: Set<UUID> = [],
+        includeAllTiles: Bool = false,
         includeAllZones: Bool = false
     ) -> Bool {
         guard pendingGeometryEdit == nil else { return false }
+        let capturesLayoutChain = isAutoLayoutEnabled && action != .resizeTileToPreset && action != .dockTile
+        let capturedTileIds = includeAllTiles || capturesLayoutChain
+            ? Set(allWorkspaceTiles().map(\.id))
+            : tileIds
         let capturedZoneIds = includeAllZones ? Set(allZonePlacements().map(\.zoneId)) : zoneIds
         pendingGeometryEdit = PendingGeometryEdit(
             action: action,
-            tileIds: tileIds,
+            tileIds: capturedTileIds,
             zoneIds: capturedZoneIds,
-            before: captureGeometry(tileIds: tileIds, zoneIds: capturedZoneIds)
+            before: captureGeometry(tileIds: capturedTileIds, zoneIds: capturedZoneIds)
         )
         return true
     }
@@ -1419,6 +1403,10 @@ final class CanvasNSView: NSView, TokenThemed {
         let after = captureGeometry(tileIds: pending.tileIds, zoneIds: pending.zoneIds)
         let transaction = CanvasGeometryTransaction(action: pending.action, before: pending.before, after: after)
         guard !transaction.isNoOp else { return nil }
+        guard persistGeometrySnapshot(transaction.after) else {
+            _ = applyGeometrySnapshot(transaction.before, notifyCommit: false)
+            return nil
+        }
         if let workspaceId = activeUndoWorkspaceId {
             canvasHistories[workspaceId]?.record(transaction)
         }
@@ -1437,6 +1425,7 @@ final class CanvasNSView: NSView, TokenThemed {
         _ action: CanvasGeometryAction,
         tileIds: Set<UUID> = [],
         zoneIds: Set<UUID> = [],
+        includeAllTiles: Bool = false,
         includeAllZones: Bool = false,
         mutation: () -> Void
     ) -> CanvasGeometryTransaction? {
@@ -1444,6 +1433,7 @@ final class CanvasNSView: NSView, TokenThemed {
             action,
             tileIds: tileIds,
             zoneIds: zoneIds,
+            includeAllTiles: includeAllTiles,
             includeAllZones: includeAllZones
         ) else { return nil }
         mutation()
@@ -1475,7 +1465,11 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         for layer in zoneLayers {
             for tile in layer.tiles where tileIds.contains(tile.id) {
-                tilesById[tile.id] = CanvasTileGeometry(tileId: tile.id, frame: tile.frame, zoneId: tile.zoneId)
+                tilesById[tile.id] = CanvasTileGeometry(
+                    tileId: tile.id,
+                    frame: CanvasEngine.worldFrame(tile: tile, in: layer.placement),
+                    zoneId: tile.zoneId
+                )
             }
         }
         let zones = allZonePlacements().compactMap { placement -> CanvasZoneGeometry? in
@@ -1492,30 +1486,12 @@ final class CanvasNSView: NSView, TokenThemed {
         ) == snapshot
     }
 
+    @discardableResult
     func applyGeometrySnapshot(
         _ snapshot: CanvasGeometrySnapshot,
         previous: CanvasGeometrySnapshot? = nil,
         notifyCommit: Bool = true
-    ) {
-        let tileValues = Dictionary(uniqueKeysWithValues: snapshot.tiles.map { ($0.tileId, $0) })
-        for index in canvasState.tiles.indices {
-            guard let value = tileValues[canvasState.tiles[index].id] else { continue }
-            canvasState.tiles[index].frame = value.frame
-            canvasState.tiles[index].zoneId = value.zoneId
-            if let zoneId = value.zoneId {
-                tileZoneMembership[value.tileId] = zoneId
-            } else {
-                tileZoneMembership.removeValue(forKey: value.tileId)
-            }
-        }
-        for layer in zoneLayers {
-            for index in layer.tiles.indices {
-                guard let value = tileValues[layer.tiles[index].id] else { continue }
-                layer.tiles[index].frame = value.frame
-                layer.tiles[index].zoneId = value.zoneId
-            }
-        }
-
+    ) -> Bool {
         let zoneValues = Dictionary(uniqueKeysWithValues: snapshot.zones.map { ($0.zoneId, $0) })
         for index in liveZones.indices {
             guard let value = zoneValues[liveZones[index].zoneId] else { continue }
@@ -1535,12 +1511,55 @@ final class CanvasNSView: NSView, TokenThemed {
             layer.renderModel.placement.origin = value.origin
             layer.renderModel.placement.size = value.size
         }
+
+        let tileValues = Dictionary(uniqueKeysWithValues: snapshot.tiles.map { ($0.tileId, $0) })
+        for index in canvasState.tiles.indices {
+            guard let value = tileValues[canvasState.tiles[index].id] else { continue }
+            canvasState.tiles[index].frame = value.frame
+            canvasState.tiles[index].zoneId = value.zoneId
+            if let zoneId = value.zoneId {
+                tileZoneMembership[value.tileId] = zoneId
+            } else {
+                tileZoneMembership.removeValue(forKey: value.tileId)
+            }
+        }
+        for layer in zoneLayers {
+            for index in layer.tiles.indices {
+                guard let value = tileValues[layer.tiles[index].id] else { continue }
+                layer.tiles[index].frame = CanvasEngine.worldToZoneLocal(
+                    value.frame,
+                    zoneOrigin: layer.placement.origin
+                )
+                layer.tiles[index].zoneId = value.zoneId
+            }
+        }
         layoutAllTiles()
         reorderTileSubviewsByZIndex()
 
         if notifyCommit {
+            guard persistGeometrySnapshot(snapshot) else {
+                if let previous { _ = applyGeometrySnapshot(previous, notifyCommit: false) }
+                return false
+            }
             notifyGeometrySnapshotApplied(snapshot, previous: previous)
         }
+        return true
+    }
+
+    private func persistGeometrySnapshot(_ snapshot: CanvasGeometrySnapshot) -> Bool {
+        guard let onLayoutCommitted else { return true }
+        let placements = Dictionary(uniqueKeysWithValues: allZonePlacements().map { ($0.zoneId, $0) })
+        var layout = CanvasLayoutTransaction(
+            tileFrames: Dictionary(uniqueKeysWithValues: snapshot.tiles.map { ($0.tileId, $0.frame) }),
+            zonePlacements: [:]
+        )
+        for zone in snapshot.zones {
+            guard var placement = placements[zone.zoneId] else { continue }
+            placement.origin = zone.origin
+            placement.size = zone.size
+            layout.zonePlacements[zone.zoneId] = placement
+        }
+        return onLayoutCommitted(layout)
     }
 
     private func notifyGeometryCommit(_ transaction: CanvasGeometryTransaction) {
@@ -6010,6 +6029,7 @@ final class CanvasNSView: NSView, TokenThemed {
         canvas.dragMagnetizeDefaults = defaults
         canvas.resizeHUDDefaults = defaults
         canvas.autoLayoutReduceMotionProvider = { true }
+        canvas.activateUndoWorkspace(UUID(uuidString: "A1300000-0000-4000-8000-000000000099")!)
         defer { defaults.removePersistentDomain(forName: suite) }
         canvas.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
