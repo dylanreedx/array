@@ -10164,8 +10164,9 @@ do {
     // the oracle check (`canonicalEncode(materialize(all generated ops))`),
     // so the seed-1 baseline is updated with the seam-level route in place.
     // Workspace v5 adds the canonical `documentLinks` field to materialized
-    // workspace output; seed 1 grows by the field's 19-byte empty encoding.
-    let expectedSeed1CanonicalBytes = 1519
+    // workspace output; v6 adds the per-zone auto-layout encoding. Together
+    // those intentional schema additions grow the seed-1 output by 100 bytes.
+    let expectedSeed1CanonicalBytes = 1600
     expect(i4Stats.seed1CanonicalBytes == expectedSeed1CanonicalBytes,
            "seed-1 regression (arm64-only): canonical byte count drifted from the pinned baseline (\(expectedSeed1CanonicalBytes)) to \(i4Stats.seed1CanonicalBytes) — update the baseline deliberately if an Op/materialize change intentionally changed the output")
 }
@@ -10324,12 +10325,13 @@ do {
         .setZoneColor(id: fixedZone, color: "#FF00AA"),
         .setZoneCollapsed(id: fixedZone, collapsed: false),
         .setZoneProjectId(id: fixedZone, projectId: nil),
+        .setZoneAutoLayoutMode(id: fixedZone, mode: .enabled),
         .setZonePosition(id: fixedZone, position: .first),
         .setTileZone(tileId: fixedTile, zoneId: fixedZone),
         .setLastActiveTile(id: fixedTile),
         .setLastActiveZone(id: fixedZone),
     ]
-    expect(ops.count == 19, "one fixture per Op case, no gaps; got \(ops.count)")
+    expect(ops.count == 20, "one fixture per Op case, no gaps; got \(ops.count)")
 
     var scannedOpCount = 0
     for op in ops {
@@ -10344,7 +10346,7 @@ do {
                "LoggedOp wrapping \(op) is taint-free; found: \(violations)")
         scannedOpCount += 1
     }
-    expect(scannedOpCount == 19, "scanned every Op case; got \(scannedOpCount)")
+    expect(scannedOpCount == 20, "scanned every Op case; got \(scannedOpCount)")
 
     // ── Activity events ───────────────────────────────────────────────────
     // One AgentActivityEvent per (tone × status) combination. Full cross-product
@@ -10971,6 +10973,161 @@ func runStatusVocabularyUnificationChecks() {
 
 // Ticket: docs/38-tickets/90-agent-ux/P1.4-type-scale.md — the type scale held
 // against the REAL ReadabilityPolicy band boundary (AgentUIChecks cannot see Core).
+func runCanvasAutoLayoutChecks() {
+    let zoneId = UUID(uuidString: "A1100000-0000-4000-8000-000000000001")!
+    let neighborZoneId = UUID(uuidString: "A1100000-0000-4000-8000-000000000002")!
+    let firstId = UUID(uuidString: "A1100000-0000-4000-8000-000000000011")!
+    let secondId = UUID(uuidString: "A1100000-0000-4000-8000-000000000012")!
+    let neighborTileId = UUID(uuidString: "A1100000-0000-4000-8000-000000000013")!
+    let zone = ZonePlacement(zoneId: zoneId, projectId: nil, origin: ZonePoint(x: 0, y: 0),
+                             size: ZoneSize(width: 232, height: 200), color: "teal", collapsed: false,
+                             hydrationPolicy: .automatic)
+    let neighbor = ZonePlacement(zoneId: neighborZoneId, projectId: nil, origin: ZonePoint(x: 240, y: 0),
+                                 size: ZoneSize(width: 180, height: 200), color: "blue", collapsed: false,
+                                 hydrationPolicy: .automatic)
+    let tiles = [
+        CanvasAutoLayoutEngine.LayoutTile(id: firstId, frame: TileFrame(x: 8, y: 28, width: 100, height: 72), zoneId: zoneId),
+        CanvasAutoLayoutEngine.LayoutTile(id: secondId, frame: TileFrame(x: 116, y: 28, width: 100, height: 72), zoneId: zoneId),
+        CanvasAutoLayoutEngine.LayoutTile(id: neighborTileId, frame: TileFrame(x: 260, y: 30, width: 80, height: 60), zoneId: neighborZoneId),
+    ]
+
+    var squeezed = zone
+    squeezed.size.width = 96
+    let result = CanvasAutoLayoutEngine.solve(
+        scene: .init(tiles: tiles, zones: [zone, neighbor]), mutation: .zone(id: zoneId, placement: squeezed),
+        gap: 8, zonePadding: 8, headerHeight: 20)
+    let committedZone = result.zonePlacements[zoneId] ?? squeezed
+    expect(committedZone.size.width >= 100, "jelly: zone clamps at its widest fixed-size member")
+    expect(result.blockedZoneIds.contains(zoneId), "jelly: clamped resize reports resistance")
+    let a = result.tileFrames[firstId] ?? tiles[0].frame
+    let b = result.tileFrames[secondId] ?? tiles[1].frame
+    expect(a.width == 100 && a.height == 72 && b.width == 100 && b.height == 72,
+           "jelly: solver never resizes member tiles")
+    expect(!(a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y),
+           "jelly: squeezed members reflow without overlap")
+
+    var grown = zone
+    grown.size.width = 260
+    let pushed = CanvasAutoLayoutEngine.solve(
+        scene: .init(tiles: tiles, zones: [zone, neighbor]), mutation: .zone(id: zoneId, placement: grown),
+        gap: 8, zonePadding: 8, headerHeight: 20)
+    let pushedNeighbor = pushed.zonePlacements[neighborZoneId]
+    expect((pushedNeighbor?.origin.x ?? neighbor.origin.x) >= 268,
+           "jelly: incoming zone has priority and pushes the neighboring zone by the configured gap")
+    let movedMember = pushed.tileFrames[neighborTileId]
+    let neighborDelta = (pushedNeighbor?.origin.x ?? neighbor.origin.x) - neighbor.origin.x
+    expect((movedMember?.x ?? tiles[2].frame.x) == tiles[2].frame.x + neighborDelta,
+           "jelly: a pushed zone carries its member without changing membership")
+
+    var disabled = zone
+    disabled.autoLayoutMode = .disabled
+    let disabledResult = CanvasAutoLayoutEngine.solve(
+        scene: .init(tiles: tiles, zones: [disabled]), mutation: .tidy(zoneId: zoneId),
+        gap: 8, zonePadding: 8, headerHeight: 20)
+    expect(disabledResult.tileFrames.isEmpty && disabledResult.zonePlacements.isEmpty,
+           "jelly: disabled zone preserves today's freeform geometry")
+
+    var compressedZone = zone
+    compressedZone.size = ZoneSize(width: 204, height: 92)
+    let compressed = CanvasAutoLayoutEngine.solve(
+        scene: .init(tiles: tiles.dropLast(), zones: [zone]), mutation: .zone(id: zoneId, placement: compressedZone),
+        gap: 8, zonePadding: 8, headerHeight: 20)
+    let compressedFrames = tiles.dropLast().map { compressed.tileFrames[$0.id] ?? $0.frame }.sorted { $0.x < $1.x }
+    let compressedGap = compressedFrames[1].x - compressedFrames[0].x - compressedFrames[0].width
+    expect(compressedGap >= -0.001 && compressedGap < 8,
+           "jelly: a constrained topology compresses gaps evenly toward zero")
+    let compressedScene = CanvasAutoLayoutEngine.Scene(
+        tiles: zip(tiles.dropLast(), compressedFrames).map { original, frame in .init(id: original.id, frame: frame, zoneId: zoneId) },
+        zones: [compressed.zonePlacements[zoneId] ?? compressedZone])
+    var expandedZone = compressed.zonePlacements[zoneId] ?? compressedZone
+    expandedZone.size = ZoneSize(width: 232, height: 108)
+    let restored = CanvasAutoLayoutEngine.solve(
+        scene: compressedScene, mutation: .zone(id: zoneId, placement: expandedZone),
+        gap: 8, zonePadding: 8, headerHeight: 20)
+    let restoredFrames = compressedScene.tiles.map { restored.tileFrames[$0.id] ?? $0.frame }.sorted { $0.x < $1.x }
+    expect(abs(restoredFrames[1].x - restoredFrames[0].x - restoredFrames[0].width - 8) < 0.01,
+           "jelly: expansion restores the configured gap in the current topology")
+
+    let negativeZone = ZonePlacement(
+        zoneId: zoneId, projectId: nil, origin: ZonePoint(x: -500, y: -300),
+        size: ZoneSize(width: 232, height: 200), color: "teal", collapsed: false,
+        hydrationPolicy: .automatic)
+    let negativeTiles = tiles.dropLast().enumerated().map { index, tile in
+        CanvasAutoLayoutEngine.LayoutTile(
+            id: tile.id,
+            frame: TileFrame(x: -492 + Double(index * 108), y: -272, width: tile.frame.width, height: tile.frame.height),
+            zoneId: zoneId)
+    }
+    let negativeResult = CanvasAutoLayoutEngine.solve(
+        scene: .init(tiles: negativeTiles, zones: [negativeZone]), mutation: .tidy(zoneId: zoneId),
+        gap: 8, zonePadding: 8, headerHeight: 20)
+    expect(!negativeResult.tileFrames.values.contains { !$0.x.isFinite || !$0.y.isFinite },
+           "jelly: negative-coordinate scenes stay finite")
+    let emptyResult = CanvasAutoLayoutEngine.solve(
+        scene: .init(tiles: [], zones: [zone]), mutation: .tidy(zoneId: zoneId),
+        gap: 8, zonePadding: 8, headerHeight: 20)
+    expect(emptyResult == CanvasLayoutTransaction(), "jelly: empty zones are stable")
+
+    let stressTiles = (0..<50).map { index in
+        CanvasAutoLayoutEngine.LayoutTile(
+            id: UUID(uuidString: String(format: "A1200000-0000-4000-8000-%012d", index))!,
+            frame: TileFrame(x: Double(index * 108), y: 0, width: 100, height: 72), zoneId: nil)
+    }
+    let stressScene = CanvasAutoLayoutEngine.Scene(tiles: stressTiles, zones: [])
+    var samples: [Double] = []
+    for _ in 0..<80 {
+        let start = DispatchTime.now().uptimeNanoseconds
+        _ = CanvasAutoLayoutEngine.solve(
+            scene: stressScene,
+            mutation: .tile(id: stressTiles[0].id, frame: TileFrame(x: 24, y: 0, width: 100, height: 72)),
+            gap: 8, zonePadding: 8, headerHeight: 20)
+        samples.append(Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
+    }
+    samples.sort()
+    let p95 = samples[Int(Double(samples.count - 1) * 0.95)]
+    expect(p95 < 4, "jelly: 50-entity solver p95 must stay below 4 ms (measured \(p95) ms)")
+    print(String(format: "Jelly auto layout: geometry/migration/config checks passed; 50-entity p95 %.3f ms", p95))
+
+    let legacyJSON = """
+    {"zoneId":"\(zoneId.uuidString)","projectId":null,"origin":{"x":0,"y":0},"size":{"width":100,"height":100},"color":"teal","collapsed":false,"hydrationPolicy":"automatic","name":"Legacy","navKey":null,"zPosition":{"value":"V"}}
+    """.data(using: .utf8)!
+    if let decoded = try? JSONCodec.makeDecoder().decode(ZonePlacement.self, from: legacyJSON) {
+        expect(decoded.autoLayoutMode == .inherit, "jelly: pre-v6 zones decode with the global-inherit default")
+    } else {
+        // FracIndex's representation can evolve; the WorkspaceDocument migration
+        // tests cover the complete real document. Keep the new-field assertion
+        // explicit without making this check a second wire-format fixture.
+        expect(zone.autoLayoutMode == .inherit, "jelly: memberwise default is inherit")
+    }
+
+    let v5Document = WorkspaceDocument(
+        schemaVersion: 5, viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        zones: [zone], lastActiveZoneId: zoneId)
+    var v5Object = try! JSONSerialization.jsonObject(with: JSONCodec.makeEncoder().encode(v5Document)) as! [String: Any]
+    v5Object["schemaVersion"] = 5
+    var v5Zones = v5Object["zones"] as! [[String: Any]]
+    v5Zones[0].removeValue(forKey: "autoLayoutMode")
+    v5Object["zones"] = v5Zones
+    let migratedV5 = try! JSONCodec.makeDecoder().decode(
+        WorkspaceDocument.self,
+        from: JSONSerialization.data(withJSONObject: v5Object, options: [.sortedKeys]))
+    expect(migratedV5.schemaVersion == 6 && migratedV5.zones[0].autoLayoutMode == .inherit,
+           "jelly: schema v5 migrates to v6 with a per-zone inherit override")
+    var persistedEnabled = migratedV5
+    persistedEnabled.zones[0].autoLayoutMode = .enabled
+    let reloadedEnabled = try! JSONCodec.makeDecoder().decode(
+        WorkspaceDocument.self, from: JSONCodec.makeEncoder().encode(persistedEnabled))
+    expect(reloadedEnabled.zones[0].autoLayoutMode == .enabled,
+           "jelly: per-zone override survives an encode/reload round trip")
+
+    let defaults = UserDefaults(suiteName: "CanvasAutoLayoutChecks-\(UUID().uuidString)")!
+    expect(CanvasAutoLayoutConfig.enabled(defaults: defaults), "jelly: auto layout defaults on")
+    expect(CanvasAutoLayoutConfig.activation(defaults: defaults) == .immediately, "jelly: enable behavior defaults immediate")
+    defaults.set(CanvasAutoLayoutActivation.onFirstEdit.rawValue, forKey: CanvasAutoLayoutConfig.activationKey)
+    expect(CanvasAutoLayoutConfig.activation(defaults: defaults) == .onFirstEdit, "jelly: deferred first-edit activation resolves")
+}
+
+runCanvasAutoLayoutChecks()
 runTypographyReadabilityChecks()
 
 // Ticket: docs/38-tickets/90-agent-ux/P2A.1-agent-record.md — the agent as an

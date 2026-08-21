@@ -137,6 +137,7 @@ public enum Op: Sendable, Equatable {
     case setZoneColor(id: UUID, color: String)
     case setZoneCollapsed(id: UUID, collapsed: Bool)
     case setZoneProjectId(id: UUID, projectId: UUID?)
+    case setZoneAutoLayoutMode(id: UUID, mode: ZoneAutoLayoutMode)
 
     // --- Z-order (fractional index on zones) ---
     case setZonePosition(id: UUID, position: FracIndex)
@@ -179,6 +180,7 @@ extension Op: Codable {
         case setZoneColor = "setZoneColor"
         case setZoneCollapsed = "setZoneCollapsed"
         case setZoneProjectId = "setZoneProjectId"
+        case setZoneAutoLayoutMode = "setZoneAutoLayoutMode"
         case setZonePosition = "setZonePosition"
         case setTileZone = "setTileZone"
         case setLastActiveTile = "setLastActiveTile"
@@ -208,6 +210,7 @@ extension Op: Codable {
     private enum SetZoneColorKeys: String, CodingKey { case id = "id", color = "color" }
     private enum SetZoneCollapsedKeys: String, CodingKey { case id = "id", collapsed = "collapsed" }
     private enum SetZoneProjectIdKeys: String, CodingKey { case id = "id", projectId = "projectId" }
+    private enum SetZoneAutoLayoutModeKeys: String, CodingKey { case id = "id", mode = "mode" }
     private enum SetZonePositionKeys: String, CodingKey { case id = "id", position = "position" }
     private enum SetTileZoneKeys: String, CodingKey { case tileId = "tileId", zoneId = "zoneId" }
     private enum SetLastActiveTileKeys: String, CodingKey { case id = "id" }
@@ -295,6 +298,9 @@ extension Op: Codable {
         case .setZoneProjectId:
             let p = try c.nestedContainer(keyedBy: SetZoneProjectIdKeys.self, forKey: .setZoneProjectId)
             self = .setZoneProjectId(id: try p.decode(UUID.self, forKey: .id), projectId: try p.decodeIfPresent(UUID.self, forKey: .projectId))
+        case .setZoneAutoLayoutMode:
+            let p = try c.nestedContainer(keyedBy: SetZoneAutoLayoutModeKeys.self, forKey: .setZoneAutoLayoutMode)
+            self = .setZoneAutoLayoutMode(id: try p.decode(UUID.self, forKey: .id), mode: try p.decode(ZoneAutoLayoutMode.self, forKey: .mode))
         case .setZonePosition:
             let p = try c.nestedContainer(keyedBy: SetZonePositionKeys.self, forKey: .setZonePosition)
             self = .setZonePosition(id: try p.decode(UUID.self, forKey: .id), position: try p.decode(FracIndex.self, forKey: .position))
@@ -378,6 +384,10 @@ extension Op: Codable {
             var p = c.nestedContainer(keyedBy: SetZoneProjectIdKeys.self, forKey: .setZoneProjectId)
             try p.encode(id, forKey: .id)
             try p.encodeIfPresent(projectId, forKey: .projectId)
+        case let .setZoneAutoLayoutMode(id, mode):
+            var p = c.nestedContainer(keyedBy: SetZoneAutoLayoutModeKeys.self, forKey: .setZoneAutoLayoutMode)
+            try p.encode(id, forKey: .id)
+            try p.encode(mode, forKey: .mode)
         case let .setZonePosition(id, position):
             var p = c.nestedContainer(keyedBy: SetZonePositionKeys.self, forKey: .setZonePosition)
             try p.encode(id, forKey: .id)

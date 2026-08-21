@@ -92,6 +92,7 @@ private struct ZoneAccum {
     var name: FieldTracker<String>
     var color: FieldTracker<String>
     var collapsed: FieldTracker<Bool>
+    var autoLayoutMode: FieldTracker<ZoneAutoLayoutMode>
     var zPosition: FieldTracker<FracIndex>
 
     func build() -> ZonePlacement {
@@ -103,6 +104,7 @@ private struct ZoneAccum {
             color: color.value,
             collapsed: collapsed.value,
             hydrationPolicy: .automatic,
+            autoLayoutMode: autoLayoutMode.value,
             name: name.value,
             navKey: nil,
             zPosition: zPosition.value
@@ -184,6 +186,7 @@ private func apply(_ logged: LoggedOp, into state: inout FoldState) {
                 name: FieldTracker(opId: opId, value: name),
                 color: FieldTracker(opId: opId, value: color),
                 collapsed: FieldTracker(opId: opId, value: false),
+                autoLayoutMode: FieldTracker(opId: opId, value: .inherit),
                 // createZone carries no initial position; a zone with no
                 // setZonePosition ever applied stays at the same default
                 // ZonePlacement's own memberwise init uses.
@@ -231,6 +234,9 @@ private func apply(_ logged: LoggedOp, into state: inout FoldState) {
 
     case .setZoneProjectId(let id, let projectId):
         state.zones[id]?.projectId.offer(opId, projectId)
+
+    case .setZoneAutoLayoutMode(let id, let mode):
+        state.zones[id]?.autoLayoutMode.offer(opId, mode)
 
     case .setZonePosition(let id, let position):
         state.zones[id]?.zPosition.offer(opId, position)
@@ -378,6 +384,7 @@ extension FoldState {
                 name: FieldTracker(opId: baseOpId, value: zone.name),
                 color: FieldTracker(opId: baseOpId, value: zone.color),
                 collapsed: FieldTracker(opId: baseOpId, value: zone.collapsed),
+                autoLayoutMode: FieldTracker(opId: baseOpId, value: zone.autoLayoutMode),
                 zPosition: FieldTracker(opId: baseOpId, value: zone.zPosition)
             )
         }

@@ -19,7 +19,7 @@ private let cksTile = UUID(uuidString: "C1000000-0000-4000-8000-0000000000A1")!
 private let cksZone = UUID(uuidString: "C1000000-0000-4000-8000-0000000000B1")!
 
 /// One representative `Op` per case — every case in the enum, so the
-/// round-trip check exercises all 19, not a sample.
+/// round-trip check exercises all 20, not a sample.
 private func allOpCases() -> [(String, Op)] {
     let frame = TileFrame(x: 10, y: 20, width: 300, height: 200)
     let origin = ZonePoint(x: 5, y: 5)
@@ -40,6 +40,7 @@ private func allOpCases() -> [(String, Op)] {
         ("setZoneColor", .setZoneColor(id: cksZone, color: "grape")),
         ("setZoneCollapsed", .setZoneCollapsed(id: cksZone, collapsed: true)),
         ("setZoneProjectId", .setZoneProjectId(id: cksZone, projectId: nil)),
+        ("setZoneAutoLayoutMode", .setZoneAutoLayoutMode(id: cksZone, mode: .enabled)),
         ("setZonePosition", .setZonePosition(id: cksZone, position: FracIndex(value: 0.4))),
         ("setTileZone", .setTileZone(tileId: cksTile, zoneId: cksZone)),
         ("setLastActiveTile", .setLastActiveTile(id: cksTile)),
@@ -52,7 +53,7 @@ private func allOpCases() -> [(String, Op)] {
 /// exactly `"\(lamport)-\(replicaUUID)"`.
 private func checkRoundTripEncoding() {
     let cases = allOpCases()
-    expect(cases.count == 19, "round-trip: exercises all 19 Op cases, got \(cases.count)")
+    expect(cases.count == 20, "round-trip: exercises all 20 Op cases, got \(cases.count)")
     for (index, (label, op)) in cases.enumerated() {
         let opId = OpId(lamport: UInt64(index + 1), replica: index % 2 == 0 ? cksRepA : cksRepB)
         let logged = LoggedOp(opId: opId, op: op)
@@ -85,7 +86,7 @@ private func checkRoundTripEncoding() {
         let decoded = try! decodeOpRecord(record)
         expect(decoded == logged, "round-trip[\(label)]: decodeOpRecord(encodeOpRecord(x)) == x")
     }
-    print("cloudkit-sync-transport: round-trip encoding — all 19 Op cases encode/decode byte-for-byte identical, record names exactly \"lamport-replicaUUID\", zoneID is the custom sync zone, opPayload matches JSONCodec.makeOpLogEncoder() canonical bytes exactly")
+    print("cloudkit-sync-transport: round-trip encoding — all 20 Op cases encode/decode byte-for-byte identical, record names exactly \"lamport-replicaUUID\", zoneID is the custom sync zone, opPayload matches JSONCodec.makeOpLogEncoder() canonical bytes exactly")
 }
 
 /// 2. Idempotency of record names: two `LoggedOp`s sharing an `OpId` produce
@@ -380,5 +381,5 @@ func runCloudKitSyncTransportChecks() async throws {
     checkMalformedRecordRejection()
     checkOutboundIntegerOverflow()
     try await checkRetryBackoffSequence()
-    print("ContinuumRevivedSyncChecks passed: CloudKitSyncTransport logic — round-trip (19/19 Op cases), record-name idempotency (OpId-derived, not payload-derived), serverRecordChanged classifier, presumed-duplicate-subscription classifier, malformed-record rejection, outbound integer overflow (checked conversion, no trap), retry backoff sequence (incl. non-retryable passthrough), all headless (no CKContainer/CKDatabase instantiated)")
+    print("ContinuumRevivedSyncChecks passed: CloudKitSyncTransport logic — round-trip (20/20 Op cases), record-name idempotency (OpId-derived, not payload-derived), serverRecordChanged classifier, presumed-duplicate-subscription classifier, malformed-record rejection, outbound integer overflow (checked conversion, no trap), retry backoff sequence (incl. non-retryable passthrough), all headless (no CKContainer/CKDatabase instantiated)")
 }

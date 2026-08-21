@@ -97,7 +97,7 @@ public func capability(for op: Op) -> ControlMessage {
         return .resizeTile
     case .createTile, .deleteTile, .setTileZIndex, .setTileTitle, .setTileKind, .setTileCollapsed,
          .createZone, .deleteZone, .setZoneOrigin, .setZoneSize, .setZoneName, .setZoneColor,
-         .setZoneCollapsed, .setZoneProjectId, .setZonePosition, .setTileZone,
+         .setZoneCollapsed, .setZoneProjectId, .setZoneAutoLayoutMode, .setZonePosition, .setTileZone,
          .setLastActiveTile, .setLastActiveZone:
         return .moveTile
     }

@@ -36,6 +36,7 @@ private func allOpCases() -> [Op] {
         .setZoneCollapsed(id: id1, collapsed: false),
         .setZoneProjectId(id: id1, projectId: id2),
         .setZoneProjectId(id: id1, projectId: nil),
+        .setZoneAutoLayoutMode(id: id1, mode: .enabled),
         .setZonePosition(id: id1, position: FracIndex(value: 0.5)),
         .setTileZone(tileId: id1, zoneId: id2),
         .setTileZone(tileId: id1, zoneId: nil),
@@ -77,7 +78,7 @@ func runSpatialOpTests() {
         case .createTile, .deleteTile, .createZone, .deleteZone,
              .setTileFrame, .setTileZIndex, .setTileTitle, .setTileKind, .setTileCollapsed,
              .setZoneOrigin, .setZoneSize, .setZoneName, .setZoneColor, .setZoneCollapsed,
-             .setZoneProjectId, .setZonePosition, .setTileZone,
+             .setZoneProjectId, .setZoneAutoLayoutMode, .setZonePosition, .setTileZone,
              .setLastActiveTile, .setLastActiveZone:
             break
         }

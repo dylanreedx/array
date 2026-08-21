@@ -153,6 +153,14 @@ private func runFieldLWWChecks() {
     )
 
     assertZoneFieldLWW(
+        "setZoneAutoLayoutMode LWW",
+        low: LoggedOp(opId: opId(2, repA), op: .setZoneAutoLayoutMode(id: zoneId, mode: .disabled)),
+        high: LoggedOp(opId: opId(3, repB), op: .setZoneAutoLayoutMode(id: zoneId, mode: .enabled)),
+        extract: { $0.workspaceDocument.zones.first(where: { $0.zoneId == zoneId })?.autoLayoutMode },
+        expected: ZoneAutoLayoutMode.enabled
+    )
+
+    assertZoneFieldLWW(
         "setZonePosition LWW",
         low: LoggedOp(opId: opId(2, repA), op: .setZonePosition(id: zoneId, position: FracIndex(value: 0.2))),
         high: LoggedOp(opId: opId(3, repB), op: .setZonePosition(id: zoneId, position: FracIndex(value: 0.8))),

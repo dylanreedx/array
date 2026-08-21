@@ -6,7 +6,8 @@ public struct WorkspaceDocument: Equatable, Sendable {
     /// v4: zone stacking on `ZonePlacement.zPosition` fractional index; the
     /// `zoneZOrder` array is a decode-only legacy migration key (ticket 04).
     /// v5: durable agent-to-document relationships.
-    public static let currentSchemaVersion = 5
+    /// v6: per-zone auto-layout override.
+    public static let currentSchemaVersion = 6
 
     public let schemaVersion: Int
     public var viewport: CanvasViewport
@@ -294,6 +295,7 @@ public struct ZonePlacement: Equatable, Sendable {
     public var color: String
     public var collapsed: Bool
     public var hydrationPolicy: ZoneHydrationPolicy
+    public var autoLayoutMode: ZoneAutoLayoutMode
     public var name: String
     public var navKey: String?
     /// Zone stacking as a fractional-index LWW register (ticket 04): the field
@@ -311,6 +313,7 @@ public struct ZonePlacement: Equatable, Sendable {
         color: String,
         collapsed: Bool,
         hydrationPolicy: ZoneHydrationPolicy,
+        autoLayoutMode: ZoneAutoLayoutMode = .inherit,
         name: String = "",
         navKey: String? = nil,
         zPosition: FracIndex = .first
@@ -322,6 +325,7 @@ public struct ZonePlacement: Equatable, Sendable {
         self.color = color
         self.collapsed = collapsed
         self.hydrationPolicy = hydrationPolicy
+        self.autoLayoutMode = autoLayoutMode
         self.name = name
         self.navKey = navKey
         self.zPosition = zPosition
@@ -330,7 +334,7 @@ public struct ZonePlacement: Equatable, Sendable {
 
 extension ZonePlacement: Codable {
     private enum CodingKeys: String, CodingKey {
-        case zoneId, projectId, origin, size, color, collapsed, hydrationPolicy, name, navKey, zPosition
+        case zoneId, projectId, origin, size, color, collapsed, hydrationPolicy, autoLayoutMode, name, navKey, zPosition
     }
 
     public init(from decoder: Decoder) throws {
@@ -342,6 +346,7 @@ extension ZonePlacement: Codable {
         color = try container.decode(String.self, forKey: .color)
         collapsed = try container.decode(Bool.self, forKey: .collapsed)
         hydrationPolicy = try container.decode(ZoneHydrationPolicy.self, forKey: .hydrationPolicy)
+        autoLayoutMode = try container.decodeIfPresent(ZoneAutoLayoutMode.self, forKey: .autoLayoutMode) ?? .inherit
         name = try container.decodeIfPresent(String.self, forKey: .name) ?? ""
         navKey = try container.decodeIfPresent(String.self, forKey: .navKey)
         // Pre-v4 placeholder; the WorkspaceDocument decoder overwrites it from
@@ -358,6 +363,7 @@ extension ZonePlacement: Codable {
         try container.encode(color, forKey: .color)
         try container.encode(collapsed, forKey: .collapsed)
         try container.encode(hydrationPolicy, forKey: .hydrationPolicy)
+        try container.encode(autoLayoutMode, forKey: .autoLayoutMode)
         try container.encode(name, forKey: .name)
         try container.encodeIfPresent(navKey, forKey: .navKey)
         try container.encode(zPosition, forKey: .zPosition)
@@ -387,6 +393,20 @@ public struct ZoneSize: Codable, Equatable, Sendable {
 public enum ZoneHydrationPolicy: String, Codable, Equatable, Sendable, CaseIterable {
     case automatic
     case pinnedLive
+}
+
+public enum ZoneAutoLayoutMode: String, Codable, Equatable, Sendable, CaseIterable {
+    case inherit
+    case enabled
+    case disabled
+
+    public func resolves(globalEnabled: Bool) -> Bool {
+        switch self {
+        case .inherit: globalEnabled
+        case .enabled: true
+        case .disabled: false
+        }
+    }
 }
 
 public enum HydrationTier: String, Codable, Equatable, Sendable, CaseIterable {

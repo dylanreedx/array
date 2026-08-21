@@ -215,6 +215,7 @@ public enum DesktopSpatialBootstrap {
             ops.append(logged(&lamport, replicaId, .setZonePosition(id: zone.zoneId, position: zone.zPosition)))
             ops.append(logged(&lamport, replicaId, .setZoneCollapsed(id: zone.zoneId, collapsed: zone.collapsed)))
             ops.append(logged(&lamport, replicaId, .setZoneProjectId(id: zone.zoneId, projectId: zone.projectId)))
+            ops.append(logged(&lamport, replicaId, .setZoneAutoLayoutMode(id: zone.zoneId, mode: zone.autoLayoutMode)))
         }
 
         for tile in canvasState.tiles.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
