@@ -11044,6 +11044,58 @@ func runCanvasAutoLayoutChecks() {
     expect((zoneBlockedByTile.tileFrames[outsideId]?.x ?? outsideTile.frame.x) >= 288,
            "jelly: the inverse stays solid — an expanding zone pushes an outside tile")
 
+    let pressureZoneId = UUID(uuidString: "A1100000-0000-4000-8000-000000000020")!
+    let pressureActiveId = UUID(uuidString: "A1100000-0000-4000-8000-000000000021")!
+    let pressureNeighborId = UUID(uuidString: "A1100000-0000-4000-8000-000000000022")!
+    let pressureZone = ZonePlacement(
+        zoneId: pressureZoneId, projectId: nil, origin: ZonePoint(x: 100, y: 100),
+        size: ZoneSize(width: 624, height: 440), color: "blue", collapsed: false,
+        hydrationPolicy: .automatic)
+    let pressureTiles = [
+        CanvasAutoLayoutEngine.LayoutTile(
+            id: pressureActiveId, frame: TileFrame(x: 108, y: 140, width: 240, height: 300),
+            zoneId: pressureZoneId, minimumSize: CGSize(width: 240, height: 160)),
+        CanvasAutoLayoutEngine.LayoutTile(
+            id: pressureNeighborId, frame: TileFrame(x: 356, y: 140, width: 360, height: 300),
+            zoneId: pressureZoneId, minimumSize: CGSize(width: 240, height: 160)),
+    ]
+    var gapPressureFrame = pressureTiles[0].frame
+    gapPressureFrame.width += 4
+    let gapPressure = CanvasAutoLayoutEngine.solve(
+        scene: .init(tiles: pressureTiles, zones: [pressureZone]),
+        mutation: .tile(id: pressureActiveId, frame: gapPressureFrame),
+        gap: 8, zonePadding: 8, headerHeight: 32)
+    let gapPressureNeighbor = gapPressure.tileFrames[pressureNeighborId] ?? pressureTiles[1].frame
+    expect(gapPressureNeighbor.width == 360,
+           "jelly resize pressure compresses the gap before changing a neighbor's size")
+
+    var sizePressureFrame = pressureTiles[0].frame
+    sizePressureFrame.width += 120
+    let sizePressure = CanvasAutoLayoutEngine.solve(
+        scene: .init(tiles: pressureTiles, zones: [pressureZone]),
+        mutation: .tile(id: pressureActiveId, frame: sizePressureFrame),
+        gap: 8, zonePadding: 8, headerHeight: 32)
+    let sizePressureNeighbor = sizePressure.tileFrames[pressureNeighborId] ?? pressureTiles[1].frame
+    expect(sizePressureNeighbor.width < 360 && sizePressureNeighbor.width >= 240,
+           "jelly resize pressure shrinks a neighbor only after the available gap reaches zero")
+    expect(sizePressure.zonePlacements[pressureZoneId] == nil,
+           "jelly keeps the zone fixed while neighbor shrink capacity remains")
+
+    var exhaustedPressureFrame = pressureTiles[0].frame
+    exhaustedPressureFrame.width += 150
+    let exhaustedPressure = CanvasAutoLayoutEngine.solve(
+        scene: .init(tiles: pressureTiles, zones: [pressureZone]),
+        mutation: .tile(id: pressureActiveId, frame: exhaustedPressureFrame),
+        gap: 8, zonePadding: 8, headerHeight: 32)
+    let exhaustedNeighbor = exhaustedPressure.tileFrames[pressureNeighborId] ?? pressureTiles[1].frame
+    let exhaustedActive = exhaustedPressure.tileFrames[pressureActiveId] ?? exhaustedPressureFrame
+    expect(abs(exhaustedNeighbor.width - 240) < 0.01,
+           "jelly clamps a pressured neighbor at its existing tile-kind minimum")
+    expect(exhaustedNeighbor.x >= exhaustedActive.x + exhaustedActive.width,
+           "jelly keeps pressured neighbors non-overlapping after their minimum is exhausted")
+    expect((exhaustedPressure.zonePlacements[pressureZoneId]?.size.width ?? pressureZone.size.width) > pressureZone.size.width,
+           "jelly expands the zone only after neighbor shrink capacity is exhausted")
+
     var disabled = zone
     disabled.autoLayoutMode = .disabled
     let disabledResult = CanvasAutoLayoutEngine.solve(

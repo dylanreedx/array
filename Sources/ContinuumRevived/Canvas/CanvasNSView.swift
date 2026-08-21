@@ -236,7 +236,9 @@ final class CanvasNSView: NSView, TokenThemed {
 
     private func autoLayoutScene() -> CanvasAutoLayoutEngine.Scene {
         var layoutTiles = canvasState.tiles.map {
-            CanvasAutoLayoutEngine.LayoutTile(id: $0.id, frame: $0.frame, zoneId: tileZoneMembership[$0.id])
+            CanvasAutoLayoutEngine.LayoutTile(
+                id: $0.id, frame: $0.frame, zoneId: tileZoneMembership[$0.id],
+                minimumSize: TileGeometry.minimumSize(for: $0.kind))
         }
         let known = Set(layoutTiles.map(\.id))
         for layer in zoneLayers {
@@ -244,7 +246,8 @@ final class CanvasNSView: NSView, TokenThemed {
                 layoutTiles.append(.init(
                     id: tile.id,
                     frame: CanvasEngine.worldFrame(tile: tile, in: layer.placement),
-                    zoneId: layer.placement.zoneId
+                    zoneId: layer.placement.zoneId,
+                    minimumSize: TileGeometry.minimumSize(for: tile.kind)
                 ))
             }
         }
@@ -1444,38 +1447,30 @@ final class CanvasNSView: NSView, TokenThemed {
 
     func updateTile(_ tile: Tile, recalculateZoneBounds: Bool = true, notifyChange: Bool = true) {
         let baseline = autoLayoutGestureBaseline ?? autoLayoutScene()
-        if let layer = zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == tile.id }) }),
-           let index = layer.tiles.firstIndex(where: { $0.id == tile.id }) {
-            let previous = layer.tiles[index]
-            var installed = tile
-            installed.zoneId = layer.placement.zoneId
-            layer.tiles[index] = installed
-            _layoutLayerTile(installed, in: layer)
-            if CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) {
-                applyAutoLayout(
-                    .tile(id: installed.id, frame: CanvasEngine.worldFrame(tile: installed, in: layer.placement)),
-                    baseline: baseline
-                )
-            } else if recalculateZoneBounds {
-                growZoneToFitMembers(layer.placement.zoneId, notifyChange: false)
-            }
-            if previous.title != installed.title || previous.kind != installed.kind {
-                delegate?.canvasSidebarModelDidChange(self)
-            }
-            if notifyChange { delegate?.canvasDidChange(self) }
+        let previousTile: Tile
+        let requestedWorldFrame: TileFrame
+        if let idx = canvasState.tiles.firstIndex(where: { $0.id == tile.id }) {
+            previousTile = canvasState.tiles[idx]
+            canvasState.tiles[idx] = tile
+            requestedWorldFrame = tile.frame
+        } else if let layer = zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == tile.id }) }),
+                  let idx = layer.tiles.firstIndex(where: { $0.id == tile.id }) {
+            previousTile = layer.tiles[idx]
+            var updated = tile
+            updated.zoneId = layer.placement.zoneId
+            layer.tiles[idx] = updated
+            requestedWorldFrame = CanvasEngine.worldFrame(tile: updated, in: layer.placement)
+        } else {
             return
         }
-        guard let idx = canvasState.tiles.firstIndex(where: { $0.id == tile.id }) else { return }
-        let previousTile = canvasState.tiles[idx]
-        canvasState.tiles[idx] = tile
         // zone-unify P3: only a RESIZE grows the owning zone; a MOVE leaves the
         // zone frame fixed (the caller passes recalculateZoneBounds: false).
         if CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) {
-            applyAutoLayout(.tile(id: tile.id, frame: tile.frame), baseline: baseline)
+            applyAutoLayout(.tile(id: tile.id, frame: requestedWorldFrame), baseline: baseline)
         } else if recalculateZoneBounds, let zoneId = tileZoneMembership[tile.id] {
             growZoneToFitMembers(zoneId, notifyChange: false)
         }
-        if !CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) { layoutTile(tile) }
+        if !CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) { layoutAllTiles() }
         layoutZoneChromeViews()
         if previousTile.title != tile.title || previousTile.kind != tile.kind {
             delegate?.canvasSidebarModelDidChange(self)
@@ -4600,7 +4595,10 @@ final class CanvasNSView: NSView, TokenThemed {
         if !zoneLayerOrder.contains(zoneId) {
             zoneLayerOrder.append(zoneId)
         }
-        for (_, view) in layer.tileViews {
+        for (tileId, view) in layer.tileViews {
+            view.canvas = self
+            view.onClose = { [weak self] in self?.onTileCloseRequested?(tileId) }
+            view.onStopRun = { [weak self] in self?.onTileStopRunRequested?(tileId) }
             worldPlane.addSubview(view)
             focusBroker?.register(view)
         }
@@ -5862,6 +5860,13 @@ final class CanvasNSView: NSView, TokenThemed {
             view.mouseDragged(with: try event(.leftMouseDragged, end, window: window))
             view.mouseUp(with: try event(.leftMouseUp, end, window: window))
         }
+        func resizeTileRight(_ view: TileNSView, worldDX: Double, window: NSWindow) throws {
+            let start = view.convert(NSPoint(x: view.bounds.maxX - 1, y: view.bounds.midY), to: nil)
+            let end = NSPoint(x: start.x + CGFloat(worldDX), y: start.y)
+            view.mouseDown(with: try event(.leftMouseDown, start, window: window))
+            view.mouseDragged(with: try event(.leftMouseDragged, end, window: window))
+            view.mouseUp(with: try event(.leftMouseUp, end, window: window))
+        }
 
         let zoneId = UUID(uuidString: "A1300000-0000-4000-8000-000000000001")!
         let firstId = UUID(uuidString: "A1300000-0000-4000-8000-000000000011")!
@@ -5967,6 +5972,67 @@ final class CanvasNSView: NSView, TokenThemed {
         canvas.tidyAutoLayout()
         try expect(Dictionary(uniqueKeysWithValues: canvas.canvasState.tiles.map { ($0.id, $0.frame) }) == durableFrames,
                    "a rejected cross-store transaction must restore the last durable geometry")
+
+        // The production multi-zone representation stores member frames locally
+        // in ZoneLayer. Drive a real right-edge resize through TileNSView and prove
+        // that the same world solver moves and shrinks its neighbor before the
+        // zone itself needs to expand.
+        let layerZoneId = UUID(uuidString: "A1300000-0000-4000-8000-000000000021")!
+        let layerFirstId = UUID(uuidString: "A1300000-0000-4000-8000-000000000022")!
+        let layerSecondId = UUID(uuidString: "A1300000-0000-4000-8000-000000000023")!
+        let layerPlacement = ZonePlacement(
+            zoneId: layerZoneId, projectId: nil, origin: ZonePoint(x: 100, y: 100),
+            size: ZoneSize(width: 624, height: 440), color: "blue", collapsed: false,
+            hydrationPolicy: .automatic, name: "Layer Jelly", navKey: nil)
+        let layerFirst = Tile(
+            id: layerFirstId, kind: .note, title: "Layer A",
+            frame: TileFrame(x: 8, y: 40, width: 240, height: 300),
+            zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let layerSecond = Tile(
+            id: layerSecondId, kind: .note, title: "Layer B",
+            frame: TileFrame(x: 256, y: 40, width: 360, height: 300),
+            zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
+        let layerCanvas = CanvasNSView(
+            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil),
+            showsZoneChrome: true)
+        layerCanvas.autoLayoutDefaults = defaults
+        layerCanvas.dragMagnetizeDefaults = defaults
+        layerCanvas.autoLayoutReduceMotionProvider = { true }
+        layerCanvas.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        let layerWindow = NSWindow(contentRect: layerCanvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        layerWindow.contentView = layerCanvas
+        layerWindow.orderFrontRegardless()
+        let layerFirstView = DescriptorTileNSView(tile: layerFirst)
+        let layerSecondView = DescriptorTileNSView(tile: layerSecond)
+        let layer = ZoneLayer(
+            placement: layerPlacement,
+            renderModel: ZoneRenderModel(placement: layerPlacement, displayName: "Layer Jelly"),
+            tiles: [layerFirst, layerSecond])
+        layer.tileViews[layerFirstId] = layerFirstView
+        layer.tileViews[layerSecondId] = layerSecondView
+        layerCanvas.upsertZoneLayer(layer)
+        layerCanvas.layoutSubtreeIfNeeded()
+        var layerCommits: [CanvasLayoutTransaction] = []
+        layerCanvas.onLayoutCommitted = { layerCommits.append($0); return true }
+        try resizeTileRight(layerFirstView, worldDX: 120, window: layerWindow)
+        guard let resizedLayerTiles = layerCanvas.tiles(inZone: layerZoneId),
+              let resizedLayerFirst = resizedLayerTiles.first(where: { $0.id == layerFirstId })?.frame,
+              let resizedLayerSecond = resizedLayerTiles.first(where: { $0.id == layerSecondId })?.frame,
+              let resizedLayerZone = layerCanvas.qaZoneLayerPlacement(for: layerZoneId) else {
+            throw CheckError.failed("ZoneLayer resize lost its live model")
+        }
+        try expect(resizedLayerFirst.width == 360,
+                   "direct ZoneLayer resize must preserve the requested tile width; got \(resizedLayerFirst.width)")
+        try expect(resizedLayerSecond.x >= resizedLayerFirst.x + resizedLayerFirst.width,
+                   "an in-zone neighbor must move away from the resized tile instead of overlapping; active=\(resizedLayerFirst), neighbor=\(resizedLayerSecond), zone=\(resizedLayerZone)")
+        try expect(resizedLayerSecond.width < layerSecond.frame.width
+                       && resizedLayerSecond.width >= TileGeometry.minimumSize(for: .note).width,
+                   "after gaps reach zero, resize pressure must shrink the neighbor toward its minimum")
+        try expect(resizedLayerZone.size.width == layerPlacement.size.width,
+                   "the zone must stay fixed while neighbor shrink capacity can absorb the resize")
+        try expect(layerCommits.count == 1,
+                   "one ZoneLayer tile resize must produce one final geometry transaction")
+
         let fm = FileManager.default
         let root = URL(fileURLWithPath: fm.currentDirectoryPath)
             .appendingPathComponent("qa-runs", isDirectory: true)
@@ -5976,7 +6042,7 @@ final class CanvasNSView: NSView, TokenThemed {
         try JSONSerialization.data(withJSONObject: [
             "check": "jelly-auto-layout", "transactions": commits.count,
             "minimumWidth": squeezed.size.width, "expandedWidth": expanded.size.width,
-            "reduceMotion": true,
+            "reduceMotion": true, "zoneLayerResizeCommits": layerCommits.count,
         ], options: [.sortedKeys]).write(to: artifact, options: .atomic)
         return artifact
     }

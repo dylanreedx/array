@@ -20,11 +20,13 @@ public enum CanvasAutoLayoutEngine {
         public var id: UUID
         public var frame: TileFrame
         public var zoneId: UUID?
+        public var minimumSize: CGSize
 
-        public init(id: UUID, frame: TileFrame, zoneId: UUID?) {
+        public init(id: UUID, frame: TileFrame, zoneId: UUID?, minimumSize: CGSize? = nil) {
             self.id = id
             self.frame = frame
             self.zoneId = zoneId
+            self.minimumSize = minimumSize ?? CGSize(width: frame.width, height: frame.height)
         }
     }
 
@@ -56,11 +58,17 @@ public enum CanvasAutoLayoutEngine {
         var activeZone: UUID?
         var vector = CGVector(dx: 1, dy: 0)
         var activeZoneOnlyTranslated = false
+        var activeTileResizeIsHorizontal: Bool?
 
         switch mutation {
         case let .tile(id, frame):
             if var tile = tiles[id] {
                 vector = CGVector(dx: frame.x - tile.frame.x, dy: frame.y - tile.frame.y)
+                let widthDelta = abs(frame.width - tile.frame.width)
+                let heightDelta = abs(frame.height - tile.frame.height)
+                if widthDelta > 0.001 || heightDelta > 0.001 {
+                    activeTileResizeIsHorizontal = widthDelta >= heightDelta
+                }
                 tile.frame = frame
                 tiles[id] = tile
                 activeTile = id
@@ -104,23 +112,33 @@ public enum CanvasAutoLayoutEngine {
             let memberIds = tiles.values.filter { $0.zoneId == zoneId }.map(\.id).sorted(by: uuidLess)
             guard !memberIds.isEmpty else { continue }
 
-            let minimum = minimumFeasibleSize(memberIds: memberIds, tiles: tiles, proposed: zone, header: header)
-            if zone.size.width < minimum.width || zone.size.height < minimum.height {
-                blocked.insert(zoneId)
-                zone = clampPlacement(zone, previous: scene.zones.first { $0.zoneId == zoneId }, minimum: minimum)
-                zones[zoneId] = zone
+            let activeResizeHere = activeTileResizeIsHorizontal != nil
+                && activeTile.map { tiles[$0]?.zoneId == zoneId } == true
+            if !activeResizeHere {
+                let minimum = minimumFeasibleSize(memberIds: memberIds, tiles: tiles, proposed: zone, header: header)
+                if zone.size.width < minimum.width || zone.size.height < minimum.height {
+                    blocked.insert(zoneId)
+                    zone = clampPlacement(zone, previous: scene.zones.first { $0.zoneId == zoneId }, minimum: minimum)
+                    zones[zoneId] = zone
+                }
             }
 
-            var packed = pack(memberIds: memberIds, tiles: tiles, zone: zone, gap: gap, padding: padding, header: header, pinned: activeTile)
+            var packed = pack(
+                memberIds: memberIds, tiles: tiles, zone: zone, gap: gap, padding: padding,
+                header: header, pinned: activeTile, allowPinnedOutside: !activeResizeHere)
             if packed == nil {
                 // Restore the configured inter-tile gap whenever the current
                 // topology has room for it, even if a perpendicular zone edge
                 // still requires compressed padding. Only then compress the gap.
                 var low = 0.0, high = gap
-                packed = pack(memberIds: memberIds, tiles: tiles, zone: zone, gap: 0, padding: 0, header: header, pinned: activeTile)
+                packed = pack(
+                    memberIds: memberIds, tiles: tiles, zone: zone, gap: 0, padding: 0,
+                    header: header, pinned: activeTile, allowPinnedOutside: !activeResizeHere)
                 for _ in 0..<12 {
                     let middle = (low + high) / 2
-                    if let result = pack(memberIds: memberIds, tiles: tiles, zone: zone, gap: middle, padding: 0, header: header, pinned: activeTile) {
+                    if let result = pack(
+                        memberIds: memberIds, tiles: tiles, zone: zone, gap: middle, padding: 0,
+                        header: header, pinned: activeTile, allowPinnedOutside: !activeResizeHere) {
                         packed = result
                         low = middle
                     } else {
@@ -132,12 +150,41 @@ public enum CanvasAutoLayoutEngine {
                 high = padding
                 for _ in 0..<12 {
                     let middle = (low + high) / 2
-                    if let result = pack(memberIds: memberIds, tiles: tiles, zone: zone, gap: resolvedGap, padding: middle, header: header, pinned: activeTile) {
+                    if let result = pack(
+                        memberIds: memberIds, tiles: tiles, zone: zone, gap: resolvedGap, padding: middle,
+                        header: header, pinned: activeTile, allowPinnedOutside: !activeResizeHere) {
                         packed = result
                         low = middle
                     } else {
                         high = middle
                     }
+                }
+            }
+            if packed == nil, activeResizeHere, let horizontal = activeTileResizeIsHorizontal,
+               let shrunk = shrinkNeighborsAndPack(
+                   memberIds: memberIds, tiles: tiles, zone: zone, padding: 0, header: header,
+                   pinned: activeTile, horizontal: horizontal) {
+                tiles = shrunk.tiles
+                packed = shrunk.frames
+            }
+            if packed == nil, activeResizeHere {
+                // Neighbor minima are exhausted. Grow only now, in the active
+                // resize direction, so pressure order is gap → neighbor size → zone.
+                for id in memberIds where id != activeTile {
+                    guard var tile = tiles[id] else { continue }
+                    if activeTileResizeIsHorizontal == true {
+                        tile.frame.width = min(tile.frame.width, max(tile.minimumSize.width, 1))
+                    } else {
+                        tile.frame.height = min(tile.frame.height, max(tile.minimumSize.height, 1))
+                    }
+                    tiles[id] = tile
+                }
+                if let expanded = expandZoneAndPack(
+                    memberIds: memberIds, tiles: tiles, zone: zone, header: header,
+                    pinned: activeTile, horizontal: activeTileResizeIsHorizontal == true) {
+                    zone = expanded.zone
+                    zones[zoneId] = zone
+                    packed = expanded.frames
                 }
             }
             if let packed {
@@ -157,6 +204,80 @@ public enum CanvasAutoLayoutEngine {
             result.zonePlacements[original.zoneId] = zones[original.zoneId]
         }
         return result
+    }
+
+    private static func shrinkNeighborsAndPack(
+        memberIds: [UUID], tiles: [UUID: LayoutTile], zone: ZonePlacement,
+        padding: Double, header: Double, pinned: UUID?, horizontal: Bool
+    ) -> (tiles: [UUID: LayoutTile], frames: [UUID: TileFrame])? {
+        func candidate(_ pressure: Double) -> [UUID: LayoutTile] {
+            var result = tiles
+            for id in memberIds where id != pinned {
+                guard var tile = result[id] else { continue }
+                if horizontal {
+                    let minimum = min(tile.frame.width, max(1, tile.minimumSize.width))
+                    tile.frame.width -= (tile.frame.width - minimum) * pressure
+                } else {
+                    let minimum = min(tile.frame.height, max(1, tile.minimumSize.height))
+                    tile.frame.height -= (tile.frame.height - minimum) * pressure
+                }
+                result[id] = tile
+            }
+            return result
+        }
+
+        let fullyShrunk = candidate(1)
+        guard var bestFrames = pack(
+            memberIds: memberIds, tiles: fullyShrunk, zone: zone,
+            gap: 0, padding: padding, header: header, pinned: pinned,
+            allowPinnedOutside: false) else { return nil }
+        var bestTiles = fullyShrunk
+        var low = 0.0, high = 1.0
+        for _ in 0..<12 {
+            let middle = (low + high) / 2
+            let trialTiles = candidate(middle)
+            if let trialFrames = pack(
+                memberIds: memberIds, tiles: trialTiles, zone: zone,
+                gap: 0, padding: padding, header: header, pinned: pinned,
+                allowPinnedOutside: false) {
+                high = middle
+                bestTiles = trialTiles
+                bestFrames = trialFrames
+            } else {
+                low = middle
+            }
+        }
+        return (bestTiles, bestFrames)
+    }
+
+    private static func expandZoneAndPack(
+        memberIds: [UUID], tiles: [UUID: LayoutTile], zone: ZonePlacement,
+        header: Double, pinned: UUID?, horizontal: Bool
+    ) -> (zone: ZonePlacement, frames: [UUID: TileFrame])? {
+        func attempt(_ extent: Double) -> (ZonePlacement, [UUID: TileFrame])? {
+            var candidate = zone
+            if horizontal { candidate.size.width = extent } else { candidate.size.height = extent }
+            guard let frames = pack(
+                memberIds: memberIds, tiles: tiles, zone: candidate,
+                gap: 0, padding: 0, header: header, pinned: pinned,
+                allowPinnedOutside: false) else { return nil }
+            return (candidate, frames)
+        }
+
+        let current = horizontal ? zone.size.width : zone.size.height
+        var low = current
+        var high = max(current + 1, current * 2)
+        var upper = attempt(high)
+        for _ in 0..<12 where upper == nil {
+            high *= 2
+            upper = attempt(high)
+        }
+        guard upper != nil else { return nil }
+        for _ in 0..<18 {
+            let middle = (low + high) / 2
+            if attempt(middle) != nil { high = middle } else { low = middle }
+        }
+        return attempt(ceil(high)) ?? upper
     }
 
     private static func minimumFeasibleSize(memberIds: [UUID], tiles: [UUID: LayoutTile], proposed: ZonePlacement, header: Double) -> CGSize {
@@ -205,7 +326,11 @@ public enum CanvasAutoLayoutEngine {
     /// Candidate positions come from the zone edges and already-placed tile edges.
     /// Choosing the candidate nearest the old frame produces minimal, spatially
     /// stable reflow without introducing a permanent row/column order.
-    private static func pack(memberIds: [UUID], tiles: [UUID: LayoutTile], zone: ZonePlacement, gap: Double, padding: Double, header: Double, pinned: UUID?) -> [UUID: TileFrame]? {
+    private static func pack(
+        memberIds: [UUID], tiles: [UUID: LayoutTile], zone: ZonePlacement,
+        gap: Double, padding: Double, header: Double, pinned: UUID?,
+        allowPinnedOutside: Bool = true
+    ) -> [UUID: TileFrame]? {
         let content = CGRect(x: zone.origin.x + padding, y: zone.origin.y + header + padding,
                              width: max(0, zone.size.width - 2 * padding), height: max(0, zone.size.height - header - 2 * padding))
         guard content.width > 0, content.height > 0 else { return nil }
@@ -226,6 +351,8 @@ public enum CanvasAutoLayoutEngine {
                     // policy can make the membership decision on mouse-up.
                     if valid(source, in: content, against: Array(placed.values), gap: gap) {
                         placed[id] = source
+                    } else if !allowPinnedOutside {
+                        return nil
                     }
                     continue
                 }
