@@ -28,6 +28,15 @@ final class CompactStatusProbeThinkingIndicatorView: NSView, AgentThinkingIndica
     }
 }
 
+@MainActor
+private final class CodeBlockScrollHandoffProbe: NSResponder {
+    private(set) var verticalWheelEvents = 0
+
+    override func scrollWheel(with event: NSEvent) {
+        if event.scrollingDeltaY != 0 { verticalWheelEvents += 1 }
+    }
+}
+
 /// Geometry assertions over a `UIProbe`-rendered tree — layout bugs caught with
 /// numbers instead of eyes.
 ///
@@ -7530,6 +7539,59 @@ enum UIProbeGeometry {
         }
         guard copiedActions == [id] else {
             throw fail("code block reported an unexpected agent action during layout")
+        }
+
+        let shortCode = "let answer = 42"
+        let shortBlock = AgentBlock(
+            id: id, revision: 4, kind: .fencedCode,
+            payload: .fencedCode(.init(language: "swift", code: shortCode, isComplete: true))
+        )
+        let shortHeight = try host.measuredHeight(for: shortBlock, width: 320, context: context)
+        host.frame = NSRect(x: 0, y: 0, width: 320, height: shortHeight)
+        try host.apply(block: shortBlock, context: context)
+        host.layoutSubtreeIfNeeded()
+        view.layoutSubtreeIfNeeded()
+        guard !view.scrollView.hasVerticalScroller,
+              view.codeTextView.frame.height <= view.scrollView.contentSize.height + 0.5 else {
+            throw fail("one-line fenced code retained unnecessary vertical scrolling")
+        }
+        let handoff = CodeBlockScrollHandoffProbe()
+        let priorNextResponder = view.scrollView.nextResponder
+        view.scrollView.nextResponder = handoff
+        guard let verticalEvent = CGEvent(
+            scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2,
+            wheel1: 12, wheel2: 0, wheel3: 0
+        ).flatMap(NSEvent.init(cgEvent:)) else {
+            throw fail("could not synthesize the code-block vertical scroll witness")
+        }
+        view.scrollView.scrollWheel(with: verticalEvent)
+        view.scrollView.nextResponder = priorNextResponder
+        guard handoff.verticalWheelEvents == 1 else {
+            throw fail("one-line fenced code trapped a vertical scroll instead of handing it to its document")
+        }
+
+        let longSingleLine = String(repeating: "0123456789", count: 100)
+        let longSingleLineBlock = AgentBlock(
+            id: id, revision: 5, kind: .fencedCode,
+            payload: .fencedCode(.init(language: nil, code: longSingleLine, isComplete: true))
+        )
+        let longSingleLineHeight = try host.measuredHeight(for: longSingleLineBlock, width: 320, context: context)
+        host.frame = NSRect(x: 0, y: 0, width: 320, height: longSingleLineHeight)
+        try host.apply(block: longSingleLineBlock, context: context)
+        host.layoutSubtreeIfNeeded()
+        view.layoutSubtreeIfNeeded()
+        guard !view.scrollView.hasVerticalScroller,
+              view.scrollView.hasHorizontalScroller,
+              view.codeTextView.frame.width > view.scrollView.contentSize.width else {
+            throw fail("long one-line fenced code did not keep horizontal-only scrolling")
+        }
+
+        host.frame.size.height = CodeBlockView.maximumExpandedHeight
+        try host.apply(block: longBlock, context: context)
+        host.layoutSubtreeIfNeeded()
+        view.layoutSubtreeIfNeeded()
+        guard view.scrollView.hasVerticalScroller else {
+            throw fail("a resized/streamed tall fenced-code block did not restore vertical scrolling")
         }
         return longCode.reduce(into: 1) { count, character in
             if character == "\n" { count += 1 }

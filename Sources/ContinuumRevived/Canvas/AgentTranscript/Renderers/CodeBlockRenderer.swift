@@ -42,7 +42,7 @@ final class CodeBlockView: NSView {
     static let minimumCodeHeight = CGFloat(Metrics.lineHeight(for: .bodyMono)) + CGFloat(Space.m) * 2
 
     private(set) var codeTextView: CodeTextView
-    private(set) var scrollView = NSScrollView(frame: .zero)
+    private(set) var scrollView = CodeBlockScrollView(frame: .zero)
     private(set) var languageLabel = NSTextField(labelWithString: "Code")
     private(set) var streamingLabel = NSTextField(labelWithString: "Streaming")
     private(set) var copyButton = CodeCopyButton(frame: .zero)
@@ -69,8 +69,12 @@ final class CodeBlockView: NSView {
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
         scrollView.hasHorizontalScroller = true
-        scrollView.hasVerticalScroller = true
+        scrollView.hasVerticalScroller = false
         scrollView.autohidesScrollers = true
+        // Overlay scrollers do not shrink the viewport when a long line reveals
+        // the horizontal bar. Without this, that lost height can falsely make a
+        // one-line block appear to overflow vertically.
+        scrollView.scrollerStyle = .overlay
         scrollView.documentView = codeTextView
 
         addSubview(languageLabel)
@@ -133,6 +137,12 @@ final class CodeBlockView: NSView {
             height: max(0, bounds.height - Self.headerHeight)
         )
         scrollView.layoutSubtreeIfNeeded()
+        let measuredCodeSize = CodeTextView.measuredCodeSize(codeTextView.string)
+        let needsVerticalScroll = measuredCodeSize.height > scrollView.contentSize.height + 0.5
+        if scrollView.hasVerticalScroller != needsVerticalScroll {
+            scrollView.hasVerticalScroller = needsVerticalScroll
+            scrollView.layoutSubtreeIfNeeded()
+        }
         codeTextView.sizeDocument(toFit: scrollView.contentSize)
     }
 
@@ -167,6 +177,25 @@ final class CodeBlockView: NSView {
         guard let language else { return nil }
         let trimmed = language.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+/// A fenced-code block is nested inside the transcript or Markdown document
+/// scroller. When the code fits vertically, a vertical trackpad gesture belongs
+/// to that outer owner; retaining it here makes even a one-line snippet feel like
+/// a dead patch in the document. Horizontal gestures remain local for long lines,
+/// and capped multiline blocks keep their own vertical scrolling.
+@MainActor
+final class CodeBlockScrollView: NSScrollView {
+    override func scrollWheel(with event: NSEvent) {
+        let vertical = abs(event.scrollingDeltaY)
+        let horizontal = abs(event.scrollingDeltaX)
+        if !hasVerticalScroller, vertical > 0, vertical >= horizontal,
+           let nextResponder {
+            nextResponder.scrollWheel(with: event)
+            return
+        }
+        super.scrollWheel(with: event)
     }
 }
 
