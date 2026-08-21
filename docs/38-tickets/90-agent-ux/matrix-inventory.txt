@@ -1,6 +1,7 @@
 check --add-zone-check
 check --agent-display-name-check
 check --agent-fanout-check
+check --agent-first-paint-check
 check --agent-inbox-check
 check --agent-incremental-refresh-check
 check --agent-input-check
@@ -167,6 +168,7 @@ leg run swift run ContinuumRevivedSyncIntegrationChecks
 leg run_app_check .build/debug/Array --add-zone-check
 leg run_app_check .build/debug/Array --agent-display-name-check
 leg run_app_check .build/debug/Array --agent-fanout-check
+leg run_app_check .build/debug/Array --agent-first-paint-check
 leg run_app_check .build/debug/Array --agent-inbox-check
 leg run_app_check .build/debug/Array --agent-incremental-refresh-check
 leg run_app_check .build/debug/Array --agent-input-check

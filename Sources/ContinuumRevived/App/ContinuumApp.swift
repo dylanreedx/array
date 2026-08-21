@@ -2360,6 +2360,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--agent-first-paint-check") {
+            do {
+                _ = NSApplication.shared
+                try AgentFirstPaintChecks.checkSpawnWindowIsPresentable()
+                try AgentFirstPaintChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--agent-tile-click-focus-check") {
             do {
                 _ = NSApplication.shared

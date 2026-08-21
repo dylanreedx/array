@@ -505,6 +505,13 @@ run_app_check .build/debug/Array --note-click-focus-check
 # P5.5 correction: the same click-focus contract for the v2 agent composer — the
 # broker steal, an editor-glyph click, and a padding-ring click all land in the editor.
 run_app_check .build/debug/Array --agent-tile-click-focus-check
+# Dead air: the two failures behind "I send a message and nothing happens". The
+# prompt echo must precede the action sink (it used to sit behind an actor hop, a
+# draft-journal write, a store flock and a role-directory scan), a refused
+# submission must say so rather than leaving an optimistic prompt on screen, and
+# the spawn window must carry a state, a word and a clock instead of presenting
+# "idle" while a CLI process starts. Asserted as ordering, never as elapsed time.
+run_app_check .build/debug/Array --agent-first-paint-check
 # The composer's paste/drop intake: image decoding, thumbnail cache, attachment
 # rail, cross-agent rebind isolation, and the shared mixed image/file-reference
 # route through the real managed attachment store. It shipped with 44fbe73 but
