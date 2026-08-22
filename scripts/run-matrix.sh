@@ -586,6 +586,13 @@ run_app_check .build/debug/Array --workspace-switch-check
 # resulting view, which is why every tile becoming a dead placeholder after the
 # first in-process switch has been green this whole time.
 run_app_check .build/debug/Array --zone-tile-hydration-check
+# M1.0 (.plans/46): a project's canvas.json must only ever receive that project's
+# tiles. setZones never updates the flat canvasState, and retireFlatCompatibilityScene
+# deliberately leaves canvasState.tiles alone, so it keeps the DEPARTED project's
+# tiles; ZoneRuntimeController.flushCanvasSave then persists that flat state into
+# whichever project is now active. Unlike the placeholder defect above, this one is
+# not undone by relaunching -- it overwrites the file.
+run_app_check .build/debug/Array --canvas-persistence-model-check
 # .plans/15: opening a project file resolves the ACTIVE project/zone at invocation
 # time. Before the repair, an open after an in-process workspace switch installed
 # into the departed zone's model and persisted through the boot project's store.

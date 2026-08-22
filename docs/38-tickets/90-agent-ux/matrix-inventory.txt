@@ -35,6 +35,7 @@ check --browser-url-focus-check
 check --camera-chrome-redraw-check
 check --canvas-camera-coalesce-check
 check --canvas-camera-hit-oracle-check
+check --canvas-persistence-model-check
 check --canvas-zoom-invalidation-probe-check
 check --canvas-zoom-momentum-check
 check --companion-sync-health-check
@@ -205,6 +206,7 @@ leg run_app_check .build/debug/Array --browser-url-focus-check
 leg run_app_check .build/debug/Array --camera-chrome-redraw-check
 leg run_app_check .build/debug/Array --canvas-camera-coalesce-check
 leg run_app_check .build/debug/Array --canvas-camera-hit-oracle-check
+leg run_app_check .build/debug/Array --canvas-persistence-model-check
 leg run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
 leg run_app_check .build/debug/Array --canvas-zoom-momentum-check
 leg run_app_check .build/debug/Array --companion-sync-health-check

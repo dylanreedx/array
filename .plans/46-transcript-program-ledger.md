@@ -96,15 +96,26 @@ per-turn process spawn, shrinking M6.
 
 Work in this order; each row names the legs to run for that landing.
 
-| step | ticket | affected legs |
+**Re-scoped 2026-08-22** after sizing M1 properly against `d5561c2`. Three
+changes: a new **M1.0** goes ahead of everything (it is the only defect here that
+destroys a file rather than a view); **M1.5 merged into it**, being the same bug
+on the other call path; and **M1.8 stayed in M1 at full scope** after Dylan
+rejected deferring it — see the plan's §2.7. Sizing is by blast radius, never by
+engineer-days.
+
+| step | ticket | status / affected legs |
 |---|---|---|
-| 1 | **M1.1** new `--zone-tile-hydration-check` | **RED 2026-08-22** — `act1: noteTileB must be a live tile after switching to WB, not a DescriptorTileNSView placeholder; got DescriptorTileNSView`. The preceding `viewB != nil` resolve assertion PASSES, which is what proves it fails for the hydration defect and not a lookup. Registered at `run-matrix.sh:588`; inventory regenerated to 362 records. Drives production wiring via `AppDelegate.configureWorkspaceRuntimeHooks()` (extracted in this ticket) rather than substituting its own closures. |
-| 2 | **M1.2** `hydrateInstalledZoneTiles` after `setZones` | new leg, `--workspace-switch-check`, `--workspace-runtime-install-check`, `--zone-hydration-lifecycle-check`, `--multi-zone-render-check` |
-| 3 | **M1.3** skip tiles with a live runtime | new leg, `--terminal-tmux-persistence-check`, `--browser-lru-budget-check` |
-| 4 | **M1.4** `detach()` sweep before `setZones` | new leg, `--agent-restore-check`, `--agent-observer-independence-check` |
-| 5 | **M1.5** `persistProjectCanvas` merge + `--project-canvas-truncation-check` | new leg, `--workspace-boot-persistence-check`, `--zone-save-isolation-check` |
-| 6 | **M1.6** `spawnerForFilesystemCreation()` on inbox attach | `--cross-project-agents-check`, `--managed-agent-model-spawn-check` |
-| 7 | **M1.7/M1.8/M1.9** stop-is-not-a-failure + process group + teeth | `--agent-supervisor-check`, `--strict-agent-harness-check`, `--managed-agent-live-check`, new stop witness |
+| 1 | **M1.0** `--canvas-persistence-model-check` + one persistence helper | **RED 2026-08-22** — `pb-leak: Pb's canvas.json must never contain Pa's tiles, but a canvas change after the switch wrote 3 of them into it`. The `pa-baseline` and `pb-precondition` assertions before it PASS, which is what proves the fixture is sound and the defect is real. Drives the production `AppDelegate.canvasDidChange` + `flushCanvasSave`, not a hand-rolled save. Registered at `run-matrix.sh:595`; inventory 362 → 364. Fix: one helper for "the tiles to persist for this project", merged over disk, used by BOTH `flushCanvasSave`/`flushCanvasSaveOffMain` and `persistProjectCanvas`. Also: `--workspace-boot-persistence-check`, `--zone-save-isolation-check`, `--workspace-switch-check`. |
+| 2 | **M1.1** `--zone-tile-hydration-check` | **RED 2026-08-22** (`d5561c2`) — `act1: noteTileB must be a live tile after switching to WB, not a DescriptorTileNSView placeholder; got DescriptorTileNSView`. The preceding `viewB != nil` resolve assertion PASSES, proving it fails for the hydration defect and not a lookup. Registered at `run-matrix.sh:588`. Drives production wiring via `AppDelegate.configureWorkspaceRuntimeHooks()` (extracted in this ticket) rather than substituting its own closures. |
+| 3 | **M1.2** two-phase hydration; Phase A before `setZones`, never via `installProjectTile` | new leg, `--workspace-switch-check`, `--workspace-runtime-install-check`, `--zone-hydration-lifecycle-check`, `--multi-zone-render-check` |
+| 4 | **M1.2b** never mint an agent while hydrating | `--zone-tile-hydration-check`, `--agent-restore-check`, `--cross-project-agents-check` |
+| 5 | **M1.3** skip tiles with a live runtime | new leg, `--terminal-tmux-persistence-check`, `--browser-lru-budget-check` |
+| 6 | **M1.3b** a spawner per live controller, so Phase B reaches every zone | `--multi-zone-render-check`, `--zone-tier-transition-check`, `--browser-lru-budget-check` |
+| 7 | **M1.4** `detach()` sweep before `setZones` | new leg, `--agent-restore-check`, `--agent-observer-independence-check` |
+| 8 | **M1.6** `spawnerForFilesystemCreation()` on inbox attach | `--cross-project-agents-check`, `--managed-agent-model-spawn-check` |
+| 9 | **M1.7** a stop is `.interrupted`, not `.failed` | `--agent-supervisor-check`, `--strict-agent-harness-check`, `--managed-agent-live-check` |
+| 10 | **M1.8** whole process group, with escalation; lift the machinery out of `AgentNameOneShot` | new leg, `--agent-supervisor-check`, `--image-supervisor-check` |
+| 11 | **M1.9** the stop witness with teeth (a runner whose `stop()` really throws) | new leg, `--agent-supervisor-check` |
 | — | full matrix, then release | judged by the end-of-run summary |
 
 ---

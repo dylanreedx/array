@@ -1005,6 +1005,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--canvas-persistence-model-check") {
+            do {
+                _ = NSApplication.shared
+                try CanvasPersistenceModelChecks.run()
+                print("ContinuumRevivedCanvasPersistenceModelChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--workspace-switch-check") {
             do {
                 try AppDelegate.runWorkspaceSwitchSelfCheck()
