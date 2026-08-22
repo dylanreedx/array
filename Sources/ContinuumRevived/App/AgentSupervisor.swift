@@ -12218,7 +12218,55 @@ private func checkPerAgentProviderSettings(
     }
     foreignTile.detach()
 
-    return "per-agent provider settings: a pick lands on the record and the disk and reaches --model/--thinking (\(pickedModel) / \(pickedThinking), both unlike the global default), two agents hold different models, a moved global default moves neither, \(3 + 1) off-catalogue values are refused while `off` is accepted, and the tile's \(tile.qaModelOptionTitles.count)+\(tile.qaThinkingOptionTitles.count) options are AgentModelConfig's own with no visible inert next-turn notice"
+    // MARK: 9 · a harness pick is atomic, including a model shared by two harnesses
+
+    // This is the exact production regression: Pi and Claude Code can both list the
+    // same Anthropic model ID. Choosing Claude Code used to update only the footer's
+    // temporary harness while the unchanged model title made the two-step state look
+    // committed. Send then read the still-Pi record. One harness click must update
+    // the footer, live record, disk, and therefore the next runner together.
+    let sharedModel = "anthropic/claude-opus-5"
+    let savedHarnessCatalogues = AgentHarness.allCases.map {
+        AgentModelCatalog.shared.snapshot(for: $0)
+    }
+    defer {
+        for snapshot in savedHarnessCatalogues {
+            AgentModelCatalog.shared.resetForQA(snapshot: snapshot)
+        }
+    }
+    AgentModelCatalog.shared.resetForQA(snapshot: .init(
+        harness: .pi, readiness: .ready, models: [sharedModel],
+        displayNames: [sharedModel: "Claude Opus (latest)"]))
+    AgentModelCatalog.shared.resetForQA(snapshot: .init(
+        harness: .claudeCode, readiness: .ready, models: [sharedModel],
+        displayNames: [sharedModel: "Claude Opus (latest)"]))
+
+    let harnessTileID = UUID()
+    let harnessAgentID = supervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, harness: .pi,
+        model: sharedModel, thinking: "medium", tileId: harnessTileID)
+    let harnessTile = ManagedAgentTileNSView(tile: Tile(
+        id: harnessTileID,
+        kind: .managedAgent,
+        title: "shared model harness switch",
+        frame: TileFrame(x: 0, y: 0, width: 520, height: 360),
+        zPosition: .fromLegacyRank(1),
+        runtimeRef: nil,
+        metadata: TileMetadata(launchProfileId: "managed")
+    ))
+    harnessTile.attach(agentID: harnessAgentID, supervisor: supervisor)
+    guard harnessTile.qaProviderFooterView.qaLaunchSelection.harness == .pi,
+          harnessTile.qaPickHarness(.claudeCode),
+          harnessTile.qaProviderFooterView.qaLaunchSelection == AgentLaunchSelection(
+            harness: .claudeCode, model: sharedModel, thinking: "medium"),
+          supervisor.launchSelection(for: harnessAgentID) == AgentLaunchSelection(
+            harness: .claudeCode, model: sharedModel, thinking: "medium"),
+          try store.load(id: harnessAgentID)?.harness == .claudeCode else {
+        throw fail("provider-settings: choosing Claude Code while Pi shared the same visible Opus model did not atomically update the footer, record, and disk")
+    }
+    harnessTile.detach()
+
+    return "per-agent provider settings: a pick lands on the record and the disk and reaches --model/--thinking (\(pickedModel) / \(pickedThinking), both unlike the global default), two agents hold different models, a moved global default moves neither, \(3 + 1) off-catalogue values are refused while `off` is accepted, a Pi→Claude Code switch sharing the same visible Opus model commits atomically, and the tile's \(tile.qaModelOptionTitles.count)+\(tile.qaThinkingOptionTitles.count) options are AgentModelConfig's own with no visible inert next-turn notice"
 }
 
 /// macOS temp directories live under a `/var` symlink to `/private/var`, and git

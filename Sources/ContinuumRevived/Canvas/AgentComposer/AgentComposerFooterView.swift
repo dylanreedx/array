@@ -221,7 +221,45 @@ final class AgentComposerFooterView: NSView, TokenThemed {
 
     private func pick(harness: AgentHarness? = nil, model: String? = nil, thinking: String? = nil) {
         if let harness {
+            guard harness != recordHarness else {
+                selectedHarness = recordHarness
+                rebuildChoices()
+                return
+            }
+
+            // A harness choice is a complete next-turn choice, not the first half
+            // of a hidden two-step transaction. In particular, Anthropic model IDs
+            // can appear in both Pi and Claude Code. The old path changed only
+            // `selectedHarness`, left the record on Pi, and kept showing the same
+            // "Claude Opus" model title; Send then ran Pi even though the footer
+            // visibly said Claude Code. Preserve the current model when the new
+            // harness owns it, otherwise choose that harness's first runnable model,
+            // and persist the pair atomically through the same writer as a model pick.
+            let previousHarness = recordHarness
+            let previousSettings = settings
+            let snapshot = AgentModelCatalog.shared.snapshot(for: harness)
+            let compatibleModels = snapshot.models.filter {
+                AgentHarnessConfig.isProviderCompatible(model: $0, harness: harness)
+            }
+            guard let nextModel = compatibleModels.contains(settings.model)
+                    ? settings.model
+                    : compatibleModels.first else {
+                selectedHarness = previousHarness
+                rebuildChoices()
+                return
+            }
+            let next = AgentModelConfig.Resolution(model: nextModel, thinking: settings.thinking)
+            let accepted = onLaunchSelectionWrite?(harness, next.model, next.thinking) ?? true
+            guard accepted else {
+                recordHarness = previousHarness
+                selectedHarness = previousHarness
+                settings = previousSettings
+                rebuildChoices()
+                return
+            }
+            recordHarness = harness
             selectedHarness = harness
+            settings = next
             rebuildChoices()
             return
         }
@@ -279,6 +317,9 @@ final class AgentComposerFooterView: NSView, TokenThemed {
     // path after the popover chooses. The context seams remain for the tile's older
     // QA wrapper, but the footer no longer installs a visible Next turn label.
     var qaSettings: AgentModelConfig.Resolution { settings }
+    var qaLaunchSelection: AgentLaunchSelection {
+        AgentLaunchSelection(harness: recordHarness, model: settings.model, thinking: settings.thinking)
+    }
     var qaContextText: String { "" }
     var qaContextIsActionable: Bool { false }
     var qaHasVisibleContextLabel: Bool {
@@ -305,6 +346,12 @@ final class AgentComposerFooterView: NSView, TokenThemed {
         let before = settings
         pick(model: value)
         return settings != before
+    }
+    @discardableResult func qaPickHarness(_ value: AgentHarness) -> Bool {
+        guard harnessButton.items.contains(where: { $0.id == value.rawValue && $0.enabled }), controlsEnabled else { return false }
+        let before = qaLaunchSelection
+        pick(harness: value)
+        return qaLaunchSelection != before
     }
     @discardableResult func qaPickThinking(_ value: String) -> Bool {
         guard effortButton.items.contains(where: { $0.id == value && $0.enabled }), controlsEnabled else { return false }

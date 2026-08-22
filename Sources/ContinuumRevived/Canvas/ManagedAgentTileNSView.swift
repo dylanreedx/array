@@ -2266,6 +2266,8 @@ final class ManagedAgentTileNSView: TileNSView {
     @discardableResult
     func qaPickModel(_ model: String) -> Bool { providerFooter.qaPickModel(model) }
     @discardableResult
+    func qaPickHarness(_ harness: AgentHarness) -> Bool { providerFooter.qaPickHarness(harness) }
+    @discardableResult
     func qaPickThinking(_ thinking: String) -> Bool { providerFooter.qaPickThinking(thinking) }
     /// nil when the chip is hidden, so "no branch is shown" and "an empty branch is
     /// shown" cannot be confused.
