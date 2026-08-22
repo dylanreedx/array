@@ -2,6 +2,15 @@ import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
+/// AgentRecord is deliberately host-local, not a sync payload. Schema version 2
+/// happens to be PID-shaped under the generic sync scanner, so the record witness
+/// excludes that structural integer and audits every actual host location.
+private func agentRecordTaintViolations(_ json: Any) -> [TaintViolation] {
+    taintCheck(json).filter {
+        !($0.keyPath == "schemaVersion" && $0.pattern == .pidShapedInteger)
+    }
+}
+
 // Ticket: docs/38-tickets/90-agent-ux/P2A.1-agent-record.md
 //
 // Four properties, each with a negative test observed red before the final code
@@ -206,6 +215,9 @@ private func runAgentRecordForwardCompatCheck() {
                 && decoded.parentAgentID == nil && decoded.tileId == nil
                 && decoded.sourceItemId == nil,
                "AgentRecord decodes absent optional fields as nil")
+        expect(decoded.checkoutRoot == decoded.cwd && decoded.lastObservedWhere == decoded.cwd
+                && decoded.homeRelativePath == nil,
+               "v1 cwd migrates to checkout root, root Home, and Where")
         expect(decoded.createdAt == Date(timeIntervalSinceReferenceDate: 806_000_000.25),
                "AgentRecord decodes createdAt from the reference interval")
     } catch {
@@ -218,7 +230,7 @@ private func runAgentRecordForwardCompatCheck() {
     // (decode-forward means the version travels through, not that it is pinned).
     let fromTheFuture = """
     {
-      "schemaVersion": 2,
+      "schemaVersion": 3,
       "id": "2A100000-0000-4000-8000-000000000012",
       "displayName": "From a newer build",
       "model": "openai-codex/gpt-5.6-sol",
@@ -237,7 +249,7 @@ private func runAgentRecordForwardCompatCheck() {
         let decoded = try decoder.decode(AgentRecord.self, from: Data(fromTheFuture.utf8))
         expect(decoded.displayName == "From a newer build",
                "AgentRecord ignores an unknown future key rather than throwing")
-        expect(decoded.schemaVersion == 2,
+        expect(decoded.schemaVersion == 3,
                "AgentRecord carries a newer schemaVersion through rather than clamping it — got \(decoded.schemaVersion)")
         expect(decoded.settledOverride == .neutral,
                "an override word from a newer build reads as .neutral rather than throwing away the record — got \(decoded.settledOverride.rawValue)")
@@ -246,8 +258,8 @@ private func runAgentRecordForwardCompatCheck() {
         Foundation.exit(1)
     }
 
-    expect(AgentRecord.currentSchemaVersion == 1,
-           "AgentRecord schemaVersion starts at 1; got \(AgentRecord.currentSchemaVersion)")
+    expect(AgentRecord.currentSchemaVersion == 2,
+           "AgentRecord schemaVersion is bumped for independent checkout/Home/Where persistence; got \(AgentRecord.currentSchemaVersion)")
 }
 
 // 3 · `tileId` is a VIEW BINDING, not identity. Two things are asserted, because
@@ -331,11 +343,11 @@ private func runAgentRecordSyncBoundaryTaintWitness() {
             fputs("FAIL: AgentRecord failed to encode for the taint witness\n", stderr)
             Foundation.exit(1)
         }
-        let violations = taintCheck(json)
+        let violations = agentRecordTaintViolations(json)
         expect(violations.contains { $0.keyPath == "cwd" && $0.pattern == .hostLocalPath },
                "an AgentRecord with cwd \(cwd) is flagged host-bound by the taint scanner — found \(violations)")
-        expect(violations.count == 1,
-               "the host path is the ONLY thing the scanner flags in an AgentRecord — found \(violations)")
+        expect(Set(violations.map(\.keyPath)) == Set(["cwd", "checkoutRoot", "lastObservedWhere"]),
+               "every persisted host location is flagged and no unrelated field is tainted — found \(violations)")
         witnessedRoots += 1
     }
     // Floored at 4 = the scanner's four host prefixes, so shrinking the sweep is
@@ -350,7 +362,7 @@ private func runAgentRecordSyncBoundaryTaintWitness() {
         fputs("FAIL: AgentRecord failed to encode for the discriminating taint case\n", stderr)
         Foundation.exit(1)
     }
-    expect(taintCheck(cleanJson).isEmpty,
+    expect(agentRecordTaintViolations(cleanJson).isEmpty,
            "the taint flag comes from the host path itself, not from the record's shape")
 }
 
@@ -569,8 +581,9 @@ private func runAgentRecordLifecycleCheck() {
         fputs("FAIL: a lifecycle-carrying AgentRecord failed to encode for the taint witness\n", stderr)
         Foundation.exit(1)
     }
-    expect(taintCheck(taintJson).count == 1,
-           "the lifecycle fields add nothing for the taint scanner to flag — found \(taintCheck(taintJson))")
+    let locationViolations = agentRecordTaintViolations(taintJson)
+    expect(Set(locationViolations.map(\.keyPath)) == Set(["cwd", "checkoutRoot", "lastObservedWhere"]),
+           "the lifecycle fields add no taint beyond persisted host locations — found \(locationViolations)")
 }
 
 // P6.2/P6.4 · the new optional dates are durable facts, but a malformed optional

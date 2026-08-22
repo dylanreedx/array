@@ -239,6 +239,13 @@ public struct TileMetadata: Codable, Equatable, Sendable {
     public var diffSource: String?
     public var baseBranch: String?
     public var branch: String?
+    /// Durable filesystem identity for Shell/File Tree (and any future
+    /// filesystem-backed tile). Visual zone membership never rewrites these.
+    public var filesystemProjectId: UUID?
+    public var filesystemCheckoutRootPath: String?
+    public var filesystemHomeRelativePath: String?
+    public var filesystemWherePath: String?
+    public var worktreeId: String?
 
     public init(
         launchProfileId: String? = nil,
@@ -254,7 +261,12 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         reviewId: UUID? = nil,
         diffSource: String? = nil,
         baseBranch: String? = nil,
-        branch: String? = nil
+        branch: String? = nil,
+        filesystemProjectId: UUID? = nil,
+        filesystemCheckoutRootPath: String? = nil,
+        filesystemHomeRelativePath: String? = nil,
+        filesystemWherePath: String? = nil,
+        worktreeId: String? = nil
     ) {
         self.launchProfileId = launchProfileId
         self.projectRelativeCwd = projectRelativeCwd
@@ -270,6 +282,11 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         self.diffSource = diffSource
         self.baseBranch = baseBranch
         self.branch = branch
+        self.filesystemProjectId = filesystemProjectId
+        self.filesystemCheckoutRootPath = filesystemCheckoutRootPath
+        self.filesystemHomeRelativePath = filesystemHomeRelativePath
+        self.filesystemWherePath = filesystemWherePath
+        self.worktreeId = worktreeId
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -287,6 +304,11 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         case diffSource
         case baseBranch
         case branch
+        case filesystemProjectId
+        case filesystemCheckoutRootPath
+        case filesystemHomeRelativePath
+        case filesystemWherePath
+        case worktreeId
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -305,6 +327,11 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         try container.encodeIfPresent(diffSource, forKey: .diffSource)
         try container.encodeIfPresent(baseBranch, forKey: .baseBranch)
         try container.encodeIfPresent(branch, forKey: .branch)
+        try container.encodeIfPresent(filesystemProjectId, forKey: .filesystemProjectId)
+        try container.encodeIfPresent(filesystemCheckoutRootPath, forKey: .filesystemCheckoutRootPath)
+        try container.encodeIfPresent(filesystemHomeRelativePath, forKey: .filesystemHomeRelativePath)
+        try container.encodeIfPresent(filesystemWherePath, forKey: .filesystemWherePath)
+        try container.encodeIfPresent(worktreeId, forKey: .worktreeId)
     }
 }
 

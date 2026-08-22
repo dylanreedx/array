@@ -32,7 +32,7 @@ final class TileSpawner {
     }
 
     private enum FreshTerminalProfileResolution {
-        case resolved(spec: LaunchProfileSpec, profile: LaunchProfile, projectRoot: String)
+        case resolved(spec: LaunchProfileSpec, profile: LaunchProfile, projectRoot: String, creationScope: CreationScope?)
         case failed(Outcome)
     }
 
@@ -57,6 +57,7 @@ final class TileSpawner {
     private let tmuxControlFactory: @Sendable (String, RemoteReach, UserDefaults) -> any TmuxControl
     private var browserProfiles: [BrowserProfile]
     private var managedAgentLaunchSelections: [UUID: AgentLaunchSelection] = [:]
+    private var managedAgentCreationScopes: [UUID: CreationScope] = [:]
 
     /// Dynamic source used by browser tile profile menus after registry edits.
     var browserProfileMenuProvider: (() -> [BrowserProfile])?
@@ -66,6 +67,10 @@ final class TileSpawner {
     /// process-wide active project root, allowing worktree project entries to
     /// spawn agents into their own checkout.
     var terminalProjectContextProvider: (() -> ProjectEntry?)?
+    /// Resolved once by the App according to explicit > zone > focused agent >
+    /// workspace recent. Filesystem-backed spawn paths copy this exact value
+    /// into runtime inputs, tile metadata and persistence.
+    var creationScopeProvider: (() -> CreationScope?)?
     var terminalSessionTargetProvider: (() -> TerminalSessionTarget?)?
     var terminalFocusedPaneTargetProvider: (() -> String?)?
     var focusedTerminalCwdProvider: (() -> String?)?
@@ -176,11 +181,13 @@ final class TileSpawner {
         let spec: LaunchProfileSpec
         let profile: LaunchProfile
         let projectRoot: String
+        let creationScope: CreationScope?
         switch resolvedFreshTerminalProfile(profileId: profileId) {
-        case let .resolved(resolvedSpec, resolvedProfile, resolvedProjectRoot):
+        case let .resolved(resolvedSpec, resolvedProfile, resolvedProjectRoot, resolvedCreationScope):
             spec = resolvedSpec
             profile = resolvedProfile
             projectRoot = resolvedProjectRoot
+            creationScope = resolvedCreationScope
         case let .failed(outcome):
             return outcome
         }
@@ -191,7 +198,8 @@ final class TileSpawner {
             agentDescriptor: agentDescriptor(for: spec, projectRoot: projectRoot, at: now),
             createdAt: now,
             at: worldPoint,
-            allowTmuxPersistence: allowTmuxPersistence
+            allowTmuxPersistence: allowTmuxPersistence,
+            creationScope: creationScope
         )
     }
 
@@ -199,7 +207,8 @@ final class TileSpawner {
         guard let spec = registry.spec(for: profileId) else {
             return .failed(.unknownProfile(id: profileId))
         }
-        let projectRoot = terminalProjectRoot()
+        let creationScope = creationScopeProvider?()
+        let projectRoot = creationScope?.projectRoot ?? terminalProjectRoot()
         let resolution = registry.resolve(
             spec,
             in: projectRoot,
@@ -212,18 +221,19 @@ final class TileSpawner {
         case let .missing(name): return .failed(.missingCommand(executable: name))
         case let .notConfigured(id): return .failed(.notConfigured(profileId: id))
         }
-        let inheritedCwd = resolvedSpawnCwd(projectRoot: projectRoot)
+        let inheritedCwd = resolvedSpawnCwd(projectRoot: projectRoot, creationScope: creationScope)
         let effectiveProfile = LaunchProfile(
             command: profile.command,
             arguments: profile.arguments,
             cwd: inheritedCwd,
             title: profile.title
         )
-        return .resolved(spec: spec, profile: effectiveProfile, projectRoot: projectRoot)
+        return .resolved(spec: spec, profile: effectiveProfile, projectRoot: projectRoot, creationScope: creationScope)
     }
 
     func spawnHarnessRoleRun(role: HarnessRole, prompt: String, at worldPoint: CGPoint? = nil) -> Outcome {
-        let projectRoot = terminalProjectRoot()
+        let creationScope = creationScopeProvider?()
+        let projectRoot = creationScope?.projectRoot ?? terminalProjectRoot()
         let now = Date()
         let runId = HarnessRoleRunBuilder.makeRunId(roleId: role.id, now: now, suffix: UUID().uuidString)
         let profile = HarnessRoleRunBuilder.buildLaunchProfile(role: role, prompt: prompt, projectRoot: projectRoot, runId: runId)
@@ -233,7 +243,8 @@ final class TileSpawner {
             agentDescriptor: AgentDescriptor.configuring(agentKind: .pi, worktreePath: projectRoot, now: now, runId: runId),
             createdAt: now,
             at: worldPoint,
-            allowTmuxPersistence: false
+            allowTmuxPersistence: false,
+            creationScope: creationScope
         )
     }
 
@@ -243,16 +254,18 @@ final class TileSpawner {
         agentDescriptor: AgentDescriptor?,
         createdAt now: Date,
         at worldPoint: CGPoint?,
-        allowTmuxPersistence: Bool
+        allowTmuxPersistence: Bool,
+        creationScope: CreationScope? = nil
     ) -> Outcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
         guard let ghostty else { return .failure(SpawnError.canvasUnavailable) }
-        let frame = makePlacement(
+        let frame = makeProjectTilePlacement(
             worldPoint: worldPoint,
             size: CanvasEngine.defaultFrame(for: .terminal),
             in: canvasView
         )
         let nextZ = CanvasEngine.zPositionAbove(canvasView.projectTiles())
+        let wherePath = profile.cwd
         var tile = Tile(
             id: UUID(),
             kind: .terminal,
@@ -260,7 +273,14 @@ final class TileSpawner {
             frame: frame,
             zPosition: nextZ,
             runtimeRef: nil,
-            metadata: TileMetadata(launchProfileId: launchProfileId, projectRelativeCwd: ".")
+            metadata: TileMetadata(
+                launchProfileId: launchProfileId,
+                projectRelativeCwd: creationScope?.homeRelativePath ?? ".",
+                filesystemProjectId: creationScope?.projectId,
+                filesystemCheckoutRootPath: creationScope?.projectRoot,
+                filesystemHomeRelativePath: creationScope?.homeRelativePath,
+                filesystemWherePath: wherePath
+            )
         )
         let sessionTarget = terminalSessionTargetProvider?()
         let wrappedProfile: TmuxWrappedProfile
@@ -285,7 +305,7 @@ final class TileSpawner {
 
         let view = TerminalTileNSView(tile: tile, runtime: runtime)
         view.agentStatus = agentDescriptor?.status
-        canvasView.install(tileView: view, for: tile)
+        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: creationScope?.zoneId)
 
         let descriptor = TerminalSessionDescriptor(
             id: runtime.id,
@@ -304,7 +324,7 @@ final class TileSpawner {
         do {
             try projectStore.saveSession(descriptor)
             writeInitialManagedSessionRecord(for: descriptor, windowTarget: wrappedProfile.windowTarget, at: now)
-            try projectStore.saveCanvas(canvasView.canvasState)
+            try persistProjectCanvas(after: target, in: canvasView)
             terminalSpawnedHandler?(descriptor)
         } catch {
             if let target = wrappedProfile.windowTarget {
@@ -347,15 +367,27 @@ final class TileSpawner {
         terminalProjectContextProvider?().map(\.rootPath) ?? project.rootPath
     }
 
-    private func resolvedSpawnCwd(projectRoot: String) -> String {
+    private func resolvedSpawnCwd(projectRoot: String, creationScope: CreationScope? = nil) -> String {
+        if let creationScope {
+            let home = creationScope.homePath(inCheckoutRoot: creationScope.projectRoot)
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: home, isDirectory: &isDirectory), isDirectory.boolValue {
+                lastSpawnedCwd = home
+                return home
+            }
+            return projectRoot
+        }
         let resolved = resolveNewTileCwd(
             policy: NewTileCwdConfig.policy(defaults: defaults),
             focused: focusedTerminalCwdProvider?(),
             lastUsed: lastSpawnedCwd,
             projectRoot: projectRoot
         )
-        lastSpawnedCwd = resolved
-        return resolved
+        // A focused/last cwd may refine Where only inside the already-resolved
+        // project. It never chooses a different project by accident.
+        let contained = FilesystemScope.contains(path: resolved, within: projectRoot) ? resolved : projectRoot
+        lastSpawnedCwd = contained
+        return contained
     }
 
     private func tmuxWrappedProfileIfAvailable(
@@ -530,7 +562,7 @@ final class TileSpawner {
     func restartTerminalTile(tileId: UUID) -> RestartOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
         guard let ghostty else { return .failure(SpawnError.canvasUnavailable) }
-        guard let existing = canvasView.canvasState.tiles.first(where: { $0.id == tileId }) else {
+        guard let existing = canvasView.tileRecord(for: tileId) else {
             return .tileNotFound
         }
         let profileId = existing.metadata.launchProfileId ?? "shell"
@@ -594,7 +626,11 @@ final class TileSpawner {
         let agentDescriptor = agentDescriptor(for: spec, projectRoot: projectRoot, at: now)
         let view = TerminalTileNSView(tile: tile, runtime: runtime)
         view.agentStatus = agentDescriptor?.status
-        canvasView.install(tileView: view, for: tile)
+        let target = canvasView.installProjectTile(
+            tileView: view,
+            for: tile,
+            targetZoneId: canvasView.zoneId(containing: tile.id)
+        )
 
         let descriptor = TerminalSessionDescriptor(
             id: runtime.id,
@@ -628,7 +664,7 @@ final class TileSpawner {
                 try? projectStore.deleteSession(id: staleId)
             }
             writeInitialManagedSessionRecord(for: descriptor, windowTarget: wrappedProfile.windowTarget ?? persistedWindowTarget, at: now)
-            try projectStore.saveCanvas(canvasView.canvasState)
+            try persistProjectCanvas(after: target, in: canvasView)
             terminalSpawnedHandler?(descriptor)
         } catch {
             if let target = wrappedProfile.windowTarget,
@@ -792,7 +828,7 @@ final class TileSpawner {
         if let persisted = try? loadBrowserStateIfAvailable()?.tiles.first(where: { $0.tileId == tileId }) {
             return browserProfile(for: persisted.profileId).id
         }
-        return browserProfile(for: canvasView?.canvasState.tiles.first(where: { $0.id == tileId })?.metadata.browserProfileId).id
+        return browserProfile(for: canvasView?.tileRecord(for: tileId)?.metadata.browserProfileId).id
     }
 
     private func configureBrowserProfileMenu(_ view: BrowserTileNSView, tileId: UUID) {
@@ -832,7 +868,7 @@ final class TileSpawner {
             return .failure(error)
         }
 
-        let frame = makePlacement(
+        let frame = makeProjectTilePlacement(
             worldPoint: worldPoint,
             size: CanvasEngine.defaultFrame(for: .browser),
             in: canvasView
@@ -865,7 +901,7 @@ final class TileSpawner {
         view.onTabModelChange = { [weak self] model in try? self?.writeBrowserTabModel(tileId: tile.id, runtimeId: runtime.id, model: model, storageGroupId: storageGroupId, profileId: profile.id) }
         configureBrowserProfileMenu(view, tileId: tile.id)
         configureBrowserInspectorMenu(view, tileId: tile.id)
-        canvasView.install(tileView: view, for: tile)
+        let target = canvasView.installProjectTile(tileView: view, for: tile)
 
         do {
             try upsertBrowserTile(
@@ -877,7 +913,7 @@ final class TileSpawner {
                 profileId: profile.id,
                 in: browserState
             )
-            try projectStore.saveCanvas(canvasView.canvasState)
+            try persistProjectCanvas(after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -906,19 +942,22 @@ final class TileSpawner {
             return nil
         }
 
-        let openerFrame = canvasView.canvasState.tiles.first(where: { $0.id == openerTileId })?.frame
+        let openerSnapshot = canvasView.navigationTileSnapshot(for: openerTileId)
+        let openerFrame = openerSnapshot?.worldFrame
+        let targetZoneId = openerSnapshot?.zoneId
         let placementPoint: CGPoint?
         if let openerFrame {
             placementPoint = CGPoint(x: openerFrame.x + openerFrame.width + 24, y: openerFrame.y + 24)
         } else {
             placementPoint = nil
         }
-        let frame = makePlacement(
+        let frame = makeProjectTilePlacement(
             worldPoint: placementPoint,
             size: CanvasEngine.defaultFrame(for: .browser),
-            in: canvasView
+            in: canvasView,
+            targetZoneId: targetZoneId
         )
-        let nextZ = CanvasEngine.zPositionAbove(canvasView.canvasState.tiles)
+        let nextZ = CanvasEngine.zPositionAbove(canvasView.allWorkspaceTiles())
         let profile = browserProfile(for: profileId)
         var tile = Tile(
             id: UUID(),
@@ -946,7 +985,7 @@ final class TileSpawner {
         view.onTabModelChange = { [weak self] model in try? self?.writeBrowserTabModel(tileId: tile.id, runtimeId: runtime.id, model: model, storageGroupId: profile.dataStoreIdentifier, profileId: profile.id) }
         configureBrowserProfileMenu(view, tileId: tile.id)
         configureBrowserInspectorMenu(view, tileId: tile.id)
-        canvasView.install(tileView: view, for: tile)
+        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
 
         do {
             try upsertBrowserTile(
@@ -958,7 +997,7 @@ final class TileSpawner {
                 profileId: profile.id,
                 in: browserState
             )
-            try projectStore.saveCanvas(canvasView.canvasState)
+            try persistProjectCanvas(after: target, in: canvasView)
         } catch {
             fputs("TileSpawner target=_blank persistence failed: \(error)\n", stderr)
             canvasView.removeTile(id: tile.id)
@@ -970,7 +1009,7 @@ final class TileSpawner {
 
     func installBrowserSnapshotTile(runtime: WKWebViewBrowserRuntime, snapshotImage: NSImage) throws {
         guard let canvasView,
-              let existing = canvasView.canvasState.tiles.first(where: { $0.id == runtime.tileId })
+              let existing = canvasView.tileRecord(for: runtime.tileId)
         else { throw SpawnError.canvasUnavailable }
         try writeBrowserTileSnapshotOrThrow(for: runtime)
         var tile = existing
@@ -983,8 +1022,12 @@ final class TileSpawner {
             snapshotImage: snapshotImage,
             urlString: runtime.url
         )
-        canvasView.install(tileView: view, for: tile)
-        try projectStore.saveCanvas(canvasView.canvasState)
+        let target = canvasView.installProjectTile(
+            tileView: view,
+            for: tile,
+            targetZoneId: canvasView.zoneId(containing: tile.id)
+        )
+        try persistProjectCanvas(after: target, in: canvasView)
         runtime.terminate(policy: .force)
     }
 
@@ -992,7 +1035,7 @@ final class TileSpawner {
     /// fresh runtime. Reuses tile id, frame, and z-index.
     func restartBrowserTile(tileId: UUID) -> BrowserRestartOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
-        guard let existing = canvasView.canvasState.tiles.first(where: { $0.id == tileId }) else {
+        guard let existing = canvasView.tileRecord(for: tileId) else {
             return .tileNotFound
         }
         let browserState: BrowserState?
@@ -1031,7 +1074,11 @@ final class TileSpawner {
         view.onTabModelChange = { [weak self] model in try? self?.writeBrowserTabModel(tileId: tile.id, runtimeId: runtime.id, model: model, storageGroupId: storageGroupId, profileId: profile.id) }
         configureBrowserProfileMenu(view, tileId: tile.id)
         configureBrowserInspectorMenu(view, tileId: tile.id)
-        canvasView.install(tileView: view, for: tile)
+        let target = canvasView.installProjectTile(
+            tileView: view,
+            for: tile,
+            targetZoneId: canvasView.zoneId(containing: tile.id)
+        )
 
         do {
             try upsertBrowserTile(
@@ -1044,7 +1091,7 @@ final class TileSpawner {
                 interactionState: persistedBrowserTile?.interactionState,
                 in: browserState ?? BrowserState(tiles: [])
             )
-            try projectStore.saveCanvas(canvasView.canvasState)
+            try persistProjectCanvas(after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -1061,9 +1108,12 @@ final class TileSpawner {
 
     func spawnBrowserInspector(for browserTileId: UUID, at worldPoint: CGPoint? = nil) -> BrowserInspectorOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
-        guard let browserTile = canvasView.canvasState.tiles.first(where: { $0.id == browserTileId && $0.kind == .browser }) else {
+        guard let browserTile = canvasView.tileRecord(for: browserTileId), browserTile.kind == .browser else {
             return .notBrowserTile
         }
+        let browserSnapshot = canvasView.navigationTileSnapshot(for: browserTileId)
+        let targetZoneId = browserSnapshot?.zoneId
+        let browserWorldFrame = browserSnapshot?.worldFrame ?? browserTile.frame
 
         let browserState: BrowserState
         do {
@@ -1079,12 +1129,13 @@ final class TileSpawner {
             return .spawned(tileId: existingInspectorId)
         }
 
-        let frame = makePlacement(
-            worldPoint: worldPoint ?? CGPoint(x: browserTile.frame.x + browserTile.frame.width + 24, y: browserTile.frame.y),
+        let frame = makeProjectTilePlacement(
+            worldPoint: worldPoint ?? CGPoint(x: browserWorldFrame.x + browserWorldFrame.width + 24, y: browserWorldFrame.y),
             size: CanvasEngine.defaultFrame(for: .browserInspector),
-            in: canvasView
+            in: canvasView,
+            targetZoneId: targetZoneId
         )
-        let nextZ = CanvasEngine.zPositionAbove(canvasView.canvasState.tiles)
+        let nextZ = CanvasEngine.zPositionAbove(canvasView.allWorkspaceTiles())
         let now = Date()
         let inspectorTileId = UUID()
         let inspectorState = BrowserInspectorState(
@@ -1116,14 +1167,14 @@ final class TileSpawner {
             networkLiteEventProvider: browserInspectorNetworkLiteEventProvider(for: browserTileId)
         )
         configureBrowserInspectorView(view, inspectorTileId: inspectorTileId, browserTileId: browserTileId)
-        canvasView.install(tileView: view, for: tile)
+        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
 
         var nextState = browserState
         nextState.inspectorStates.append(inspectorState)
         do {
             try projectStore.saveBrowserState(nextState)
             _ = revealTile(inspectorTileId)
-            try projectStore.saveCanvas(canvasView.canvasState)
+            try persistProjectCanvas(after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -1153,7 +1204,7 @@ final class TileSpawner {
                 try? self?.updateBrowserInspectorPanel(inspectorTileId: inspectorTileId, selectedPanel: panel)
             }
         }
-        canvasView.install(tileView: view, for: tile)
+        _ = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: tile.zoneId)
     }
 
     private func configureBrowserInspectorView(_ view: BrowserInspectorTileNSView, inspectorTileId: UUID, browserTileId: UUID) {
@@ -1172,14 +1223,14 @@ final class TileSpawner {
     private func existingBrowserInspectorTileId(inspecting browserTileId: UUID, browserState: BrowserState, in canvasView: CanvasNSView) -> UUID? {
         browserState.inspectorStates.first { state in
             state.inspectedBrowserTileId == browserTileId
-                && canvasView.canvasState.tiles.contains { $0.id == state.inspectorTileId && $0.kind == .browserInspector }
+                && canvasView.tileRecord(for: state.inspectorTileId)?.kind == .browserInspector
         }?.inspectorTileId
     }
 
     @discardableResult
     private func revealTile(_ tileId: UUID) -> Bool {
         guard let canvasView,
-              canvasView.canvasState.tiles.contains(where: { $0.id == tileId })
+              canvasView.tileRecord(for: tileId) != nil
         else { return false }
         canvasView.centerOnTile(tileId)
         if canvasView.focusBroker?.enterScope(.tile(tileId), reason: .userClick) != true {
@@ -1206,9 +1257,9 @@ final class TileSpawner {
             inspectorView.updateInspectedBrowser(summary)
         }
         guard let summary,
-              let index = canvasView.canvasState.tiles.firstIndex(where: { $0.id == inspectorTileId && $0.kind == .browserInspector })
+              var tile = canvasView.tileRecord(for: inspectorTileId),
+              tile.kind == .browserInspector
         else { return }
-        var tile = canvasView.canvasState.tiles[index]
         let title = "Inspector — \(Self.inspectorDisplayName(title: summary.title, url: summary.url))"
         guard tile.title != title else { return }
         tile.title = title
@@ -1304,7 +1355,7 @@ final class TileSpawner {
 
     private func browserInspectorSummary(for browserTileId: UUID, browserState: BrowserState?) -> BrowserInspectorTileNSView.InspectedBrowserSummary? {
         guard let canvasView,
-              let tile = canvasView.canvasState.tiles.first(where: { $0.id == browserTileId && $0.kind == .browser })
+              let tile = canvasView.tileRecord(for: browserTileId), tile.kind == .browser
         else { return nil }
         let liveBrowser = canvasView.tileView(for: browserTileId) as? BrowserTileNSView
         let persisted = browserState?.tiles.first { $0.tileId == browserTileId }
@@ -1340,7 +1391,7 @@ final class TileSpawner {
     /// so profile changes cannot be applied in place.
     func switchBrowserTileProfile(tileId: UUID, profileId: UUID) -> BrowserProfileSwitchOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
-        guard let existing = canvasView.canvasState.tiles.first(where: { $0.id == tileId }) else {
+        guard let existing = canvasView.tileRecord(for: tileId) else {
             return .tileNotFound
         }
         guard let selectedProfile = availableBrowserProfiles().first(where: { $0.id == profileId }) else {
@@ -1381,7 +1432,11 @@ final class TileSpawner {
         view.onTabModelChange = { [weak self] model in try? self?.writeBrowserTabModel(tileId: tile.id, runtimeId: runtime.id, model: model, storageGroupId: selectedProfile.dataStoreIdentifier, profileId: selectedProfile.id) }
         configureBrowserProfileMenu(view, tileId: tile.id)
         configureBrowserInspectorMenu(view, tileId: tile.id)
-        canvasView.install(tileView: view, for: tile)
+        let target = canvasView.installProjectTile(
+            tileView: view,
+            for: tile,
+            targetZoneId: canvasView.zoneId(containing: tile.id)
+        )
 
         do {
             try upsertBrowserTile(
@@ -1393,7 +1448,7 @@ final class TileSpawner {
                 profileId: selectedProfile.id,
                 in: browserState ?? BrowserState(tiles: [])
             )
-            try projectStore.saveCanvas(canvasView.canvasState)
+            try persistProjectCanvas(after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -1416,18 +1471,12 @@ final class TileSpawner {
         providerSettings: AgentModelConfig.Resolution? = nil
     ) -> ManagedAgentOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
+        let creationScope = creationScopeProvider?()
         let now = Date()
         let tileId = UUID()
         let threadId = "managed-\(tileId.uuidString)"
-        // DELIBERATELY the flat model, not `makeProjectTilePlacement`/`installProjectTile`.
-        // Routing agent spawns into the active zone layer is the right destination
-        // (hazard 9), but the layer is REBUILT on a workspace switch and rebuilds a
-        // `.managedAgent` tile as a plain descriptor view — switch away and back and a
-        // live agent tile returns as a dead placeholder. File tiles were migrated with
-        // that path understood; agents need the zone re-installation to reconstruct
-        // their views first. Until then this keeps the shipped behaviour.
-        let frame = makePlacement(worldPoint: worldPoint, size: CanvasEngine.defaultFrame(for: .managedAgent), in: canvasView)
-        let nextZ = CanvasEngine.zPositionAbove(canvasView.canvasState.tiles)
+        let frame = makeProjectTilePlacement(worldPoint: worldPoint, size: CanvasEngine.defaultFrame(for: .managedAgent), in: canvasView)
+        let nextZ = CanvasEngine.zPositionAbove(canvasView.projectTiles())
         // One resolution seeds every pre-attach projection. Cmd+K supplies its
         // explicit choice; generic creation falls back to Settings. Wiring gives
         // the same resolution to the agent record before the view attaches.
@@ -1445,9 +1494,16 @@ final class TileSpawner {
             title: spawnModelName,
             frame: frame,
             zPosition: nextZ,
-            zoneId: canvasView.activeProjectZonePlacement == nil ? canvasView.activeZone?.zoneId : nil,
+            zoneId: creationScope?.zoneId,
             runtimeRef: nil,
-            metadata: TileMetadata(launchProfileId: "managed-agent", projectRelativeCwd: ".")
+            metadata: TileMetadata(
+                launchProfileId: "managed-agent",
+                projectRelativeCwd: creationScope?.homeRelativePath ?? ".",
+                filesystemProjectId: creationScope?.projectId,
+                filesystemCheckoutRootPath: creationScope?.projectRoot,
+                filesystemHomeRelativePath: creationScope?.homeRelativePath,
+                filesystemWherePath: creationScope?.homePath(inCheckoutRoot: creationScope?.projectRoot ?? project.rootPath)
+            )
         )
         let descriptor = AgentDescriptor(agentKind: agentKind, worktreePath: nil, status: .configuring, statusUpdatedAt: now)
         let view = ManagedAgentTileNSView(
@@ -1458,8 +1514,7 @@ final class TileSpawner {
         )
         view.ingest(.sessionStateChanged(.ready))
         view.ingest(.contentDelta(threadId: threadId, turnId: "bootstrap", streamKind: .assistant, delta: "Ready. Type a prompt below to run \(spawnModelName) in this tile."))
-        canvasView.install(tileView: view, for: tile)
-        canvasView.arrangeAutoLayoutAfterSpawn(zoneId: tile.zoneId)
+        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: creationScope?.zoneId)
 
         do {
             try managedSessionStore.upsert(ManagedAgentSessionRecord(
@@ -1474,17 +1529,22 @@ final class TileSpawner {
                 resumeCursor: nil,
                 runtimePayload: nil
             ))
-            try persistProjectCanvas(after: .flatCanvasState, in: canvasView)
+            try persistProjectCanvas(after: target, in: canvasView)
         } catch {
             try? managedSessionStore.delete(tileId: tileId)
             return .failure(error)
         }
         managedAgentLaunchSelections[tileId] = resolvedSelection
+        if let creationScope { managedAgentCreationScopes[tileId] = creationScope }
         return .spawned(tileId: tileId)
     }
 
     func managedAgentLaunchSelection(tileId: UUID) -> AgentLaunchSelection? {
         managedAgentLaunchSelections[tileId]
+    }
+
+    func managedAgentCreationScope(tileId: UUID) -> CreationScope? {
+        managedAgentCreationScopes[tileId]
     }
 
     /// ⌘K's managed-agent spawn, whole, in ONE function: validate the explicit
@@ -2158,7 +2218,8 @@ final class TileSpawner {
         case .flatCanvasState:
             try projectStore.saveCanvas(canvasView.canvasState)
         case let .zoneLayer(zoneId):
-            guard let tiles = canvasView.tiles(inZone: zoneId) else { throw SpawnError.canvasUnavailable }
+            guard let projectId = canvasView.projectId(forZone: zoneId) else { throw SpawnError.canvasUnavailable }
+            let tiles = canvasView.tiles(forProjectId: projectId)
             var state = ((try? projectStore.tryLoadCanvas()) ?? nil) ?? CanvasState(
                 viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
                 tiles: [],
@@ -2290,7 +2351,7 @@ final class TileSpawner {
 
     func writeBrowserTileSnapshotOrThrow(for runtime: WKWebViewBrowserRuntime) throws {
         guard let canvasView,
-              let tile = canvasView.canvasState.tiles.first(where: { $0.id == runtime.tileId })
+              let tile = canvasView.tileRecord(for: runtime.tileId)
         else { return }
         let persistedTile = try loadBrowserStateIfAvailable()?.tiles.first(where: { $0.tileId == tile.id })
         let profile = browserProfile(for: persistedTile?.profileId ?? tile.metadata.browserProfileId)
@@ -3865,14 +3926,13 @@ final class TileSpawner {
         try expect(offsetFixture.canvas.viewport == offsetViewportBefore,
                    "spawning must not pan or zoom the viewport; \(offsetViewportBefore) -> \(offsetFixture.canvas.viewport)")
 
-        // MARK: Fixture 3 — the first-fit routes, in world space
+        // MARK: Fixture 3 — a migrated filesystem tile, in world space
         //
-        // File tree, terminal, browser and managed agents still scan first-fit. They
-        // must scan the WORLD rect the user is looking at, intersected with the active
-        // zone: viewport 900..2700 x 400..1300 against zone 1000..2800 x 500..1400
-        // leaves 1000..2700 x 500..1300, so an empty canvas places at (1000,500) —
-        // screen (100,100). Computing that window in zone-local space and storing the
-        // result as a world frame put the tile at world (0,0), off screen entirely.
+        // File Tree now shares the zone-aware project-tile placement/install path.
+        // With no ZoneLayer installed this fixture stores WORLD frames, so viewport
+        // 900..2700 x 400..1300 centres a 360x520 tree at world (1620,590). This
+        // guards against both the retired first-fit policy and the older bug where a
+        // zone-local result was persisted as a world frame.
         let firstFitFixture = try makeFixture(name: "firstfit", zoneOrigin: ZonePoint(x: 1000, y: 500), viewport: CanvasViewport(x: 900, y: 400, zoom: 1))
         let treeTileId: UUID
         switch firstFitFixture.spawner.spawnFileTree(rootPath: firstFitFixture.root.path) {
@@ -3882,8 +3942,8 @@ final class TileSpawner {
         }
         let treeFrame = try placedFrame(firstFitFixture, treeTileId)
         try expectFrame(treeFrame,
-                        TileFrame(x: 1000, y: 500, width: 360, height: 520),
-                        "a first-fit route must scan the visible WORLD window, not zone-local coordinates")
+                        TileFrame(x: 1620, y: 590, width: 360, height: 520),
+                        "a migrated filesystem tile must use centre-aware WORLD placement")
         guard let treeView = firstFitFixture.canvas.tileView(for: treeTileId) else {
             throw CheckError.failed("no installed view for the spawned file tree")
         }
@@ -3892,7 +3952,8 @@ final class TileSpawner {
         // PRESENTED rect, so convert through the view tree.
         let treePresented = treeView.convert(treeView.bounds, to: firstFitFixture.canvas)
         try expect(firstFitFixture.canvas.bounds.contains(treePresented),
-                   "a first-fit spawn must render inside the visible canvas; got \(treePresented) in \(firstFitFixture.canvas.bounds)")
+                   "a migrated filesystem tile must render inside the visible canvas; got \(treePresented) in \(firstFitFixture.canvas.bounds)")
+        try expectRenderedCentre(firstFitFixture.canvas, treeTileId, "file-tree fixture")
 
         // MARK: Fixture 4 — a ZoneLayer owns the active project
         //
@@ -4462,7 +4523,7 @@ final class TileSpawner {
         }
         func resolvedProfile(spawner: TileSpawner) throws -> LaunchProfile {
             switch spawner.resolvedFreshTerminalProfile(profileId: "shell") {
-            case let .resolved(_, profile, _):
+            case let .resolved(_, profile, _, _):
                 return profile
             case let .failed(outcome):
                 throw CheckError.failed("fresh profile resolution failed: \(outcome)")
@@ -5778,7 +5839,16 @@ final class TileSpawner {
 
     // MARK: - File tree tiles
 
-    func spawnFileTree(rootPath: String, at worldPoint: CGPoint? = nil) -> FileTreeOutcome {
+    func spawnFileTreeForCreationScope(at worldPoint: CGPoint? = nil) -> FileTreeOutcome {
+        guard let scope = creationScopeProvider?() else { return .invalidPath }
+        return spawnFileTree(
+            rootPath: scope.homePath(inCheckoutRoot: scope.projectRoot),
+            at: worldPoint,
+            creationScope: scope
+        )
+    }
+
+    func spawnFileTree(rootPath: String, at worldPoint: CGPoint? = nil, creationScope: CreationScope? = nil) -> FileTreeOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
         let trimmedRootPath = rootPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedRootPath.isEmpty else { return .invalidPath }
@@ -5788,12 +5858,12 @@ final class TileSpawner {
             return .invalidPath
         }
 
-        let frame = makePlacement(
+        let frame = makeProjectTilePlacement(
             worldPoint: worldPoint,
             size: CanvasEngine.defaultFrame(for: .fileTree),
             in: canvasView
         )
-        let nextZ = CanvasEngine.zPositionAbove(canvasView.canvasState.tiles)
+        let nextZ = CanvasEngine.zPositionAbove(canvasView.projectTiles())
         let tile = Tile(
             id: UUID(),
             kind: .fileTree,
@@ -5801,7 +5871,13 @@ final class TileSpawner {
             frame: frame,
             zPosition: nextZ,
             runtimeRef: nil,
-            metadata: TileMetadata(filePath: URL(fileURLWithPath: trimmedRootPath, isDirectory: true).standardizedFileURL.path)
+            metadata: TileMetadata(
+                filePath: URL(fileURLWithPath: trimmedRootPath, isDirectory: true).standardizedFileURL.path,
+                filesystemProjectId: creationScope?.projectId,
+                filesystemCheckoutRootPath: creationScope?.projectRoot,
+                filesystemHomeRelativePath: creationScope?.homeRelativePath,
+                filesystemWherePath: trimmedRootPath
+            )
         )
         let fileTreeTile = defaultFileTreeTile(tileId: tile.id, rootPath: trimmedRootPath)
         do {
@@ -5810,9 +5886,14 @@ final class TileSpawner {
             return .failure(error)
         }
 
-        let viewModel = installFileTreeView(tile, fileTreeTile: fileTreeTile, in: canvasView)
+        let (viewModel, target) = installFileTreeView(
+            tile,
+            fileTreeTile: fileTreeTile,
+            in: canvasView,
+            targetZoneId: creationScope?.zoneId
+        )
         do {
-            try projectStore.saveCanvas(canvasView.canvasState)
+            try persistProjectCanvas(after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -5821,9 +5902,10 @@ final class TileSpawner {
 
     func restartFileTreeTile(tileId: UUID) -> FileTreeRestartOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
-        guard var existing = canvasView.canvasState.tiles.first(where: { $0.id == tileId }) else {
+        guard var existing = canvasView.tileRecord(for: tileId) else {
             return .tileNotFound
         }
+        let targetZoneId = canvasView.zoneId(containing: tileId)
 
         switch validatedFileTreeTile(for: existing) {
         case let .valid(fileTreeTile, backfilledDescriptorRoot):
@@ -5833,14 +5915,27 @@ final class TileSpawner {
             }
             do {
                 try upsertFileTreeTile(fileTreeTile)
-                try projectStore.saveCanvas(canvasView.canvasState)
+                let target: CanvasNSView.ProjectTileTarget = targetZoneId.map(CanvasNSView.ProjectTileTarget.zoneLayer)
+                    ?? .flatCanvasState
+                try persistProjectCanvas(after: target, in: canvasView)
             } catch {
                 return .failure(error)
             }
-            let viewModel = installFileTreeView(existing, fileTreeTile: fileTreeTile, in: canvasView)
+            let (viewModel, _) = installFileTreeView(
+                existing,
+                fileTreeTile: fileTreeTile,
+                in: canvasView,
+                targetZoneId: targetZoneId
+            )
             return .restarted(viewModel)
         case let .recoverableError(fileTreeTile, message):
-            let viewModel = installFileTreeErrorView(existing, fileTreeTile: fileTreeTile, message: message, in: canvasView)
+            let viewModel = installFileTreeErrorView(
+                existing,
+                fileTreeTile: fileTreeTile,
+                message: message,
+                in: canvasView,
+                targetZoneId: targetZoneId
+            )
             return .restarted(viewModel)
         }
     }
@@ -5853,8 +5948,9 @@ final class TileSpawner {
     private func installFileTreeView(
         _ tile: Tile,
         fileTreeTile: FileTreeTile,
-        in canvasView: CanvasNSView
-    ) -> FileTreeViewModel {
+        in canvasView: CanvasNSView,
+        targetZoneId: UUID? = nil
+    ) -> (FileTreeViewModel, CanvasNSView.ProjectTileTarget) {
         let viewModel = FileTreeViewModel()
         let view = FileTreeTileNSView(tile: tile, fileTreeTile: fileTreeTile, viewModel: viewModel)
         view.onPersist = { [weak self] _ in
@@ -5871,19 +5967,20 @@ final class TileSpawner {
         view.onOpenFile = { [weak self] path in
             self?.openFileInPreferredEditor(path: path)
         }
-        canvasView.install(tileView: view, for: tile)
-        return viewModel
+        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
+        return (viewModel, target)
     }
 
     private func installFileTreeErrorView(
         _ tile: Tile,
         fileTreeTile: FileTreeTile,
         message: String,
-        in canvasView: CanvasNSView
+        in canvasView: CanvasNSView,
+        targetZoneId: UUID? = nil
     ) -> FileTreeViewModel {
         let viewModel = FileTreeViewModel()
         let view = FileTreeTileNSView(tile: tile, fileTreeTile: fileTreeTile, recoverableErrorMessage: message)
-        canvasView.install(tileView: view, for: tile)
+        _ = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
         return viewModel
     }
 
@@ -7501,13 +7598,19 @@ final class TileSpawner {
     /// Automatic placement is centre-aware (.plans/18): the new tile lands where the
     /// user is looking. An explicit `worldPoint` is spatial intent and outranks it.
     ///
-    /// The routes that still call `makePlacement` — terminal, browser, inspector, file
-    /// tree, diff, managed agent — remain first-fit until they migrate to
-    /// `installProjectTile`; placing them centre-aware without migrating their install
-    /// and persistence would put a correct frame in the wrong model.
-    private func makeProjectTilePlacement(worldPoint: CGPoint?, size: CGSize, in canvasView: CanvasNSView) -> TileFrame {
+    /// `targetZoneId` is important for child surfaces such as target-blank browser
+    /// windows and inspectors: their opener's layer owns placement even when a
+    /// different zone happens to be active by the time WebKit requests the child.
+    private func makeProjectTilePlacement(
+        worldPoint: CGPoint?,
+        size: CGSize,
+        in canvasView: CanvasNSView,
+        targetZoneId: UUID? = nil
+    ) -> TileFrame {
         let zoom = canvasView.viewport.zoom.isFinite && canvasView.viewport.zoom > 0 ? canvasView.viewport.zoom : 1
-        guard let zone = canvasView.activeProjectZonePlacement else {
+        let targetZone = targetZoneId.flatMap { canvasView.zonePlacement(for: $0) }
+            ?? canvasView.activeProjectZonePlacement
+        guard let zone = targetZone else {
             // Flat model: world frames, so the viewport and siblings are used as they are.
             if let worldPoint {
                 return TileFrame(

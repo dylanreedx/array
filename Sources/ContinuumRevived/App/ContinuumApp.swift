@@ -3162,7 +3162,16 @@ enum ContinuumApp {
         checkForUpdatesItem.target = updaterController
         appMenu.addItem(checkForUpdatesItem)
         appMenu.addItem(NSMenuItem.separator())
-        appMenu.addItem(NSMenuItem(title: "Settings…", action: #selector(AppDelegate.openSettingsFromMenu(_:)), keyEquivalent: ","))
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(AppDelegate.openSettingsFromMenu(_:)), keyEquivalent: "")
+        settingsItem.tag = registeredSettingsMenuTag
+        appMenu.addItem(settingsItem)
+        let commandCenterItem = NSMenuItem(
+            title: "Command Center",
+            action: #selector(AppDelegate.openCommandCenterFromMenu(_:)),
+            keyEquivalent: ""
+        )
+        commandCenterItem.tag = registeredCommandCenterMenuTag
+        appMenu.addItem(commandCenterItem)
         appMenu.addItem(NSMenuItem.separator())
 
         let servicesItem = NSMenuItem(title: "Services", action: nil, keyEquivalent: "")
@@ -3199,8 +3208,8 @@ enum ContinuumApp {
 
         let viewMenuItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
         let viewMenu = NSMenu(title: "View")
-        let sidebarItem = NSMenuItem(title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: "S")
-        sidebarItem.keyEquivalentModifierMask = [.command, .shift]
+        let sidebarItem = NSMenuItem(title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: "")
+        sidebarItem.tag = registeredSidebarMenuTag
         viewMenu.addItem(sidebarItem)
         viewMenu.addItem(NSMenuItem(title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: ""))
         viewMenuItem.submenu = viewMenu
@@ -3224,6 +3233,14 @@ enum ContinuumApp {
 
         let helpMenuItem = NSMenuItem(title: "Help", action: nil, keyEquivalent: "")
         let helpMenu = NSMenu(title: "Help")
+        let keybindingsItem = NSMenuItem(
+            title: "All Shortcuts…",
+            action: #selector(AppDelegate.openKeybindingsFromMenu(_:)),
+            keyEquivalent: ""
+        )
+        keybindingsItem.tag = registeredKeybindingsMenuTag
+        helpMenu.addItem(keybindingsItem)
+        helpMenu.addItem(NSMenuItem(title: "Replay Getting Started", action: #selector(AppDelegate.replayGettingStartedFromMenu(_:)), keyEquivalent: ""))
         helpMenu.addItem(NSMenuItem(title: "Environment Setup…", action: #selector(AppDelegate.openEnvironmentSetupFromMenu(_:)), keyEquivalent: ""))
         helpMenu.addItem(NSMenuItem(title: "Report a Problem…", action: #selector(AppDelegate.reportProblemFromMenu(_:)), keyEquivalent: ""))
         helpMenuItem.submenu = helpMenu
@@ -3231,6 +3248,36 @@ enum ContinuumApp {
         NSApp.helpMenu = helpMenu
 
         NSApp.mainMenu = mainMenu
+        refreshRegisteredCommandMenuItems()
+    }
+
+    private static let registeredCommandCenterMenuTag = 8_401
+    private static let registeredKeybindingsMenuTag = 8_402
+    private static let registeredSettingsMenuTag = 8_403
+    private static let registeredSidebarMenuTag = 8_404
+
+    @MainActor
+    fileprivate static func refreshRegisteredCommandMenuItems() {
+        guard let menu = NSApp.mainMenu,
+              let registry = try? CommandRegistry.productRegistry() else { return }
+        let store = ShortcutBindingStore()
+        func item(tag: Int, in menu: NSMenu) -> NSMenuItem? {
+            for candidate in menu.items {
+                if candidate.tag == tag { return candidate }
+                if let submenu = candidate.submenu, let found = item(tag: tag, in: submenu) { return found }
+            }
+            return nil
+        }
+        func update(tag: Int, commandID: CommandID, title: String) {
+            guard let item = item(tag: tag, in: menu),
+                  let definition = registry.shortcuts.first(where: { $0.commandID == commandID }) else { return }
+            let display = store.gestures(for: definition).first?.displayString
+            item.title = display.map { "\(title)  \($0)" } ?? title
+        }
+        update(tag: registeredCommandCenterMenuTag, commandID: "app.commandCenter", title: "Command Center")
+        update(tag: registeredKeybindingsMenuTag, commandID: "app.openKeybindings", title: "All Shortcuts…")
+        update(tag: registeredSettingsMenuTag, commandID: "app.settings", title: "Settings…")
+        update(tag: registeredSidebarMenuTag, commandID: "view.toggleWorkspaceSidebar", title: "Show Workspace Sidebar")
     }
 
     private static func launchProbeSentinelPath() -> String? {
@@ -3258,6 +3305,12 @@ enum ContinuumApp {
             throw SelfCheckError("menu item Check for Updates… target should be the updater controller (nil when gated)")
         }
         guard appMenu.item(withTitle: "Services")?.submenu === NSApp.servicesMenu else { throw SelfCheckError("missing Services menu") }
+        guard let settingsItem = appMenu.item(withTag: registeredSettingsMenuTag),
+              settingsItem.action == #selector(AppDelegate.openSettingsFromMenu(_:)),
+              settingsItem.keyEquivalent.isEmpty,
+              settingsItem.title.hasPrefix("Settings…") else {
+            throw SelfCheckError("registered Settings menu item is missing or retained a hardcoded key equivalent")
+        }
         try expectMenuItem(appMenu, title: "Hide Array", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         try expectMenuItem(appMenu, title: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h", modifiers: [.command, .option])
         try expectMenuItem(appMenu, title: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
@@ -3273,11 +3326,17 @@ enum ContinuumApp {
         try expectMenuItem(editMenu, title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
 
         guard let viewMenu = mainMenu.item(withTitle: "View")?.submenu else { throw SelfCheckError("missing View menu") }
-        try expectMenuItem(viewMenu, title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: "S", modifiers: [.command, .shift])
+        guard let sidebarItem = viewMenu.item(withTag: registeredSidebarMenuTag),
+              sidebarItem.action == #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)),
+              sidebarItem.keyEquivalent.isEmpty,
+              sidebarItem.title.hasPrefix("Show Workspace Sidebar") else {
+            throw SelfCheckError("registered Activity Dock menu item is missing or retained a hardcoded key equivalent")
+        }
         try expectMenuItem(viewMenu, title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: "")
 
         guard let helpMenu = mainMenu.item(withTitle: "Help")?.submenu else { throw SelfCheckError("missing Help menu") }
         guard helpMenu === NSApp.helpMenu else { throw SelfCheckError("Help menu is not NSApp.helpMenu") }
+        try expectMenuItem(helpMenu, title: "Replay Getting Started", action: #selector(AppDelegate.replayGettingStartedFromMenu(_:)), keyEquivalent: "")
         try expectMenuItem(helpMenu, title: "Environment Setup…", action: #selector(AppDelegate.openEnvironmentSetupFromMenu(_:)), keyEquivalent: "")
         try expectMenuItem(helpMenu, title: "Report a Problem…", action: #selector(AppDelegate.reportProblemFromMenu(_:)), keyEquivalent: "")
 
@@ -3477,6 +3536,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var workspaceSidebarView: WorkspaceSidebarView?
     private var observedAgentStatuses: [UUID: AgentStatus] = [:]
     private var workspaceTopBarView: WorkspaceTopBarView?
+    private var canvasShortcutRailView: CanvasShortcutRailView?
+    private var canvasGettingStartedView: CanvasGettingStartedView?
     private var workspaceSplitView: NSSplitView?
     private var isApplyingWorkspaceSidebarVisibility = false
     private var workspaceCreatePromptProvider: (() -> String?)?
@@ -3567,10 +3628,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var agentActivityChangeBase = ActivityLogSnapshot.empty
     private var profilePalette: LaunchProfilePalette?
     private var paletteContextTileId: UUID?
+    private var paletteContextZoneId: UUID?
     private var settingsPanel: SettingsPanel?
     private var onboardingPanel: OnboardingPanel?
+    private lazy var onboardingProgressStore = OnboardingProgressStore()
+    private var starterCreationEligible = false
+    private var projectHomePicker: ProjectHomePickerController?
+    /// Set only for the synchronous production action fired by an explicit
+    /// creation picker confirmation; cleared immediately afterward.
+    private var explicitCreationScopeOverride: CreationScope?
     private var componentLabPanel: ComponentLabPanel?
-    private var settingsChangeObserver: NSObjectProtocol?
+    private var settingChangeObservers: [NSObjectProtocol] = []
     private var tmuxDefaults: UserDefaults = .standard
     private var tmuxPathResolver: (UserDefaults) -> String? = { TmuxLocator.resolve(defaults: $0) }
     // Ticket: docs/38-tickets/12-injectable-substrates.md — the daemon-dependent
@@ -3733,7 +3801,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 : []
 
             var canvasState: CanvasState
-            if let existing = try projectStore.tryLoadCanvasWithSanitizationResult() {
+            let existingCanvasResult = try projectStore.tryLoadCanvasWithSanitizationResult()
+            let selectedProjectHadCanvasState = existingCanvasResult != nil
+            if let existing = existingCanvasResult {
                 canvasState = existing.canvas
                 if existing.recenteredViewport {
                     for note in existing.notes {
@@ -3790,6 +3860,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             canvasView.onZoneRenamed = { [weak self] zoneId, name in
                 self?.persistRenamedZone(zoneId, name: name)
+                self?.demonstrateOnboarding(.zoneRenamed)
+            }
+            canvasView.onZoneColorChanged = { [weak self] _, _ in self?.demonstrateOnboarding(.zoneColorSelected) }
+            canvasView.filesystemScopeForTile = { [weak self] tileId in
+                self?.filesystemScopeEvidence(forTile: tileId)
+            }
+            canvasView.scopeLabelForZoneScope = { [weak self] scope in
+                self?.zoneScopeLabel(scope) ?? "Needs Project"
+            }
+            canvasView.onZoneScopeRequired = { [weak self] placement, anchor in
+                self?.presentProjectHomePicker(for: placement, anchor: anchor, isNewZone: true)
+            }
+            canvasView.onZoneScopeChangeRequested = { [weak self] placement, anchor in
+                self?.presentProjectHomePicker(for: placement, anchor: anchor, isNewZone: false)
             }
 
             self.ghostty = ghostty
@@ -3889,11 +3973,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self?.deleteBrowserProfile(tileId: tileId, profileId: profileId)
             }
             self.bootTileSpawner = spawner
-            configureFileOpenRoute(on: spawner)
-            wireBrowserRuntimeRegistration(on: spawner)
+            configureCreationAndRuntimeRoutes(on: spawner)
             workspaceRuntime?.onSpawnerCreated = { [weak self] arriving in
-                self?.configureFileOpenRoute(on: arriving)
-                self?.wireBrowserRuntimeRegistration(on: arriving)
+                self?.configureCreationAndRuntimeRoutes(on: arriving)
             }
             workspaceRuntime?.documentAgentTileIdsProvider = { [weak self] in
                 guard let self else { return [:] }
@@ -4043,7 +4125,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 runSmokeTest(window: window, runtime: runtimes.first)
             } else {
                 startDesktopCompanionSyncService()
-                presentOnboardingIfFirstRun(registryWasEmpty: registryWasEmpty)
+                presentOnboardingIfFirstRun(
+                    registryWasEmpty: registryWasEmpty,
+                    selectedProjectHadCanvasState: selectedProjectHadCanvasState,
+                    firstProjectId: project.id
+                )
                 if ProcessInfo.processInfo.environment["CONTINUUM_AUTO_PAIR_PHONE"] == "1" {
                     DispatchQueue.main.async { [weak self] in
                         self?.issueObserverPairingTokenFromMenu(nil)
@@ -5165,7 +5251,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         runtime.terminate(policy: .force)
 
         guard let canvasView,
-              let tile = canvasView.canvasState.tiles.first(where: { $0.id == tileId })
+              let tile = canvasView.tileRecord(for: tileId)
         else {
             fputs("Browser content-process terminated: tile \(tileId) not found in canvas\n", stderr)
             return
@@ -5200,7 +5286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         workspaceRuntime?.activeController?.sessionObserverTileDidClose(tileId: tileId)
 
         guard let canvasView,
-              let tile = canvasView.canvasState.tiles.first(where: { $0.id == tileId })
+              let tile = canvasView.tileRecord(for: tileId)
         else { return }
 
         let statusText: String
@@ -5214,7 +5300,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func recoverFocusAfterTileRemoval(deletedTileId: UUID, in canvasView: CanvasNSView) {
-        let fallbackTiles = canvasView.canvasState.tiles
+        let fallbackTiles = canvasView.allWorkspaceTiles()
             .filter { $0.id != deletedTileId }
             .sorted { lhs, rhs in
                 if lhs.zPosition == rhs.zPosition {
@@ -6058,7 +6144,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             wireRuntimeExitHandler(runtime)
             runtimes.append(runtime)
         case let .missingCommand(executable):
-            if let tile = canvasView.canvasState.tiles.first(where: { $0.id == tileId }) {
+            if let tile = canvasView.tileRecord(for: tileId) {
                 installRestartPlaceholder(
                     for: tile,
                     statusText: "\(executable) not found on $PATH",
@@ -6582,6 +6668,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func openNavMode() {
+        demonstrateOnboarding(.navigationModeEntered)
         focusBroker.openModal(.navMode)
         navSelectedZoneId = canvasView?.navZoneRenderModels.first?.placement.zoneId
         canvasView?.navModeHintLine = navKeymap.hintLine
@@ -6657,6 +6744,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             disarmLeader() // closes the leader modal (restores prior scope) + hides HUD
             guard let tileId, canvasView?.navigationTileSnapshot(for: tileId) != nil else { return true }
             revealTileForWork(tileId, historyReason: .directTileActivation, scopeReason: .modalDismissed)
+            demonstrateOnboarding(.quickJumpUsed)
             return true
         }
         if let direction = leaderArrowDirection(event.keyCode) {
@@ -6681,6 +6769,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if !key.isEmpty, let tileId = canvasView?.leaderJumpTarget(forLabel: key) {
             disarmLeader() // closes the leader modal (restores prior scope) + hides HUD
             revealTileForWork(tileId, historyReason: .completedTileJump, scopeReason: .modalDismissed)
+            demonstrateOnboarding(.quickJumpUsed)
             return true
         }
         return true
@@ -6775,6 +6864,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             closeNavMode()
             focusBroker.enterScope(.tile(selectedTileId), reason: .modalDismissed)
+            demonstrateOnboarding(.navigationModeActivated)
             return
         }
 
@@ -6869,7 +6959,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // `listSessions()` this replaced did too.
         rebuildAgentActivitySnapshot()
         let statuses = agentStatusesByTileId()
-        return canvasView.canvasState.tiles
+        return canvasView.allWorkspaceTiles()
             .sorted { lhs, rhs in
                 if lhs.zPosition != rhs.zPosition { return lhs.zPosition < rhs.zPosition }
                 return lhs.id.uuidString < rhs.id.uuidString
@@ -6967,7 +7057,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func applyAgentStatusesToCanvas() {
         guard let canvasView else { return }
         let statuses = agentStatusesByTileId()
-        for tile in canvasView.canvasState.tiles {
+        for tile in canvasView.allWorkspaceTiles() {
             // P2B.6: NO ENTRY is not an entry saying "no agent". This sweep used to
             // assign `canvasBadgeStatus(statuses[tile.id])` unconditionally, so a
             // tile the inventory has nothing to say about — a managed tile whose
@@ -7008,12 +7098,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func moveNavSelection(direction: TileArrangement.Direction) {
-        guard let canvasView,
-              let selectedTileId = canvasView.canvasState.lastActiveTileId,
+        guard let canvasView else { return }
+        let worldTiles = canvasView.navigationTileSnapshots().compactMap { snapshot -> Tile? in
+            guard var tile = canvasView.tileRecord(for: snapshot.tileId) else { return nil }
+            tile.frame = snapshot.worldFrame
+            return tile
+        }
+        guard let selectedTileId = canvasView.canvasState.lastActiveTileId,
               let nextTileId = CanvasEngine.nearestTile(
                 from: selectedTileId,
                 direction: direction,
-                tiles: canvasView.canvasState.tiles
+                tiles: worldTiles
               ) else { return }
         canvasView.markActive(tileId: nextTileId)
         synchronizeAgentFocus(to: nextTileId)
@@ -7071,6 +7166,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func handleReservedShortcut(_ event: NSEvent) -> Bool {
+        let modifiers = FocusKeyModifiers(modifierFlags: event.modifierFlags)
+        if let registry = try? CommandRegistry.productRegistry() {
+            let store = ShortcutBindingStore()
+            if let matched = registry.shortcuts.first(where: {
+                $0.contexts.contains(.global)
+                    && store.matches(keyCode: event.keyCode, modifiers: modifiers, definition: $0)
+            }), performRegisteredGlobalCommand(matched.commandID) {
+                return true
+            }
+
+            // ReservedShortcut remains the compatibility classifier while nav
+            // and tile-local bindings finish migrating. Registered globals own
+            // their old defaults now: moving or unassigning one must not leave a
+            // second invisible hardcoded route behind.
+            if let legacy = ReservedShortcut.classify(keyCode: event.keyCode, modifiers: modifiers, keymap: navKeymap),
+               let shortcutID = registeredShortcutID(for: legacy),
+               let definition = registry.shortcuts.first(where: { $0.id == shortcutID }),
+               !store.matches(keyCode: event.keyCode, modifiers: modifiers, definition: definition) {
+                return false
+            }
+        }
         // Nav-mode leader carries special open/close/pass-through semantics, but
         // ONLY when the event actually classifies as the leader. Everything else
         // — including ⌘⌃ tile-action chords (resize presets, etc.) — must fall
@@ -7109,7 +7225,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let scope = reservedDispatchScope()
         let focusedKind: TileKind?
         if case let .tile(tileId) = scope {
-            focusedKind = canvasView?.canvasState.tiles.first(where: { $0.id == tileId })?.kind
+            focusedKind = canvasView?.tileRecord(for: tileId)?.kind
         } else {
             focusedKind = nil
         }
@@ -7158,6 +7274,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return executeTileAction(action)
         case .passThrough:
             return false
+        }
+    }
+
+    private func performRegisteredGlobalCommand(_ commandID: CommandID) -> Bool {
+        switch commandID.rawValue {
+        case "app.commandCenter":
+            openProfilePalette()
+        case "app.openKeybindings":
+            openKeybindingsSettings()
+        case "app.focusMode":
+            if focusModeSession == nil, let selectedTileId = canvasView?.canvasState.lastActiveTileId {
+                openFocusMode(primaryTileId: selectedTileId)
+            } else {
+                closeFocusMode()
+            }
+        case "app.settings":
+            toggleSettingsPanel()
+        case "tile.quickSpawn.1":
+            spawnTerminalFromProfile("claude", trigger: "shortcut:quick-spawn-1")
+        case "tile.quickSpawn.2":
+            spawnTerminalFromProfile("shell", trigger: "shortcut:quick-spawn-2")
+        case "tile.quickSpawn.3":
+            spawnBrowserDefault()
+        case "tile.quickSpawn.4":
+            spawnTerminalFromProfile("nvim", trigger: "shortcut:quick-spawn-4")
+        case "view.toggleWorkspaceSidebar":
+            toggleWorkspaceSidebar()
+        default:
+            return false
+        }
+        return true
+    }
+
+    private func registeredShortcutID(for legacy: ReservedShortcut) -> ShortcutID? {
+        switch legacy {
+        case .palette: return "global.commandCenter"
+        case .focusMode: return "global.focusMode"
+        case .settings: return "global.settings"
+        case .spawnProfile(let number): return ShortcutID(rawValue: "global.spawnProfile.\(number)")
+        case .navModeLeader: return nil
         }
     }
 
@@ -7245,7 +7401,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// canvas model, or nil when scope is canvas/modal or no canvas exists.
     private func focusedTile() -> Tile? {
         guard let canvasView, case let .tile(tileId) = reservedDispatchScope() else { return nil }
-        return canvasView.canvasState.tiles.first(where: { $0.id == tileId })
+        return canvasView.tileRecord(for: tileId)
     }
 
     /// The focused tile's live VIEW (not just its model) — the surface browser/
@@ -7333,12 +7489,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func openProfilePalette(initialQuery: String = "") {
         guard let activeController = workspaceRuntime?.activeController,
               let host = window else { return }
+        demonstrateOnboarding(.commandCenterOpened)
         let palette = profilePalette ?? makeProfilePalette()
         let wasVisible = palette.isVisible
         let focusedTileId = focusedTileIdForPaletteContext()
+        let focusedZoneId = focusedTileId.flatMap { canvasView?.zoneId(containing: $0) }
+            ?? canvasView?.activeProjectZonePlacement?.zoneId
+            ?? canvasView?.activeZone?.zoneId
         let contextualActions = contextualPaletteActions(for: focusedTileId)
         profilePalette = palette
         paletteContextTileId = focusedTileId
+        paletteContextZoneId = focusedZoneId
         if !wasVisible {
             focusBroker.openModal(.palette)
         }
@@ -7408,7 +7569,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     statusLabel: state?.label,
                     attentionReason: state?.attention)
             }
-        palette.show(near: host, profiles: rows.profiles, projects: rows.projects, workspaces: rows.workspaces, contextualActions: contextualActions, harnessRoles: harnessRolesForActiveProject(), jumpTiles: jumpTiles, jumpZones: jumpZones, tilelessAgents: tilelessAgents, initialQuery: initialQuery)
+        palette.show(near: host, profiles: rows.profiles, projects: rows.projects, workspaces: rows.workspaces, contextualActions: contextualActions, harnessRoles: harnessRolesForActiveProject(), jumpTiles: jumpTiles, jumpZones: jumpZones, tilelessAgents: tilelessAgents, initialQuery: initialQuery, filesystemCreationPreview: creationScopePreviewText())
+    }
+
+    private func creationScopePreviewText() -> String? {
+        guard let scope = resolvedCreationScope() else { return "Choose Project / Home…" }
+        let registry = (try? registryStore?.loadOrEmpty()) ?? Registry.empty()
+        let projectName = registry.projects.first(where: { $0.id == scope.projectId })?.name
+            ?? URL(fileURLWithPath: scope.projectRoot, isDirectory: true).lastPathComponent
+        let home = scope.homeRelativePath?.isEmpty == false ? scope.homeRelativePath! : "Project Root"
+        var parts = ["\(projectName) / \(home)"]
+        if let tileId = focusedTileIdForPaletteContext(),
+           let agentId = agentSupervisor.agent(forTile: tileId),
+           let record = agentSupervisor.records[agentId],
+           record.projectId == scope.projectId,
+           let branch = record.worktreeBranch, !branch.isEmpty {
+            parts.append(branch)
+        }
+        return parts.joined(separator: " · ")
     }
 
     private func commandCenterAgentState(
@@ -7430,18 +7608,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func focusedTileIdForPaletteContext() -> UUID? {
         guard let canvasView else { return nil }
         guard case let .tile(tileId) = reservedDispatchScope(),
-              canvasView.canvasState.tiles.contains(where: { $0.id == tileId }) else { return nil }
+              canvasView.tileRecord(for: tileId) != nil else { return nil }
         return tileId
     }
 
     private func tileKind(for tileId: UUID?) -> TileKind? {
         guard let tileId else { return nil }
-        return canvasView?.canvasState.tiles.first(where: { $0.id == tileId })?.kind
+        return canvasView?.tileRecord(for: tileId)?.kind
     }
 
     private func contextualPaletteActions(for focusedTileId: UUID?) -> [LaunchPaletteAction] {
-        guard tileKind(for: focusedTileId) == .browser else { return [] }
-        return [.openInspectorForFocusedBrowser]
+        var actions: [LaunchPaletteAction] = []
+        if tileKind(for: focusedTileId) == .browser { actions.append(.openInspectorForFocusedBrowser) }
+        let zoneId = focusedTileId.flatMap { canvasView?.zoneId(containing: $0) }
+            ?? canvasView?.activeProjectZonePlacement?.zoneId
+            ?? canvasView?.activeZone?.zoneId
+        if zoneId != nil {
+            actions += [.renameCurrentZone, .pickCurrentZoneColor, .changeCurrentZoneScope, .toggleCurrentZoneAutoLayout, .tidyCurrentZone]
+        }
+        return actions
     }
 
     private func contextualPaletteActionsForFocusedTile() -> [LaunchPaletteAction] {
@@ -7477,6 +7662,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self?.focusBroker.closeModal(.palette)
             self?.profilePalette = nil
             self?.paletteContextTileId = nil
+            self?.paletteContextZoneId = nil
         }
         return palette
     }
@@ -7489,22 +7675,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         NSWorkspace.shared.open(Self.reportProblemURL)
     }
 
-    /// Go-live Phase 4: first-run onboarding. Fires once per profile — the
-    /// empty registry at boot is the trigger, the defaults key makes it
-    /// once-only across relaunches (topology-note precedent). QA runs of the
-    /// real UI drive isolated fresh profiles where the panel would sit over
-    /// every capture, hence the env gate; real users never set CONTINUUM_*.
-    private func presentOnboardingIfFirstRun(registryWasEmpty: Bool) {
+    /// Versioned, truth-based first-project onboarding. Environment readiness
+    /// remains dynamic; progress is recorded only after production actions.
+    private func presentOnboardingIfFirstRun(
+        registryWasEmpty: Bool,
+        selectedProjectHadCanvasState: Bool,
+        firstProjectId: UUID
+    ) {
         let environment = ProcessInfo.processInfo.environment
         guard environment["CONTINUUM_QA_FLOW"] == nil,
               environment["CONTINUUM_APP_SUPPORT"] == nil else { return }
-        guard registryWasEmpty, !UserDefaults.standard.bool(forKey: Self.onboardingShownKey) else { return }
-        UserDefaults.standard.set(true, forKey: Self.onboardingShownKey)
-        showOnboardingPanel()
+        var progress = onboardingProgressStore.load()
+        if progress.firstProjectId == nil { progress.firstProjectId = firstProjectId }
+        if registryWasEmpty, selectedProjectHadCanvasState,
+           progress.starter.phase == .notStarted {
+            progress.starter.phase = .ineligible
+            progress.starter.projectId = firstProjectId
+        }
+        onboardingProgressStore.save(progress)
+
+        starterCreationEligible = registryWasEmpty
+            && !selectedProjectHadCanvasState
+            && !progress.explicitlySkippedStarter
+            && progress.starter.phase != .complete
+            && progress.starter.phase != .ineligible
+        if starterCreationEligible { attemptFirstProjectStarter() }
+        refreshGettingStartedTasks()
+        if onboardingProgressStore.load().needsIntro || onboardingProgressStore.load().starter.phase == .waitingForEnvironment {
+            showOnboardingPanel()
+        }
     }
 
     @objc func openEnvironmentSetupFromMenu(_ sender: Any?) {
         showOnboardingPanel()
+    }
+
+    @objc func replayGettingStartedFromMenu(_ sender: Any?) {
+        replayGettingStarted()
     }
 
     private func showOnboardingPanel() {
@@ -7513,11 +7720,142 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             created.onOpenTile = { [weak self] profileId in
                 self?.spawnTerminalFromProfile(profileId, trigger: "onboarding:\(profileId)")
             }
-            created.onClose = { [weak self] in self?.onboardingPanel = nil }
+            created.onRecheck = { [weak self] in
+                AgentModelCatalog.shared.requestRefresh()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.attemptFirstProjectStarter() }
+            }
+            created.onSkipStarter = { [weak self] in
+                guard let self else { return }
+                onboardingProgressStore.update {
+                    $0.explicitlySkippedStarter = true
+                    $0.starter.phase = .skipped
+                }
+                starterCreationEligible = false
+                refreshGettingStartedTasks()
+            }
+            created.onClose = { [weak self] in
+                guard let self else { return }
+                onboardingProgressStore.update {
+                    if $0.needsIntro {
+                        $0.introVersion = OnboardingProgress.currentIntroVersion
+                        $0.explicitlyDismissedIntro = true
+                    }
+                }
+                refreshGettingStartedTasks()
+                onboardingPanel = nil
+            }
             return created
         }()
         onboardingPanel = panel
         panel.show(near: window)
+    }
+
+    private func configuredHarnessIsReady() -> Bool {
+        AgentModelCatalog.shared.snapshot(for: AgentHarnessConfig.resolved()).readiness.canRun
+    }
+
+    private func demonstrateOnboarding(_ milestone: OnboardingMilestone) {
+        onboardingProgressStore.update { $0.demonstrate(milestone) }
+        refreshGettingStartedTasks()
+    }
+
+    private func refreshGettingStartedTasks() {
+        canvasGettingStartedView?.reload(
+            progress: onboardingProgressStore.load(),
+            commandCenterShortcut: resolvedShortcutDisplay(commandID: "app.commandCenter"),
+            navKeymap: navKeymap
+        )
+    }
+
+    private func skipGettingStartedTask(_ task: GettingStartedTask) {
+        onboardingProgressStore.update { $0.skipTask(task) }
+        refreshGettingStartedTasks()
+    }
+
+    private func replayGettingStarted() {
+        onboardingProgressStore.update { $0.replayEducation() }
+        refreshGettingStartedTasks()
+        canvasView?.showWorkspaceTransitionLabel("Getting Started tasks reset · workspace content unchanged")
+    }
+
+    /// Idempotent recovery: each created id is persisted immediately, so a crash
+    /// resumes at the first missing component and never duplicates completed work.
+    private func attemptFirstProjectStarter() {
+        guard starterCreationEligible,
+              let canvasView,
+              let project = activeProject else { return }
+        defer { refreshGettingStartedTasks() }
+        var progress = onboardingProgressStore.load()
+        guard !progress.explicitlySkippedStarter,
+              progress.starter.phase != .complete,
+              progress.starter.phase != .ineligible else { return }
+        guard configuredHarnessIsReady() else {
+            progress.starter.phase = .waitingForEnvironment
+            progress.starter.projectId = project.id
+            onboardingProgressStore.save(progress)
+            AgentModelCatalog.shared.requestRefresh()
+            showOnboardingPanel()
+            return
+        }
+
+        progress.starter.phase = .creating
+        progress.starter.projectId = project.id
+        onboardingProgressStore.save(progress)
+
+        var zoneId = progress.starter.zoneId.flatMap { id in
+            workspaceRuntime?.document.zones.contains(where: { $0.zoneId == id && $0.projectId == project.id }) == true ? id : nil
+        }
+        if zoneId == nil {
+            zoneId = workspaceRuntime?.document.zones.first(where: { $0.projectId == project.id })?.zoneId
+        }
+        if zoneId == nil {
+            addProjectZone(projectId: project.id)
+            zoneId = workspaceRuntime?.document.lastActiveZoneId
+        }
+        guard let zoneId else { return }
+        progress.starter.zoneId = zoneId
+        onboardingProgressStore.save(progress)
+        canvasView.setActiveProjectZone(zoneId)
+
+        let scope = CreationScope(projectId: project.id, projectRoot: project.rootPath, source: .explicit, zoneId: zoneId)
+        explicitCreationScopeOverride = scope
+        defer { explicitCreationScopeOverride = nil }
+
+        func tileExists(_ id: UUID?) -> Bool {
+            guard let id else { return false }
+            return canvasView.allWorkspaceTiles().contains(where: { $0.id == id })
+        }
+        func newlyCreatedTile(before: Set<UUID>) -> UUID? {
+            canvasView.allWorkspaceTiles().map(\.id).first(where: { !before.contains($0) })
+        }
+
+        if !tileExists(progress.starter.agentTileId) {
+            let before = Set(canvasView.allWorkspaceTiles().map(\.id))
+            if spawnManagedAgentFromPalette(), let id = newlyCreatedTile(before: before) {
+                progress.starter.agentTileId = id
+                onboardingProgressStore.save(progress)
+            }
+        }
+        if !tileExists(progress.starter.shellTileId) {
+            let before = Set(canvasView.allWorkspaceTiles().map(\.id))
+            if spawnTerminalFromProfile("shell", trigger: "onboarding:starter"), let id = newlyCreatedTile(before: before) {
+                progress.starter.shellTileId = id
+                onboardingProgressStore.save(progress)
+            }
+        }
+        if !tileExists(progress.starter.browserTileId) {
+            let before = Set(canvasView.allWorkspaceTiles().map(\.id))
+            spawnBrowserDefault()
+            if let id = newlyCreatedTile(before: before) {
+                progress.starter.browserTileId = id
+                onboardingProgressStore.save(progress)
+            }
+        }
+        if tileExists(progress.starter.agentTileId), tileExists(progress.starter.shellTileId), tileExists(progress.starter.browserTileId) {
+            canvasView.tidyAutoLayout(zoneId: zoneId, offerUndo: false)
+            progress.starter.phase = .complete
+            onboardingProgressStore.save(progress)
+        }
     }
 
     @objc func openSettingsFromMenu(_ sender: Any?) {
@@ -7529,6 +7867,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         settingsPanel = panel
         panel.show(near: window)
+    }
+
+    @objc func openCommandCenterFromMenu(_ sender: Any?) {
+        openProfilePalette()
+    }
+
+    @objc func openKeybindingsFromMenu(_ sender: Any?) {
+        openKeybindingsSettings()
+    }
+
+    private func openKeybindingsSettings() {
+        let panel = settingsPanel ?? makeSettingsPanel()
+        if !panel.isVisible { focusBroker.openModal(.settings) }
+        settingsPanel = panel
+        panel.show(near: window, sectionID: "keybindings")
     }
 
     private func toggleSettingsPanel() {
@@ -8107,6 +8460,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         panel.onKeymapChanged = { [weak self] keymap in
             self?.applyEditedNavKeymap(keymap)
         }
+        panel.onShortcutsChanged = { [weak self] in
+            self?.refreshRegisteredShortcutSurfaces()
+        }
         return panel
     }
 
@@ -8133,11 +8489,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         contentPane.autoresizingMask = [.width, .height]
         let topBar = WorkspaceTopBarView(frame: NSRect(x: 0, y: max(0, frame.height - 38), width: contentPane.bounds.width, height: 38))
         configureWorkspaceTopBar(topBar)
+        let shortcutRail = CanvasShortcutRailView(frame: .zero)
+        shortcutRail.onOpenCommandCenter = { [weak self] in self?.openProfilePalette() }
+        shortcutRail.onOpenKeybindings = { [weak self] in self?.openKeybindingsSettings() }
+        let gettingStarted = CanvasGettingStartedView(frame: .zero)
+        gettingStarted.onOpenCommandCenter = { [weak self] in self?.openProfilePalette() }
+        gettingStarted.onShowZoneActions = { [weak self] in self?.openProfilePalette(initialQuery: "This Zone") }
+        gettingStarted.onSkipTask = { [weak self] task in self?.skipGettingStartedTask(task) }
 
         topBar.translatesAutoresizingMaskIntoConstraints = false
         canvasView.translatesAutoresizingMaskIntoConstraints = false
         contentPane.addSubview(topBar)
         contentPane.addSubview(canvasView)
+        shortcutRail.translatesAutoresizingMaskIntoConstraints = false
+        contentPane.addSubview(shortcutRail, positioned: .above, relativeTo: canvasView)
+        gettingStarted.translatesAutoresizingMaskIntoConstraints = false
+        contentPane.addSubview(gettingStarted, positioned: .above, relativeTo: canvasView)
         NSLayoutConstraint.activate([
             topBar.leadingAnchor.constraint(equalTo: contentPane.leadingAnchor),
             topBar.trailingAnchor.constraint(equalTo: contentPane.trailingAnchor),
@@ -8148,13 +8515,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             canvasView.trailingAnchor.constraint(equalTo: contentPane.trailingAnchor),
             canvasView.topAnchor.constraint(equalTo: topBar.bottomAnchor),
             canvasView.bottomAnchor.constraint(equalTo: contentPane.bottomAnchor),
+
+            shortcutRail.trailingAnchor.constraint(equalTo: contentPane.trailingAnchor, constant: -12),
+            shortcutRail.bottomAnchor.constraint(equalTo: contentPane.bottomAnchor, constant: -12),
+
+            gettingStarted.leadingAnchor.constraint(equalTo: contentPane.leadingAnchor, constant: 12),
+            gettingStarted.topAnchor.constraint(equalTo: topBar.bottomAnchor, constant: 12),
         ])
 
         splitView.addSubview(sidebar)
         splitView.addSubview(contentPane)
         workspaceSidebarView = sidebar
         workspaceTopBarView = topBar
+        canvasShortcutRailView = shortcutRail
+        canvasGettingStartedView = gettingStarted
         workspaceSplitView = splitView
+        refreshGettingStartedTasks()
         reloadWorkspaceSidebar()
         applyWorkspaceSidebarVisibility(WorkspaceSidebarConfig.resolveVisible())
 
@@ -8237,6 +8613,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func configureWorkspaceTopBar(_ topBar: WorkspaceTopBarView) {
+        topBar.onOpenCommandCenter = { [weak self] in self?.openProfilePalette() }
+        topBar.updateCommandCenterShortcut(resolvedShortcutDisplay(commandID: "app.commandCenter"))
         topBar.onSwitchWorkspace = { [weak self] workspaceId in
             self?.switchWorkspaceAndRelaunch(workspaceId: workspaceId)
         }
@@ -8252,6 +8630,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         topBar.onToggleSidebar = { [weak self] in
             self?.toggleWorkspaceSidebar()
         }
+    }
+
+    private func resolvedShortcutDisplay(commandID: CommandID) -> String? {
+        guard let registry = try? CommandRegistry.productRegistry(),
+              let definition = registry.shortcuts.first(where: { $0.commandID == commandID }) else { return nil }
+        return ShortcutBindingStore().gestures(for: definition).first?.displayString
+    }
+
+    private func refreshRegisteredShortcutSurfaces() {
+        workspaceTopBarView?.updateCommandCenterShortcut(resolvedShortcutDisplay(commandID: "app.commandCenter"))
+        canvasShortcutRailView?.reloadBindings(navKeymap: navKeymap)
+        refreshGettingStartedTasks()
+        ContinuumApp.refreshRegisteredCommandMenuItems()
     }
 
     private func currentWorkspaceIdForSidebar() -> UUID? {
@@ -10728,16 +11119,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func installSettingsChangeObserver() {
-        guard settingsChangeObserver == nil else { return }
-        settingsChangeObserver = NotificationCenter.default.addObserver(
-            forName: .continuumSettingsChanged,
-            object: nil,
-            queue: nil
+        guard settingChangeObservers.isEmpty else { return }
+        let center = NotificationCenter.default
+        settingChangeObservers.append(center.addObserver(
+            forName: SettingChangeEvent.name(for: SettingID(rawValue: BrowserInspectionPolicy.userDefaultsKey)),
+            object: nil, queue: nil
         ) { [weak self] _ in
             Task { @MainActor in
                 self?.applyBrowserInspectionPolicyToLiveWebViews()
             }
-        }
+        })
+        settingChangeObservers.append(center.addObserver(
+            forName: SettingChangeEvent.name(for: SettingID(rawValue: CanvasShortcutRailConfig.visibleKey)),
+            object: nil, queue: nil
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.canvasShortcutRailView?.reloadBindings(navKeymap: self.navKeymap)
+            }
+        })
     }
 
     @discardableResult
@@ -10912,6 +11312,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         navKeymap = keymap
         focusBroker.navKeymap = keymap
         canvasView?.navModeHintLine = keymap.hintLine
+        canvasShortcutRailView?.reloadBindings(navKeymap: keymap)
+        refreshGettingStartedTasks()
     }
 
     private func focusSpawnedTile(_ tileId: UUID) {
@@ -10937,7 +11339,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     @discardableResult
     private func spawnTerminalFromProfile(_ profileId: String, trigger: String? = nil) -> Bool {
-        guard let spawner = tileSpawner else { return false }
+        guard resolvedCreationScope() != nil else {
+            presentCreationScopePicker { [weak self] in _ = self?.spawnTerminalFromProfile(profileId, trigger: trigger) }
+            return false
+        }
+        guard let spawner = spawnerForFilesystemCreation() else { return false }
         let admissionTrigger = trigger ?? "profile:\(profileId)"
         if let refusal = terminalSpawnAdmission.admit(trigger: admissionTrigger, liveCount: liveTerminalRuntimeCount()) {
             fputs("\(refusal.message)\n", stderr)
@@ -10963,7 +11369,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func spawnManagedAgentFromPalette(model: String? = nil) -> Bool {
-        guard let spawner = tileSpawner else { return false }
+        guard resolvedCreationScope() != nil else {
+            presentCreationScopePicker { [weak self] in _ = self?.spawnManagedAgentFromPalette(model: model) }
+            return false
+        }
+        guard let spawner = spawnerForFilesystemCreation() else { return false }
         // The catalogue guard, the refusal's own voice, and the atomic threading all
         // live in `TileSpawner.spawnManagedAgentForSelectedModel` — one function, so
         // `--managed-agent-model-spawn-check` can DRIVE them and watch a departed
@@ -11034,14 +11444,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if let focusedTile = focusedTileIdForPaletteContext(),
            let focusedAgent = agentSupervisor.agent(forTile: focusedTile),
            let record = agentSupervisor.records[focusedAgent] {
-            // `projectRoot` is left nil: this call site knows the agent's checkout
-            // and its project id, and the resolver reads only those. Inventing a
-            // root by re-deriving it from the registry here would add a second
-            // source of truth for something nothing on this path consumes.
             selectedAgentHome = AgentHome(
                 projectId: record.projectId,
-                projectRoot: nil,
-                checkoutRoot: URL(fileURLWithPath: record.cwd, isDirectory: true))
+                projectRoot: record.projectRoot.map { URL(fileURLWithPath: $0, isDirectory: true) },
+                checkoutRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true),
+                homeRelativePath: record.homeRelativePath)
         }
         let activeProjectHome: AgentHome? = activeProject.map { project in
             let root = URL(fileURLWithPath: project.rootPath, isDirectory: true)
@@ -11053,7 +11460,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let resolution = ManagedAgentSpawnHomeResolver.resolve(
                 selectedAgent: selectedAgentHome,
                 activeProject: activeProjectHome),
-              let cwd = usableAgentHomeDirectory(resolution.home.checkoutRoot) else {
+              let cwd = usableAgentHomeDirectory(resolution.home.homeRoot) else {
             NSSound.beep()
             fputs("Managed agent spawn refused: choose an explicit Home; process cwd is never an agent Home fallback\n", stderr)
             return nil
@@ -11063,6 +11470,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             prompt: prompt,
             cwd: cwd,
             projectId: resolution.home.projectId,
+            projectRoot: resolution.home.projectRoot,
+            checkoutRoot: resolution.home.checkoutRoot,
+            homeRelativePath: resolution.home.homeRelativePath,
             launchSelection: launchSelection)
     }
 
@@ -11075,6 +11485,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         prompt: String? = nil,
         cwd: URL,
         projectId: UUID?,
+        projectRoot: URL? = nil,
+        checkoutRoot: URL? = nil,
+        homeRelativePath: String? = nil,
         launchSelection: AgentLaunchSelection? = nil
     ) -> AgentID? {
         guard let selection = launchSelection ?? AgentModelConfig.launchSelection() else {
@@ -11090,6 +11503,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             model: selection.model,
             thinking: selection.thinking,
             projectId: projectId,
+            projectRoot: projectRoot ?? checkoutRoot,
+            homeRelativePath: homeRelativePath,
             tileId: tileId
         )
     }
@@ -11138,10 +11553,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return
         } else {
             let launchSelection = initialLaunchSelection ?? tileSpawner?.managedAgentLaunchSelection(tileId: tileId)
-            guard let spawnedAgentID = spawnSupervisedAgent(
-                tileId: tileId,
-                launchSelection: launchSelection
-            ) else { return }
+            let creationScope = tileSpawner?.managedAgentCreationScope(tileId: tileId)
+            let spawned: AgentID?
+            if let creationScope,
+               let cwd = usableAgentHomeDirectory(URL(fileURLWithPath: creationScope.homePath(inCheckoutRoot: creationScope.projectRoot), isDirectory: true)) {
+                let root = URL(fileURLWithPath: creationScope.projectRoot, isDirectory: true)
+                spawned = spawnSupervisedAgentAtHome(
+                    tileId: tileId,
+                    cwd: cwd,
+                    projectId: creationScope.projectId,
+                    projectRoot: root,
+                    checkoutRoot: root,
+                    homeRelativePath: creationScope.homeRelativePath,
+                    launchSelection: launchSelection
+                )
+            } else {
+                spawned = spawnSupervisedAgent(tileId: tileId, launchSelection: launchSelection)
+            }
+            guard let spawnedAgentID = spawned else { return }
             agentId = spawnedAgentID
         }
         // The view binding lives in one place (P2A.5), so this is the site that
@@ -11822,6 +12251,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return jumpToZoneFromPalette(zoneId)
         case .createZone:
             return createGroupZoneFromPalette()
+        case .renameCurrentZone:
+            guard let zoneId = paletteContextZoneId else { return false }
+            canvasView?.beginZoneRename(zoneId: zoneId)
+            return canvasView != nil
+        case .pickCurrentZoneColor:
+            guard let zoneId = paletteContextZoneId else { return false }
+            canvasView?.presentZoneColorPicker(zoneId: zoneId)
+            return canvasView != nil
+        case .changeCurrentZoneScope:
+            guard let zoneId = paletteContextZoneId else { return false }
+            canvasView?.requestZoneScopeChange(zoneId: zoneId)
+            return canvasView != nil
+        case .toggleCurrentZoneAutoLayout:
+            guard let zoneId = paletteContextZoneId else { return false }
+            canvasView?.toggleZoneAutoLayout(zoneId: zoneId)
+            return canvasView != nil
+        case .tidyCurrentZone:
+            guard let zoneId = paletteContextZoneId else { return false }
+            canvasView?.tidyAutoLayout(zoneId: zoneId)
+            return canvasView != nil
+        case .replayGettingStarted:
+            replayGettingStarted()
+            return true
         }
     }
 
@@ -12003,7 +12455,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if let zoneId = canvasView.navigationTileSnapshot(for: tileId)?.zoneId {
             return zoneId
         }
-        guard let tile = canvasView.canvasState.tiles.first(where: { $0.id == tileId }) else { return nil }
+        guard let tile = canvasView.tileRecord(for: tileId) else { return nil }
         let tileRect = CGRect(x: tile.frame.x, y: tile.frame.y, width: tile.frame.width, height: tile.frame.height)
         return canvasView.navZoneRenderModels.first { model in
             let frame = CanvasEngine.zoneWorldFrame(model.placement)
@@ -12020,45 +12472,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         let zoneFrame = CanvasEngine.zoneWorldFrame(model.placement)
         let zoneRect = CGRect(x: zoneFrame.x, y: zoneFrame.y, width: zoneFrame.width, height: zoneFrame.height)
-        return canvasView.canvasState.tiles.first { tile in
-            let tileRect = CGRect(x: tile.frame.x, y: tile.frame.y, width: tile.frame.width, height: tile.frame.height)
+        return canvasView.navigationTileSnapshots().first { snapshot in
+            let frame = snapshot.worldFrame
+            let tileRect = CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
             return zoneRect.intersects(tileRect)
-        }?.id
+        }?.tileId
     }
 
-    /// ⌘K "Create Zone" — mirrors the persistence body of addProjectZone (minus the
-    /// project/registry mutation). Resolves the active workspaceId, loads the document,
-    /// appends a group zone with the configured default name, persists, and saves the
-    /// registry. Does NOT spin a ZoneRuntimeController (T08's addZone responsibility).
+    /// ⌘K "Create Zone" enters the same provisional project/Home flow as a
+    /// marquee. A blank project-less zone is never written to disk.
     @discardableResult
     private func createGroupZoneFromPalette() -> Bool {
-        guard let registryStore else { return false }
-        do {
-            var registry = try registryStore.loadOrEmpty()
-            let workspaceId: UUID
-            if let wId = workspaceRuntime?.workspaceId {
-                workspaceId = wId
-            } else if let wId = registry.lastActiveWorkspaceId {
-                workspaceId = wId
-            } else {
-                fputs("Create Zone failed: no active workspace\n", stderr)
-                return false
-            }
-            let appSupport = registryStore.registryFile.deletingLastPathComponent()
-            let store = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
-            var document = try store.load()
-            document.appendGroupZone(name: DefaultGroupZoneName.resolve())
-            let saveController = WorkspaceDocumentSaveController(store: store)
-            saveController.scheduleZoneLayoutSave(document)
-            try saveController.flushPendingSave()
-            workspaceRuntime?.replaceDocument(document, for: workspaceId)
-            try registryStore.save(registry)
-            reloadWorkspaceSidebar()
-            return true
-        } catch {
-            fputs("Create Zone failed: \(error)\n", stderr)
-            return false
-        }
+        guard let canvasView else { return false }
+        _ = canvasView.beginProvisionalZone()
+        return true
     }
 
     /// Persist a group zone created by the on-canvas drag-to-create gesture (T19).
@@ -12284,6 +12711,178 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             reloadWorkspaceSidebar()
         } catch {
             fputs("persistRenamedZone failed: \(error)\n", stderr)
+        }
+    }
+
+    private func zoneScopeLabel(_ scope: ZoneScope) -> String {
+        guard let projectId = scope.projectId,
+              let registry = try? registryStore?.loadOrEmpty(),
+              let project = registry.projects.first(where: { $0.id == projectId }) else {
+            return "Needs Project"
+        }
+        return scope.homeRelativePath.map { "\(project.name) / \($0)" }
+            ?? "\(project.name) / Project Root"
+    }
+
+    private func filesystemScopeEvidence(forTile tileId: UUID) -> ZoneScope? {
+        if let agentId = agentSupervisor.agent(forTile: tileId),
+           let record = agentSupervisor.records[agentId],
+           let projectId = record.projectId {
+            return ZoneScope(projectId: projectId, homeRelativePath: record.homeRelativePath)
+        }
+        guard let tile = canvasView?.tileRecord(for: tileId) else { return nil }
+        if let projectId = tile.metadata.filesystemProjectId {
+            return ZoneScope(projectId: projectId, homeRelativePath: tile.metadata.filesystemHomeRelativePath)
+        }
+        if let location = tile.metadata.documentLocation,
+           let projectId = location.projectId {
+            return ZoneScope(projectId: projectId, homeRelativePath: location.relativeDirectory == "." ? nil : location.relativeDirectory)
+        }
+        guard tile.kind == .fileTree,
+              let rootPath = tile.metadata.filePath,
+              let registry = try? registryStore?.loadOrEmpty() else { return nil }
+        let selected = URL(fileURLWithPath: rootPath, isDirectory: true)
+        for project in registry.projects where !project.missing {
+            let projectRoot = URL(fileURLWithPath: project.rootPath, isDirectory: true)
+            if let relative = try? ProjectHomeValidator.relativeHome(projectRoot: projectRoot, selectedHome: selected) {
+                return ZoneScope(projectId: project.id, homeRelativePath: relative)
+            }
+        }
+        return nil
+    }
+
+    private func presentProjectHomePicker(
+        for placement: ZonePlacement,
+        anchor: CGPoint,
+        isNewZone: Bool
+    ) {
+        guard let canvasView, let registryStore else {
+            if isNewZone { self.canvasView?.cancelProvisionalZone(zoneId: placement.zoneId) }
+            return
+        }
+        let registry = (try? registryStore.loadOrEmpty()) ?? Registry.empty()
+        let selected = placement.projectId.flatMap { projectId in
+            registry.projects.first(where: { $0.id == projectId }).map {
+                ProjectHomeSelection(project: $0, homeRelativePath: placement.homeRelativePath)
+            }
+        }
+        var recents: [ProjectHomeSelection] = []
+        if let workspaceId = workspaceRuntime?.workspaceId {
+            let store = WorkspaceStore(
+                workspaceId: workspaceId,
+                applicationSupportDirectory: registryStore.registryFile.deletingLastPathComponent()
+            )
+            if let document = try? store.load(),
+               let scope = document.lastExplicitCreationScope,
+               let projectId = scope.projectId,
+               let project = registry.projects.first(where: { $0.id == projectId }) {
+                recents.append(ProjectHomeSelection(project: project, homeRelativePath: scope.homeRelativePath))
+            }
+        }
+        let picker = ProjectHomePickerController()
+        projectHomePicker?.dismiss(cancelled: false)
+        projectHomePicker = picker
+        picker.present(
+            projects: registry.projects,
+            recents: recents,
+            selected: selected,
+            anchor: anchor,
+            relativeTo: canvasView,
+            addProject: { [weak self] in self?.registerProjectUsingOpenPanel() },
+            confirmsDestructiveCancellation: isNewZone,
+            onInteractionOwnershipChanged: { [weak canvasView] owned in
+                canvasView?.setZoneScopePickerInteractionOwned(owned)
+            },
+            onConfirm: { [weak self] selection in
+                guard let self else { return }
+                let label = self.zoneScopeLabel(ZoneScope(
+                    projectId: selection.project.id,
+                    homeRelativePath: selection.homeRelativePath
+                ))
+                if isNewZone {
+                    canvasView.commitProvisionalZone(
+                        zoneId: placement.zoneId,
+                        projectId: selection.project.id,
+                        homeRelativePath: selection.homeRelativePath,
+                        scopeLabel: label
+                    )
+                } else {
+                    canvasView.setZoneScope(
+                        zoneId: placement.zoneId,
+                        projectId: selection.project.id,
+                        homeRelativePath: selection.homeRelativePath,
+                        scopeLabel: label
+                    )
+                    canvasView.showWorkspaceTransitionLabel("Future filesystem tiles will start in \(selection.displayPath)")
+                }
+                self.persistLastExplicitCreationScope(
+                    ZoneScope(projectId: selection.project.id, homeRelativePath: selection.homeRelativePath)
+                )
+                self.demonstrateOnboarding(.zoneScopeInspected)
+                self.projectHomePicker = nil
+            },
+            onCancel: { [weak self, weak canvasView] in
+                if isNewZone { canvasView?.cancelProvisionalZone(zoneId: placement.zoneId) }
+                self?.projectHomePicker = nil
+            }
+        )
+    }
+
+    private func persistLastExplicitCreationScope(_ scope: ZoneScope) {
+        guard scope.projectId != nil,
+              let registryStore,
+              let workspaceId = workspaceRuntime?.workspaceId else { return }
+        do {
+            let store = WorkspaceStore(
+                workspaceId: workspaceId,
+                applicationSupportDirectory: registryStore.registryFile.deletingLastPathComponent()
+            )
+            var document = try store.load()
+            document.lastExplicitCreationScope = scope
+            let saveController = WorkspaceDocumentSaveController(store: store)
+            saveController.scheduleZoneLayoutSave(document)
+            try saveController.flushPendingSave()
+            workspaceRuntime?.replaceDocument(document, for: workspaceId)
+        } catch {
+            fputs("persistLastExplicitCreationScope failed: \(error)\n", stderr)
+        }
+    }
+
+    private func registerProjectUsingOpenPanel() -> ProjectEntry? {
+        guard let registryStore else { return nil }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Add Project"
+        guard panel.runModal() == .OK, let rawURL = panel.url else { return nil }
+        let root = rawURL.standardizedFileURL.resolvingSymlinksInPath()
+        do {
+            var registry = try registryStore.loadOrEmpty()
+            if let existing = registry.projects.first(where: {
+                URL(fileURLWithPath: $0.rootPath, isDirectory: true)
+                    .standardizedFileURL.resolvingSymlinksInPath().path == root.path
+            }) {
+                return existing
+            }
+            let store = ProjectStore(projectRoot: root)
+            let project = try Self.loadOrCreateProject(in: store, projectRoot: root)
+            registry.upsertProject(project, openedAt: Date())
+            if let projectIndex = registry.projects.firstIndex(where: { $0.id == project.id }) {
+                registry.projects[projectIndex].workspaceId = workspaceRuntime?.workspaceId
+            }
+            if let workspaceId = workspaceRuntime?.workspaceId,
+               let workspaceIndex = registry.workspaces.firstIndex(where: { $0.id == workspaceId }),
+               !registry.workspaces[workspaceIndex].projectIds.contains(project.id) {
+                registry.workspaces[workspaceIndex].projectIds.append(project.id)
+                registry.workspaces[workspaceIndex].updatedAt = Date()
+            }
+            try registryStore.save(registry)
+            reloadWorkspaceSidebar()
+            return registry.projects.first(where: { $0.id == project.id })
+        } catch {
+            fputs("Add Project failed: \(error)\n", stderr)
+            return nil
         }
     }
 
@@ -12746,6 +13345,127 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    /// All filesystem-backed creation reads this one resolver at invocation.
+    /// Merely focusing a tile never mutates the workspace recent scope.
+    private func resolvedCreationScope(explicit: CreationScope? = nil) -> CreationScope? {
+        let registry = (try? registryStore?.loadOrEmpty()) ?? Registry.empty()
+        func root(for projectId: UUID) -> String? {
+            registry.projects.first(where: { $0.id == projectId && !$0.missing })?.rootPath
+        }
+
+        let zonePlacement = canvasView?.activeProjectZonePlacement
+            ?? canvasView?.activeZone.flatMap { $0.projectId == nil ? nil : $0 }
+        let zoneScope: CreationScope? = zonePlacement.flatMap { zone in
+            guard let projectId = zone.projectId, let projectRoot = root(for: projectId) else { return nil }
+            return CreationScope(projectId: projectId, projectRoot: projectRoot, homeRelativePath: zone.homeRelativePath, source: .zone, zoneId: zone.zoneId)
+        }
+        let focusedScope: CreationScope? = {
+            guard zoneScope == nil,
+                  let tileId = focusedTileIdForPaletteContext(),
+                  let agentId = agentSupervisor.agent(forTile: tileId),
+                  let record = agentSupervisor.records[agentId],
+                  let projectId = record.projectId else { return nil }
+            return CreationScope(
+                projectId: projectId,
+                projectRoot: record.projectRoot ?? root(for: projectId) ?? record.checkoutRoot,
+                homeRelativePath: record.homeRelativePath,
+                source: .focusedAgent
+            )
+        }()
+        let recentScope: CreationScope? = {
+            guard let scope = workspaceRuntime?.document.lastExplicitCreationScope,
+                  let projectId = scope.projectId,
+                  let projectRoot = root(for: projectId) else { return nil }
+            return CreationScope(projectId: projectId, projectRoot: projectRoot, homeRelativePath: scope.homeRelativePath, source: .recentExplicit)
+        }()
+        return CreationScopeResolver.resolve(explicit: explicit ?? explicitCreationScopeOverride, zone: zoneScope, focusedAgent: focusedScope, recentExplicit: recentScope)
+    }
+
+    private func presentCreationScopePicker(then action: @escaping () -> Void) {
+        guard let canvasView, let registryStore else { return }
+        let registry = (try? registryStore.loadOrEmpty()) ?? Registry.empty()
+        let recentSelection: ProjectHomeSelection? = workspaceRuntime?.document.lastExplicitCreationScope.flatMap { scope in
+            guard let projectId = scope.projectId,
+                  let project = registry.projects.first(where: { $0.id == projectId }) else { return nil }
+            return ProjectHomeSelection(project: project, homeRelativePath: scope.homeRelativePath)
+        }
+        let picker = ProjectHomePickerController()
+        projectHomePicker?.dismiss(cancelled: false)
+        projectHomePicker = picker
+        picker.present(
+            projects: registry.projects,
+            recents: recentSelection.map { [$0] } ?? [],
+            selected: recentSelection,
+            anchor: CGPoint(x: canvasView.bounds.midX, y: canvasView.bounds.midY),
+            relativeTo: canvasView,
+            addProject: { [weak self] in self?.registerProjectUsingOpenPanel() },
+            onInteractionOwnershipChanged: { [weak canvasView] owned in canvasView?.setZoneScopePickerInteractionOwned(owned) },
+            onConfirm: { [weak self] selection in
+                guard let self else { return }
+                let scope = CreationScope(
+                    projectId: selection.project.id,
+                    projectRoot: selection.project.rootPath,
+                    homeRelativePath: selection.homeRelativePath,
+                    source: .explicit
+                )
+                persistLastExplicitCreationScope(ZoneScope(projectId: selection.project.id, homeRelativePath: selection.homeRelativePath))
+                explicitCreationScopeOverride = scope
+                defer { explicitCreationScopeOverride = nil }
+                projectHomePicker = nil
+                action()
+            },
+            onCancel: { [weak self] in self?.projectHomePicker = nil }
+        )
+    }
+
+    private func spawnerForFilesystemCreation() -> TileSpawner? {
+        if let projectId = resolvedCreationScope()?.projectId,
+           let scoped = workspaceRuntime?.controller(for: projectId)?.tileSpawner {
+            return scoped
+        }
+        return tileSpawner
+    }
+
+    /// Every boot and post-workspace-switch spawner receives identical policy
+    /// providers. This prevents creation semantics from changing after a switch.
+    private func configureCreationAndRuntimeRoutes(on spawner: TileSpawner) {
+        spawner.creationScopeProvider = { [weak self] in self?.resolvedCreationScope() }
+        spawner.terminalProjectContextProvider = { [weak self] in self?.activeZoneProjectEntry() }
+        spawner.terminalSessionTargetProvider = { [weak self] in
+            guard let self else { return nil }
+            if let projectId = resolvedCreationScope()?.projectId { return .project(projectId: projectId) }
+            if let workspaceId = workspaceRuntime?.workspaceId {
+                return .ambient(workspaceId: workspaceId)
+            }
+            return nil
+        }
+        spawner.terminalFocusedPaneTargetProvider = { [weak self] in
+            guard let self,
+                  let tileId = canvasView?.canvasState.lastActiveTileId,
+                  let record = managedSessionRecord(forTileId: tileId) else { return nil }
+            return record.tmuxWindowTarget()
+        }
+        spawner.focusedTerminalCwdProvider = { [weak self] in
+            guard let self,
+                  let tileId = canvasView?.canvasState.lastActiveTileId,
+                  let view = canvasView?.tileView(for: tileId) as? TerminalTileNSView else { return nil }
+            return view.runtime.capturedCwd
+        }
+        spawner.reservedShortcutHandler = { [weak self] event in self?.handleReservedShortcut(event) ?? false }
+        spawner.browserProfileMenuProvider = { [weak self] in
+            (try? self?.registryStore?.loadOrEmpty().settings.browserProfiles) ?? [BrowserProfile.builtInDefault()]
+        }
+        spawner.browserProfileSwitchHandler = { [weak self] tileId, profileId in self?.switchBrowserTileProfile(tileId: tileId, profileId: profileId) }
+        spawner.browserProfileCreateHandler = { [weak self] tileId in self?.createBrowserProfile(for: tileId) }
+        spawner.browserProfileRenameHandler = { [weak self] tileId, profileId in self?.renameBrowserProfile(tileId: tileId, profileId: profileId) }
+        spawner.browserProfileDeleteHandler = { [weak self] tileId, profileId in self?.deleteBrowserProfile(tileId: tileId, profileId: profileId) }
+        spawner.browserPersistenceHandler = { [weak self] in self?.scheduleBrowserSave() }
+        spawner.notePersistenceHandler = { [weak self] in self?.scheduleNoteSave() }
+        spawner.fileTreePersistenceHandler = { [weak self] in self?.scheduleFileTreeSave() }
+        configureFileOpenRoute(on: spawner)
+        wireBrowserRuntimeRegistration(on: spawner)
+    }
+
     private func resolveDocumentLocation(_ url: URL) -> DocumentLocation {
         let registryRoots: [DocumentLocationRoot] = ((try? registryStore?.loadOrEmpty().projects) ?? []).map {
             DocumentLocationRoot(rootURL: URL(fileURLWithPath: $0.rootPath, isDirectory: true), projectId: $0.id)
@@ -12780,16 +13500,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func spawnFileTreeFromPalette() {
-        guard let spawner = tileSpawner,
-              let project = activeProject else { return }
-        switch spawner.spawnFileTree(rootPath: project.rootPath) {
+        guard resolvedCreationScope() != nil else {
+            presentCreationScopePicker { [weak self] in self?.spawnFileTreeFromPalette() }
+            return
+        }
+        guard let spawner = spawnerForFilesystemCreation() else { return }
+        switch spawner.spawnFileTreeForCreationScope() {
         case let .spawned(tileId, _):
             if let view = canvasView?.tileView(for: tileId) as? FileTreeTileNSView {
                 fileTreeViews[tileId] = view
             }
             focusSpawnedTile(tileId)
         case .invalidPath:
-            fputs("TileSpawner.spawnFileTree rejected project root: \(project.rootPath)\n", stderr)
+            fputs("TileSpawner.spawnFileTree requires a project/Home scope\n", stderr)
         case let .failure(error):
             fputs("TileSpawner.spawnFileTree failed: \(error)\n", stderr)
         }
@@ -12962,7 +13685,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     // MARK: - Persistence helpers
 
     private func activeZoneProjectEntry() -> ProjectEntry? {
-        guard let projectId = canvasView?.activeZone?.projectId ?? workspaceRuntime?.activeController?.project.id,
+        guard let projectId = canvasView?.activeProjectZonePlacement?.projectId
+                ?? canvasView?.activeZone?.projectId
+                ?? workspaceRuntime?.activeController?.project.id,
               let registry = try? registryStore?.loadOrEmpty()
         else { return nil }
         return registry.projects.first(where: { $0.id == projectId })
@@ -13390,9 +14115,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let orderedZones = document.zonesInZOrder
         return orderedZones.map { zone in
             let projectEntry = registry.projects.first(where: { $0.id == zone.projectId })
-            let name = projectEntry?.name ?? (zone.name.isEmpty ? "Zone" : zone.name)
+            let name = zone.name.isEmpty ? (projectEntry?.name ?? "Zone") : zone.name
+            let scopeLabel: String
+            if let projectEntry {
+                scopeLabel = zone.homeRelativePath.map { "\(projectEntry.name) / \($0)" }
+                    ?? "\(projectEntry.name) / Project Root"
+            } else {
+                scopeLabel = "Needs Project"
+            }
             let qaVerdict = projectEntry.flatMap { QARunManifestReader.latest(projectRoot: URL(fileURLWithPath: $0.rootPath, isDirectory: true)) }
-            return CanvasNSView.ZoneRenderModel(placement: zone, displayName: name, agentStatusRollup: .empty, qaVerdict: qaVerdict)
+            return CanvasNSView.ZoneRenderModel(
+                placement: zone,
+                displayName: name,
+                scopeLabel: scopeLabel,
+                agentStatusRollup: .empty,
+                qaVerdict: qaVerdict
+            )
         }
     }
 
@@ -13785,10 +14523,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             .appendingPathComponent("continuum-add-zone-check-\(UUID().uuidString)", isDirectory: true)
         let pRoot      = tempRoot.appendingPathComponent("ProjectP", isDirectory: true)
         let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
-        let hgroup     = tempRoot.appendingPathComponent("Hgroup", isDirectory: true)
         try fm.createDirectory(at: pRoot, withIntermediateDirectories: true)
         try fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
-        try fm.createDirectory(at: hgroup, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: tempRoot) }
 
         // Seed project P.
@@ -13871,18 +14607,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         delegate.workspaceRuntime = runtime
         delegate.registryStore = registryStore
 
-        // Set AmbientZoneHome override to hgroup (for Part B).
-        let ambientKey = AmbientZoneHome.userDefaultsKey
-        let originalAmbient = UserDefaults.standard.string(forKey: ambientKey)
-        UserDefaults.standard.set(hgroup.path, forKey: ambientKey)
-        defer {
-            if let original = originalAmbient {
-                UserDefaults.standard.set(original, forKey: ambientKey)
-            } else {
-                UserDefaults.standard.removeObject(forKey: ambientKey)
-            }
-        }
-
         // ── Part A: project zone ──────────────────────────────────────────────
 
         delegate.addProjectZone(projectId: projectP)
@@ -13915,126 +14639,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(reloadedDoc1.zonesInZOrder.last?.zoneId == persistedZone!.zoneId,
                    "assertion 4: zone stacking order should end with the new P zone")
 
-        // 5. Idempotent: second addProjectZone(P) → refCount stays 1, same controller instance, no duplicate zone.
+        // 5. The same project may back multiple organizational zones. Its
+        // runtime remains shared while placement identity stays per-zone.
         delegate.addProjectZone(projectId: projectP)
         let refCountAfterDup = zoneRegistry.refCount(for: projectP)
         try expect(refCountAfterDup == 1,
-                   "assertion 5: refCount(P) should still be 1 after duplicate add, got \(refCountAfterDup)")
+                   "assertion 5: refCount(P) should still be 1 after adding a second zone, got \(refCountAfterDup)")
         let controllerP2 = zoneRegistry.controller(for: projectP)
         try expect(controllerP2 === controllerP,
-                   "assertion 5: second add must return the SAME controller instance (===)")
+                   "assertion 5: both zones must share the SAME controller instance (===)")
         let installedIds2 = canvas.installedZoneLayerIds
-        let pZoneCount = runtime.document.zones.filter { $0.projectId == projectP }.count
-        try expect(pZoneCount == 1,
-                   "assertion 5: document must have exactly 1 zone for P after duplicate add, got \(pZoneCount)")
-        try expect(installedIds2.count == 1,
-                   "assertion 5: canvas should still have exactly 1 layer after duplicate add, got \(installedIds2.count)")
+        let projectZones = runtime.document.zones.filter { $0.projectId == projectP }
+        try expect(projectZones.count == 2,
+                   "assertion 5: document must retain two zones for P, got \(projectZones.count)")
+        try expect(Set(projectZones.map(\.zoneId)).count == 2,
+                   "assertion 5: each project zone must have a distinct zoneId")
+        try expect(projectZones.allSatisfy { $0.homeRelativePath == nil },
+                   "assertion 5: project zones default Home to the project root")
+        try expect(installedIds2.count == 2,
+                   "assertion 5: canvas should install both project-zone layers, got \(installedIds2.count)")
 
-        // ── Part B: group zone ────────────────────────────────────────────────
+        // ── Part B: project requirement ──────────────────────────────────────
 
-        // AmbientZoneHome.current should now resolve to hgroup (set above).
-        try expect(AmbientZoneHome.current == hgroup.path,
-                   "Part B pre-check: AmbientZoneHome.current should be \(hgroup.path), got \(AmbientZoneHome.current)")
-
-        try runtime.addZone(projectId: nil)
-
-        // 6. Ambient controller created with projectRoot == Hgroup; registry for projectId keys is unchanged.
-        let ambientControllers = runtime.ambientControllers
-        try expect(ambientControllers.count == 1,
-                   "assertion 6: runtime should have 1 ambient controller after addZone(nil), got \(ambientControllers.count)")
-        try expect(ambientControllers[0].projectRoot.path == hgroup.path,
-                   "assertion 6: ambient controller.projectRoot.path should be \(hgroup.path), got \(ambientControllers[0].projectRoot.path)")
-        // ProjectId-keyed registry count must still be just P.
+        // 6. The persistence boundary rejects a project-less new zone. Legacy
+        // nil-project zones remain renderable for migration, but no new ambient
+        // Home or controller can be created.
+        do {
+            _ = try runtime.addZone(projectId: nil)
+            throw CheckFailure(description: "assertion 6: project-less zone creation unexpectedly succeeded")
+        } catch WorkspaceRuntime.ZoneCreationError.projectRequired {
+            // Expected.
+        }
+        try expect(runtime.document.zones.count == 2,
+                   "assertion 6: rejected project-less creation must not mutate the document")
+        try expect(canvas.installedZoneLayerIds.count == 2,
+                   "assertion 6: rejected project-less creation must not install a layer")
         try expect(zoneRegistry.liveProjectIds == Set([projectP]),
-                   "assertion 6: projectId-keyed registry should only contain P (not polluted by group zone)")
-        // acquireLock: false — no lock file must materialise in the ambient root.
-        // (acquireLock: true would create <root>/.array/lock via ProjectLock.acquire().)
-        let ambientLockFile = hgroup.appendingPathComponent(".array/lock")
-        try expect(!fm.fileExists(atPath: ambientLockFile.path),
-                   "assertion 6: group/ambient controller must NOT hold a project lock (acquireLock:false); lock file unexpectedly exists at \(ambientLockFile.path)")
-
-        // 7. Group placement persisted with projectId == nil.
-        let reloadedDoc2 = try WorkspaceStore(workspaceId: workspaceW, applicationSupportDirectory: appSupport).load()
-        let groupZone = reloadedDoc2.zones.first(where: { $0.projectId == nil })
-        try expect(groupZone != nil, "assertion 7: reloaded document must contain a zone with projectId == nil")
-        try expect(!groupZone!.name.isEmpty, "assertion 7: group zone must have a non-empty name, got '\(groupZone!.name)'")
-
-        // 8. Group tiles in workspace store (T02): real round-trip + isolation.
-        //
-        // The old assertion just checked tiles(forZone:) == [] which is tautological —
-        // it returns [] for ANY unknown UUID, so it proves nothing about routing. Instead:
-        // (a) store a tile into the group zone via the workspace document/store API,
-        // (b) save + reload from disk, assert the tile round-trips, and
-        // (c) assert the tile does NOT appear in the ambient controller's ProjectStore
-        //     canvas (group tiles live in the workspace store, not the project canvas).
-        let groupZoneId = groupZone!.zoneId
-        let sentinelTileId = UUID(uuidString: "00000000-0000-0000-0000-000000004880")!
-        let sentinelTile = Tile(
-            id: sentinelTileId,
-            kind: .note,
-            title: "group-zone-sentinel",
-            frame: TileFrame(x: 10, y: 10, width: 300, height: 200),
-            zPosition: .fromLegacyRank(1),
-            runtimeRef: nil,
-            metadata: TileMetadata(noteId: sentinelTileId)
-        )
-        // Write the tile into the live runtime document, then flush to disk.
-        let groupWsStore = WorkspaceStore(workspaceId: workspaceW, applicationSupportDirectory: appSupport)
-        var docForGroupTile = try groupWsStore.load()
-        docForGroupTile.setTiles([sentinelTile], forZone: groupZoneId)
-        try groupWsStore.save(docForGroupTile)
-
-        // (a) Reload from a FRESH store (proves the tile persisted in the workspace store).
-        let reloadedDoc3 = try WorkspaceStore(workspaceId: workspaceW, applicationSupportDirectory: appSupport).load()
-        let roundTrippedTiles = reloadedDoc3.tiles(forZone: groupZoneId)
-        try expect(roundTrippedTiles.count == 1,
-                   "assertion 8a: reloaded workspace doc must have exactly 1 tile for the group zone (round-trip), got \(roundTrippedTiles.count)")
-        try expect(roundTrippedTiles[0].id == sentinelTileId,
-                   "assertion 8a: round-tripped tile id should be \(sentinelTileId), got \(roundTrippedTiles[0].id)")
-
-        // (b) Isolation: the sentinel tile must NOT appear in the ambient controller's
-        // ProjectStore canvas (group tiles live in the workspace store, not the project canvas).
-        let ambientProjectCanvas = try ambientControllers[0].projectStore.tryLoadCanvas()
-        let sentinelInProjectCanvas = ambientProjectCanvas?.tiles.contains(where: { $0.id == sentinelTileId }) ?? false
-        try expect(!sentinelInProjectCanvas,
-                   "assertion 8b: group tile must NOT be routed to the ambient controller's ProjectStore canvas (isolation failure)")
-
-        // 9. Group layer installed on canvas: count == 2, group layer has projectId == nil.
-        let installedIds3 = canvas.installedZoneLayerIds
-        try expect(installedIds3.count == 2,
-                   "assertion 9: canvas should have 2 installed zone layers (P + group), got \(installedIds3.count)")
-        let groupLayerPlacement = runtime.installedZonePlacement(for: groupZoneId)
-        try expect(groupLayerPlacement != nil, "assertion 9: installedZonePlacement for group zone must be non-nil")
-        try expect(groupLayerPlacement!.projectId == nil,
-                   "assertion 9: group layer placement.projectId should be nil")
-
-        // ── Part C: configurable ambient home ────────────────────────────────
-
-        let cSuiteName = "continuum-ambient-zone-home-check-\(UUID().uuidString)"
-        let cDefaults = UserDefaults(suiteName: cSuiteName)!
-        defer { cDefaults.removePersistentDomain(forName: cSuiteName) }
-        cDefaults.removePersistentDomain(forName: cSuiteName)
-
-        // 10a. Empty defaults → fallback to $HOME.
-        let resA = AmbientZoneHome.resolvedFromDefaults(standardDefaults: cDefaults, directoryExists: { _ in true })
-        try expect(resA.path == NSHomeDirectory(),
-                   "assertion 10a: empty defaults → path should be $HOME (\(NSHomeDirectory())), got \(resA.path)")
-        try expect(resA.source == .fallbackDefault, "assertion 10a: source should be .fallbackDefault")
-
-        // 10b. Valid override dir → that dir.
-        cDefaults.set(hgroup.path, forKey: AmbientZoneHome.userDefaultsKey)
-        let resB = AmbientZoneHome.resolvedFromDefaults(standardDefaults: cDefaults, directoryExists: { _ in true })
-        try expect(resB.path == hgroup.path,
-                   "assertion 10b: valid override → path should be \(hgroup.path), got \(resB.path)")
-        try expect(resB.source == .standardDomain, "assertion 10b: source should be .standardDomain")
-
-        // 10c. Non-existent path → fall back to $HOME (bogus override rejected).
-        let bogusPath = "/nonexistent-\(UUID().uuidString)"
-        cDefaults.set(bogusPath, forKey: AmbientZoneHome.userDefaultsKey)
-        let resC = AmbientZoneHome.resolvedFromDefaults(standardDefaults: cDefaults, directoryExists: { _ in false })
-        try expect(resC.path == NSHomeDirectory(),
-                   "assertion 10c: non-existent override → path should be $HOME (\(NSHomeDirectory())), got \(resC.path)")
-        try expect(resC.source == .fallbackDefault, "assertion 10c: source should be .fallbackDefault on bogus path")
+                   "assertion 6: rejected creation must not acquire another controller")
 
         // Write manifest artifact.
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
@@ -14045,11 +14686,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try fm.createDirectory(at: artifactDir, withIntermediateDirectories: true)
         let manifest: [String: Any] = [
             "check": "add-zone",
-            "assertions": 10,
+            "assertions": 6,
             "refCountP": 1,
             "installedLayerCount": 2,
-            "ambientControllerRoot": ambientControllers[0].projectRoot.path,
-            "groupZoneName": groupZone!.name
+            "projectZoneCount": projectZones.count,
+            "projectRequired": true
         ]
         let manifestURL = artifactDir.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
@@ -19139,8 +19780,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Scenario 1: drives the REAL performPaletteAction(.jumpToZone) inside an open
     /// .palette modal; asserts viewport, navSelectedZoneId, focus survival after
     /// closeModal, and unknown-zone no-op.
-    /// Scenario 2: drives performPaletteAction(.createZone) on disk, re-loads the
-    /// document and asserts the group zone was persisted with the right fields.
+    /// Scenario 2: drives performPaletteAction(.createZone), proves the blank
+    /// zone remains memory-only while its project/Home picker owns the decision,
+    /// then confirms a scope and proves that only the committed zone persists.
     static func runPaletteZoneSelfCheck() throws -> URL {
         enum CheckError: Error, CustomStringConvertible {
             case failed(String)
@@ -19261,7 +19903,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(vpEqual(canvas.viewport, beforeViewport), "jumping to unknown zone must not change viewport")
         try expect(app.focusBroker.activeSurface == beforeSurface, "jumping to unknown zone must not change activeSurface; got \(String(describing: app.focusBroker.activeSurface))")
 
-        // --- Scenario 2: Create Zone (on-disk) ---
+        // --- Scenario 2: Create Zone (provisional, then committed on-disk) ---
         let tempAppSupport = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("continuum-palette-zone-check-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: tempAppSupport) }
@@ -19304,36 +19946,83 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(preDoc.zones.count == 1, "precondition: initial workspace has 1 zone; got \(preDoc.zones.count)")
         try expect(preDoc.zones[0].projectId == projectP, "precondition: initial zone has projectId == P")
 
-        // Wire app with registryStore pointing at tempAppSupport.
+        // Wire the real palette action to a canvas with one installed project
+        // zone. The persistence callback is the same boundary production uses:
+        // a provisional zone cannot reach it; a committed zone does exactly once.
         let checkApp = AppDelegate()
         checkApp.registryStore = registryStore
+        let createCanvas = CanvasNSView(
+            canvasState: CanvasState(viewport: initialDoc.viewport, tiles: [], groups: [], lastActiveTileId: nil),
+            zoneRenderModels: [CanvasNSView.ZoneRenderModel(placement: firstZone, displayName: "Existing")]
+        )
+        createCanvas.frame = NSRect(x: 0, y: 0, width: 1400, height: 900)
+        checkApp.canvasView = createCanvas
+        var requestedPlacement: ZonePlacement?
+        var requestedAnchor: CGPoint?
+        var persistenceError: Error?
+        createCanvas.onZoneScopeRequired = { placement, anchor in
+            requestedPlacement = placement
+            requestedAnchor = anchor
+        }
+        createCanvas.onZoneCreated = { placement in
+            initialDoc.zones.append(placement)
+            initialDoc.bringZoneToFront(placement.zoneId)
+            initialDoc.lastActiveZoneId = placement.zoneId
+            do { try workspaceStore.save(initialDoc) }
+            catch { persistenceError = error }
+        }
 
-        // Assert 8 — create via the REAL performPaletteAction.
+        // Assert 8 — create via the REAL performPaletteAction. The project/Home
+        // picker callback must fire, but the workspace store must remain byte-
+        // logically unchanged until confirmation.
         checkApp.focusBroker.openModal(.palette)
         checkApp.performPaletteAction(.createZone)
         checkApp.focusBroker.closeModal(.palette)
+        guard let provisional = requestedPlacement else {
+            throw CheckError.failed("create-zone did not request project/Home for its blank provisional zone")
+        }
+        try expect(requestedAnchor != nil, "create-zone did not provide a screen anchor for the project/Home picker")
+        try expect(createCanvas.qaLiveZoneIds.count == 2, "provisional zone was not visible in memory")
+        try expect(createCanvas.qaLiveZonePlacement(provisional.zoneId)?.projectId == nil, "provisional zone claimed a project before confirmation")
+        let provisionalDoc = try workspaceStore.load()
+        try expect(provisionalDoc.zones.count == 1, "provisional zone reached disk before project/Home confirmation; got \(provisionalDoc.zones.count)")
 
-        // Assert 9 — re-load from disk: 2 zones, new zone is group zone.
+        // Confirm the reusable picker result. This is the only point at which
+        // the zone-created sink may write the atomic project/Home pair.
+        createCanvas.commitProvisionalZone(
+            zoneId: provisional.zoneId,
+            projectId: projectP,
+            homeRelativePath: nil,
+            scopeLabel: "T17 Check Project"
+        )
+        if let persistenceError { throw persistenceError }
+
+        // Assert 9 — re-load from disk: two zones, and the new one owns the
+        // selected project/root Home rather than becoming an ambient group.
         let postDoc = try workspaceStore.load()
-        try expect(postDoc.zones.count == 2, "create-zone must write a second zone to disk; got \(postDoc.zones.count)")
+        try expect(postDoc.zones.count == 2, "confirmed create-zone must write a second zone to disk; got \(postDoc.zones.count)")
         let newZone = postDoc.zones[1]
-        try expect(newZone.projectId == nil, "created group zone must have projectId == nil; got \(String(describing: newZone.projectId))")
-        try expect(newZone.name == DefaultGroupZoneName.resolve(), "created group zone must have configured default name; got '\(newZone.name)'")
-        let expectedOriginX = firstZone.origin.x + Double(firstZone.size.width) + 120
-        try expect(abs(newZone.origin.x - expectedOriginX) < 0.001, "created group zone origin.x must be firstZone.right + 120 gap; got \(newZone.origin.x) want \(expectedOriginX)")
+        try expect(newZone.projectId == projectP, "confirmed zone must persist selected project P; got \(String(describing: newZone.projectId))")
+        try expect(newZone.homeRelativePath == nil, "project-root Home must persist as nil")
+        let expectedZoneName = "\(DefaultGroupZoneName.resolve()) 1"
+        try expect(newZone.name == expectedZoneName, "created zone must have configured sequential name; got '\(newZone.name)' want '\(expectedZoneName)'")
+        try expect(newZone.size.width > 0 && newZone.size.height > 0, "created zone must have nonzero canvas geometry")
         try expect(postDoc.zonesInZOrder.last?.zoneId == newZone.zoneId, "created group zone must be frontmost in zone stacking order")
         try expect(postDoc.lastActiveZoneId == newZone.zoneId, "created group zone must be lastActiveZoneId")
 
-        // Assert 10 — registry projectIds unchanged (no project added for group zone).
+        // Assert 10 — selecting an already registered project does not mutate
+        // workspace membership.
         let postRegistry = try registryStore.loadOrEmpty()
         let workspaceEntry = postRegistry.workspaces.first(where: { $0.id == workspaceW })!
-        try expect(workspaceEntry.projectIds == [projectP], "create-zone must NOT add a project to the workspace's projectIds; got \(workspaceEntry.projectIds)")
+        try expect(workspaceEntry.projectIds == [projectP], "create-zone must not duplicate a registered project in workspace.projectIds; got \(workspaceEntry.projectIds)")
 
         let manifest: [String: Any] = [
             "check": "palette-zone",
-            "path": "performPaletteAction(.jumpToZone)/(.createZone) inside an open .palette modal → closeModal (real action + modal lifecycle + on-disk WorkspaceDocument)",
+            "path": "performPaletteAction(.jumpToZone)/(.createZone) → memory-only provisional → commitProvisionalZone(project, Home) → on-disk WorkspaceDocument",
             "fitViewport": ["x": expectedViewport.x, "y": expectedViewport.y, "zoom": expectedViewport.zoom],
             "createdZoneOrigin": ["x": newZone.origin.x, "y": newZone.origin.y],
+            "provisionalStayedOffDisk": provisionalDoc.zones.count == 1,
+            "committedProjectId": projectP.uuidString,
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -19482,14 +20171,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         let browserSection = SettingsSchema.sections().first { $0.id == "browser" }
         let settingsCopy = browserSection?.fields.map(\.label).joined(separator: " ") ?? ""
-        let settingsCopyDistinguishesSafariAndContinuumInspector = settingsCopy.contains("Safari Web Inspector")
-            && settingsCopy.contains("Safari Develop")
-            && settingsCopy.contains("Continuum Inspector Tile")
+        let settingsCopyDistinguishesSafariAndArrayInspector = settingsCopy.contains("Safari Web Inspector")
+            && settingsCopy.contains("native WebKit inspection")
+            && settingsCopy.contains("Array Inspector")
             && settingsCopy.contains("Elements")
-            && settingsCopy.contains("logs-only Console")
+            && settingsCopy.contains("Console")
             && settingsCopy.contains("Styles")
-            && settingsCopy.contains("Network-lite")
-        try expect(settingsCopyDistinguishesSafariAndContinuumInspector, "Browser settings copy does not distinguish Safari Web Inspector from Continuum Inspector Tile")
+            && settingsCopy.contains("Network")
+        try expect(settingsCopyDistinguishesSafariAndArrayInspector, "Browser settings copy does not distinguish Safari Web Inspector from Array Inspector")
 
         let timestamp = Self.qaTimestamp()
         let directory = URL(fileURLWithPath: "qa-runs/\(timestamp)/browser-inspector-actions", isDirectory: true)
@@ -19504,7 +20193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "focusedBrowserPaletteActionWorked": focusedBrowserPaletteActionWorked,
             "inspectorMenuIncludesRevealInspectedBrowser": true,
             "revealInspectedBrowserWorked": revealInspectedBrowserWorked,
-            "settingsCopyDistinguishesSafariAndContinuumInspector": settingsCopyDistinguishesSafariAndContinuumInspector,
+            "settingsCopyDistinguishesSafariAndArrayInspector": settingsCopyDistinguishesSafariAndArrayInspector,
             "palettePath": "LaunchPaletteModel contextual action -> performPaletteAction(.openInspectorForFocusedBrowser) -> TileSpawner.spawnBrowserInspector",
             "inspectorTileId": inspectorTile.id.uuidString,
             "browserTileId": browserTileId.uuidString
@@ -26289,12 +26978,12 @@ extension AppDelegate {
                "opening a row must not start or stop the agent's work")
 
     // 2 · a second click on the same row does NOT hand the agent a second tile.
-    let tilesAfterFirstClick = revealCanvas.canvasState.tiles.count
+    let tilesAfterFirstClick = revealCanvas.allWorkspaceTiles().count
     try expect(revealInbox.clickRowForQA(id: hereAgent.rawValue), "the here-agent's row must still be clickable")
     try expect(revealSupervisor.records[hereAgent]?.tileId == hereTile,
                "an agent that has a tile is revealed IN it — its binding moved to \(String(describing: revealSupervisor.records[hereAgent]?.tileId))")
-    try expect(revealCanvas.canvasState.tiles.count == tilesAfterFirstClick,
-               "…and no second tile was spawned for it — \(revealCanvas.canvasState.tiles.count) tiles, was \(tilesAfterFirstClick)")
+    try expect(revealCanvas.allWorkspaceTiles().count == tilesAfterFirstClick,
+               "…and no second tile was spawned for it — \(revealCanvas.allWorkspaceTiles().count) tiles, was \(tilesAfterFirstClick)")
 
     // 2b · DIRECT TILE FOCUS: no sidebar reveal callback participates. Rewind the
     // read watermark, then drive the same accepted-focus notification emitted by
@@ -26329,20 +27018,20 @@ extension AppDelegate {
     try expect(revealApp.focusBroker.activeSurface == .tile(attachedTile),
                "…and the click landed on it — focus is \(String(describing: revealApp.focusBroker.activeSurface))")
 
-    // 3b · a headless agent that belongs to the OTHER project still gets a view and
-    //      still lands — in the ACTIVE project's canvas, which is where the app's one
-    //      spawner puts every tile. Pinned rather than left unstated: the click must
-    //      not become a no-op for the agent an orchestrator is most likely to have
-    //      spawned, and the day a per-project spawner exists, this assertion is the
-    //      one that has to be rewritten.
+    // 3b · a headless agent that belongs to the OTHER project still gets a view in
+    //      the active zone. Placement is visual only: the view is persisted by the
+    //      zone that received it while the durable agent keeps its own project.
     try expect(revealInbox.clickRowForQA(id: elsewhereAgent.rawValue), "the other project's headless row must be clickable")
     guard let elsewhereTile = revealSupervisor.records[elsewhereAgent]?.tileId else {
         throw CheckError.failed("clicking a headless agent in another project must still attach a tile — its binding is still nil")
     }
     try expect(revealApp.focusBroker.activeSurface == .tile(elsewhereTile),
                "…and the click lands on it — focus is \(String(describing: revealApp.focusBroker.activeSurface))")
-    try expect(revealCanvas.canvasState.tiles.contains { $0.id == elsewhereTile },
-               "the tile is in the ACTIVE project's canvas, which is the only place this app spawns")
+    try expect(revealCanvas.tileRecord(for: elsewhereTile) != nil,
+               "the tile is installed in the active workspace's zone-aware canvas")
+    let activeProjectTiles = try hereStore.loadCanvas().tiles.map(\.id)
+    try expect(activeProjectTiles.contains(elsewhereTile),
+               "the tile's visual placement is persisted by the active zone's project store")
     let otherProjectTiles = try thereStore.loadCanvas().tiles.map(\.id)
     try expect(!otherProjectTiles.contains(elsewhereTile),
                "…and NOT written into the other project's canvas, which nothing here is holding open")
@@ -26382,7 +27071,7 @@ extension AppDelegate {
                "the park is DURABLE, or the next launch puts the agent back at the top of the list — on disk: \(String(describing: durableClose))")
     try expect(revealSupervisor.records[elsewhereAgent] != nil,
                "closing a tile must not delete the agent — History is where it went, not a grave")
-    try expect(!revealCanvas.canvasState.tiles.contains { $0.id == elsewhereTile },
+    try expect(revealCanvas.tileRecord(for: elsewhereTile) == nil,
                "the tile itself is gone from the canvas")
     try expect(!revealInbox.rowIdsForQA.contains(elsewhereAgent.rawValue),
                "a closed agent LEAVES the live list — got \(revealInbox.titlesForQA)")
@@ -26403,7 +27092,7 @@ extension AppDelegate {
                "History collapses: a closed agent is the most parked row there is, not a card")
 
     // And clicking it brings the agent back — same agent, new tile, out of History.
-    let tilesBeforeReopen = revealCanvas.canvasState.tiles.count
+    let tilesBeforeReopen = revealCanvas.allWorkspaceTiles().count
     let recordsBeforeReopen = revealSupervisor.records.count
     try expect(revealInbox.clickRowForQA(id: elsewhereAgent.rawValue), "a History row must be clickable")
     revealInbox.layoutForQA()
@@ -26415,8 +27104,8 @@ extension AppDelegate {
                "…and take it back out of History, on disk too — stored archivedAt \(String(describing: durableReopen))")
     try expect(revealSupervisor.records.count == recordsBeforeReopen,
                "reopening must not mint a second agent — \(revealSupervisor.records.count) records, was \(recordsBeforeReopen)")
-    try expect(revealCanvas.canvasState.tiles.count == tilesBeforeReopen + 1,
-               "…and exactly one tile came back — \(revealCanvas.canvasState.tiles.count) tiles, was \(tilesBeforeReopen)")
+    try expect(revealCanvas.allWorkspaceTiles().count == tilesBeforeReopen + 1,
+               "…and exactly one tile came back — \(revealCanvas.allWorkspaceTiles().count) tiles, was \(tilesBeforeReopen)")
     try expect(revealApp.focusBroker.activeSurface == .tile(reopenedTile),
                "…and the click landed on it — focus is \(String(describing: revealApp.focusBroker.activeSurface))")
     try expect(revealInbox.historyHeaderTitleForQA == nil,
@@ -26425,14 +27114,14 @@ extension AppDelegate {
     // …and ARCHIVE does the same thing from the other side. Its whole difference
     // from closing a tile is where you start; if it left the tile behind, the same
     // agent would be a "Closed" row above a tile you can still type into.
-    let tilesBeforeArchive = revealCanvas.canvasState.tiles.count
+    let tilesBeforeArchive = revealCanvas.allWorkspaceTiles().count
     try expect(revealApp.performInboxRowAction(.archive, on: [elsewhereAgent.rawValue]),
                "Archive must be performable on an idle agent")
     revealInbox.layoutForQA()
     try expect(revealSupervisor.records[elsewhereAgent]?.archivedAt != nil,
                "Archive parks the agent, exactly as closing its tile does")
-    try expect(revealCanvas.canvasState.tiles.count == tilesBeforeArchive - 1,
-               "…and takes its tile with it — \(revealCanvas.canvasState.tiles.count) tiles, was \(tilesBeforeArchive)")
+    try expect(revealCanvas.allWorkspaceTiles().count == tilesBeforeArchive - 1,
+               "…and takes its tile with it — \(revealCanvas.allWorkspaceTiles().count) tiles, was \(tilesBeforeArchive)")
     try expect(revealSupervisor.records[elsewhereAgent]?.tileId == nil,
                "…leaving no binding to a tile that is gone — got \(String(describing: revealSupervisor.records[elsewhereAgent]?.tileId))")
     let archivedRecordOnDisk = try revealAgentStore.load(id: elsewhereAgent)
@@ -26727,7 +27416,7 @@ extension AppDelegate {
         keyCode: 19) else {
         throw CheckError.failed("could not synthesize ⌘2")
     }
-    let tilesBeforeJump = revealCanvas.canvasState.tiles.count
+    let tilesBeforeJump = revealApp.canvasView?.allWorkspaceTiles().count ?? 0
     revealApp.focusBroker.recoverToCanvas(reason: .userClick)
     try expect(revealApp.focusBroker.activeSurface != .tile(jumpTargetTile),
                "setup: the jump's target must not already be focused")
@@ -26736,8 +27425,9 @@ extension AppDelegate {
                "⌘2 with the inbox focused must be consumed by the jump, not by launch profile 2")
     try expect(revealApp.focusBroker.activeSurface == .tile(jumpTargetTile),
                "…and it must land on row two's agent — focus is \(String(describing: revealApp.focusBroker.activeSurface))")
-    try expect(revealCanvas.canvasState.tiles.count == tilesBeforeJump,
-               "…and spawn nothing: profile 2 would have added a terminal — \(revealCanvas.canvasState.tiles.count) tiles, was \(tilesBeforeJump)")
+    let tilesAfterJump = revealApp.canvasView?.allWorkspaceTiles().count ?? 0
+    try expect(tilesAfterJump == tilesBeforeJump,
+               "…and spawn nothing: profile 2 would have added a terminal — \(tilesAfterJump) tiles, was \(tilesBeforeJump)")
 
     // Space PREVIEWS rather than reveals: frame an existing tile in the current
     // canvas while workspace, focus, tile identity, and unread state stay put.
@@ -27803,10 +28493,15 @@ extension AppDelegate {
                "a deleted agent stays deleted across a relaunch — got \(afterDelete.records.count) restored records")
 
     // H5 · DELETE REMOVES THE MANAGED TILE TOO, and a stale restored copy still
-    // cannot mint a replacement. Closing/detaching remains non-destructive.
+    // cannot mint a replacement. Closing/detaching remains non-destructive. The
+    // prior sections deliberately left us in another workspace; reveal through
+    // production first so the visual placement (not the agent's repository) picks
+    // the workspace that owns this tile.
+    try expect(revealInbox.clickRowForQA(id: elsewhereAgent.rawValue),
+               "the cross-project agent's existing tile must remain revealable by its visual placement")
     guard let doomedTile = revealSupervisor.records[elsewhereAgent]?.tileId,
           revealApp.canvasView?.tileView(for: doomedTile) is ManagedAgentTileNSView else {
-        throw CheckError.failed("setup: the agent being deleted must hold a managed-agent tile that is really on the canvas — section D spawned one for it")
+        throw CheckError.failed("setup: revealing the agent must switch to the workspace that holds its managed-agent tile")
     }
     let recordsBeforeTiled = revealSupervisor.records.count
     try expect(revealApp.performInboxRowAction(.delete, on: [elsewhereAgent.rawValue]),

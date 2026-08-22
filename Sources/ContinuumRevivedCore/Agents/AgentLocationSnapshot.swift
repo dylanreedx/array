@@ -49,11 +49,27 @@ public struct AgentHome: Equatable, Sendable {
     public let projectId: UUID?
     public let projectRoot: URL?
     public let checkoutRoot: URL
+    /// Logical Home relative to the checkout. nil means checkout root. Keeping
+    /// it logical lets the same project subfolder map into an isolated worktree.
+    public let homeRelativePath: String?
 
-    public init(projectId: UUID?, projectRoot: URL?, checkoutRoot: URL) {
+    public init(
+        projectId: UUID?,
+        projectRoot: URL?,
+        checkoutRoot: URL,
+        homeRelativePath: String? = nil
+    ) {
         self.projectId = projectId
         self.projectRoot = projectRoot.map(normalizedDirectoryURL)
         self.checkoutRoot = normalizedDirectoryURL(checkoutRoot)
+        self.homeRelativePath = homeRelativePath
+    }
+
+    public var homeRoot: URL {
+        guard let homeRelativePath, !homeRelativePath.isEmpty else { return checkoutRoot }
+        return normalizedDirectoryURL(
+            checkoutRoot.appendingPathComponent(homeRelativePath, isDirectory: true)
+        )
     }
 }
 
@@ -68,8 +84,8 @@ public struct AgentWorkingLocation: Equatable, Sendable {
     public init(directory: URL, home: AgentHome) {
         let normalized = normalizedDirectoryURL(directory)
         self.directory = normalized
-        self.relationToHome = AgentPathRelation.classify(normalized, relativeTo: home.checkoutRoot)
-        self.relativePath = AgentPathRelation.relativePath(normalized, relativeTo: home.checkoutRoot)
+        self.relationToHome = AgentPathRelation.classify(normalized, relativeTo: home.homeRoot)
+        self.relativePath = AgentPathRelation.relativePath(normalized, relativeTo: home.homeRoot)
     }
 }
 
@@ -148,29 +164,32 @@ public struct AgentLocationSnapshot: Equatable, Sendable {
         self.workingLocation = AgentWorkingLocation(directory: whereDirectory, home: home)
         self.what = what
         self.whatRelationToHome = what?.targetPath.map {
-            AgentPathRelation.classify($0, relativeTo: home.checkoutRoot)
+            AgentPathRelation.classify($0, relativeTo: home.homeRoot)
         }
         self.whatExpiresAt = what == nil ? nil : whatExpiresAt
         self.lastUsefulWhat = lastUsefulWhat
         self.lastUsefulWhatRelationToHome = lastUsefulWhat?.targetPath.map {
-            AgentPathRelation.classify($0, relativeTo: home.checkoutRoot)
+            AgentPathRelation.classify($0, relativeTo: home.homeRoot)
         }
     }
 
-    /// Migration-safe projection for every record written before the richer
-    /// location contract. No record bytes change and required `cwd` retains its
-    /// existing launch/restore meaning.
+    /// Projection for both v2 records and legacy records. v1 decoding migrates
+    /// `cwd` into checkout, Home and Where, so callers always consume the four
+    /// distinct roles without branching on schema version.
     public static func legacy(
         record: AgentRecord,
         projectRoot: URL? = nil,
         what: AgentObservedActivity? = nil
     ) -> AgentLocationSnapshot {
-        let legacyCWD = URL(fileURLWithPath: record.cwd, isDirectory: true)
+        let checkout = URL(fileURLWithPath: record.checkoutRoot, isDirectory: true)
+        let whereDirectory = URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true)
+        let persistedProjectRoot = record.projectRoot.map { URL(fileURLWithPath: $0, isDirectory: true) }
         let home = AgentHome(
             projectId: record.projectId,
-            projectRoot: projectRoot,
-            checkoutRoot: legacyCWD)
-        return AgentLocationSnapshot(home: home, whereDirectory: legacyCWD, what: what)
+            projectRoot: persistedProjectRoot ?? projectRoot,
+            checkoutRoot: checkout,
+            homeRelativePath: record.homeRelativePath)
+        return AgentLocationSnapshot(home: home, whereDirectory: whereDirectory, what: what)
     }
 }
 

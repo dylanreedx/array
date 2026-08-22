@@ -65,21 +65,44 @@ func runDocumentLocationChecks() {
            "workspace document links must dedupe by agent/tile and refresh updatedAt")
     let data = try! JSONEncoder().encode(workspace)
     let decoded = try! JSONDecoder().decode(WorkspaceDocument.self, from: data)
-    expect(decoded.schemaVersion == 6 && decoded.documentLinks == workspace.documentLinks,
-           "workspace v6 must round-trip document links")
+    expect(decoded.schemaVersion == WorkspaceDocument.currentSchemaVersion && decoded.documentLinks == workspace.documentLinks,
+           "current workspace schema must round-trip document links")
     var v5Object = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
     v5Object["schemaVersion"] = 5
     let v5Data = try! JSONSerialization.data(withJSONObject: v5Object)
     let migratedV5 = try! JSONDecoder().decode(WorkspaceDocument.self, from: v5Data)
-    expect(migratedV5.schemaVersion == 6 && migratedV5.documentLinks == workspace.documentLinks,
-           "workspace v5 must migrate to v6 without losing document links")
+    expect(migratedV5.schemaVersion == WorkspaceDocument.currentSchemaVersion && migratedV5.documentLinks == workspace.documentLinks,
+           "workspace v5 must migrate to current without losing document links")
+    // A real store/relaunch witness, not just an in-memory decoder exercise.
+    // Write the shipped v5 shape to the canonical workspace path, load it through
+    // WorkspaceStore, save the migrated document, and load it twice more. The
+    // relationship must remain singular and byte-stable across both relaunches.
+    let workspaceId = UUID()
+    let persistenceRoot = root.appendingPathComponent("AppSupport", isDirectory: true)
+    let workspaceStore = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: persistenceRoot)
+    try! fm.createDirectory(at: workspaceStore.layout.workspaceDirectory, withIntermediateDirectories: true)
+    var storeV5Object = try! JSONSerialization.jsonObject(
+        with: JSONCodec.makeEncoder().encode(workspace)) as! [String: Any]
+    storeV5Object["schemaVersion"] = 5
+    let storeV5Data = try! JSONSerialization.data(withJSONObject: storeV5Object)
+    try! storeV5Data.write(to: workspaceStore.layout.canvasFile)
+    let firstRelaunch = try! workspaceStore.load()
+    expect(firstRelaunch.schemaVersion == WorkspaceDocument.currentSchemaVersion && firstRelaunch.documentLinks == workspace.documentLinks,
+           "WorkspaceStore must retain v5 document relationships on first relaunch")
+    try! workspaceStore.save(firstRelaunch)
+    let secondRelaunch = try! workspaceStore.load()
+    try! workspaceStore.save(secondRelaunch)
+    let thirdRelaunch = try! workspaceStore.load()
+    expect(secondRelaunch.documentLinks == workspace.documentLinks
+            && thirdRelaunch.documentLinks == workspace.documentLinks,
+           "repeated v6 save/relaunch cycles must neither drop nor duplicate document relationships")
     var v4Object = v5Object
     v4Object["schemaVersion"] = 4
     v4Object.removeValue(forKey: "documentLinks")
     let v4Data = try! JSONSerialization.data(withJSONObject: v4Object)
     let migratedV4 = try! JSONDecoder().decode(WorkspaceDocument.self, from: v4Data)
-    expect(migratedV4.schemaVersion == 6 && migratedV4.documentLinks.isEmpty,
-           "workspace v4 must migrate through v5 to v6 with an empty relationship list")
+    expect(migratedV4.schemaVersion == WorkspaceDocument.currentSchemaVersion && migratedV4.documentLinks.isEmpty,
+           "workspace v4 must migrate to current with an empty relationship list")
     workspace.removeDocumentLinks(agentId: agent)
     expect(workspace.documentLinks.isEmpty, "agent deletion must remove its document relationships")
     workspace.linkDocument(tile, to: agent, at: first)

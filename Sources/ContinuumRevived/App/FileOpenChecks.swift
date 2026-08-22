@@ -582,6 +582,185 @@ enum FileOpenChecks {
         return lines.joined(separator: "\n")
     }
 
+    private static func checkDocumentRelationshipGeometry() throws {
+        typealias Segment = DocumentRelationshipOverlayView.Segment
+        func cubic(_ source: CGRect, _ target: CGRect, label: String) throws
+            -> (CGPoint, CGPoint, CGPoint, CGPoint) {
+            guard case let .cubic(start, control1, control2, end)? =
+                DocumentRelationshipOverlayView.route(for: Segment(source: source, target: target, emphasized: false))
+            else { throw Failure(message: "\(label) did not produce a cubic route") }
+            try expect([start, control1, control2, end].flatMap { [$0.x, $0.y] }.allSatisfy(\.isFinite),
+                       "\(label) produced non-finite geometry")
+            return (start, control1, control2, end)
+        }
+
+        for gap in [CGFloat(8), 20, 180] {
+            let source = CGRect(x: 20, y: 40, width: 100, height: 80)
+            let target = CGRect(x: source.maxX + gap, y: 95, width: 120, height: 90)
+            let route = try cubic(source, target, label: "\(Int(gap))pt right gap")
+            try expect(route.0.x == source.maxX && route.3.x == target.minX,
+                       "\(Int(gap))pt route did not use facing horizontal edges")
+            try expect(route.1.x >= route.0.x && route.1.x <= route.3.x
+                        && route.2.x >= route.0.x && route.2.x <= route.3.x,
+                       "\(Int(gap))pt handles escaped the visible gap")
+        }
+
+        let leftDocument = try cubic(
+            CGRect(x: 260, y: 40, width: 100, height: 80),
+            CGRect(x: 120, y: 90, width: 120, height: 90), label: "document left")
+        try expect(leftDocument.0.x == 260 && leftDocument.3.x == 240
+                    && leftDocument.1.x <= leftDocument.0.x && leftDocument.2.x >= leftDocument.3.x,
+                   "document-left route did not reverse its facing edges and handles")
+
+        let vertical = try cubic(
+            CGRect(x: 80, y: 20, width: 120, height: 80),
+            CGRect(x: 110, y: 120, width: 120, height: 80), label: "vertical gap")
+        try expect(vertical.0.y == 100 && vertical.3.y == 120,
+                   "vertically separated tiles did not use facing vertical edges")
+
+        let overlapSource = CGRect(x: 80, y: 80, width: 160, height: 120)
+        let overlapTarget = CGRect(x: 180, y: 130, width: 160, height: 120)
+        guard case let .polyline(points)? = DocumentRelationshipOverlayView.route(for: Segment(
+            source: overlapSource, target: overlapTarget, emphasized: false)) else {
+            throw Failure(message: "overlapping tiles did not use the outside-union route")
+        }
+        let union = overlapSource.union(overlapTarget)
+        try expect(points.contains(where: {
+            $0.x < union.minX || $0.x > union.maxX || $0.y < union.minY || $0.y > union.maxY
+        }), "overlap route never escaped the obscuring tile union")
+        try expect(DocumentRelationshipOverlayView.route(for: Segment(
+            source: CGRect(x: CGFloat.nan, y: 0, width: 10, height: 10),
+            target: CGRect(x: 20, y: 0, width: 10, height: 10), emphasized: false)) == nil,
+                   "non-finite endpoint geometry must be skipped safely")
+    }
+
+    private static func accentDirectedPixelChanges(
+        before: NSBitmapImageRep, after: NSBitmapImageRep, pointXRange: ClosedRange<CGFloat>
+    ) -> Int {
+        guard before.pixelsWide == after.pixelsWide, before.pixelsHigh == after.pixelsHigh,
+              let accent = NSColor.controlAccentColor.usingColorSpace(.deviceRGB) else { return 0 }
+        let scale = CGFloat(after.pixelsWide) / max(1, after.size.width)
+        let minX = max(0, Int(floor(pointXRange.lowerBound * scale)))
+        let maxX = min(after.pixelsWide - 1, Int(ceil(pointXRange.upperBound * scale)))
+        guard minX <= maxX else { return 0 }
+        func distance(_ color: NSColor, from target: NSColor) -> CGFloat {
+            guard let rgb = color.usingColorSpace(.deviceRGB) else { return .greatestFiniteMagnitude }
+            return abs(rgb.redComponent - target.redComponent)
+                + abs(rgb.greenComponent - target.greenComponent)
+                + abs(rgb.blueComponent - target.blueComponent)
+        }
+        var count = 0
+        for x in minX...maxX {
+            for y in 0..<after.pixelsHigh {
+                guard let old = before.colorAt(x: x, y: y), let new = after.colorAt(x: x, y: y) else { continue }
+                let channelDelta = abs(old.redComponent - new.redComponent)
+                    + abs(old.greenComponent - new.greenComponent)
+                    + abs(old.blueComponent - new.blueComponent)
+                if channelDelta > 0.01 && distance(new, from: accent) < distance(old, from: accent) {
+                    count += 1
+                }
+            }
+        }
+        return count
+    }
+
+    private static func checkDocumentRelationshipStabilityAndCost() throws {
+        let zone = ZonePlacement(
+            zoneId: UUID(), projectId: UUID(), origin: .init(x: 0, y: 0),
+            size: .init(width: 900, height: 600), color: "blue", collapsed: false,
+            hydrationPolicy: .automatic)
+        let agentID = AgentID(rawValue: UUID())
+        let agentTile = Tile(id: UUID(), kind: .managedAgent, title: "agent",
+                             frame: .init(x: 40, y: 80, width: 220, height: 180),
+                             zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: .init())
+        let documentTile = Tile(id: UUID(), kind: .file, title: "document",
+                                frame: .init(x: 280, y: 100, width: 220, height: 180),
+                                zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: .init())
+        let canvas = CanvasNSView(
+            canvasState: .init(viewport: .init(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil),
+            activeZone: zone, showsZoneChrome: true)
+        canvas.frame = CGRect(x: 0, y: 0, width: 900, height: 600)
+        canvas.install(tileView: DescriptorTileNSView(tile: agentTile), for: agentTile)
+        canvas.install(tileView: DescriptorTileNSView(tile: documentTile), for: documentTile)
+        let relationshipDate = Date(timeIntervalSinceReferenceDate: 1)
+        canvas.setDocumentRelationships(
+            [.init(agentId: agentID, documentTileId: documentTile.id,
+                   createdAt: relationshipDate, updatedAt: relationshipDate)],
+            agentTileIds: [agentID: agentTile.id])
+        let window = NSWindow(contentRect: canvas.bounds, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        try expect(window.makeFirstResponder(canvas), "stability fixture could not focus its canvas")
+        let responder = window.firstResponder
+        let subviewCount = canvas.worldPlane.subviews.count
+        for index in 0..<40 {
+            canvas.bringToFront(tileId: index.isMultiple(of: 2) ? agentTile.id : documentTile.id)
+        }
+        let temporaryZone = ZonePlacement(
+            zoneId: UUID(), projectId: nil, origin: .init(x: 620, y: 40),
+            size: .init(width: 220, height: 220), color: "purple", collapsed: false,
+            hydrationPolicy: .automatic)
+        canvas.upsertZoneLayer(.init(
+            placement: temporaryZone,
+            renderModel: .init(placement: temporaryZone, displayName: "temporary")))
+        canvas.removeZoneLayer(zoneId: temporaryZone.zoneId)
+        try expect(canvas.worldPlane.subviews.count == subviewCount,
+                   "structural reorder cycles leaked or duplicated world-plane views")
+        try expect(window.firstResponder === responder,
+                   "stacking reconciliation changed the first responder")
+        try expect(canvas.qaDocumentRelationshipStackingSnapshot.contractHolds,
+                   "background → connector → tile → screen-overlay stacking contract failed")
+
+        let invalidations = canvas.qaDocumentRelationshipDisplayInvalidationCount
+        canvas.setDocumentRelationships(
+            [.init(agentId: agentID, documentTileId: documentTile.id,
+                   createdAt: relationshipDate, updatedAt: relationshipDate)],
+            agentTileIds: [agentID: agentTile.id])
+        try expect(canvas.qaDocumentRelationshipDisplayInvalidationCount == invalidations,
+                   "an unchanged relationship refresh invalidated display")
+
+        // Structural performance witness: one index visit per tile and one link
+        // evaluation per durable relationship, including a missing endpoint.
+        let largeCanvas = CanvasNSView(
+            canvasState: .init(viewport: .init(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil),
+            showsZoneChrome: false)
+        largeCanvas.frame = CGRect(x: 0, y: 0, width: 1_200, height: 900)
+        let sharedDocument = Tile(id: UUID(), kind: .file, title: "shared",
+                                  frame: .init(x: 980, y: 360, width: 120, height: 100),
+                                  zPosition: .fromLegacyRank(100), runtimeRef: nil, metadata: .init())
+        largeCanvas.install(tileView: DescriptorTileNSView(tile: sharedDocument), for: sharedDocument)
+        var ids: [AgentID: UUID] = [:]
+        var links: [DocumentAgentLink] = []
+        for index in 0..<64 {
+            let id = AgentID(rawValue: UUID())
+            let tile = Tile(id: UUID(), kind: .managedAgent, title: "agent \(index)",
+                            frame: .init(x: Double((index % 8) * 100), y: Double((index / 8) * 100),
+                                         width: 80, height: 70),
+                            zPosition: .fromLegacyRank(index), runtimeRef: nil, metadata: .init())
+            largeCanvas.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
+            ids[id] = tile.id
+            links.append(.init(agentId: id, documentTileId: sharedDocument.id,
+                               createdAt: relationshipDate, updatedAt: relationshipDate))
+        }
+        let missingID = AgentID(rawValue: UUID())
+        ids[missingID] = UUID()
+        links.append(.init(agentId: missingID, documentTileId: sharedDocument.id,
+                           createdAt: relationshipDate, updatedAt: relationshipDate))
+        largeCanvas.qaResetDocumentRelationshipStats()
+        largeCanvas.setDocumentRelationships(links, agentTileIds: ids)
+        try expect(largeCanvas.qaDocumentRelationshipStats.tileIndexVisits == 65
+                    && largeCanvas.qaDocumentRelationshipStats.linkEvaluations == 65
+                    && largeCanvas.qaDocumentRelationshipSegmentCount == 64,
+                   "relationship refresh was not O(tiles + links), or failed missing-endpoint filtering: \(largeCanvas.qaDocumentRelationshipStats)")
+        largeCanvas.qaResetDocumentRelationshipStats()
+        let largeInvalidations = largeCanvas.qaDocumentRelationshipDisplayInvalidationCount
+        largeCanvas.setViewport(largeCanvas.viewport)
+        try expect(largeCanvas.qaDocumentRelationshipStats.stackingReconciliations == 0
+                    && largeCanvas.qaDocumentRelationshipStats.tileIndexVisits == 65
+                    && largeCanvas.qaDocumentRelationshipStats.linkEvaluations == 65
+                    && largeCanvas.qaDocumentRelationshipDisplayInvalidationCount == largeInvalidations,
+                   "geometry-only refresh reordered views or repainted unchanged connectors: \(largeCanvas.qaDocumentRelationshipStats)")
+    }
+
     // MARK: - Section 3: an agent's local-file link opens beside the agent
 
     /// Drives the real production chain — assistant Markdown → semantic link →
@@ -589,6 +768,9 @@ enum FileOpenChecks {
     /// `onOpenLocalFile` → `AgentLocalFileOpener` → `TileSpawner` — inside an
     /// isolated checkout, and proves authored content cannot escape that checkout.
     static func runAgentLocalFileLinkCheck() throws {
+        try checkDocumentRelationshipGeometry()
+        try checkDocumentRelationshipStabilityAndCost()
+
         let fileManager = FileManager.default
         let tempRoot = fileManager.temporaryDirectory
             .appendingPathComponent("continuum-agent-link-\(UUID().uuidString)", isDirectory: true)
@@ -610,6 +792,9 @@ enum FileOpenChecks {
         // A single-project workspace: the agent tile and its files share one zone.
         let harness = try makeSingleProjectHarness(root: checkout, tempRoot: tempRoot)
         defer { harness.browserEngine.shutdown() }
+        let window = NSWindow(
+            contentRect: harness.canvas.bounds, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = harness.canvas
 
         let agentFrame = TileFrame(x: 100, y: 80, width: 460, height: 360)
         let agentTile = Tile(id: UUID(), kind: .managedAgent, title: "agent",
@@ -671,18 +856,22 @@ enum FileOpenChecks {
         agentView.ingest(AgentRuntimeEvent.turnCompleted(threadId: "thread-link", turnId: "turn-1", outcome: .completed, errorMessage: nil))
         agentView.layoutSubtreeIfNeeded()
 
-        var inlineViews: [RichInlineTextView] = []
-        func walk(_ view: NSView) {
-            if let inline = view as? RichInlineTextView { inlineViews.append(inline) }
-            view.subviews.forEach(walk)
+        func renderedLinks() -> [(view: RichInlineTextView, link: AgentTextStyleResolver.LinkRange)] {
+            var inlineViews: [RichInlineTextView] = []
+            func walk(_ view: NSView) {
+                if let inline = view as? RichInlineTextView { inlineViews.append(inline) }
+                view.subviews.forEach(walk)
+            }
+            walk(agentView)
+            return inlineViews.flatMap { view in view.linkRanges.map { (view: view, link: $0) } }
         }
-        walk(agentView)
-        let links = inlineViews.flatMap { view in view.linkRanges.map { (view: view, link: $0) } }
+        let links = renderedLinks()
         try expect(!links.isEmpty, "the assistant message must render semantic links in the tile")
 
         func activate(_ destination: String) throws {
-            guard let match = links.first(where: { $0.link.destination == destination }) else {
-                throw Failure(message: "the transcript must contain a link to \(destination); it has \(links.map(\.link.destination))")
+            let currentLinks = renderedLinks()
+            guard let match = currentLinks.first(where: { $0.link.destination == destination }) else {
+                throw Failure(message: "the transcript must contain a link to \(destination); it has \(currentLinks.map(\.link.destination))")
             }
             _ = match.view.activateLink(at: match.link.range.location)
         }
@@ -748,7 +937,7 @@ enum FileOpenChecks {
         )
         harness.canvas.installProjectTile(
             tileView: ManagedAgentTileNSView(tile: secondTile, threadId: "thread-link-2"),
-            for: secondTile
+            for: secondTile, targetZoneId: harness.zone
         )
         harness.runtime.documentAgentTileIdsProvider = {
             [firstAgentId: agentTile.id, secondAgentId: secondTile.id]
@@ -766,6 +955,51 @@ enum FileOpenChecks {
                    "a second agent must add a relationship to the same document")
         try expect(harness.canvas.qaDocumentRelationshipSegmentCount == 2,
                    "both visible agent relationships must render connector geometry")
+        try expect(harness.canvas.qaDocumentRelationshipStackingSnapshot.contractHolds,
+                   "the relationship overlay must sit above zone chrome and below every tile")
+
+        // Render the actual transcript-created relationship through the real
+        // window hierarchy. Comparing link-off/link-on pixels in the exposed gap
+        // makes the shipped 0.5.7 stacking defect red: its zone chrome covers the
+        // overlay, so that corridor is byte-identical.
+        let artifactStamp = ISO8601DateFormatter().string(from: Date())
+            .replacingOccurrences(of: ":", with: "")
+        let artifactDirectory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs/\(artifactStamp)/document-relationships", isDirectory: true)
+        try fileManager.createDirectory(at: artifactDirectory, withIntermediateDirectories: true)
+        let persistedLinks = harness.runtime.document.documentLinks
+        let persistedAgentTiles = harness.runtime.documentAgentTileIdsProvider?() ?? [:]
+        guard let firstRoute = harness.canvas.qaDocumentRelationshipRoutes.first else {
+            throw Failure(message: "the transcript-created relationship has no drawable route")
+        }
+        let routePoints = firstRoute.points
+        let corridorX: ClosedRange<CGFloat>
+        if let minimum = routePoints.map(\.x).min(), let maximum = routePoints.map(\.x).max() {
+            corridorX = minimum...maximum
+        } else {
+            throw Failure(message: "the transcript-created relationship route has no points")
+        }
+        let originalAppearance = NSApp.appearance
+        defer { NSApp.appearance = originalAppearance }
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            let appearance = NSAppearance(named: appearanceName)
+            NSApp.appearance = appearance
+            window.appearance = appearance
+            harness.canvas.setDocumentRelationships([], agentTileIds: persistedAgentTiles)
+            let before = try UIProbe.bitmap(
+                of: harness.canvas, id: "document-relationship.\(appearanceName.rawValue).before", scale: 1)
+            harness.canvas.setDocumentRelationships(persistedLinks, agentTileIds: persistedAgentTiles)
+            let after = try UIProbe.bitmap(
+                of: harness.canvas, id: "document-relationship.\(appearanceName.rawValue).after", scale: 1)
+            let coloredPixels = accentDirectedPixelChanges(before: before, after: after, pointXRange: corridorX)
+            try expect(coloredPixels >= 2,
+                       "\(appearanceName.rawValue) rendered no connector-colored pixels in the visible endpoint corridor")
+            guard let png = after.representation(using: .png, properties: [:]) else {
+                throw Failure(message: "could not encode \(appearanceName.rawValue) relationship render")
+            }
+            try png.write(to: artifactDirectory.appendingPathComponent("\(appearanceName.rawValue).png"))
+        }
+        print("Document relationship renders: \(artifactDirectory.path)")
 
         // 5. The absolute and file:// spellings of the same file reveal that tile too.
         try activate(sourceFile.path)
@@ -804,6 +1038,36 @@ enum FileOpenChecks {
                    "an https link must never reach the local-file opener")
         try expect(AgentLinkPolicy.disposition(for: "https://example.com/guide") == .openExternally,
                    "https must stay externally dispositioned")
+
+        // Persist the exact linked endpoint tiles, reload the schema-v6 document
+        // twice, then reconstruct a fresh runtime/canvas as a relaunch would.
+        // This runs after every activation/refusal assertion so the deliberate
+        // second runtime cannot perturb the live transcript fixture under test.
+        guard let persistedZoneTiles = harness.canvas.tiles(inZone: harness.zone) else {
+            throw Failure(message: "the project zone disappeared before relaunch persistence")
+        }
+        try harness.projectStore.saveCanvas(.init(
+            viewport: .init(x: 0, y: 0, zoom: 1), tiles: persistedZoneTiles,
+            groups: [], lastActiveTileId: fileTileId))
+        let firstReload = try harness.workspaceStore.load()
+        try expect(firstReload.schemaVersion == WorkspaceDocument.currentSchemaVersion
+                       && firstReload.documentLinks.count == 2,
+                   "first workspace relaunch lost or duplicated relationships")
+        try harness.workspaceStore.save(firstReload)
+        let secondReload = try harness.workspaceStore.load()
+        try expect(secondReload.documentLinks == firstReload.documentLinks,
+                   "second workspace relaunch changed relationship identity or order")
+        let relaunched = try makeSingleProjectHarness(
+            root: checkout, tempRoot: tempRoot, initializeStore: false)
+        defer { relaunched.browserEngine.shutdown() }
+        relaunched.runtime.documentAgentTileIdsProvider = {
+            [firstAgentId: agentTile.id, secondAgentId: secondTile.id]
+        }
+        relaunched.canvas.layoutSubtreeIfNeeded()
+        try expect(relaunched.canvas.qaDocumentRelationshipSegmentCount == 2,
+                   "relaunch did not restore both visible relationship connectors")
+        try expect(relaunched.canvas.qaDocumentRelationshipStackingSnapshot.contractHolds,
+                   "relaunch did not restore the stacking contract")
     }
 
     private struct SingleProjectHarness {
@@ -811,10 +1075,14 @@ enum FileOpenChecks {
         let canvas: CanvasNSView
         let focusBroker: FocusBroker
         let browserEngine: BrowserEngineContext
+        let projectStore: ProjectStore
+        let workspaceStore: WorkspaceStore
         let zone: UUID
     }
 
-    private static func makeSingleProjectHarness(root: URL, tempRoot: URL) throws -> SingleProjectHarness {
+    private static func makeSingleProjectHarness(
+        root: URL, tempRoot: URL, initializeStore: Bool = true
+    ) throws -> SingleProjectHarness {
         let now = Date(timeIntervalSince1970: 1_900_000_000)
         let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
         try FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
@@ -828,10 +1096,12 @@ enum FileOpenChecks {
                                                         browserStoragePolicy: .perProject,
                                                         terminalClosePolicy: .askWhenRunning))
         let store = ProjectStore(projectRoot: root)
-        try store.saveProject(project)
-        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+        if initializeStore {
+            try store.saveProject(project)
+            try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+        }
 
-        let document = WorkspaceDocument(
+        let initialDocument = WorkspaceDocument(
             viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
             zones: [ZonePlacement(zoneId: zoneId, projectId: projectId, origin: ZonePoint(x: 0, y: 0),
                                   size: ZoneSize(width: 2_000, height: 1_400), color: "blue",
@@ -839,7 +1109,9 @@ enum FileOpenChecks {
             zoneZOrder: [zoneId],
             lastActiveZoneId: zoneId
         )
-        try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport).save(document)
+        let workspaceStore = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
+        if initializeStore { try workspaceStore.save(initialDocument) }
+        let document = initializeStore ? initialDocument : try workspaceStore.load()
 
         var appRegistry = Registry.empty()
         appRegistry.lastActiveWorkspaceId = workspaceId
@@ -847,7 +1119,7 @@ enum FileOpenChecks {
                                              workspaceId: workspaceId, lastOpenedAt: now,
                                              pinned: false, missing: false)]
         let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
-        try registryStore.save(appRegistry)
+        if initializeStore { try registryStore.save(appRegistry) }
 
         let focusBroker = FocusBroker()
         let browserEngine = BrowserEngineContext()
@@ -859,13 +1131,14 @@ enum FileOpenChecks {
                                        ghostty: nil, browserEngine: browserEngine)
         let canvas = CanvasNSView(
             canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil),
-            activeZone: nil, zoneRenderModels: [], showsZoneChrome: false
+            activeZone: nil, zoneRenderModels: [], showsZoneChrome: true
         )
         canvas.frame = CGRect(x: 0, y: 0, width: 1_800, height: 1_200)
         try runtime.install(into: canvas, appRegistry: appRegistry)
         canvas.layoutSubtreeIfNeeded()
         return SingleProjectHarness(runtime: runtime, canvas: canvas, focusBroker: focusBroker,
-                                    browserEngine: browserEngine, zone: zoneId)
+                                    browserEngine: browserEngine, projectStore: store,
+                                    workspaceStore: workspaceStore, zone: zoneId)
     }
 
     // MARK: - Section 2: Markdown preview / editing

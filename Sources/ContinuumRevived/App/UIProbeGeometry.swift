@@ -6166,6 +6166,32 @@ enum UIProbeGeometry {
         }
         controller.dismiss()
 
+        // Contextual pickers can constrain themselves to a canvas viewport so
+        // an edge-adjacent zone never lets its panel spill over the sidebar.
+        let constrainedViewport = NSRect(
+            x: visible.maxX - 600,
+            y: visible.midY - 250,
+            width: 580,
+            height: 500
+        ).intersection(visible)
+        controller.present(
+            items: Array(completionItems.prefix(7)),
+            selectedID: nil,
+            presentation: .completions,
+            layout: .completion(CompletionPopoverLayout(
+                breadcrumb: "Choose Project & Home",
+                footer: "Choose a project, then its Home"
+            )),
+            anchor: anchor.bounds,
+            relativeTo: anchor,
+            placementFrame: constrainedViewport
+        ) { _ in }
+        guard let constrainedPanel = controller.panel,
+              constrainedViewport.insetBy(dx: 8, dy: 8).contains(constrainedPanel.frame) else {
+            throw fail("choice popover: contextual placement escaped its canvas viewport")
+        }
+        controller.dismiss()
+
         controller.present(
             items: items, selectedID: "balanced", anchor: anchor.bounds, relativeTo: anchor
         ) { _ in }

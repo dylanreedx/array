@@ -35,6 +35,8 @@ final class OnboardingPanel {
 
     var onOpenTile: ((String) -> Void)?
     var onClose: (() -> Void)?
+    var onRecheck: (() -> Void)?
+    var onSkipStarter: (() -> Void)?
 
     private let probes: [Probe]
     private var panel: NSPanel?
@@ -270,7 +272,7 @@ final class OnboardingPanel {
         if let panel { return panel }
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 480),
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 600),
             styleMask: [.titled, .closable, .utilityWindow],
             backing: .buffered,
             defer: false
@@ -282,7 +284,7 @@ final class OnboardingPanel {
         panel.isFloatingPanel = true
         panel.becomesKeyOnlyIfNeeded = false
 
-        let root = NSView(frame: panel.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 560, height: 480))
+        let root = NSView(frame: panel.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 620, height: 600))
         root.autoresizingMask = [.width, .height]
         root.setAccessibilityIdentifier("onboarding-panel-root")
         root.wantsLayer = true
@@ -295,12 +297,26 @@ final class OnboardingPanel {
         stack.spacing = 14
         stack.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
         stack.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(stack)
+        let document = FlippedDocumentView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(stack)
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.documentView = document
+        root.addSubview(scroll)
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: root.topAnchor),
-            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: root.bottomAnchor)
+            scroll.topAnchor.constraint(equalTo: root.topAnchor),
+            scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            document.widthAnchor.constraint(equalTo: scroll.widthAnchor),
+            stack.topAnchor.constraint(equalTo: document.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: document.bottomAnchor)
         ])
 
         let intro = NSTextField(wrappingLabelWithString:
@@ -358,10 +374,13 @@ final class OnboardingPanel {
         footer.spacing = 10
         let recheck = NSButton(title: "Re-check", target: self, action: #selector(recheckPressed(_:)))
         recheck.bezelStyle = .rounded
+        let skipStarter = NSButton(title: "Skip Starter Layout", target: self, action: #selector(skipStarterPressed(_:)))
+        skipStarter.bezelStyle = .rounded
         let done = NSButton(title: "Done", target: self, action: #selector(donePressed(_:)))
         done.bezelStyle = .rounded
         done.keyEquivalent = "\r"
         footer.addArrangedSubview(recheck)
+        footer.addArrangedSubview(skipStarter)
         footer.addArrangedSubview(done)
         stack.addArrangedSubview(footer)
 
@@ -393,6 +412,7 @@ final class OnboardingPanel {
 
     @objc private func recheckPressed(_ sender: Any?) {
         refreshStatuses()
+        onRecheck?()
     }
 
     @objc private func connectPressed(_ sender: NSButton) {
@@ -400,8 +420,16 @@ final class OnboardingPanel {
         onOpenTile?(profileId)
     }
 
+    @objc private func skipStarterPressed(_ sender: Any?) {
+        onSkipStarter?()
+    }
+
     @objc private func donePressed(_ sender: Any?) {
         close()
+    }
+
+    private final class FlippedDocumentView: NSView {
+        override var isFlipped: Bool { true }
     }
 
     // MARK: - QA accessors (`--onboarding-panel-check`)

@@ -361,7 +361,7 @@ code without culling installed views, which the always-render-live constraint
 forbids — so the leg is KNOWN-RED against the product target and publishes the
 number every run.
 
-### `canvas.gesture-transition` — gating, green
+### `canvas.gesture-transition` — structurally green, host-calibration KNOWN-RED
 
 ```sh
 .build/debug/Array --perf-budget-gesture-transition-check
@@ -388,13 +388,22 @@ over the `canvas.pan`/`canvas.zoom` fixture:
 | `gesture-transition.excessChromeRedraws` (I − Zc) | == 0 | 0 (84 == 84) |
 | `gesture-transition.excessLayoutPasses` (I − Zc) | == 0 | 0 (84 == 84) |
 | `gesture-transition.transitionStepOverhead` | ≤ 1 ms | 0.05 ms |
-| `gesture-transition.worstStepDuration` | ≤ 8.3 ms | ~5 ms |
+| `gesture-transition.worstStepDuration` | ≤ 8.3 ms | 8.93–10.20 ms on 0.5.7; 10.80–11.35 ms on the 0.5.8 candidate (RED) |
 
 `transitionStepOverhead` is the direct encoding of the complaint: the worst of
 the first five pan steps after a zoom, over the steady pan median — the lag was
 a spike, and a mean hides a spike. Structural guards throw if the interleave
 degenerates (fewer than two distinct zooms, or no actual pan), because every
 zero above passes vacuously on a drive that did nothing.
+
+On 2026-08-21, macOS 26.6.1 / SDK 26.5 moved the coarse single-worst-step
+number over its old host calibration. The exact 0.5.7 release commit failed
+three out of three reruns at 8.93–10.20 ms; the 0.5.8 candidate failed three
+out of three at 10.80–11.35 ms. Both retained zero transition pan chrome and
+layout work, zero interleave excess, and 0.05–0.31 ms transition overhead.
+The strict 8.3 ms product target remains unchanged. The leg is KNOWN-RED until
+the display/OS-sensitive single worst-sample alarm is replaced by a calibrated
+witness; this is not permission to ignore a structural counter regression.
 
 ### The unified camera driver's own witnesses
 
@@ -605,7 +614,7 @@ sub-millisecond medians can legitimately land below zero on noise — a run at
 `PERF_SURFACE_HOST_TILE_COUNTS=5,15` reported -0.056 ms and failed a metric that
 was only ever meant to be published. A published slope needs a sign-safe floor.
 
-### `--tile-surface-residency-check` — gating, display-dependent, green
+### `--tile-surface-residency-check` — correctness green, speed calibration KNOWN-RED
 
 ```sh
 .build/debug/Array --tile-surface-residency-check
@@ -618,6 +627,15 @@ real `CanvasNSView`, the real `CanvasCameraDriver` (settles arrive via
 `ManagedAgentTileNSView`s. The feature is OFF by default
 (`continuum.tileSurfaceResidency.enabled`, env override
 `ARRAY_TILE_SURFACE_RESIDENCY`).
+
+The leg's correctness contract remains gating, but its published marginal-live-
+tile speed tripwire is host-calibration RED as of 2026-08-21. On the same macOS
+26.6.1 / SDK 26.5 host, the exact 0.5.7 release commit measured 4.86 ms/live
+tile and the 0.5.8 candidate measured 5.04 ms/live tile against the historical
+~2.9 ms calibration. In both runs, producer/native mean channel difference was
+0.000 and the liveness, sharpness, focus/input, streaming, appearance, eviction,
+and cleanup assertions passed. The old target is preserved; do not rebaseline it
+from these results.
 
 **The policy is Option A of `.plans/37`: a tile keeps its real body while it is
 LIVE, and renders from a surface while it is quiet.** Live means any of four

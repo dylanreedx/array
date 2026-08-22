@@ -15,6 +15,7 @@ public enum KeybindEditor {
         /// A nav binding needs a single typed character (letters/digits); a
         /// modifier chord or multi-char input is not a valid nav key.
         case invalidNavKey
+        case registeredBinding(String)
     }
 
     public enum Result: Equatable, Sendable {
@@ -43,12 +44,42 @@ public enum KeybindEditor {
         if let shortcut = ReservedShortcut.classify(keyCode: keyCode, modifiers: modifiers, keymap: currentNavKeymap),
            FocusDispatch.isInviolable(shortcut) {
             let isLeaderNoOp = (target == .leader && shortcut == .navModeLeader)
-            if !isLeaderNoOp {
+            let registeredOwnsGesture: Bool = {
+                guard case let .registered(shortcutID) = target,
+                      let registry = try? CommandRegistry.productRegistry(),
+                      let definition = registry.shortcuts.first(where: { $0.id == shortcutID }) else { return false }
+                return ShortcutBindingStore(defaults: defaults).matches(
+                    keyCode: keyCode, modifiers: modifiers, definition: definition)
+            }()
+            let paletteHasMoved: Bool = {
+                guard shortcut == .palette,
+                      let registry = try? CommandRegistry.productRegistry(),
+                      let commandCenter = registry.shortcuts.first(where: { $0.id == "global.commandCenter" }) else { return false }
+                return !ShortcutBindingStore(defaults: defaults).matches(
+                    keyCode: keyCode, modifiers: modifiers, definition: commandCenter)
+            }()
+            if !isLeaderNoOp && !registeredOwnsGesture && !paletteHasMoved {
                 return .rejected(.collidesWithInviolableGlobal(shortcut))
             }
         }
 
         switch target {
+        case .registered(let shortcutID):
+            guard let registry = try? CommandRegistry.productRegistry(),
+                  let definition = registry.shortcuts.first(where: { $0.id == shortcutID }) else {
+                return .rejected(.registeredBinding("The registered shortcut is unavailable."))
+            }
+            do {
+                try ShortcutBindingStore(defaults: defaults).set(
+                    [ShortcutGesture(keyCode: keyCode, modifiers: modifiers)],
+                    for: definition,
+                    registry: registry
+                )
+                return .applied(navKeymap: nil)
+            } catch {
+                return .rejected(.registeredBinding(error.localizedDescription))
+            }
+
         case .leader:
             var map = currentNavKeymap
             map.leader = KeyChord(keyCode: keyCode, modifiers: modifiers)
@@ -81,6 +112,11 @@ public enum KeybindEditor {
         defaults: UserDefaults = .standard
     ) -> NavKeymap? {
         switch target {
+        case .registered(let shortcutID):
+            guard let registry = try? CommandRegistry.productRegistry(),
+                  let definition = registry.shortcuts.first(where: { $0.id == shortcutID }) else { return nil }
+            ShortcutBindingStore(defaults: defaults).reset(definition)
+            return nil
         case .leader:
             defaults.removeObject(forKey: "continuum.keymap.leader")
             return NavKeymap.resolve(defaults: defaults, warn: { _ in })

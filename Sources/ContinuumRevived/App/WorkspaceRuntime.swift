@@ -28,9 +28,6 @@ final class WorkspaceRuntime {
     // Retains the installed ZoneLayers so the check (and T09 swap) can read back placements.
     private var installedLayers: [CanvasNSView.ZoneLayer] = []
 
-    // Retains group (ambient) controllers for the lifetime of the workspace.
-    private var groupControllers: [ZoneRuntimeController] = []
-
     /// The controller whose project owns the active zone (`document.lastActiveZoneId`
     /// → its `projectId`). nil when the active zone is a group zone or none is active.
     /// AppDelegate reads `runtimes`, `projectStore`, `activeProject` through this.
@@ -55,10 +52,6 @@ final class WorkspaceRuntime {
     func controller(for projectId: UUID) -> ZoneRuntimeController? {
         registry.controller(for: projectId)
     }
-
-    /// Returns the ambient (group) controllers installed by addZone(projectId: nil) calls.
-    /// These are NOT in the projectId-keyed registry (group zones have no projectId).
-    var ambientControllers: [ZoneRuntimeController] { groupControllers }
 
     /// Keep the runtime's in-memory document aligned with app-level canvas zone
     /// callbacks that mutate the WorkspaceDocument directly. Without this, a later
@@ -191,6 +184,9 @@ final class WorkspaceRuntime {
 
         var layers: [CanvasNSView.ZoneLayer] = []
         var newlyAcquired: [UUID] = []
+        let firstZoneByProject = document.zones.reduce(into: [UUID: UUID]()) { result, zone in
+            if let projectId = zone.projectId, result[projectId] == nil { result[projectId] = zone.zoneId }
+        }
 
         for zone in document.zones {
             guard let projectId = zone.projectId else {
@@ -203,8 +199,13 @@ final class WorkspaceRuntime {
             // Only acquire controllers for live-tier zones.
             guard plan.tier(for: zone.zoneId) == .live else { continue }
 
-            let controller = try registry.acquire(projectId: projectId)
-            newlyAcquired.append(projectId)
+            let controller: ZoneRuntimeController
+            if newlyAcquired.contains(projectId), let existing = registry.controller(for: projectId) {
+                controller = existing
+            } else {
+                controller = try registry.acquire(projectId: projectId)
+                newlyAcquired.append(projectId)
+            }
 
             // Load canvas state for this zone's project.
             let canvasState: CanvasState
@@ -219,9 +220,15 @@ final class WorkspaceRuntime {
                 )
             }
 
+            // A project can appear in several zones. Persisted `zoneId` owns
+            // membership; pre-membership legacy tiles are adopted by only that
+            // project's first zone so they are never rendered N times.
+            let memberTiles = canvasState.tiles.filter {
+                $0.zoneId == zone.zoneId || ($0.zoneId == nil && firstZoneByProject[projectId] == zone.zoneId)
+            }
             // Build tile views (descriptor views — headless safe; real hydration is T08).
             var tileViews: [UUID: TileNSView] = [:]
-            for tile in canvasState.tiles {
+            for tile in memberTiles {
                 let view = DescriptorTileNSView(tile: tile)
                 tileViews[tile.id] = view
             }
@@ -243,7 +250,7 @@ final class WorkspaceRuntime {
             let layer = CanvasNSView.ZoneLayer(
                 placement: zone,
                 renderModel: renderModel,
-                tiles: canvasState.tiles
+                tiles: memberTiles
             )
             layer.tileViews = tileViews
             layers.append(layer)
@@ -293,33 +300,36 @@ final class WorkspaceRuntime {
 
     /// Add a zone to the live canvas.
     ///
-    /// - project zone (`projectId != nil`): acquires (ref-counts) the project's shared
+    /// - project zone: acquires (ref-counts) the project's shared
     ///   `ZoneRuntimeController` via the registry, appends a `ZonePlacement` to the
     ///   document (de-duped), installs its `ZoneLayer` on the canvas, and flushes saves.
-    /// - group zone (`projectId == nil`): creates an ambient rootless controller rooted
-    ///   at `AmbientZoneHome.current`, stores an empty tile list in the workspace store
-    ///   (T02 group-tile storage), installs its `ZoneLayer`, and flushes saves.
+    /// Legacy nil-project zones remain renderable during migration, but new zones
+    /// must select a registered project/Home before this persistence boundary.
     ///
-    /// Returns the new (or existing, for the idempotent project case) `zoneId`.
+    /// Returns the new `zoneId`. The same project may back several zones.
     @discardableResult
     func addZone(projectId: UUID?, appRegistry: Registry? = nil) throws -> UUID {
-        if let projectId {
-            return try _addProjectZone(projectId: projectId, appRegistry: appRegistry)
-        } else {
-            return try _addGroupZone()
+        guard let projectId else { throw ZoneCreationError.projectRequired }
+        return try _addProjectZone(projectId: projectId, appRegistry: appRegistry)
+    }
+
+    enum ZoneCreationError: Error, Equatable, LocalizedError {
+        case projectRequired
+
+        var errorDescription: String? {
+            "Choose a project and Home before creating a zone."
         }
     }
 
     private func _addProjectZone(projectId: UUID, appRegistry: Registry?) throws -> UUID {
-        // De-dupe: if a zone for this project already exists, just make it active.
-        if let existing = document.zones.first(where: { $0.projectId == projectId }) {
-            document.lastActiveZoneId = existing.zoneId
-            return existing.zoneId
-        }
-
-        // Acquire (create-if-missing, ref-count++) through the registry.
-        let controller = try registry.acquire(projectId: projectId)
-        if !acquiredProjectIds.contains(projectId) {
+        // The same project may intentionally appear in several organizational
+        // zones. Acquire its runtime once, then create a distinct placement each
+        // time; zone membership remains per tile through `zoneId`.
+        let controller: ZoneRuntimeController
+        if acquiredProjectIds.contains(projectId), let existing = registry.controller(for: projectId) {
+            controller = existing
+        } else {
+            controller = try registry.acquire(projectId: projectId)
             acquiredProjectIds.append(projectId)
         }
 
@@ -342,15 +352,20 @@ final class WorkspaceRuntime {
             canvasState = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil)
         }
 
+        // A second zone for the same project starts empty. Persisted zoneId is
+        // authoritative membership; replaying the project's entire canvas here
+        // would visually clone every existing tile into the new zone.
+        let memberTiles = canvasState.tiles.filter { $0.zoneId == placement.zoneId }
+
         // Build tile views.
         var tileViews: [UUID: TileNSView] = [:]
-        for tile in canvasState.tiles {
+        for tile in memberTiles {
             let view = DescriptorTileNSView(tile: tile)
             tileViews[tile.id] = view
         }
 
         let renderModel = CanvasNSView.ZoneRenderModel(placement: placement, displayName: displayName)
-        let layer = CanvasNSView.ZoneLayer(placement: placement, renderModel: renderModel, tiles: canvasState.tiles)
+        let layer = CanvasNSView.ZoneLayer(placement: placement, renderModel: renderModel, tiles: memberTiles)
         layer.tileViews = tileViews
         installedLayers.append(layer)
 
@@ -384,50 +399,6 @@ final class WorkspaceRuntime {
         let layer = CanvasNSView.ZoneLayer(placement: zone, renderModel: renderModel, tiles: memberTiles)
         layer.tileViews = tileViews
         return layer
-    }
-
-    private func _addGroupZone() throws -> UUID {
-        let home = AmbientZoneHome.current
-        // Create an ambient (rootless) controller — acquireLock: false so no project lock is grabbed.
-        let ambientController = try ZoneRuntimeController(root: URL(fileURLWithPath: home), acquireLock: false)
-        groupControllers.append(ambientController)
-
-        // Append group placement (projectId == nil).
-        let zoneId = UUID()
-        let maxX = document.zones.map { $0.origin.x + $0.size.width }.max() ?? 0
-        let origin = document.zones.isEmpty ? ZonePoint(x: 0, y: 0) : ZonePoint(x: maxX + 120, y: 0)
-        let placement = ZonePlacement(
-            zoneId: zoneId,
-            projectId: nil,
-            origin: origin,
-            size: ZoneSize(width: 1280, height: 720),
-            color: "purple",
-            collapsed: false,
-            hydrationPolicy: .automatic,
-            name: "Group",
-            navKey: nil,
-            zPosition: FracIndex.after(document.zones.map(\.zPosition).max() ?? .first)
-        )
-        document.zones.append(placement)
-        document.lastActiveZoneId = zoneId
-
-        // A new group zone starts with no members: no ambient tile's zoneId
-        // register points at it yet, so tiles(forZone:) is [] until a real
-        // membership write (setTileZone / setTiles) lands.
-
-        // Build and install layer from the register read path.
-        let layer = Self.makeAmbientZoneLayer(zone: placement, document: document)
-        installedLayers.append(layer)
-        canvasView?.upsertZoneLayer(layer)
-
-        // Flush document save.
-        let appSupport = registryStore.registryFile.deletingLastPathComponent()
-        let workspaceStore = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
-        let saveController = WorkspaceDocumentSaveController(store: workspaceStore)
-        saveController.scheduleZoneLayoutSave(document)
-        try saveController.flushPendingSave()
-
-        return zoneId
     }
 
     // MARK: - Active spawner ownership
@@ -649,6 +620,9 @@ final class WorkspaceRuntime {
 
         // Build layers from newly acquired + shared controllers.
         var layers: [CanvasNSView.ZoneLayer] = []
+        let firstZoneByProject = targetDocument.zones.reduce(into: [UUID: UUID]()) { result, zone in
+            if let projectId = zone.projectId, result[projectId] == nil { result[projectId] = zone.zoneId }
+        }
         for zone in targetDocument.zones {
             guard let projectId = zone.projectId else {
                 // Ambient zone: rendered from the workspace document's ambientTiles
@@ -665,14 +639,17 @@ final class WorkspaceRuntime {
             } else {
                 canvasState = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil)
             }
+            let memberTiles = canvasState.tiles.filter {
+                $0.zoneId == zone.zoneId || ($0.zoneId == nil && firstZoneByProject[projectId] == zone.zoneId)
+            }
             var tileViews: [UUID: TileNSView] = [:]
-            for tile in canvasState.tiles {
+            for tile in memberTiles {
                 let view = DescriptorTileNSView(tile: tile)
                 tileViews[tile.id] = view
             }
             let displayName = zone.name.isEmpty ? controller.project.name : zone.name
             let renderModel = CanvasNSView.ZoneRenderModel(placement: zone, displayName: displayName)
-            let layer = CanvasNSView.ZoneLayer(placement: zone, renderModel: renderModel, tiles: canvasState.tiles)
+            let layer = CanvasNSView.ZoneLayer(placement: zone, renderModel: renderModel, tiles: memberTiles)
             layer.tileViews = tileViews
             layers.append(layer)
         }

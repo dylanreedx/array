@@ -34,6 +34,8 @@ private func allOpCases() -> [Op] {
         .setZoneName(id: id1, name: "zone name"),
         .setZoneColor(id: id1, color: "#0000ff"),
         .setZoneCollapsed(id: id1, collapsed: false),
+        .setZoneScope(id: id1, projectId: id2, homeRelativePath: "Sources/ContinuumRevived"),
+        .setZoneScope(id: id1, projectId: id2, homeRelativePath: nil),
         .setZoneProjectId(id: id1, projectId: id2),
         .setZoneProjectId(id: id1, projectId: nil),
         .setZoneAutoLayoutMode(id: id1, mode: .enabled),
@@ -78,7 +80,7 @@ func runSpatialOpTests() {
         case .createTile, .deleteTile, .createZone, .deleteZone,
              .setTileFrame, .setTileZIndex, .setTileTitle, .setTileKind, .setTileCollapsed,
              .setZoneOrigin, .setZoneSize, .setZoneName, .setZoneColor, .setZoneCollapsed,
-             .setZoneProjectId, .setZoneAutoLayoutMode, .setZonePosition, .setTileZone,
+             .setZoneScope, .setZoneProjectId, .setZoneAutoLayoutMode, .setZonePosition, .setTileZone,
              .setLastActiveTile, .setLastActiveZone:
             break
         }

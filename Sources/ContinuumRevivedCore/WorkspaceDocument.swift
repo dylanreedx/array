@@ -7,7 +7,12 @@ public struct WorkspaceDocument: Equatable, Sendable {
     /// `zoneZOrder` array is a decode-only legacy migration key (ticket 04).
     /// v5: durable agent-to-document relationships.
     /// v6: per-zone auto-layout override.
-    public static let currentSchemaVersion = 6
+    /// v7: project-relative Home on zones. Project + Home form one creation
+    /// scope and are changed atomically; legacy project zones migrate to the
+    /// project root (`homeRelativePath == nil`).
+    /// v8: workspace-local last explicitly confirmed creation scope. Focus and
+    /// automatic navigation never write it.
+    public static let currentSchemaVersion = 8
 
     public let schemaVersion: Int
     public var viewport: CanvasViewport
@@ -19,6 +24,7 @@ public struct WorkspaceDocument: Equatable, Sendable {
     /// from each tile's `zoneId` register, never from a per-zone list.
     public var ambientTiles: [Tile]
     public var documentLinks: [DocumentAgentLink]
+    public var lastExplicitCreationScope: ZoneScope?
 
     /// `zoneZOrder` is a RANK-STAMPING convenience mirroring the decoder's
     /// legacy migration: zones listed in it receive evenly distributed
@@ -33,7 +39,8 @@ public struct WorkspaceDocument: Equatable, Sendable {
         zoneZOrder: [UUID] = [],
         lastActiveZoneId: UUID?,
         ambientTiles: [Tile] = [],
-        documentLinks: [DocumentAgentLink] = []
+        documentLinks: [DocumentAgentLink] = [],
+        lastExplicitCreationScope: ZoneScope? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.viewport = viewport
@@ -41,6 +48,7 @@ public struct WorkspaceDocument: Equatable, Sendable {
         self.lastActiveZoneId = lastActiveZoneId
         self.ambientTiles = ambientTiles
         self.documentLinks = Self.deduplicated(documentLinks)
+        self.lastExplicitCreationScope = lastExplicitCreationScope
     }
 
     public mutating func linkDocument(_ tileId: UUID, to agentId: AgentID, at date: Date = Date()) {
@@ -221,7 +229,7 @@ extension WorkspaceDocument: Codable {
     private enum CodingKeys: String, CodingKey {
         // `groupZoneTiles` (pre-v3) and `zoneZOrder` (pre-v4) are decode-only
         // legacy migration keys. Never re-emitted.
-        case schemaVersion, viewport, zones, zoneZOrder, lastActiveZoneId, ambientTiles, groupZoneTiles, documentLinks
+        case schemaVersion, viewport, zones, zoneZOrder, lastActiveZoneId, ambientTiles, groupZoneTiles, documentLinks, lastExplicitCreationScope
     }
 
     /// Decode-only parse of the pre-v3 grouped shape. Not public API; exists
@@ -261,6 +269,7 @@ extension WorkspaceDocument: Codable {
         }
         ambientTiles = tiles
         documentLinks = Self.deduplicated(try container.decodeIfPresent([DocumentAgentLink].self, forKey: .documentLinks) ?? [])
+        lastExplicitCreationScope = try container.decodeIfPresent(ZoneScope.self, forKey: .lastExplicitCreationScope)
 
         // Migrate-forward-on-load: supported older versions decode into the current
         // in-memory shape and are stamped current. Future versions keep their stamp
@@ -284,12 +293,17 @@ extension WorkspaceDocument: Codable {
         // Only the flat register-carrying list; the legacy grouped key is never re-emitted.
         try container.encode(ambientTiles, forKey: .ambientTiles)
         try container.encode(documentLinks, forKey: .documentLinks)
+        try container.encodeIfPresent(lastExplicitCreationScope, forKey: .lastExplicitCreationScope)
     }
 }
 
 public struct ZonePlacement: Equatable, Sendable {
     public let zoneId: UUID
     public var projectId: UUID?
+    /// A normalized path relative to the registered project root. `nil` means
+    /// the project root. This is a default for filesystem-backed tiles created
+    /// in the zone; changing it never retargets existing tiles.
+    public var homeRelativePath: String?
     public var origin: ZonePoint
     public var size: ZoneSize
     public var color: String
@@ -308,6 +322,7 @@ public struct ZonePlacement: Equatable, Sendable {
     public init(
         zoneId: UUID,
         projectId: UUID?,
+        homeRelativePath: String? = nil,
         origin: ZonePoint,
         size: ZoneSize,
         color: String,
@@ -320,6 +335,7 @@ public struct ZonePlacement: Equatable, Sendable {
     ) {
         self.zoneId = zoneId
         self.projectId = projectId
+        self.homeRelativePath = homeRelativePath
         self.origin = origin
         self.size = size
         self.color = color
@@ -330,17 +346,41 @@ public struct ZonePlacement: Equatable, Sendable {
         self.navKey = navKey
         self.zPosition = zPosition
     }
+
+    public var scope: ZoneScope {
+        get { ZoneScope(projectId: projectId, homeRelativePath: homeRelativePath) }
+        set {
+            projectId = newValue.projectId
+            homeRelativePath = newValue.homeRelativePath
+        }
+    }
+}
+
+/// The atomic, syncable creation scope owned by a zone. `projectId == nil` is
+/// retained only for migrated legacy zones that still need a project choice;
+/// all newly committed zones require a project.
+public struct ZoneScope: Codable, Equatable, Sendable {
+    public var projectId: UUID?
+    public var homeRelativePath: String?
+
+    public init(projectId: UUID?, homeRelativePath: String? = nil) {
+        self.projectId = projectId
+        self.homeRelativePath = homeRelativePath
+    }
+
+    public var needsProject: Bool { projectId == nil }
 }
 
 extension ZonePlacement: Codable {
     private enum CodingKeys: String, CodingKey {
-        case zoneId, projectId, origin, size, color, collapsed, hydrationPolicy, autoLayoutMode, name, navKey, zPosition
+        case zoneId, projectId, homeRelativePath, origin, size, color, collapsed, hydrationPolicy, autoLayoutMode, name, navKey, zPosition
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         zoneId = try container.decode(UUID.self, forKey: .zoneId)
         projectId = try container.decodeIfPresent(UUID.self, forKey: .projectId)
+        homeRelativePath = try container.decodeIfPresent(String.self, forKey: .homeRelativePath)
         origin = try container.decode(ZonePoint.self, forKey: .origin)
         size = try container.decode(ZoneSize.self, forKey: .size)
         color = try container.decode(String.self, forKey: .color)
@@ -358,6 +398,7 @@ extension ZonePlacement: Codable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(zoneId, forKey: .zoneId)
         try container.encodeIfPresent(projectId, forKey: .projectId)
+        try container.encodeIfPresent(homeRelativePath, forKey: .homeRelativePath)
         try container.encode(origin, forKey: .origin)
         try container.encode(size, forKey: .size)
         try container.encode(color, forKey: .color)

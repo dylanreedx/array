@@ -246,6 +246,7 @@ final class ChoicePopoverController {
     nonisolated(unsafe) private var globalMonitor: Any?
     nonisolated(unsafe) private var observers: [NSObjectProtocol] = []
     private var anchorWindowObservation: NSKeyValueObservation?
+    private var cancellationHandler: (() -> Void)?
 
     var isPresented: Bool { panel?.isVisible == true }
 
@@ -263,9 +264,11 @@ final class ChoicePopoverController {
         layout: ChoicePopoverLayout = .intrinsic,
         anchor: NSRect,
         relativeTo view: NSView,
+        placementFrame: NSRect? = nil,
         takesFocus: Bool = true,
         onSelection: @escaping (ChoiceItem) -> Void,
-        focusReturnView: NSView? = nil
+        focusReturnView: NSView? = nil,
+        onDismiss: (() -> Void)? = nil
     ) {
         dismiss()
         lastAccessibilityAnnouncementForQA = nil
@@ -282,7 +285,14 @@ final class ChoicePopoverController {
         listView = list
         guard let window = view.window else { return }
 
-        let visibleFrame = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? window.frame
+        let screenFrame = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? window.frame
+        let requestedFrame = placementFrame.map { $0.intersection(screenFrame) }
+        let visibleFrame: NSRect
+        if let requestedFrame, !requestedFrame.isNull, !requestedFrame.isEmpty {
+            visibleFrame = requestedFrame
+        } else {
+            visibleFrame = screenFrame
+        }
         let windowAnchor = view.convert(anchor, to: nil)
         let screenAnchor = window.convertToScreen(windowAnchor)
         let contentView: NSView
@@ -343,6 +353,7 @@ final class ChoicePopoverController {
         listView = list
         anchorView = view
         self.focusReturnView = focusReturnView
+        cancellationHandler = onDismiss
         parentWindow = window
         let accessibilityLabel: String
         switch layout {
@@ -358,7 +369,7 @@ final class ChoicePopoverController {
             self?.dismiss()
             onSelection(item)
         }
-        list.onDismiss = { [weak self] in self?.dismiss() }
+        list.onDismiss = { [weak self] in self?.dismissAsCancellation() }
 
         window.addChildWindow(panel, ordered: .above)
         installDismissalObservers(for: window, anchor: view, takesFocus: takesFocus)
@@ -405,9 +416,16 @@ final class ChoicePopoverController {
         anchorView = nil
         focusReturnView = nil
         parentWindow = nil
+        cancellationHandler = nil
         if let returnView, let window, returnView.window === window {
             window.makeFirstResponder(returnView)
         }
+    }
+
+    private func dismissAsCancellation() {
+        let handler = cancellationHandler
+        dismiss()
+        handler?()
     }
 
     /// Places below when it fits, otherwise above, then clamps both axes to the
@@ -487,17 +505,17 @@ final class ChoicePopoverController {
             // completion panels leave the editor's parent key and observe it.
             observers.append(center.addObserver(
                 forName: NSWindow.didResignKeyNotification, object: resignationOwner, queue: .main
-            ) { [weak self] _ in MainActor.assumeIsolated { self?.dismiss() } })
+            ) { [weak self] _ in MainActor.assumeIsolated { self?.dismissAsCancellation() } })
         }
         observers.append(center.addObserver(
             forName: NSWindow.willCloseNotification, object: window, queue: .main
         ) { [weak self] _ in MainActor.assumeIsolated { self?.dismiss() } })
         observers.append(center.addObserver(
             forName: NSApplication.didResignActiveNotification, object: NSApp, queue: .main
-        ) { [weak self] _ in MainActor.assumeIsolated { self?.dismiss() } })
+        ) { [weak self] _ in MainActor.assumeIsolated { self?.dismissAsCancellation() } })
         observers.append(center.addObserver(
             forName: NSView.frameDidChangeNotification, object: anchor, queue: .main
-        ) { [weak self] _ in MainActor.assumeIsolated { self?.dismiss() } })
+        ) { [weak self] _ in MainActor.assumeIsolated { self?.dismissAsCancellation() } })
         anchor.postsFrameChangedNotifications = true
         anchorWindowObservation = anchor.observe(\.window, options: [.old, .new]) { [weak self] _, change in
             // `window` is optional, so KVO wraps both values in a second Optional.
@@ -511,11 +529,11 @@ final class ChoicePopoverController {
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) {
             [weak self] event in
             guard let self else { return event }
-            if event.window !== self.panel { self.dismiss() }
+            if event.window !== self.panel { self.dismissAsCancellation() }
             return event
         }
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) {
-            [weak self] _ in Task { @MainActor [weak self] in self?.dismiss() }
+            [weak self] _ in Task { @MainActor [weak self] in self?.dismissAsCancellation() }
         }
     }
 

@@ -86,7 +86,9 @@ private struct TileAccum {
 /// Per-zone accumulator; same per-field LWW discipline as `TileAccum`.
 private struct ZoneAccum {
     let id: UUID
-    var projectId: FieldTracker<UUID?>
+    /// One LWW register for project + Home. They are an indivisible creation
+    /// scope, never independently converging scalar fields.
+    var scope: FieldTracker<ZoneScope>
     var origin: FieldTracker<ZonePoint>
     var size: FieldTracker<ZoneSize>
     var name: FieldTracker<String>
@@ -98,7 +100,8 @@ private struct ZoneAccum {
     func build() -> ZonePlacement {
         ZonePlacement(
             zoneId: id,
-            projectId: projectId.value,
+            projectId: scope.value.projectId,
+            homeRelativePath: scope.value.homeRelativePath,
             origin: origin.value,
             size: size.value,
             color: color.value,
@@ -180,7 +183,7 @@ private func apply(_ logged: LoggedOp, into state: inout FoldState) {
         if state.zones[id] == nil && !state.tombstonedZones.contains(id) {
             state.zones[id] = ZoneAccum(
                 id: id,
-                projectId: FieldTracker(opId: opId, value: projectId),
+                scope: FieldTracker(opId: opId, value: ZoneScope(projectId: projectId)),
                 origin: FieldTracker(opId: opId, value: origin),
                 size: FieldTracker(opId: opId, value: size),
                 name: FieldTracker(opId: opId, value: name),
@@ -232,8 +235,16 @@ private func apply(_ logged: LoggedOp, into state: inout FoldState) {
     case .setZoneCollapsed(let id, let collapsed):
         state.zones[id]?.collapsed.offer(opId, collapsed)
 
+    case .setZoneScope(let id, let projectId, let homeRelativePath):
+        state.zones[id]?.scope.offer(
+            opId,
+            ZoneScope(projectId: projectId, homeRelativePath: homeRelativePath)
+        )
+
     case .setZoneProjectId(let id, let projectId):
-        state.zones[id]?.projectId.offer(opId, projectId)
+        // Legacy logs did not know Home. Treat the old operation as an atomic
+        // root-Home scope write; new producers exclusively emit setZoneScope.
+        state.zones[id]?.scope.offer(opId, ZoneScope(projectId: projectId))
 
     case .setZoneAutoLayoutMode(let id, let mode):
         state.zones[id]?.autoLayoutMode.offer(opId, mode)
@@ -378,7 +389,7 @@ extension FoldState {
         for zone in base.workspaceDocument.zones {
             zones[zone.zoneId] = ZoneAccum(
                 id: zone.zoneId,
-                projectId: FieldTracker(opId: baseOpId, value: zone.projectId),
+                scope: FieldTracker(opId: baseOpId, value: zone.scope),
                 origin: FieldTracker(opId: baseOpId, value: zone.origin),
                 size: FieldTracker(opId: baseOpId, value: zone.size),
                 name: FieldTracker(opId: baseOpId, value: zone.name),

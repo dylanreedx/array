@@ -167,16 +167,17 @@ private func runPersistedPushCategoryPreferenceChecks(config: APNSConfig) throws
         expect(preferences.isEnabled(category), "\(category.rawValue): persisted true wins")
     }
 
-    guard let agents = SettingsSchema.sections().first(where: { $0.id == "agents" }) else {
-        throw NSError(domain: "PersistedPushCategoryPreferencesChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: "missing agents settings section"])
-    }
-    let toggleFields = agents.fields.compactMap { field -> SettingsField? in
-        if case .toggle = field { return field }
-        return nil
+    guard let notifications = SettingsSchema.sections().first(where: { $0.id == "activityAndNotifications" }) else {
+        throw NSError(domain: "PersistedPushCategoryPreferencesChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: "missing Activity & Notifications settings section"])
     }
     let muteableCategories = PushCategory.allCases.filter(\.isMuteable)
-    expect(toggleFields.count == 7, "agents section exposes exactly 7 muteable category toggles")
-    expect(toggleFields.map(\.key) == muteableCategories.map { PersistedPushCategoryPreferences.key(for: $0) }, "agents section toggle keys match muteable push category order")
+    let categoryKeys = Set(muteableCategories.map { PersistedPushCategoryPreferences.key(for: $0) })
+    let toggleFields = notifications.fields.filter { field in
+        guard case .toggle = field, let key = field.key else { return false }
+        return categoryKeys.contains(key)
+    }
+    expect(toggleFields.count == 7, "Activity & Notifications exposes exactly 7 muteable category toggles")
+    expect(toggleFields.map(\.key) == muteableCategories.map { PersistedPushCategoryPreferences.key(for: $0) }, "notification toggle keys match muteable push category order")
     for (field, category) in zip(toggleFields, muteableCategories) {
         expect(field.currentValue(in: defaults) == .bool(preferences.isEnabled(category)), "\(category.rawValue): settings currentValue reads fixture defaults")
         field.setValue(.bool(false), in: defaults)

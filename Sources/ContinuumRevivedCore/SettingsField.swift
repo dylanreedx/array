@@ -12,6 +12,13 @@ public enum SettingsField: Equatable, Sendable {
     case toggle(key: String, label: String, default: Bool)
     /// A free-text preference (rendered as a text field).
     case text(key: String, label: String, default: String)
+    /// A URL with inline validation. Invalid input remains visible and is not
+    /// persisted until it becomes a URL with a scheme.
+    case url(key: String, label: String, default: String)
+    /// A directory selected through the native folder permission surface.
+    case directory(key: String, label: String, default: String)
+    /// A bounded numeric value with an explicit unit and stepper.
+    case number(key: String, label: String, range: ClosedRange<Double>, default: Double, unit: String, step: Double)
     /// A fixed-options preference (rendered as a popup). `setValue` rejects any
     /// value not in `options`, falling back to `default`.
     case choice(key: String, label: String, options: [String], default: String)
@@ -31,6 +38,9 @@ public enum SettingsField: Equatable, Sendable {
         switch self {
         case .toggle(let key, _, _): return key
         case .text(let key, _, _): return key
+        case .url(let key, _, _): return key
+        case .directory(let key, _, _): return key
+        case .number(let key, _, _, _, _, _): return key
         case .choice(let key, _, _, _): return key
         case .slider(let key, _, _, _, _): return key
         case .info: return nil
@@ -43,6 +53,9 @@ public enum SettingsField: Equatable, Sendable {
         switch self {
         case .toggle(_, let label, _): return label
         case .text(_, let label, _): return label
+        case .url(_, let label, _): return label
+        case .directory(_, let label, _): return label
+        case .number(_, let label, _, _, _, _): return label
         case .choice(_, let label, _, _): return label
         case .slider(_, let label, _, _, _): return label
         case .info(let label): return label
@@ -59,6 +72,14 @@ public enum SettingsField: Equatable, Sendable {
             return .bool(defaults.bool(forKey: key))
         case .text(let key, _, let fallback):
             return .string(defaults.string(forKey: key) ?? fallback)
+        case .url(let key, _, let fallback), .directory(let key, _, let fallback):
+            return .string(defaults.string(forKey: key) ?? fallback)
+        case .number(let key, _, let range, let fallback, _, _):
+            let raw = defaults.object(forKey: key)
+            let decoded = (raw as? NSNumber)?.doubleValue
+                ?? (raw as? String).flatMap(Double.init)
+                ?? fallback
+            return .double(min(range.upperBound, max(range.lowerBound, decoded)))
         case .choice(let key, _, let options, let fallback):
             let raw = defaults.string(forKey: key)
             if let raw, options.contains(raw) { return .string(raw) }
@@ -87,6 +108,16 @@ public enum SettingsField: Equatable, Sendable {
         case .text(let key, _, let fallback):
             guard case .string(let text) = value else { defaults.set(fallback, forKey: key); return }
             defaults.set(text, forKey: key)
+        case .url(let key, _, let fallback):
+            guard case .string(let text) = value else { defaults.set(fallback, forKey: key); return }
+            guard let url = URL(string: text), url.scheme != nil else { return }
+            defaults.set(text, forKey: key)
+        case .directory(let key, _, let fallback):
+            guard case .string(let text) = value else { defaults.set(fallback, forKey: key); return }
+            defaults.set(text, forKey: key)
+        case .number(let key, _, let range, let fallback, _, _):
+            guard case .double(let raw) = value else { defaults.set(fallback, forKey: key); return }
+            defaults.set(min(range.upperBound, max(range.lowerBound, raw)), forKey: key)
         case .choice(let key, _, let options, let fallback):
             guard case .string(let raw) = value, options.contains(raw) else {
                 defaults.set(fallback, forKey: key)
@@ -106,6 +137,21 @@ public enum SettingsField: Equatable, Sendable {
     public func isVisible(in defaults: UserDefaults) -> Bool {
         guard case .slider(_, _, _, _, let condition) = self, let condition else { return true }
         return defaults.string(forKey: condition.key) == condition.equals
+    }
+
+    public var defaultValue: SettingsValue? {
+        switch self {
+        case .toggle(_, _, let value): return .bool(value)
+        case .text(_, _, let value), .url(_, _, let value), .directory(_, _, let value): return .string(value)
+        case .number(_, _, _, let value, _, _), .slider(_, _, _, let value, _): return .double(value)
+        case .choice(_, _, _, let value): return .string(value)
+        case .info, .shortcuts: return nil
+        }
+    }
+
+    public func reset(in defaults: UserDefaults) {
+        guard let key else { return }
+        defaults.removeObject(forKey: key)
     }
 }
 

@@ -28,6 +28,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     private var agentModelRows: [LaunchPaletteRow] = []
     private var filtered: [LaunchPaletteRow] = []
     private var displayEntries: [CommandCenterDisplayEntry] = []
+    private var filesystemCreationPreview: String?
     private weak var previousFirstResponder: NSResponder?
     private weak var previousFirstResponderWindow: NSWindow?
 
@@ -55,11 +56,12 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         super.init()
     }
 
-    func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], contextualActions: [LaunchPaletteAction] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = [], jumpZones: [JumpZoneRow] = [], tilelessAgents: [TilelessAgentPaletteRow] = [], initialQuery: String = "", agentModels: [AgentModelPaletteRow]? = nil) {
+    func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], contextualActions: [LaunchPaletteAction] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = [], jumpZones: [JumpZoneRow] = [], tilelessAgents: [TilelessAgentPaletteRow] = [], initialQuery: String = "", agentModels: [AgentModelPaletteRow]? = nil, filesystemCreationPreview: String? = nil) {
         rootRows = LaunchPaletteModel.makeRows(profiles: profiles.map(Self.profileRow(for:)), projects: projects, workspaces: workspaces, contextualActions: contextualActions, harnessRoles: harnessRoles, jumpTiles: jumpTiles, jumpZones: jumpZones, tilelessAgents: tilelessAgents)
         rows = rootRows
         rootQuery = initialQuery
         navigationLevel = .root
+        self.filesystemCreationPreview = filesystemCreationPreview
         let catalogModels = agentModels ?? Self.availableAgentModels()
         agentModelRows = Self.agentModelChoices(catalogModels, defaults: defaults)
             .map(LaunchPaletteRow.agentModel)
@@ -78,7 +80,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         applyFilter(query: initialQuery)
 
         let hostBounds = hostView.bounds
-        let contentHeight = CGFloat(64) + displayEntries.reduce(CGFloat.zero) { total, entry in
+        let contentHeight = CGFloat(92) + displayEntries.reduce(CGFloat.zero) { total, entry in
             total + (entry.isSection ? 24 : 46)
         }
         let availableWidth = max(0, hostBounds.width - 32)
@@ -165,6 +167,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         navigationLevel = .root
         filtered.removeAll()
         displayEntries.removeAll()
+        filesystemCreationPreview = nil
         onClose?()
     }
 
@@ -528,6 +531,14 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             profiles: foundProfiles,
             sentinel: "selection-sentinel"
         ) {
+            // The recognition-first zero-query home now pins New Agent ahead of
+            // dynamic profiles. Search for this fixture explicitly so this
+            // witness continues to exercise a completed profile selection.
+            guard let searchField = palette.searchField else {
+                throw PaletteSelfCheckError.missingSearchField
+            }
+            searchField.stringValue = "QA"
+            palette.applyFilter(query: "QA")
             _ = palette.control(NSSearchField(), textView: NSTextView(), doCommandBy: #selector(NSResponder.insertNewline(_:)))
         }
 
@@ -654,7 +665,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         guard host.makeFirstResponder(previousProbe), host.firstResponder === previousProbe else {
             throw PaletteSelfCheckError.unexpectedFirstResponder(String(describing: host.firstResponder), expected: "previous probe before selection")
         }
-        palette.show(near: host, profiles: profiles)
+        palette.show(near: host, profiles: profiles, initialQuery: "QA")
         guard paletteRootCount(in: hostView) == 1 else {
             throw PaletteSelfCheckError.unexpectedRootCount(paletteRootCount(in: hostView), expected: 1)
         }
@@ -714,8 +725,15 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         scroll.borderType = .noBorder
         scroll.drawsBackground = false
 
+        let footer = NSTextField(labelWithString: "Type to search · ↑↓ Select · Return Open · Esc Close")
+        footer.font = .systemFont(ofSize: 10.5, weight: .medium)
+        footer.textColor = .secondaryLabelColor
+        footer.alignment = .center
+        footer.translatesAutoresizingMaskIntoConstraints = false
+
         content.addSubview(search)
         content.addSubview(scroll)
+        content.addSubview(footer)
         NSLayoutConstraint.activate([
             search.topAnchor.constraint(equalTo: content.topAnchor, constant: 14),
             search.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
@@ -724,7 +742,11 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             scroll.topAnchor.constraint(equalTo: search.bottomAnchor, constant: 10),
             scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 8),
             scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8),
-            scroll.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10)
+            scroll.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -8),
+            footer.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
+            footer.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
+            footer.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10),
+            footer.heightAnchor.constraint(equalToConstant: 16)
         ])
 
         self.paletteView = content
@@ -891,8 +913,29 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         case let .section(title):
             return CommandCenterSectionCell(title: title)
         case let .item(item):
-            return CommandCenterItemCell(item: item)
+            return CommandCenterItemCell(
+                item: item,
+                shortcut: shortcutAccessory(for: item.row),
+                creationPreview: rowUsesFilesystemScope(item.row) ? filesystemCreationPreview : nil
+            )
         }
+    }
+
+    private func rowUsesFilesystemScope(_ row: LaunchPaletteRow) -> Bool {
+        switch row {
+        case let .profile(profile): return profile.displayName.lowercased() == "shell"
+        case .action(.newManagedAgent), .action(.openFileTree): return true
+        default: return false
+        }
+    }
+
+    private func shortcutAccessory(for row: LaunchPaletteRow) -> String? {
+        guard case let .profile(profile) = row,
+              let index = rootRows.compactMap({ candidate -> LaunchPaletteProfileRow? in
+                  if case let .profile(value) = candidate { return value }
+                  return nil
+              }).firstIndex(where: { $0.id == profile.id }), index < 4 else { return nil }
+        return "⌘\(index + 1)"
     }
 
     func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
@@ -1236,7 +1279,7 @@ private final class CommandCenterSectionCell: NSTableCellView {
 }
 
 private final class CommandCenterItemCell: NSTableCellView {
-    init(item: CommandCenterItem) {
+    init(item: CommandCenterItem, shortcut: String? = nil, creationPreview: String? = nil) {
         super.init(frame: .zero)
         let image = NSImageView(image: NSImage(systemSymbolName: item.iconSystemName, accessibilityDescription: nil) ?? NSImage())
         image.contentTintColor = item.row.isSelectable ? .labelColor : .tertiaryLabelColor
@@ -1248,11 +1291,19 @@ private final class CommandCenterItemCell: NSTableCellView {
         title.textColor = item.row.isSelectable ? .labelColor : .tertiaryLabelColor
         title.lineBreakMode = .byTruncatingTail
 
-        let subtitle = NSTextField(labelWithString: item.subtitle ?? "")
+        let combinedSubtitle = [item.subtitle, creationPreview].compactMap { $0 }.joined(separator: " · ")
+        let subtitle = NSTextField(labelWithString: combinedSubtitle)
         subtitle.font = .systemFont(ofSize: 11.5)
         subtitle.textColor = .secondaryLabelColor
         subtitle.lineBreakMode = .byTruncatingMiddle
-        subtitle.isHidden = item.subtitle == nil
+        subtitle.isHidden = combinedSubtitle.isEmpty
+
+        let shortcutLabel = NSTextField(labelWithString: shortcut ?? "")
+        shortcutLabel.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
+        shortcutLabel.textColor = .secondaryLabelColor
+        shortcutLabel.alignment = .right
+        shortcutLabel.isHidden = shortcut == nil
+        shortcutLabel.translatesAutoresizingMaskIntoConstraints = false
 
         let stack = NSStackView(views: [title, subtitle])
         stack.orientation = .vertical
@@ -1261,17 +1312,21 @@ private final class CommandCenterItemCell: NSTableCellView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(image)
         addSubview(stack)
+        addSubview(shortcutLabel)
         NSLayoutConstraint.activate([
             image.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
             image.centerYAnchor.constraint(equalTo: centerYAnchor),
             image.widthAnchor.constraint(equalToConstant: 18),
             image.heightAnchor.constraint(equalToConstant: 18),
             stack.leadingAnchor.constraint(equalTo: image.trailingAnchor, constant: 10),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: shortcutLabel.leadingAnchor, constant: -10),
+            shortcutLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            shortcutLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            shortcutLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 34),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
         setAccessibilityLabel(item.title)
-        if let detail = item.subtitle { setAccessibilityHelp(detail) }
+        if !combinedSubtitle.isEmpty { setAccessibilityHelp(combinedSubtitle) }
     }
 
     required init?(coder: NSCoder) { nil }

@@ -11,12 +11,13 @@ import Foundation
 /// the extensibility contract. Field edits write LIVE through the bound
 /// `SettingsField.setValue` to UserDefaults (chord capture is A7, not here).
 @MainActor
-final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
+final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSSearchFieldDelegate {
     var onClose: (() -> Void)?
     /// Live-apply hook: after a leader/nav rebind the panel persists the override
     /// and hands the re-resolved `NavKeymap` back so the app can refresh its live
     /// keymaps (no relaunch). The app should also update `navKeymap` here.
     var onKeymapChanged: ((NavKeymap) -> Void)?
+    var onShortcutsChanged: (() -> Void)?
 
     static let rootAccessibilityIdentifier = "ContinuumSettingsPanelRoot"
 
@@ -29,6 +30,8 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     private var panel: NSPanel?
     private var sidebar: NSTableView?
     private var detailStack: NSStackView?
+    private var settingsSearchField: NSSearchField?
+    private var searchQuery = ""
     private var selectedSectionIndex = 0
     private weak var previousKeyWindow: NSWindow?
 
@@ -42,8 +45,12 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
 
     // MARK: - Lifecycle
 
-    func show(near host: NSWindow?) {
+    func show(near host: NSWindow?, sectionID: String? = nil) {
         let panel = ensurePanel()
+        if let sectionID, let index = sections.firstIndex(where: { $0.id == sectionID }) {
+            selectedSectionIndex = index
+            sidebar?.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        }
         previousKeyWindow = host ?? NSApp.keyWindow
         if let host, host.screen != nil {
             let hostFrame = host.frame
@@ -65,6 +72,7 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         panel = nil
         sidebar = nil
         detailStack = nil
+        settingsSearchField = nil
         previousKeyWindow = nil
         restoreTarget?.makeKeyAndOrderFront(nil)
         onClose?()
@@ -96,8 +104,17 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         root.layer?.backgroundColor = NSColor.windowBackgroundColor.appResolvedCGColor
         panel.contentView = root
 
+        let search = NSSearchField(frame: NSRect(x: 14, y: root.bounds.height - 42, width: root.bounds.width - 28, height: 28))
+        search.autoresizingMask = [.width, .minYMargin]
+        search.placeholderString = "Search settings and commands…"
+        search.target = self
+        search.action = #selector(settingsSearchChanged(_:))
+        search.delegate = self
+        root.addSubview(search)
+        settingsSearchField = search
+
         // Sidebar — section titles.
-        let sidebarScroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 180, height: root.bounds.height))
+        let sidebarScroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 180, height: root.bounds.height - 52))
         sidebarScroll.autoresizingMask = [.height]
         sidebarScroll.hasVerticalScroller = true
         sidebarScroll.drawsBackground = false
@@ -117,7 +134,7 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         self.sidebar = sidebar
 
         // Detail — vertical stack of field controls inside a scroll view.
-        let detailScroll = NSScrollView(frame: NSRect(x: 192, y: 0, width: root.bounds.width - 192, height: root.bounds.height))
+        let detailScroll = NSScrollView(frame: NSRect(x: 192, y: 0, width: root.bounds.width - 192, height: root.bounds.height - 52))
         detailScroll.autoresizingMask = [.width, .height]
         detailScroll.hasVerticalScroller = true
         detailScroll.drawsBackground = false
@@ -165,14 +182,48 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         }
         guard sections.indices.contains(selectedSectionIndex) else { return }
         let section = sections[selectedSectionIndex]
+        let normalizedQuery = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let displayedFields: [(SettingsSection, SettingsField)]
+        if normalizedQuery.isEmpty {
+            displayedFields = section.fields.filter { $0.isVisible(in: defaults) }.map { (section, $0) }
+        } else {
+            displayedFields = sections.flatMap { candidate in
+                candidate.fields.filter {
+                    $0.isVisible(in: defaults) && matchesSearch($0, in: candidate, query: normalizedQuery)
+                }.map { (candidate, $0) }
+            }
+        }
 
-        let header = label(section.title, size: 16, weight: .semibold, color: .labelColor)
-        stack.addArrangedSubview(header)
+        let headerTitle = normalizedQuery.isEmpty ? section.title : "Search Results"
+        let header = label(headerTitle, size: 16, weight: .semibold, color: .labelColor)
+        let resetSection = NSButton(title: "Reset Section", target: self, action: #selector(resetCurrentSection(_:)))
+        resetSection.bezelStyle = .rounded
+        resetSection.font = .systemFont(ofSize: 11)
+        resetSection.isHidden = !normalizedQuery.isEmpty
+        let headerRow = NSStackView(views: [header, NSView(), resetSection])
+        headerRow.orientation = .horizontal
+        headerRow.alignment = .centerY
+        headerRow.distribution = .fill
+        headerRow.translatesAutoresizingMaskIntoConstraints = false
+        headerRow.widthAnchor.constraint(equalToConstant: 510).isActive = true
+        stack.addArrangedSubview(headerRow)
 
         bindings.removeAll()
         sliderValueLabels.removeAll()
-        for field in section.fields where field.isVisible(in: defaults) {
-            stack.addArrangedSubview(controlRow(for: field))
+        resetButtonFields.removeAll()
+        validationLabels.removeAll()
+        directoryButtonFields.removeAll()
+        directoryPathLabels.removeAll()
+        numberStepperTextFields.removeAll()
+        numberTextFieldSteppers.removeAll()
+        for (owner, field) in displayedFields {
+            if !normalizedQuery.isEmpty {
+                stack.addArrangedSubview(label(owner.title.uppercased(), size: 9.5, weight: .semibold, color: .tertiaryLabelColor))
+            }
+            stack.addArrangedSubview(decoratedControlRow(for: field))
+        }
+        if displayedFields.isEmpty {
+            stack.addArrangedSubview(label("No matching settings.", size: 12, weight: .regular, color: .secondaryLabelColor))
         }
     }
 
@@ -184,6 +235,12 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
             return toggleRow(for: field)
         case .text:
             return textRow(for: field)
+        case .url:
+            return urlRow(for: field)
+        case .directory:
+            return directoryRow(for: field)
+        case .number(_, _, let range, _, let unit, let step):
+            return numberRow(for: field, range: range, unit: unit, step: step)
         case .choice(_, _, let options, _):
             return choiceRow(for: field, options: options)
         case .slider:
@@ -193,6 +250,30 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         case .shortcuts:
             return shortcutsRow(for: field)
         }
+    }
+
+    private func decoratedControlRow(for field: SettingsField) -> NSView {
+        let control = controlRow(for: field)
+        guard let key = field.key else { return control }
+        let definition = (try? CommandRegistry.productRegistry())?.settings.first { $0.id.rawValue == key }
+        let policy: String
+        switch definition?.applicationPolicy ?? .live {
+        case .live: policy = "Applies immediately"
+        case .nextCreation: policy = "New tiles only"
+        case .nextLaunch: policy = "Requires relaunch"
+        }
+        let modified = defaults.object(forKey: key) != nil
+        let status = label(modified ? "• Modified  ·  \(policy)" : policy, size: 10, weight: modified ? .semibold : .regular, color: modified ? .controlAccentColor : .tertiaryLabelColor)
+        let reset = NSButton(title: "Reset", target: self, action: #selector(resetSetting(_:)))
+        reset.bezelStyle = .inline
+        reset.font = .systemFont(ofSize: 10)
+        reset.isEnabled = modified
+        resetButtonFields[ObjectIdentifier(reset)] = field
+        let meta = NSStackView(views: [status, reset])
+        meta.orientation = .horizontal
+        meta.alignment = .centerY
+        meta.spacing = 8
+        return vGroup([control, meta])
     }
 
     private func toggleRow(for field: SettingsField) -> NSView {
@@ -219,6 +300,80 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         }
         bindings[ObjectIdentifier(textField)] = field
         return vGroup([labelView, textField])
+    }
+
+    private func urlRow(for field: SettingsField) -> NSView {
+        let labelView = label(field.label, size: 12, weight: .regular, color: .secondaryLabelColor)
+        let textField = NSTextField()
+        textField.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        textField.delegate = self
+        textField.target = self
+        textField.action = #selector(urlCommitted(_:))
+        textField.translatesAutoresizingMaskIntoConstraints = false
+        textField.widthAnchor.constraint(greaterThanOrEqualToConstant: 360).isActive = true
+        if case .string(let value) = field.currentValue(in: defaults) { textField.stringValue = value }
+        let validation = label("Enter a complete URL, including https://", size: 10, weight: .regular, color: .systemRed)
+        validation.isHidden = true
+        bindings[ObjectIdentifier(textField)] = field
+        validationLabels[ObjectIdentifier(textField)] = validation
+        return vGroup([labelView, textField, validation])
+    }
+
+    private func directoryRow(for field: SettingsField) -> NSView {
+        let labelView = label(field.label, size: 12, weight: .regular, color: .secondaryLabelColor)
+        let path: String
+        if case .string(let value) = field.currentValue(in: defaults) { path = value } else { path = "" }
+        let pathLabel = label(path.isEmpty ? "Not selected" : path, size: 11, weight: .regular, color: .secondaryLabelColor)
+        pathLabel.lineBreakMode = .byTruncatingMiddle
+        pathLabel.translatesAutoresizingMaskIntoConstraints = false
+        pathLabel.widthAnchor.constraint(equalToConstant: 340).isActive = true
+        let choose = NSButton(title: "Choose Folder…", target: self, action: #selector(chooseDirectory(_:)))
+        choose.bezelStyle = .rounded
+        directoryButtonFields[ObjectIdentifier(choose)] = field
+        directoryPathLabels[ObjectIdentifier(choose)] = pathLabel
+        let row = NSStackView(views: [pathLabel, choose])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        return vGroup([labelView, row])
+    }
+
+    private func numberRow(for field: SettingsField, range: ClosedRange<Double>, unit: String, step: Double) -> NSView {
+        let labelView = label(field.label, size: 12, weight: .regular, color: .secondaryLabelColor)
+        let textField = NSTextField()
+        textField.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        textField.alignment = .right
+        textField.target = self
+        textField.action = #selector(numberCommitted(_:))
+        textField.translatesAutoresizingMaskIntoConstraints = false
+        textField.widthAnchor.constraint(equalToConstant: 90).isActive = true
+        let formatter = NumberFormatter()
+        formatter.minimum = NSNumber(value: range.lowerBound)
+        formatter.maximum = NSNumber(value: range.upperBound)
+        formatter.maximumFractionDigits = step < 1 ? 2 : 0
+        formatter.allowsFloats = step < 1
+        textField.formatter = formatter
+        let current: Double
+        if case .double(let value) = field.currentValue(in: defaults) { current = value } else { current = range.lowerBound }
+        textField.doubleValue = current
+
+        let stepper = NSStepper()
+        stepper.minValue = range.lowerBound
+        stepper.maxValue = range.upperBound
+        stepper.increment = step
+        stepper.doubleValue = current
+        stepper.target = self
+        stepper.action = #selector(numberStepperChanged(_:))
+        let unitLabel = label(unit, size: 11, weight: .regular, color: .secondaryLabelColor)
+        bindings[ObjectIdentifier(textField)] = field
+        bindings[ObjectIdentifier(stepper)] = field
+        numberStepperTextFields[ObjectIdentifier(stepper)] = textField
+        numberTextFieldSteppers[ObjectIdentifier(textField)] = stepper
+        let row = NSStackView(views: [textField, stepper, unitLabel])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 6
+        return vGroup([labelView, row])
     }
 
     private func choiceRow(for field: SettingsField, options: [String]) -> NSView {
@@ -283,7 +438,7 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         button.onSelection = { [weak self] item in
             guard let self else { return }
             field.setValue(.string(item.id), in: self.defaults)
-            self.notifySettingsChanged()
+            self.notifySettingsChanged(for: field)
         }
         modelPickerButtonForQA = button
         modelPickerField = field
@@ -319,6 +474,7 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         shortcutRowsById.removeAll()
         editButtonToEntryId.removeAll()
         resetButtonToEntryId.removeAll()
+        unassignButtonToEntryId.removeAll()
         shortcutGroupButtonTitles.removeAll()
 
         let grouped = groupedShortcutEntries()
@@ -415,6 +571,13 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         resetButton.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
         row.addArrangedSubview(editButton)
         row.addArrangedSubview(resetButton)
+        if case .registered = target {
+            let unassignButton = NSButton(title: "Unassign", target: self, action: #selector(unassignShortcut(_:)))
+            unassignButton.bezelStyle = .rounded
+            unassignButton.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+            row.addArrangedSubview(unassignButton)
+            unassignButtonToEntryId[ObjectIdentifier(unassignButton)] = entry.id
+        }
 
         let context = ShortcutRowContext(entry: entry, target: target, row: row, chordLabel: chordLabel,
                                           editButton: editButton, resetButton: resetButton)
@@ -464,6 +627,7 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     private var shortcutRowsById: [String: ShortcutRowContext] = [:]
     private var editButtonToEntryId: [ObjectIdentifier: String] = [:]
     private var resetButtonToEntryId: [ObjectIdentifier: String] = [:]
+    private var unassignButtonToEntryId: [ObjectIdentifier: String] = [:]
     private var selectedShortcutGroup: String?
     private var shortcutGroupButtonTitles: [ObjectIdentifier: String] = [:]
 
@@ -477,7 +641,23 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         if let resolved = KeybindEditor.reset(target: context.target, defaults: defaults) {
             applyResolvedKeymap(resolved)
         }
+        if case .registered = context.target { onShortcutsChanged?() }
         renderSelectedSection()
+    }
+
+    @objc private func unassignShortcut(_ sender: NSButton) {
+        guard let id = unassignButtonToEntryId[ObjectIdentifier(sender)],
+              let context = shortcutRowsById[id],
+              case let .registered(shortcutID) = context.target,
+              let registry = try? CommandRegistry.productRegistry(),
+              let definition = registry.shortcuts.first(where: { $0.id == shortcutID }) else { return }
+        do {
+            try ShortcutBindingStore(defaults: defaults).unassign(definition, registry: registry)
+            onShortcutsChanged?()
+            renderSelectedSection()
+        } catch {
+            NSSound.beep()
+        }
     }
 
     private func beginCapture(in context: ShortcutRowContext) {
@@ -510,12 +690,19 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         switch result {
         case .applied(let resolved):
             if let resolved { applyResolvedKeymap(resolved) }
+            if case .registered = context.target { onShortcutsChanged?() }
             renderSelectedSection()
-        case .rejected:
-            // Surface gracefully: beep and leave the binding as it was, then
-            // restore the static row.
-            NSSound.beep()
-            cancelCapture(context)
+        case .rejected(let reason):
+            let message: String
+            switch reason {
+            case .collidesWithInviolableGlobal:
+                message = "That shortcut is already reserved by an active global command."
+            case .invalidNavKey:
+                message = "Navigation bindings must be one letter or number."
+            case .registeredBinding(let explanation):
+                message = explanation
+            }
+            context.captureView?.showValidationError(message)
         }
         return result
     }
@@ -550,7 +737,7 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     @objc private func toggleChanged(_ sender: NSButton) {
         guard let field = bindings[ObjectIdentifier(sender)] else { return }
         field.setValue(.bool(sender.state == .on), in: defaults)
-        notifySettingsChanged()
+        notifySettingsChanged(for: field)
     }
 
     @objc private func choiceChanged(_ sender: NSPopUpButton) {
@@ -561,7 +748,7 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         if field.key == AgentBackendConfig.key {
             refreshModelPickerForHarnessChange()
         }
-        notifySettingsChanged()
+        notifySettingsChanged(for: field)
         if field.key == CommandCenterAppearanceConfig.glassinessKey {
             renderSelectedSection()
         }
@@ -571,29 +758,126 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         guard let field = bindings[ObjectIdentifier(sender)] else { return }
         field.setValue(.double(sender.doubleValue), in: defaults)
         sliderValueLabels[ObjectIdentifier(sender)]?.stringValue = Self.opacityLabel(sender.doubleValue)
-        notifySettingsChanged()
+        notifySettingsChanged(for: field)
     }
 
     @objc private func textCommitted(_ sender: NSTextField) {
         guard let field = bindings[ObjectIdentifier(sender)] else { return }
         field.setValue(.string(sender.stringValue), in: defaults)
-        notifySettingsChanged()
+        notifySettingsChanged(for: field)
+    }
+
+    @objc private func urlCommitted(_ sender: NSTextField) {
+        guard let field = bindings[ObjectIdentifier(sender)] else { return }
+        let valid = URL(string: sender.stringValue)?.scheme != nil
+        validationLabels[ObjectIdentifier(sender)]?.isHidden = valid
+        guard valid else { return }
+        field.setValue(.string(sender.stringValue), in: defaults)
+        notifySettingsChanged(for: field)
+        renderSelectedSection()
+    }
+
+    @objc private func numberCommitted(_ sender: NSTextField) {
+        guard let field = bindings[ObjectIdentifier(sender)] else { return }
+        field.setValue(.double(sender.doubleValue), in: defaults)
+        numberTextFieldSteppers[ObjectIdentifier(sender)]?.doubleValue = sender.doubleValue
+        notifySettingsChanged(for: field)
+        renderSelectedSection()
+    }
+
+    @objc private func numberStepperChanged(_ sender: NSStepper) {
+        guard let field = bindings[ObjectIdentifier(sender)] else { return }
+        field.setValue(.double(sender.doubleValue), in: defaults)
+        numberStepperTextFields[ObjectIdentifier(sender)]?.doubleValue = sender.doubleValue
+        notifySettingsChanged(for: field)
+        renderSelectedSection()
+    }
+
+    @objc private func chooseDirectory(_ sender: NSButton) {
+        guard let field = directoryButtonFields[ObjectIdentifier(sender)] else { return }
+        let picker = NSOpenPanel()
+        picker.canChooseFiles = false
+        picker.canChooseDirectories = true
+        picker.allowsMultipleSelection = false
+        picker.canCreateDirectories = true
+        guard picker.runModal() == .OK, let url = picker.url else { return }
+        field.setValue(.string(url.path), in: defaults)
+        directoryPathLabels[ObjectIdentifier(sender)]?.stringValue = url.path
+        notifySettingsChanged(for: field)
+        renderSelectedSection()
+    }
+
+    @objc private func resetSetting(_ sender: NSButton) {
+        guard let field = resetButtonFields[ObjectIdentifier(sender)] else { return }
+        field.reset(in: defaults)
+        notifySettingsChanged(for: field)
+        renderSelectedSection()
+    }
+
+    @objc private func resetCurrentSection(_ sender: NSButton) {
+        guard sections.indices.contains(selectedSectionIndex) else { return }
+        for field in sections[selectedSectionIndex].fields {
+            field.reset(in: defaults)
+            notifySettingsChanged(for: field)
+        }
+        renderSelectedSection()
+    }
+
+    @objc private func settingsSearchChanged(_ sender: NSSearchField) {
+        searchQuery = sender.stringValue
+        renderSelectedSection()
+    }
+
+    func controlTextDidChange(_ obj: Notification) {
+        guard let field = obj.object as? NSSearchField, field === settingsSearchField else { return }
+        searchQuery = field.stringValue
+        renderSelectedSection()
+    }
+
+    private func matchesSearch(_ field: SettingsField, in section: SettingsSection, query: String) -> Bool {
+        var terms = [section.title, field.label, field.key ?? ""]
+        if let key = field.key,
+           let definition = (try? CommandRegistry.productRegistry())?.settings.first(where: { $0.id.rawValue == key }) {
+            terms.append(definition.description)
+            terms.append(contentsOf: definition.keywords)
+        }
+        if case .shortcuts = field,
+           let registry = try? CommandRegistry.productRegistry() {
+            terms.append(contentsOf: registry.commands.flatMap { [$0.title, $0.subtitle ?? ""] + $0.aliases + $0.helpKeywords })
+            terms.append(contentsOf: ShortcutCatalog.entries(navKeymap: navKeymap, defaults: defaults).flatMap { [$0.label, $0.chordDisplay] })
+        }
+        let tokens = query.split(whereSeparator: \.isWhitespace).map(String.init)
+        let normalized = terms.map { $0.lowercased() }
+        return tokens.allSatisfy { token in normalized.contains(where: { $0.contains(token) }) }
     }
 
     func controlTextDidEndEditing(_ obj: Notification) {
         guard let textField = obj.object as? NSTextField, let field = bindings[ObjectIdentifier(textField)] else { return }
-        field.setValue(.string(textField.stringValue), in: defaults)
-        notifySettingsChanged()
+        switch field {
+        case .url:
+            urlCommitted(textField)
+        case .number:
+            numberCommitted(textField)
+        default:
+            field.setValue(.string(textField.stringValue), in: defaults)
+            notifySettingsChanged(for: field)
+        }
     }
 
-    /// Notify live consumers (e.g. the focus-border overlay) that a preference
-    /// changed, so they can re-resolve their config without an app restart.
-    private func notifySettingsChanged() {
-        NotificationCenter.default.post(name: .continuumSettingsChanged, object: nil)
+    /// Notify only consumers registered for this stable setting ID.
+    private func notifySettingsChanged(for field: SettingsField) {
+        guard let key = field.key else { return }
+        SettingChangeEvent.post(SettingID(rawValue: key))
     }
 
     private var bindings: [ObjectIdentifier: SettingsField] = [:]
     private var sliderValueLabels: [ObjectIdentifier: NSTextField] = [:]
+    private var resetButtonFields: [ObjectIdentifier: SettingsField] = [:]
+    private var validationLabels: [ObjectIdentifier: NSTextField] = [:]
+    private var directoryButtonFields: [ObjectIdentifier: SettingsField] = [:]
+    private var directoryPathLabels: [ObjectIdentifier: NSTextField] = [:]
+    private var numberStepperTextFields: [ObjectIdentifier: NSTextField] = [:]
+    private var numberTextFieldSteppers: [ObjectIdentifier: NSStepper] = [:]
     /// The default-model picker trigger, kept for the self-check: it must be
     /// the SAME component the tile composer uses, fed by the same catalogue.
     private(set) var modelPickerButtonForQA: ProviderModelButton?
@@ -677,7 +961,19 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         (detailStack?.arrangedSubviews.count ?? 0)
     }
     func firstToggleControlForQA() -> NSButton? {
-        detailStack?.arrangedSubviews.compactMap { $0 as? NSButton }.first
+        guard let stack = detailStack else { return nil }
+        func find(in view: NSView) -> NSButton? {
+            if let button = view as? NSButton,
+               let field = bindings[ObjectIdentifier(button)],
+               case .toggle = field {
+                return button
+            }
+            for child in view.subviews {
+                if let match = find(in: child) { return match }
+            }
+            return nil
+        }
+        return find(in: stack)
     }
     func firstSliderControlForQA() -> NSSlider? {
         guard let stack = detailStack else { return nil }
@@ -732,6 +1028,12 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
                 if firstDescendant(of: row, ofType: NSButton.self) == nil { return false }
             case .text:
                 if firstDescendant(of: row, ofType: NSTextField.self, where: { $0.isEditable }) == nil { return false }
+            case .url:
+                if firstDescendant(of: row, ofType: NSTextField.self, where: { $0.isEditable }) == nil { return false }
+            case .directory:
+                if firstDescendant(of: row, ofType: NSButton.self) == nil { return false }
+            case .number:
+                if firstDescendant(of: row, ofType: NSStepper.self) == nil { return false }
             case .choice:
                 // The default-model field renders the provider>model picker
                 // trigger; every other choice stays a stock popup.
@@ -844,12 +1146,33 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         let initial: Bool
         if case .bool(let value) = toggleField.currentValue(in: defaults) { initial = value } else { initial = false }
         let target = !initial
+        final class SettingEventCounts: @unchecked Sendable {
+            var exact = 0
+            var unrelated = 0
+        }
+        let eventCounts = SettingEventCounts()
+        let exactObserver = NotificationCenter.default.addObserver(
+            forName: SettingChangeEvent.name(for: SettingID(rawValue: key)),
+            object: nil, queue: nil
+        ) { _ in eventCounts.exact += 1 }
+        let unrelatedObserver = NotificationCenter.default.addObserver(
+            forName: SettingChangeEvent.name(for: "settings.selfcheck.unrelated"),
+            object: nil, queue: nil
+        ) { _ in eventCounts.unrelated += 1 }
+        defer {
+            NotificationCenter.default.removeObserver(exactObserver)
+            NotificationCenter.default.removeObserver(unrelatedObserver)
+        }
         // The checkbox renders reflecting `initial`; one click flips it to
         // `target` and fires the bound action (which writes UserDefaults).
         toggle.performClick(nil)
         let storedAfter = defaults.object(forKey: key) != nil ? defaults.bool(forKey: key) : nil
         guard case .bool(let reflected) = toggleField.currentValue(in: defaults), reflected == target, storedAfter == target else {
             throw SettingsPanelSelfCheckError.toggleDidNotRoundTrip(stored: storedAfter, expected: target)
+        }
+        guard eventCounts.exact == 1, eventCounts.unrelated == 0 else {
+            throw SettingsPanelSelfCheckError.sectionFieldsNotRendered(
+                "exact setting-ID event routing produced exact=\(eventCounts.exact), unrelated=\(eventCounts.unrelated)")
         }
 
         // 3a. Custom command-menu opacity is progressive disclosure: the

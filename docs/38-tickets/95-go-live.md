@@ -68,6 +68,15 @@ Status as of 2026-08-09 (end of day):
      The paragraph below is kept as written, because the sequence is the point:
      a leg leaving this list is only as trustworthy as the witness that let it go.
 
+     **Updated 2026-08-21.** The authoritative allowlist has 10 entries. Two
+     display/host-sensitive alarms are inherited reds on macOS 26.6.1 / SDK
+     26.5: `--perf-budget-gesture-transition-check` and
+     `--tile-surface-residency-check`. Both were reproduced against the exact
+     0.5.7 release commit before being classified. Their strict targets remain
+     unchanged, and their structural/correctness assertions remain green; the
+     A/B measurements and removal conditions are recorded in
+     [performance-budgets.md](../internals/performance-budgets.md).
+
      **It was briefly back to those 7.** `--perf-budget-zoom-check` joined the list after
      the retained world plane (`.plans/22` Slice 3) and has now left it again.
      Its original cause — a zoom step resizing every tile view — was fixed by the

@@ -18,6 +18,9 @@ public enum ShortcutLayer: Equatable, Sendable {
 /// configurable global has no target (`nil`); configurable rows carry the write
 /// path their edit must take (docs/24 S5).
 public enum KeybindEditTarget: Equatable, Sendable {
+    /// A feature-registered application command. This is the migration path for
+    /// former hardcoded globals and is also what future features use directly.
+    case registered(shortcutID: ShortcutID)
     /// The nav-mode leader chord (a `NavKeymap.leader` rebind).
     case leader
     /// A single-key nav-mode binding, by its `NavKeymap` field name (e.g. "up").
@@ -61,8 +64,17 @@ public enum ShortcutCatalog {
     /// chord. With `nil`, tile rows show the in-code default chords (the Guide /
     /// exhaustiveness baseline).
     public static func entries(navKeymap: NavKeymap = .default, defaults: UserDefaults? = nil) -> [ShortcutCatalogEntry] {
-        globalEntries(navKeymap: navKeymap) + navModeEntries(navKeymap: navKeymap) + inboxEntries()
-            + tileEntries(defaults: defaults)
+        let effectiveDefaults: UserDefaults
+        if let defaults {
+            effectiveDefaults = defaults
+        } else {
+            let isolated = UserDefaults(suiteName: "continuum.shortcutCatalog.defaults")!
+            isolated.removePersistentDomain(forName: "continuum.shortcutCatalog.defaults")
+            effectiveDefaults = isolated
+        }
+        return globalEntries(navKeymap: navKeymap, defaults: effectiveDefaults)
+            + navModeEntries(navKeymap: navKeymap) + inboxEntries()
+            + tileEntries(defaults: effectiveDefaults)
     }
 
     // MARK: Agent inbox — ⌘1–⌘9 row jumps (P3.10).
@@ -86,14 +98,36 @@ public enum ShortcutCatalog {
 
     // MARK: Globals — one entry per ReservedShortcut.
 
-    static func globalEntries(navKeymap: NavKeymap) -> [ShortcutCatalogEntry] {
+    static func globalEntries(navKeymap: NavKeymap, defaults: UserDefaults = .standard) -> [ShortcutCatalogEntry] {
         var entries: [ShortcutCatalogEntry] = [
-            entry(.palette),
-            entry(.focusMode),
-            entry(.settings),
+            ShortcutCatalogEntry(
+                id: "global.palette",
+                label: "Command Center",
+                chordDisplay: registeredChordDisplay(id: "global.commandCenter", fallback: KeyChord(keyCode: 40, modifiers: .command), defaults: defaults),
+                layer: .global,
+                configurable: true,
+                editTarget: .registered(shortcutID: "global.commandCenter")
+            ),
+            registeredEntry(
+                id: "global.focusMode",
+                label: "Focus Mode",
+                fallback: KeyChord(keyCode: 3, modifiers: .command),
+                defaults: defaults
+            ),
+            registeredEntry(
+                id: "global.settings",
+                label: "Settings",
+                fallback: KeyChord(keyCode: 43, modifiers: .command),
+                defaults: defaults
+            ),
         ]
         for profile in 1...4 {
-            entries.append(entry(.spawnProfile(profile)))
+            entries.append(registeredEntry(
+                id: ShortcutID(rawValue: "global.spawnProfile.\(profile)"),
+                label: "Quick Spawn \(profile)",
+                fallback: KeyChord(keyCode: UInt16(17 + profile), modifiers: .command),
+                defaults: defaults
+            ))
         }
         // Leader's chord is editable via NavKeymap; the rest are hardcoded.
         entries.append(ShortcutCatalogEntry(
@@ -105,13 +139,45 @@ public enum ShortcutCatalog {
             editTarget: .leader
         ))
         entries.append(ShortcutCatalogEntry(
+            id: "global.openKeybindings",
+            label: "All Shortcuts",
+            chordDisplay: registeredChordDisplay(id: "global.openKeybindings", fallback: KeyChord(keyCode: 44, modifiers: [.command, .shift]), defaults: defaults),
+            layer: .global,
+            configurable: true,
+            editTarget: .registered(shortcutID: "global.openKeybindings")
+        ))
+        entries.append(registeredEntry(
             id: "global.toggleWorkspaceSidebar",
             label: "Show Activity Dock",
-            chordDisplay: "⌘⇧S",
-            layer: .global,
-            configurable: false
+            fallback: KeyChord(keyCode: 1, modifiers: [.command, .shift]),
+            defaults: defaults
         ))
         return entries
+    }
+
+    private static func registeredChordDisplay(id: ShortcutID, fallback: KeyChord, defaults: UserDefaults) -> String {
+        guard let registry = try? CommandRegistry.productRegistry(),
+              let definition = registry.shortcuts.first(where: { $0.id == id }) else {
+            return fallback.displayString
+        }
+        let gestures = ShortcutBindingStore(defaults: defaults).gestures(for: definition)
+        return gestures.isEmpty ? "Unassigned" : gestures.map(\.displayString).joined(separator: " / ")
+    }
+
+    private static func registeredEntry(
+        id: ShortcutID,
+        label: String,
+        fallback: KeyChord,
+        defaults: UserDefaults
+    ) -> ShortcutCatalogEntry {
+        ShortcutCatalogEntry(
+            id: id.rawValue,
+            label: label,
+            chordDisplay: registeredChordDisplay(id: id, fallback: fallback, defaults: defaults),
+            layer: .global,
+            configurable: true,
+            editTarget: .registered(shortcutID: id)
+        )
     }
 
     private static func entry(_ shortcut: ReservedShortcut) -> ShortcutCatalogEntry {

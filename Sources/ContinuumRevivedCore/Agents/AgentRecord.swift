@@ -199,7 +199,10 @@ public struct AgentCapabilities: Codable, Equatable, Sendable {
 }
 
 public struct AgentRecord: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 1
+    /// v2 separates registered project, concrete checkout/worktree, logical
+    /// Home, and observed Where. Legacy `cwd` remains encoded as a compatibility
+    /// launch mirror while old records migrate it into all three path roles.
+    public static let currentSchemaVersion = 2
     /// Compatibility spelling for callers that need the sentinel beside the
     /// record. The literal itself lives in `AgentName`, once, in AgentUI.
     public static let defaultAgentName = AgentName.defaultName
@@ -225,8 +228,21 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// `AgentModelConfig` (a prefix lets Pi's fuzzy matcher choose silently).
     public var model: String
     public var thinking: String
-    /// Host path. May be a per-agent worktree path (P2C). Host-bound: I5.
+    /// Legacy compatibility/launch mirror. New location-aware code uses
+    /// `checkoutRoot`, `homeRelativePath`, and `lastObservedWhere`.
     public var cwd: String
+    /// Registered project root at creation time. `projectId` remains the stable
+    /// identity; keeping the root makes stale/missing registry state visible.
+    public var projectRoot: String?
+    /// Concrete main checkout or agent-specific worktree root.
+    public var checkoutRoot: String
+    /// Logical Home relative to `checkoutRoot`; nil means checkout root.
+    public var homeRelativePath: String?
+    /// Last observed runtime working directory. It may be deeper than Home or
+    /// outside it; Array surfaces that relation rather than correcting it.
+    public var lastObservedWhere: String
+    /// Provider/git worktree identity when one exists independently of branch.
+    public var worktreeId: String?
     /// Branch checked out in that worktree, when the agent owns one (P2C).
     public var worktreeBranch: String?
     public var projectId: UUID?
@@ -510,6 +526,11 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         model: String,
         thinking: String,
         cwd: String,
+        projectRoot: String? = nil,
+        checkoutRoot: String? = nil,
+        homeRelativePath: String? = nil,
+        lastObservedWhere: String? = nil,
+        worktreeId: String? = nil,
         worktreeBranch: String? = nil,
         projectId: UUID? = nil,
         parentAgentID: AgentID? = nil,
@@ -545,6 +566,11 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         self.model = model
         self.thinking = thinking
         self.cwd = cwd
+        self.projectRoot = projectRoot
+        self.checkoutRoot = checkoutRoot ?? cwd
+        self.homeRelativePath = homeRelativePath
+        self.lastObservedWhere = lastObservedWhere ?? cwd
+        self.worktreeId = worktreeId
         self.worktreeBranch = worktreeBranch
         self.projectId = projectId
         self.parentAgentID = parentAgentID
@@ -662,6 +688,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     // conversion happens and the round-trip is exact.
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, id, displayName, displayNameSource, namingRequest, role, harness, model, thinking, cwd
+        case projectRoot, checkoutRoot, homeRelativePath, lastObservedWhere, worktreeId
         case worktreeBranch, projectId, parentAgentID, capabilities, sourceItemId
         case parentRelativeOrdinal, nextChildOrdinal
         case createdAtReferenceInterval, lastActivityAtReferenceInterval
@@ -713,6 +740,11 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         namingRequest = try container.decodeIfPresent(NamingRequest.self, forKey: .namingRequest)
         thinking = try container.decode(String.self, forKey: .thinking)
         cwd = try container.decode(String.self, forKey: .cwd)
+        projectRoot = try container.decodeIfPresent(String.self, forKey: .projectRoot)
+        checkoutRoot = try container.decodeIfPresent(String.self, forKey: .checkoutRoot) ?? cwd
+        homeRelativePath = try container.decodeIfPresent(String.self, forKey: .homeRelativePath)
+        lastObservedWhere = try container.decodeIfPresent(String.self, forKey: .lastObservedWhere) ?? cwd
+        worktreeId = try container.decodeIfPresent(String.self, forKey: .worktreeId)
         worktreeBranch = try container.decodeIfPresent(String.self, forKey: .worktreeBranch)
         projectId = try container.decodeIfPresent(UUID.self, forKey: .projectId)
         parentAgentID = try container.decodeIfPresent(AgentID.self, forKey: .parentAgentID)
@@ -787,6 +819,11 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         try container.encode(model, forKey: .model)
         try container.encode(thinking, forKey: .thinking)
         try container.encode(cwd, forKey: .cwd)
+        try container.encodeIfPresent(projectRoot, forKey: .projectRoot)
+        try container.encode(checkoutRoot, forKey: .checkoutRoot)
+        try container.encodeIfPresent(homeRelativePath, forKey: .homeRelativePath)
+        try container.encode(lastObservedWhere, forKey: .lastObservedWhere)
+        try container.encodeIfPresent(worktreeId, forKey: .worktreeId)
         try container.encodeIfPresent(worktreeBranch, forKey: .worktreeBranch)
         try container.encodeIfPresent(projectId, forKey: .projectId)
         try container.encodeIfPresent(parentAgentID, forKey: .parentAgentID)

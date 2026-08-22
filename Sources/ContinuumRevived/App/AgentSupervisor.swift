@@ -1075,7 +1075,7 @@ final class AgentSupervisor {
         ClaudeAgentRunner.Config(
             model: ClaudeCLIBackend.modelArgument(forCatalogId: record.model),
             effort: ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
-            cwd: URL(fileURLWithPath: record.cwd, isDirectory: true),
+            cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
             sessionId: claudeSessionId(for: record.id),
             // An agent that has never had a turn cannot have a conversation to
             // resume, so resume-first would spawn a CLI process purely to be told
@@ -1100,7 +1100,7 @@ final class AgentSupervisor {
         CodexAgentRunner.Config(
             model: CodexCLIBackend.modelArgument(forCatalogId: record.model),
             effort: CodexCLIBackend.effortArgument(forThinking: record.thinking),
-            cwd: URL(fileURLWithPath: record.cwd, isDirectory: true),
+            cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
             threadId: record.codexThreadId
         )
     }
@@ -1114,7 +1114,7 @@ final class AgentSupervisor {
     /// the same `.pi/agents` its project does, and editing a role file takes effect on
     /// the next run instead of being frozen at spawn time.
     nonisolated static func runnerConfig(for record: AgentRecord) -> PiAgentRunner.Config {
-        let cwd = URL(fileURLWithPath: record.cwd, isDirectory: true)
+        let cwd = URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true)
         // `model`/`thinking` come from the RECORD: the role already decided them at
         // spawn time (`handleSpawnRequest`), and a role file edited since must not
         // silently move a running agent's provider settings. Only the tool list is
@@ -1133,16 +1133,16 @@ final class AgentSupervisor {
             // Array's own project has 12 role files; a roleless agent read all of
             // them before each prompt.
             extraArgs: record.role.map {
-                RoleRegistry(projectRoot: cwd).toolsArguments(roleId: $0)
+                RoleRegistry(projectRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true))
+                    .toolsArguments(roleId: $0)
             } ?? []
         )
     }
 
     // MARK: - Host-local Home / Where / What (Queue 91 P2)
 
-    /// Current private location projection. Legacy `cwd` remains both checkout
-    /// Home and initial Where; richer project-root lookup/persistence is a later
-    /// migration. This value is not Codable and never enters companion sync.
+    /// Current private location projection from the durable four-part location
+    /// model. This host-local value never enters companion sync.
     func locationSnapshot(for id: AgentID, at now: Date = Date()) -> AgentLocationSnapshot? {
         guard let record = records[id] else { return nil }
         ensureLocationProjector(for: record)
@@ -1151,14 +1151,15 @@ final class AgentSupervisor {
 
     private func ensureLocationProjector(for record: AgentRecord) {
         guard locationProjectors[record.id] == nil else { return }
-        let checkout = URL(fileURLWithPath: record.cwd, isDirectory: true)
+        let checkout = URL(fileURLWithPath: record.checkoutRoot, isDirectory: true)
         let home = AgentHome(
             projectId: record.projectId,
-            projectRoot: nil,
-            checkoutRoot: checkout)
+            projectRoot: record.projectRoot.map { URL(fileURLWithPath: $0, isDirectory: true) },
+            checkoutRoot: checkout,
+            homeRelativePath: record.homeRelativePath)
         locationProjectors[record.id] = AgentLocationProjector(
             home: home,
-            whereDirectory: checkout)
+            whereDirectory: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true))
     }
 
     @discardableResult
@@ -1240,13 +1241,18 @@ final class AgentSupervisor {
     }
 
     /// Explicitly changes authoritative Home for a provisional zero-turn agent.
-    /// This mutates only the host-local execution record (`cwd`, `projectId`) and
+    /// This mutates only the host-local execution location and project identity and
     /// the in-memory location projector; no path-bearing value becomes Codable.
     @discardableResult
     func reassignProvisionalHome(agentID id: AgentID, cwd: URL, projectId: UUID?) -> Bool {
         guard var record = records[id] else { return false }
         guard !hasUserWorkOrSessionHistory(id) else { return false }
         record.cwd = cwd.path
+        record.projectRoot = cwd.path
+        record.checkoutRoot = cwd.path
+        record.homeRelativePath = nil
+        record.lastObservedWhere = cwd.path
+        record.worktreeId = nil
         record.projectId = projectId
         record.lastActivityAt = max(record.lastActivityAt, Date())
         do {
@@ -1484,16 +1490,24 @@ final class AgentSupervisor {
         model: String,
         thinking: String,
         projectId: UUID? = nil,
+        projectRoot: URL? = nil,
+        homeRelativePath: String? = nil,
         parentAgentID: AgentID? = nil,
         sourceItemId: String? = nil,
         tileId: UUID? = nil,
         displayName: String? = nil
     ) -> AgentID {
-        makeAgent(
+        let logicalProjectRoot = projectRoot ?? cwd
+        let checkoutRoot = projectRoot ?? cwd
+        return makeAgent(
             id: AgentID(rawValue: UUID()),
             role: role,
             prompt: prompt,
             cwd: cwd,
+            projectRoot: logicalProjectRoot,
+            checkoutRoot: checkoutRoot,
+            homeRelativePath: homeRelativePath,
+            worktreeId: nil,
             worktreeBranch: nil,
             harness: harness,
             model: model,
@@ -1526,6 +1540,8 @@ final class AgentSupervisor {
         model: String,
         thinking: String,
         projectId: UUID? = nil,
+        projectRoot: URL? = nil,
+        homeRelativePath: String? = nil,
         parentAgentID: AgentID? = nil,
         sourceItemId: String? = nil,
         tileId: UUID? = nil,
@@ -1536,21 +1552,35 @@ final class AgentSupervisor {
         // derived from it — `WorktreeManager.slug` id-suffixes so two agents given the
         // same role and prompt do not land on one directory and one branch.
         let id = AgentID(rawValue: UUID())
+        let logicalProjectRoot = projectRoot ?? cwd
+        var checkoutRoot = projectRoot ?? cwd
         var workingDirectory = cwd
         var branch: String?
+        var worktreeId: String?
         if isolated {
             let worktree = try worktrees.add(
-                repo: cwd,
+                repo: logicalProjectRoot,
                 slug: WorktreeManager.slug(role: role, prompt: prompt, id: id)
             )
-            workingDirectory = worktree.path
+            checkoutRoot = worktree.path
+            workingDirectory = homeRelativePath.map {
+                worktree.path.appendingPathComponent($0, isDirectory: true)
+            } ?? worktree.path
             branch = worktree.branch
+            worktreeId = worktree.path.lastPathComponent
+        } else if let homeRelativePath {
+            checkoutRoot = logicalProjectRoot
+            workingDirectory = logicalProjectRoot.appendingPathComponent(homeRelativePath, isDirectory: true)
         }
         return makeAgent(
             id: id,
             role: role,
             prompt: prompt,
             cwd: workingDirectory,
+            projectRoot: logicalProjectRoot,
+            checkoutRoot: checkoutRoot,
+            homeRelativePath: homeRelativePath,
+            worktreeId: worktreeId,
             worktreeBranch: branch,
             harness: harness,
             model: model,
@@ -1568,6 +1598,10 @@ final class AgentSupervisor {
         role: String?,
         prompt: String?,
         cwd: URL,
+        projectRoot: URL,
+        checkoutRoot: URL,
+        homeRelativePath: String?,
+        worktreeId: String?,
         worktreeBranch: String?,
         harness: AgentHarness,
         model: String,
@@ -1588,6 +1622,10 @@ final class AgentSupervisor {
                 id: id,
                 role: role,
                 cwd: cwd,
+                projectRoot: projectRoot,
+                checkoutRoot: checkoutRoot,
+                homeRelativePath: homeRelativePath,
+                worktreeId: worktreeId,
                 worktreeBranch: worktreeBranch,
                 harness: harness,
                 model: model,
@@ -1616,6 +1654,11 @@ final class AgentSupervisor {
                 model: model,
                 thinking: thinking,
                 cwd: cwd.path,
+                projectRoot: projectRoot.path,
+                checkoutRoot: checkoutRoot.path,
+                homeRelativePath: homeRelativePath,
+                lastObservedWhere: cwd.path,
+                worktreeId: worktreeId,
                 worktreeBranch: worktreeBranch,
                 projectId: projectId,
                 parentAgentID: nil,
@@ -1656,6 +1699,10 @@ final class AgentSupervisor {
         id: AgentID,
         role: String?,
         cwd: URL,
+        projectRoot: URL,
+        checkoutRoot: URL,
+        homeRelativePath: String?,
+        worktreeId: String?,
         worktreeBranch: String?,
         harness: AgentHarness,
         model: String,
@@ -1700,6 +1747,11 @@ final class AgentSupervisor {
                     model: model,
                     thinking: thinking,
                     cwd: cwd.path,
+                    projectRoot: projectRoot.path,
+                    checkoutRoot: checkoutRoot.path,
+                    homeRelativePath: homeRelativePath,
+                    lastObservedWhere: cwd.path,
+                    worktreeId: worktreeId,
                     worktreeBranch: worktreeBranch,
                     projectId: projectId,
                     parentAgentID: parentAgentID,
@@ -2301,7 +2353,10 @@ final class AgentSupervisor {
     /// cleanup identifies an agent checkout by its `.worktrees/` container, and keeps
     /// its own guard because it DELETES; this one only chooses where to add).
     static func repositoryRoot(of record: AgentRecord) -> URL {
-        let cwd = URL(fileURLWithPath: record.cwd, isDirectory: true)
+        if let projectRoot = record.projectRoot {
+            return URL(fileURLWithPath: projectRoot, isDirectory: true)
+        }
+        let cwd = URL(fileURLWithPath: record.checkoutRoot, isDirectory: true)
         guard record.worktreeBranch != nil,
               cwd.deletingLastPathComponent().lastPathComponent == WorktreeManager.containerDirectoryName
         else {
@@ -2315,7 +2370,7 @@ final class AgentSupervisor {
     /// broader directory—so Falcon-like nested repositories cannot leak outward.
     func completionContext(for agentID: AgentID) -> AgentCompletionContext? {
         guard let record = records[agentID], let harness = record.harness else { return nil }
-        let checkoutRoot = URL(fileURLWithPath: record.cwd, isDirectory: true).standardizedFileURL
+        let checkoutRoot = URL(fileURLWithPath: record.checkoutRoot, isDirectory: true).standardizedFileURL
         return AgentCompletionContext(
             agentID: agentID,
             backend: harness,
@@ -2645,12 +2700,12 @@ final class AgentSupervisor {
     /// on somebody's project root.
     private func cleanUpWorktree(of record: AgentRecord, into report: inout ArchiveReport) {
         guard let branch = record.worktreeBranch else { return }
-        let worktree = URL(fileURLWithPath: record.cwd, isDirectory: true)
+        let worktree = URL(fileURLWithPath: record.checkoutRoot, isDirectory: true)
         let container = worktree.deletingLastPathComponent()
         guard container.lastPathComponent == WorktreeManager.containerDirectoryName else {
             report.worktreeRetained = (worktree, "cwd is not inside \(WorktreeManager.containerDirectoryName)/")
             report.branchRetained = (branch, "the worktree could not be identified")
-            warn("AgentSupervisor.archive: \(record.id.rawValue.uuidString) claims branch \(branch) but its cwd \(record.cwd) is not an agent worktree; leaving both alone")
+            warn("AgentSupervisor.archive: \(record.id.rawValue.uuidString) claims branch \(branch) but its checkout \(record.checkoutRoot) is not an agent worktree; leaving both alone")
             return
         }
         let repo = container.deletingLastPathComponent()
@@ -3000,7 +3055,7 @@ final class AgentSupervisor {
         let source = firstPromptByAgent[id]
             ?? "No source prompt is available. Propose a concise name from the current agent title: \(record.humanDisplayName)"
         let prompt = Self.generatedNamePrompt(source)
-        let cwd = URL(fileURLWithPath: record.cwd, isDirectory: true)
+        let cwd = URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true)
         let timeout = nameGenerationTimeout
         activeNameGenerations += 1
         nameGenerationRequestIDs[id] = request.id
@@ -3302,7 +3357,7 @@ final class AgentSupervisor {
             agentKind: .managed,
             worktreeBranch: record.worktreeBranch,
             checkedOutBranch: checkedOutBranches.branch(
-                repo: URL(fileURLWithPath: record.cwd, isDirectory: true)
+                repo: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true)
             )
         )
     }
@@ -3319,7 +3374,7 @@ final class AgentSupervisor {
             agentKind: .managed,
             worktreeBranch: record.worktreeBranch,
             checkedOutBranch: checkedOutBranches.cachedOnly(
-                repo: URL(fileURLWithPath: record.cwd, isDirectory: true)) ?? nil
+                repo: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true)) ?? nil
         )
     }
 
@@ -3327,8 +3382,8 @@ final class AgentSupervisor {
     func warmCheckedOutBranchTargets() -> [URL] {
         var seen = Set<String>()
         return records.values.compactMap { record in
-            seen.insert(record.cwd).inserted
-                ? URL(fileURLWithPath: record.cwd, isDirectory: true) : nil
+            seen.insert(record.checkoutRoot).inserted
+                ? URL(fileURLWithPath: record.checkoutRoot, isDirectory: true) : nil
         }
     }
 

@@ -28,6 +28,13 @@ if CommandLine.arguments.contains("--document-location-check") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--onboarding-foundation-check") {
+    try runDirectoryScopeChecks()
+    try runProductRegistryChecks()
+    try runOnboardingProgressChecks()
+    Foundation.exit(0)
+}
+
 private final class AtomicWriterOpenFaultState: @unchecked Sendable {
     var failTempOpen = false
     var failDirectoryOpen = false
@@ -5694,26 +5701,35 @@ do {
     for shortcut in reservedCases {
         expect(globalLayerEntry(shortcut) != nil, "ShortcutCatalog: ReservedShortcut \(shortcut) has a .global entry")
     }
-    expect(globalEntries.count == reservedCases.count + 1, "ShortcutCatalog: exactly one .global entry per ReservedShortcut case plus the sidebar toggle, got \(globalEntries.count)")
+    expect(globalEntries.count == reservedCases.count + 2, "ShortcutCatalog: ReservedShortcut rows plus registered All Shortcuts and sidebar toggle, got \(globalEntries.count)")
+    guard let keybindingsEntry = globalEntries.first(where: { $0.id == "global.openKeybindings" }) else {
+        expect(false, "ShortcutCatalog: missing registered global.openKeybindings entry")
+        fatalError("unreachable")
+    }
+    expect(keybindingsEntry.configurable && keybindingsEntry.editTarget == .registered(shortcutID: "global.openKeybindings"),
+           "ShortcutCatalog: All Shortcuts routes through the registered shortcut store")
     guard let sidebarToggleEntry = globalEntries.first(where: { $0.id == "global.toggleWorkspaceSidebar" }) else {
         expect(false, "ShortcutCatalog: missing global.toggleWorkspaceSidebar entry")
         fatalError("unreachable")
     }
     expect(sidebarToggleEntry.label == "Show Activity Dock", "ShortcutCatalog: sidebar toggle label")
-    expect(sidebarToggleEntry.chordDisplay == "⌘⇧S", "ShortcutCatalog: sidebar toggle chord display")
-    expect(sidebarToggleEntry.configurable == false, "ShortcutCatalog: sidebar toggle is not configurable in this phase")
-    expect(sidebarToggleEntry.editTarget == nil, "ShortcutCatalog: sidebar toggle has no edit target")
+    expect(sidebarToggleEntry.chordDisplay == KeyChord(keyCode: 1, modifiers: [.command, .shift]).displayString,
+           "ShortcutCatalog: sidebar toggle chord display")
+    expect(sidebarToggleEntry.configurable, "ShortcutCatalog: sidebar toggle is configurable")
+    expect(sidebarToggleEntry.editTarget == .registered(shortcutID: "global.toggleWorkspaceSidebar"),
+           "ShortcutCatalog: sidebar toggle routes through the registered shortcut store")
 
-    // configurable policy: globals are hardcoded (false) except the nav leader,
-    // whose chord persists via NavKeymap (true). The leader carries the .leader
-    // edit target; the hardcoded globals carry none.
+    // Every application-global command and the nav leader are configurable.
     for entry in globalEntries {
-        let expectedConfigurable = entry.id == "global.navModeLeader"
-        expect(entry.configurable == expectedConfigurable, "ShortcutCatalog: global \(entry.id) configurable should be \(expectedConfigurable)")
+        expect(entry.configurable, "ShortcutCatalog: global \(entry.id) should be configurable")
         if entry.id == "global.navModeLeader" {
             expect(entry.editTarget == .leader, "ShortcutCatalog: leader entry routes to .leader edit target")
+        } else if entry.id == "global.palette" {
+            expect(entry.editTarget == .registered(shortcutID: "global.commandCenter"),
+                   "ShortcutCatalog: Command Center routes to its registered shortcut")
         } else {
-            expect(entry.editTarget == nil, "ShortcutCatalog: hardcoded global \(entry.id) has no edit target")
+            expect(entry.editTarget == .registered(shortcutID: ShortcutID(rawValue: entry.id)),
+                   "ShortcutCatalog: global \(entry.id) routes to its registered shortcut")
         }
     }
 
@@ -6935,6 +6951,14 @@ do {
     let sections = SettingsSchema.sections()
     let allFields = sections.flatMap(\.fields)
 
+    expect(
+        sections.map(\.title) == [
+            "General", "Appearance", "Canvas & Zones", "Navigation", "Keybindings",
+            "Agents", "Terminal", "Browser", "Activity & Notifications", "Advanced",
+        ],
+        "settings exposes the ten product categories in stable order"
+    )
+
     // Structural invariants: non-empty ids/labels/titles, no duplicate keys.
     for section in sections {
         expect(!section.id.isEmpty, "settings section id must be non-empty")
@@ -6960,7 +6984,6 @@ do {
         ZoneHydrationBudgetConfig.maxLiveZonesKey,
         ZoneHydrationReconcileConfig.intervalKey,
         BrowserRuntimeBudget.defaultsKey,
-        AmbientZoneHome.userDefaultsKey,
         DefaultGroupZoneName.userDefaultsKey,
         AutosaveConfig.debounceMsKey,
         ZoneGestureConfig.minCreateDragScreenPointsKey,
@@ -6979,6 +7002,7 @@ do {
         // stores). Settings entries will be added when the session-state bridge lands.
     ]
     expect(expectedKeys.isSubset(of: Set(fieldKeys)), "settings schema must represent every existing pref key")
+    expect(!fieldKeys.contains("continuum.ambientZoneHome"), "Ambient Zone Home is no longer a global setting")
 
     // Drag snapping resolver: default-true on empty defaults, reads an override.
     let dragSuiteName = "DragMagnetizeChecks-\(UUID().uuidString)"
@@ -6997,52 +7021,6 @@ do {
     expect(ZoneHydrationReconcileConfig.intervalMs(defaults: reconcileDefaults) == ZoneHydrationReconcileConfig.defaultIntervalMs, "reconcile debounce: empty defaults returns 200")
     reconcileDefaults.set("50", forKey: ZoneHydrationReconcileConfig.intervalKey)
     expect(ZoneHydrationReconcileConfig.intervalMs(defaults: reconcileDefaults) == 50, "reconcile debounce: string override '50' reads back 50")
-
-    // AmbientZoneHome resolver: isolated suite round-trip (conflict-guard coverage for the new key).
-    let ambientSuiteName = "AmbientZoneHomeChecks-\(UUID().uuidString)"
-    let ambientDefaults = UserDefaults(suiteName: ambientSuiteName)!
-    defer { ambientDefaults.removePersistentDomain(forName: ambientSuiteName) }
-    ambientDefaults.removePersistentDomain(forName: ambientSuiteName)
-    // Empty defaults → fallback to $HOME.
-    let emptyResolution = AmbientZoneHome.resolvedFromDefaults(standardDefaults: ambientDefaults, directoryExists: { _ in true })
-    expect(emptyResolution.path == NSHomeDirectory(), "ambient zone home: empty defaults resolves to $HOME")
-    expect(emptyResolution.source == .fallbackDefault, "ambient zone home: empty defaults source is .fallbackDefault")
-    // Valid override dir → that dir.
-    let validPath = NSHomeDirectory()
-    ambientDefaults.set(validPath, forKey: AmbientZoneHome.userDefaultsKey)
-    let validResolution = AmbientZoneHome.resolvedFromDefaults(standardDefaults: ambientDefaults, directoryExists: { _ in true })
-    expect(validResolution.path == validPath, "ambient zone home: valid override honored")
-    expect(validResolution.source == .standardDomain, "ambient zone home: valid override source is .standardDomain")
-    // Bogus/non-existent override → fallback to $HOME.
-    let bogusPath = "/nonexistent-\(UUID().uuidString)"
-    ambientDefaults.set(bogusPath, forKey: AmbientZoneHome.userDefaultsKey)
-    let bogusResolution = AmbientZoneHome.resolvedFromDefaults(standardDefaults: ambientDefaults, directoryExists: { _ in false })
-    expect(bogusResolution.path == NSHomeDirectory(), "ambient zone home: bogus override rejected, fallback to $HOME")
-    expect(bogusResolution.source == .fallbackDefault, "ambient zone home: bogus override source is .fallbackDefault")
-    // Relative roots never inherit the Continuum process cwd.
-    ambientDefaults.set("../relative-home", forKey: AmbientZoneHome.userDefaultsKey)
-    let relativeResolution = AmbientZoneHome.resolvedFromDefaults(
-        standardDefaults: ambientDefaults,
-        directoryExists: { _ in true })
-    expect(relativeResolution.source == .fallbackDefault,
-           "ambient zone home: relative override rejected even when an existence probe says true")
-    // Tilde input expands to one absolute standardized directory.
-    ambientDefaults.set("~", forKey: AmbientZoneHome.userDefaultsKey)
-    let tildeResolution = AmbientZoneHome.resolvedFromDefaults(
-        standardDefaults: ambientDefaults,
-        directoryExists: { $0 == NSHomeDirectory() })
-    expect(tildeResolution.path == URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
-        .resolvingSymlinksInPath().path,
-        "ambient zone home: tilde override expands and normalizes")
-    // Existing regular files do not qualify as ambient directory roots.
-    let ambientFile = FileManager.default.temporaryDirectory
-        .appendingPathComponent("ambient-home-file-\(UUID().uuidString)")
-    try! Data("not a directory".utf8).write(to: ambientFile)
-    defer { try? FileManager.default.removeItem(at: ambientFile) }
-    ambientDefaults.set(ambientFile.path, forKey: AmbientZoneHome.userDefaultsKey)
-    let fileResolution = AmbientZoneHome.resolvedFromDefaults(standardDefaults: ambientDefaults)
-    expect(fileResolution.source == .fallbackDefault,
-           "ambient zone home: a regular file override is rejected")
 
     // AutosaveConfig resolver: default / clamp-low / clamp-high / non-numeric → default.
     let autosaveSuiteName = "AutosaveConfigChecks-\(UUID().uuidString)"
@@ -7075,13 +7053,13 @@ do {
     // The Keybindings section renders the ShortcutCatalog via a .shortcuts field.
     expect(allFields.contains { if case .shortcuts = $0 { return true } else { return false } }, "settings schema must include a .shortcuts field")
 
-    guard let activitySection = sections.first(where: { $0.id == "activity" }) else {
-        expect(false, "settings schema must include an Activity section")
+    guard let activitySection = sections.first(where: { $0.id == "activityAndNotifications" }) else {
+        expect(false, "settings schema must include Activity & Notifications")
         fatalError("unreachable")
     }
-    expect(activitySection.title == "Activity", "Activity settings section title")
-    expect(activitySection.fields.contains { $0.key == WorkspaceSidebarConfig.visibleKey }, "Activity settings section exposes sidebar visibility")
-    expect(activitySection.fields.contains { $0.key == WorkspaceSidebarConfig.widthKey }, "Activity settings section exposes sidebar width")
+    expect(activitySection.title == "Activity & Notifications", "Activity & Notifications settings section title")
+    expect(activitySection.fields.contains { $0.key == WorkspaceSidebarConfig.visibleKey }, "Activity & Notifications exposes sidebar visibility")
+    expect(activitySection.fields.contains { $0.key == WorkspaceSidebarConfig.widthKey }, "Activity & Notifications exposes sidebar width")
 
     let sidebarSuiteName = "WorkspaceSidebarConfigChecks-\(UUID().uuidString)"
     let sidebarDefaults = UserDefaults(suiteName: sidebarSuiteName)!
@@ -7133,6 +7111,22 @@ do {
             expect(field.currentValue(in: defaults) == .string(fallback), "text currentValue on empty defaults is its declared default")
             field.setValue(.string("\(fallback)-edited"), in: defaults)
             expect(field.currentValue(in: defaults) == .string("\(fallback)-edited"), "text round-trips through setValue/currentValue")
+        case .url(let key, _, let fallback):
+            expect(field.currentValue(in: defaults) == .string(fallback), "URL currentValue on empty defaults is its declared default")
+            let valid = "https://example.com/settings-check"
+            field.setValue(.string(valid), in: defaults)
+            expect(field.currentValue(in: defaults) == .string(valid), "URL round-trips a valid absolute URL")
+            field.setValue(.string("not a URL"), in: defaults)
+            expect(defaults.string(forKey: key) == valid, "invalid URL remains unpersisted for inline validation")
+        case .directory(_, _, let fallback):
+            expect(field.currentValue(in: defaults) == .string(fallback), "directory currentValue on empty defaults is its declared default")
+            field.setValue(.string("/tmp"), in: defaults)
+            expect(field.currentValue(in: defaults) == .string("/tmp"), "directory picker values round-trip")
+        case .number(let key, _, let range, let fallback, _, _):
+            expect(field.currentValue(in: defaults) == .double(fallback), "number currentValue on empty defaults is its declared default")
+            field.setValue(.double(range.upperBound + 1), in: defaults)
+            expect(field.currentValue(in: defaults) == .double(range.upperBound), "number controls clamp values to their declared range")
+            expect(defaults.double(forKey: key) == range.upperBound, "number controls persist the bounded value")
         case .choice(let key, _, let options, let fallback):
             expect(field.currentValue(in: defaults) == .string(fallback), "choice currentValue on empty defaults is its declared default")
             let valid = options.first { $0 != fallback } ?? fallback
@@ -7615,36 +7609,40 @@ do {
 
     // Group 8: SettingsSchema wiring.
     let sections = SettingsSchema.sections()
-    guard let zonesSection = sections.first(where: { $0.id == "zones" }) else {
-        fputs("FAIL: zoneBoundsConfig group8: no zones section in SettingsSchema\n", stderr)
+    guard let zonesSection = sections.first(where: { $0.id == "canvasAndZones" }),
+          let advancedSection = sections.first(where: { $0.id == "advanced" }) else {
+        fputs("FAIL: zoneBoundsConfig group8: missing Canvas & Zones or Advanced section\n", stderr)
         Foundation.exit(1)
     }
-    func field(key: String) -> SettingsField? {
-        zonesSection.fields.first {
-            if case let .text(k, _, _) = $0 { return k == key }
-            return false
-        }
+    func numberField(key: String, in section: SettingsSection) -> SettingsField? {
+        section.fields.first { $0.key == key }
     }
-    guard let paddingField = field(key: ZoneBoundsConfig.paddingKey) else {
-        fputs("FAIL: zoneBoundsConfig group8: missing paddingKey in general section\n", stderr)
+    guard let paddingField = numberField(key: ZoneBoundsConfig.paddingKey, in: zonesSection) else {
+        fputs("FAIL: zoneBoundsConfig group8: missing padding in Canvas & Zones\n", stderr)
         Foundation.exit(1)
     }
-    guard let minWField = field(key: ZoneBoundsConfig.emptyMinWidthKey) else {
-        fputs("FAIL: zoneBoundsConfig group8: missing emptyMinWidthKey in general section\n", stderr)
+    guard let minWField = numberField(key: ZoneBoundsConfig.emptyMinWidthKey, in: advancedSection) else {
+        fputs("FAIL: zoneBoundsConfig group8: missing minimum width in Advanced\n", stderr)
         Foundation.exit(1)
     }
-    guard let minHField = field(key: ZoneBoundsConfig.emptyMinHeightKey) else {
-        fputs("FAIL: zoneBoundsConfig group8: missing emptyMinHeightKey in general section\n", stderr)
+    guard let minHField = numberField(key: ZoneBoundsConfig.emptyMinHeightKey, in: advancedSection) else {
+        fputs("FAIL: zoneBoundsConfig group8: missing minimum height in Advanced\n", stderr)
         Foundation.exit(1)
     }
-    if case let .text(_, _, d) = paddingField {
-        expect(d == String(Int(ZoneBoundsConfig.defaultPadding)), "zoneBoundsConfig group8: paddingField default mismatch: \(d)")
+    if case let .number(_, _, _, value, unit, _) = paddingField {
+        expect(value == ZoneBoundsConfig.defaultPadding && unit == "pt", "zoneBoundsConfig group8: padding control metadata")
+    } else {
+        expect(false, "zoneBoundsConfig group8: padding must use a bounded numeric control")
     }
-    if case let .text(_, _, d) = minWField {
-        expect(d == String(Int(ZoneBoundsConfig.defaultEmptyMinWidth)), "zoneBoundsConfig group8: emptyMinWidthField default mismatch: \(d)")
+    if case let .number(_, _, _, value, unit, _) = minWField {
+        expect(value == ZoneBoundsConfig.defaultEmptyMinWidth && unit == "pt", "zoneBoundsConfig group8: width control metadata")
+    } else {
+        expect(false, "zoneBoundsConfig group8: minimum width must use a bounded numeric control")
     }
-    if case let .text(_, _, d) = minHField {
-        expect(d == String(Int(ZoneBoundsConfig.defaultEmptyMinHeight)), "zoneBoundsConfig group8: emptyMinHeightField default mismatch: \(d)")
+    if case let .number(_, _, _, value, unit, _) = minHField {
+        expect(value == ZoneBoundsConfig.defaultEmptyMinHeight && unit == "pt", "zoneBoundsConfig group8: height control metadata")
+    } else {
+        expect(false, "zoneBoundsConfig group8: minimum height must use a bounded numeric control")
     }
 }
 
@@ -11469,8 +11467,8 @@ func runCanvasAutoLayoutChecks() {
     let migratedV5 = try! JSONCodec.makeDecoder().decode(
         WorkspaceDocument.self,
         from: JSONSerialization.data(withJSONObject: v5Object, options: [.sortedKeys]))
-    expect(migratedV5.schemaVersion == 6 && migratedV5.zones[0].autoLayoutMode == .inherit,
-           "jelly: schema v5 migrates to v6 with a per-zone inherit override")
+    expect(migratedV5.schemaVersion == WorkspaceDocument.currentSchemaVersion && migratedV5.zones[0].autoLayoutMode == .inherit,
+           "jelly: schema v5 migrates to current with a per-zone inherit override")
     var persistedEnabled = migratedV5
     persistedEnabled.zones[0].autoLayoutMode = .enabled
     let reloadedEnabled = try! JSONCodec.makeDecoder().decode(
@@ -11495,6 +11493,9 @@ runAgentRecordChecks()
 // Queue 91 spatial awareness: provider-neutral Home / Where / What contracts,
 // preserving legacy cwd and the host-local I5 boundary before UI/inference work.
 runAgentLocationContractChecks()
+try runDirectoryScopeChecks()
+try runProductRegistryChecks()
+try runOnboardingProgressChecks()
 
 // Queue 91 P2: host-local What observations stay separate from Codable
 // runtime/activity streams and never infer Where from tool arguments.

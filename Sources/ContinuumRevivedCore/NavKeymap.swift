@@ -22,14 +22,13 @@ public struct KeyChord: Equatable, Hashable, Sendable {
 
     private static func keyName(for keyCode: UInt16) -> String {
         switch keyCode {
-        case 3: return "F"
-        case 14: return "E"
-        case 15: return "R"
-        case 37: return "L"
-        case 30: return "]"
-        case 33: return "["
-        case 40: return "K"
-        case 43: return ","
+        case 0: return "A"; case 1: return "S"; case 2: return "D"; case 3: return "F"
+        case 4: return "H"; case 5: return "G"; case 6: return "Z"; case 7: return "X"
+        case 8: return "C"; case 9: return "V"; case 11: return "B"; case 12: return "Q"
+        case 13: return "W"; case 14: return "E"; case 15: return "R"; case 16: return "Y"
+        case 17: return "T"; case 31: return "O"; case 32: return "U"; case 34: return "I"
+        case 35: return "P"; case 37: return "L"; case 38: return "J"; case 40: return "K"
+        case 45: return "N"; case 46: return "M"
         case 18: return "1"
         case 19: return "2"
         case 20: return "3"
@@ -42,6 +41,13 @@ public struct KeyChord: Equatable, Hashable, Sendable {
         case 28: return "8"
         case 25: return "9"
         case 29: return "0"
+        case 24: return "="; case 27: return "-"; case 30: return "]"; case 33: return "["
+        case 39: return "'"; case 41: return ";"; case 42: return "\\"; case 43: return ","
+        case 44: return "/"; case 47: return "."; case 50: return "`"
+        case 36, 76: return "Return"
+        case 48: return "Tab"
+        case 51: return "Delete"
+        case 53: return "Esc"
         case 123: return "←"
         case 124: return "→"
         case 125: return "↓"
@@ -89,14 +95,13 @@ public struct KeyChord: Equatable, Hashable, Sendable {
     /// Canonical, parseable name for a key code. Inverse of `keyCode(forSerializedName:)`.
     static func serializedName(for keyCode: UInt16) -> String {
         switch keyCode {
-        case 3: return "f"
-        case 14: return "e"
-        case 15: return "r"
-        case 37: return "l"
-        case 30: return "]"
-        case 33: return "["
-        case 40: return "k"
-        case 43: return ","
+        case 0: return "a"; case 1: return "s"; case 2: return "d"; case 3: return "f"
+        case 4: return "h"; case 5: return "g"; case 6: return "z"; case 7: return "x"
+        case 8: return "c"; case 9: return "v"; case 11: return "b"; case 12: return "q"
+        case 13: return "w"; case 14: return "e"; case 15: return "r"; case 16: return "y"
+        case 17: return "t"; case 31: return "o"; case 32: return "u"; case 34: return "i"
+        case 35: return "p"; case 37: return "l"; case 38: return "j"; case 40: return "k"
+        case 45: return "n"; case 46: return "m"
         case 18: return "1"
         case 19: return "2"
         case 20: return "3"
@@ -107,26 +112,38 @@ public struct KeyChord: Equatable, Hashable, Sendable {
         case 28: return "8"
         case 25: return "9"
         case 29: return "0"
+        case 24: return "="; case 27: return "-"; case 30: return "]"; case 33: return "["
+        case 39: return "'"; case 41: return ";"; case 42: return "\\"; case 43: return ","
+        case 44: return "/"; case 47: return "."; case 50: return "`"
+        case 36, 76: return "return"
+        case 48: return "tab"
+        case 51: return "delete"
+        case 53: return "escape"
         case 123: return "left"
         case 124: return "right"
         case 125: return "down"
         case 126: return "up"
         case 49: return "space"
-        case 5: return "g"
         default: return "key\(keyCode)"
         }
     }
 
     static func keyCode(forSerializedName name: String) -> UInt16? {
         switch name {
-        case "f": return 3
-        case "e": return 14
-        case "r": return 15
-        case "l": return 37
+        case "a": return 0; case "s": return 1; case "d": return 2; case "f": return 3
+        case "h": return 4; case "g": return 5; case "z": return 6; case "x": return 7
+        case "c": return 8; case "v": return 9; case "b": return 11; case "q": return 12
+        case "w": return 13; case "e": return 14; case "r": return 15; case "y": return 16
+        case "t": return 17; case "o": return 31; case "u": return 32; case "i": return 34
+        case "p": return 35; case "l": return 37; case "j": return 38; case "k": return 40
+        case "n": return 45; case "m": return 46
         case "]", "rightbracket": return 30
         case "[", "leftbracket": return 33
-        case ",", "comma": return 43
-        case "k": return 40
+        case "=", "equals": return 24; case "-", "minus": return 27
+        case ",", "comma": return 43; case "/", "slash": return 44
+        case "'", "quote": return 39; case ";", "semicolon": return 41
+        case "\\", "backslash": return 42; case ".", "period": return 47
+        case "`", "backtick": return 50
         case "1": return 18
         case "2": return 19
         case "3": return 20
@@ -142,7 +159,10 @@ public struct KeyChord: Equatable, Hashable, Sendable {
         case "down", "arrowdown": return 125
         case "up", "arrowup": return 126
         case "space": return 49
-        case "g": return 5
+        case "return", "enter": return 36
+        case "tab": return 48
+        case "delete", "backspace": return 51
+        case "escape", "esc": return 53
         default: return nil
         }
     }

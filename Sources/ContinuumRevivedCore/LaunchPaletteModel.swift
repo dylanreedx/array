@@ -35,6 +35,12 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     case jumpToTile(UUID)
     case jumpToZone(UUID)
     case createZone
+    case renameCurrentZone
+    case pickCurrentZoneColor
+    case changeCurrentZoneScope
+    case toggleCurrentZoneAutoLayout
+    case tidyCurrentZone
+    case replayGettingStarted
 
     public var displayName: String {
         switch self {
@@ -92,6 +98,12 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return "Jump to Zone…"
         case .createZone:
             return "Create Zone…"
+        case .renameCurrentZone: return "Rename This Zone…"
+        case .pickCurrentZoneColor: return "Color This Zone…"
+        case .changeCurrentZoneScope: return "Change This Zone Project/Home…"
+        case .toggleCurrentZoneAutoLayout: return "Toggle This Zone Auto Layout"
+        case .tidyCurrentZone: return "Tidy This Zone"
+        case .replayGettingStarted: return "Replay Getting Started"
         }
     }
 
@@ -151,6 +163,12 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return ["jump", "zone", "go"]
         case .createZone:
             return ["create", "new", "zone"]
+        case .renameCurrentZone: return ["this", "zone", "rename", "name"]
+        case .pickCurrentZoneColor: return ["this", "zone", "color", "colour", "palette"]
+        case .changeCurrentZoneScope: return ["this", "zone", "project", "home", "scope", "directory"]
+        case .toggleCurrentZoneAutoLayout: return ["this", "zone", "auto", "layout", "toggle"]
+        case .tidyCurrentZone: return ["this", "zone", "tidy", "arrange", "layout"]
+        case .replayGettingStarted: return ["replay", "getting", "started", "onboarding", "learn", "tutorial"]
         }
     }
 }
@@ -529,23 +547,44 @@ public enum LaunchPaletteModel {
             return rankedSections(from: items)
         }
 
-        let allItems = rows.map(presentation(for:))
+        // The empty-query home is a launch surface, not an availability report.
+        // Missing profiles remain searchable (with their explanation), but they
+        // must never consume one of the twelve recognition-first home slots.
+        let allItems = rows.filter(\.isSelectable).map(presentation(for:))
         let byID = allItems.reduce(into: [String: CommandCenterItem]()) { result, item in
             if result[item.stableID] == nil { result[item.stableID] = item }
         }
         let needsYouItems = Array(allItems.filter { $0.category == .needsYou }.prefix(defaultItemLimit))
         let needsYouIDs = Set(needsYouItems.map(\.stableID))
+        // Keep the five actions that establish Array's basic workflow visible in
+        // a stable order. A terminal is a dynamic launch profile, so find it by
+        // its product-facing title rather than assuming a profile id.
+        let pinnedStableIDs = [
+            "action:new-agent",
+            allItems.first(where: { item in
+                if case .profile = item.row { return item.title == "Terminal" }
+                return false
+            })?.stableID,
+            "action:new-browser",
+            "action:new-note",
+            "action:create-zone",
+        ].compactMap { $0 }
+        let pinnedItems = pinnedStableIDs.compactMap { byID[$0] }
+            .filter { !needsYouIDs.contains($0.stableID) }
+        let pinnedIDs = Set(pinnedItems.map(\.stableID))
+
         let recentItems = Array(sanitizeRecentIDs(recentIDs, rows: rows)
             .compactMap { byID[$0] }
-            .filter { !needsYouIDs.contains($0.stableID) }
-            .prefix(max(0, defaultItemLimit - needsYouItems.count)))
-        var remaining = max(0, defaultItemLimit - needsYouItems.count - recentItems.count)
+            .filter { !needsYouIDs.contains($0.stableID) && !pinnedIDs.contains($0.stableID) }
+            .prefix(max(0, defaultItemLimit - needsYouItems.count - pinnedItems.count)))
+        var remaining = max(0, defaultItemLimit - needsYouItems.count - pinnedItems.count - recentItems.count)
         var homeItems: [CommandCenterItem] = []
         for category in [CommandCenterCategory.create, .models, .workspacesAndProjects, .actions] {
             let candidates = allItems.filter {
                 let candidate = $0
                 return candidate.category == category
                     && candidate.isDefaultVisible
+                    && !pinnedIDs.contains(candidate.stableID)
                     && !recentItems.contains(where: { $0.stableID == candidate.stableID })
             }
             let slice = Array(candidates.prefix(remaining))
@@ -557,7 +596,7 @@ public enum LaunchPaletteModel {
         var result: [CommandCenterSection] = []
         if !needsYouItems.isEmpty { result.append(CommandCenterSection(category: .needsYou, items: needsYouItems)) }
         if !recentItems.isEmpty { result.append(CommandCenterSection(category: .recent, items: recentItems)) }
-        result.append(contentsOf: sections(from: homeItems, order: [.create, .models, .workspacesAndProjects, .actions]))
+        result.append(contentsOf: sections(from: pinnedItems + homeItems, order: [.create, .models, .workspacesAndProjects, .actions]))
         return result
     }
 
@@ -629,7 +668,7 @@ public enum LaunchPaletteModel {
     }
 
     public static func sanitizeRecentIDs(_ ids: [String], rows: [LaunchPaletteRow]) -> [String] {
-        let safe = rows.map(presentation(for:)).filter(\.isSafeRecent).reduce(into: [String: CommandCenterItem]()) { result, item in
+        let safe = rows.filter(\.isSelectable).map(presentation(for:)).filter(\.isSafeRecent).reduce(into: [String: CommandCenterItem]()) { result, item in
             result[item.stableID] = item
         }
         var seen = Set<String>()
@@ -707,6 +746,12 @@ public enum LaunchPaletteModel {
         case let .jumpToTile(id): return item(row, .agentsAndTiles, "Tile", nil, "rectangle.on.rectangle", ["jump"], false, true, "tile:\(id.uuidString)")
         case let .jumpToZone(id): return item(row, .agentsAndTiles, "Zone", nil, "square.dashed", ["jump"], false, true, "zone:\(id.uuidString)")
         case .createZone: return item(row, .create, "Zone", "Group related canvas work", "square.dashed", ["new", "create"], true, true, "action:create-zone")
+        case .renameCurrentZone: return item(row, .actions, "Rename", "This Zone", "pencil", ["zone", "name"], true, false, "zone-action:rename")
+        case .pickCurrentZoneColor: return item(row, .actions, "Color", "This Zone", "paintpalette", ["zone", "colour"], true, false, "zone-action:color")
+        case .changeCurrentZoneScope: return item(row, .actions, "Change Project/Home", "This Zone · affects future filesystem tiles", "folder", ["zone", "scope", "directory"], true, false, "zone-action:scope")
+        case .toggleCurrentZoneAutoLayout: return item(row, .actions, "Auto Layout", "This Zone", "rectangle.3.group", ["zone", "toggle"], true, false, "zone-action:auto-layout")
+        case .tidyCurrentZone: return item(row, .actions, "Tidy Now", "This Zone", "wand.and.stars", ["zone", "arrange"], true, false, "zone-action:tidy")
+        case .replayGettingStarted: return item(row, .actions, "Replay Getting Started", "Reset learning tasks without changing the canvas", "arrow.counterclockwise", ["onboarding", "tutorial", "learn"], false, false, "action:replay-getting-started")
         case .tidyCanvas: return item(row, .actions, "Tidy canvas", "Restore spacing without changing tile sizes", "rectangle.3.group", ["tidy", "arrange", "layout"], true, true, "action:tidy-canvas")
         }
     }

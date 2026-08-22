@@ -136,6 +136,10 @@ public enum Op: Sendable, Equatable {
     case setZoneName(id: UUID, name: String)
     case setZoneColor(id: UUID, color: String)
     case setZoneCollapsed(id: UUID, collapsed: Bool)
+    /// Atomic project + Home write. `setZoneProjectId` remains decodeable for
+    /// legacy logs, but new producers must use this operation so replicas can
+    /// never observe a project paired with another write's Home.
+    case setZoneScope(id: UUID, projectId: UUID?, homeRelativePath: String?)
     case setZoneProjectId(id: UUID, projectId: UUID?)
     case setZoneAutoLayoutMode(id: UUID, mode: ZoneAutoLayoutMode)
 
@@ -179,6 +183,7 @@ extension Op: Codable {
         case setZoneName = "setZoneName"
         case setZoneColor = "setZoneColor"
         case setZoneCollapsed = "setZoneCollapsed"
+        case setZoneScope = "setZoneScope"
         case setZoneProjectId = "setZoneProjectId"
         case setZoneAutoLayoutMode = "setZoneAutoLayoutMode"
         case setZonePosition = "setZonePosition"
@@ -209,6 +214,9 @@ extension Op: Codable {
     private enum SetZoneNameKeys: String, CodingKey { case id = "id", name = "name" }
     private enum SetZoneColorKeys: String, CodingKey { case id = "id", color = "color" }
     private enum SetZoneCollapsedKeys: String, CodingKey { case id = "id", collapsed = "collapsed" }
+    private enum SetZoneScopeKeys: String, CodingKey {
+        case id = "id", projectId = "projectId", homeRelativePath = "homeRelativePath"
+    }
     private enum SetZoneProjectIdKeys: String, CodingKey { case id = "id", projectId = "projectId" }
     private enum SetZoneAutoLayoutModeKeys: String, CodingKey { case id = "id", mode = "mode" }
     private enum SetZonePositionKeys: String, CodingKey { case id = "id", position = "position" }
@@ -295,6 +303,13 @@ extension Op: Codable {
         case .setZoneCollapsed:
             let p = try c.nestedContainer(keyedBy: SetZoneCollapsedKeys.self, forKey: .setZoneCollapsed)
             self = .setZoneCollapsed(id: try p.decode(UUID.self, forKey: .id), collapsed: try p.decode(Bool.self, forKey: .collapsed))
+        case .setZoneScope:
+            let p = try c.nestedContainer(keyedBy: SetZoneScopeKeys.self, forKey: .setZoneScope)
+            self = .setZoneScope(
+                id: try p.decode(UUID.self, forKey: .id),
+                projectId: try p.decodeIfPresent(UUID.self, forKey: .projectId),
+                homeRelativePath: try p.decodeIfPresent(String.self, forKey: .homeRelativePath)
+            )
         case .setZoneProjectId:
             let p = try c.nestedContainer(keyedBy: SetZoneProjectIdKeys.self, forKey: .setZoneProjectId)
             self = .setZoneProjectId(id: try p.decode(UUID.self, forKey: .id), projectId: try p.decodeIfPresent(UUID.self, forKey: .projectId))
@@ -380,6 +395,11 @@ extension Op: Codable {
             var p = c.nestedContainer(keyedBy: SetZoneCollapsedKeys.self, forKey: .setZoneCollapsed)
             try p.encode(id, forKey: .id)
             try p.encode(collapsed, forKey: .collapsed)
+        case let .setZoneScope(id, projectId, homeRelativePath):
+            var p = c.nestedContainer(keyedBy: SetZoneScopeKeys.self, forKey: .setZoneScope)
+            try p.encode(id, forKey: .id)
+            try p.encodeIfPresent(projectId, forKey: .projectId)
+            try p.encodeIfPresent(homeRelativePath, forKey: .homeRelativePath)
         case let .setZoneProjectId(id, projectId):
             var p = c.nestedContainer(keyedBy: SetZoneProjectIdKeys.self, forKey: .setZoneProjectId)
             try p.encode(id, forKey: .id)

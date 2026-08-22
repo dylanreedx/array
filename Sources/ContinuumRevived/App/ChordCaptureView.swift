@@ -48,6 +48,14 @@ final class ChordCaptureView: NSView {
         window?.makeFirstResponder(self)
     }
 
+    func showValidationError(_ message: String) {
+        promptLabel.stringValue = message
+        promptLabel.textColor = .systemRed
+        promptLabel.toolTip = message
+        NSSound.beep()
+        window?.makeFirstResponder(self)
+    }
+
     // Capturing both `keyDown` and `performKeyEquivalent` ensures we intercept
     // command-modified chords (which the responder chain routes through key
     // equivalents) as well as plain keys.
