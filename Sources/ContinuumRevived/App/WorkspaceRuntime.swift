@@ -472,10 +472,45 @@ final class WorkspaceRuntime {
     @discardableResult
     func openDocument(_ request: DocumentOpenRequest) -> FileOpenOutcome {
         let title = URL(fileURLWithPath: request.location.path).lastPathComponent
-        let sourceZoneId = request.sourceTileId.flatMap { canvasView?.zoneId(containing: $0) }
-        let sourceProjectId = sourceZoneId.flatMap { zoneId in
+        var sourceZoneId = request.sourceTileId.flatMap { canvasView?.zoneId(containing: $0) }
+        var sourceProjectId = sourceZoneId.flatMap { zoneId in
             document.zones.first(where: { $0.zoneId == zoneId })?.projectId
+        } ?? request.location.projectId
+
+        // A transcript can remain visible while its project zone is not the
+        // workspace's active zone (for example, the user last clicked an ambient
+        // group). The old route consulted only the active controller, so a valid
+        // checkout-scoped link incorrectly reported that no project was open.
+        // Resolve the owning project from the source tile / durable document
+        // location and make that zone the active creation target first.
+        if let projectId = sourceProjectId,
+           !document.zones.contains(where: { $0.projectId == projectId }),
+           let projectWorkspaceId = (try? registryStore.loadOrEmpty())?.projects
+            .first(where: { $0.id == projectId && !$0.missing })?.workspaceId,
+           projectWorkspaceId != workspaceId {
+            do {
+                try switchWorkspace(to: projectWorkspaceId)
+            } catch {
+                return .failure("Couldn't open \(title) in its workspace: \(error.localizedDescription)")
+            }
+            sourceZoneId = request.sourceTileId.flatMap { canvasView?.zoneId(containing: $0) }
+            sourceProjectId = sourceZoneId.flatMap { zoneId in
+                document.zones.first(where: { $0.zoneId == zoneId })?.projectId
+            } ?? request.location.projectId
         }
+
+        if let projectId = sourceProjectId,
+           let projectZoneId = sourceZoneId
+            ?? document.zones.first(where: { $0.projectId == projectId })?.zoneId,
+           registry.controller(for: projectId)?.tileSpawner == nil,
+           let canvasView {
+            document.lastActiveZoneId = projectZoneId
+            canvasView.setActiveProjectZone(projectZoneId)
+            attachActiveControllerUI(canvasView: canvasView)
+            try? persistWorkspaceDocument()
+            sourceZoneId = projectZoneId
+        }
+
         let spawner = sourceProjectId.flatMap { registry.controller(for: $0)?.tileSpawner }
             ?? activeController?.tileSpawner
         guard let spawner else {
@@ -654,7 +689,10 @@ final class WorkspaceRuntime {
             layers.append(layer)
         }
 
-        // 4. Swap canvas: setZones unregisters old adapters + registers new ones (T05).
+        // 4. Swap canvas. The first switch also retires the boot-only flat
+        // compatibility scene so tiles from the departing project cannot remain
+        // visible or navigable in an unrelated (including empty) workspace.
+        canvasView?.retireFlatCompatibilityScene()
         canvasView?.setZones(layers)
         installedLayers = layers
 

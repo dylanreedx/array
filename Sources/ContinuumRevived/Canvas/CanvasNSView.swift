@@ -85,6 +85,11 @@ final class CanvasNSView: NSView, TokenThemed {
     let activeZone: ZonePlacement?
     private(set) var zoneRenderModels: [ZoneRenderModel]
     private var tileViews: [UUID: TileNSView] = [:]
+    /// The boot project initially renders through the legacy flat canvas. Once
+    /// an in-process workspace switch installs ZoneLayers, that boot scene is a
+    /// departed workspace and must no longer participate in rendering,
+    /// navigation, hit-testing, or document identity.
+    private var flatCompatibilitySceneActive = true
     private var agentLineageOverlay: AgentLineageOverlayView?
     private var contextualAgentLineage: (parentTileID: UUID, childTileID: UUID)?
     private var showsZoneChrome: Bool
@@ -1570,7 +1575,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Callers must NOT retain the returned reference — the canvas may swap
     /// the underlying view at any time and a cached pointer will go stale.
     func tileView(for tileId: UUID) -> TileNSView? {
-        if let v = tileViews[tileId] { return v }
+        if flatCompatibilitySceneActive, let v = tileViews[tileId] { return v }
         for layer in zoneLayers {
             if let v = layer.tileViews[tileId] { return v }
         }
@@ -2357,7 +2362,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// re-applies immediately.
     private func applyFocusBorder() {
         let config = FocusBorderConfig.resolvedFromDefaults(defaults: focusBorderDefaults)
-        guard config.enabled, let targetId = borderedTileId, let view = tileViews[targetId] else {
+        guard config.enabled, let targetId = borderedTileId, let view = tileView(for: targetId) else {
             focusBorderOverlay?.hide()
             return
         }
@@ -2451,7 +2456,7 @@ final class CanvasNSView: NSView, TokenThemed {
             attentionBorderOverlays.removeValue(forKey: tileId)
         }
         for tileId in attentionTileIds.sorted(by: { $0.uuidString < $1.uuidString }) {
-            guard let view = tileViews[tileId] else { continue }
+            guard let view = tileView(for: tileId) else { continue }
             let overlay = attentionBorderOverlays[tileId] ?? FocusBorderOverlayView(frame: .zero)
             overlay.setMarchingSuspended(overlayAnimationsSuspended)
             attentionBorderOverlays[tileId] = overlay
@@ -2527,13 +2532,13 @@ final class CanvasNSView: NSView, TokenThemed {
     /// the bordered tile. Called from layout paths so the border tracks the tile
     /// on pan/zoom/move/resize. No-op when `tileId` is not bordered.
     private func repositionFocusBorderIfNeeded(for tileId: UUID) {
-        guard tileId == borderedTileId, let view = tileViews[tileId] else { return }
+        guard tileId == borderedTileId, let view = tileView(for: tileId) else { return }
         showOverlayIfOnViewport(focusBorderOverlayView(), around: tileRectInCanvasSpace(view))
     }
 
     private func repositionAttentionBorderIfNeeded(for tileId: UUID) {
         guard attentionTileIds.contains(tileId),
-              let view = tileViews[tileId],
+              let view = tileView(for: tileId),
               let overlay = attentionBorderOverlays[tileId] else { return }
         showOverlayIfOnViewport(overlay, around: tileRectInCanvasSpace(view))
     }
@@ -2548,7 +2553,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// bordered tile's outset screen frame. Drives the `--focus-border-check`.
     var qaFocusBorderActive: Bool {
         guard let targetId = borderedTileId,
-              let view = tileViews[targetId],
+              let view = tileView(for: targetId),
               let overlay = focusBorderOverlay,
               overlay.qaIsAnimating else { return false }
         return overlay.frame == tileRectInCanvasSpace(view).insetBy(dx: -overlay.gap, dy: -overlay.gap)
@@ -4094,7 +4099,7 @@ final class CanvasNSView: NSView, TokenThemed {
     func navigationTileSnapshots() -> [NavigationTileSnapshot] {
         var snapshots: [NavigationTileSnapshot] = []
         var seen = Set<UUID>()
-        for tile in canvasState.tiles {
+        for tile in flatCompatibilitySceneActive ? canvasState.tiles : [] {
             guard seen.insert(tile.id).inserted else { continue }
             let zone = membershipPlacement(of: tile.id)
             guard zone?.collapsed != true else { continue }
@@ -5040,6 +5045,26 @@ final class CanvasNSView: NSView, TokenThemed {
         tileSurfaceStore.prune(keeping: Set(tileViewsInVisualOrder.map { $0.tile.id }))
     }
 
+    /// Permanently retire the boot-only flat scene before the first workspace
+    /// swap. Its model remains intact for its owning ProjectStore, but none of
+    /// its views or indexes may leak into the arriving workspace canvas.
+    func retireFlatCompatibilityScene() {
+        guard flatCompatibilitySceneActive else { return }
+        flatCompatibilitySceneActive = false
+        for (_, view) in tileViews {
+            focusBroker?.unregister(view.focusSurfaceID)
+            releaseSurfaceResidency(of: view)
+            view.removeFromSuperview()
+        }
+        tileViews.removeAll()
+        tileZoneMembership.removeAll()
+        liveZones.removeAll()
+        zoneRenderModels.removeAll()
+        zoneDisplayByZoneId.removeAll()
+        canvasState.lastActiveTileId = nil
+        clearFocusBorder()
+    }
+
     /// Add or replace a single layer by zoneId. Unregisters old tile adapters before registering new ones.
     func upsertZoneLayer(_ layer: ZoneLayer) {
         let zoneId = layer.placement.zoneId
@@ -5157,14 +5182,15 @@ final class CanvasNSView: NSView, TokenThemed {
     /// `setZones` installs layers.
     func projectTiles() -> [Tile] {
         if let activeProjectZoneId, let tiles = tiles(inZone: activeProjectZoneId) { return tiles }
-        return canvasState.tiles
+        return flatCompatibilitySceneActive ? canvasState.tiles : []
     }
 
     /// Every currently installed tile model across the compatibility canvas and
     /// all zone layers. Document identity is workspace-wide, not active-zone-only.
     func allWorkspaceTiles() -> [Tile] {
         var seen = Set<UUID>()
-        return (canvasState.tiles + zoneLayers.flatMap(\.tiles)).filter { seen.insert($0.id).inserted }
+        let flatTiles = flatCompatibilitySceneActive ? canvasState.tiles : []
+        return (flatTiles + zoneLayers.flatMap(\.tiles)).filter { seen.insert($0.id).inserted }
     }
 
     /// Resolve one tile from the model that currently owns it. App-level
@@ -5177,7 +5203,9 @@ final class CanvasNSView: NSView, TokenThemed {
         }).first {
             return tile
         }
-        return canvasState.tiles.first(where: { $0.id == tileId })
+        return flatCompatibilitySceneActive
+            ? canvasState.tiles.first(where: { $0.id == tileId })
+            : nil
     }
 
     /// Union of every installed zone representing one registered project. The
@@ -5202,7 +5230,7 @@ final class CanvasNSView: NSView, TokenThemed {
 
     func zoneId(containing tileId: UUID) -> UUID? {
         zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == tileId }) })?.placement.zoneId
-            ?? canvasState.tiles.first(where: { $0.id == tileId })?.zoneId
+            ?? (flatCompatibilitySceneActive ? canvasState.tiles.first(where: { $0.id == tileId })?.zoneId : nil)
     }
 
     /// Where `installProjectTile` actually put a tile. Callers persist through the
@@ -8630,7 +8658,42 @@ final class CanvasNSView: NSView, TokenThemed {
         let expectedCustomFrame = viewA.frame.insetBy(dx: -customGap, dy: -customGap)
         try expect(canvas.qaFocusBorderFrame == expectedCustomFrame, "custom gap \(customGap) should outset the overlay by \(customGap); expected \(expectedCustomFrame), got \(String(describing: canvas.qaFocusBorderFrame))")
 
-        // 7) Deleting the BORDERED tile must take its overlay with it. Last, because
+        // 7) A production workspace tile lives in a ZoneLayer, not the legacy
+        //    flat tileViews table. Focusing it must use the same marching-ants
+        //    overlay and coordinate conversion.
+        let layerZoneId = UUID(uuidString: "00000000-0000-0000-0000-0000000005C0")!
+        let layerTileId = UUID(uuidString: "00000000-0000-0000-0000-0000000005C1")!
+        let layerTile = Tile(
+            id: layerTileId, kind: .note, title: "BORDER_LAYER",
+            frame: TileFrame(x: 40, y: 40, width: 240, height: 160),
+            zPosition: .fromLegacyRank(1), zoneId: layerZoneId,
+            runtimeRef: nil, metadata: TileMetadata()
+        )
+        let layerPlacement = ZonePlacement(
+            zoneId: layerZoneId, projectId: UUID(),
+            origin: ZonePoint(x: 80, y: 80), size: ZoneSize(width: 360, height: 240),
+            color: "mint", collapsed: false, hydrationPolicy: .automatic
+        )
+        let layer = ZoneLayer(
+            placement: layerPlacement,
+            renderModel: ZoneRenderModel(placement: layerPlacement, displayName: "Layer"),
+            tiles: [layerTile]
+        )
+        let layerView = DescriptorTileNSView(tile: layerTile)
+        layer.tileViews[layerTileId] = layerView
+        canvas.upsertZoneLayer(layer)
+        canvas.layoutSubtreeIfNeeded()
+        let layerTitlePoint = layerView.convert(
+            NSPoint(x: layerView.bounds.midX, y: TileNSView.titleBarHeight / 2), to: nil)
+        AppDelegate.routeTileClickFocus(at: layerTitlePoint, in: canvas, focusBroker: focusBroker)
+        let expectedLayerFrame = layerView.convert(layerView.bounds, to: canvas)
+            .insetBy(dx: -customGap, dy: -customGap)
+        try expect(canvas.qaFocusBorderActive, "focusing a ZoneLayer tile must show and animate the focus border")
+        try expect(canvas.borderedTileId == layerTileId, "the ZoneLayer tile must become the bordered tile")
+        try expect(canvas.qaFocusBorderFrame == expectedLayerFrame,
+                   "the focus border must track a ZoneLayer tile in canvas coordinates; expected \(expectedLayerFrame), got \(String(describing: canvas.qaFocusBorderFrame))")
+
+        // 8) Deleting the BORDERED tile must take its overlay with it. Last, because
         //    it destroys A.
         //
         //    Reported from the real canvas as a "dead zone I can see but can't
@@ -8644,6 +8707,7 @@ final class CanvasNSView: NSView, TokenThemed {
         //    visibility instead of `borderedTileId` — the old accessor consulted the
         //    very bookkeeping that was wrong, so it reported nil while the rectangle
         //    was plainly on screen. That is why no gate caught this.
+        _ = focusBroker.requestFocus(.tile(tileAId), reason: .userClick)
         try expect(canvas.qaFocusBorderActive, "precondition: A is bordered before it is deleted")
         let frameBeforeDelete = canvas.qaFocusBorderFrame
         canvas.removeTile(id: tileAId)
@@ -8684,6 +8748,8 @@ final class CanvasNSView: NSView, TokenThemed {
             "tileAScreenFrame": rectDict(viewA.frame),
             "expectedAOutsetFrame": rectDict(expectedAFrame),
             "expectedBOutsetFrame": rectDict(expectedBFrame),
+            "layerTileId": layerTileId.uuidString,
+            "expectedLayerOutsetFrame": rectDict(expectedLayerFrame),
             "frozenSnapshotDistinctColors": metrics.distinctSampledColors,
             "frozenSnapshotSize": ["width": metrics.width, "height": metrics.height],
             "frozenSnapshotIsBlank": metrics.isBlank,

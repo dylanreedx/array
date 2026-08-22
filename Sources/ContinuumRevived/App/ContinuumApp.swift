@@ -3881,9 +3881,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self.canvasView = canvasView
 
             // Wrap the boot controller in WorkspaceRuntime (T06).
-            let bootRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { _ in
-                throw NSError(domain: "WorkspaceRuntime", code: 1,
-                              userInfo: [NSLocalizedDescriptionKey: "unexpected acquire on boot registry — T08 wires this"])
+            let bootRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { [weak self] projectId in
+                guard let self else {
+                    throw NSError(domain: "WorkspaceRuntime", code: 1,
+                                  userInfo: [NSLocalizedDescriptionKey: "Array closed while opening a workspace project."])
+                }
+                let liveRegistry = try registryStore.loadOrEmpty()
+                guard let entry = liveRegistry.projects.first(where: { $0.id == projectId && !$0.missing }) else {
+                    throw NSError(domain: "WorkspaceRuntime", code: 2,
+                                  userInfo: [NSLocalizedDescriptionKey: "That workspace's project is no longer registered."])
+                }
+                return try self.presentLockContentionUXIfNeeded(
+                    projectRoot: URL(fileURLWithPath: entry.rootPath, isDirectory: true),
+                    registry: liveRegistry
+                )
             })
             if let activeWorkspace {
                 self.workspaceRuntime = WorkspaceRuntime(
