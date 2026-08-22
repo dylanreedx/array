@@ -615,6 +615,12 @@ run_app_check .build/debug/Array --zone-spawner-coverage-check
 # stale-location timer. turnCapabilityObservers is flat and un-keyed, so one
 # leaked entry runs for every agent in the app, not just its own.
 run_app_check .build/debug/Array --zone-tile-detach-sweep-check
+# M1.6 (.plans/46): revealing a headless agent from the inbox used the app-wide
+# spawner, so the tile landed in the ACTIVE project while the agent's record went
+# on naming a different one -- the old code logged that mismatch on stderr and
+# then committed it. Behavioural on purpose: the pre-existing coverage of this
+# method is a source scan, which stays green while the behaviour is inverted.
+run_app_check .build/debug/Array --inbox-reveal-project-check
 # .plans/15: opening a project file resolves the ACTIVE project/zone at invocation
 # time. Before the repair, an open after an in-process workspace switch installed
 # into the departed zone's model and persisted through the boot project's store.

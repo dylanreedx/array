@@ -993,6 +993,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--inbox-reveal-project-check") {
+            do {
+                _ = NSApplication.shared
+                try InboxRevealProjectChecks.run()
+                print("ContinuumRevivedInboxRevealProjectChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--zone-tile-detach-sweep-check") {
             do {
                 _ = NSApplication.shared
@@ -9520,10 +9532,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// stderr rather than left silent, and the agent's own record — its cwd, its
     /// project, the project chip on its row — is untouched: only the view moved.
     private func attachTileToAgentFromInbox(_ agentId: AgentID) -> UUID? {
-        guard let spawner = tileSpawner else { return nil }
-        if let recordProject = agentSupervisor.records[agentId]?.projectId,
-           let activeProjectId = activeProject?.id, recordProject != activeProjectId {
-            fputs("Reveal from inbox: \(agentId.rawValue.uuidString) belongs to project \(recordProject.uuidString) but its new tile lands in the active project \(activeProjectId.uuidString) — the app spawns into the active project only\n", stderr)
+        // M1.6: put the tile in the AGENT'S project when that project has a live
+        // zone. M1.3b gave every live controller a spawner, which is what makes
+        // this possible at all; before it, only the active project had one and the
+        // mismatch below was unavoidable.
+        //
+        // The scope override is not optional extra care: `spawnManagedAgent` frames
+        // and installs against `creationScopeProvider()?.zoneId`, so using the
+        // right store with the active zone still in place would install into one
+        // project's layer and persist into another's.
+        let recordProject = agentSupervisor.records[agentId]?.projectId
+        var scopeOverrideApplied = false
+        defer { if scopeOverrideApplied { explicitCreationScopeOverride = nil } }
+
+        let spawner: TileSpawner
+        if let recordProject, let (scoped, scope) = spawnerAndScope(forProject: recordProject) {
+            spawner = scoped
+            explicitCreationScopeOverride = scope
+            scopeOverrideApplied = true
+        } else {
+            guard let fallback = tileSpawner else { return nil }
+            spawner = fallback
+            // Still SAY it. The remaining case is an agent whose project has no live
+            // zone in this workspace, which no spawner can fix — the tile has to go
+            // somewhere, and P3.9's negative-test ledger (item 7) explicitly rejects
+            // refusing the reveal, because that "would make the click a no-op for
+            // exactly the agents an orchestrator spawns."
+            if let recordProject, let activeProjectId = activeProject?.id, recordProject != activeProjectId {
+                fputs("Reveal from inbox: \(agentId.rawValue.uuidString) belongs to project \(recordProject.uuidString), which has no live zone in this workspace, so its new tile lands in the active project \(activeProjectId.uuidString)\n", stderr)
+            }
         }
         // The agent EXISTS, so its tile is titled and its bootstrap line written from
         // ITS record, not from the Settings default: `wireManagedAgentTile` below binds
@@ -13494,6 +13531,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return tileSpawner
     }
 
+    /// The spawner and creation scope for a SUPPLIED project, rather than for
+    /// whatever `resolvedCreationScope()` says is current. M1.6 (`.plans/46`).
+    ///
+    /// `spawnerForFilesystemCreation()` above keys on the resolved scope, which is
+    /// exactly what a cross-project reveal must not do. Returns nil when the
+    /// project has no LIVE zone in this workspace: that project has no controller,
+    /// so there is no store to persist into and no layer to install into, and the
+    /// caller falls back rather than pretending.
+    ///
+    /// The scope matters as much as the spawner. `spawnManagedAgent` frames and
+    /// installs against `creationScopeProvider()?.zoneId`, so handing it the right
+    /// store while leaving the active zone in place would install the tile into one
+    /// project's layer and persist it into another's — a mismatch worse than the
+    /// one being fixed.
+    private func spawnerAndScope(forProject projectId: UUID) -> (TileSpawner, CreationScope)? {
+        guard let spawner = workspaceRuntime?.controller(for: projectId)?.tileSpawner,
+              let zone = workspaceRuntime?.document.zones.first(where: { $0.projectId == projectId }),
+              let root = ((try? registryStore?.loadOrEmpty()) ?? Registry.empty())
+                  .projects.first(where: { $0.id == projectId && !$0.missing })?.rootPath
+        else { return nil }
+        return (spawner, CreationScope(
+            projectId: projectId,
+            projectRoot: root,
+            homeRelativePath: zone.homeRelativePath,
+            source: .zone,
+            zoneId: zone.zoneId
+        ))
+    }
+
     /// Every boot and post-workspace-switch spawner receives identical policy
     /// providers. This prevents creation semantics from changing after a switch.
     /// The app's focus broker, for an offline check that must construct a
@@ -13518,11 +13584,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     func qaPrepareForOfflineSceneCheck(
         canvas: CanvasNSView,
         browserEngine: BrowserEngineContext,
-        runtime: WorkspaceRuntime
+        runtime: WorkspaceRuntime,
+        registryStore: RegistryStore? = nil
     ) {
         self.canvasView = canvas
         self.browserEngine = browserEngine
         self.workspaceRuntime = runtime
+        // M1.6: creation-scope resolution reads project roots out of the registry,
+        // so a leg that drives a scoped spawn has to supply the same store the
+        // runtime was built with. Optional, because the earlier scene legs do not
+        // need it and passing nil keeps their behaviour identical.
+        if let registryStore { self.registryStore = registryStore }
         configureWorkspaceRuntimeHooks()
     }
 
