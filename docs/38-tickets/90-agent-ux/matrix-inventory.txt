@@ -160,6 +160,7 @@ check --zone-project-session-naming-check
 check --zone-registry-refcount-check
 check --zone-rename-inline-check
 check --zone-resize-check
+check --zone-runtime-duplication-check
 check --zone-save-isolation-check
 check --zone-tier-transition-check
 check --zone-tile-hydration-check
@@ -331,6 +332,7 @@ leg run_app_check .build/debug/Array --zone-project-session-naming-check
 leg run_app_check .build/debug/Array --zone-registry-refcount-check
 leg run_app_check .build/debug/Array --zone-rename-inline-check
 leg run_app_check .build/debug/Array --zone-resize-check
+leg run_app_check .build/debug/Array --zone-runtime-duplication-check
 leg run_app_check .build/debug/Array --zone-save-isolation-check
 leg run_app_check .build/debug/Array --zone-tier-transition-check
 leg run_app_check .build/debug/Array --zone-tile-hydration-check

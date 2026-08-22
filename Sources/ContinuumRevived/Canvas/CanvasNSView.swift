@@ -5280,8 +5280,20 @@ final class CanvasNSView: NSView, TokenThemed {
         persistedTiles: [Tile]
     ) -> CanvasState {
         var state = base
-        if flatCompatibilitySceneActive {
+        let covered = installedZoneIds(forProjectId: projectId)
+        if flatCompatibilitySceneActive && covered.isEmpty {
             // Boot, single project, no layers yet: the flat scene IS this project.
+            //
+            // BOTH halves of that condition are load-bearing. The flag alone stays
+            // true until the first workspace SWITCH, so it is still true after
+            // `setZones` has installed this project's layers — and at that moment
+            // the flat `canvasState` is no longer the project's model. Persisting
+            // it then writes whatever the flat scene happens to hold, which for a
+            // canvas built empty and populated purely through layers is nothing at
+            // all: the project's `canvas.json` is truncated to zero tiles.
+            // Found by `--zone-runtime-duplication-check`, whose fixture installs a
+            // workspace into a canvas with no flat tiles and watched all three of
+            // its tiles disappear from disk.
             state.tiles = canvasState.tiles
             state.lastActiveTileId = canvasState.lastActiveTileId
             return state
@@ -5289,7 +5301,7 @@ final class CanvasNSView: NSView, TokenThemed {
         state.tiles = CanvasEngine.mergeProjectTilesForPersistence(
             persisted: persistedTiles,
             installed: tiles(forProjectId: projectId),
-            coveredZoneIds: installedZoneIds(forProjectId: projectId)
+            coveredZoneIds: covered
         )
         return state
     }

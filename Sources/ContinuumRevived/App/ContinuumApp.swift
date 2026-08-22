@@ -2933,6 +2933,21 @@ enum ContinuumApp {
             }
         }
 
+        // M1.3 (`.plans/46`): builds a real `GhosttyRuntimeContext` to drive
+        // `restartTerminalTile` through Phase B, so it must sit below
+        // `ghostty_init()` for the same reason as the check above.
+        if CommandLine.arguments.contains("--zone-runtime-duplication-check") {
+            do {
+                _ = NSApplication.shared
+                try ZoneRuntimeDuplicationChecks.run()
+                print("ContinuumRevivedZoneRuntimeDuplicationChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--ghostty-zoom-scale-spike") {
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)
@@ -13660,16 +13675,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 guard canvas.tileView(for: tile.id) is DescriptorTileNSView else { continue }
                 switch tile.kind {
                 case .terminal:
-                    // M1.3: never mint a second runtime for a tile that already has
-                    // a live one. `restartTerminalTile` does not check, and it
-                    // re-binds to the persisted tmux pane, so a second call puts two
-                    // Ghostty surfaces on one pty.
-                    guard !controller.runtimes.contains(where: { $0.tileId == tile.id }) else { continue }
+                    // M1.3: the controller may already hold a runtime for this tile
+                    // — it survives a switch whenever the project is shared between
+                    // the two workspaces, which `switchWorkspace` is explicitly
+                    // written for. Retire it first; see `retireOrphanedRuntimes`.
+                    retireOrphanedRuntimes(forTile: tile.id, controller: controller)
                     if case let .restarted(runtime) = spawner.restartTerminalTile(tileId: tile.id) {
                         controller.runtimes.append(runtime)
                     }
                 case .browser:
-                    guard !controller.browserRuntimes.contains(where: { $0.tileId == tile.id }) else { continue }
+                    retireOrphanedRuntimes(forTile: tile.id, controller: controller)
                     if case let .restarted(runtime) = spawner.restartBrowserTile(tileId: tile.id) {
                         controller.browserRuntimes.append(runtime)
                         wireContentProcessTerminationHandler(runtime)
@@ -13685,6 +13700,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
         }
         workspaceRuntime?.enforceBrowserRuntimeBudget()
+    }
+
+    /// Drop any runtime this controller still holds for `tileId`, before Phase B
+    /// restarts it. M1.3 (`.plans/46`).
+    ///
+    /// A controller outlives a workspace switch whenever its project is shared
+    /// between the two workspaces — `switchWorkspace` builds the arriving layers
+    /// *before* releasing, precisely "so shared controllers stay alive"
+    /// (`WorkspaceRuntime.swift:668`). Its `runtimes`/`browserRuntimes` are plain
+    /// arrays with no uniqueness invariant, and `restartTerminalTile` never
+    /// consults them: it always mints `GhosttyTerminalRuntime(id: UUID(), …)` and
+    /// re-binds to the persisted tmux window, so hydrating such a tile a second
+    /// time puts **two Ghostty surfaces on one pty**. `restartBrowserTile` is the
+    /// same shape, where a duplicate is a leaked WKWebView content process.
+    ///
+    /// **Why retire rather than skip.** The obvious guard — leave the tile alone
+    /// when a runtime already exists — keeps the count at one and leaves a dead
+    /// `DescriptorTileNSView` on screen, trading this defect for the exact one M1.2
+    /// just fixed. And the surviving runtime genuinely cannot be reused:
+    /// `setZones` destroyed its host view, and `GhosttyTerminalRuntime.attach(to:)`
+    /// constructs a **new** `GhosttyTerminalView`, so re-hosting the old object
+    /// would spawn a second surface rather than move the first. Terminating it
+    /// also stops a pty from running with nothing attached. With tmux on — the
+    /// designed persistence mechanism — the restart re-binds to the persisted
+    /// window and the session survives the round trip; browsers restore through
+    /// the persisted `interactionState` (history, scroll, forms).
+    ///
+    /// *Noted, not done:* `WKWebViewBrowserRuntime.attach(to:)` re-adds the **same**
+    /// `webView`, so a browser could be re-hosted instead of restarted, keeping the
+    /// live page. Doing it needs the tab-model, profile-menu and inspector wiring
+    /// that `TileSpawner.restartBrowserTile` owns, so it belongs in the spawner
+    /// rather than duplicated here.
+    private func retireOrphanedRuntimes(forTile tileId: UUID, controller: ZoneRuntimeController) {
+        for runtime in controller.runtimes where runtime.tileId == tileId {
+            runtime.detach()
+            runtime.terminate(policy: .force)
+        }
+        controller.runtimes.removeAll { $0.tileId == tileId }
+        for runtime in controller.browserRuntimes where runtime.tileId == tileId {
+            runtime.detach()
+            runtime.terminate(policy: .force)
+        }
+        controller.browserRuntimes.removeAll { $0.tileId == tileId }
     }
 
     private func configureCreationAndRuntimeRoutes(on spawner: TileSpawner) {

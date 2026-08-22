@@ -593,6 +593,14 @@ run_app_check .build/debug/Array --zone-tile-hydration-check
 # whichever project is now active. Unlike the placeholder defect above, this one is
 # not undone by relaunching -- it overwrites the file.
 run_app_check .build/debug/Array --canvas-persistence-model-check
+# M1.3 (.plans/46): a controller survives a workspace switch whenever its project
+# is shared between the two workspaces, and its runtimes/browserRuntimes are plain
+# arrays with no uniqueness invariant. restartTerminalTile never consults them --
+# it always mints a new GhosttyTerminalRuntime and re-binds to the persisted tmux
+# window -- so hydrating such a tile twice puts two Ghostty surfaces on one pty.
+# NOT named --terminal-tmux-*: that prefix opts a leg out of this script's
+# -continuum.terminal.tmux.enabled NO injection, and this one needs it.
+run_app_check .build/debug/Array --zone-runtime-duplication-check
 # .plans/15: opening a project file resolves the ACTIVE project/zone at invocation
 # time. Before the repair, an open after an in-process workspace switch installed
 # into the departed zone's model and persisted through the boot project's store.
