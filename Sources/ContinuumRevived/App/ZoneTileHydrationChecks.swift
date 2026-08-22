@@ -62,6 +62,9 @@ enum ZoneTileHydrationChecks {
         let zoneB = UUID(uuidString: "00000000-0000-0000-0000-0000000A1106")!
         let noteTileA = UUID(uuidString: "00000000-0000-0000-0000-0000000A1107")!
         let noteTileB = UUID(uuidString: "00000000-0000-0000-0000-0000000A1108")!
+        // The kind this whole program is about. It also carries M1.2b: it has NO
+        // agent record, and hydrating it must not mint one.
+        let agentTileB = UUID(uuidString: "00000000-0000-0000-0000-0000000A1109")!
 
         let tempRoot = fileManager.temporaryDirectory
             .appendingPathComponent("continuum-zone-hydration-\(UUID().uuidString)", isDirectory: true)
@@ -84,15 +87,24 @@ enum ZoneTileHydrationChecks {
                 )
             )
         }
-        func makeCanvas(tileId: UUID) -> CanvasState {
-            CanvasState(
+        func makeCanvas(tileId: UUID, agentTileId: UUID? = nil) -> CanvasState {
+            var tiles = [Tile(
+                id: tileId, kind: .note, title: "note",
+                frame: TileFrame(x: 10, y: 10, width: 220, height: 140),
+                zPosition: .fromLegacyRank(1), runtimeRef: nil,
+                metadata: TileMetadata(noteId: tileId)
+            )]
+            if let agentTileId {
+                tiles.append(Tile(
+                    id: agentTileId, kind: .managedAgent, title: "agent",
+                    frame: TileFrame(x: 260, y: 10, width: 420, height: 320),
+                    zPosition: .fromLegacyRank(2), runtimeRef: nil,
+                    metadata: TileMetadata()
+                ))
+            }
+            return CanvasState(
                 viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
-                tiles: [Tile(
-                    id: tileId, kind: .note, title: "note",
-                    frame: TileFrame(x: 10, y: 10, width: 220, height: 140),
-                    zPosition: .fromLegacyRank(1), runtimeRef: nil,
-                    metadata: TileMetadata(noteId: tileId)
-                )],
+                tiles: tiles,
                 groups: [],
                 lastActiveTileId: tileId
             )
@@ -105,7 +117,7 @@ enum ZoneTileHydrationChecks {
         try storePa.saveProject(projectPaObj)
         try storePa.saveCanvas(makeCanvas(tileId: noteTileA))
         try storePb.saveProject(projectPbObj)
-        try storePb.saveCanvas(makeCanvas(tileId: noteTileB))
+        try storePb.saveCanvas(makeCanvas(tileId: noteTileB, agentTileId: agentTileB))
 
         let docA = WorkspaceDocument(
             viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
@@ -202,6 +214,26 @@ enum ZoneTileHydrationChecks {
         try expect(viewB is NoteTileNSView,
                    "act1: noteTileB must be a NoteTileNSView; got \(describe(viewB))")
 
+        // The managed agent tile — the surface this program exists for.
+        let agentView = canvas.tileView(for: agentTileB)
+        try expect(agentView != nil,
+                   "act1: tileView(for: agentTileB) must resolve after the switch — got nil, "
+                   + "which means this leg is failing for a lookup reason, not the hydration defect")
+        try expect(!(agentView is DescriptorTileNSView),
+                   "act1: agentTileB must be a live managed agent tile after switching to WB, not a "
+                   + "DescriptorTileNSView placeholder; got \(describe(agentView))")
+        try expect(agentView is ManagedAgentTileNSView,
+                   "act1: agentTileB must be a ManagedAgentTileNSView; got \(describe(agentView))")
+
+        // M1.2b: hydrating an UNBOUND managed-agent tile must not mint an agent.
+        // `wireManagedAgentTile` spawns one whenever `agent(forTile:)` is nil, and
+        // resolves its scope through a spawner whose creation scopes are empty on an
+        // arriving workspace — so an unguarded hydrator would mint a misfiled agent
+        // on every switch, for every agent tile.
+        try expect(delegate.qaManagedAgentCount == 0,
+                   "act1: hydrating an unbound managed-agent tile must not create an agent; "
+                   + "the supervisor now holds \(delegate.qaManagedAgentCount) record(s)")
+
         // === ACT 2: switch back to A. A's tiles must be real too. ===
         try runtime.switchWorkspace(to: workspaceWA)
         canvas.layoutSubtreeIfNeeded()
@@ -224,6 +256,11 @@ enum ZoneTileHydrationChecks {
                    "act2: noteTileB must not still resolve after switching away from WB; "
                    + "got \(describe(canvas.tileView(for: noteTileB)))")
 
-        print("ZoneTileHydrationChecks: 2 workspace switches, every installed tile hydrated to a live view")
+        try expect(delegate.qaManagedAgentCount == 0,
+                   "act2: no agent may have been minted across two switches; the supervisor holds "
+                   + "\(delegate.qaManagedAgentCount) record(s)")
+
+        print("ZoneTileHydrationChecks: 2 workspace switches, every installed tile hydrated to a live "
+              + "view (note + managed agent), and no agent was minted")
     }
 }

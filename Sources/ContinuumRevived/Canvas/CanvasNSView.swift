@@ -90,6 +90,8 @@ final class CanvasNSView: NSView, TokenThemed {
     /// departed workspace and must no longer participate in rendering,
     /// navigation, hit-testing, or document identity.
     private var flatCompatibilitySceneActive = true
+    /// See `withAutoLayoutSuppressed` (M1.2, `.plans/46`).
+    private var _suppressesAutoLayoutForHydration = false
     private var agentLineageOverlay: AgentLineageOverlayView?
     private var contextualAgentLineage: (parentTileID: UUID, childTileID: UUID)?
     private var showsZoneChrome: Bool
@@ -427,7 +429,27 @@ final class CanvasNSView: NSView, TokenThemed {
         }
     }
 
+    /// Suppresses `arrangeAutoLayoutAfterSpawn` for the duration of `body`.
+    ///
+    /// M1.2 (`.plans/46`): hydrating a zone reinstalls its runtime-backed tiles
+    /// through `installProjectTile`, which ends in `arrangeAutoLayoutAfterSpawn` and
+    /// re-tidies the WHOLE zone. Running that once per tile would move the user's
+    /// tiles on every workspace switch. A hydration restores what was already
+    /// arranged; it is not a spawn and must not arrange anything.
+    func withAutoLayoutSuppressed(_ body: () -> Void) {
+        let previous = suppressesAutoLayoutForHydration
+        suppressesAutoLayoutForHydration = true
+        defer { suppressesAutoLayoutForHydration = previous }
+        body()
+    }
+
+    private var suppressesAutoLayoutForHydration: Bool {
+        get { _suppressesAutoLayoutForHydration }
+        set { _suppressesAutoLayoutForHydration = newValue }
+    }
+
     func arrangeAutoLayoutAfterSpawn(zoneId: UUID?) {
+        guard !suppressesAutoLayoutForHydration else { return }
         guard isAutoLayoutEnabled else { return }
         let baseline = autoLayoutScene()
         _ = beginGeometryEdit(

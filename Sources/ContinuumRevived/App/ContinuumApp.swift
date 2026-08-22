@@ -13459,6 +13459,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// `WorkspaceRuntime` the way production does.
     var qaFocusBroker: FocusBroker { focusBroker }
 
+    /// How many managed agents the supervisor holds records for. Used by
+    /// `--zone-tile-hydration-check` (M1.2b) to prove that hydrating a managed-agent
+    /// tile with no bound agent does not MINT one.
+    var qaManagedAgentCount: Int { agentSupervisor.records.count }
+
     /// Minimal offline wiring so a check living in another file can drive the
     /// REAL `configureWorkspaceRuntimeHooks()` instead of substituting its own
     /// closures. `AppDelegate`'s scene properties are `private`, and file-private
@@ -13489,12 +13494,197 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         workspaceRuntime?.onSpawnerCreated = { [weak self] arriving in
             self?.configureCreationAndRuntimeRoutes(on: arriving)
         }
+        workspaceRuntime?.hydrateZoneLayerTiles = { [weak self] canvas, layers, phase in
+            self?.hydrateZoneLayerTiles(canvas, layers, phase: phase)
+        }
         workspaceRuntime?.documentAgentTileIdsProvider = { [weak self] in
             guard let self else { return [:] }
             return Dictionary(uniqueKeysWithValues: agentSupervisor.records.values.compactMap { record in
                 record.tileId.map { (record.id, $0) }
             })
         }
+    }
+
+    // MARK: - Zone tile hydration (M1.2, `.plans/46`)
+
+    /// Replace a ZoneLayer's `DescriptorTileNSView` placeholders with real tiles.
+    ///
+    /// `WorkspaceRuntime` builds every layer's views as placeholders, and real views
+    /// were only ever built by the boot walk — which runs once. So from the first
+    /// in-process workspace switch onward every tile was a title label: no
+    /// transcript, no composer, nothing to click. Witnessed by
+    /// `--zone-tile-hydration-check`.
+    ///
+    /// **Per layer, per project.** A note's body, a diff's repository and a
+    /// conductor queue's root all belong to the layer's OWN project, not the active
+    /// one, so everything here resolves through
+    /// `workspaceRuntime.controller(for: projectId)` rather than through
+    /// `activeProject` or the boot spawner. Getting that wrong would render one
+    /// project's notes inside another's tiles.
+    func hydrateZoneLayerTiles(
+        _ canvas: CanvasNSView,
+        _ layers: [CanvasNSView.ZoneLayer],
+        phase: WorkspaceRuntime.TileHydrationPhase
+    ) {
+        for layer in layers {
+            // Ambient (project-less) zones keep their placeholders for now: their
+            // tiles live in the workspace document's own register rather than in a
+            // project store, so there is no controller to resolve a note body or a
+            // repository root from. Tracked as M1.2's known gap.
+            guard let projectId = layer.placement.projectId,
+                  let controller = workspaceRuntime?.controller(for: projectId) else { continue }
+
+            switch phase {
+            case .beforeInstall:
+                for tile in layer.tiles {
+                    guard layer.tileViews[tile.id] is DescriptorTileNSView || layer.tileViews[tile.id] == nil,
+                          let view = makeHydratedTileView(tile, controller: controller) else { continue }
+                    layer.tileViews[tile.id] = view
+                }
+            case .afterInstall:
+                hydrateRuntimeBackedTiles(in: layer, controller: controller, canvas: canvas)
+            }
+        }
+    }
+
+    /// A real view for every tile kind that can be built from the persisted `Tile`
+    /// alone. Returns nil for terminal, browser, browser-inspector and file tree —
+    /// those need a runtime and are Phase B's job.
+    ///
+    /// Deliberately NOT shared with the `installInitial*` boot walk, and the reason
+    /// is behavioural rather than convenience: boot owns a legacy migration that
+    /// hydration must never repeat. `TileSpawner.installNoteTile` mints a `noteId`
+    /// for a pre-metadata tile and writes the canvas as a side effect; re-running
+    /// that on every workspace switch would keep rewriting project files from a
+    /// path whose job is to render, not to persist. A hydrated tile has been
+    /// through boot already and always carries its metadata.
+    private func makeHydratedTileView(
+        _ tile: Tile,
+        controller: ZoneRuntimeController
+    ) -> TileNSView? {
+        switch tile.kind {
+        case .terminal, .browser, .browserInspector, .fileTree:
+            return nil  // Phase B: needs a runtime.
+
+        case .note:
+            // No noteId means this tile predates note metadata. Leave the
+            // placeholder rather than minting one here — see the note above.
+            guard let noteId = tile.metadata.noteId else { return nil }
+            let body = controller.projectStore.tryLoadNoteBody(id: noteId) ?? ""
+            let view = NoteTileNSView(tile: tile, noteId: noteId, initialBody: body)
+            view.onTextChange = { [weak controller] in controller?.scheduleNoteSave() }
+            view.onSaveAsMarkdownRequested = { [weak controller] url in
+                // nil until M1.3b gives every live controller a spawner; the active
+                // project — the only one whose note menu is reachable today — has one.
+                controller?.tileSpawner?.saveNoteAsMarkdown(
+                    noteId: noteId, tileId: tile.id, destination: url)
+            }
+            noteViews[noteId] = view
+            return view
+
+        case .file:
+            return FileTileNSView(tile: tile)
+
+        case .runArtifacts:
+            return RunArtifactsTileNSView(tile: tile)
+
+        case .ticketQueue:
+            let view = TicketQueueTileNSView(tile: tile, dispatchHandler: { [weak self] row in
+                self?.dispatchAgent(for: row)
+            }, fanOutHandler: { [weak self] rows in
+                self?.fanOutAgents(for: rows, from: tile.id)
+            })
+            ticketQueueViews[tile.id] = view
+            installFanOutCompletionRouting()
+            for itemId in agentSupervisor.completedFanOutItems { view.markItemDone(itemId) }
+            return view
+
+        case .conductorQueue:
+            return ConductorQueueTileNSView(tile: tile, projectRoot: controller.projectRoot)
+
+        case .diffReview:
+            let view = DiffReviewTileNSView(
+                tile: tile,
+                repositoryURL: controller.projectRoot,
+                sendCommentsToAgent: { [weak self] in
+                    self?.sendReviewCommentsFromMenu(reviewTileId: tile.id)
+                })
+            view.onSourceChanged = { [weak canvasView] updated in canvasView?.updateTile(updated) }
+            return view
+
+        case .managedAgent:
+            let view = ManagedAgentTileNSView(tile: tile)
+            // M1.2b: wire ONLY an agent that already exists. `wireManagedAgentTile`
+            // spawns a brand-new agent when `supervisor.agent(forTile:)` is nil, and
+            // resolves its scope through `tileSpawner.managedAgentCreationScope`,
+            // which is empty on a spawner built for an arriving workspace. Hydrating
+            // an unbound tile would therefore mint an agent in the wrong project on
+            // every switch — hazard 10's duplicate-agent minting, in-process.
+            // An unwired tile still renders; submitting a prompt in it asks for an
+            // agent deliberately, which is the existing respawn-suppressed contract.
+            return view
+        }
+    }
+
+    /// Terminal, browser, browser-inspector and file-tree tiles, which need a
+    /// runtime and therefore the layer to be installed first.
+    ///
+    /// These go through the `restart*` paths, which end in `installProjectTile` —
+    /// and that fires `arrangeAutoLayoutAfterSpawn`, re-tidying the entire zone.
+    /// Once per tile would shuffle the user's canvas, so auto-layout is suppressed
+    /// for the duration. A hydration is not a spawn.
+    private func hydrateRuntimeBackedTiles(
+        in layer: CanvasNSView.ZoneLayer,
+        controller: ZoneRuntimeController,
+        canvas: CanvasNSView
+    ) {
+        // Managed agents are BUILT in Phase A but WIRED here: `wireManagedAgentTile`
+        // resolves the view through `canvasView.tileView(for:)`, so the layer has to
+        // be installed before it can find anything.
+        for tile in layer.tiles where tile.kind == .managedAgent {
+            guard agentSupervisor.agent(forTile: tile.id) != nil else { continue }
+            wireManagedAgentTile(tile.id)
+        }
+
+        guard let spawner = controller.tileSpawner else { return }
+        let candidates = layer.tiles.filter { tile in
+            switch tile.kind {
+            case .terminal, .browser, .fileTree: return true
+            default: return false
+            }
+        }
+        guard !candidates.isEmpty else { return }
+
+        canvas.withAutoLayoutSuppressed {
+            for tile in candidates {
+                guard canvas.tileView(for: tile.id) is DescriptorTileNSView else { continue }
+                switch tile.kind {
+                case .terminal:
+                    // M1.3: never mint a second runtime for a tile that already has
+                    // a live one. `restartTerminalTile` does not check, and it
+                    // re-binds to the persisted tmux pane, so a second call puts two
+                    // Ghostty surfaces on one pty.
+                    guard !controller.runtimes.contains(where: { $0.tileId == tile.id }) else { continue }
+                    if case let .restarted(runtime) = spawner.restartTerminalTile(tileId: tile.id) {
+                        controller.runtimes.append(runtime)
+                    }
+                case .browser:
+                    guard !controller.browserRuntimes.contains(where: { $0.tileId == tile.id }) else { continue }
+                    if case let .restarted(runtime) = spawner.restartBrowserTile(tileId: tile.id) {
+                        controller.browserRuntimes.append(runtime)
+                        wireContentProcessTerminationHandler(runtime)
+                    }
+                case .fileTree:
+                    if case .restarted = spawner.restartFileTreeTile(tileId: tile.id),
+                       let view = canvas.tileView(for: tile.id) as? FileTreeTileNSView {
+                        fileTreeViews[tile.id] = view
+                    }
+                default:
+                    continue
+                }
+            }
+        }
+        workspaceRuntime?.enforceBrowserRuntimeBudget()
     }
 
     private func configureCreationAndRuntimeRoutes(on spawner: TileSpawner) {

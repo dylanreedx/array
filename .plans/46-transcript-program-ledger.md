@@ -78,6 +78,16 @@ per-turn process spawn, shrinking M6.
    `installProjectTile`. Also: `WorkspaceRuntime.install` is check-only, so three
    loops matter, not four. Ticket S0.2 rewritten as M1.2.
 
+### Known gap left open by M1.2 (2026-08-22)
+
+**Ambient (project-less) zones keep their placeholders.** The hydrator resolves a
+note body, a repository root and a conductor root from
+`workspaceRuntime.controller(for: projectId)`, and an ambient zone has no project
+and therefore no controller. Its tiles live in the workspace document's own
+`ambientTiles` register instead of a project store. Everything in a *project* zone
+hydrates. Not folded into M1.2 because it needs a different source of truth, not a
+different loop.
+
 ### Two hazards found while sizing, now owned by M1
 
 - **Duplicate terminal runtimes.** A project surviving a switch keeps its
@@ -107,9 +117,9 @@ engineer-days.
 |---|---|---|
 | 1 | **M1.0** `--canvas-persistence-model-check` + one persistence reader | **GREEN 2026-08-22** — was RED with `pb-leak: ... a canvas change after the switch wrote 3 of them into it`. Fixed by `CanvasEngine.mergeProjectTilesForPersistence` (Core, pure, 7 cases in `CanvasPersistenceMergeChecks`) behind `CanvasNSView.canvasStateForPersistence(projectId:base:persistedTiles:)`. **All three** stale-flat-model readers routed through it: `flushCanvasSave`/`flushCanvasSaveOffMain`, `persistProjectCanvas`, and `hydrateToLive`'s browser filter. `WorkspaceRuntime` now STAMPS adopted `zoneId` at layer-build time so the merge has no undecidable nil case. Act 3 covers the merged M1.5 truncation and was teeth-verified by restoring `state.tiles = tiles` (fails: `pa-truncation: ... dropped 2 tile(s)`). **A base/persisted split was needed:** flush must base on the LIVE canvasState or pan/zoom stops persisting — caught by `--zone-save-isolation-check` and `--workspace-runtime-install-check`, both of which went red first. 10 affected legs green; inventory 364 (CoreChecks 88→89). |
 | 2 | **M1.1** `--zone-tile-hydration-check` | **RED 2026-08-22** (`d5561c2`) — `act1: noteTileB must be a live tile after switching to WB, not a DescriptorTileNSView placeholder; got DescriptorTileNSView`. The preceding `viewB != nil` resolve assertion PASSES, proving it fails for the hydration defect and not a lookup. Registered at `run-matrix.sh:588`. Drives production wiring via `AppDelegate.configureWorkspaceRuntimeHooks()` (extracted in this ticket) rather than substituting its own closures. |
-| 3 | **M1.2** two-phase hydration; Phase A before `setZones`, never via `installProjectTile` | new leg, `--workspace-switch-check`, `--workspace-runtime-install-check`, `--zone-hydration-lifecycle-check`, `--multi-zone-render-check` |
-| 4 | **M1.2b** never mint an agent while hydrating | `--zone-tile-hydration-check`, `--agent-restore-check`, `--cross-project-agents-check` |
-| 5 | **M1.3** skip tiles with a live runtime | new leg, `--terminal-tmux-persistence-check`, `--browser-lru-budget-check` |
+| 3 | **M1.2** two-phase hydration; Phase A before `setZones`, never via `installProjectTile` | **GREEN 2026-08-22** — `--zone-tile-hydration-check` now passes: *2 workspace switches, every installed tile hydrated to a live view (note + managed agent), and no agent was minted*. `WorkspaceRuntime.hydrateZoneLayerTiles` hook (optional, so `PerfScenarios` keeps cheap descriptors) called at `install`, `switchWorkspace` and `_addProjectZone`, in both phases. Phase A assigns real views into `layer.tileViews` before `setZones`, so `_installLayer` wires them exactly as it wires placeholders — no `installProjectTile`, no auto-layout, no persist. Phase B runs after `attachActiveControllerUI` builds the spawner. Everything resolves through `controller(for: projectId)`, NOT the active project, so one project's notes cannot render in another's tiles. New `CanvasNSView.withAutoLayoutSuppressed` guards `arrangeAutoLayoutAfterSpawn`. 18 legs green. |
+| 4 | **M1.2b** never mint an agent while hydrating | **GREEN 2026-08-22**, teeth-verified. Phase B wires a managed-agent tile only when `agentSupervisor.agent(forTile:)` already resolves. Removing that guard makes the leg fail with *hydrating an unbound managed-agent tile must not create an agent; the supervisor now holds 1 record(s)* — so the mint hazard was real, not theoretical. New `qaManagedAgentCount` accessor. |
+| 5 | **M1.3** skip tiles with a live runtime | **PARTIAL 2026-08-22 — guard written, witness NOT written.** The skip had to ship inside M1.2's Phase B, because shipping Phase B without it would actively create the duplicate-runtime hazard (`controller.runtimes.contains { $0.tileId == ... }` for terminals, `browserRuntimes` for browsers, plus `enforceBrowserRuntimeBudget` after). What remains is the dedicated leg. Per the plan it cannot be RED-first — at HEAD a switch created zero runtimes — so it is a regression guard: write it, then confirm it goes red by temporarily removing the skip. Needs a real `GhosttyRuntimeContext` and dispatch after `ghostty_init()` (`ContinuumApp.swift:2899-2914`); **must not** be named `--terminal-tmux-*` or it opts out of the matrix's tmux-off injection. |
 | 6 | **M1.3b** a spawner per live controller, so Phase B reaches every zone | `--multi-zone-render-check`, `--zone-tier-transition-check`, `--browser-lru-budget-check` |
 | 7 | **M1.4** `detach()` sweep before `setZones` | new leg, `--agent-restore-check`, `--agent-observer-independence-check` |
 | 8 | **M1.6** `spawnerForFilesystemCreation()` on inbox attach | `--cross-project-agents-check`, `--managed-agent-model-spawn-check` |

@@ -271,6 +271,7 @@ final class WorkspaceRuntime {
         // Wire the broker before setZones so _installLayer can register adapters.
         canvasView.focusBroker = focusBroker
 
+        hydrateZoneLayerTiles?(canvasView, layers, .beforeInstall)
         canvasView.setZones(layers)
         installedLayers = layers
 
@@ -279,6 +280,8 @@ final class WorkspaceRuntime {
 
         // Attach UI to the active controller so dirty tracking and focus callbacks work.
         attachActiveControllerUI(canvasView: canvasView)
+        // Phase B needs the active controller's spawner, which the line above builds.
+        hydrateZoneLayerTiles?(canvasView, layers, .afterInstall)
 
         // Restore focus: active zone's last-active tile, or fall back to canvas.
         restoreFocus(from: canvasView)
@@ -380,7 +383,9 @@ final class WorkspaceRuntime {
         installedLayers.append(layer)
 
         // Install on canvas.
+        if let canvas = canvasView { hydrateZoneLayerTiles?(canvas, [layer], .beforeInstall) }
         canvasView?.upsertZoneLayer(layer)
+        if let canvas = canvasView { hydrateZoneLayerTiles?(canvas, [layer], .afterInstall) }
 
         // Flush document save.
         let appSupport = registryStore.registryFile.deletingLastPathComponent()
@@ -417,6 +422,32 @@ final class WorkspaceRuntime {
     /// wire its app-owned handlers onto the arriving spawner instead of only onto
     /// the one it built at boot.
     var onSpawnerCreated: ((TileSpawner) -> Void)?
+
+    /// When the hydrator runs. M1.2 (`.plans/46`).
+    ///
+    /// `.beforeInstall` is the important one: the layers exist but `setZones` has
+    /// not run, so a real view can be dropped straight into `layer.tileViews` and
+    /// `_installLayer` will wire it exactly as it wires a placeholder. Nothing
+    /// touches the canvas, so `installProjectTile` — and with it
+    /// `arrangeAutoLayoutAfterSpawn`, which re-tidies the whole zone — stays out of
+    /// the way.
+    ///
+    /// `.afterInstall` is for the three kinds that cannot be built from a `Tile`
+    /// alone: terminal, browser and file tree need a runtime, and their `restart*`
+    /// paths open with `guard let existing = canvasView.tileRecord(for:)`, so the
+    /// layer has to be installed first.
+    enum TileHydrationPhase {
+        case beforeInstall
+        case afterInstall
+    }
+
+    /// Turns a ZoneLayer's `DescriptorTileNSView` placeholders into real tiles.
+    ///
+    /// Optional on purpose: headless checks build `WorkspaceRuntime` without an
+    /// `AppDelegate`, and `PerfScenarios` deliberately wants cheap descriptor tiles
+    /// for 128 tiles across 8 zones. A nil hydrator restores the old behaviour
+    /// exactly.
+    var hydrateZoneLayerTiles: ((CanvasNSView, [CanvasNSView.ZoneLayer], TileHydrationPhase) -> Void)?
     var documentAgentTileIdsProvider: (() -> [AgentID: UUID])? {
         didSet { refreshDocumentRelationships() }
     }
@@ -713,6 +744,7 @@ final class WorkspaceRuntime {
         // compatibility scene so tiles from the departing project cannot remain
         // visible or navigable in an unrelated (including empty) workspace.
         canvasView?.retireFlatCompatibilityScene()
+        if let canvas = canvasView { hydrateZoneLayerTiles?(canvas, layers, .beforeInstall) }
         canvasView?.setZones(layers)
         installedLayers = layers
 
@@ -735,6 +767,8 @@ final class WorkspaceRuntime {
         if let canvas = canvasView {
             canvas.setActiveProjectZone(targetDocument.lastActiveZoneId)
             attachActiveControllerUI(canvasView: canvas)
+            // Phase B needs the active controller's spawner, built on the line above.
+            hydrateZoneLayerTiles?(canvas, layers, .afterInstall)
         }
 
         if let canvas = canvasView {

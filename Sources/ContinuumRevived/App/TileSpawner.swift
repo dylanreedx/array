@@ -2039,6 +2039,14 @@ final class TileSpawner {
         noteConvertedHandler?(noteId, tileId)
     }
 
+    /// Convert a note to a Markdown document and report the outcome the same way
+    /// the note tile's own menu item does. Exposed for M1.2's zone hydration, which
+    /// rebuilds note tiles outside `installNoteTile` and must not re-implement the
+    /// outcome handling.
+    func saveNoteAsMarkdown(noteId: UUID, tileId: UUID, destination: URL) {
+        handleNoteConversion(convertNoteToDocument(noteId: noteId, tileId: tileId, destination: destination))
+    }
+
     private func handleNoteConversion(_ outcome: NoteConversionOutcome?) {
         guard let outcome else { return }
         switch outcome {
