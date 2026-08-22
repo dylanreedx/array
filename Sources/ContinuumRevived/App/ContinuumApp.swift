@@ -2948,6 +2948,20 @@ enum ContinuumApp {
             }
         }
 
+        // M1.3b (`.plans/46`): builds a real `GhosttyRuntimeContext` for the same
+        // reason as the leg above, so it sits below `ghostty_init()` too.
+        if CommandLine.arguments.contains("--zone-spawner-coverage-check") {
+            do {
+                _ = NSApplication.shared
+                try ZoneSpawnerCoverageChecks.run()
+                print("ContinuumRevivedZoneSpawnerCoverageChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--ghostty-zoom-scale-spike") {
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)

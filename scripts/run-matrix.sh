@@ -601,6 +601,13 @@ run_app_check .build/debug/Array --canvas-persistence-model-check
 # NOT named --terminal-tmux-*: that prefix opts a leg out of this script's
 # -continuum.terminal.tmux.enabled NO injection, and this one needs it.
 run_app_check .build/debug/Array --zone-runtime-duplication-check
+# M1.3b (.plans/46): attachActiveControllerUI built exactly ONE TileSpawner, for
+# the active controller, so every other live zone's terminals and browsers could
+# not hydrate -- a two-zone workspace came back with a live tile in the zone you
+# were looking at and a dead placeholder in the other. The leg also pins the
+# subset contract: a non-active controller gets a spawner and NOT the session
+# observer or the tmux reaper, which are process-wide and belong to one zone.
+run_app_check .build/debug/Array --zone-spawner-coverage-check
 # .plans/15: opening a project file resolves the ACTIVE project/zone at invocation
 # time. Before the repair, an open after an in-process workspace switch installed
 # into the departed zone's model and persisted through the boot project's store.

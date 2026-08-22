@@ -416,12 +416,34 @@ final class WorkspaceRuntime {
         return layer
     }
 
-    // MARK: - Active spawner ownership
+    // MARK: - Spawner ownership
 
     /// Called with every `TileSpawner` this runtime builds, so `AppDelegate` can
     /// wire its app-owned handlers onto the arriving spawner instead of only onto
     /// the one it built at boot.
     var onSpawnerCreated: ((TileSpawner) -> Void)?
+
+    /// The three construction inputs `attachActiveControllerUI` used to omit, now
+    /// injectable. M1.3b (`.plans/46`).
+    ///
+    /// `defaults` and the two tmux seams are not a tidy-up: without them a spawner
+    /// built after a workspace switch gets `UserDefaults.standard` and a real
+    /// `ProcessTmuxControl`, so **no check can neutralize tmux on the switch path**
+    /// and `run-matrix.sh`'s argument-domain injection is the only guard. Threading
+    /// them is what makes the hydration path testable at all.
+    var spawnerDefaults: UserDefaults = .standard
+    var spawnerTmuxPathResolver: (UserDefaults) -> String? = { TmuxLocator.resolve(defaults: $0) }
+    var spawnerTmuxControlFactory: @Sendable (String) -> any TmuxControl = { ProcessTmuxControl(tmuxPath: $0) }
+
+    /// Live browser profiles for a spawner built mid-session. The boot spawner
+    /// passes `registry.settings.browserProfiles` (`ContinuumApp.swift:3969`) and
+    /// this call site passed nothing, so a browser restarted after a switch
+    /// resolved its profile against the built-in default alone — a live
+    /// inconsistency, not a hypothetical one.
+    private func currentBrowserProfiles() -> [BrowserProfile] {
+        let profiles = (try? registryStore.loadOrEmpty().settings.browserProfiles) ?? []
+        return profiles.isEmpty ? [BrowserProfile.builtInDefault()] : profiles
+    }
 
     /// When the hydrator runs. M1.2 (`.plans/46`).
     ///
@@ -458,18 +480,48 @@ final class WorkspaceRuntime {
 
     /// Builds the arriving active project's spawner and hands it to that
     /// controller, which now owns it strongly (see `ZoneRuntimeController.tileSpawner`).
+    /// Every live controller gets a spawner; the ACTIVE one additionally gets the
+    /// full UI attachment. M1.3b (`.plans/46`).
+    ///
+    /// This used to build exactly one `TileSpawner`, for the active controller.
+    /// Every other live controller had `tileSpawner == nil` — which is why
+    /// `enforceBrowserRuntimeBudget` still `continue`s past a controller without
+    /// one, and why the hydrator's Phase B could only restore terminals and
+    /// browsers in the zone you happened to be looking at. A multi-zone workspace
+    /// came back with dead tiles in every other zone.
+    ///
+    /// The split is deliberate. A spawner is a per-project *factory* and is safe to
+    /// hold for any live project. `attachUI` is different: it starts a session
+    /// observer and a tmux reaper, and takes ownership of the shared `focusBroker`
+    /// callbacks. Exactly one controller may do that, so it stays with the active
+    /// one.
     private func attachActiveControllerUI(canvasView: CanvasNSView) {
-        guard let active = activeController else { return }
+        let active = activeController
+        for controller in registry.liveControllers {
+            let spawner = makeSpawner(for: controller, canvasView: canvasView)
+            if controller === active {
+                controller.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
+            } else {
+                controller.attachSpawner(spawner, canvasView: canvasView)
+            }
+        }
+    }
+
+    private func makeSpawner(for controller: ZoneRuntimeController, canvasView: CanvasNSView) -> TileSpawner {
         let spawner = TileSpawner(
             canvasView: canvasView,
             ghostty: ghostty,
             browserEngine: browserEngine,
-            projectStore: active.projectStore,
-            project: active.project,
-            managedSessionStore: active.managedSessionStore
+            projectStore: controller.projectStore,
+            project: controller.project,
+            defaults: spawnerDefaults,
+            tmuxPathResolver: spawnerTmuxPathResolver,
+            tmuxControlFactory: spawnerTmuxControlFactory,
+            browserProfiles: currentBrowserProfiles(),
+            managedSessionStore: controller.managedSessionStore
         )
         onSpawnerCreated?(spawner)
-        active.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
+        return spawner
     }
 
     // MARK: - Opening a project file (one active-context route)

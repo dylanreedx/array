@@ -162,6 +162,7 @@ check --zone-rename-inline-check
 check --zone-resize-check
 check --zone-runtime-duplication-check
 check --zone-save-isolation-check
+check --zone-spawner-coverage-check
 check --zone-tier-transition-check
 check --zone-tile-hydration-check
 leg run git diff --check
@@ -334,6 +335,7 @@ leg run_app_check .build/debug/Array --zone-rename-inline-check
 leg run_app_check .build/debug/Array --zone-resize-check
 leg run_app_check .build/debug/Array --zone-runtime-duplication-check
 leg run_app_check .build/debug/Array --zone-save-isolation-check
+leg run_app_check .build/debug/Array --zone-spawner-coverage-check
 leg run_app_check .build/debug/Array --zone-tier-transition-check
 leg run_app_check .build/debug/Array --zone-tile-hydration-check
 leg run_ios_build

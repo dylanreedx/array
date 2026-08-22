@@ -61,6 +61,12 @@ final class ZoneRuntimeController {
     private var fileTreeSaveTimer: Timer?
     private var sessionPruner: SessionPruner?
     private var sessionObserver: SessionObserver?
+
+    /// QA (M1.3b): whether this controller took the process-wide attachments —
+    /// session observer and tmux reaper. `attachSpawner` must leave both alone, and
+    /// a witness that only checked `tileSpawner != nil` could not tell the two
+    /// attach paths apart.
+    var qaHoldsProcessWideAttachments: Bool { sessionObserver != nil || sessionPruner != nil }
     private var isCanvasDirty = false
     private var isBrowserDirty = false
     private var isNoteDirty = false
@@ -195,6 +201,23 @@ final class ZoneRuntimeController {
         }
 
         projectLock?.release()
+    }
+
+    /// A spawner for a live but NON-active controller. M1.3b (`.plans/46`).
+    ///
+    /// Deliberately a subset of `attachUI`: no session observer, no tmux reaper, no
+    /// `focusBroker` callbacks. Those three take ownership of process-wide or
+    /// shared state and exactly one controller may hold them, so they stay with the
+    /// active zone. What a non-active controller does need is the ability to build
+    /// and restore its own tiles — which is a per-project factory, safe to hold
+    /// anywhere — so that hydration reaches every zone rather than only the one in
+    /// front of you.
+    func attachSpawner(_ tileSpawner: TileSpawner, canvasView: CanvasNSView) {
+        self.canvasView = canvasView
+        self.tileSpawner = tileSpawner
+        tileSpawner.terminalSpawnedHandler = { [weak self] descriptor in
+            self?.sessionObserverTileDidSpawn(descriptor)
+        }
     }
 
     func attachUI(canvasView: CanvasNSView, tileSpawner: TileSpawner, focusBroker: FocusBroker) {
