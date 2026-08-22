@@ -205,7 +205,10 @@ public final class PiAgentRunner: @unchecked Sendable {
     private var buffer = Data()
     private var stderrBuffer = Data()   // queue-confined
     private var stopRequested = false   // queue-confined (M1.7); a stopped run is not a failed one
-    private var process: Process?       // queue-confined (set in run, read in stop)
+    /// M1.8: a `ProcessGroupChild`, not a Foundation `Process`. `Process.terminate()`
+    /// signals ONE pid, so every shell, MCP server and tool subprocess pi launched
+    /// survived a Stop. Queue-confined (set in run, read in stop).
+    private var child: ProcessGroupChild?
 
     public init(config: Config) {
         self.config = config
@@ -216,33 +219,38 @@ public final class PiAgentRunner: @unchecked Sendable {
     /// Blocking; call off the main thread. `onEvent` is invoked on the
     /// runner's serial queue.
     public func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
-        let process = Process()
         // Resolve `pi` to an absolute path so a GUI-launched app (thin PATH)
         // finds it; falls back to `/usr/bin/env pi` for shell launches. See
         // the ticket GUI watch-out.
         let command = Self.liveResolvedCommand()
-        process.executableURL = URL(fileURLWithPath: command.executable)
-        process.arguments = command.prefixArgs + Self.processArguments(
+        let arguments = command.prefixArgs + Self.processArguments(
             model: config.model,
             thinking: config.thinking,
             sessionId: config.sessionId,
             extraArgs: config.extraArgs,
             prompt: prompt
         )
-        process.currentDirectoryURL = config.cwd
-
-        // Augment PATH so the child finds both `pi` and the `node` its shebang
-        // re-invokes — a GUI launch inherits a thin PATH missing the nvm bin.
-        process.environment = Self.childEnvironment()
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
 
         queue.sync { buffer.removeAll(); stderrBuffer.removeAll() }
 
-        stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        let spawned: ProcessGroupChild
+        do {
+            spawned = try ProcessGroupChild.spawn(
+                executable: command.executable,
+                arguments: arguments,
+                // Augment PATH so the child finds both `pi` and the `node` its shebang
+                // re-invokes — a GUI launch inherits a thin PATH missing the nvm bin.
+                environment: Self.childEnvironment(),
+                currentDirectory: config.cwd,
+                // pi inherits the app's stdin, exactly as it did under `Process`.
+                standardInput: .inherit
+            )
+        } catch {
+            throw RunError.launchFailed(String(describing: error))
+        }
+        queue.sync { self.child = spawned }
+
+        spawned.standardOutput.readabilityHandler = { [weak self] handle in
             let chunk = handle.availableData
             guard !chunk.isEmpty else { return }
             self?.queue.sync { self?.consume(chunk, onEvent: onEvent) }
@@ -250,39 +258,33 @@ public final class PiAgentRunner: @unchecked Sendable {
         // Drain stderr CONCURRENTLY. Reading it only after waitUntilExit() lets
         // a chatty child fill its stderr pipe (~64KB) and block forever while
         // we block in waitUntilExit — a deadlock. Accumulate on the queue.
-        stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        spawned.standardError.readabilityHandler = { [weak self] handle in
             let chunk = handle.availableData
             guard !chunk.isEmpty else { return }
             self?.queue.sync { self?.stderrBuffer.append(chunk) }
         }
 
-        queue.sync { self.process = process }
-        do {
-            try process.run()
-        } catch {
-            throw RunError.launchFailed(String(describing: error))
-        }
-        process.waitUntilExit()
-        stdoutPipe.fileHandleForReading.readabilityHandler = nil
-        stderrPipe.fileHandleForReading.readabilityHandler = nil
+        let exitCode = spawned.wait()
+        spawned.standardOutput.readabilityHandler = nil
+        spawned.standardError.readabilityHandler = nil
 
         // Flush any trailing partial line + drain whatever the handlers missed.
-        let remainder = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderrRemainder = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        let remainder = spawned.standardOutput.readDataToEndOfFile()
+        let stderrRemainder = spawned.standardError.readDataToEndOfFile()
         let errText: String = queue.sync {
             if !remainder.isEmpty { consume(remainder, onEvent: onEvent) }
             flushBuffer(onEvent: onEvent)
             stderrBuffer.append(stderrRemainder)
             let text = String(decoding: stderrBuffer, as: UTF8.self)
-            self.process = nil
+            self.child = nil
             return text
         }
 
-        if process.terminationStatus != 0 {
+        if exitCode != 0 {
             // M1.7: pi had NO stop flag at all -- `stop()` terminated the child and
             // this line then reported the resulting non-zero exit as a failure.
             if queue.sync { stopRequested } { throw AgentRunStopped(detail: errText) }
-            throw RunError.piFailed(exitCode: process.terminationStatus, stderr: errText)
+            throw RunError.piFailed(exitCode: exitCode, stderr: errText)
         }
     }
 
@@ -292,10 +294,14 @@ public final class PiAgentRunner: @unchecked Sendable {
     }
 
     public func stop() {
-        queue.sync {
+        // M1.8: the whole GROUP, with escalation, at the interactive grace -- a
+        // human is watching the button. `Process.terminate()` signalled the pi
+        // leader alone and left everything it had launched running.
+        let running = queue.sync { () -> ProcessGroupChild? in
             stopRequested = true
-            process?.terminate()
+            return child
         }
+        running?.terminateGroup(graceSeconds: ProcessGroupChild.Grace.interactive)
     }
 
     /// P2D.2 — observe `spawn_agent` calls this agent makes, out of band.

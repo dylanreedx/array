@@ -451,85 +451,78 @@ enum AgentNameOneShot {
         stdoutLimit: Int = 64 * 1024,
         stderrLimit: Int = 16 * 1024
     ) throws -> BoundedProcessResult {
-        let inputPipe = Pipe()
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        let stdoutBox = LockedData(limit: stdoutLimit)
-        let stderrBox = LockedData(limit: stderrLimit)
-        let stdoutReader = BoundedPipeReader(
-            handle: stdoutPipe.fileHandleForReading,
-            box: stdoutBox)
-        let stderrReader = BoundedPipeReader(
-            handle: stderrPipe.fileHandleForReading,
-            box: stderrBox)
-
-        let pid: pid_t
+        // M1.8: the spawn and the SIGTERM -> grace -> SIGKILL escalation now come
+        // from `ProcessGroupChild` in Core. This path owned both and was correct,
+        // but the runners live in Core and cannot import the app -- so the
+        // machinery moved down and this became a client of it. One escalation
+        // routine, two graces, rather than two routines that drift.
+        //
+        // What stays here is genuinely one-shot-specific and NOT duplicated logic:
+        // the hard timeout, the bounded readers, and the deliberate refusal to
+        // block. A normally-exited leader can leave a descendant holding stdout,
+        // so `wait()` would wait forever; every reap below is the WNOHANG form.
+        let child: ProcessGroupChild
         do {
-            pid = try spawnInOwnProcessGroup(
+            child = try ProcessGroupChild.spawn(
                 executable: executable,
-                arguments: arguments,
+                // `runProcess`'s contract is that `arguments` INCLUDES argv[0] --
+                // both callers pass one deliberately (a bare `sh`, and a login
+                // shell's own basename), and argv[0] is not cosmetic for a shell.
+                arguments: Array(arguments.dropFirst()),
                 environment: environment,
-                input: inputPipe,
-                stdout: stdoutPipe,
-                stderr: stderrPipe)
-        } catch let error as AgentNameOneShotError {
-            stdoutReader.stopAndClose()
-            stderrReader.stopAndClose()
-            try? inputPipe.fileHandleForReading.close()
-            try? inputPipe.fileHandleForWriting.close()
-            try? stdoutPipe.fileHandleForWriting.close()
-            try? stderrPipe.fileHandleForWriting.close()
-            throw error
+                currentDirectory: nil,
+                standardInput: .pipe,
+                argv0: arguments.first)
         } catch {
-            stdoutReader.stopAndClose()
-            stderrReader.stopAndClose()
-            try? inputPipe.fileHandleForReading.close()
-            try? inputPipe.fileHandleForWriting.close()
-            try? stdoutPipe.fileHandleForWriting.close()
-            try? stderrPipe.fileHandleForWriting.close()
             throw AgentNameOneShotError.launchFailed
         }
+        guard let inputWrite = child.standardInput else {
+            child.terminateGroup(graceSeconds: processGroupGrace)
+            throw AgentNameOneShotError.launchFailed
+        }
+
+        let stdoutBox = LockedData(limit: stdoutLimit)
+        let stderrBox = LockedData(limit: stderrLimit)
+        let stdoutReader = BoundedPipeReader(handle: child.standardOutput, box: stdoutBox)
+        let stderrReader = BoundedPipeReader(handle: child.standardError, box: stderrBox)
 
         let deadline = Date().addingTimeInterval(max(0.01, timeout))
         do {
             if inputWriteDelay > 0 {
                 Thread.sleep(forTimeInterval: min(inputWriteDelay, max(0.01, timeout)))
             }
-            try writeInput(
-                input,
-                to: inputPipe.fileHandleForWriting.fileDescriptor,
-                until: deadline)
-            try inputPipe.fileHandleForWriting.close()
+            try writeInput(input, to: inputWrite.fileDescriptor, until: deadline)
+            try inputWrite.close()
         } catch {
-            try? inputPipe.fileHandleForWriting.close()
-            _ = cleanupProcessGroup(pid, knownStatus: nil)
+            try? inputWrite.close()
+            child.terminateGroup(graceSeconds: processGroupGrace)
             stdoutReader.finish(timeout: processGroupGrace)
             stderrReader.finish(timeout: processGroupGrace)
             throw AgentNameOneShotError.inputFailed
         }
 
-        var status = waitForProcess(pid, noHang: true)
+        var status = child.pollExitRaw()
         while status == nil && Date() < deadline {
             Thread.sleep(forTimeInterval: 0.01)
-            status = waitForProcess(pid, noHang: true)
+            status = child.pollExitRaw()
         }
         guard let status else {
-            _ = cleanupProcessGroup(pid, knownStatus: nil)
+            child.terminateGroup(graceSeconds: processGroupGrace)
             stdoutReader.finish(timeout: processGroupGrace)
             stderrReader.finish(timeout: processGroupGrace)
             throw AgentNameOneShotError.timedOut
         }
 
-        // This cleanup is intentional even after a successful leader exit. The
-        // leader can have forked a child that still owns stdout/stderr; killing
-        // the whole group before joining the bounded readers releases the slot.
-        let finalStatus = cleanupProcessGroup(pid, knownStatus: status) ?? status
+        // Intentional even after a successful leader exit. The leader can have
+        // forked a child that still owns stdout/stderr; killing the whole group
+        // before joining the bounded readers releases the slot.
+        child.terminateGroup(graceSeconds: processGroupGrace)
         stdoutReader.finish(timeout: processGroupGrace)
         stderrReader.finish(timeout: processGroupGrace)
         return BoundedProcessResult(
             stdout: String(decoding: stdoutBox.data, as: UTF8.self),
             stderr: String(decoding: stderrBox.data, as: UTF8.self),
-            status: finalStatus)
+            status: child.reapedRawStatus ?? status)
     }
 
     private static func writeInput(

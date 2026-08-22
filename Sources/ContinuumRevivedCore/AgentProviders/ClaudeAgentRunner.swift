@@ -259,7 +259,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     private var translator: ClaudeEventTranslator
     private var buffer = Data()
     private var stderrBuffer = Data()   // queue-confined
-    private var process: Process?       // queue-confined (set in run, read in stop)
+    /// M1.8: see `ProcessGroupChild`. Queue-confined (set in run, read in stop).
+    private var child: ProcessGroupChild?
     private var stopRequested = false   // queue-confined; suppresses the retry
 
     public init(config: Config) {
@@ -316,10 +317,12 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     }
 
     public func stop() {
-        queue.sync {
+        // M1.8: the whole GROUP, at the interactive grace. See `ProcessGroupChild`.
+        let running = queue.sync { () -> ProcessGroupChild? in
             stopRequested = true
-            process?.terminate()
+            return child
         }
+        running?.terminateGroup(graceSeconds: ProcessGroupChild.Grace.interactive)
     }
 
     /// Claude has no `spawn_agent` — its Task tool spawns claude-internal
@@ -340,10 +343,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         prompt: AgentPrompt,
         onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void
     ) throws -> (exitCode: Int32, stderr: String) {
-        let process = Process()
         let command = Self.liveResolvedCommand()
-        process.executableURL = URL(fileURLWithPath: command.executable)
-        process.arguments = command.prefixArgs + Self.processArguments(
+        let arguments = command.prefixArgs + Self.processArguments(
             model: config.model,
             effort: config.effort,
             sessionMode: mode,
@@ -351,56 +352,56 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             extraArgs: config.extraArgs,
             prompt: prompt
         )
-        process.currentDirectoryURL = config.cwd
-
-        // Same GUI-thin-PATH augmentation as pi's: an npm-installed claude is
-        // a node script whose shebang needs node on PATH. (The native binary
-        // doesn't, but augmenting is harmless there.) HOME and
-        // CLAUDE_CONFIG_DIR stay untouched — overriding HOME relocates the
-        // keychain lookup and the CLI stops finding its own login.
-        process.environment = PiAgentRunner.childEnvironment()
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
 
         queue.sync { buffer.removeAll(); stderrBuffer.removeAll() }
 
-        stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        let spawned: ProcessGroupChild
+        do {
+            spawned = try ProcessGroupChild.spawn(
+                executable: command.executable,
+                arguments: arguments,
+                // Same GUI-thin-PATH augmentation as pi's: an npm-installed claude is
+                // a node script whose shebang needs node on PATH. (The native binary
+                // doesn't, but augmenting is harmless there.) HOME and
+                // CLAUDE_CONFIG_DIR stay untouched — overriding HOME relocates the
+                // keychain lookup and the CLI stops finding its own login.
+                environment: PiAgentRunner.childEnvironment(),
+                currentDirectory: config.cwd,
+                standardInput: .inherit
+            )
+        } catch {
+            throw RunError.launchFailed(String(describing: error))
+        }
+        queue.sync { self.child = spawned }
+
+        spawned.standardOutput.readabilityHandler = { [weak self] handle in
             let chunk = handle.availableData
             guard !chunk.isEmpty else { return }
             self?.queue.sync { self?.consume(chunk, onEvent: onEvent) }
         }
         // Drain stderr CONCURRENTLY (the pi runner's deadlock lesson: a full
         // 64KB stderr pipe blocks the child while we block in waitUntilExit).
-        stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        spawned.standardError.readabilityHandler = { [weak self] handle in
             let chunk = handle.availableData
             guard !chunk.isEmpty else { return }
             self?.queue.sync { self?.stderrBuffer.append(chunk) }
         }
 
-        queue.sync { self.process = process }
-        do {
-            try process.run()
-        } catch {
-            throw RunError.launchFailed(String(describing: error))
-        }
-        process.waitUntilExit()
-        stdoutPipe.fileHandleForReading.readabilityHandler = nil
-        stderrPipe.fileHandleForReading.readabilityHandler = nil
+        let exitCode = spawned.wait()
+        spawned.standardOutput.readabilityHandler = nil
+        spawned.standardError.readabilityHandler = nil
 
-        let remainder = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderrRemainder = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        let remainder = spawned.standardOutput.readDataToEndOfFile()
+        let stderrRemainder = spawned.standardError.readDataToEndOfFile()
         let errText: String = queue.sync {
             if !remainder.isEmpty { consume(remainder, onEvent: onEvent) }
             flushBuffer(onEvent: onEvent)
             stderrBuffer.append(stderrRemainder)
             let text = String(decoding: stderrBuffer, as: UTF8.self)
-            self.process = nil
+            self.child = nil
             return text
         }
-        return (process.terminationStatus, errText)
+        return (exitCode, errText)
     }
 
     // MARK: - queue-confined line assembly

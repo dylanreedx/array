@@ -233,7 +233,8 @@ public final class CodexAgentRunner: @unchecked Sendable {
     private var buffer = Data()
     private var stderrBuffer = Data()   // queue-confined
     private var pendingTerminalEvents: [AgentRuntimeEvent] = [] // queue-confined
-    private var process: Process?       // queue-confined (set in run, read in stop)
+    /// M1.8: see `ProcessGroupChild`. Queue-confined (set in run, read in stop).
+    private var child: ProcessGroupChild?
     private var stopRequested = false   // queue-confined; suppresses the self-heal
     private var runtimeObservationHandler: (@Sendable (AgentRuntimeObservation) -> Void)?
 
@@ -299,10 +300,12 @@ public final class CodexAgentRunner: @unchecked Sendable {
     }
 
     public func stop() {
-        queue.sync {
+        // M1.8: the whole GROUP, at the interactive grace. See `ProcessGroupChild`.
+        let running = queue.sync { () -> ProcessGroupChild? in
             stopRequested = true
-            process?.terminate()
+            return child
         }
+        running?.terminateGroup(graceSeconds: ProcessGroupChild.Grace.interactive)
     }
 
     /// Codex has no `spawn_agent` side channel (same as claude). The handler is
@@ -328,10 +331,8 @@ public final class CodexAgentRunner: @unchecked Sendable {
     ) throws -> (exitCode: Int32, stderr: String, finalEvents: [AgentRuntimeEvent]) {
         let startingRolloutURL = threadId.flatMap { CodexRolloutTelemetry.rolloutURL(threadId: $0) }
         let startingOffset = startingRolloutURL.flatMap { CodexRolloutTelemetry.fileSize(of: $0) } ?? 0
-        let process = Process()
         let command = Self.liveResolvedCommand()
-        process.executableURL = URL(fileURLWithPath: command.executable)
-        process.arguments = command.prefixArgs + CodexCLIBackend.processArguments(
+        let arguments = command.prefixArgs + CodexCLIBackend.processArguments(
             model: config.model,
             effort: config.effort,
             sessionMode: mode,
@@ -340,23 +341,6 @@ public final class CodexAgentRunner: @unchecked Sendable {
             extraArgs: config.extraArgs,
             prompt: prompt
         )
-        // Set the cwd on BOTH paths: resume can't take `-C`, and it is harmless
-        // on fresh (which also passes `-C`).
-        process.currentDirectoryURL = config.cwd
-        // Live turns printed "Reading additional input from stdin…" even with a
-        // positional prompt; a null stdin removes any chance of a block.
-        process.standardInput = FileHandle.nullDevice
-
-        // Same GUI-thin-PATH augmentation as pi's/claude's: an npm-installed
-        // codex is a node script whose shebang needs node on PATH. HOME and the
-        // codex config dir stay untouched — overriding HOME relocates the login
-        // lookup and the CLI stops finding its own auth.
-        process.environment = PiAgentRunner.childEnvironment()
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
 
         queue.sync {
             buffer.removeAll()
@@ -366,31 +350,48 @@ public final class CodexAgentRunner: @unchecked Sendable {
             translator.onRuntimeObservation = runtimeObservationHandler
         }
 
-        stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        let spawned: ProcessGroupChild
+        do {
+            spawned = try ProcessGroupChild.spawn(
+                executable: command.executable,
+                arguments: arguments,
+                // Same GUI-thin-PATH augmentation as pi's/claude's: an npm-installed
+                // codex is a node script whose shebang needs node on PATH. HOME and the
+                // codex config dir stay untouched — overriding HOME relocates the login
+                // lookup and the CLI stops finding its own auth.
+                environment: PiAgentRunner.childEnvironment(),
+                // Set the cwd on BOTH paths: resume can't take `-C`, and it is harmless
+                // on fresh (which also passes `-C`).
+                currentDirectory: config.cwd,
+                // Live turns printed "Reading additional input from stdin…" even with a
+                // positional prompt; a null stdin removes any chance of a block. This
+                // is the one runner that must NOT inherit the app's stdin.
+                standardInput: .nullDevice
+            )
+        } catch {
+            throw RunError.launchFailed(String(describing: error))
+        }
+        queue.sync { self.child = spawned }
+
+        spawned.standardOutput.readabilityHandler = { [weak self] handle in
             let chunk = handle.availableData
             guard !chunk.isEmpty else { return }
             self?.queue.sync { self?.consume(chunk, onEvent: onEvent) }
         }
         // Drain stderr CONCURRENTLY (the pi/claude deadlock lesson: a full 64KB
-        // stderr pipe blocks the child while we block in waitUntilExit).
-        stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        // stderr pipe blocks the child while we block waiting for it to exit).
+        spawned.standardError.readabilityHandler = { [weak self] handle in
             let chunk = handle.availableData
             guard !chunk.isEmpty else { return }
             self?.queue.sync { self?.stderrBuffer.append(chunk) }
         }
 
-        queue.sync { self.process = process }
-        do {
-            try process.run()
-        } catch {
-            throw RunError.launchFailed(String(describing: error))
-        }
-        process.waitUntilExit()
-        stdoutPipe.fileHandleForReading.readabilityHandler = nil
-        stderrPipe.fileHandleForReading.readabilityHandler = nil
+        let exitCode = spawned.wait()
+        spawned.standardOutput.readabilityHandler = nil
+        spawned.standardError.readabilityHandler = nil
 
-        let remainder = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderrRemainder = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        let remainder = spawned.standardOutput.readDataToEndOfFile()
+        let stderrRemainder = spawned.standardError.readDataToEndOfFile()
         let finalState: (stderr: String, threadId: String?, terminal: [AgentRuntimeEvent]) = queue.sync {
             if !remainder.isEmpty { consume(remainder, onEvent: onEvent) }
             flushBuffer(onEvent: onEvent)
@@ -398,7 +399,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
             let text = String(decoding: stderrBuffer, as: UTF8.self)
             let providerThreadId = translator.providerThreadId
             let terminal = pendingTerminalEvents
-            self.process = nil
+            self.child = nil
             return (text, providerThreadId, terminal)
         }
         let providerThreadId = finalState.threadId ?? threadId
@@ -424,7 +425,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
             threadId: providerThreadId ?? "codex-unknown",
             terminalEvents: finalState.terminal,
             snapshot: snapshot)
-        return (process.terminationStatus, finalState.stderr, finalEvents)
+        return (exitCode, finalState.stderr, finalEvents)
     }
 
     // MARK: - queue-confined line assembly

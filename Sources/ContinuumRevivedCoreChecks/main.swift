@@ -11588,4 +11588,8 @@ runDocumentLocationChecks()
 // may report one of its tiles deleted.
 runCanvasPersistenceMergeChecks()
 
+// Plan: .plans/46 M1.8 — stopping an agent must stop everything it launched.
+// Process.terminate() signals one pid; a coding CLI is a process TREE.
+runProcessGroupChildChecks()
+
 print("ContinuumRevivedCoreChecks passed")
