@@ -254,6 +254,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
             let result = try runOnce(mode: .fresh, threadId: nil, prompt: prompt, onEvent: onEvent)
             publish(result.finalEvents, onEvent: onEvent)
             if result.exitCode != 0 {
+                try throwStoppedIfRequested(stderr: result.stderr)
                 throw RunError.codexFailed(exitCode: result.exitCode, stderr: result.stderr)
             }
             return
@@ -266,12 +267,15 @@ public final class CodexAgentRunner: @unchecked Sendable {
         // Self-heal: a stored id whose rollout was deleted/archived/cleaned.
         guard CodexCLIBackend.isUnknownSessionFailure(stderr: resumed.stderr) else {
             publish(resumed.finalEvents, onEvent: onEvent)
+            // M1.7: same as claude -- the flag was read only to gate the self-heal
+            // BELOW, with three unguarded throws in front of it.
+            try throwStoppedIfRequested(stderr: resumed.stderr)
             throw RunError.codexFailed(exitCode: resumed.exitCode, stderr: resumed.stderr)
         }
         let shouldHeal: Bool = queue.sync { !stopRequested }
         guard shouldHeal else {
             publish(resumed.finalEvents, onEvent: onEvent)
-            return
+            throw AgentRunStopped(detail: resumed.stderr)
         }
         // The rejected resume's terminal/accounting/rollout telemetry is
         // deliberately dropped. A new translator gives the fresh process a
@@ -279,8 +283,14 @@ public final class CodexAgentRunner: @unchecked Sendable {
         let fresh = try runOnce(mode: .fresh, threadId: nil, prompt: prompt, onEvent: onEvent)
         publish(fresh.finalEvents, onEvent: onEvent)
         if fresh.exitCode != 0 {
+            try throwStoppedIfRequested(stderr: fresh.stderr)
             throw RunError.codexFailed(exitCode: fresh.exitCode, stderr: fresh.stderr)
         }
+    }
+
+    /// M1.7: consult the stop flag before every throw. See `AgentRunStopped`.
+    private func throwStoppedIfRequested(stderr: String) throws {
+        if queue.sync { stopRequested } { throw AgentRunStopped(detail: stderr) }
     }
 
     /// Text-only compatibility wrapper, matching the other runners'.

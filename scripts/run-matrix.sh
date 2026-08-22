@@ -621,6 +621,15 @@ run_app_check .build/debug/Array --zone-tile-detach-sweep-check
 # then committed it. Behavioural on purpose: the pre-existing coverage of this
 # method is a source scan, which stays green while the behaviour is inverted.
 run_app_check .build/debug/Array --inbox-reveal-project-check
+# M1.7/M1.9 (.plans/46): AgentRunning.stop() is non-throwing and reports nothing;
+# what happens is that it SIGTERMs the child and run() throws on the way out. The
+# supervisor turned that into .runtimeError -> didFail -> .failed, persisted, and
+# pushed to the phone as "agent failed" -- with all eleven consumers of
+# TurnOutcome.interrupted already correct and no producer anywhere. The seven
+# existing stop checks drive a ScriptedAgentRunner that returns NORMALLY after
+# stop(), so none of them could observe the throw; M1.9's stopError seam is that
+# shape. Act 3 is the guard against laundering every error into an interruption.
+run_app_check .build/debug/Array --agent-stop-outcome-check
 # .plans/15: opening a project file resolves the ACTIVE project/zone at invocation
 # time. Before the repair, an open after an in-process workspace switch installed
 # into the departed zone's model and persisted through the boot project's store.

@@ -11,6 +11,7 @@ check --agent-message-bus-check
 check --agent-observer-independence-check
 check --agent-restore-check
 check --agent-status-check
+check --agent-stop-outcome-check
 check --agent-supervisor-check
 check --agent-tile-click-focus-check
 check --app-support-channel-check
@@ -186,6 +187,7 @@ leg run_app_check .build/debug/Array --agent-message-bus-check
 leg run_app_check .build/debug/Array --agent-observer-independence-check
 leg run_app_check .build/debug/Array --agent-restore-check
 leg run_app_check .build/debug/Array --agent-status-check
+leg run_app_check .build/debug/Array --agent-stop-outcome-check
 leg run_app_check .build/debug/Array --agent-supervisor-check
 leg run_app_check .build/debug/Array --agent-tile-click-focus-check
 leg run_app_check .build/debug/Array --app-support-channel-check

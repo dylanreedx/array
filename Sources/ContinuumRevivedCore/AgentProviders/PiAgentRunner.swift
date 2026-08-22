@@ -204,6 +204,7 @@ public final class PiAgentRunner: @unchecked Sendable {
     private var translator: PiEventTranslator
     private var buffer = Data()
     private var stderrBuffer = Data()   // queue-confined
+    private var stopRequested = false   // queue-confined (M1.7); a stopped run is not a failed one
     private var process: Process?       // queue-confined (set in run, read in stop)
 
     public init(config: Config) {
@@ -278,6 +279,9 @@ public final class PiAgentRunner: @unchecked Sendable {
         }
 
         if process.terminationStatus != 0 {
+            // M1.7: pi had NO stop flag at all -- `stop()` terminated the child and
+            // this line then reported the resulting non-zero exit as a failure.
+            if queue.sync { stopRequested } { throw AgentRunStopped(detail: errText) }
             throw RunError.piFailed(exitCode: process.terminationStatus, stderr: errText)
         }
     }
@@ -288,7 +292,10 @@ public final class PiAgentRunner: @unchecked Sendable {
     }
 
     public func stop() {
-        queue.sync { process?.terminate() }
+        queue.sync {
+            stopRequested = true
+            process?.terminate()
+        }
     }
 
     /// P2D.2 — observe `spawn_agent` calls this agent makes, out of band.

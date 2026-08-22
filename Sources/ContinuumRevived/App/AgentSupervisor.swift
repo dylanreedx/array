@@ -2047,6 +2047,10 @@ final class AgentSupervisor {
         // dispatch, not just the provider's silence.
         turnFacts[id, default: TurnFacts()].submittedAt = now
 
+        // M1.7: a new prompt is a new turn, so the previous turn's stop no longer
+        // speaks for it. Cleared here rather than in `stop` because the throw it
+        // guards arrives strictly after `stop` returns.
+        stopRequestedAgents.remove(id)
         let runner = makeRunner(record)
         runners[id] = runner
         notifyTurnCapabilitiesChanged(id)
@@ -2073,9 +2077,38 @@ final class AgentSupervisor {
                 }
             } catch {
                 let message = SecretRedactor.redactLocalDiagnostics(String(describing: error))
-                fputs("AgentSupervisor: runner failed for agent \(id.rawValue.uuidString): \(message)\n", stderr)
+                let runnerSaidStopped = error is AgentRunStopped
                 DispatchQueue.main.async {
-                    self?.deliver(.runtimeError(threadId: threadId, message: message), to: id)
+                    guard let self else { return }
+                    // M1.7: a stop is not a failure.
+                    //
+                    // `AgentRunning.stop()` is non-throwing and reports nothing; what
+                    // actually happens is that it SIGTERMs the child and `run()` then
+                    // throws on the way out. That threw `.runtimeError` -> didFail ->
+                    // `.failed`, which was persisted and pushed to the user's phone
+                    // as "agent failed". Every consumer of `TurnOutcome.interrupted`
+                    // was already correct; there was no producer.
+                    //
+                    // TWO independent sources agree here on purpose. The runner's own
+                    // `AgentRunStopped` is the precise one. The supervisor's own
+                    // record of having called `stop(_:)` closes the race the plan
+                    // named: `stop` delivers `.sessionStateChanged(.stopped)`
+                    // synchronously while the throw arrives later on this hop, so a
+                    // runner that decided to throw a plain error microseconds before
+                    // the flag was set would still overwrite the stopped state. It
+                    // also covers any runner that has not adopted `AgentRunStopped`.
+                    if runnerSaidStopped || self.stopRequestedAgents.contains(id) {
+                        self.deliver(
+                            .turnCompleted(
+                                threadId: threadId,
+                                turnId: "stopped:\(threadId)",
+                                outcome: .interrupted,
+                                errorMessage: nil),
+                            to: id)
+                        return
+                    }
+                    fputs("AgentSupervisor: runner failed for agent \(id.rawValue.uuidString): \(message)\n", stderr)
+                    self.deliver(.runtimeError(threadId: threadId, message: message), to: id)
                 }
             }
             DispatchQueue.main.async { self?.clearRunner(runner, for: id) }
@@ -2158,6 +2191,9 @@ final class AgentSupervisor {
             warn("AgentSupervisor.stop: no agent \(id.rawValue.uuidString)")
             return
         }
+        // M1.7: recorded BEFORE the runner is told, so the unwinding `run()` can
+        // never lose the race back to `deliver`.
+        stopRequestedAgents.insert(id)
         runners[id]?.stop()
         runners[id] = nil
         notifyTurnCapabilitiesChanged(id)
@@ -2472,6 +2508,10 @@ final class AgentSupervisor {
     /// `canSend == false` forever (P5.5 live finding). Observers re-read
     /// `turnSnapshot(for:)`; nothing is fabricated onto the event stream. Token
     /// per observer because every attached agent tile subscribes.
+    /// Agents whose in-flight turn was deliberately stopped, cleared when the next
+    /// prompt starts a new turn. M1.7 (`.plans/46`) — see the catch in `send`.
+    private var stopRequestedAgents: Set<AgentID> = []
+
     private var turnCapabilityObservers: [UUID: (AgentID) -> Void] = [:]
 
     @discardableResult
@@ -4174,6 +4214,18 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
     private let runtimeObservations: [AgentRuntimeObservation]
     private let holdUntilStopped: Bool
     private let runError: Error?
+    /// Thrown AFTER `released.wait()` returns — i.e. as a consequence of `stop()`.
+    /// M1.9 (`.plans/46`).
+    ///
+    /// `runError` above is thrown before `run` ever blocks, so it can model "failed
+    /// to start" and nothing else. Production's shape is the opposite: `stop()` is
+    /// non-throwing (`AgentRunning` declares it so, and the supervisor calls it
+    /// unqualified), it SIGTERMs the child, and `run()` throws on the way out
+    /// because the CLI exited non-zero. This is that. Every one of the seven
+    /// existing `supervisor.stop(_:)` checks drives a runner whose `run` falls
+    /// through to a normal return after the semaphore, which is exactly why they
+    /// were all green while a Stop was being recorded as a failure.
+    private let stopError: Error?
     private let released = DispatchSemaphore(value: 0)
     private let lock = NSLock()
     private var stopCountStorage = 0
@@ -4189,12 +4241,14 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
         script: [AgentRuntimeEvent],
         runtimeObservations: [AgentRuntimeObservation] = [],
         holdUntilStopped: Bool = false,
-        runError: Error? = nil
+        runError: Error? = nil,
+        stopError: Error? = nil
     ) {
         self.script = script
         self.runtimeObservations = runtimeObservations
         self.holdUntilStopped = holdUntilStopped
         self.runError = runError
+        self.stopError = stopError
     }
 
     var stopCount: Int { lock.withLock { stopCountStorage } }
@@ -4220,6 +4274,13 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
         }
         for event in script { onEvent(event) }
         if holdUntilStopped { released.wait() }
+        if let stopError {
+            lock.withLock {
+                completedRunStorage += 1
+                liveHandler = nil
+            }
+            throw stopError
+        }
         lock.withLock {
             completedRunStorage += 1
             liveHandler = nil

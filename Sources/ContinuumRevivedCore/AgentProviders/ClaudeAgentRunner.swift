@@ -288,14 +288,26 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         let first = try runOnce(mode: order.first, prompt: prompt, onEvent: onEvent)
         if first.exitCode == 0 { return }
         guard ClaudeCLIBackend.retryIsWarranted(after: order.first, stderr: first.stderr) else {
+            // M1.7: a Stop SIGTERMs the child, so this non-zero exit is the Stop
+            // arriving, not a failure. The flag existed and was read only to
+            // suppress the retry BELOW -- after this line had already thrown.
+            try throwStoppedIfRequested(stderr: first.stderr)
             throw RunError.claudeFailed(exitCode: first.exitCode, stderr: first.stderr)
         }
         let shouldRetry: Bool = queue.sync { !stopRequested }
-        guard shouldRetry else { return }
+        guard shouldRetry else { throw AgentRunStopped(detail: first.stderr) }
         let second = try runOnce(mode: order.retry, prompt: prompt, onEvent: onEvent)
         if second.exitCode != 0 {
+            try throwStoppedIfRequested(stderr: second.stderr)
             throw RunError.claudeFailed(exitCode: second.exitCode, stderr: second.stderr)
         }
+    }
+
+    /// M1.7: consult the stop flag BEFORE every throw. `stopRequested` is set
+    /// under `queue.sync` by `stop()`, which also sends the SIGTERM, so by the time
+    /// a `run` sees a non-zero exit the flag is already true.
+    private func throwStoppedIfRequested(stderr: String) throws {
+        if queue.sync { stopRequested } { throw AgentRunStopped(detail: stderr) }
     }
 
     /// Text-only compatibility wrapper, matching PiAgentRunner's.

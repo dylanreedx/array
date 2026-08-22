@@ -993,6 +993,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--agent-stop-outcome-check") {
+            do {
+                _ = NSApplication.shared
+                try AgentStopOutcomeChecks.run()
+                print("ContinuumRevivedAgentStopOutcomeChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--inbox-reveal-project-check") {
             do {
                 _ = NSApplication.shared
