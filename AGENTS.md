@@ -154,8 +154,38 @@ frozen fallback in QA).
    frames the tile against a zone that is no longer on screen, and persists it
    through the wrong project's store — this is exactly what file opening did
    until `.plans/15`. Use `CanvasNSView.installProjectTile` and
-   `TileSpawner.makeProjectTilePlacement`; terminal, note, browser, and agent
-   spawns have NOT been migrated yet and still carry the bug.
+   `TileSpawner.makeProjectTilePlacement`.
+
+   **Corrected 2026-08-22 (`.plans/46`), verified at `09de0b0`.** This hazard
+   used to say terminal, note, browser and agent spawns were unmigrated. **All
+   four are migrated.** The remaining production spawns on the stale flat path
+   are **`spawnRunArtifacts`** (`TileSpawner.swift:2262`, the sole surviving
+   caller of `makePlacement` at `:2246`) and **`spawnDiffReviewFromPalette`**
+   (`ContinuumApp.swift:13505`). The `installInitial*` boot walk
+   (`ContinuumApp.swift:4053-4075`) and its `TileSpawner` helpers
+   (`installNoteTile`, `installFileTile`, `installRunArtifactsTile`) are
+   deliberately flat and boot-only.
+
+   **The bigger hazard on this seam, and it applies to EVERY tile kind:** four
+   places build a ZoneLayer's tile views as `DescriptorTileNSView` placeholders
+   — `WorkspaceRuntime.swift:229-234` (`install`), `:361-365` (`addZone`),
+   `:393-396` (`makeAmbientZoneLayer`) and `:680-684` (`switchWorkspace`) —
+   with only the first carrying the comment "real hydration is T08". Real views
+   are built ONLY by the boot walk, which runs once at
+   `applicationDidFinishLaunching`. So after the first in-process workspace
+   switch every tile is a title-label placeholder: no transcript, no composer,
+   nothing to click. `ecf3bf3`'s `retireFlatCompatibilityScene()` made this
+   latent defect live by emptying the flat `tileViews` table that used to keep
+   boot tiles resolvable. `openDocument` calls `switchWorkspace` itself
+   (`WorkspaceRuntime.swift:486-500`), so one cross-workspace link click can
+   trigger it.
+
+   Compounding it: `persistProjectCanvas` (`TileSpawner.swift:2213-2232`, ten
+   call sites) writes `state.tiles = canvasView.tiles(forProjectId:)`, and that
+   helper reads **installed layers only** (`CanvasNSView.swift:5214-5220`). A
+   spawn that persists a project whose other zones are not hydrated therefore
+   **erases those tiles from the project's canvas file.** This is on the
+   "correct" path and has no witness.
 10. **Two installs on ONE project root.** The channel split covers Application
    Support and the defaults domain. It does NOT cover a project: the canvas,
    tiles, notes, managed sessions and lock live in `<root>/.array/`, keyed by

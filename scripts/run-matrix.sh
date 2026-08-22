@@ -580,6 +580,12 @@ run_app_check .build/debug/Array --zone-registry-refcount-check
 run_app_check .build/debug/Array --agent-message-bus-check
 run_app_check .build/debug/Array --workspace-runtime-install-check
 run_app_check .build/debug/Array --workspace-switch-check
+# M1.1 (.plans/46): a workspace switch must leave REAL tile views, not
+# DescriptorTileNSView placeholders. The three legs above assert zone identity,
+# ref-counts, focus and viewport across a switch and never the CLASS of the
+# resulting view, which is why every tile becoming a dead placeholder after the
+# first in-process switch has been green this whole time.
+run_app_check .build/debug/Array --zone-tile-hydration-check
 # .plans/15: opening a project file resolves the ACTIVE project/zone at invocation
 # time. Before the repair, an open after an in-process workspace switch installed
 # into the departed zone's model and persisted through the boot project's store.

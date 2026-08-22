@@ -161,6 +161,7 @@ check --zone-rename-inline-check
 check --zone-resize-check
 check --zone-save-isolation-check
 check --zone-tier-transition-check
+check --zone-tile-hydration-check
 leg run git diff --check
 leg run scripts/check-agent-tile-ux-program.sh
 leg run scripts/check-app-bundle.sh --configuration debug
@@ -330,6 +331,7 @@ leg run_app_check .build/debug/Array --zone-rename-inline-check
 leg run_app_check .build/debug/Array --zone-resize-check
 leg run_app_check .build/debug/Array --zone-save-isolation-check
 leg run_app_check .build/debug/Array --zone-tier-transition-check
+leg run_app_check .build/debug/Array --zone-tile-hydration-check
 leg run_ios_build
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --document-location-check
 leg run_leg scripts/check-color-hygiene.sh

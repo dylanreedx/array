@@ -993,6 +993,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--zone-tile-hydration-check") {
+            do {
+                _ = NSApplication.shared
+                try ZoneTileHydrationChecks.run()
+                print("ContinuumRevivedZoneTileHydrationChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--workspace-switch-check") {
             do {
                 try AppDelegate.runWorkspaceSwitchSelfCheck()
@@ -3985,15 +3997,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             self.bootTileSpawner = spawner
             configureCreationAndRuntimeRoutes(on: spawner)
-            workspaceRuntime?.onSpawnerCreated = { [weak self] arriving in
-                self?.configureCreationAndRuntimeRoutes(on: arriving)
-            }
-            workspaceRuntime?.documentAgentTileIdsProvider = { [weak self] in
-                guard let self else { return [:] }
-                return Dictionary(uniqueKeysWithValues: agentSupervisor.records.values.compactMap { record in
-                    record.tileId.map { (record.id, $0) }
-                })
-            }
+            configureWorkspaceRuntimeHooks()
             installSettingsChangeObserver()
             workspaceRuntime?.activeController?.onBrowserRuntimeHydrated = { [weak self] runtime in
                 self?.wireContentProcessTerminationHandler(runtime)
@@ -13439,6 +13443,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     /// Every boot and post-workspace-switch spawner receives identical policy
     /// providers. This prevents creation semantics from changing after a switch.
+    /// The app's focus broker, for an offline check that must construct a
+    /// `WorkspaceRuntime` the way production does.
+    var qaFocusBroker: FocusBroker { focusBroker }
+
+    /// Minimal offline wiring so a check living in another file can drive the
+    /// REAL `configureWorkspaceRuntimeHooks()` instead of substituting its own
+    /// closures. `AppDelegate`'s scene properties are `private`, and file-private
+    /// access is why every other delegate-driven check had to be pasted into this
+    /// 20k-line file; this seam is the smaller price. Used by
+    /// `--zone-tile-hydration-check` (M1.1, `.plans/46`).
+    func qaPrepareForOfflineSceneCheck(
+        canvas: CanvasNSView,
+        browserEngine: BrowserEngineContext,
+        runtime: WorkspaceRuntime
+    ) {
+        self.canvasView = canvas
+        self.browserEngine = browserEngine
+        self.workspaceRuntime = runtime
+        configureWorkspaceRuntimeHooks()
+    }
+
+    /// Every app-owned hook the `WorkspaceRuntime` needs, in one place.
+    ///
+    /// Extracted from `applicationDidFinishLaunching` (M1.1, `.plans/46`) so a
+    /// self-check can drive the REAL wiring instead of substituting its own
+    /// closures. That substitution is the failure mode `--agent-local-file-link-check`
+    /// shipped with: it wired its own `onOpenLocalFile` and therefore never
+    /// executed the production path it claimed to cover.
+    ///
+    /// Production calls this once, after `bootTileSpawner` is configured.
+    func configureWorkspaceRuntimeHooks() {
+        workspaceRuntime?.onSpawnerCreated = { [weak self] arriving in
+            self?.configureCreationAndRuntimeRoutes(on: arriving)
+        }
+        workspaceRuntime?.documentAgentTileIdsProvider = { [weak self] in
+            guard let self else { return [:] }
+            return Dictionary(uniqueKeysWithValues: agentSupervisor.records.values.compactMap { record in
+                record.tileId.map { (record.id, $0) }
+            })
+        }
+    }
+
     private func configureCreationAndRuntimeRoutes(on spawner: TileSpawner) {
         spawner.creationScopeProvider = { [weak self] in self?.resolvedCreationScope() }
         spawner.terminalProjectContextProvider = { [weak self] in self?.activeZoneProjectEntry() }
