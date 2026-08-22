@@ -355,7 +355,7 @@ bundle-check --palette-duplicate-root-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 21
 count ContinuumRevivedAgentUIChecks 19
-count ContinuumRevivedCoreChecks 88
+count ContinuumRevivedCoreChecks 89
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

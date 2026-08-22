@@ -66,6 +66,14 @@ enum CanvasPersistenceModelChecks {
             UUID(uuidString: "00000000-0000-0000-0000-0000000C0A03")!
         ]
         let pbTile = UUID(uuidString: "00000000-0000-0000-0000-0000000C0B01")!
+        // Pa also owns two tiles in a zone this fixture NEVER installs -- the shape
+        // of a project that appears in a second workspace, or in a zone held below
+        // the live hydration tier. Persisting Pa must not disturb them.
+        let zoneOther = UUID(uuidString: "00000000-0000-0000-0000-0000000C0007")!
+        let paOtherTiles = [
+            UUID(uuidString: "00000000-0000-0000-0000-0000000C0A04")!,
+            UUID(uuidString: "00000000-0000-0000-0000-0000000C0A05")!
+        ]
 
         let tempRoot = fileManager.temporaryDirectory
             .appendingPathComponent("continuum-canvas-persistence-\(UUID().uuidString)", isDirectory: true)
@@ -88,30 +96,37 @@ enum CanvasPersistenceModelChecks {
                 )
             )
         }
-        func makeCanvas(tileIds: [UUID]) -> CanvasState {
+        func makeCanvas(_ specs: [(id: UUID, zoneId: UUID?)]) -> CanvasState {
             CanvasState(
                 viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
-                tiles: tileIds.enumerated().map { index, id in
-                    Tile(
-                        id: id, kind: .note, title: "note-\(index)",
+                tiles: specs.enumerated().map { index, spec in
+                    var tile = Tile(
+                        id: spec.id, kind: .note, title: "note-\(index)",
                         frame: TileFrame(x: Double(10 + index * 40), y: 10, width: 220, height: 140),
                         zPosition: .fromLegacyRank(index + 1), runtimeRef: nil,
-                        metadata: TileMetadata(noteId: id)
+                        metadata: TileMetadata(noteId: spec.id)
                     )
+                    tile.zoneId = spec.zoneId
+                    return tile
                 },
                 groups: [],
-                lastActiveTileId: tileIds.first
+                lastActiveTileId: specs.first?.id
             )
         }
+        let paCanvas = makeCanvas(
+            paTiles.map { (id: $0, zoneId: Optional(zoneA)) }
+                + paOtherTiles.map { (id: $0, zoneId: Optional(zoneOther)) }
+        )
+        let paAllTiles = paTiles + paOtherTiles
 
         let projectPaObj = makeProject(id: projectPa, name: "Pa", root: paRoot)
         let projectPbObj = makeProject(id: projectPb, name: "Pb", root: pbRoot)
         let storePa = ProjectStore(projectRoot: paRoot)
         let storePb = ProjectStore(projectRoot: pbRoot)
         try storePa.saveProject(projectPaObj)
-        try storePa.saveCanvas(makeCanvas(tileIds: paTiles))
+        try storePa.saveCanvas(paCanvas)
         try storePb.saveProject(projectPbObj)
-        try storePb.saveCanvas(makeCanvas(tileIds: [pbTile]))
+        try storePb.saveCanvas(makeCanvas([(id: pbTile, zoneId: zoneB)]))
 
         func makeDocument(zoneId: UUID, projectId: UUID, color: String) -> WorkspaceDocument {
             WorkspaceDocument(
@@ -155,7 +170,7 @@ enum CanvasPersistenceModelChecks {
         })
 
         let canvas = CanvasNSView(
-            canvasState: makeCanvas(tileIds: paTiles),
+            canvasState: paCanvas,
             activeZone: nil, zoneRenderModels: [], showsZoneChrome: false
         )
         canvas.frame = CGRect(x: 0, y: 0, width: 2000, height: 1200)
@@ -179,8 +194,9 @@ enum CanvasPersistenceModelChecks {
 
         // Baseline: the fixture is what we think it is BEFORE anything moves.
         let paBefore = ((try? storePa.tryLoadCanvas()) ?? nil)?.tiles.map(\.id) ?? []
-        try expect(Set(paBefore) == Set(paTiles),
-                   "pa-baseline: Pa's canvas must start with its own 3 tiles; got \(paBefore.count)")
+        try expect(Set(paBefore) == Set(paAllTiles),
+                   "pa-baseline: Pa's canvas must start with its own 5 tiles (3 in zoneA, 2 in the "
+                   + "never-installed zone); got \(paBefore.count)")
 
         // === Switch to WB. Pb is now the active project. ===
         try runtime.switchWorkspace(to: workspaceWB)
@@ -200,7 +216,7 @@ enum CanvasPersistenceModelChecks {
         // === Pb's file must still be Pb's. ===
         let pbAfter = ((try? storePb.tryLoadCanvas()) ?? nil)?.tiles ?? []
         let pbAfterIds = Set(pbAfter.map(\.id))
-        let leaked = pbAfterIds.intersection(Set(paTiles))
+        let leaked = pbAfterIds.intersection(Set(paAllTiles))
         try expect(leaked.isEmpty,
                    "pb-leak: Pb's canvas.json must never contain Pa's tiles, but a canvas change "
                    + "after the switch wrote \(leaked.count) of them into it "
@@ -213,10 +229,39 @@ enum CanvasPersistenceModelChecks {
 
         // And the departed project must not have been emptied on the way out.
         let paAfter = ((try? storePa.tryLoadCanvas()) ?? nil)?.tiles.map(\.id) ?? []
-        try expect(Set(paAfter) == Set(paTiles),
-                   "pa-survives: Pa's canvas must still hold its own 3 tiles after switching away; "
+        try expect(Set(paAfter) == Set(paAllTiles),
+                   "pa-survives: Pa's canvas must still hold all 5 of its tiles after switching away; "
                    + "got \(paAfter.count)")
 
-        print("CanvasPersistenceModelChecks: a canvas change after a workspace switch persisted only the active project's tiles")
+        // === ACT 3: back to WA, then persist Pa. The never-installed zone's tiles
+        // must survive. This is the merged M1.5: `tiles(forProjectId:)` reads
+        // INSTALLED layers only, so replacing the file with it erased every tile in
+        // a zone below the live tier. Only a zone that is installed may delete. ===
+        try runtime.switchWorkspace(to: workspaceWA)
+        canvas.layoutSubtreeIfNeeded()
+
+        try expect(runtime.activeController?.project.id == projectPa,
+                   "act3-precondition: Pa must be active again after switching back")
+        let installedForPa = canvas.installedZoneIds(forProjectId: projectPa)
+        try expect(installedForPa == Set([zoneA]),
+                   "act3-precondition: exactly zoneA must be installed for Pa, so zoneOther is the "
+                   + "un-installed zone under test; got \(installedForPa.count) zone(s)")
+
+        delegate.canvasDidChange(canvas)
+        runtime.activeController?.flushCanvasSave()
+
+        let paFinal = ((try? storePa.tryLoadCanvas()) ?? nil)?.tiles ?? []
+        let paFinalIds = Set(paFinal.map(\.id))
+        let truncated = Set(paOtherTiles).subtracting(paFinalIds)
+        try expect(truncated.isEmpty,
+                   "pa-truncation: persisting Pa dropped \(truncated.count) tile(s) that live in a zone "
+                   + "no layer has installed "
+                   + "(\(truncated.sorted(by: { $0.uuidString < $1.uuidString }).map(\.uuidString).joined(separator: ", "))). "
+                   + "Persistence read installed layers only and replaced the file with them.")
+        try expect(paFinalIds == Set(paAllTiles),
+                   "pa-final: Pa's canvas must still be exactly its own 5 tiles; got \(paFinalIds.count)")
+
+        print("CanvasPersistenceModelChecks: a switch persisted only the active project's tiles, and a "
+              + "project's un-installed zone survived the write")
     }
 }

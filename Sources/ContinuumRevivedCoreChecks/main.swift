@@ -11583,4 +11583,9 @@ try runAsyncCheck {
 runAgentLocalFileLinkChecks()
 runDocumentLocationChecks()
 
+// Plan: .plans/46 M1.0 — what a project's canvas.json is allowed to receive.
+// An un-installed zone's tiles must survive a save; only a zone that IS installed
+// may report one of its tiles deleted.
+runCanvasPersistenceMergeChecks()
+
 print("ContinuumRevivedCoreChecks passed")

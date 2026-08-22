@@ -223,8 +223,18 @@ final class WorkspaceRuntime {
             // A project can appear in several zones. Persisted `zoneId` owns
             // membership; pre-membership legacy tiles are adopted by only that
             // project's first zone so they are never rendered N times.
+            // M1.0 (.plans/46): STAMP the adoption. A pre-membership legacy tile
+            // (zoneId == nil) adopted by this zone is written back with that zone
+            // id, so persistence can tell "deleted from a zone I can see" from
+            // "lives in a zone I cannot see". Leaving it nil makes that
+            // undecidable, and the safe answer to an undecidable delete is to keep
+            // the tile forever -- which loses real deletions instead.
             let memberTiles = canvasState.tiles.filter {
                 $0.zoneId == zone.zoneId || ($0.zoneId == nil && firstZoneByProject[projectId] == zone.zoneId)
+            }.map { tile -> Tile in
+                var adopted = tile
+                adopted.zoneId = zone.zoneId
+                return adopted
             }
             // Build tile views (descriptor views — headless safe; real hydration is T08).
             var tileViews: [UUID: TileNSView] = [:]
@@ -674,8 +684,18 @@ final class WorkspaceRuntime {
             } else {
                 canvasState = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil)
             }
+            // M1.0 (.plans/46): STAMP the adoption. A pre-membership legacy tile
+            // (zoneId == nil) adopted by this zone is written back with that zone
+            // id, so persistence can tell "deleted from a zone I can see" from
+            // "lives in a zone I cannot see". Leaving it nil makes that
+            // undecidable, and the safe answer to an undecidable delete is to keep
+            // the tile forever -- which loses real deletions instead.
             let memberTiles = canvasState.tiles.filter {
                 $0.zoneId == zone.zoneId || ($0.zoneId == nil && firstZoneByProject[projectId] == zone.zoneId)
+            }.map { tile -> Tile in
+                var adopted = tile
+                adopted.zoneId = zone.zoneId
+                return adopted
             }
             var tileViews: [UUID: TileNSView] = [:]
             for tile in memberTiles {

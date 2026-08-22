@@ -561,7 +561,14 @@ final class ZoneRuntimeController {
 
     private func hydrateToLive() throws {
         guard let canvasView, let tileSpawner else { throw HydrationLifecycleError.uiUnavailable }
-        let browserTileIds = canvasView.canvasState.tiles
+        // M1.0 (.plans/46): read THIS project's tiles from whichever model owns
+        // them. The flat `canvasState` holds the departed project's tiles after a
+        // workspace switch, so filtering it here rehydrated the wrong browsers --
+        // or none. Same root cause as the two persistence paths above.
+        let ownedTiles = canvasView.isFlatCompatibilitySceneActive
+            ? canvasView.canvasState.tiles
+            : canvasView.tiles(forProjectId: project.id)
+        let browserTileIds = ownedTiles
             .filter { $0.kind == .browser && $0.runtimeRef == nil }
             .map(\.id)
 
@@ -596,6 +603,25 @@ final class ZoneRuntimeController {
         return (profiles, projects, registry.workspaces)
     }
 
+    /// What this controller is allowed to write into ITS OWN project's canvas.
+    ///
+    /// M1.0 (`.plans/46`). Both flush paths used to persist `canvasView.canvasState`
+    /// verbatim. That flat collection is not a mirror: `setZones` never updates it
+    /// and `retireFlatCompatibilityScene` deliberately leaves it holding the
+    /// DEPARTED project's tiles. Since `canvasDidChange` schedules the save on the
+    /// newly ACTIVE controller, the first canvas change after a workspace switch
+    /// wrote project A's tiles into project B's file. Witnessed by
+    /// `--canvas-persistence-model-check`.
+    private func canvasStateToPersist(canvasView: CanvasNSView) -> CanvasState {
+        let persistedTiles = ((try? projectStore.tryLoadCanvas()) ?? nil)?.tiles ?? []
+        // Base on the LIVE canvas: this path's whole job is saving the camera.
+        return canvasView.canvasStateForPersistence(
+            projectId: project.id,
+            base: canvasView.canvasState,
+            persistedTiles: persistedTiles
+        )
+    }
+
     func scheduleCanvasSave() {
         // Coalesce drag-rate writes: schedule a save after the last change.
         // flushPendingSaves() runs immediately for project switch and close.
@@ -620,7 +646,7 @@ final class ZoneRuntimeController {
         saveTimer?.invalidate()
         saveTimer = nil
         guard isCanvasDirty, let canvasView else { return }
-        let snapshot = canvasView.canvasState
+        let snapshot = canvasStateToPersist(canvasView: canvasView)
         let store = projectStore
         isCanvasDirty = false
         Self.canvasSaveQueue.async { [weak self] in
@@ -665,7 +691,7 @@ final class ZoneRuntimeController {
         saveTimer?.invalidate()
         saveTimer = nil
         guard isCanvasDirty, let canvasView else { return }
-        let snapshot = canvasView.canvasState
+        let snapshot = canvasStateToPersist(canvasView: canvasView)
         // Serialize behind any in-flight debounced write so the durable copy
         // on disk is the newest state — project switch and close rely on it.
         Self.canvasSaveQueue.sync {

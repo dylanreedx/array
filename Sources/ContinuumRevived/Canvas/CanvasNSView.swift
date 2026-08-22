@@ -5219,6 +5219,59 @@ final class CanvasNSView: NSView, TokenThemed {
             .filter { seen.insert($0.id).inserted }
     }
 
+    /// Whether the flat boot scene still owns the active project. False from the
+    /// first `setZones`/`retireFlatCompatibilityScene` onward, after which
+    /// `canvasState.tiles` describes the DEPARTED project and must not be persisted.
+    /// M1.0 (`.plans/46`).
+    var isFlatCompatibilitySceneActive: Bool { flatCompatibilitySceneActive }
+
+    /// The zoneIds of this project's INSTALLED layers — the only zones entitled to
+    /// report a tile as deleted. See `CanvasEngine.mergeProjectTilesForPersistence`.
+    func installedZoneIds(forProjectId projectId: UUID) -> Set<UUID> {
+        Set(zoneLayers.filter { $0.placement.projectId == projectId }.map(\.placement.zoneId))
+    }
+
+    /// The canvas state to persist for one project, merged over what is on disk.
+    ///
+    /// M1.0 (`.plans/46`). This is the ONE reader every persistence path must use.
+    /// Before it, `flushCanvasSave` wrote the raw flat `canvasState` into whichever
+    /// project was active — so the first canvas change after a workspace switch
+    /// overwrote the arriving project's `canvas.json` with the departed project's
+    /// tiles — and `persistProjectCanvas` replaced the file with the installed
+    /// layers alone, dropping every zone below the live tier.
+    ///
+    /// `base` supplies every field except `tiles`, and the two callers want
+    /// different bases — which is the whole reason this takes both.
+    ///
+    /// A **camera flush** must base on the LIVE `canvasState`, because the viewport
+    /// it exists to save lives there and nowhere else; basing it on the disk copy
+    /// silently stops persisting pan and zoom (caught by `--zone-save-isolation-check`
+    /// and `--workspace-runtime-install-check`, which is exactly their job).
+    /// A **spawn** bases on the disk copy, so adding a tile does not also commit
+    /// whatever the camera happens to be doing.
+    ///
+    /// `persistedTiles` is always the on-disk tile list, whichever base is used:
+    /// it is what tells the merge which zones exist beyond the installed ones.
+    func canvasStateForPersistence(
+        projectId: UUID,
+        base: CanvasState,
+        persistedTiles: [Tile]
+    ) -> CanvasState {
+        var state = base
+        if flatCompatibilitySceneActive {
+            // Boot, single project, no layers yet: the flat scene IS this project.
+            state.tiles = canvasState.tiles
+            state.lastActiveTileId = canvasState.lastActiveTileId
+            return state
+        }
+        state.tiles = CanvasEngine.mergeProjectTilesForPersistence(
+            persisted: persistedTiles,
+            installed: tiles(forProjectId: projectId),
+            coveredZoneIds: installedZoneIds(forProjectId: projectId)
+        )
+        return state
+    }
+
     func projectId(forZone zoneId: UUID) -> UUID? {
         zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.placement.projectId
     }

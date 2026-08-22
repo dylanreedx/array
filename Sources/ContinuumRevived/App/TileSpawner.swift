@@ -2219,15 +2219,24 @@ final class TileSpawner {
             try projectStore.saveCanvas(canvasView.canvasState)
         case let .zoneLayer(zoneId):
             guard let projectId = canvasView.projectId(forZone: zoneId) else { throw SpawnError.canvasUnavailable }
-            let tiles = canvasView.tiles(forProjectId: projectId)
-            var state = ((try? projectStore.tryLoadCanvas()) ?? nil) ?? CanvasState(
+            let persisted = ((try? projectStore.tryLoadCanvas()) ?? nil) ?? CanvasState(
                 viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
                 tiles: [],
                 groups: [],
                 lastActiveTileId: nil
             )
-            state.tiles = tiles
-            try projectStore.saveCanvas(state)
+            // M1.0 (.plans/46): MERGE, never replace. `tiles(forProjectId:)` reads
+            // installed layers only, so assigning it wholesale erased every tile of
+            // this project living in a zone below the live tier -- or in another
+            // workspace -- on the next spawn. Only a zone that is actually
+            // installed may delete a tile.
+            try projectStore.saveCanvas(
+                canvasView.canvasStateForPersistence(
+                    projectId: projectId,
+                    base: persisted,
+                    persistedTiles: persisted.tiles
+                )
+            )
         }
     }
 
