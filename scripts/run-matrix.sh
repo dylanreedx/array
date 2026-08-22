@@ -608,6 +608,13 @@ run_app_check .build/debug/Array --zone-runtime-duplication-check
 # subset contract: a non-active controller gets a spawner and NOT the session
 # observer or the tmux reaper, which are process-wide and belong to one zone.
 run_app_check .build/debug/Array --zone-spawner-coverage-check
+# M1.4 (.plans/46): setZones unregistered focus, released surface residency and
+# removed the view -- and never told the view. Only TWO production callers of
+# ManagedAgentTileNSView.detach() existed, so every workspace switch orphaned an
+# agent tile's event subscription, three supervisor observer tokens and its
+# stale-location timer. turnCapabilityObservers is flat and un-keyed, so one
+# leaked entry runs for every agent in the app, not just its own.
+run_app_check .build/debug/Array --zone-tile-detach-sweep-check
 # .plans/15: opening a project file resolves the ACTIVE project/zone at invocation
 # time. Before the repair, an open after an in-process workspace switch installed
 # into the departed zone's model and persisted through the boot project's store.

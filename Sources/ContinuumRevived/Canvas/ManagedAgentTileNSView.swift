@@ -541,6 +541,12 @@ final class ManagedAgentTileNSView: TileNSView {
     /// an agent must not kill it (locked decision). The transcript already on screen
     /// is left alone, so a detached tile still SHOWS the agent it was following;
     /// `attach` is what clears it, on the next replay.
+    /// M1.4: a workspace switch is a removal, and a removal must detach. See
+    /// `TileNSView.prepareForRemovalFromScene`.
+    override func prepareForRemovalFromScene() {
+        detach()
+    }
+
     func detach() {
         prepareStreamingMarkupForTeardown(final: true)
         // Detach is an immediate visual/lifecycle boundary: a retained transcript

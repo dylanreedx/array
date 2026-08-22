@@ -3787,6 +3787,28 @@ final class AgentSupervisor {
         subscribers[id]?.count ?? 0
     }
 
+    // MARK: - QA observer counts (M1.4, `.plans/46`)
+
+    /// Of the four things `ManagedAgentTileNSView.detach()` releases, only the
+    /// event subscription was observable — `subscriberCount(for:)`. These three
+    /// expose the rest, because the leak they witness is not equal in kind.
+    ///
+    /// `turnCapabilityObservers` is a **flat, un-keyed** dictionary: every entry is
+    /// invoked for *every* agent's capability change, and the tile filters after
+    /// the fact by comparing `changed == attachedAgentID`. So one leaked entry from
+    /// one dead tile keeps running on every agent in the app, forever. The other
+    /// two are per-agent and prune their inner map on removal, which makes their
+    /// assertion crisp: after a sweep the outer key must be gone.
+    var qaTurnCapabilityObserverCount: Int { turnCapabilityObservers.count }
+
+    func qaRuntimeObservationObserverCount(for id: AgentID) -> Int {
+        runtimeObservationObservers[id]?.count ?? 0
+    }
+
+    func qaDisplayNameObserverCount(for id: AgentID) -> Int {
+        displayNameObservers[id]?.count ?? 0
+    }
+
     private func removeSubscriber(_ token: UUID, for id: AgentID) {
         subscribers[id]?.removeValue(forKey: token)
         if subscribers[id]?.isEmpty == true { subscribers.removeValue(forKey: id) }

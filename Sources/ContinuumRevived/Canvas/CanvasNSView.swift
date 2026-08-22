@@ -5037,6 +5037,12 @@ final class CanvasNSView: NSView, TokenThemed {
         // Unregister + remove all currently installed layers.
         for layer in zoneLayers {
             for (_, view) in layer.tileViews {
+                // M1.4: tell the view it is leaving BEFORE dismantling it. Without
+                // this an agent tile's event subscription, three supervisor
+                // observer tokens and its stale-location timer orphaned on every
+                // switch -- and the flat `turnCapabilityObservers` entry among them
+                // keeps firing for every agent in the app, not just its own.
+                view.prepareForRemovalFromScene()
                 focusBroker?.unregister(view.focusSurfaceID)
                 releaseSurfaceResidency(of: view)
                 view.removeFromSuperview()
@@ -5074,6 +5080,9 @@ final class CanvasNSView: NSView, TokenThemed {
         guard flatCompatibilitySceneActive else { return }
         flatCompatibilitySceneActive = false
         for (_, view) in tileViews {
+            // M1.4: same removal, same contract -- the boot scene's agent tiles
+            // leak exactly as a zone layer's do.
+            view.prepareForRemovalFromScene()
             focusBroker?.unregister(view.focusSurfaceID)
             releaseSurfaceResidency(of: view)
             view.removeFromSuperview()

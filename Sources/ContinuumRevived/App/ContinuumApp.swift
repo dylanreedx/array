@@ -993,6 +993,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--zone-tile-detach-sweep-check") {
+            do {
+                _ = NSApplication.shared
+                try ZoneTileDetachSweepChecks.run()
+                print("ContinuumRevivedZoneTileDetachSweepChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--zone-tile-hydration-check") {
             do {
                 _ = NSApplication.shared
@@ -13492,6 +13504,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// `--zone-tile-hydration-check` (M1.2b) to prove that hydrating a managed-agent
     /// tile with no bound agent does not MINT one.
     var qaManagedAgentCount: Int { agentSupervisor.records.count }
+
+    /// M1.4: the detach-sweep leg needs a real agent record bound to a tile, and
+    /// then needs to read the supervisor's observer counts back.
+    var qaAgentSupervisor: AgentSupervisor { agentSupervisor }
 
     /// Minimal offline wiring so a check living in another file can drive the
     /// REAL `configureWorkspaceRuntimeHooks()` instead of substituting its own

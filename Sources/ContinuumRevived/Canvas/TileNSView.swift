@@ -9,6 +9,19 @@ import Foundation
 /// edges is a resize affordance.
 @MainActor
 class TileNSView: NSView, TokenThemed {
+    /// Called immediately before this view leaves the canvas scene for good —
+    /// a workspace switch, a zone teardown, or the retirement of the boot-only
+    /// flat scene. M1.4 (`.plans/46`).
+    ///
+    /// The default is empty; `ManagedAgentTileNSView` overrides it to `detach()`.
+    /// Before this existed, `setZones` unregistered focus, released surface
+    /// residency and removed the view — and never told the view. An agent tile's
+    /// event-subscription `Task`, its three supervisor observer tokens and its
+    /// `locationStaleTimer` therefore orphaned on EVERY switch, and `deinit`'s
+    /// belt-and-braces could not run while the supervisor still held those
+    /// closures. Only two production callers of `detach()` existed: the self-detach
+    /// inside `attach` and the deliberate tile close.
+    func prepareForRemovalFromScene() {}
     struct ChromeSnapshot: Equatable {
         var title: String
         var providerModel: String?
