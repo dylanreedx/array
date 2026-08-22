@@ -166,26 +166,38 @@ frozen fallback in QA).
    (`installNoteTile`, `installFileTile`, `installRunArtifactsTile`) are
    deliberately flat and boot-only.
 
-   **The bigger hazard on this seam, and it applies to EVERY tile kind:** four
-   places build a ZoneLayer's tile views as `DescriptorTileNSView` placeholders
-   — `WorkspaceRuntime.swift:229-234` (`install`), `:361-365` (`addZone`),
-   `:393-396` (`makeAmbientZoneLayer`) and `:680-684` (`switchWorkspace`) —
-   with only the first carrying the comment "real hydration is T08". Real views
-   are built ONLY by the boot walk, which runs once at
-   `applicationDidFinishLaunching`. So after the first in-process workspace
-   switch every tile is a title-label placeholder: no transcript, no composer,
-   nothing to click. `ecf3bf3`'s `retireFlatCompatibilityScene()` made this
-   latent defect live by emptying the flat `tileViews` table that used to keep
-   boot tiles resolvable. `openDocument` calls `switchWorkspace` itself
-   (`WorkspaceRuntime.swift:486-500`), so one cross-workspace link click can
-   trigger it.
+   **The placeholder and persistence hazards on this seam are FIXED — M1 of
+   `.plans/46`, 2026-08-22.** Kept here because the shape still constrains new
+   code, not as a live warning.
 
-   Compounding it: `persistProjectCanvas` (`TileSpawner.swift:2213-2232`, ten
-   call sites) writes `state.tiles = canvasView.tiles(forProjectId:)`, and that
-   helper reads **installed layers only** (`CanvasNSView.swift:5214-5220`). A
-   spawn that persists a project whose other zones are not hydrated therefore
-   **erases those tiles from the project's canvas file.** This is on the
-   "correct" path and has no witness.
+   Layers are still BUILT as `DescriptorTileNSView` placeholders in four places,
+   and of those only two are reachable in production: `switchWorkspace` and its
+   ambient path via `makeAmbientZoneLayer`. `WorkspaceRuntime.install` has 20
+   call sites and zero are production, and `_addProjectZone`'s loop filters
+   `memberTiles` on a freshly appended `placement.zoneId`, so it is always
+   empty. The placeholders no longer survive: `AppDelegate.hydrateZoneLayerTiles`
+   replaces them, in two phases, before and after `setZones`
+   (`--zone-tile-hydration-check`, `--zone-spawner-coverage-check`). **Ambient
+   project-less zones are the exception and still keep placeholders** — their
+   tiles live in the workspace document's own register, so there is no
+   controller to resolve a note body or a repository root from.
+
+   **What a new tile kind owes.** Add it to `makeHydratedTileView` if it can be
+   built from the persisted `Tile` alone; otherwise to Phase B, which needs the
+   layer installed first, must go through `retireOrphanedRuntimes` so one tile
+   can never own two runtimes, and must not re-tidy the zone
+   (`withAutoLayoutSuppressed`). Everything resolves through
+   `controller(for: projectId)`, never the active project. Do NOT share the
+   `installInitial*` boot walk: it mints missing `noteId`s and writes the canvas
+   as a side effect, which a render path must not repeat.
+
+   Persistence: `persistProjectCanvas` and `flushCanvasSave` now both route
+   through `CanvasNSView.canvasStateForPersistence`, over the pure
+   `CanvasEngine.mergeProjectTilesForPersistence`. The rule is *cover, then
+   replace* — a persisted tile may only vanish when its own zone is installed
+   and it is nonetheless absent. Any new persistence path must use that reader;
+   `state.tiles = tiles` erases every tile of the project living in a zone below
+   the live tier.
 10. **Two installs on ONE project root.** The channel split covers Application
    Support and the defaults domain. It does NOT cover a project: the canvas,
    tiles, notes, managed sessions and lock live in `<root>/.array/`, keyed by

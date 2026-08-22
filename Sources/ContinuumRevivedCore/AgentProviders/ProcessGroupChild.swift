@@ -32,6 +32,7 @@ public final class ProcessGroupChild: @unchecked Sendable {
         case fileActionsUnavailable
         case allocationFailed
         case spawnFailed(errnoCode: Int32, executable: String)
+        case workingDirectoryUnsupported
 
         public var description: String {
             switch self {
@@ -40,6 +41,8 @@ public final class ProcessGroupChild: @unchecked Sendable {
             case .allocationFailed: return "could not allocate the child's argv/envp"
             case let .spawnFailed(code, executable):
                 return "could not launch \(executable): \(String(cString: strerror(code))) (\(code))"
+            case .workingDirectoryUnsupported:
+                return "spawning into a working directory is not available on this platform"
             }
         }
     }
@@ -135,9 +138,18 @@ public final class ProcessGroupChild: @unchecked Sendable {
             posix_spawn_file_actions_addclose(&fileActions, descriptor)
         }
         if let currentDirectory {
+            // `posix_spawn_file_actions_addchdir_np` is explicitly UNAVAILABLE on
+            // iOS, and this file is in Core, which the iOS target builds. The
+            // matrix's iOS build leg is what caught it. Nothing on iOS spawns a
+            // coding CLI, so the honest answer there is to refuse rather than to
+            // silently run in the wrong directory.
+            #if os(macOS)
             _ = currentDirectory.path.withCString {
                 posix_spawn_file_actions_addchdir_np(&fileActions, $0)
             }
+            #else
+            throw SpawnError.workingDirectoryUnsupported
+            #endif
         }
 
         var attributes: posix_spawnattr_t?
