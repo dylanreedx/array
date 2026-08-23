@@ -491,6 +491,13 @@ run_app_check .build/debug/Array --leader-jump-check
 run_app_check .build/debug/Array --leader-zone-jump-check
 run_app_check .build/debug/Array --palette-jump-check
 run_app_check .build/debug/Array --palette-zone-check
+# M1.11 (.plans/46): the toolbar "+" creates an EMPTY workspace and switches into
+# it, which releases every controller. openProfilePalette guarded on
+# activeController, so Cmd+K and the Add button then did nothing at all --
+# silently, in the one state where the user most needs a way to add something.
+# Note and browser spawning guarded only on tileSpawner, which fell back to the
+# DEPARTED project's boot spawner and wrote into its canvas.
+run_app_check .build/debug/Array --empty-workspace-creation-check
 run_app_check .build/debug/Array --tile-reveal-work-check
 run_app_check .build/debug/Array --leader-snap-check
 run_app_check .build/debug/Array --palette-captures-keys-over-browser-check

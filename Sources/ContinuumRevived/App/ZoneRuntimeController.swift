@@ -619,13 +619,29 @@ final class ZoneRuntimeController {
     }
 
     func paletteRows(registryStore: RegistryStore?) -> (profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow], workspaces: [WorkspaceEntry]) {
-        let profiles = tileSpawner?.annotatedProfiles() ?? []
+        Self.paletteRows(
+            registryStore: registryStore,
+            profiles: tileSpawner?.annotatedProfiles() ?? [],
+            excludingProjectId: project.id)
+    }
+
+    /// The same rows, buildable with no controller at all. M1.11 (`.plans/46`).
+    ///
+    /// A workspace with no projects has no active controller, and the palette used
+    /// to `guard` on one — so ⌘K and the Add button did nothing whatsoever, in the
+    /// one state where the user most needs a way to add something. Only two inputs
+    /// here are project-derived; the rest is the registry.
+    static func paletteRows(
+        registryStore: RegistryStore?,
+        profiles: [TileSpawner.AnnotatedProfile],
+        excludingProjectId: UUID?
+    ) -> (profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow], workspaces: [WorkspaceEntry]) {
         guard let registryStore,
               let registry = try? registryStore.loadOrEmpty() else {
             return (profiles, [], [])
         }
         let projects = ProjectPickerModel.makeRows(registry: registry)
-            .filter { $0.id != project.id }
+            .filter { $0.id != excludingProjectId }
         return (profiles, projects, registry.workspaces)
     }
 

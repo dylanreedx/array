@@ -47,6 +47,7 @@ check --cross-project-agents-check
 check --diff-tile-check
 check --document-location-check
 check --drag-magnetize-check
+check --empty-workspace-creation-check
 check --file-markdown-perf-check
 check --file-markdown-preview-check
 check --file-open-active-context-check
@@ -223,6 +224,7 @@ leg run_app_check .build/debug/Array --conductor-queue-tile-check
 leg run_app_check .build/debug/Array --cross-project-agents-check
 leg run_app_check .build/debug/Array --diff-tile-check
 leg run_app_check .build/debug/Array --drag-magnetize-check
+leg run_app_check .build/debug/Array --empty-workspace-creation-check
 leg run_app_check .build/debug/Array --file-markdown-perf-check
 leg run_app_check .build/debug/Array --file-markdown-preview-check
 leg run_app_check .build/debug/Array --file-open-active-context-check

@@ -1029,6 +1029,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--empty-workspace-creation-check") {
+            do {
+                _ = NSApplication.shared
+                try EmptyWorkspaceCreationChecks.run()
+                print("ContinuumRevivedEmptyWorkspaceCreationChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--workspace-scene-owner-check") {
             do {
                 _ = NSApplication.shared
@@ -3641,7 +3653,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var canvasGettingStartedView: CanvasGettingStartedView?
     private var workspaceSplitView: NSSplitView?
     private var isApplyingWorkspaceSidebarVisibility = false
-    private var workspaceCreatePromptProvider: (() -> String?)?
+    var workspaceCreatePromptProvider: (() -> String?)?
     private var workspaceRenamePromptProvider: ((String) -> String?)?
     private var workspaceDeleteConfirmationProvider: ((WorkspaceDeleteConfirmationRequest) -> Bool)?
     /// P3.15: the same seam for deleting an agent.
@@ -3663,7 +3675,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var bootTileSpawner: TileSpawner?
     /// The spawner for whatever project is active RIGHT NOW. Resolve at invocation.
     private var tileSpawner: TileSpawner? {
-        workspaceRuntime?.activeController?.tileSpawner ?? bootTileSpawner
+        if let live = workspaceRuntime?.activeController?.tileSpawner { return live }
+        guard let boot = bootTileSpawner else { return nil }
+        // M1.11 (`.plans/46`): a departed boot project's spawner is not a fallback,
+        // it is a trap. After a switch away from the boot workspace its store, its
+        // project and its controller all belong to a project this workspace
+        // released — and `runtimes`/`browserRuntimes`/`noteViews` are computed over
+        // `activeController`, so with none the SETTER is a no-op and any runtime it
+        // built is dropped on the floor. Note and browser spawning "succeeded" into
+        // that hole, silently, which is why an empty workspace looked broken rather
+        // than merely empty.
+        if let runtime = workspaceRuntime, runtime.controller(for: boot.spawnerProjectId) == nil {
+            return nil
+        }
+        return boot
+    }
+
+    /// A refusal the user can actually perceive. M1.11 (`.plans/46`).
+    ///
+    /// Deliberately not `NSAlert.runModal()`: a modal here would violate AGENTS
+    /// hazard 6 in a check run. `setWorkspaceManagementMessage` paints into the top
+    /// bar and the sidebar, is non-modal, and checks already read it.
+    func presentSpawnRefusal(_ message: String) {
+        fputs("Spawn refused: \(message)\n", stderr)
+        setWorkspaceManagementMessage(message)
+        NSSound.beep()
     }
     /// The app-lifetime owner of every agent (P2A.3). Replaces the per-tile
     /// `managedAgentRunners` dictionary this view used to hold: the supervisor owns
@@ -7512,8 +7548,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func openProfilePalette(initialQuery: String = "") {
-        guard let activeController = workspaceRuntime?.activeController,
-              let host = window else { return }
+        // M1.11 (`.plans/46`): opens with NO active controller. A workspace with no
+        // projects releases every controller, and this used to `guard` on one — so
+        // ⌘K and the toolbar's "Add or jump…" did nothing at all, silently, in the
+        // one state where the user most needs a way to add something. The palette
+        // is the app's only add surface; the toolbar `+` creates a workspace.
+        //
+        // `activeController` was only ever used for two things: the row set, which
+        // `ZoneRuntimeController.paletteRows` can now build statically, and the
+        // project name, which is genuinely absent here.
+        guard let host = window else { return }
+        let activeController = workspaceRuntime?.activeController
         demonstrateOnboarding(.commandCenterOpened)
         let palette = profilePalette ?? makeProfilePalette()
         let wasVisible = palette.isVisible
@@ -7528,12 +7573,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if !wasVisible {
             focusBroker.openModal(.palette)
         }
-        let rows = activeController.paletteRows(registryStore: registryStore)
+        let rows = activeController?.paletteRows(registryStore: registryStore)
+            // No project means no project root, so a launch profile resolved against
+            // one would be a fiction. The `.addProject` action below is what the
+            // home offers instead.
+            ?? ZoneRuntimeController.paletteRows(
+                registryStore: registryStore, profiles: [], excludingProjectId: nil)
         let zoneNames = Dictionary(uniqueKeysWithValues: (canvasView?.navZoneRenderModels ?? []).map {
             ($0.placement.zoneId, $0.displayName)
         })
         let workspaceName = rows.workspaces.first(where: { $0.id == workspaceRuntime?.workspaceId })?.name
-        let projectName = activeController.project.name
+        let projectName = activeController?.project.name
         let jumpTiles = (canvasView?.navigationTileSnapshots() ?? []).map { tile in
             let agentID = agentSupervisor.agent(forTile: tile.tileId)
             let record = agentID.flatMap { agentSupervisor.records[$0] }
@@ -10575,6 +10625,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ghostty: nil,
             browserEngine: browserEngine
         )
+        // M1.10: a switch now requires a canvas — the whole defect was that it
+        // silently did the document half without one. This fixture only asserts the
+        // top bar, but it must still drive a legal switch.
+        let topBarCanvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+        runtime.adoptCanvas(topBarCanvas)
         let topBar = WorkspaceTopBarView(frame: NSRect(x: 0, y: 0, width: 900, height: 44))
         app.registryStore = registryStore
         app.workspaceRuntime = runtime
@@ -10714,6 +10770,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         app.registryStore = registryStore
         // P3.2 (design §5.9): arm the listing gate exactly as boot does.
         try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
+        // M1.10: a switch now requires a canvas; see the top-bar fixture.
+        let polishCanvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+        runtime.adoptCanvas(polishCanvas)
         app.workspaceRuntime = runtime
         app.workspaceSidebarView = sidebar
         app.workspaceTopBarView = topBar
@@ -11390,7 +11450,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     @discardableResult
     private func spawnTerminalFromProfile(_ profileId: String, trigger: String? = nil) -> Bool {
         guard resolvedCreationScope() != nil else {
-            presentCreationScopePicker { [weak self] in _ = self?.spawnTerminalFromProfile(profileId, trigger: trigger) }
+            requestCreationScope { [weak self] in _ = self?.spawnTerminalFromProfile(profileId, trigger: trigger) }
             return false
         }
         guard let spawner = spawnerForFilesystemCreation() else { return false }
@@ -11420,7 +11480,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func spawnManagedAgentFromPalette(model: String? = nil) -> Bool {
         guard resolvedCreationScope() != nil else {
-            presentCreationScopePicker { [weak self] in _ = self?.spawnManagedAgentFromPalette(model: model) }
+            requestCreationScope { [weak self] in _ = self?.spawnManagedAgentFromPalette(model: model) }
             return false
         }
         guard let spawner = spawnerForFilesystemCreation() else { return false }
@@ -12102,8 +12162,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         spawnBrowserFromPalette(url: nil)
     }
 
-    private func spawnBrowserFromPalette(url: String?) {
-        guard let spawner = tileSpawner else { return }
+    @discardableResult
+    private func spawnBrowserFromPalette(url: String?) -> Bool {
+        // M1.11: same as the note path, same reason — this guarded only on
+        // `tileSpawner`, so with no active controller it spawned into a departed
+        // project AND dropped the runtime (`browserRuntimes`' setter is a no-op
+        // without an active controller).
+        guard let spawner = spawnerForFilesystemCreation() else {
+            guard offerCreationScope(then: { [weak self] in _ = self?.spawnBrowserFromPalette(url: url) }) else {
+                presentSpawnRefusal("Add a project to this workspace before opening a browser.")
+                return false
+            }
+            return false
+        }
         switch spawner.spawnBrowser(url: url) {
         case let .spawned(runtime):
             wireContentProcessTerminationHandler(runtime)
@@ -12111,10 +12182,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             focusSpawnedTile(runtime.tileId)
             workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
             workspaceRuntime?.enforceBrowserRuntimeBudget()
+            return true
         case let .invalidURL(url):
             fputs("TileSpawner.spawnBrowser invalid URL: \(url)\n", stderr)
+            return false
         case let .failure(error):
             fputs("TileSpawner.spawnBrowser failed: \(error)\n", stderr)
+            return false
         }
     }
 
@@ -12278,6 +12352,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let before = canvasView?.navZoneRenderModels.count ?? 0
             addProjectZone(projectId: projectId)
             return (canvasView?.navZoneRenderModels.count ?? 0) > before
+        case .addProject:
+            return addProjectFromDiskAndPlaceOnCanvas()
         case .newWorkspace:
             let before = workspaceRuntime?.workspaceId
             createWorkspaceFromChrome()
@@ -12898,6 +12974,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    /// Register a folder and give it a zone, in one action. M1.11 (`.plans/46`).
+    ///
+    /// `registerProjectUsingOpenPanel` alone is not enough: it writes the registry
+    /// but creates no zone, so a project chosen in an empty workspace becomes
+    /// registered and invisible — the same dead end one level down. Choosing a
+    /// project here has to give it somewhere to land.
+    @discardableResult
+    private func addProjectFromDiskAndPlaceOnCanvas() -> Bool {
+        guard let entry = addProjectSelectionProvider?() ?? registerProjectUsingOpenPanel() else { return false }
+        addProjectZone(projectId: entry.id)
+        return workspaceRuntime?.controller(for: entry.id) != nil
+    }
+
     private func registerProjectUsingOpenPanel() -> ProjectEntry? {
         guard let registryStore else { return nil }
         let panel = NSOpenPanel()
@@ -13268,21 +13357,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    private func spawnNoteFromPalette() {
-        guard let spawner = tileSpawner else { return }
+    @discardableResult
+    private func spawnNoteFromPalette() -> Bool {
+        // M1.11: this used to guard only on `tileSpawner`, which fell back to the
+        // DEPARTED boot project's spawner — so in a workspace with no projects the
+        // note landed in another project's canvas and nothing appeared.
+        //
+        // The signal is "no spawner", not "no scope": a boot-only app has a live
+        // boot spawner and no `WorkspaceRuntime` at all, and must keep working.
+        guard let spawner = spawnerForFilesystemCreation() else {
+            guard offerCreationScope(then: { [weak self] in self?.spawnNoteFromPalette() }) else {
+                presentSpawnRefusal("Add a project to this workspace before creating a note.")
+                return false
+            }
+            return false
+        }
         switch spawner.spawnNote(title: "New Note") {
         case let .spawned(noteId, tileId):
             if let view = canvasView?.tileView(for: tileId) as? NoteTileNSView {
                 noteViews[noteId] = view
             }
             focusSpawnedTile(tileId)
+            return true
         case let .failure(error):
             fputs("TileSpawner.spawnNote failed: \(error)\n", stderr)
+            return false
         }
     }
 
     private func openFileFromPalette() {
-        guard let project = activeProject else { return }
+        // M1.11: refuse audibly, and offer a way out, instead of returning into
+        // silence when there is no active controller.
+        guard let project = activeProject else {
+            guard offerCreationScope(then: { [weak self] in self?.openFileFromPalette() }) else {
+                presentSpawnRefusal("Add a project to this workspace before opening a file.")
+                return
+            }
+            return
+        }
         let projectRoot = URL(fileURLWithPath: project.rootPath, isDirectory: true)
         let panel = NSOpenPanel()
         panel.title = "Open File"
@@ -13431,6 +13543,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return CreationScopeResolver.resolve(explicit: explicit ?? explicitCreationScopeOverride, zone: zoneScope, focusedAgent: focusedScope, recentExplicit: recentScope)
     }
 
+    /// Offer the user a project to create into, if there is one to offer.
+    /// M1.11 (`.plans/46`).
+    ///
+    /// Returns false when there is nothing to ask about — no registry, or no
+    /// registered project — so the caller refuses out loud instead of popping an
+    /// empty picker. When it returns true the picker (or its QA seam) owns the
+    /// retry.
+    @discardableResult
+    private func offerCreationScope(then action: @escaping () -> Void) -> Bool {
+        let projects = ((try? registryStore?.loadOrEmpty()) ?? nil)?.projects.filter { !$0.missing } ?? []
+        guard !projects.isEmpty else { return false }
+        requestCreationScope(then: action)
+        return true
+    }
+
+    /// Ask for a creation scope. M1.11: one route, so a `--*-check` can observe the
+    /// ask without a `ChoicePopover` appearing (AGENTS hazard 6).
+    private func requestCreationScope(then action: @escaping () -> Void) {
+        if let presenter = creationScopePickerPresenterForQA { presenter(action); return }
+        presentCreationScopePicker(then: action)
+    }
+
     private func presentCreationScopePicker(then action: @escaping () -> Void) {
         guard let canvasView, let registryStore else { return }
         let registry = (try? registryStore.loadOrEmpty()) ?? Registry.empty()
@@ -13459,6 +13593,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     source: .explicit
                 )
                 persistLastExplicitCreationScope(ZoneScope(projectId: selection.project.id, homeRelativePath: selection.homeRelativePath))
+                // M1.11 (`.plans/46`): a project chosen in a workspace where it has
+                // no zone was never acquired, so `spawnerForFilesystemCreation()`
+                // finds no controller for it and falls through to the boot spawner
+                // — spawning into a DEPARTED project. Give it somewhere to land
+                // first. This one insertion is what repairs terminal, managed agent
+                // and file tree in an empty workspace, not just note and browser.
+                if workspaceRuntime?.controller(for: selection.project.id) == nil {
+                    addProjectZone(projectId: selection.project.id)
+                }
                 explicitCreationScopeOverride = scope
                 defer { explicitCreationScopeOverride = nil }
                 projectHomePicker = nil
@@ -13510,6 +13653,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// The app's focus broker, for an offline check that must construct a
     /// `WorkspaceRuntime` the way production does.
     var qaFocusBroker: FocusBroker { focusBroker }
+
+    /// QA (M1.11): the palette surface, so a leg can assert it actually opened in a
+    /// workspace with no active controller.
+    var qaProfilePalette: LaunchProfilePalette? { profilePalette }
+    /// QA (M1.11): `openProfilePalette` is private; a leg drives the real one.
+    func qaOpenProfilePalette() { openProfilePalette() }
+    /// QA (M1.11): the spoken refusal, so "it refused audibly" is assertable.
+    var qaWorkspaceManagementMessage: String? { workspaceManagementMessage }
+    /// QA (M1.11): reach the broken state through the real "+" route.
+    func qaCreateWorkspaceFromChrome() { createWorkspaceFromChrome() }
+    /// QA (M1.11): drive a palette action the way the palette does.
+    @discardableResult
+    func qaPerformPaletteAction(_ action: LaunchPaletteAction) -> Bool { performPaletteAction(action) }
+    /// QA (M1.11): whether a spawner is reachable at all.
+    var qaHasTileSpawner: Bool { tileSpawner != nil }
+    /// QA (M1.11): live browser runtimes, to prove none was built and dropped.
+    var qaBrowserRuntimeCount: Int { browserRuntimes.count }
+    /// QA (M1.11): `openProfilePalette` needs a host window. Borderless and never
+    /// ordered front, so a check cannot take the screen.
+    func qaAttachWindowForOfflineCheck(_ window: NSWindow) { self.window = window }
+
+    /// QA seam for `.addProject`, mirroring `workspaceCreatePromptProvider`. A
+    /// `--*-check` may never raise an `NSOpenPanel` (AGENTS hazard 6).
+    var addProjectSelectionProvider: (() -> ProjectEntry?)?
+
+    /// QA seam for the creation-scope popover, same reason.
+    var creationScopePickerPresenterForQA: ((@escaping () -> Void) -> Void)?
 
     /// How many managed agents the supervisor holds records for. Used by
     /// `--zone-tile-hydration-check` (M1.2b) to prove that hydrating a managed-agent
@@ -13992,9 +14162,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func spawnDiffReviewFromPalette() {
-        guard let canvasView,
-              let projectStore,
-              let activeProject else { return }
+        // M1.11: refuse audibly rather than returning into silence. Its flat-path
+        // install is deliberately left alone — AGENTS hazard 9 names it as one of
+        // the two remaining flat spawns, and that is its own ticket.
+        guard let canvasView, let projectStore, let activeProject else {
+            presentSpawnRefusal("Add a project to this workspace before opening a diff review.")
+            return
+        }
         let reviewId = UUID()
         var canvasState = canvasView.canvasState
         let tile = Self.materializeDiffReviewTile(in: &canvasState, reviewId: reviewId)
@@ -14016,7 +14190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func spawnFileTreeFromPalette() {
         guard resolvedCreationScope() != nil else {
-            presentCreationScopePicker { [weak self] in self?.spawnFileTreeFromPalette() }
+            requestCreationScope { [weak self] in self?.spawnFileTreeFromPalette() }
             return
         }
         guard let spawner = spawnerForFilesystemCreation() else { return }

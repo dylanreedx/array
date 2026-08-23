@@ -61,6 +61,8 @@ public enum CommandRegistry {
             ),
             definition("help.replayGettingStarted", .replayGettingStarted, aliases: ["onboarding", "learn Array"]),
             definition("workspace.new", .newWorkspace, aliases: ["canvas"]),
+            // M1.11: the only add route a workspace with no projects has.
+            definition("project.add", .addProject, aliases: ["register project", "open folder"]),
             CommandDefinition(
                 id: "app.commandCenter",
                 title: "Command Center",

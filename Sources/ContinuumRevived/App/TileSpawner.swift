@@ -112,6 +112,11 @@ final class TileSpawner {
     var reservedShortcutHandler: ((NSEvent) -> Bool)?
     private var lastSpawnedCwd: String?
 
+    /// The project this spawner writes into. M1.11 (`.plans/46`): `AppDelegate`
+    /// needs it to tell a live boot spawner from one whose project has been
+    /// released, without exposing `project` itself.
+    var spawnerProjectId: UUID { project.id }
+
     init(
         canvasView: CanvasNSView,
         ghostty: GhosttyRuntimeContext?,
@@ -4018,9 +4023,22 @@ final class TileSpawner {
         else {
             throw CheckError.failed("the layer-owned note must be persisted through the ACTIVE project's store")
         }
+        // M1.10 (`.plans/46`): the on-disk convention is WORLD, and this assertion
+        // used to say zone-local.
+        //
+        // Both conventions had coexisted, because only one path ever ran: the layer
+        // branch of `persistProjectCanvas` wrote zone-local frames, and it was
+        // unreachable from production, so every `canvas.json` in the field holds
+        // world frames written by the flat branch. The flat boot path reads them as
+        // world too. Persisting zone-local would therefore move every tile by its
+        // zone origin on the next launch — the opposite of what the old comment
+        // claimed. The conversion now happens at the model boundary
+        // (`CanvasNSView.tilesInWorldFrames(forProjectId:)`), so the layer keeps its
+        // zone-local frames in memory, asserted just above, and the file does not
+        // change convention.
         try expectFrame(persistedLayerNote.frame,
-                        TileFrame(x: 680, y: 300, width: 640, height: 400),
-                        "the persisted frame must be the zone-local one, so a relaunch reproduces the same world position")
+                        TileFrame(x: 4680, y: 2300, width: 640, height: 400),
+                        "the persisted frame must be the WORLD one, so the flat boot path — which reads canvas.json as world — reproduces the same position")
 
         // An explicit anchor keeps its relationship, in the layer's own space, and is
         // untouched by the centre policy: to the right of the anchor, top-aligned.

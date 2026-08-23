@@ -534,6 +534,12 @@ final class WorkspaceRuntime {
         // Install on canvas.
         if let canvas = canvasView { hydrateZoneLayerTiles?(canvas, [layer], .beforeInstall) }
         canvasView?.upsertZoneLayer(layer)
+        // M1.11 (`.plans/46`): the arriving project needs a SPAWNER, not just a
+        // controller. Adding a project to the canvas acquires its controller but
+        // left `tileSpawner` nil, so `spawnerForFilesystemCreation()` found nothing
+        // and fell through — which meant "Add Project…" in an empty workspace still
+        // could not be spawned into. Phase B needs it too.
+        if let canvas = canvasView { attachActiveControllerUI(canvasView: canvas) }
         if let canvas = canvasView { hydrateZoneLayerTiles?(canvas, [layer], .afterInstall) }
 
         // Flush document save.

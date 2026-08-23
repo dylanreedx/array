@@ -26,6 +26,11 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     case openURL(String)
     case switchProject(UUID)
     case addProjectToCanvas(UUID)
+    /// Register a folder that is not a project yet, and place it on this canvas.
+    /// M1.11 (`.plans/46`) — distinct from `addProjectToCanvas`, which needs an id
+    /// that does not exist yet. It is the only add route a workspace with no
+    /// projects has.
+    case addProject
     case newWorkspace
     case renameWorkspace(UUID)
     case deleteWorkspace(UUID)
@@ -80,6 +85,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return "Switch Project…"
         case .addProjectToCanvas:
             return "Add Project to Canvas…"
+        case .addProject:
+            return "Add Project…"
         case .newWorkspace:
             return "New Workspace…"
         case .renameWorkspace:
@@ -145,6 +152,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return ["switch", "project"]
         case .addProjectToCanvas:
             return ["add", "project", "canvas", "zone"]
+        case .addProject:
+            return ["add", "project", "register", "folder", "open", "new"]
         case .newWorkspace:
             return ["new", "workspace", "canvas"]
         case .renameWorkspace:
@@ -737,6 +746,7 @@ public enum LaunchPaletteModel {
         case let .openURL(url): return item(row, .actions, "Open \(url)", "Browser", "globe", ["url", "web"], false, true, "url:\(url)")
         case let .switchProject(id): return item(row, .workspacesAndProjects, "Switch project", nil, "folder", [], false, true, "project-switch:\(id.uuidString)")
         case let .addProjectToCanvas(id): return item(row, .workspacesAndProjects, "Add project", "Place on this canvas", "folder.badge.plus", [], false, true, "project-add:\(id.uuidString)")
+        case .addProject: return item(row, .create, "Project", "Add a folder to this canvas", "folder.badge.plus", ["add", "register", "open", "folder"], true, true, "action:add-project")
         case .newWorkspace: return item(row, .create, "Workspace", "Create a spatial workspace", "square.grid.2x2", ["new"], true, true, "action:new-workspace")
         case let .renameWorkspace(id): return item(row, .developer, "Rename workspace", nil, "pencil", [], false, false, "workspace-rename:\(id.uuidString)")
         case let .deleteWorkspace(id): return item(row, .developer, "Delete workspace", nil, "trash", [], false, false, "workspace-delete:\(id.uuidString)")
