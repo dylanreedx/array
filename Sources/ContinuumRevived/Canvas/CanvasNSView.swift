@@ -1698,9 +1698,7 @@ final class CanvasNSView: NSView, TokenThemed {
 
     var qaDocumentRelationshipStackingSnapshot: DocumentRelationshipStackingQASnapshot {
         let worldSubviews = worldPlane.subviews
-        let backgrounds = Set(
-            zoneChromeViews.values.map(ObjectIdentifier.init)
-                + zoneLayers.compactMap(\.chrome).map(ObjectIdentifier.init))
+        let backgrounds = Set(zoneChromeViews.values.map(ObjectIdentifier.init))
         let connectors = Set(
             [ObjectIdentifier(documentRelationshipOverlay)]
                 + [agentLineageOverlay].compactMap { $0 }.map(ObjectIdentifier.init))
@@ -2521,18 +2519,13 @@ final class CanvasNSView: NSView, TokenThemed {
         guard showsZoneChrome != visible else { return }
         showsZoneChrome = visible
         if visible {
+            // M1.10: `installZoneChromeViews()` covers layers too, because
+            // `setZones` now writes `liveZones` from the layer set.
             installZoneChromeViews()
-            for layer in zoneLayers where layer.chrome == nil {
-                let chrome = ZoneChromeNSView(model: layer.renderModel)
-                layer.chrome = chrome
-                worldPlane.addSubview(chrome)
-            }
         } else {
             for view in zoneChromeViews.values { view.removeFromSuperview() }
             zoneChromeViews.removeAll()
             for layer in zoneLayers {
-                layer.chrome?.removeFromSuperview()
-                layer.chrome = nil
             }
         }
         layoutAllTiles()
@@ -4267,9 +4260,6 @@ final class CanvasNSView: NSView, TokenThemed {
 
         var backgroundViews: [(zoneId: UUID, view: ZoneChromeNSView)] =
             zoneChromeViews.map { (zoneId: $0.key, view: $0.value) }
-        backgroundViews += zoneLayers.compactMap { layer in
-            layer.chrome.map { (zoneId: layer.placement.zoneId, view: $0) }
-        }
         let backgroundOrder = backgroundViews.sorted { lhs, rhs in
             let lhsPosition = liveZones.first(where: { $0.zoneId == lhs.zoneId })?.zPosition
                 ?? zoneLayers.first(where: { $0.placement.zoneId == lhs.zoneId })?.placement.zPosition
@@ -4374,11 +4364,6 @@ final class CanvasNSView: NSView, TokenThemed {
         for layer in zoneLayers {
             for tile in layer.tiles {
                 _layoutLayerTile(tile, in: layer, invalidateTileDisplay: invalidateTileDisplay)
-            }
-            if let chrome = layer.chrome {
-                chrome.frame = _zoneLayerChromeWorldFrame(layer)
-                qaCameraLayoutStats.chromeRepaints += 1
-                chrome.needsDisplay = true
             }
         }
         if navModeOverlayView != nil { qaCameraLayoutStats.chromeRepaints += 1 }
@@ -5015,7 +5000,6 @@ final class CanvasNSView: NSView, TokenThemed {
         var renderModel: ZoneRenderModel
         var tiles: [Tile]
         var tileViews: [UUID: TileNSView] = [:]
-        fileprivate var chrome: ZoneChromeNSView?
 
         init(placement: ZonePlacement, renderModel: ZoneRenderModel, tiles: [Tile] = []) {
             self.placement = placement
@@ -5047,12 +5031,38 @@ final class CanvasNSView: NSView, TokenThemed {
                 releaseSurfaceResidency(of: view)
                 view.removeFromSuperview()
             }
-            layer.chrome?.removeFromSuperview()
         }
         zoneLayers = []
         zoneLayerOrder = []
         // The departing zone set owns the spawn target; the caller re-declares it.
         activeProjectZoneId = nil
+
+        // M1.10 (`.plans/46`): `setZones` is now the WRITER of the zone model, not
+        // just of the tile layers.
+        //
+        // `liveZones` is not decoration. Zone create, move, resize, rename, close,
+        // header hit-test, zone-at-point, drop membership and grow-to-fit all read
+        // it, and only three of those consult `zoneLayers`. Because `setZones`
+        // never wrote it and `retireFlatCompatibilityScene` empties it, the first
+        // workspace switch used to leave every zone unmovable, unresizable,
+        // unrenameable and unclosable — latent only because the layer path was
+        // unreachable from production. Chrome has the same split: Model B's
+        // `zoneChromeViews` were orphaned in `worldPlane` while `_installLayer`
+        // added a second set on top.
+        //
+        // One owner: Model B owns zone geometry, chrome and gestures; a ZoneLayer
+        // owns tiles.
+        for (_, view) in zoneChromeViews { view.removeFromSuperview() }
+        zoneChromeViews.removeAll()
+        liveZones = layers.map(\.placement)
+        zoneRenderModels = layers.map(\.renderModel)
+        zoneDisplayByZoneId = Dictionary(
+            layers.map { ($0.placement.zoneId, $0.renderModel) },
+            uniquingKeysWith: { first, _ in first })
+        tileZoneMembership = Dictionary(
+            layers.flatMap { layer in layer.tiles.map { ($0.id, layer.placement.zoneId) } },
+            uniquingKeysWith: { first, _ in first })
+        installZoneChromeViews()
 
         // Install the new layers back-to-front by zone zPosition.
         let orderedLayers = layers.sorted { lhs, rhs in
@@ -5092,6 +5102,12 @@ final class CanvasNSView: NSView, TokenThemed {
         liveZones.removeAll()
         zoneRenderModels.removeAll()
         zoneDisplayByZoneId.removeAll()
+        // M1.10: clearing the DATA while leaving the VIEWS in `worldPlane` is what
+        // left a departed workspace's zone rectangles painted on screen forever,
+        // frozen at their last frame (`layoutZoneChromeViews` iterates `liveZones`,
+        // so an orphan is never re-framed again yet still rides the camera).
+        for (_, view) in zoneChromeViews { view.removeFromSuperview() }
+        zoneChromeViews.removeAll()
         canvasState.lastActiveTileId = nil
         clearFocusBorder()
     }
@@ -5105,14 +5121,40 @@ final class CanvasNSView: NSView, TokenThemed {
                 focusBroker?.unregister(view.focusSurfaceID)
                 view.removeFromSuperview()
             }
-            existing.chrome?.removeFromSuperview()
+            for tile in existing.tiles { tileZoneMembership.removeValue(forKey: tile.id) }
             zoneLayers.removeAll { $0.placement.zoneId == zoneId }
         }
         // Add at end of z-order if not already present.
         if !zoneLayerOrder.contains(zoneId) {
             zoneLayerOrder.append(zoneId)
         }
+        // M1.10: this path does not go through `setZones`, so it registers the
+        // zone into Model B itself — otherwise the zone would render (a layer
+        // exists) but be unmovable, unresizable and unrenameable, because every
+        // one of those gestures reads `liveZones`.
+        if let index = liveZones.firstIndex(where: { $0.zoneId == zoneId }) {
+            liveZones[index] = layer.placement
+        } else {
+            liveZones.append(layer.placement)
+        }
+        if let index = zoneRenderModels.firstIndex(where: { $0.placement.zoneId == zoneId }) {
+            zoneRenderModels[index] = layer.renderModel
+        } else {
+            zoneRenderModels.append(layer.renderModel)
+        }
+        zoneDisplayByZoneId[zoneId] = layer.renderModel
+        for tile in layer.tiles { tileZoneMembership[tile.id] = zoneId }
+        if showsZoneChrome {
+            if let chrome = zoneChromeViews[zoneId] {
+                chrome.update(model: layer.renderModel)
+            } else {
+                let chrome = ZoneChromeNSView(model: layer.renderModel)
+                zoneChromeViews[zoneId] = chrome
+                worldPlane.addSubview(chrome, positioned: .below, relativeTo: nil)
+            }
+        }
         _installLayer(layer)
+        layoutZoneChromeViews()
         layoutAllTiles()
         reorderTileSubviewsByZIndex()
     }
@@ -5124,7 +5166,11 @@ final class CanvasNSView: NSView, TokenThemed {
             focusBroker?.unregister(view.focusSurfaceID)
             view.removeFromSuperview()
         }
-        layer.chrome?.removeFromSuperview()
+        zoneChromeViews.removeValue(forKey: zoneId)?.removeFromSuperview()
+        liveZones.removeAll { $0.zoneId == zoneId }
+        zoneRenderModels.removeAll { $0.placement.zoneId == zoneId }
+        zoneDisplayByZoneId.removeValue(forKey: zoneId)
+        for tile in layer.tiles { tileZoneMembership.removeValue(forKey: tile.id) }
         zoneLayers.removeAll { $0.placement.zoneId == zoneId }
         zoneLayerOrder.removeAll { $0 == zoneId }
         if activeProjectZoneId == zoneId { activeProjectZoneId = nil }
@@ -5135,43 +5181,37 @@ final class CanvasNSView: NSView, TokenThemed {
     func setZonePlacement(_ placement: ZonePlacement) {
         guard let layer = zoneLayers.first(where: { $0.placement.zoneId == placement.zoneId }) else { return }
         layer.placement = placement
+        // M1.10: Model B owns geometry, so a layer placement change has to land
+        // there too — `liveZones` is what every zone gesture and the chrome layout
+        // read.
+        if let index = liveZones.firstIndex(where: { $0.zoneId == placement.zoneId }) {
+            liveZones[index] = placement
+        }
+        if var model = zoneDisplayByZoneId[placement.zoneId] {
+            model.placement = placement
+            zoneDisplayByZoneId[placement.zoneId] = model
+            zoneChromeViews[placement.zoneId]?.update(model: model)
+        }
         for tile in layer.tiles {
             _layoutLayerTile(tile, in: layer)
         }
-        if let chrome = layer.chrome {
-            chrome.frame = _zoneLayerChromeWorldFrame(layer)
-            chrome.needsDisplay = true
-        }
+        layoutZoneChromeViews()
         updateDocumentRelationshipOverlay()
         updateContextualAgentLineageGeometry()
     }
 
-    /// Shared chrome-layout helper for ZoneLayer chrome: adaptive bounds derived
-    /// from member world frames (mirrors `layoutZoneChromeViews` for T05 layers).
-    private func _zoneLayerChromeWorldFrame(_ layer: ZoneLayer) -> CGRect {
-        let memberFrames = layer.tiles.map { CanvasEngine.worldFrame(tile: $0, in: layer.placement) }
-        var adaptiveBounds = CanvasEngine.zoneBounds(
-            memberFrames: memberFrames,
-            padding: ZoneBoundsConfig.padding(),
-            minSize: ZoneBoundsConfig.emptyMinSize(),
-            headerHeight: ZoneChromeNSView.headerHeight
-        )
-        if memberFrames.isEmpty {
-            let origin = layer.placement.origin
-            adaptiveBounds = TileFrame(
-                x: origin.x + adaptiveBounds.x,
-                y: origin.y + adaptiveBounds.y,
-                width: adaptiveBounds.width,
-                height: adaptiveBounds.height
-            )
-        }
-        return Self.worldRect(adaptiveBounds)
+
+    /// Test introspection: world frame of a zone's chrome view.
+    ///
+    /// M1.10: reads `zoneChromeViews`, which is now the only chrome there is —
+    /// a ZoneLayer stopped owning a second one.
+    func zoneLayerChromeFrame(for zoneId: UUID) -> CGRect? {
+        zoneChromeViews[zoneId]?.frame
     }
 
-    /// Test introspection: screen frame of a ZoneLayer's chrome view.
-    func zoneLayerChromeFrame(for zoneId: UUID) -> CGRect? {
-        zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.chrome?.frame
-    }
+    /// QA (M1.10): exactly one chrome view per zone, no orphan from a departed
+    /// workspace and no duplicate from a layer install.
+    var qaZoneChromeViewCount: Int { zoneChromeViews.count }
 
     /// Test introspection: zoneIds of installed layers in z-order (back-to-front).
     var installedZoneLayerIds: [UUID] { zoneLayerOrder }
@@ -5379,10 +5419,7 @@ final class CanvasNSView: NSView, TokenThemed {
         worldPlane.addSubview(tileView)
         focusBroker?.register(tileView)
         _layoutLayerTile(installed, in: layer)
-        if let chrome = layer.chrome {
-            chrome.frame = _zoneLayerChromeWorldFrame(layer)
-            chrome.needsDisplay = true
-        }
+        tileZoneMembership[tile.id] = zoneId
         reorderTileSubviewsByZIndex()
         delegate?.canvasSidebarModelDidChange(self)
         arrangeAutoLayoutAfterSpawn(zoneId: zoneId)
@@ -5409,11 +5446,9 @@ final class CanvasNSView: NSView, TokenThemed {
             worldPlane.addSubview(view)
             focusBroker?.register(view)
         }
-        if showsZoneChrome {
-            let chromeView = ZoneChromeNSView(model: layer.renderModel)
-            layer.chrome = chromeView
-            worldPlane.addSubview(chromeView)
-        }
+        // M1.10: chrome belongs to Model B (`zoneChromeViews`), rebuilt by
+        // `setZones`. A second set here was the double-draw half of the split, and
+        // it would also have been the half that is NOT the move/resize grab target.
     }
 
     // Layout a single tile belonging to a ZoneLayer.

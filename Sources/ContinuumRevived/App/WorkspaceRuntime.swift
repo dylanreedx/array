@@ -156,6 +156,29 @@ final class WorkspaceRuntime {
         acquiredProjectIds = [controller.project.id]
     }
 
+    /// Hand this runtime the canvas it is supposed to be driving. M1.10 (`.plans/46`).
+    ///
+    /// `canvasView` is a `private weak var` written in exactly one other place —
+    /// `install(into:appRegistry:)` — and **nothing in production has ever called
+    /// that method**, in the whole life of this type. So every canvas operation in
+    /// `switchWorkspace` optional-chained through nil and did nothing: switching
+    /// workspaces changed the document, the registry and the toolbar header while
+    /// leaving the previous workspace's tiles on screen. It also meant the entire
+    /// M1 hydration/persistence/detach programme was unreachable code, green only
+    /// because each of its witnesses called `install(into:)` itself.
+    ///
+    /// Deliberately does ONE thing. Boot already runs `activateUndoWorkspace`,
+    /// `attachUI` and the focus wiring in `mountWorkspaceSceneAtBoot`, so adopting
+    /// must not repeat any of them — that is what keeps this a wiring fix rather
+    /// than a second boot path. `install(into:)` stays a checks-only entry point.
+    func adoptCanvas(_ canvasView: CanvasNSView) {
+        self.canvasView = canvasView
+    }
+
+    /// QA (M1.10): whether this runtime can actually drive a canvas. The assertion
+    /// that would have been RED for this defect's entire life.
+    var qaHasCanvas: Bool { canvasView != nil }
+
     /// Install the CURRENT workspace's zone set into `canvasView`.
     ///
     /// For each `ZonePlacement` with a non-nil `projectId`, acquires a
@@ -698,6 +721,11 @@ final class WorkspaceRuntime {
     var _relaunchSpy: (() -> Void)?
 
     func switchWorkspace(to targetWorkspaceId: UUID) throws {
+        // M1.10: the defect this milestone exists to fix was that EVERY canvas call
+        // below optional-chained through a nil `canvasView` and did nothing, for
+        // months, in silence. Refusing loudly means any future path that reaches a
+        // canvas-less runtime fails at the first click instead.
+        guard canvasView != nil else { throw WorkspaceSwitchError.noCanvas }
         // 1. Flush current + persist departing workspace's live viewport/focus to disk.
         let departingFocus = departingFocusSnapshot(from: canvasView)
         flushAll()
@@ -832,8 +860,14 @@ final class WorkspaceRuntime {
 
     enum WorkspaceSwitchError: Error, CustomStringConvertible {
         case documentNotFound(UUID)
+        /// M1.10: the runtime was asked to switch before anything gave it a canvas.
+        case noCanvas
         var description: String {
-            switch self { case let .documentNotFound(id): return "switchWorkspace: no document for workspace \(id)" }
+            switch self {
+            case let .documentNotFound(id): return "switchWorkspace: no document for workspace \(id)"
+            case .noCanvas:
+                return "switchWorkspace: this WorkspaceRuntime has no canvas — nothing called adoptCanvas(_:), so the switch would have silently changed the document and left the canvas alone"
+            }
         }
     }
 

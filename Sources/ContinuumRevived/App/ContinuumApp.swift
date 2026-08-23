@@ -1029,6 +1029,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--workspace-scene-owner-check") {
+            do {
+                _ = NSApplication.shared
+                try WorkspaceSceneOwnerChecks.run()
+                print("ContinuumRevivedWorkspaceSceneOwnerChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--zone-tile-hydration-check") {
             do {
                 _ = NSApplication.shared
@@ -4006,9 +4018,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     browserEngine: browserEngine
                 )
             }
-            if let workspaceId = self.workspaceRuntime?.workspaceId {
-                canvasView.activateUndoWorkspace(workspaceId)
-            }
 
             let spawner = TileSpawner(
                 canvasView: canvasView,
@@ -4072,91 +4081,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             spawner.browserProfileDeleteHandler = { [weak self] tileId, profileId in
                 self?.deleteBrowserProfile(tileId: tileId, profileId: profileId)
             }
-            self.bootTileSpawner = spawner
-            configureCreationAndRuntimeRoutes(on: spawner)
-            configureWorkspaceRuntimeHooks()
-            installSettingsChangeObserver()
-            workspaceRuntime?.activeController?.onBrowserRuntimeHydrated = { [weak self] runtime in
-                self?.wireContentProcessTerminationHandler(runtime)
-                self?.workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
-                self?.workspaceRuntime?.enforceBrowserRuntimeBudget()
-            }
-            // The observer writer persists one changed tile at a time; the
-            // canvas consumes the resulting full active snapshot so plain
-            // tiles are cleared and zone rollups stay derived from one source.
-            workspaceRuntime?.activeController?.onAgentStatusWritten = { [weak self] _, _ in
-                guard let self else { return }
-                // P2B.4: no status map is passed here any more — the rebuild reads
-                // every project's persisted descriptors itself, which is exactly what
-                // the map this used to compute contained.
-                self.refreshAgentSurfaces()
-                self.scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "agent-status", debounce: 1.0)
-            }
-            // Ticket 86: canvas mutations publish too — the relay delivers
-            // in ~1s, but only if the desktop sends. The controller's
-            // debounced autosave is the funnel every canvas change passes
-            // through, so the phone tracks moves/adds/deletes live.
-            workspaceRuntime?.activeController?.onCanvasStatePersisted = { [weak self] in
-                self?.scheduleCompanionSyncPublish(reason: .canvasChanged, diagnosticsReason: "canvas-changed", debounce: 1.0)
-            }
-            workspaceRuntime?.activeController?.onObservedAgentStatusesChanged = { [weak self] statuses in
-                DispatchQueue.main.async {
-                    guard let self else { return }
-                    self.observedAgentStatuses = statuses
-                    self.applyObserverStatuses(statuses)
-                }
-            }
-            workspaceRuntime?.activeController?.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
-            installAcceptedTileFocusHook()
-
-            installHotkeyMonitor()
-            installTileFocusMonitor()
-            installCanvasGestureMonitors()
-
-            // P2A.7: adopt the agents a previous launch persisted BEFORE the tile
-            // walk below. `installInitialManagedAgentTile` → `wireManagedAgentTile`
-            // re-finds an agent by its `tileId`, so without this a restored tile
-            // spawns a brand-new agent over the top of a record that survived, and
-            // the old one's identity, model and role are lost. No provider process is
-            // started here — see `AgentSupervisor.restore`.
-            let agentRestore = agentSupervisor.restore()
-            if !agentRestore.restored.isEmpty || !agentRestore.stale.isEmpty {
-                fputs("AgentSupervisor: restored \(agentRestore.restored.count) agent(s) idle from the previous launch, skipped \(agentRestore.stale.count) whose project root is gone\n", stderr)
-            }
-
-            // Walk every tile in the canvas, spawn a runtime for each terminal
-            // tile (or install a Restart placeholder if the profile fails to
-            // resolve), and install descriptor placeholders for non-terminal
-            // tiles. The spawner persists each session descriptor; saveCanvas
-            // happens once at the end.
-            for tile in canvasState.tiles {
-                switch tile.kind {
-                case .terminal:
-                    installInitialTerminalTile(tile, in: canvasView, via: spawner)
-                case .browser:
-                    installInitialBrowserTile(tile, in: canvasView, via: spawner)
-                case .browserInspector:
-                    installInitialBrowserInspectorTile(tile, in: canvasView, via: spawner)
-                case .note:
-                    installInitialNoteTile(tile, in: canvasView, via: spawner)
-                case .file:
-                    installInitialFileTile(tile, in: canvasView, via: spawner)
-                case .fileTree:
-                    installInitialFileTreeTile(tile, in: canvasView, via: spawner)
-                case .ticketQueue:
-                    installInitialTicketQueueTile(tile, in: canvasView)
-                case .conductorQueue:
-                    installInitialConductorQueueTile(tile, in: canvasView)
-                case .diffReview:
-                    installInitialDiffReviewTile(tile, in: canvasView)
-                case .runArtifacts:
-                    installInitialRunArtifactsTile(tile, in: canvasView, via: spawner)
-                case .managedAgent:
-                    installInitialManagedAgentTile(tile, in: canvasView)
-                }
-            }
-
-            try projectStore.saveCanvas(canvasView.canvasState)
+            try mountWorkspaceSceneAtBoot(
+                canvasView: canvasView,
+                spawner: spawner,
+                projectStore: projectStore,
+                canvasState: canvasState)
             refreshAgentSurfaces(notify: false)
 
             let window = NSWindow(
@@ -13593,6 +13522,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// access is why every other delegate-driven check had to be pasted into this
     /// 20k-line file; this seam is the smaller price. Used by
     /// `--zone-tile-hydration-check` (M1.1, `.plans/46`).
+    /// Minimal stored-property wiring for a leg that drives
+    /// `mountWorkspaceSceneAtBoot` itself. M1.10 (`.plans/46`).
+    ///
+    /// Deliberately does NOT call `configureWorkspaceRuntimeHooks()` — the mount
+    /// does that, and a leg that pre-wired it would be testing its own setup
+    /// rather than the production sequence.
+    func qaPrepareForBootMountCheck(
+        canvas: CanvasNSView,
+        browserEngine: BrowserEngineContext,
+        runtime: WorkspaceRuntime,
+        registryStore: RegistryStore
+    ) {
+        self.canvasView = canvas
+        self.browserEngine = browserEngine
+        self.workspaceRuntime = runtime
+        self.registryStore = registryStore
+    }
+
     func qaPrepareForOfflineSceneCheck(
         canvas: CanvasNSView,
         browserEngine: BrowserEngineContext,
@@ -13608,6 +13555,122 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // need it and passing nil keeps their behaviour identical.
         if let registryStore { self.registryStore = registryStore }
         configureWorkspaceRuntimeHooks()
+    }
+
+    /// Everything that turns a freshly built canvas, runtime and spawner into the
+    /// live scene at launch. Extracted from `applicationDidFinishLaunching`
+    /// (M1.10, `.plans/46`).
+    ///
+    /// **Why it is a method and not inline.** The scene work used to be buried in
+    /// the middle of a 400-line launch handler, so no self-check could reach it —
+    /// and every scene witness in M1 therefore drove
+    /// `WorkspaceRuntime.install(into:appRegistry:)` instead, which has NEVER had
+    /// a production caller. Six green legs proved nothing about the shipping app.
+    /// This is the seam they should have driven; the precedent is
+    /// `configureWorkspaceRuntimeHooks()`, extracted for exactly this reason.
+    ///
+    /// Order is load-bearing and matches launch exactly; do not reshuffle.
+    func mountWorkspaceSceneAtBoot(
+        canvasView: CanvasNSView,
+        spawner: TileSpawner,
+        projectStore: any ProjectStoring,
+        canvasState: CanvasState,
+        installsGlobalEventMonitors: Bool = true
+    ) throws {
+        if let workspaceId = self.workspaceRuntime?.workspaceId {
+            canvasView.activateUndoWorkspace(workspaceId)
+        }
+
+        self.bootTileSpawner = spawner
+        configureCreationAndRuntimeRoutes(on: spawner)
+        configureWorkspaceRuntimeHooks()
+        installSettingsChangeObserver()
+        workspaceRuntime?.activeController?.onBrowserRuntimeHydrated = { [weak self] runtime in
+            self?.wireContentProcessTerminationHandler(runtime)
+            self?.workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
+            self?.workspaceRuntime?.enforceBrowserRuntimeBudget()
+        }
+        // The observer writer persists one changed tile at a time; the
+        // canvas consumes the resulting full active snapshot so plain
+        // tiles are cleared and zone rollups stay derived from one source.
+        workspaceRuntime?.activeController?.onAgentStatusWritten = { [weak self] _, _ in
+            guard let self else { return }
+            // P2B.4: no status map is passed here any more — the rebuild reads
+            // every project's persisted descriptors itself, which is exactly what
+            // the map this used to compute contained.
+            self.refreshAgentSurfaces()
+            self.scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "agent-status", debounce: 1.0)
+        }
+        // Ticket 86: canvas mutations publish too — the relay delivers
+        // in ~1s, but only if the desktop sends. The controller's
+        // debounced autosave is the funnel every canvas change passes
+        // through, so the phone tracks moves/adds/deletes live.
+        workspaceRuntime?.activeController?.onCanvasStatePersisted = { [weak self] in
+            self?.scheduleCompanionSyncPublish(reason: .canvasChanged, diagnosticsReason: "canvas-changed", debounce: 1.0)
+        }
+        workspaceRuntime?.activeController?.onObservedAgentStatusesChanged = { [weak self] statuses in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.observedAgentStatuses = statuses
+                self.applyObserverStatuses(statuses)
+            }
+        }
+        workspaceRuntime?.activeController?.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
+        installAcceptedTileFocusHook()
+
+        // Global NSEvent monitors: process-wide, and meaningless without a key
+        // window. A headless leg passes false so it can drive this method without
+        // installing them (AGENTS hazard 6).
+        if installsGlobalEventMonitors {
+            installHotkeyMonitor()
+            installTileFocusMonitor()
+            installCanvasGestureMonitors()
+        }
+
+        // P2A.7: adopt the agents a previous launch persisted BEFORE the tile
+        // walk below. `installInitialManagedAgentTile` → `wireManagedAgentTile`
+        // re-finds an agent by its `tileId`, so without this a restored tile
+        // spawns a brand-new agent over the top of a record that survived, and
+        // the old one's identity, model and role are lost. No provider process is
+        // started here — see `AgentSupervisor.restore`.
+        let agentRestore = agentSupervisor.restore()
+        if !agentRestore.restored.isEmpty || !agentRestore.stale.isEmpty {
+            fputs("AgentSupervisor: restored \(agentRestore.restored.count) agent(s) idle from the previous launch, skipped \(agentRestore.stale.count) whose project root is gone\n", stderr)
+        }
+
+        // Walk every tile in the canvas, spawn a runtime for each terminal
+        // tile (or install a Restart placeholder if the profile fails to
+        // resolve), and install descriptor placeholders for non-terminal
+        // tiles. The spawner persists each session descriptor; saveCanvas
+        // happens once at the end.
+        for tile in canvasState.tiles {
+            switch tile.kind {
+            case .terminal:
+                installInitialTerminalTile(tile, in: canvasView, via: spawner)
+            case .browser:
+                installInitialBrowserTile(tile, in: canvasView, via: spawner)
+            case .browserInspector:
+                installInitialBrowserInspectorTile(tile, in: canvasView, via: spawner)
+            case .note:
+                installInitialNoteTile(tile, in: canvasView, via: spawner)
+            case .file:
+                installInitialFileTile(tile, in: canvasView, via: spawner)
+            case .fileTree:
+                installInitialFileTreeTile(tile, in: canvasView, via: spawner)
+            case .ticketQueue:
+                installInitialTicketQueueTile(tile, in: canvasView)
+            case .conductorQueue:
+                installInitialConductorQueueTile(tile, in: canvasView)
+            case .diffReview:
+                installInitialDiffReviewTile(tile, in: canvasView)
+            case .runArtifacts:
+                installInitialRunArtifactsTile(tile, in: canvasView, via: spawner)
+            case .managedAgent:
+                installInitialManagedAgentTile(tile, in: canvasView)
+            }
+        }
+
+        try projectStore.saveCanvas(canvasView.canvasState)
     }
 
     /// Every app-owned hook the `WorkspaceRuntime` needs, in one place.
