@@ -188,6 +188,21 @@ final class CanvasNSView: NSView, TokenThemed {
 
     /// QA reader: the live zone ids in seeded order.
     var qaLiveZoneIds: [UUID] { liveZones.map { $0.zoneId } }
+
+    /// The zones as the canvas is ACTUALLY DRAWING them, in z-order.
+    ///
+    /// This is `liveZones` — Model B — and it is not always the document. A zone
+    /// grown by auto-layout updates `liveZones` (and therefore the chrome the user
+    /// sees) through `onZoneMoved`, and the document can lag. Anything that answers
+    /// "which zone is the user looking at" must read THIS, because the user is
+    /// looking at pixels. `cameraArmedZone` read the document and silently
+    /// disagreed with the screen. T2 (`.plans/47`).
+    var renderedZonesInZOrder: [ZonePlacement] {
+        liveZones.sorted { lhs, rhs in
+            if lhs.zPosition != rhs.zPosition { return lhs.zPosition < rhs.zPosition }
+            return lhs.zoneId.uuidString < rhs.zoneId.uuidString
+        }
+    }
     /// QA reader: the zone a tile currently belongs to, or nil if bare.
     func qaZoneMembership(of tileId: UUID) -> UUID? { tileZoneMembership[tileId] }
     /// QA reader: the current (mutable) placement of a live zone, or nil.
@@ -254,6 +269,12 @@ final class CanvasNSView: NSView, TokenThemed {
 
     /// Fired after a zone is closed so the caller can drop it from persistence.
     var onZoneClosed: ((UUID) -> Void)?
+
+    /// Fired when a press lands anywhere inside a zone — chrome or interior.
+    /// T2 (`.plans/47`): clicking a zone arms it as the target for new tiles. The
+    /// canvas reports the hit and `WorkspaceRuntime.setActiveZone` decides whether
+    /// it may arm (a group zone may not), so the arming policy stays in one place.
+    var onZoneActivated: ((UUID) -> Void)?
 
     /// Fired after a zone is renamed (inline edit committed) so the caller can
     /// persist the new name. Carries (zoneId, newName).
@@ -1323,6 +1344,7 @@ final class CanvasNSView: NSView, TokenThemed {
             worldPlane.addSubview(view, positioned: .below, relativeTo: nil)
         }
         layoutZoneChromeViews()
+        applyArmedZoneChrome()
     }
 
     private func layoutZoneChromeViews() {
@@ -1340,6 +1362,73 @@ final class CanvasNSView: NSView, TokenThemed {
             qaCameraLayoutStats.chromeRepaints += 1
             view.needsDisplay = true
         }
+    }
+
+    /// Grow a zone's stored frame so it contains one WORLD rect, never shrinking.
+    /// T7 (`.plans/47`) — a zone resizes the moment a tile lands in it, not only
+    /// once the tile is dragged afterwards.
+    ///
+    /// Takes an explicit rect rather than re-deriving the member set, because at
+    /// spawn time the tile exists in exactly one of the two models and membership
+    /// may not be stamped yet (a flat install does not stamp `zoneId`). The caller
+    /// already knows precisely which rectangle has to fit.
+    ///
+    /// **Growing may move the origin, and that is not free for a layer.** A layer
+    /// holds ZONE-LOCAL frames and `_layoutLayerTile` renders `local + origin`, so
+    /// moving the origin left drags every existing tile left with it. The local
+    /// frames are compensated by the same delta, which keeps every tile on the
+    /// pixel it already occupied — the identical invariant the membership repair
+    /// protects.
+    @discardableResult
+    func growZone(_ zoneId: UUID, toInclude worldFrame: TileFrame, notifyChange: Bool = true) -> Bool {
+        guard let idx = liveZones.firstIndex(where: { $0.zoneId == zoneId }) else { return false }
+        let pad = ZoneBoundsConfig.padding(defaults: autoLayoutDefaults)
+        let hh = Double(ZoneChromeNSView.headerHeight)
+        let cur = liveZones[idx]
+        let newX = min(cur.origin.x, worldFrame.x - pad)
+        let newY = min(cur.origin.y, worldFrame.y - pad - hh)
+        let newMaxX = max(cur.origin.x + cur.size.width, worldFrame.x + worldFrame.width + pad)
+        let newMaxY = max(cur.origin.y + cur.size.height, worldFrame.y + worldFrame.height + pad)
+        let grown = ZonePoint(x: newX, y: newY)
+        let grownSize = ZoneSize(width: newMaxX - newX, height: newMaxY - newY)
+        guard grown != cur.origin || grownSize != cur.size else { return false }
+
+        var placement = cur
+        placement.origin = grown
+        placement.size = grownSize
+        liveZones[idx] = placement
+
+        // world = local + origin, so an origin that moved by -delta needs every
+        // local frame moved by +delta to stay where it is.
+        let dx = cur.origin.x - grown.x
+        let dy = cur.origin.y - grown.y
+        if let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) {
+            layer.placement = placement
+            if dx != 0 || dy != 0 {
+                for i in layer.tiles.indices {
+                    layer.tiles[i].frame.x += dx
+                    layer.tiles[i].frame.y += dy
+                }
+            }
+            for tile in layer.tiles { _layoutLayerTile(tile, in: layer) }
+        }
+        if var model = zoneDisplayByZoneId[zoneId] {
+            model.placement = placement
+            zoneDisplayByZoneId[zoneId] = model
+            zoneChromeViews[zoneId]?.update(model: model)
+        }
+        layoutZoneChromeViews()
+        // Persist, so the grown zone survives a relaunch rather than snapping back.
+        if notifyChange { onZoneMoved?(placement) }
+        return true
+    }
+
+    /// `growZone` for the spawn path, skipped while hydration is replaying a
+    /// persisted scene. A restore must not re-tidy or re-size the zone it is
+    /// rebuilding — the frames it installs are already the ones that were saved.
+    private func growZoneOnSpawn(_ zoneId: UUID, toInclude worldFrame: TileFrame) {
+        guard !suppressesAutoLayoutForHydration else { return }
+        growZone(zoneId, toInclude: worldFrame)
     }
 
     /// Grow a zone's stored frame to contain its members (union + padding +
@@ -1666,6 +1755,31 @@ final class CanvasNSView: NSView, TokenThemed {
 
     var qaDocumentRelationshipSegmentCount: Int { documentRelationshipOverlay.segments.count }
 
+    /// T8 (`.plans/48`): the segment rects as the overlay will actually paint them,
+    /// plus the two conversions a leg needs to check them against an INDEPENDENT
+    /// oracle. Asserting the segment equals `overlay.convert(view.bounds, from:)`
+    /// would just restate the fix; converting both sides into the canvas's own
+    /// space — the `tileRectInCanvasSpace` idiom — does not.
+    var qaDocumentRelationshipSegmentRects: [(source: CGRect, target: CGRect)] {
+        documentRelationshipOverlay.segments.map { ($0.source, $0.target) }
+    }
+
+    func qaSegmentRectInCanvasSpace(_ rect: CGRect) -> CGRect {
+        documentRelationshipOverlay.convert(rect, to: self)
+    }
+
+    func qaTileRectInCanvasSpace(_ tileId: UUID) -> CGRect? {
+        guard let view = tileView(for: tileId) else { return nil }
+        return view.convert(view.bounds, to: self)
+    }
+
+    /// T8: the lineage overlay's painted endpoints, in the canvas's own space.
+    var qaLineageEndpointsInCanvasSpace: (start: CGPoint, end: CGPoint)? {
+        guard let overlay = agentLineageOverlay else { return nil }
+        return (overlay.convert(overlay.startPoint, to: self),
+                overlay.convert(overlay.endPoint, to: self))
+    }
+
     var qaDocumentRelationshipRoutes: [DocumentRelationshipOverlayView.Route] {
         documentRelationshipOverlay.segments.compactMap(DocumentRelationshipOverlayView.route(for:))
     }
@@ -1737,9 +1851,23 @@ final class CanvasNSView: NSView, TokenThemed {
                   let source = viewsByTileId[agentTileId], !source.isHidden,
                   let target = viewsByTileId[link.documentTileId], !target.isHidden,
                   source.frame.union(target.frame).intersects(visible) else { return nil }
+            // T8 (`.plans/48`): converted into the OVERLAY's coordinate space, not
+            // handed raw `worldPlane` frames.
+            //
+            // `worldPlane` implements pan as `setBoundsOrigin(worldOrigin)`, so its
+            // `bounds.origin` IS the camera's world position. Assigning that rect
+            // as this overlay's FRAME positions it correctly, but the overlay's own
+            // `bounds.origin` stays (0,0) — so a path drawn at world W painted at
+            // `worldOrigin + W`, displaced by exactly the camera pan and growing
+            // the further you pan from the world origin. At viewport (0,0) the
+            // offset is zero, which is the only viewport the old coverage used.
+            //
+            // `convert` rather than subtracting `worldPlane.bounds.origin`: it is
+            // the idiom the lineage overlay and the focus border already use in
+            // this file, and it cannot drift if the camera model changes again.
             return .init(
-                source: source.frame,
-                target: target.frame,
+                source: documentRelationshipOverlay.convert(source.bounds, from: source),
+                target: documentRelationshipOverlay.convert(target.bounds, from: target),
                 emphasized: focused == agentTileId || focused == link.documentTileId
                     || hoveredRelationshipEndpointId == agentTileId
                     || hoveredRelationshipEndpointId == link.documentTileId
@@ -4742,6 +4870,13 @@ final class CanvasNSView: NSView, TokenThemed {
             return
         }
         let point = convert(event.locationInWindow, from: nil)
+        // T2 (`.plans/47`): before any gesture classification, because every branch
+        // below returns early. `_zoneId(at:)` rather than `zoneId(at:)` so a zone
+        // installed only as a layer is not read as empty canvas — the same reason
+        // the create-gesture branch uses it.
+        if let activatedZoneId = _zoneId(at: point) {
+            onZoneActivated?(activatedZoneId)
+        }
         if zoneOverflowButtonZoneId(at: point) != nil,
            let zoneMenu = menu(for: event) {
             zoneMenu.popUp(positioning: nil, at: point, in: self)
@@ -5163,6 +5298,10 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         _installLayer(layer)
         layoutZoneChromeViews()
+        // T5: a zone can be armed BEFORE its chrome exists — `_addProjectZone`
+        // installs the layer and then arms it, and `setActiveProjectZone` is a
+        // no-op until the layer is there. Re-apply once the chrome is built.
+        applyArmedZoneChrome()
         layoutAllTiles()
         reorderTileSubviewsByZIndex()
     }
@@ -5245,6 +5384,7 @@ final class CanvasNSView: NSView, TokenThemed {
     private(set) var activeProjectZoneId: UUID?
 
     func setActiveProjectZone(_ zoneId: UUID?) {
+        defer { applyArmedZoneChrome() }
         guard let zoneId,
               zoneLayers.contains(where: {
                   $0.placement.zoneId == zoneId && $0.placement.projectId != nil
@@ -5253,6 +5393,31 @@ final class CanvasNSView: NSView, TokenThemed {
             return
         }
         activeProjectZoneId = zoneId
+    }
+
+    /// The zone new tiles will be created in, as the user should see it.
+    /// T5 (`.plans/47`).
+    ///
+    /// Mirrors `resolvedCreationScope`'s own zone candidate exactly, fallback
+    /// included: at boot no layer is installed, `activeProjectZoneId` is nil, and
+    /// the boot `activeZone` is the real target. An indicator that disagreed with
+    /// the resolver would be worse than none.
+    var armedZoneId: UUID? {
+        activeProjectZoneId ?? activeZone.flatMap { $0.projectId == nil ? nil : $0.zoneId }
+    }
+
+    /// Repaint the armed accent. O(zones), and only the two chrome views whose
+    /// state actually flipped redraw — `isArmed`'s `didSet` is change-gated.
+    private func applyArmedZoneChrome() {
+        let armed = armedZoneId
+        for (zoneId, view) in zoneChromeViews {
+            view.isArmed = (zoneId == armed)
+        }
+    }
+
+    /// QA (T5): which zone is drawn as armed.
+    var qaArmedChromeZoneIds: Set<UUID> {
+        Set(zoneChromeViews.filter { $0.value.isArmed }.keys)
     }
 
     /// Every tile belonging to the ACTIVE project, read from whichever model owns
@@ -5276,6 +5441,33 @@ final class CanvasNSView: NSView, TokenThemed {
     /// lifecycle and command code must not reach into `canvasState.tiles`
     /// directly after ZoneLayers are installed: that compatibility array is
     /// intentionally not a mirror and may describe the departed workspace.
+    /// Every installed tile with its frame in WORLD coordinates, across BOTH
+    /// models. T9 (`.plans/48`).
+    ///
+    /// `projectTiles()` answers in whichever space the ACTIVE zone uses, and
+    /// `tiles(inZone:)` in that zone's local space — so a caller placing a tile
+    /// relative to an anchor in a DIFFERENT zone was mixing spaces silently. World
+    /// is the one space every tile can be expressed in, so compute there and
+    /// convert once at the end, against the zone the tile will actually install
+    /// into.
+    func allTilesInWorldFrames() -> [Tile] {
+        var seen = Set<UUID>()
+        var result: [Tile] = []
+        for layer in zoneLayers {
+            for tile in layer.tiles where seen.insert(tile.id).inserted {
+                var world = tile
+                world.frame = CanvasEngine.zoneLocalToWorld(tile.frame, zoneOrigin: layer.placement.origin)
+                result.append(world)
+            }
+        }
+        if flatCompatibilitySceneActive {
+            for tile in canvasState.tiles where seen.insert(tile.id).inserted {
+                result.append(tile)
+            }
+        }
+        return result
+    }
+
     func tileRecord(for tileId: UUID) -> Tile? {
         if let tile = zoneLayers.lazy.compactMap({ layer in
             layer.tiles.first(where: { $0.id == tileId })
@@ -5395,6 +5587,22 @@ final class CanvasNSView: NSView, TokenThemed {
             ?? allZonePlacements().first(where: { $0.zoneId == zoneId })
     }
 
+    /// The placement of a zone ONLY when an installed layer owns it.
+    ///
+    /// The distinction is a frame space, not a nicety. `installProjectTile` uses a
+    /// layer when one exists and silently falls back to the flat model when it does
+    /// not — and the flat model holds WORLD frames while a layer holds ZONE-LOCAL.
+    /// So anything computing a frame for a tile about to be installed must ask
+    /// whether the LAYER exists, not merely whether the zone does.
+    /// `zonePlacement(for:)` answers the second question: it falls back to
+    /// `allZonePlacements()`, which includes zones with no layer at all. Framing
+    /// against one of those produced a zone-local frame that the flat install then
+    /// read as world, displacing every new tile by the zone's origin.
+    /// T4 (`.plans/47`).
+    func installedZonePlacement(for zoneId: UUID) -> ZonePlacement? {
+        zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.placement
+    }
+
     func zoneId(containing tileId: UUID) -> UUID? {
         zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == tileId }) })?.placement.zoneId
             ?? (flatCompatibilitySceneActive ? canvasState.tiles.first(where: { $0.id == tileId })?.zoneId : nil)
@@ -5427,6 +5635,15 @@ final class CanvasNSView: NSView, TokenThemed {
               let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId })
         else {
             install(tileView: tileView, for: tile)
+            // T7 (`.plans/47`): the flat model never grew its zone on a spawn — only
+            // `installProjectTile`'s LAYER branch did, and only through
+            // `arrangeAutoLayoutAfterSpawn`, which is gated on auto-layout being on.
+            // The boot project is flat, so a tile spawned into the boot zone landed
+            // outside it and the zone only caught up once the tile was dragged.
+            // The tile's frame is already WORLD here.
+            if let owning = tile.zoneId ?? activeProjectZoneId ?? activeZone?.zoneId {
+                growZoneOnSpawn(owning, toInclude: tile.frame)
+            }
             return .flatCanvasState
         }
 
@@ -5453,6 +5670,10 @@ final class CanvasNSView: NSView, TokenThemed {
         tileZoneMembership[tile.id] = zoneId
         reorderTileSubviewsByZIndex()
         delegate?.canvasSidebarModelDidChange(self)
+        // T7: unconditional, and BEFORE the auto-layout pass. `arrangeAutoLayoutAfterSpawn`
+        // already expands the zone, but only when auto-layout is enabled — with it off,
+        // a spawned tile sat outside its zone until someone dragged it.
+        growZoneOnSpawn(zoneId, toInclude: CanvasEngine.worldFrame(tile: installed, in: layer.placement))
         arrangeAutoLayoutAfterSpawn(zoneId: zoneId)
         return .zoneLayer(zoneId)
     }
@@ -10118,6 +10339,8 @@ final class ZoneChromeNSView: NSView {
         var agentRollupText: String?
         var qaVerdictGlyph: String?
         var qaVerdictTooltip: String?
+        /// T5 (`.plans/47`): the zone new tiles land in.
+        var isArmed: Bool = false
     }
 
     /// Exposed for `zoneBounds` callers that need the header height without
@@ -10126,6 +10349,21 @@ final class ZoneChromeNSView: NSView {
 
     private var model: CanvasNSView.ZoneRenderModel
     private let headerHeight: CGFloat = 34
+
+    /// Whether this is the zone new tiles will be created in. T5 (`.plans/47`).
+    ///
+    /// Before this, "which zone am I creating into" had NO visual representation
+    /// at all — `setActiveProjectZone` was pure routing. That was survivable while
+    /// the answer only changed at scene mount; now that clicking, focusing and
+    /// even panning re-point it, an invisible target would just relocate the
+    /// surprise rather than remove it.
+    ///
+    /// Drawn with the zone's OWN accent rather than a new palette entry: no new
+    /// colour literal, no new `TokenThemed` surface for the ui-probe census to
+    /// hunt, and a resting zone paints exactly what it painted before.
+    var isArmed: Bool = false {
+        didSet { if isArmed != oldValue { needsDisplay = true } }
+    }
 
     /// Replace the render model (e.g. after a rename) and redraw the header.
     func update(model: CanvasNSView.ZoneRenderModel) {
@@ -10144,7 +10382,8 @@ final class ZoneChromeNSView: NSView {
             isProvisional: model.isProvisional,
             agentRollupText: model.agentStatusRollup.displayText,
             qaVerdictGlyph: model.qaVerdict?.verdict.glyph,
-            qaVerdictTooltip: model.qaVerdict?.tooltip
+            qaVerdictTooltip: model.qaVerdict?.tooltip,
+            isArmed: isArmed
         )
     }
 
@@ -10170,7 +10409,7 @@ final class ZoneChromeNSView: NSView {
         let accent = Self.color(named: model.placement.color)
         let zoneRect = bounds.insetBy(dx: 1, dy: 1)
         let path = NSBezierPath(roundedRect: zoneRect, xRadius: 12, yRadius: 12)
-        path.lineWidth = 2
+        path.lineWidth = isArmed ? 3 : 2
 
         // The body and header share one overflow boundary. Filling `zoneRect`
         // and `headerRect` as bare rectangles paints square pixels through the
@@ -10181,7 +10420,7 @@ final class ZoneChromeNSView: NSView {
         accent.withAlphaComponent(model.placement.collapsed ? 0.20 : 0.10).setFill()
         zoneRect.fill()
 
-        accent.withAlphaComponent(0.24).setFill()
+        accent.withAlphaComponent(isArmed ? 0.38 : 0.24).setFill()
         headerRect.fill()
         let title = model.placement.collapsed ? "▸ \(model.displayName)" : model.displayName
         let attributes: [NSAttributedString.Key: Any] = [
@@ -10272,7 +10511,7 @@ final class ZoneChromeNSView: NSView {
         }
         NSGraphicsContext.restoreGraphicsState()
 
-        accent.withAlphaComponent(0.75).setStroke()
+        accent.withAlphaComponent(isArmed ? 1.0 : 0.75).setStroke()
         if model.isProvisional { path.setLineDash([6, 4], count: 2, phase: 0) }
         path.stroke()
     }

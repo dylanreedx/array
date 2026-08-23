@@ -80,6 +80,39 @@ public enum CanvasEngine {
         TileFrame(x: zone.origin.x, y: zone.origin.y, width: zone.size.width, height: zone.size.height)
     }
 
+    /// The zone the camera is looking at: the topmost project-backed zone whose
+    /// world frame contains the viewport CENTRE. T2 (`.plans/47`).
+    ///
+    /// `nil` means "no answer", NOT "disarm" — the caller must leave the armed
+    /// zone alone. Panning across empty canvas, or over a group zone, is not a
+    /// request to stop targeting the zone you were working in.
+    ///
+    /// Deliberately containment and not nearest-centre: "nearest" would arm a zone
+    /// far off screen the moment the camera crossed open canvas, which is the same
+    /// class of surprise this change exists to remove. `zones` is expected in
+    /// z-order (`WorkspaceDocument.zonesInZOrder`, last element frontmost), so the
+    /// last container wins exactly as hit-testing does.
+    ///
+    /// The centre math matches `ZoneHydrationOrchestrator.plan`, which sorts the
+    /// live budget by distance from this same point.
+    public static func cameraArmedZone(
+        zones: [ZonePlacement],
+        viewport: CanvasViewport,
+        visibleSize: CGSize
+    ) -> UUID? {
+        let zoom = viewport.zoom.isFinite && viewport.zoom > 0 ? viewport.zoom : 1
+        let centerX = viewport.x + (Double(visibleSize.width) / zoom) / 2
+        let centerY = viewport.y + (Double(visibleSize.height) / zoom) / 2
+        var armed: UUID?
+        for zone in zones where zone.projectId != nil {
+            let frame = zoneWorldFrame(zone)
+            let inside = centerX >= frame.x && centerX <= frame.x + frame.width
+                && centerY >= frame.y && centerY <= frame.y + frame.height
+            if inside { armed = zone.zoneId }
+        }
+        return armed
+    }
+
     /// Returns the world-space outer rectangle of the zone chrome (the *adaptive*
     /// drawn rect, NOT the stored `zoneWorldFrame`). Origin = top-left, y-DOWN.
     ///

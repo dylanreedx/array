@@ -187,6 +187,23 @@ frozen fallback in QA).
    **What a scene witness owes.** Drive `mountWorkspaceSceneAtBoot`. A check that
    calls `install(into:)` is testing a checks-only entry point.
 
+   **What a new SPAWN owes (`.plans/47`, 2026-08-23).** One `targetZoneId`, used
+   for all four of: `makeProjectTilePlacement`, the sibling set the automatic
+   placement dodges, `zPositionAbove`, and `installProjectTile`. Framing against
+   `activeProjectZonePlacement` while installing into `creationScope?.zoneId` is
+   invisible for as long as those two cannot differ, and displaces the tile by the
+   difference of the zone origins the moment they can — which is now, because
+   clicking, focusing, creating a zone and panning all re-point the armed zone.
+   A witness that asserts the zone STAMP stays green through exactly this bug;
+   assert the tile's world frame against the zone's world rect.
+
+   The armed zone has ONE writer, `WorkspaceRuntime.setActiveZone(_:reason:)`,
+   which writes `document.lastActiveZoneId` (whence `activeController`) and
+   `canvasView.setActiveProjectZone` (whence the creation scope and every
+   placement) together. Writing one without the other is the defect it replaced.
+   A project-less zone must never arm: `activeController` is nil for one, so
+   arming it disarms creation entirely.
+
    **What a new tile kind owes.** Add it to `makeHydratedTileView` if it can be
    built from the persisted `Tile` alone; otherwise to Phase B, which needs the
    layer installed first, must go through `retireOrphanedRuntimes` so one tile

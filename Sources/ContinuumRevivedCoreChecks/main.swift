@@ -11593,6 +11593,7 @@ runCanvasPersistenceMergeChecks()
 // Plan: .plans/46 M1.10 — a tile whose zoneId names another project's zone must
 // be rescued, not rendered nowhere. Ordinary dragging produces those stamps.
 runZoneMembershipRepairChecks()
+runCameraArmedZoneChecks()
 
 runProcessGroupChildChecks()
 

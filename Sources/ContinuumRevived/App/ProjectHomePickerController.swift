@@ -109,6 +109,20 @@ final class ProjectHomePickerController {
                 icon: .system(project.id == selected?.project.id ? "checkmark.circle.fill" : "folder")
             ))
         }
+        // T6 (`.plans/47`): the drill-down is now OPT-IN. Choosing a project
+        // confirms at its root, which is what almost every zone wants; refining
+        // Home to a subfolder is a deliberate second act rather than a mandatory
+        // second step. Only offered when there is a project to refine — a brand
+        // new zone has no selection yet, and "which project's subfolder?" would
+        // have no answer.
+        if let selected {
+            items.append(ChoiceItem(
+                id: "choose-subfolder",
+                title: "Choose a subfolder…",
+                detail: "Pick a Home inside \(selected.project.name)",
+                icon: .system("folder.badge.gearshape")
+            ))
+        }
         if addProject != nil {
             items.append(ChoiceItem(
                 id: "add-project",
@@ -131,7 +145,7 @@ final class ProjectHomePickerController {
             presentation: .completions,
             layout: .completion(.init(
                 breadcrumb: "Choose Project & Home",
-                footer: validationMessage ?? "Choose a project, then its Home · ↑↓ Select · Return Open · Esc Cancel",
+                footer: validationMessage ?? "Choose a project · ↑↓ Select · Return Open · Esc Cancel",
                 maximumVisibleRows: 7,
                 minimumWidth: 380,
                 maximumWidth: 480
@@ -152,7 +166,14 @@ final class ProjectHomePickerController {
                 return
             }
             if !projects.contains(where: { $0.id == project.id }) { projects.append(project) }
-            showFolders(project: project, relativePath: nil)
+            // T6: a freshly registered project confirms at its root too, rather
+            // than dropping the user into a folder browser they did not ask for.
+            confirm(project: project, relativePath: nil)
+            return
+        }
+        if item.id == "choose-subfolder" {
+            guard let selected else { return }
+            showFolders(project: selected.project, relativePath: selected.homeRelativePath)
             return
         }
         if item.id.hasPrefix("recent:"),
@@ -165,7 +186,11 @@ final class ProjectHomePickerController {
         guard item.id.hasPrefix("project:"),
               let projectId = UUID(uuidString: String(item.id.dropFirst("project:".count))),
               let project = projects.first(where: { $0.id == projectId }) else { return }
-        showFolders(project: project, relativePath: selected?.project.id == project.id ? selected?.homeRelativePath : nil)
+        // T6: the directory you pick IS the Home. For the project that is already
+        // scoped here, keep the Home it already has rather than silently resetting
+        // it to the root — re-picking the current project is not a request to
+        // discard its Home.
+        confirm(project: project, relativePath: selected?.project.id == project.id ? selected?.homeRelativePath : nil)
     }
 
     private func showFolders(project: ProjectEntry, relativePath: String?) {
@@ -191,7 +216,12 @@ final class ProjectHomePickerController {
             options: [.skipsPackageDescendants]
         )) ?? []
         for child in children.sorted(by: { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }) {
-            guard let values = try? child.resourceValues(forKeys: Set(keys)), values.isDirectory == true else { continue }
+            // `.isHiddenKey` was fetched here and never used, and `.skipsHiddenFiles`
+            // was not passed — so `.git`, `.build` and `.array` were offered as Home
+            // candidates alongside real source directories.
+            guard let values = try? child.resourceValues(forKeys: Set(keys)),
+                  values.isDirectory == true,
+                  values.isHidden != true else { continue }
             let result = Result { try ProjectHomeValidator.relativeHome(projectRoot: root, selectedHome: child) }
             let relative = try? result.get()
             items.append(ChoiceItem(

@@ -179,6 +179,133 @@ final class WorkspaceRuntime {
     /// that would have been RED for this defect's entire life.
     var qaHasCanvas: Bool { canvasView != nil }
 
+    // MARK: - The armed zone (T1, `.plans/47`)
+
+    /// Why a zone became the armed one. Only the persistence urgency differs:
+    /// a deliberate act flushes, an ambient one debounces.
+    enum ActiveZoneReason: Equatable {
+        /// The user just made this zone.
+        case created
+        /// The user named this project/Home in the creation-scope picker.
+        case explicit
+        /// A tile inside the zone took focus.
+        case focus
+        /// The user clicked the zone's chrome or interior.
+        case click
+        /// The camera settled over the zone.
+        case camera
+
+        /// A deliberate act is worth a synchronous write; ambient arming rides the
+        /// autosave debounce so a pan does not hammer the document.
+        var persistsImmediately: Bool {
+            switch self {
+            case .created, .explicit: return true
+            case .focus, .click, .camera: return false
+            }
+        }
+    }
+
+    private var armingSaveController: WorkspaceDocumentSaveController?
+
+    /// The one writer of "which zone do new tiles go into".
+    ///
+    /// Two half-states used to drift. `document.lastActiveZoneId` decides
+    /// `activeController` (and therefore the spawner); `canvasView.activeProjectZoneId`
+    /// decides the creation scope's `.zone` candidate and every spawn's placement.
+    /// Each existing writer set one or the other and never reliably both, and NO
+    /// user action set either — so the zone new tiles landed in was fixed at scene
+    /// mount and could not be moved. Creating a second zone did not move it;
+    /// correcting it through the picker did not move it, and because `.zone`
+    /// outranks `.recentExplicit` in `CreationScopeResolver`, the correction was
+    /// overruled on the very next spawn.
+    ///
+    /// Returns true when the arming took.
+    @discardableResult
+    func setActiveZone(_ zoneId: UUID?, reason: ActiveZoneReason) -> Bool {
+        // A group zone must never arm. `activeController` returns nil for one, so
+        // arming it would silently disarm creation entirely — every spawn would
+        // then refuse rather than land somewhere wrong, which is a worse bug than
+        // the one being fixed. Same for a zone this document does not contain.
+        // Leave the current arming alone rather than clearing it: panning across
+        // empty canvas, or clicking a group zone, is not a request to disarm.
+        guard let zoneId,
+              let zone = document.zones.first(where: { $0.zoneId == zoneId }),
+              zone.projectId != nil
+        else { return false }
+
+        let previousProjectId = activeController?.project.id
+        guard document.lastActiveZoneId != zoneId else {
+            // Already armed in the document, but the canvas may still disagree —
+            // `setActiveProjectZone` silently no-ops until the layer is installed.
+            canvasView?.setActiveProjectZone(zoneId)
+            return true
+        }
+        document.lastActiveZoneId = zoneId
+        canvasView?.setActiveProjectZone(zoneId)
+
+        // The spawner follows the controller, and `activeController` is derived
+        // from the id just written. Only when the PROJECT changed: re-attaching on
+        // every camera settle would rebuild a spawner per pan.
+        if let canvas = canvasView, activeController?.project.id != previousProjectId {
+            attachActiveControllerUI(canvasView: canvas)
+        }
+
+        if reason.persistsImmediately {
+            try? persistWorkspaceDocument()
+        } else {
+            if armingSaveController == nil {
+                let appSupport = registryStore.registryFile.deletingLastPathComponent()
+                armingSaveController = WorkspaceDocumentSaveController(
+                    store: WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport))
+            }
+            armingSaveController?.scheduleZoneLayoutSave(document)
+        }
+        return true
+    }
+
+    /// The memoized spawn scope for a managed-agent tile, from WHICHEVER live
+    /// spawner created it. T4 (`.plans/47`).
+    ///
+    /// `managedAgentCreationScopes` is per-`TileSpawner`, and a scoped spawn goes
+    /// through `spawnerForFilesystemCreation()` — the scope's OWN project's
+    /// spawner. `wireManagedAgentTile` then read it back off the ACTIVE
+    /// controller's spawner. When those are different objects the lookup returned
+    /// nil and the agent silently fell back to the plain active-project path, so
+    /// the tile sat in the right zone while its agent ran in the first project's
+    /// home directory.
+    func managedAgentCreationScope(tileId: UUID) -> CreationScope? {
+        if let scope = activeController?.tileSpawner?.managedAgentCreationScope(tileId: tileId) {
+            return scope
+        }
+        for controller in registry.liveControllers {
+            if let scope = controller.tileSpawner?.managedAgentCreationScope(tileId: tileId) {
+                return scope
+            }
+        }
+        return nil
+    }
+
+    /// Same problem, same fix, for the launch selection.
+    func managedAgentLaunchSelection(tileId: UUID) -> AgentLaunchSelection? {
+        if let selection = activeController?.tileSpawner?.managedAgentLaunchSelection(tileId: tileId) {
+            return selection
+        }
+        for controller in registry.liveControllers {
+            if let selection = controller.tileSpawner?.managedAgentLaunchSelection(tileId: tileId) {
+                return selection
+            }
+        }
+        return nil
+    }
+
+    /// QA: the armed zone as the document records it.
+    var qaArmedZoneId: UUID? { document.lastActiveZoneId }
+
+    /// QA: drain the debounced arming write so a check can assert on disk.
+    func flushPendingArmingSave() {
+        try? armingSaveController?.flushPendingSave()
+    }
+
     // MARK: - Zone membership (M1.10, `.plans/46`)
 
     /// This project's tiles, bucketed by zone, with foreign/nil/unknown stamps
@@ -253,6 +380,32 @@ final class WorkspaceRuntime {
     /// `maxX + gap`, nowhere near the tiles, and takes `lastActiveZoneId`. Enclose
     /// the project's persisted tiles instead, so the chrome appears around the
     /// tiles the user is already looking at and nothing moves.
+    /// Run the membership repair on the BOOT path. T10 (`.plans/48`).
+    ///
+    /// `membership(forProject:…)` already implements and persists the rule, but it
+    /// is only reached from `install(into:)` and `switchWorkspace`. Boot renders
+    /// the flat scene and never calls either, so a tile with a nil or foreign
+    /// `zoneId` survived every launch — one real store held a file tile at world
+    /// (1246,-851) belonging to no zone at all, unreachable by every zone gesture.
+    ///
+    /// Stamp-only: `resolveZoneMembership` never moves a tile, never drops one and
+    /// never rescues across a project boundary, so nothing on screen shifts. The
+    /// write goes through `ProjectStore.saveCanvas` (atomic, `.array/backups/`) and
+    /// every repaired id is named on stderr.
+    ///
+    /// The stamps are then applied to the LIVE canvas as well. Repairing only the
+    /// file would leave this session's in-memory copy stale, and the next
+    /// `persistProjectCanvas` would write the unrepaired state straight back over
+    /// it.
+    func repairBootMembership(controller: ZoneRuntimeController, canvasView: CanvasNSView) {
+        var cache: [UUID: [UUID: [Tile]]] = [:]
+        let byZone = membership(
+            forProject: controller.project.id, controller: controller, in: document, cache: &cache)
+        for (zoneId, tiles) in byZone {
+            for tile in tiles { canvasView.setTileZone(tile.id, zoneId: zoneId) }
+        }
+    }
+
     /// `ensureZone` for the boot project, called from `mountWorkspaceSceneAtBoot`.
     func ensureZoneForActiveProject(controller: ZoneRuntimeController) {
         ensureZone(forProject: controller.project.id, controller: controller)
@@ -541,6 +694,13 @@ final class WorkspaceRuntime {
         // could not be spawned into. Phase B needs it too.
         if let canvas = canvasView { attachActiveControllerUI(canvasView: canvas) }
         if let canvas = canvasView { hydrateZoneLayerTiles?(canvas, [layer], .afterInstall) }
+        // T2 (`.plans/47`): the zone the user just made is the zone they mean.
+        // `appendProjectZone` already took `document.lastActiveZoneId`, so the
+        // controller had moved — but nothing told the CANVAS, and the canvas is
+        // what `resolvedCreationScope` and every spawn's placement read. That
+        // half-move is the reported bug: make a second zone, spawn into it, get
+        // the first zone's project Home.
+        setActiveZone(placement.zoneId, reason: .created)
 
         // Flush document save.
         let appSupport = registryStore.registryFile.deletingLastPathComponent()
@@ -663,6 +823,7 @@ final class WorkspaceRuntime {
     }
 
     private func makeSpawner(for controller: ZoneRuntimeController, canvasView: CanvasNSView) -> TileSpawner {
+        let previous = controller.tileSpawner
         let spawner = TileSpawner(
             canvasView: canvasView,
             ghostty: ghostty,
@@ -675,6 +836,10 @@ final class WorkspaceRuntime {
             browserProfiles: currentBrowserProfiles(),
             managedSessionStore: controller.managedSessionStore
         )
+        // T4 (`.plans/47`): a tile's managed-agent memos outlive the spawner that
+        // recorded them. This method runs for every live controller each time the
+        // active project changes, which is now as often as the user clicks a zone.
+        if let previous, previous !== spawner { spawner.adoptManagedAgentMemos(from: previous) }
         onSpawnerCreated?(spawner)
         return spawner
     }
@@ -1109,6 +1274,26 @@ final class WorkspaceRuntime {
         }
         // Layer budget eviction over the live set (T07 cross-zone cap).
         enforceBrowserRuntimeBudget()
+
+        // T2 (`.plans/47`): the camera arms a zone. This rides the hydration
+        // debounce deliberately — `onViewportChanged` is already gated on a real
+        // viewport delta and already debounced, so arming costs one O(zones) pass
+        // per settle and never runs per frame or per input event. Adding a second
+        // timer here is how the post-0.5.1 perf erosion happened four times.
+        //
+        // `renderedZonesInZOrder`, NOT `document.zonesInZOrder`. The two diverge:
+        // a zone grown by auto-layout updates `liveZones` and the chrome on screen
+        // while the document lags behind, and one really was drawn at
+        // (656,0,5644x824) with the document still saying (5020,0,1280x720). Asking
+        // the document "is the camera inside this zone" then answers about a
+        // rectangle the user cannot see, so panning onto a zone did not arm it.
+        if let armed = CanvasEngine.cameraArmedZone(
+            zones: canvasView.renderedZonesInZOrder,
+            viewport: viewport,
+            visibleSize: visibleSize
+        ) {
+            setActiveZone(armed, reason: .camera)
+        }
     }
 
     // MARK: - Private

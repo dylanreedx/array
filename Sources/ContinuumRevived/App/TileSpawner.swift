@@ -56,8 +56,8 @@ final class TileSpawner {
     private let environmentProvider: () -> [String: String]
     private let tmuxControlFactory: @Sendable (String, RemoteReach, UserDefaults) -> any TmuxControl
     private var browserProfiles: [BrowserProfile]
-    private var managedAgentLaunchSelections: [UUID: AgentLaunchSelection] = [:]
-    private var managedAgentCreationScopes: [UUID: CreationScope] = [:]
+    fileprivate var managedAgentLaunchSelections: [UUID: AgentLaunchSelection] = [:]
+    fileprivate var managedAgentCreationScopes: [UUID: CreationScope] = [:]
 
     /// Dynamic source used by browser tile profile menus after registry edits.
     var browserProfileMenuProvider: (() -> [BrowserProfile])?
@@ -264,12 +264,18 @@ final class TileSpawner {
     ) -> Outcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
         guard let ghostty else { return .failure(SpawnError.canvasUnavailable) }
+        // T4 (`.plans/47`): frame against the zone this tile is actually installed
+        // into, below. The two used to disagree whenever the creation scope named a
+        // zone other than the armed one, and a zone-local frame computed against
+        // the wrong origin lands the tile off by the difference between them.
+        let targetZoneId = creationScope?.zoneId
         let frame = makeProjectTilePlacement(
             worldPoint: worldPoint,
             size: CanvasEngine.defaultFrame(for: .terminal),
-            in: canvasView
+            in: canvasView,
+            targetZoneId: targetZoneId
         )
-        let nextZ = CanvasEngine.zPositionAbove(canvasView.projectTiles())
+        let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
         let wherePath = profile.cwd
         var tile = Tile(
             id: UUID(),
@@ -873,12 +879,16 @@ final class TileSpawner {
             return .failure(error)
         }
 
+        // T4 (`.plans/47`): like the note path, a browser ignored the creation
+        // scope's zone and landed in whatever zone was armed.
+        let targetZoneId = creationScopeProvider?()?.zoneId
         let frame = makeProjectTilePlacement(
             worldPoint: worldPoint,
             size: CanvasEngine.defaultFrame(for: .browser),
-            in: canvasView
+            in: canvasView,
+            targetZoneId: targetZoneId
         )
-        let nextZ = CanvasEngine.zPositionAbove(canvasView.projectTiles())
+        let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
         var tile = Tile(
             id: UUID(),
             kind: .browser,
@@ -906,7 +916,7 @@ final class TileSpawner {
         view.onTabModelChange = { [weak self] model in try? self?.writeBrowserTabModel(tileId: tile.id, runtimeId: runtime.id, model: model, storageGroupId: storageGroupId, profileId: profile.id) }
         configureBrowserProfileMenu(view, tileId: tile.id)
         configureBrowserInspectorMenu(view, tileId: tile.id)
-        let target = canvasView.installProjectTile(tileView: view, for: tile)
+        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
 
         do {
             try upsertBrowserTile(
@@ -1480,8 +1490,19 @@ final class TileSpawner {
         let now = Date()
         let tileId = UUID()
         let threadId = "managed-\(tileId.uuidString)"
-        let frame = makeProjectTilePlacement(worldPoint: worldPoint, size: CanvasEngine.defaultFrame(for: .managedAgent), in: canvasView)
-        let nextZ = CanvasEngine.zPositionAbove(canvasView.projectTiles())
+        // T4 (`.plans/47`): the tile is installed into `creationScope?.zoneId`
+        // below, so it must be FRAMED against that zone too. Framing against the
+        // armed zone and installing into another displaces the tile by the
+        // difference of the two zone origins — invisible until T1-T3 let the two
+        // differ, which is exactly what they do.
+        let targetZoneId = creationScope?.zoneId
+        let frame = makeProjectTilePlacement(
+            worldPoint: worldPoint,
+            size: CanvasEngine.defaultFrame(for: .managedAgent),
+            in: canvasView,
+            targetZoneId: targetZoneId
+        )
+        let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
         // One resolution seeds every pre-attach projection. Cmd+K supplies its
         // explicit choice; generic creation falls back to Settings. Wiring gives
         // the same resolution to the agent record before the view attaches.
@@ -1550,6 +1571,27 @@ final class TileSpawner {
 
     func managedAgentCreationScope(tileId: UUID) -> CreationScope? {
         managedAgentCreationScopes[tileId]
+    }
+
+    /// QA (T4, `.plans/47`): seed the memo the way a real spawn does, so a leg can
+    /// prove the cross-spawner lookup without running an agent process.
+    func qaRememberManagedAgentCreationScope(tileId: UUID, scope: CreationScope) {
+        managedAgentCreationScopes[tileId] = scope
+    }
+
+    /// Carry a replaced spawner's managed-agent memos forward. T4 (`.plans/47`).
+    ///
+    /// `attachActiveControllerUI` builds a FRESH `TileSpawner` for every live
+    /// controller whenever the active project changes, and the armed zone now
+    /// changes on a click, a focus or a camera settle. The creation scope and
+    /// launch selection a spawn recorded live on the spawner instance, so every
+    /// re-arm silently discarded them and `wireManagedAgentTile` — which reads them
+    /// when the tile is wired, not when it is spawned — found nothing and dropped
+    /// the agent into the active project's home directory instead of its own.
+    /// These memos describe TILES, which outlive any spawner.
+    func adoptManagedAgentMemos(from previous: TileSpawner) {
+        managedAgentCreationScopes.merge(previous.managedAgentCreationScopes) { mine, _ in mine }
+        managedAgentLaunchSelections.merge(previous.managedAgentLaunchSelections) { mine, _ in mine }
     }
 
     /// ⌘K's managed-agent spawn, whole, in ONE function: validate the explicit
@@ -1891,12 +1933,19 @@ final class TileSpawner {
         // boot this is the flat canvas and behaves exactly as before, but once
         // `setZones` has installed layers the flat collection belongs to the DEPARTED
         // project and a note appended to it lands in a zone that is no longer on screen.
+        //
+        // T4 (`.plans/47`): and through the CREATION SCOPE's zone, not just the
+        // active project's. A note ignored the scope entirely — it framed and
+        // installed into whatever zone was armed — so choosing a project in the
+        // scope picker moved the note's STORE without moving where it appeared.
+        let targetZoneId = creationScopeProvider?()?.zoneId
         let frame = makeProjectTilePlacement(
             worldPoint: worldPoint,
             size: CanvasEngine.defaultFrame(for: .note),
-            in: canvasView
+            in: canvasView,
+            targetZoneId: targetZoneId
         )
-        let nextZ = CanvasEngine.zPositionAbove(canvasView.projectTiles())
+        let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
         let tile = Tile(
             id: tileId,
             kind: .note,
@@ -1917,7 +1966,7 @@ final class TileSpawner {
         view.onSaveAsMarkdownRequested = { [weak self] url in
             self?.handleNoteConversion(self?.convertNoteToDocument(noteId: noteId, tileId: tileId, destination: url))
         }
-        let target = canvasView.installProjectTile(tileView: view, for: tile)
+        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
         do {
             try persistProjectCanvas(after: target, in: canvasView)
         } catch {
@@ -2134,6 +2183,8 @@ final class TileSpawner {
         return spawnFileImpl(location: location, title: title, at: nil, beside: anchorTileId, targetZoneId: nil)
     }
 
+    /// Full-control overload used by `WorkspaceRuntime.openDocument` and by
+    /// `--agent-local-file-link-check`.
     func spawnFile(
         location: DocumentLocation,
         title: String? = nil,
@@ -2161,19 +2212,41 @@ final class TileSpawner {
         // persisted metadata does not depend on how the path was authored.
         let canonicalPath = URL(fileURLWithPath: trimmedPath).standardizedFileURL.resolvingSymlinksInPath().path
 
-        let siblings = targetZoneId.flatMap { canvasView.tiles(inZone: $0) } ?? canvasView.projectTiles()
-        let workspaceTiles = canvasView.allWorkspaceTiles()
-        if let existing = workspaceTiles.first(where: { $0.kind == .file && ($0.metadata.documentLocation?.path ?? $0.metadata.filePath) == canonicalPath }) {
+        // T9 (`.plans/48`): resolve the anchor by IDENTITY, in WORLD space.
+        //
+        // This used to scan `targetZoneId.flatMap { tiles(inZone: $0) } ?? projectTiles()`.
+        // `tiles(inZone:)` returns nil when the target zone has no installed layer,
+        // so `siblings` silently became the ACTIVE zone's tiles — which cannot
+        // contain the opening agent. The anchor was then "not found", and the two
+        // fallbacks below were both wrong: the frame came from
+        // `makeProjectTilePlacement` with no `targetZoneId` (so zone-local to the
+        // ACTIVE zone, then installed into the target's), and `zoneId` came out nil,
+        // producing a tile belonging to no zone at all. One real store held exactly
+        // that: notes.md at world (1246,-851) with `zoneId: nil`.
+        let worldSiblings = canvasView.allTilesInWorldFrames()
+        if let existing = canvasView.allWorkspaceTiles().first(where: { $0.kind == .file && ($0.metadata.documentLocation?.path ?? $0.metadata.filePath) == canonicalPath }) {
             return .alreadyOpen(tileId: existing.id)
         }
 
         let size = CanvasEngine.defaultFrame(for: .file)
-        let anchor = anchorTileId.flatMap { id in siblings.first(where: { $0.id == id }) }
+        // An explicit drop point beats the anchor. `openDocument`'s `.at(point)`
+        // demux sets BOTH, and preferring the anchor threw away where the user
+        // actually dropped the file.
+        let anchor = worldPoint == nil
+            ? anchorTileId.flatMap { id in worldSiblings.first(where: { $0.id == id }) }
+            : nil
+        // Compute in WORLD, then convert once — into the space of the model
+        // `installProjectTile` will actually use, which is a LAYER only when one
+        // owns the target zone. Agreeing on the zone is not enough; the two models
+        // store different coordinate spaces.
+        let targetPlacement = targetZoneId.flatMap { canvasView.installedZonePlacement(for: $0) }
         let frame: TileFrame
         if let anchor {
-            frame = Self.anchoredFrame(size: size, anchor: anchor.frame, siblings: siblings)
+            let world = Self.anchoredFrame(size: size, anchor: anchor.frame, siblings: worldSiblings)
+            frame = targetPlacement.map { CanvasEngine.worldToZoneLocal(world, zoneOrigin: $0.origin) } ?? world
         } else {
-            frame = makeProjectTilePlacement(worldPoint: worldPoint, size: size, in: canvasView)
+            frame = makeProjectTilePlacement(
+                worldPoint: worldPoint, size: size, in: canvasView, targetZoneId: targetZoneId)
         }
 
         let tile = Tile(
@@ -2181,8 +2254,10 @@ final class TileSpawner {
             kind: .file,
             title: title ?? URL(fileURLWithPath: canonicalPath).lastPathComponent,
             frame: frame,
-            zPosition: CanvasEngine.zPositionAbove(siblings),
-            zoneId: anchor?.zoneId,
+            zPosition: CanvasEngine.zPositionAbove(worldSiblings),
+            // Never nil when a target zone is known: a bare tile renders outside
+            // every zone and no gesture reaches it.
+            zoneId: anchor?.zoneId ?? targetZoneId,
             runtimeRef: nil,
             metadata: TileMetadata(
                 filePath: canonicalPath,
@@ -5893,12 +5968,17 @@ final class TileSpawner {
             return .invalidPath
         }
 
+        // T4 (`.plans/47`): this path already INSTALLED into `creationScope?.zoneId`
+        // (below) while framing against the armed zone — the same frame/install
+        // split as the managed agent.
+        let targetZoneId = creationScope?.zoneId
         let frame = makeProjectTilePlacement(
             worldPoint: worldPoint,
             size: CanvasEngine.defaultFrame(for: .fileTree),
-            in: canvasView
+            in: canvasView,
+            targetZoneId: targetZoneId
         )
-        let nextZ = CanvasEngine.zPositionAbove(canvasView.projectTiles())
+        let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
         let tile = Tile(
             id: UUID(),
             kind: .fileTree,
@@ -5925,7 +6005,7 @@ final class TileSpawner {
             tile,
             fileTreeTile: fileTreeTile,
             in: canvasView,
-            targetZoneId: creationScope?.zoneId
+            targetZoneId: targetZoneId
         )
         do {
             try persistProjectCanvas(after: target, in: canvasView)
@@ -7643,7 +7723,9 @@ final class TileSpawner {
         targetZoneId: UUID? = nil
     ) -> TileFrame {
         let zoom = canvasView.viewport.zoom.isFinite && canvasView.viewport.zoom > 0 ? canvasView.viewport.zoom : 1
-        let targetZone = targetZoneId.flatMap { canvasView.zonePlacement(for: $0) }
+        // `installedZonePlacement`, not `zonePlacement`: the frame space has to match
+        // the model `installProjectTile` will actually use. See its doc comment.
+        let targetZone = targetZoneId.flatMap { canvasView.installedZonePlacement(for: $0) }
             ?? canvasView.activeProjectZonePlacement
         guard let zone = targetZone else {
             // Flat model: world frames, so the viewport and siblings are used as they are.
@@ -7674,17 +7756,59 @@ final class TileSpawner {
         }
         // Layer model: zone-local frames, so the viewport is translated into that space
         // and the result stays there.
+        //
+        // Clamped to the zone, which T4 (`.plans/47`) made load-bearing. "Where the
+        // camera is looking" is only meaningful inside the target zone; when the two
+        // do not overlap it is a coordinate with no meaning here. `appendProjectZone`
+        // parks a new zone at `maxX + gap` — off to the right of everything, nowhere
+        // near the camera — so the very first tile created in a freshly added project
+        // framed at local (-4340, 400): 4340px OUTSIDE its own zone. Auto-layout then
+        // grew the zone across the entire canvas to reach it, swallowing the other
+        // zones on the way. Before T4 this was unreachable, because framing always
+        // used the zone the camera was already in.
+        let localViewport = clampedZoneLocalViewport(
+            canvasView: canvasView, zone: zone, zoom: zoom)
         return TileSpawnPlacement.automatic(TileSpawnPlacement.Context(
             newSize: size,
-            viewport: CanvasViewport(
-                x: canvasView.viewport.x - zone.origin.x,
-                y: canvasView.viewport.y - zone.origin.y,
-                zoom: zoom
-            ),
+            viewport: localViewport,
             visibleSize: canvasView.bounds.size,
-            siblings: canvasView.projectTiles(),
+            // T4 (`.plans/47`): the TARGET zone's tiles, not the armed zone's.
+            // `projectTiles()` reads `activeProjectZoneId`, so auto-placement used
+            // to dodge the wrong zone's tiles and could stack the new tile straight
+            // on top of an existing one.
+            siblings: siblingTiles(in: canvasView, targetZoneId: zone.zoneId),
             gap: TileGapResolver.resolvedGap()
         ))
+    }
+
+    /// The camera in a zone's local space, clamped so a new tile always lands
+    /// inside the zone it belongs to. T4 (`.plans/47`).
+    ///
+    /// When the visible rect overlaps the zone, this is the plain translation and
+    /// the tile appears where the user is looking. When it does not, the zone's own
+    /// top-left is used instead — the tile is off screen either way, and inside its
+    /// zone is the only defensible place for it to be.
+    private func clampedZoneLocalViewport(
+        canvasView: CanvasNSView,
+        zone: ZonePlacement,
+        zoom: Double
+    ) -> CanvasViewport {
+        let localX = canvasView.viewport.x - zone.origin.x
+        let localY = canvasView.viewport.y - zone.origin.y
+        let visibleWidth = Double(canvasView.bounds.width) / zoom
+        let visibleHeight = Double(canvasView.bounds.height) / zoom
+        let overlaps = localX < zone.size.width && localX + visibleWidth > 0
+            && localY < zone.size.height && localY + visibleHeight > 0
+        guard !overlaps else { return CanvasViewport(x: localX, y: localY, zoom: zoom) }
+        return CanvasViewport(x: 0, y: 0, zoom: zoom)
+    }
+
+    /// The tiles a newly spawned tile will share a zone with. T4 (`.plans/47`).
+    /// Falls back to the armed zone's tiles when no target zone is named — the
+    /// flat boot path, where `projectTiles()` is the only answer there is.
+    private func siblingTiles(in canvasView: CanvasNSView, targetZoneId: UUID?) -> [Tile] {
+        if let targetZoneId, let tiles = canvasView.tiles(inZone: targetZoneId) { return tiles }
+        return canvasView.projectTiles()
     }
 
     private func makePlacement(worldPoint: CGPoint?, size: CGSize, in canvasView: CanvasNSView) -> TileFrame {

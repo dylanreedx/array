@@ -498,6 +498,13 @@ run_app_check .build/debug/Array --palette-zone-check
 # Note and browser spawning guarded only on tileSpawner, which fell back to the
 # DEPARTED project's boot spawner and wrote into its canvas.
 run_app_check .build/debug/Array --empty-workspace-creation-check
+# T1-T5 (.plans/47): the zone new tiles land in must follow the user. Its only
+# input, CanvasNSView.activeProjectZoneId, was written at scene mount, workspace
+# switch, file-open and onboarding -- and by no user action at all. Creating a
+# second zone moved the controller but not the canvas, so a tile made "in" it used
+# the FIRST zone's project Home; and because .zone outranks .recentExplicit, the
+# scope picker's correction was overruled on the very next spawn.
+run_app_check .build/debug/Array --zone-arming-check
 run_app_check .build/debug/Array --tile-reveal-work-check
 run_app_check .build/debug/Array --leader-snap-check
 run_app_check .build/debug/Array --palette-captures-keys-over-browser-check
@@ -649,6 +656,12 @@ run_app_check .build/debug/Array --agent-stop-outcome-check
 # time. Before the repair, an open after an in-process workspace switch installed
 # into the departed zone's model and persisted through the boot project's store.
 run_app_check .build/debug/Array --file-open-active-context-check
+# T8 (.plans/48): the agent<->document connector painted at worldOrigin + W,
+# displaced by exactly the camera pan, because the overlay was handed raw
+# worldPlane frames while its own bounds origin stayed at zero. Runs at a
+# NON-ZERO viewport and a zoom other than 1 -- the existing coverage builds its
+# canvas at viewport (0,0), where the offset is exactly zero.
+run_app_check .build/debug/Array --relationship-geometry-check
 # Directory-aware Markdown: a real title-bar mouse click reaches Preview/Edit;
 # unsaved preview, explicit atomic save, clean reload, and conflict overwrite are witnessed.
 run_app_check .build/debug/Array --file-markdown-preview-check

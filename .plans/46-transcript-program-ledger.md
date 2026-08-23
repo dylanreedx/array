@@ -453,3 +453,17 @@ lives in the project's `.array` canvas. `emphasized` reads
 `--perf-budget-transcript-delta-check`, `--perf-budget-gesture-transition-check`,
 `--tile-surface-residency-check`. Do not bisect these as regressions; do not add
 a tenth.
+
+## Follow-on: `.plans/47` (2026-08-23)
+
+M1.10 made the workspace scene real. Hand-driving that build immediately found
+what it could not: the zone new tiles land in never followed the user. Creating
+a second zone moved `activeController` but not `activeProjectZoneId`, and
+because `.zone` outranks `.recentExplicit`, correcting it in the scope picker
+was overruled on the next spawn. Turning arming on then exposed a latent
+frame/install split in every spawn path. See
+[47-zone-targeted-creation.md](47-zone-targeted-creation.md); new legs
+`--zone-arming-check` and CoreChecks `runCameraArmedZoneChecks`.
+
+The lesson is M1.12's, repeated: **a ticket is not done until the behaviour has
+been seen by hand.** 178 green legs preceded both of these findings.

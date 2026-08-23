@@ -95,6 +95,7 @@ check --project-picker-resolution-check
 check --project-root-resolution-check
 check --provider-model-picker-check
 check --push-payload-dump-check
+check --relationship-geometry-check
 check --reserved-dispatch-check
 check --resize-dimensions-hud-check
 check --resize-snap-check
@@ -151,6 +152,7 @@ check --workspace-switch-check
 check --workspace-top-bar-check
 check --zindex-relaunch-hit-test-check
 check --zone-adaptive-bounds-check
+check --zone-arming-check
 check --zone-autoname-check
 check --zone-breakout-check
 check --zone-chrome-zorder-check
@@ -273,6 +275,7 @@ leg run_app_check .build/debug/Array --project-picker-resolution-check
 leg run_app_check .build/debug/Array --project-root-resolution-check
 leg run_app_check .build/debug/Array --provider-model-picker-check
 leg run_app_check .build/debug/Array --push-payload-dump-check
+leg run_app_check .build/debug/Array --relationship-geometry-check
 leg run_app_check .build/debug/Array --reserved-dispatch-check
 leg run_app_check .build/debug/Array --resize-dimensions-hud-check
 leg run_app_check .build/debug/Array --resize-snap-check
@@ -329,6 +332,7 @@ leg run_app_check .build/debug/Array --workspace-switch-check
 leg run_app_check .build/debug/Array --workspace-top-bar-check
 leg run_app_check .build/debug/Array --zindex-relaunch-hit-test-check
 leg run_app_check .build/debug/Array --zone-adaptive-bounds-check
+leg run_app_check .build/debug/Array --zone-arming-check
 leg run_app_check .build/debug/Array --zone-autoname-check
 leg run_app_check .build/debug/Array --zone-breakout-check
 leg run_app_check .build/debug/Array --zone-chrome-zorder-check
@@ -369,7 +373,7 @@ bundle-check --palette-duplicate-root-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 21
 count ContinuumRevivedAgentUIChecks 19
-count ContinuumRevivedCoreChecks 91
+count ContinuumRevivedCoreChecks 92
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

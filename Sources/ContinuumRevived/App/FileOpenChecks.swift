@@ -1068,6 +1068,120 @@ enum FileOpenChecks {
                    "relaunch did not restore both visible relationship connectors")
         try expect(relaunched.canvas.qaDocumentRelationshipStackingSnapshot.contractHolds,
                    "relaunch did not restore the stacking contract")
+
+        // ==================================================================
+        // T9 (`.plans/48`) — the two cases nothing covered.
+        //
+        // Everything above takes the ANCHORED branch, because the agent tile is in
+        // `tiles(inZone: harness.zone)`. The uncovered combination is a target zone
+        // with NO INSTALLED LAYER: `tiles(inZone:)` returns nil, `siblings` silently
+        // fell back to the ACTIVE zone's tiles, the anchor was "not found", and both
+        // fallbacks were wrong — the frame came from `makeProjectTilePlacement` with
+        // no `targetZoneId` (zone-local to the ACTIVE zone, then installed into the
+        // target's), and `zoneId` came out nil. One real store held exactly that: a
+        // file tile at world (1246,-851) belonging to no zone at all.
+        // ==================================================================
+        let layerlessZoneId = UUID(uuidString: "00000000-0000-0000-0000-0000000F2909")!
+        var docWithLayerlessZone = harness.runtime.document
+        docWithLayerlessZone.zones.append(ZonePlacement(
+            zoneId: layerlessZoneId,
+            projectId: docWithLayerlessZone.zones.first(where: { $0.zoneId == harness.zone })?.projectId,
+            origin: ZonePoint(x: 3_000, y: 1_500), size: ZoneSize(width: 1_200, height: 900),
+            color: "orange", collapsed: false, hydrationPolicy: .automatic,
+            name: "Layerless", navKey: nil, zPosition: .after(.first)))
+        harness.runtime.replaceDocument(docWithLayerlessZone, for: harness.runtime.workspaceId)
+
+        // An agent tile in that zone, installed FLAT — exactly the boot scene, where
+        // no layer exists and `zoneId(containing:)` answers from the flat model.
+        let layerlessAgentFrame = TileFrame(x: 3_100, y: 1_600, width: 460, height: 360)
+        var layerlessAgent = Tile(
+            id: UUID(), kind: .managedAgent, title: "layerless agent",
+            frame: layerlessAgentFrame, zPosition: .fromLegacyRank(5),
+            runtimeRef: nil, metadata: TileMetadata(launchProfileId: "managed"))
+        layerlessAgent.zoneId = layerlessZoneId
+        harness.canvas.install(
+            tileView: ManagedAgentTileNSView(tile: layerlessAgent, threadId: "thread-layerless"),
+            for: layerlessAgent)
+        harness.canvas.layoutSubtreeIfNeeded()
+        try expect(harness.canvas.installedZonePlacement(for: layerlessZoneId) == nil,
+                   "the layerless zone must genuinely have no installed layer, or this case "
+                   + "proves nothing")
+
+        let docsFile = checkout.appendingPathComponent("Docs/notes.md")
+        try Data("# Notes\n".utf8).write(to: docsFile)
+        let layerlessOutcome = harness.runtime.openDocument(.init(
+            location: DocumentLocation(path: docsFile.path, scope: .standalone),
+            placement: .beside(tileId: layerlessAgent.id),
+            sourceAgentId: firstAgentId,
+            sourceTileId: layerlessAgent.id))
+        harness.canvas.layoutSubtreeIfNeeded()
+        guard case let .opened(layerlessFileId) = layerlessOutcome else {
+            throw Failure(message: "opening beside a layerless-zone agent must succeed; got \(layerlessOutcome)")
+        }
+        guard let layerlessFile = harness.canvas.tileRecord(for: layerlessFileId) else {
+            throw Failure(message: "the layerless-zone file tile must be installed")
+        }
+        try expect(layerlessFile.zoneId != nil,
+                   "layerless zone: the file tile must NEVER be left with a nil zoneId — a bare "
+                   + "tile renders outside every zone and no zone gesture can reach it. This is "
+                   + "the (1246,-851) tile from the field.")
+        try expect(layerlessFile.zoneId == layerlessZoneId,
+                   "layerless zone: the file must inherit the OPENING AGENT's zone; got "
+                   + "\(String(describing: layerlessFile.zoneId))")
+        // World geometry, not the stamp: the frame/install split leaves the stamp
+        // correct while displacing the tile by the difference of two zone origins.
+        try expect(abs(layerlessFile.frame.y - layerlessAgentFrame.y) < 1,
+                   "layerless zone: the file must be top-aligned with its agent in WORLD "
+                   + "coordinates; got y=\(layerlessFile.frame.y) against \(layerlessAgentFrame.y)")
+        try expect(layerlessFile.frame.x > layerlessAgentFrame.x,
+                   "layerless zone: the file must sit to the RIGHT of its agent, not displaced "
+                   + "toward the active zone's origin; got x=\(layerlessFile.frame.x) against "
+                   + "agent x=\(layerlessAgentFrame.x)")
+
+        // The zoneId fallback is defensive, and needs its own case: an anchor that
+        // cannot be resolved at all, with a target zone that IS known. Production
+        // reaches this through `openDocument`'s repoint, which derives
+        // `sourceZoneId` from the project rather than from the source tile, so the
+        // two can disagree. Before the fix the tile came out with `zoneId: nil`.
+        if let spawner = harness.runtime.activeController?.tileSpawner {
+            let orphanFile = checkout.appendingPathComponent("Docs/orphan.md")
+            try Data("# Orphan\n".utf8).write(to: orphanFile)
+            let outcome = spawner.spawnFile(
+                location: DocumentLocation(path: orphanFile.path, scope: .standalone),
+                title: nil,
+                at: nil,
+                beside: UUID(),                      // never installed
+                targetZoneId: layerlessZoneId)
+            guard case let .spawned(orphanId) = outcome,
+                  let orphan = harness.canvas.tileRecord(for: orphanId) else {
+                throw Failure(message: "spawning with an unresolvable anchor must still open a tile; got \(outcome)")
+            }
+            try expect(orphan.zoneId == layerlessZoneId,
+                       "unresolvable anchor: the tile must fall back to the TARGET zone rather "
+                       + "than being left bare; got \(String(describing: orphan.zoneId))")
+        }
+
+        // An explicit drop point beats the anchor. `openDocument`'s `.at` demux sets
+        // BOTH, and preferring the anchor threw away where the user actually dropped.
+        let droppedFile = checkout.appendingPathComponent("Docs/dropped.md")
+        try Data("# Dropped\n".utf8).write(to: droppedFile)
+        let dropPoint = CGPoint(x: 3_400, y: 2_050)
+        let dropOutcome = harness.runtime.openDocument(.init(
+            location: DocumentLocation(path: droppedFile.path, scope: .standalone),
+            placement: .at(dropPoint),
+            sourceAgentId: firstAgentId,
+            sourceTileId: layerlessAgent.id))
+        harness.canvas.layoutSubtreeIfNeeded()
+        guard case let .opened(droppedId) = dropOutcome,
+              let dropped = harness.canvas.tileRecord(for: droppedId) else {
+            throw Failure(message: "dropping a file must open a tile; got \(dropOutcome)")
+        }
+        let droppedCentre = CGPoint(x: dropped.frame.x + dropped.frame.width / 2,
+                                    y: dropped.frame.y + dropped.frame.height / 2)
+        try expect(abs(droppedCentre.x - dropPoint.x) < 1 && abs(droppedCentre.y - dropPoint.y) < 1,
+                   "drop point: an explicit .at(point) must beat the anchor. Expected the tile "
+                   + "centred on \(dropPoint); got \(droppedCentre).")
+
     }
 
     private struct SingleProjectHarness {

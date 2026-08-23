@@ -228,6 +228,38 @@ enum WorkspaceSceneOwnerChecks {
                        "boot: \(tile.id) must be a live note tile; got \(describe(view))")
         }
 
+        // 2b. T10 (`.plans/48`): the membership repair runs on the BOOT path too.
+        //
+        //     `membership(forProject:…)` was only reached from `install(into:)` and
+        //     `switchWorkspace`. Boot renders the flat scene and calls neither, so a
+        //     tile with a nil or foreign `zoneId` survived every launch — a real
+        //     store held a file tile at world (1246,-851) belonging to no zone at
+        //     all, which no zone gesture could reach. Asserted here, BEFORE any
+        //     switch, because after a switch the old code path repaired it anyway.
+        for id in [noteForeign, noteUnstamped] {
+            try expect(canvas.qaZoneMembership(of: id) == zoneA,
+                       "boot repair: \(id) must be rescued into Pa's own zone at MOUNT, not "
+                       + "only after a workspace round trip; got "
+                       + "\(String(describing: canvas.qaZoneMembership(of: id)))")
+        }
+        let afterBoot = try storePa.loadCanvas()
+        try expect(afterBoot.tiles.count == paTiles.count,
+                   "boot repair: the repair is stamp-only and must not drop a tile; \(paTiles.count) "
+                   + "expected, \(afterBoot.tiles.count) on disk")
+        for original in paTiles {
+            guard let saved = afterBoot.tiles.first(where: { $0.id == original.id }) else {
+                throw Failure(message: "boot repair: \(original.id) vanished from canvas.json")
+            }
+            try expect(saved.zoneId == zoneA,
+                       "boot repair: \(original.id) must be durably stamped with Pa's zone; got "
+                       + "\(String(describing: saved.zoneId))")
+            let moved = abs(saved.frame.x - original.frame.x) + abs(saved.frame.y - original.frame.y)
+            try expect(moved < 0.001,
+                       "boot repair: the repair must NEVER move a tile — it changes membership "
+                       + "only. \(original.id) went from (\(original.frame.x), \(original.frame.y)) "
+                       + "to (\(saved.frame.x), \(saved.frame.y)).")
+        }
+
         // 3. A runtime nobody handed a canvas must FAIL, loudly, rather than
         //    silently changing the document. This is the recurrence guard.
         let orphanRuntime = WorkspaceRuntime(

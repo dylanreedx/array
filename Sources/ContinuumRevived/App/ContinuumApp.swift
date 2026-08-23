@@ -1041,6 +1041,28 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--relationship-geometry-check") {
+            do {
+                _ = NSApplication.shared
+                try RelationshipGeometryChecks.run()
+                print("ContinuumRevivedRelationshipGeometryChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("relationship-geometry check failed: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        if CommandLine.arguments.contains("--zone-arming-check") {
+            do {
+                _ = NSApplication.shared
+                try ZoneArmingChecks.run()
+                print("ContinuumRevivedZoneArmingChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("zone-arming check failed: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--workspace-scene-owner-check") {
             do {
                 _ = NSApplication.shared
@@ -4984,7 +5006,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let self else { return }
             self.synchronizeAgentFocus(to: tileId)
             self.recordAcceptedTileFocusInHistory(tileId, reason: reason)
+            self.armZoneForFocusedTile(tileId, reason: reason)
         }
+    }
+
+    /// T2 (`.plans/47`): working in a tile arms its zone, so the next thing you
+    /// create lands beside what you were just doing.
+    ///
+    /// `.userClick` ONLY. Every other reason is a restore or a side effect —
+    /// `appActivated`, `modalDismissed` and `recovery` all replay a focus the user
+    /// did not just perform, and `switchWorkspace`'s own `restoreFocus` runs
+    /// through them. Arming on those would let a workspace switch's tail end
+    /// re-point the zone the switch had just deliberately set.
+    private func armZoneForFocusedTile(_ tileId: UUID, reason: FocusRequest) {
+        guard reason == .userClick,
+              let zoneId = canvasView?.zoneId(containing: tileId) else { return }
+        workspaceRuntime?.setActiveZone(zoneId, reason: .focus)
     }
 
     /// Keep the supervisor's read watermark on the same tile focus the canvas
@@ -11662,8 +11699,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             return
         } else {
-            let launchSelection = initialLaunchSelection ?? tileSpawner?.managedAgentLaunchSelection(tileId: tileId)
-            let creationScope = tileSpawner?.managedAgentCreationScope(tileId: tileId)
+            // T4 (`.plans/47`): asked of the runtime, not of `tileSpawner`. The
+            // memo lives on the spawner that CREATED the tile, which for a scoped
+            // spawn is the scope's own project's spawner — not necessarily the
+            // active one. Reading the active spawner returned nil across a project
+            // boundary and dropped the agent back into the first project's home.
+            let launchSelection = initialLaunchSelection
+                ?? workspaceRuntime?.managedAgentLaunchSelection(tileId: tileId)
+                ?? tileSpawner?.managedAgentLaunchSelection(tileId: tileId)
+            let creationScope = workspaceRuntime?.managedAgentCreationScope(tileId: tileId)
+                ?? tileSpawner?.managedAgentCreationScope(tileId: tileId)
             let spawned: AgentID?
             if let creationScope,
                let cwd = usableAgentHomeDirectory(URL(fileURLWithPath: creationScope.homePath(inCheckoutRoot: creationScope.projectRoot), isDirectory: true)) {
@@ -13515,7 +13560,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             registry.projects.first(where: { $0.id == projectId && !$0.missing })?.rootPath
         }
 
+        // The armed zone, in order of authority. T1 (`.plans/47`).
+        //
+        // The middle rung is the fix. `activeProjectZonePlacement` requires an
+        // INSTALLED LAYER, and `setActiveProjectZone` silently no-ops to nil
+        // without one — so every moment the armed zone was not a live layer, this
+        // fell through to `activeZone`, the BOOT zone, and creation reverted to the
+        // first project in the workspace. That fallback was a magnet: at boot the
+        // scene is flat and no layer exists at all, and a zone below the live
+        // hydration tier has none either. `document.lastActiveZoneId` is the
+        // authoritative answer to "which zone is armed"; whether that zone happens
+        // to be hydrated is a rendering detail and must not change which project a
+        // new tile belongs to. Placement still needs the layer, and
+        // `installProjectTile` already falls back to the flat model without one.
+        let armedFromDocument: ZonePlacement? = workspaceRuntime.flatMap { runtime in
+            runtime.document.lastActiveZoneId.flatMap { armed in
+                runtime.document.zones.first(where: { $0.zoneId == armed && $0.projectId != nil })
+            }
+        }
         let zonePlacement = canvasView?.activeProjectZonePlacement
+            ?? armedFromDocument
             ?? canvasView?.activeZone.flatMap { $0.projectId == nil ? nil : $0 }
         let zoneScope: CreationScope? = zonePlacement.flatMap { zone in
             guard let projectId = zone.projectId, let projectRoot = root(for: projectId) else { return nil }
@@ -13602,6 +13666,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 if workspaceRuntime?.controller(for: selection.project.id) == nil {
                     addProjectZone(projectId: selection.project.id)
                 }
+                // T3 (`.plans/47`): the pick has to ARM, not just apply once.
+                //
+                // `explicitCreationScopeOverride` is `defer`-cleared two lines
+                // below, and the durable copy written by
+                // `persistLastExplicitCreationScope` enters the resolver as
+                // `.recentExplicit` — which ranks BELOW `.zone`. So a stale armed
+                // zone overruled the user's correction on the very next spawn, and
+                // every spawn after that. Arming the chosen project's zone makes
+                // `.zone` and the explicit choice agree, which removes the conflict
+                // instead of re-ranking it: `CreationScopeResolver`'s precedence is
+                // deliberately locked and stays untouched.
+                //
+                // The zone's own Home is left alone. A one-off pick of a subfolder
+                // applies to this spawn; a zone's default Home changes through
+                // "Change Home…", matching `homeRelativePath`'s documented rule
+                // that changing it never retargets what already exists.
+                if let zoneId = workspaceRuntime?.document.zones
+                    .first(where: { $0.projectId == selection.project.id })?.zoneId {
+                    workspaceRuntime?.setActiveZone(zoneId, reason: .explicit)
+                }
                 explicitCreationScopeOverride = scope
                 defer { explicitCreationScopeOverride = nil }
                 projectHomePicker = nil
@@ -13670,6 +13754,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     var qaHasTileSpawner: Bool { tileSpawner != nil }
     /// QA (M1.11): live browser runtimes, to prove none was built and dropped.
     var qaBrowserRuntimeCount: Int { browserRuntimes.count }
+
+    /// QA (T1-T3, `.plans/47`): the resolver every filesystem-backed spawn reads.
+    /// A leg asserts the project AND the zone, because the pair disagreeing is
+    /// precisely the bug: the scope named one zone while placement used another.
+    var qaResolvedCreationScope: (projectId: UUID, zoneId: UUID?, source: CreationScopeSource)? {
+        guard let scope = resolvedCreationScope() else { return nil }
+        return (scope.projectId, scope.zoneId, scope.source)
+    }
+
+    /// QA (T2): drive the click-arming route the canvas fires, without synthesizing
+    /// an NSEvent (`postToPid` does not reach a check's canvas).
+    func qaActivateZoneByClick(_ zoneId: UUID) { canvasView?.onZoneActivated?(zoneId) }
+
+    /// QA (T2): drive the focus-arming route with the reason production passes.
+    func qaAcceptTileFocus(_ tileId: UUID, reason: FocusRequest) {
+        focusBroker.appAcceptedTileFocusWithReason?(tileId, reason)
+    }
     /// QA (M1.11): `openProfilePalette` needs a host window. Borderless and never
     /// ordered front, so a check cannot take the screen.
     func qaAttachWindowForOfflineCheck(_ window: NSWindow) { self.window = window }
@@ -13756,6 +13857,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         self.bootTileSpawner = spawner
+        // T2 (`.plans/47`): clicking a zone arms it for creation. Wired HERE, not
+        // in the surrounding `applicationDidFinishLaunching` block with the other
+        // canvas callbacks, so `--zone-arming-check` drives the same assignment
+        // production does. A callback a witness cannot reach is the M1.10 trap:
+        // seven tickets passed against code the app never executed.
+        canvasView.onZoneActivated = { [weak self] zoneId in
+            self?.workspaceRuntime?.setActiveZone(zoneId, reason: .click)
+        }
         configureCreationAndRuntimeRoutes(on: spawner)
         configureWorkspaceRuntimeHooks()
         installSettingsChangeObserver()
@@ -13859,6 +13968,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             case .managedAgent:
                 installInitialManagedAgentTile(tile, in: canvasView)
             }
+        }
+
+        // T10 (`.plans/48`): the membership repair, AFTER the install walk.
+        //
+        // Ordering is load-bearing. `canvasState` is a value-type snapshot taken
+        // before this method ran, and the walk above installs from THAT — so a
+        // repair applied earlier was immediately overwritten by each install
+        // re-stamping membership from the stale copy. Running it here means the
+        // live `canvasView.canvasState` carries the repair into the `saveCanvas`
+        // on the next line, so the file and this session agree.
+        if let runtime = workspaceRuntime, let controller = runtime.activeController {
+            runtime.repairBootMembership(controller: controller, canvasView: canvasView)
         }
 
         try projectStore.saveCanvas(canvasView.canvasState)
