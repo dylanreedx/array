@@ -11590,6 +11590,10 @@ runCanvasPersistenceMergeChecks()
 
 // Plan: .plans/46 M1.8 — stopping an agent must stop everything it launched.
 // Process.terminate() signals one pid; a coding CLI is a process TREE.
+// Plan: .plans/46 M1.10 — a tile whose zoneId names another project's zone must
+// be rescued, not rendered nowhere. Ordinary dragging produces those stamps.
+runZoneMembershipRepairChecks()
+
 runProcessGroupChildChecks()
 
 print("ContinuumRevivedCoreChecks passed")

@@ -5017,7 +5017,14 @@ final class CanvasNSView: NSView, TokenThemed {
     /// zoneLayerOrder, back-to-front) derives from each placement's zPosition
     /// register — the (zPosition, zoneId) sort — never from array order
     /// (ticket 04).
-    func setZones(_ layers: [ZoneLayer]) {
+    /// - Parameter documentZones: EVERY zone in the workspace document, not just
+    ///   the ones that got a layer. M1.10 (`.plans/46`): a zone below the live
+    ///   hydration tier still has to be drawn and still has to be navigable — that
+    ///   is what a tier IS — so narrowing `liveZones` to the installed layers made
+    ///   snapshot-tier zones vanish from framing, hit-testing and chrome. Caught by
+    ///   `--workspace-sidebar-actions-check`. Defaults to the layer set for callers
+    ///   that have no document (PerfScenarios and the older zone fixtures).
+    func setZones(_ layers: [ZoneLayer], documentZones: [ZoneRenderModel]? = nil) {
         // Unregister + remove all currently installed layers.
         for layer in zoneLayers {
             for (_, view) in layer.tileViews {
@@ -5054,10 +5061,11 @@ final class CanvasNSView: NSView, TokenThemed {
         // owns tiles.
         for (_, view) in zoneChromeViews { view.removeFromSuperview() }
         zoneChromeViews.removeAll()
-        liveZones = layers.map(\.placement)
-        zoneRenderModels = layers.map(\.renderModel)
+        let zoneModels = documentZones ?? layers.map(\.renderModel)
+        liveZones = zoneModels.map(\.placement)
+        zoneRenderModels = zoneModels
         zoneDisplayByZoneId = Dictionary(
-            layers.map { ($0.placement.zoneId, $0.renderModel) },
+            zoneModels.map { ($0.placement.zoneId, $0) },
             uniquingKeysWith: { first, _ in first })
         tileZoneMembership = Dictionary(
             layers.flatMap { layer in layer.tiles.map { ($0.id, layer.placement.zoneId) } },
@@ -5290,6 +5298,29 @@ final class CanvasNSView: NSView, TokenThemed {
             .filter { seen.insert($0.id).inserted }
     }
 
+    /// The same tiles, converted back to WORLD frames for persistence.
+    ///
+    /// M1.10 (`.plans/46`). A ZoneLayer holds ZONE-LOCAL frames; `canvas.json`
+    /// holds WORLD frames, in every installed copy of the app, because the layer
+    /// path has never been reachable from production. Persisting local frames
+    /// would rewrite the file in a second convention that the boot flat path then
+    /// reads as world — moving every tile by its zone origin on the next launch.
+    /// This is the inverse of the conversion `WorkspaceRuntime` applies when it
+    /// builds a layer's `memberTiles`.
+    func tilesInWorldFrames(forProjectId projectId: UUID) -> [Tile] {
+        var seen = Set<UUID>()
+        return zoneLayers
+            .filter { $0.placement.projectId == projectId }
+            .flatMap { layer in
+                layer.tiles.map { tile -> Tile in
+                    var world = tile
+                    world.frame = CanvasEngine.zoneLocalToWorld(tile.frame, zoneOrigin: layer.placement.origin)
+                    return world
+                }
+            }
+            .filter { seen.insert($0.id).inserted }
+    }
+
     /// Whether the flat boot scene still owns the active project. False from the
     /// first `setZones`/`retireFlatCompatibilityScene` onward, after which
     /// `canvasState.tiles` describes the DEPARTED project and must not be persisted.
@@ -5349,7 +5380,7 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         state.tiles = CanvasEngine.mergeProjectTilesForPersistence(
             persisted: persistedTiles,
-            installed: tiles(forProjectId: projectId),
+            installed: tilesInWorldFrames(forProjectId: projectId),
             coveredZoneIds: covered
         )
         return state

@@ -234,9 +234,12 @@ final class ZoneRuntimeController {
         focusBroker.onAcceptedTileFocus = { [weak self] tileId in
             self?.canvasView?.markActive(tileId: tileId)
         }
-        let existingReasonHook = focusBroker.onAcceptedTileFocusWithReason
+        // M1.10: compose from the app's OWN field, never from the live closure.
+        // Chaining from `onAcceptedTileFocusWithReason` meant boot's
+        // `installAcceptedTileFocusHook()` — which runs immediately after this —
+        // overwrote the composite and killed `recoverManagedSessionOnFocus`, and
+        // it meant every workspace switch added another link.
         focusBroker.onAcceptedTileFocusWithReason = { [weak self] tileId, reason in
-            existingReasonHook?(tileId, reason)
             self?.recoverManagedSessionOnFocus(tileId: tileId, reason: reason)
         }
         // Scope leaving all tiles (canvas/modal) clears the marching-ants

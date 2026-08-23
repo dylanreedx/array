@@ -179,6 +179,129 @@ final class WorkspaceRuntime {
     /// that would have been RED for this defect's entire life.
     var qaHasCanvas: Bool { canvasView != nil }
 
+    // MARK: - Zone membership (M1.10, `.plans/46`)
+
+    /// This project's tiles, bucketed by zone, with foreign/nil/unknown stamps
+    /// repaired — and the repair persisted so it only happens once.
+    ///
+    /// Replaces the inline
+    /// `zoneId == zone.zoneId || (zoneId == nil && firstZoneByProject[...] == zone.zoneId)`
+    /// filter, which rendered a tile stamped with ANOTHER project's zone nowhere at
+    /// all. See `CanvasEngine.resolveZoneMembership` for why those stamps are
+    /// ordinary rather than exotic.
+    ///
+    /// Considers every zone this project owns in the document, not just the live
+    /// ones, so a tile belonging to a zone below the live tier stays where it is
+    /// instead of being rescued onto the screen.
+    private func membership(
+        forProject projectId: UUID,
+        controller: ZoneRuntimeController,
+        in document: WorkspaceDocument,
+        cache: inout [UUID: [UUID: [Tile]]]
+    ) -> [UUID: [Tile]] {
+        if let cached = cache[projectId] { return cached }
+        let persisted = ((try? controller.projectStore.tryLoadCanvas()) ?? nil)
+            ?? CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                           tiles: [], groups: [], lastActiveTileId: nil)
+        let projectZones = document.zones.filter { $0.projectId == projectId }
+        guard !projectZones.isEmpty else {
+            cache[projectId] = [:]
+            return [:]
+        }
+        let home = document.lastActiveZoneId.flatMap { candidate in
+            projectZones.contains(where: { $0.zoneId == candidate }) ? candidate : nil
+        } ?? projectZones[0].zoneId
+
+        let resolved = CanvasEngine.resolveZoneMembership(
+            tiles: persisted.tiles,
+            projectZones: projectZones,
+            documentZoneIds: Set(document.zones.map(\.zoneId)),
+            homeZoneId: home)
+
+        if !resolved.restamped.isEmpty {
+            // Say it out loud. This write is durable and one-way, so a rule that is
+            // wrong for a shape nobody anticipated must at least be traceable.
+            fputs("WorkspaceRuntime: repaired zone membership for \(resolved.restamped.count) tile(s) in project \(projectId.uuidString): \(resolved.restamped.map { $0.uuidString.suffix(8) }.joined(separator: ", "))\n", stderr)
+            // Only the repaired ids are restamped. A deferred tile — one whose zone
+            // lives in another workspace — keeps the stamp it had.
+            let stamped = Dictionary(
+                resolved.byZone.values.flatMap { $0 }.map { ($0.id, $0.zoneId) },
+                uniquingKeysWith: { first, _ in first })
+            var repaired = persisted
+            repaired.tiles = persisted.tiles.map { tile in
+                guard let zoneId = stamped[tile.id] else { return tile }
+                var copy = tile
+                copy.zoneId = zoneId          // stamp only; the WORLD frame is untouched
+                return copy
+            }
+            try? controller.projectStore.saveCanvas(repaired)
+        }
+
+        cache[projectId] = resolved.byZone
+        return resolved.byZone
+    }
+
+    /// Guarantee that a project with a live controller owns at least one zone in
+    /// this document. M1.10 (`.plans/46`).
+    ///
+    /// A project can be registered into a workspace and have no zone in its
+    /// document — the pinned boot project in the field had exactly that. With
+    /// layers live, such a project renders nothing at all. Repair the invariant
+    /// before anything renders rather than giving the renderer a fallback.
+    ///
+    /// Deliberately NOT `document.appendProjectZone`: that parks the zone at
+    /// `maxX + gap`, nowhere near the tiles, and takes `lastActiveZoneId`. Enclose
+    /// the project's persisted tiles instead, so the chrome appears around the
+    /// tiles the user is already looking at and nothing moves.
+    /// `ensureZone` for the boot project, called from `mountWorkspaceSceneAtBoot`.
+    func ensureZoneForActiveProject(controller: ZoneRuntimeController) {
+        ensureZone(forProject: controller.project.id, controller: controller)
+    }
+
+    @discardableResult
+    private func ensureZone(forProject projectId: UUID, controller: ZoneRuntimeController) -> ZonePlacement? {
+        if let existing = document.zones.first(where: { $0.projectId == projectId }) { return existing }
+        let persisted = ((try? controller.projectStore.tryLoadCanvas()) ?? nil)?.tiles ?? []
+        let bounds = CanvasEngine.zoneBounds(
+            memberFrames: persisted.map(\.frame),
+            padding: ZoneBoundsConfig.padding(),
+            minSize: ZoneBoundsConfig.emptyMinSize(),
+            headerHeight: ZoneChromeNSView.headerHeight)
+        var placement = ZonePlacement(
+            zoneId: UUID(),
+            projectId: projectId,
+            origin: ZonePoint(x: bounds.x, y: bounds.y),
+            size: ZoneSize(width: bounds.width, height: bounds.height),
+            color: ZoneColorAllocator.nextColor(existingColors: document.zones.map(\.color)),
+            collapsed: false,
+            hydrationPolicy: .automatic,
+            name: controller.project.name)
+        placement.zPosition = FracIndex.after(document.zones.map(\.zPosition).max() ?? .first)
+        let wasEmpty = document.lastActiveZoneId == nil
+        document.zones.append(placement)
+        if wasEmpty { document.lastActiveZoneId = placement.zoneId }
+        try? persistWorkspaceDocument()
+        fputs("WorkspaceRuntime: project \(projectId.uuidString) had no zone in this workspace; created one enclosing its \(persisted.count) tile(s)\n", stderr)
+        return placement
+    }
+
+    /// Render models for EVERY zone in the document, reusing a layer's own model
+    /// where one exists so display names stay whatever the layer resolved.
+    /// M1.10: a zone below the live tier still draws and is still navigable.
+    private static func zoneRenderModels(
+        for document: WorkspaceDocument,
+        layers: [CanvasNSView.ZoneLayer]
+    ) -> [CanvasNSView.ZoneRenderModel] {
+        let byZone = Dictionary(
+            layers.map { ($0.placement.zoneId, $0.renderModel) },
+            uniquingKeysWith: { first, _ in first })
+        return document.zones.map { zone in
+            byZone[zone.zoneId]
+                ?? CanvasNSView.ZoneRenderModel(
+                    placement: zone,
+                    displayName: zone.name.isEmpty ? "Zone" : zone.name)
+        }
+    }
     /// Install the CURRENT workspace's zone set into `canvasView`.
     ///
     /// For each `ZonePlacement` with a non-nil `projectId`, acquires a
@@ -207,9 +330,8 @@ final class WorkspaceRuntime {
 
         var layers: [CanvasNSView.ZoneLayer] = []
         var newlyAcquired: [UUID] = []
-        let firstZoneByProject = document.zones.reduce(into: [UUID: UUID]()) { result, zone in
-            if let projectId = zone.projectId, result[projectId] == nil { result[projectId] = zone.zoneId }
-        }
+        // One repaired membership answer per project, reused across its zones.
+        var membershipCache: [UUID: [UUID: [Tile]]] = [:]
 
         for zone in document.zones {
             guard let projectId = zone.projectId else {
@@ -230,33 +352,32 @@ final class WorkspaceRuntime {
                 newlyAcquired.append(projectId)
             }
 
-            // Load canvas state for this zone's project.
-            let canvasState: CanvasState
-            if let loaded = try controller.projectStore.tryLoadCanvas() {
-                canvasState = loaded
-            } else {
-                canvasState = CanvasState(
-                    viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
-                    tiles: [],
-                    groups: [],
-                    lastActiveTileId: nil
-                )
-            }
-
-            // A project can appear in several zones. Persisted `zoneId` owns
-            // membership; pre-membership legacy tiles are adopted by only that
-            // project's first zone so they are never rendered N times.
-            // M1.0 (.plans/46): STAMP the adoption. A pre-membership legacy tile
-            // (zoneId == nil) adopted by this zone is written back with that zone
-            // id, so persistence can tell "deleted from a zone I can see" from
-            // "lives in a zone I cannot see". Leaving it nil makes that
-            // undecidable, and the safe answer to an undecidable delete is to keep
-            // the tile forever -- which loses real deletions instead.
-            let memberTiles = canvasState.tiles.filter {
-                $0.zoneId == zone.zoneId || ($0.zoneId == nil && firstZoneByProject[projectId] == zone.zoneId)
-            }.map { tile -> Tile in
+            // M1.0/M1.10 (`.plans/46`): membership comes from one repaired answer
+            // per project, not from an inline filter per zone. The filter this
+            // replaces dropped any tile whose `zoneId` named a zone this project
+            // does not own -- which ordinary dragging produces -- rendering it
+            // nowhere. `membership(forProject:…)` rescues those and persists the
+            // repair once. See `CanvasEngine.resolveZoneMembership`.
+            let memberTiles = (membership(forProject: projectId, controller: controller,
+                                          in: document, cache: &membershipCache)[zone.zoneId] ?? [])
+            .map { tile -> Tile in
                 var adopted = tile
-                adopted.zoneId = zone.zoneId
+                // M1.10 (`.plans/46`): the frame spaces differ, and the file is
+                // WORLD. A ZoneLayer lays its tiles out in ZONE-LOCAL coordinates
+                // (`_layoutLayerTile` -> `zoneLocalToWorld`), but every
+                // `canvas.json` in the field holds WORLD frames -- because layers
+                // have never been reachable from production, `canvasStateForPersistence`
+                // has always taken its flat branch and written the flat state
+                // verbatim. Handing a layer those frames unconverted moves every
+                // tile by the zone origin: for a zone at x=4000, the whole project
+                // jumps 4000pt right the first time you switch workspaces.
+                //
+                // Convert on the way in, convert back on the way out
+                // (`CanvasNSView.tilesInWorldFrames(forProjectId:)`), and the
+                // on-disk convention never changes -- which is what keeps the boot
+                // flat path, and every installed copy of the app, reading the same
+                // file correctly.
+                adopted.frame = CanvasEngine.worldToZoneLocal(adopted.frame, zoneOrigin: zone.origin)
                 return adopted
             }
             // Build tile views (descriptor views — headless safe; real hydration is T08).
@@ -295,7 +416,7 @@ final class WorkspaceRuntime {
         canvasView.focusBroker = focusBroker
 
         hydrateZoneLayerTiles?(canvasView, layers, .beforeInstall)
-        canvasView.setZones(layers)
+        canvasView.setZones(layers, documentZones: Self.zoneRenderModels(for: document, layers: layers))
         installedLayers = layers
 
         // Declare the spawn target BEFORE anything can spawn into it.
@@ -391,7 +512,12 @@ final class WorkspaceRuntime {
         // A second zone for the same project starts empty. Persisted zoneId is
         // authoritative membership; replaying the project's entire canvas here
         // would visually clone every existing tile into the new zone.
-        let memberTiles = canvasState.tiles.filter { $0.zoneId == placement.zoneId }
+        let memberTiles = canvasState.tiles.filter { $0.zoneId == placement.zoneId }.map { tile -> Tile in
+            // M1.10: same world -> zone-local conversion as the two builders above.
+            var local = tile
+            local.frame = CanvasEngine.worldToZoneLocal(local.frame, zoneOrigin: placement.origin)
+            return local
+        }
 
         // Build tile views.
         var tileViews: [UUID: TileNSView] = [:]
@@ -776,9 +902,7 @@ final class WorkspaceRuntime {
 
         // Build layers from newly acquired + shared controllers.
         var layers: [CanvasNSView.ZoneLayer] = []
-        let firstZoneByProject = targetDocument.zones.reduce(into: [UUID: UUID]()) { result, zone in
-            if let projectId = zone.projectId, result[projectId] == nil { result[projectId] = zone.zoneId }
-        }
+        var membershipCache: [UUID: [UUID: [Tile]]] = [:]
         for zone in targetDocument.zones {
             guard let projectId = zone.projectId else {
                 // Ambient zone: rendered from the workspace document's ambientTiles
@@ -789,23 +913,29 @@ final class WorkspaceRuntime {
             guard plan.tier(for: zone.zoneId) == .live else { continue }
             guard let controller = registry.controller(for: projectId) else { continue }
 
-            let canvasState: CanvasState
-            if let loaded = try controller.projectStore.tryLoadCanvas() {
-                canvasState = loaded
-            } else {
-                canvasState = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil)
-            }
-            // M1.0 (.plans/46): STAMP the adoption. A pre-membership legacy tile
-            // (zoneId == nil) adopted by this zone is written back with that zone
-            // id, so persistence can tell "deleted from a zone I can see" from
-            // "lives in a zone I cannot see". Leaving it nil makes that
-            // undecidable, and the safe answer to an undecidable delete is to keep
-            // the tile forever -- which loses real deletions instead.
-            let memberTiles = canvasState.tiles.filter {
-                $0.zoneId == zone.zoneId || ($0.zoneId == nil && firstZoneByProject[projectId] == zone.zoneId)
-            }.map { tile -> Tile in
+            // M1.0/M1.10: see `install`. One repaired membership answer per
+            // project; the per-zone filter it replaces rendered a foreign-stamped
+            // tile nowhere.
+            let memberTiles = (membership(forProject: projectId, controller: controller,
+                                          in: targetDocument, cache: &membershipCache)[zone.zoneId] ?? [])
+            .map { tile -> Tile in
                 var adopted = tile
-                adopted.zoneId = zone.zoneId
+                // M1.10 (`.plans/46`): the frame spaces differ, and the file is
+                // WORLD. A ZoneLayer lays its tiles out in ZONE-LOCAL coordinates
+                // (`_layoutLayerTile` -> `zoneLocalToWorld`), but every
+                // `canvas.json` in the field holds WORLD frames -- because layers
+                // have never been reachable from production, `canvasStateForPersistence`
+                // has always taken its flat branch and written the flat state
+                // verbatim. Handing a layer those frames unconverted moves every
+                // tile by the zone origin: for a zone at x=4000, the whole project
+                // jumps 4000pt right the first time you switch workspaces.
+                //
+                // Convert on the way in, convert back on the way out
+                // (`CanvasNSView.tilesInWorldFrames(forProjectId:)`), and the
+                // on-disk convention never changes -- which is what keeps the boot
+                // flat path, and every installed copy of the app, reading the same
+                // file correctly.
+                adopted.frame = CanvasEngine.worldToZoneLocal(adopted.frame, zoneOrigin: zone.origin)
                 return adopted
             }
             var tileViews: [UUID: TileNSView] = [:]
@@ -825,7 +955,7 @@ final class WorkspaceRuntime {
         // visible or navigable in an unrelated (including empty) workspace.
         canvasView?.retireFlatCompatibilityScene()
         if let canvas = canvasView { hydrateZoneLayerTiles?(canvas, layers, .beforeInstall) }
-        canvasView?.setZones(layers)
+        canvasView?.setZones(layers, documentZones: Self.zoneRenderModels(for: targetDocument, layers: layers))
         installedLayers = layers
 
         // 5. Release departing (after setZones so adapters are already unregistered by T05).
@@ -1401,27 +1531,33 @@ final class WorkspaceRuntime {
         defer { chromeRuntime.closeAll() }
 
         if let chromeFrame = chromeCanvas.zoneLayerChromeFrame(for: zoneA) {
-            // Compute the expected adaptive bounds for zoneA's tiles.
-            let canvasStateA = try storeA.loadCanvas()
-            let memberFrames = canvasStateA.tiles.map { CanvasEngine.worldFrame(tile: $0, in: placementA) }
-            var adaptiveBounds = CanvasEngine.zoneBounds(
-                memberFrames: memberFrames,
-                padding: ZoneBoundsConfig.padding(),
-                minSize: ZoneBoundsConfig.emptyMinSize(),
-                headerHeight: ZoneChromeNSView.headerHeight
-            )
-            if memberFrames.isEmpty {
-                adaptiveBounds = TileFrame(x: placementA.origin.x + adaptiveBounds.x,
-                                           y: placementA.origin.y + adaptiveBounds.y,
-                                           width: adaptiveBounds.width,
-                                           height: adaptiveBounds.height)
-            }
-            let expectedChromeFrame = CanvasEngine.tileScreenFrame(adaptiveBounds, viewport: CanvasViewport(x: 0, y: 0, zoom: 1))
+            // M1.10 (`.plans/46`): this asserted the ADAPTIVE hug — chrome sized to
+            // the union of its member tiles. That was ZoneLayer-only behaviour, and
+            // it contradicted the decision Model B already implements
+            // (`layoutZoneChromeViews`, zone-unify P3): a zone renders at its
+            // STORED placement frame, so the size the user drew survives and, more
+            // importantly, the visible rectangle coincides with the move-grab
+            // header rect that `zoneHeaderScreenRect` derives from the same
+            // placement.
+            //
+            // The two models disagreed, and the layer path is the one that was
+            // wrong: adaptive chrome means the rectangle you see is not the
+            // rectangle you can grab. Now that `setZones` owns Model B there is one
+            // answer, and this is it.
+            let expectedChromeFrame = CanvasEngine.tileScreenFrame(
+                CanvasEngine.zoneWorldFrame(placementA),
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1))
             let diff = abs(chromeFrame.origin.x - expectedChromeFrame.origin.x)
                 + abs(chromeFrame.origin.y - expectedChromeFrame.origin.y)
                 + abs(chromeFrame.width - expectedChromeFrame.width)
                 + abs(chromeFrame.height - expectedChromeFrame.height)
-            try expect(diff < 1.0, "adaptive-chrome carry-forward: zoneA chrome frame \(chromeFrame) should match adaptive bounds \(expectedChromeFrame)")
+            try expect(diff < 1.0, "stored-frame chrome: zoneA chrome frame \(chromeFrame) should match its stored placement \(expectedChromeFrame)")
+            // And the whole point of the stored frame: chrome IS the grab target.
+            if let header = chromeCanvas.qaZoneHeaderGrabRect(zoneA) {
+                try expect(abs(header.origin.x - chromeFrame.origin.x) < 1.0
+                           && abs(header.width - chromeFrame.width) < 1.0,
+                           "the zone's move-grab header must sit on its visible chrome: header \(header) vs chrome \(chromeFrame)")
+            }
         }
         // If chrome frame is nil, showsZoneChrome may be inactive — assertion skipped (no chrome to verify).
 

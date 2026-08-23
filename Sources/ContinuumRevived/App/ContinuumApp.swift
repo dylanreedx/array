@@ -4940,7 +4940,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func installAcceptedTileFocusHook() {
-        focusBroker.onAcceptedTileFocusWithReason = { [weak self] tileId, reason in
+        // M1.10: the APP's field, not the broker's composite one. Assigning
+        // `onAcceptedTileFocusWithReason` here overwrote the controller's
+        // composite — which is why `recoverManagedSessionOnFocus` never ran at
+        // boot — and would have been overwritten right back on every switch.
+        focusBroker.appAcceptedTileFocusWithReason = { [weak self] tileId, reason in
             guard let self else { return }
             self.synchronizeAgentFocus(to: tileId)
             self.recordAcceptedTileFocusInHistory(tileId, reason: reason)
@@ -13613,6 +13617,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 guard let self else { return }
                 self.observedAgentStatuses = statuses
                 self.applyObserverStatuses(statuses)
+            }
+        }
+        // M1.10 (`.plans/46`): THE turn-on. Until this line, nothing in production
+        // ever handed the runtime a canvas, so every canvas call in
+        // `switchWorkspace` optional-chained through nil — the document, the
+        // registry and the toolbar header changed while the previous workspace's
+        // tiles stayed on screen, and the whole M1 hydration/persistence/detach
+        // programme was unreachable code.
+        //
+        // It also repairs the invariant that a live project owns at least one zone,
+        // before anything renders: a project can be registered into a workspace and
+        // have no zone in its document, and with layers live it would render
+        // nothing at all.
+        if let runtime = workspaceRuntime {
+            runtime.adoptCanvas(canvasView)
+            if let controller = runtime.activeController {
+                runtime.ensureZoneForActiveProject(controller: controller)
             }
         }
         workspaceRuntime?.activeController?.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)

@@ -141,6 +141,7 @@ check --viewport-sanitize-check
 check --workspace-boot-persistence-check
 check --workspace-profile-check
 check --workspace-runtime-install-check
+check --workspace-scene-owner-check
 check --workspace-sidebar-actions-check
 check --workspace-sidebar-default-visible-check
 check --workspace-sidebar-live-status-check
@@ -317,6 +318,7 @@ leg run_app_check .build/debug/Array --viewport-sanitize-check
 leg run_app_check .build/debug/Array --workspace-boot-persistence-check
 leg run_app_check .build/debug/Array --workspace-profile-check
 leg run_app_check .build/debug/Array --workspace-runtime-install-check
+leg run_app_check .build/debug/Array --workspace-scene-owner-check
 leg run_app_check .build/debug/Array --workspace-sidebar-actions-check
 leg run_app_check .build/debug/Array --workspace-sidebar-default-visible-check
 leg run_app_check .build/debug/Array --workspace-sidebar-live-status-check
@@ -365,7 +367,7 @@ bundle-check --palette-duplicate-root-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 21
 count ContinuumRevivedAgentUIChecks 19
-count ContinuumRevivedCoreChecks 90
+count ContinuumRevivedCoreChecks 91
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

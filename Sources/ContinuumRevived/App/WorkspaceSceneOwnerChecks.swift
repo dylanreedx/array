@@ -247,7 +247,83 @@ enum WorkspaceSceneOwnerChecks {
                    + "document half and skipping the canvas half is the defect itself.")
         zoneRegistry.release(projectId: projectPa)
 
-        print("WorkspaceSceneOwnerChecks: the production boot mount handed the runtime its canvas, "
-              + "boot stayed flat with live tiles, and a canvas-less runtime refused to switch")
+        // === Switch away. This is the path that did nothing at all before. ===
+        try runtime.switchWorkspace(to: workspaceWB)
+        canvas.layoutSubtreeIfNeeded()
+
+        try expect(!canvas.isFlatCompatibilitySceneActive,
+                   "the first switch must retire the boot flat scene")
+        for tile in paTiles {
+            try expect(canvas.tileView(for: tile.id) == nil,
+                       "switch: the departed workspace's tile \(tile.id) must not still resolve; got "
+                       + "\(describe(canvas.tileView(for: tile.id)))")
+        }
+        // M1.2 is live: the arriving tile is a real view, not a placeholder.
+        let arriving = canvas.tileView(for: noteB)
+        try expect(arriving is NoteTileNSView,
+                   "switch: the arriving workspace's tile must hydrate to a live view — this is M1.2 "
+                   + "executing in production for the first time; got \(describe(arriving))")
+        // Model B followed the switch, so the zone is still a gesture target.
+        try expect(canvas.qaLiveZoneIds == [zoneB],
+                   "switch: the live zone set must follow the workspace; got \(canvas.qaLiveZoneIds)")
+        try expect(canvas.qaZoneChromeViewCount == 1,
+                   "switch: exactly one chrome view — no orphan from WA, no duplicate from the layer "
+                   + "install; got \(canvas.qaZoneChromeViewCount)")
+        try expect(canvas.qaZoneHeaderGrabRect(zoneB) != nil,
+                   "switch: the arriving zone must still be grabbable — `liveZones` is what every zone "
+                   + "gesture reads, and setZones used to leave it empty")
+
+        // === And back. Frames must be exactly where they started. ===
+        try runtime.switchWorkspace(to: workspaceWA)
+        canvas.layoutSubtreeIfNeeded()
+
+        let returned = canvas.tilesInWorldFrames(forProjectId: projectPa)
+        try expect(returned.count == paTiles.count,
+                   "return: all \(paTiles.count) of Pa's tiles must come back; got \(returned.count). "
+                   + "The tile stamped with ANOTHER project's zone is the one the old membership "
+                   + "filter rendered nowhere.")
+        for original in paTiles {
+            guard let now = returned.first(where: { $0.id == original.id }) else {
+                throw Failure(message: "return: tile \(original.id) did not come back")
+            }
+            let dx = abs(now.frame.x - original.frame.x) + abs(now.frame.y - original.frame.y)
+            try expect(dx < 0.001,
+                       "return: tile \(original.id) must render on the pixel it already occupied. "
+                       + "World frames on disk, zone-local frames in a layer: converting on the way in "
+                       + "but not back out moves every tile by the zone origin. Expected "
+                       + "(\(original.frame.x), \(original.frame.y)), got (\(now.frame.x), \(now.frame.y)).")
+            try expect(canvas.tileView(for: original.id) is NoteTileNSView,
+                       "return: tile \(original.id) must be live again; got "
+                       + "\(describe(canvas.tileView(for: original.id)))")
+        }
+        // The repair landed, and it landed on the project's OWN zone.
+        for id in [noteForeign, noteUnstamped] {
+            try expect(canvas.qaZoneMembership(of: id) == zoneA,
+                       "return: the rescued tile \(id) must now belong to Pa's own zone; got "
+                       + "\(String(describing: canvas.qaZoneMembership(of: id)))")
+        }
+
+        // And the file: still three tiles, still WORLD frames, nothing lost.
+        let onDisk = try storePa.loadCanvas()
+        try expect(onDisk.tiles.count == 3,
+                   "return: Pa's canvas.json must still hold 3 tiles; got \(onDisk.tiles.count)")
+        for original in paTiles {
+            guard let saved = onDisk.tiles.first(where: { $0.id == original.id }) else {
+                throw Failure(message: "return: \(original.id) missing from Pa's canvas.json")
+            }
+            let dx = abs(saved.frame.x - original.frame.x) + abs(saved.frame.y - original.frame.y)
+            try expect(dx < 0.001,
+                       "return: the persisted frame for \(original.id) must stay in WORLD coordinates "
+                       + "— writing zone-local frames into canvas.json would move every tile on the "
+                       + "next launch, when the flat boot path reads them as world. Expected "
+                       + "(\(original.frame.x), \(original.frame.y)), got (\(saved.frame.x), \(saved.frame.y)).")
+            try expect(saved.zoneId == zoneA,
+                       "return: the membership repair must be durable; \(original.id) is stamped "
+                       + "\(String(describing: saved.zoneId))")
+        }
+
+        print("WorkspaceSceneOwnerChecks: the production boot mount handed the runtime its canvas, a "
+              + "workspace round trip hydrated live tiles in one grabbable zone, every tile returned "
+              + "to the pixel it started on, and the foreign/unstamped tiles were rescued durably")
     }
 }

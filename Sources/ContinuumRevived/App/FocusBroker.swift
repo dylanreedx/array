@@ -23,6 +23,24 @@ final class FocusBroker {
     /// Reason-aware mirror for app-level history. The canvas lockstep hook stays
     /// reason-agnostic; history must be able to ignore modal restores/recovery.
     var onAcceptedTileFocusWithReason: ((UUID, FocusRequest) -> Void)?
+
+    /// The APP's accepted-focus hook, owned separately from the controller's.
+    /// M1.10 (`.plans/46`).
+    ///
+    /// `ZoneRuntimeController.attachUI` used to capture whatever
+    /// `onAcceptedTileFocusWithReason` held and chain onto it. Two things went
+    /// wrong. At boot, `installAcceptedTileFocusHook()` runs right AFTER `attachUI`
+    /// and overwrote the composite, so `recoverManagedSessionOnFocus` has been dead
+    /// on the launch path. And once workspace switching actually reaches
+    /// `attachActiveControllerUI`, every switch would chain another link onto the
+    /// live closure, so the chain — and the number of times the app hook fires per
+    /// focus — would grow without bound.
+    ///
+    /// Two fields, one owner each, and the broker invokes both: the app sets this
+    /// one, the attached controller owns `onAcceptedTileFocusWithReason`. Neither
+    /// can overwrite the other, and re-attaching a controller cannot drop the app's
+    /// hook or double-fire it.
+    var appAcceptedTileFocusWithReason: ((UUID, FocusRequest) -> Void)?
     /// Fires whenever scope settles on the canvas (i.e. leaves all tiles).
     /// Mirrors `onAcceptedTileFocus`; lets the canvas clear the focus border
     /// when the scope is no longer a tile (`onAcceptedTileFocus` covers the
@@ -90,7 +108,12 @@ final class FocusBroker {
 
     private func notifyAcceptedTileFocus(_ tileId: UUID, reason: FocusRequest) {
         onAcceptedTileFocus?(tileId)
+        // M1.10: two owners, both invoked. The controller's hook and the app's used
+        // to share one field, so whichever was assigned last silently replaced the
+        // other — at boot that was the app, which is why the controller's
+        // managed-session recovery never ran.
         onAcceptedTileFocusWithReason?(tileId, reason)
+        appAcceptedTileFocusWithReason?(tileId, reason)
     }
 
     /// The single funnel for entering a non-modal focus scope. Routes through

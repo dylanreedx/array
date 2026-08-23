@@ -586,6 +586,14 @@ run_app_check .build/debug/Array --workspace-switch-check
 # resulting view, which is why every tile becoming a dead placeholder after the
 # first in-process switch has been green this whole time.
 run_app_check .build/debug/Array --zone-tile-hydration-check
+# M1.10 (.plans/46): WorkspaceRuntime.canvasView is written in exactly one place,
+# install(into:appRegistry:), and NOTHING in production has ever called it -- so
+# every canvas call in switchWorkspace optional-chained through nil and did
+# nothing, while the document, the registry and the header all changed. The six
+# M1 scene legs were green because each one calls install(into:) itself. This leg
+# drives mountWorkspaceSceneAtBoot, the method applicationDidFinishLaunching
+# calls, and never install(into:).
+run_app_check .build/debug/Array --workspace-scene-owner-check
 # M1.0 (.plans/46): a project's canvas.json must only ever receive that project's
 # tiles. setZones never updates the flat canvasState, and retireFlatCompatibilityScene
 # deliberately leaves canvasState.tiles alone, so it keeps the DEPARTED project's
