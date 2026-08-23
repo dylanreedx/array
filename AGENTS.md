@@ -166,21 +166,26 @@ frozen fallback in QA).
    (`installNoteTile`, `installFileTile`, `installRunArtifactsTile`) are
    deliberately flat and boot-only.
 
-   **The placeholder and persistence hazards on this seam are FIXED — M1 of
-   `.plans/46`, 2026-08-22.** Kept here because the shape still constrains new
-   code, not as a live warning.
+   **Corrected again 2026-08-23 (M1.10). Yesterday's note claimed the placeholder
+   and persistence hazards were "fixed". They were not fixed — they were
+   *unreachable*, which is worse, because it made a whole milestone look green.**
 
-   Layers are still BUILT as `DescriptorTileNSView` placeholders in four places,
-   and of those only two are reachable in production: `switchWorkspace` and its
-   ambient path via `makeAmbientZoneLayer`. `WorkspaceRuntime.install` has 20
-   call sites and zero are production, and `_addProjectZone`'s loop filters
-   `memberTiles` on a freshly appended `placement.zoneId`, so it is always
-   empty. The placeholders no longer survive: `AppDelegate.hydrateZoneLayerTiles`
-   replaces them, in two phases, before and after `setZones`
-   (`--zone-tile-hydration-check`, `--zone-spawner-coverage-check`). **Ambient
-   project-less zones are the exception and still keep placeholders** — their
-   tiles live in the workspace document's own register, so there is no
-   controller to resolve a note body or a repository root from.
+   `WorkspaceRuntime.canvasView` is written in exactly one place,
+   `install(into:appRegistry:)`, and **no production code had ever called it**
+   since the method was introduced in `93c68f43`. Every canvas call in
+   `switchWorkspace` optional-chained through nil, so switching workspaces
+   changed the document, the registry and the toolbar header and left the
+   previous workspace's tiles on screen. The ZoneLayer world existed only in
+   checks — and the six M1 scene witnesses were green because each one called
+   `install(into:)` itself first.
+
+   Production now calls `WorkspaceRuntime.adoptCanvas(_:)` from
+   `AppDelegate.mountWorkspaceSceneAtBoot`, and `switchWorkspace` **throws**
+   rather than silently doing the document half. `--workspace-scene-owner-check`
+   drives that mount, never `install(into:)`; that constraint is the ticket.
+
+   **What a scene witness owes.** Drive `mountWorkspaceSceneAtBoot`. A check that
+   calls `install(into:)` is testing a checks-only entry point.
 
    **What a new tile kind owes.** Add it to `makeHydratedTileView` if it can be
    built from the persisted `Tile` alone; otherwise to Phase B, which needs the
@@ -189,15 +194,36 @@ frozen fallback in QA).
    (`withAutoLayoutSuppressed`). Everything resolves through
    `controller(for: projectId)`, never the active project. Do NOT share the
    `installInitial*` boot walk: it mints missing `noteId`s and writes the canvas
-   as a side effect, which a render path must not repeat.
+   as a side effect, which a render path must not repeat. Still unhydrated after
+   a switch: `browserInspector`, ticket/conductor queue, diff review.
 
-   Persistence: `persistProjectCanvas` and `flushCanvasSave` now both route
-   through `CanvasNSView.canvasStateForPersistence`, over the pure
+   **Three invariants that now hold, and that new code must not break.**
+
+   - **Frame space.** `canvas.json` holds WORLD frames; a `ZoneLayer` holds
+     ZONE-LOCAL. Convert at the model boundary only — `WorkspaceRuntime`'s
+     `memberTiles` on the way in, `CanvasNSView.tilesInWorldFrames(forProjectId:)`
+     on the way out. Persisting zone-local moves every tile by its zone origin the
+     next time the flat boot path reads the file.
+   - **Membership.** A tile's `zoneId` can name another project's zone — ordinary
+     dragging produces that, because the boot live-zone set holds every zone in
+     the document. `CanvasEngine.resolveZoneMembership` rescues those into the
+     project's own zone by geometry, never across a project boundary, never
+     dropping a tile and never moving one. A stamp naming a zone this document
+     does not contain belongs to another workspace and is left alone.
+   - **One owner for zones.** `liveZones`/`zoneChromeViews` (Model B) own zone
+     geometry, chrome and every gesture — move, resize, rename, close, hit-test,
+     drop membership. A `ZoneLayer` owns tiles only. `setZones` writes Model B
+     from the document's whole zone set, not just the installed layers: a zone
+     below the live hydration tier still has to draw and still has to be
+     navigable.
+
+   Persistence: `persistProjectCanvas` and `flushCanvasSave` both route through
+   `CanvasNSView.canvasStateForPersistence`, over the pure
    `CanvasEngine.mergeProjectTilesForPersistence`. The rule is *cover, then
-   replace* — a persisted tile may only vanish when its own zone is installed
-   and it is nonetheless absent. Any new persistence path must use that reader;
-   `state.tiles = tiles` erases every tile of the project living in a zone below
-   the live tier.
+   replace* — a persisted tile may only vanish when its own zone is installed and
+   it is nonetheless absent. `state.tiles = tiles` erases every tile of the
+   project living in a zone below the live tier.
+
 10. **Two installs on ONE project root.** The channel split covers Application
    Support and the defaults domain. It does NOT cover a project: the canvas,
    tiles, notes, managed sessions and lock live in `<root>/.array/`, keyed by

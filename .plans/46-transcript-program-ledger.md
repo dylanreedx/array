@@ -130,6 +130,51 @@ engineer-days.
 
 ---
 
+## M1.10 / M1.11 — the milestone was dead on arrival (2026-08-23)
+
+M1 was built as an isolated dev app and driven by hand for the first time.
+Switching workspaces did not change the canvas, and ⌘K did nothing in a newly
+created workspace. **One root cause, and it invalidated most of M1.**
+
+`WorkspaceRuntime.canvasView` is written in exactly one place,
+`install(into:appRegistry:)`, and **no production code had ever called it** since
+`93c68f43` introduced the method in June. Every canvas call in `switchWorkspace`
+optional-chained through nil. The document, the registry and the toolbar header
+changed; the canvas did not.
+
+So **M1.0, M1.2, M1.2b, M1.3, M1.3b, M1.4 and M1.6 never executed in the shipping
+app.** Their witnesses were green because each one calls `install(into:)` itself
+before asserting — the exact failure this programme exists to stop, committed at
+scale and not noticed until someone clicked. Only M1.7/M1.9 and M1.8 were ever
+live. Both defects were pre-existing, verified identical at `09de0b0`; the dead
+code was mine.
+
+| step | ticket | status |
+|---|---|---|
+| 12 | **M1.10** production owns the scene | **GREEN 2026-08-23**, `--workspace-scene-owner-check`, RED first on `qaHasCanvas`. Boot stays flat — deliberately, so a defect on the switch path is cleared by relaunching. Four hazards had to be closed before the turn-on was safe: **Model B** (`liveZones`) is the zone *interaction* model, not just chrome, and `setZones` never wrote it — layers would have shipped unmovable, unresizable, unrenameable zones; **chrome** orphaned and double-drew; **frame spaces** differ and every `canvas.json` in the field is WORLD, so an unconverted layer install teleports every tile by the zone origin; and **foreign `zoneId` stamps are ordinary**, so the old membership filter would have rendered one real project's 89 tiles nowhere. New pure `CanvasEngine.resolveZoneMembership` rescues them position-preservingly. `switchWorkspace` now throws instead of silently doing the document half. |
+| 13 | **M1.11** an empty workspace is not a dead end | **GREEN 2026-08-23**, `--empty-workspace-creation-check`, teeth-verified twice. The palette opens with no active controller and offers "Add Project…"; choosing a project also gives it a zone and a spawner; `tileSpawner` stops falling back to a departed project's boot spawner; note/browser/open-file/diff-review refuse audibly. |
+
+**Three things existing witnesses caught while this landed, each a real design
+error rather than a fixture problem.** `--zone-runtime-duplication-check`: the
+first rescue rule was too eager and pulled tiles out of another workspace's zone
+— a project's zones can span workspaces, so a stamp naming a zone this document
+does not contain is now deferred. `--workspace-sidebar-actions-check`: narrowing
+`liveZones` to the installed layers made zones below the live tier vanish from
+framing and hit-testing. `--palette-browser-spawn-check`: gating spawns on "no
+scope" broke boot-only fixtures; the real signal is "no spawner".
+
+**Two expectations were corrected rather than relaxed.**
+`--workspace-runtime-install-check` pinned adaptive chrome for a layer, which
+contradicts the decision Model B already implements (a zone renders at its
+STORED frame so the visible rectangle IS the grab target).
+`--spawn-placement-check` pinned zone-local frames on disk; every file in the
+field is world, and the flat boot path reads it as world.
+
+`AGENTS.md` hazard 9 corrected again: yesterday it said "fixed" when the truth
+was "unreachable".
+
+---
+
 ---
 
 ## Probe P — settle the steering protocol
