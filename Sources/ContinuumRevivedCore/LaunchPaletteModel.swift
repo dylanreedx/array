@@ -153,7 +153,10 @@ public enum LaunchPaletteAction: Equatable, Sendable {
         case .addProjectToCanvas:
             return ["add", "project", "canvas", "zone"]
         case .addProject:
-            return ["add", "project", "register", "folder", "open", "new"]
+            // Deliberately no "new" or "open": "Add Project…" is not one of the
+            // New-something actions, and padding it into those queries makes the
+            // list noisier for no benefit. `--palette-checks` pins both.
+            return ["add", "project", "register", "folder"]
         case .newWorkspace:
             return ["new", "workspace", "canvas"]
         case .renameWorkspace:
@@ -746,7 +749,7 @@ public enum LaunchPaletteModel {
         case let .openURL(url): return item(row, .actions, "Open \(url)", "Browser", "globe", ["url", "web"], false, true, "url:\(url)")
         case let .switchProject(id): return item(row, .workspacesAndProjects, "Switch project", nil, "folder", [], false, true, "project-switch:\(id.uuidString)")
         case let .addProjectToCanvas(id): return item(row, .workspacesAndProjects, "Add project", "Place on this canvas", "folder.badge.plus", [], false, true, "project-add:\(id.uuidString)")
-        case .addProject: return item(row, .create, "Project", "Add a folder to this canvas", "folder.badge.plus", ["add", "register", "open", "folder"], true, true, "action:add-project")
+        case .addProject: return item(row, .create, "Project", "Add a folder to this canvas", "folder.badge.plus", ["add", "register", "folder"], true, true, "action:add-project")
         case .newWorkspace: return item(row, .create, "Workspace", "Create a spatial workspace", "square.grid.2x2", ["new"], true, true, "action:new-workspace")
         case let .renameWorkspace(id): return item(row, .developer, "Rename workspace", nil, "pencil", [], false, false, "workspace-rename:\(id.uuidString)")
         case let .deleteWorkspace(id): return item(row, .developer, "Delete workspace", nil, "trash", [], false, false, "workspace-delete:\(id.uuidString)")

@@ -9653,21 +9653,24 @@ final class CanvasNSView: NSView, TokenThemed {
         try expect(canvasB.tileView(for: t1Id)?.frame == t1ExpectedScreenFrame,
                    "assertion 10: t1 screen frame must match world frame via new origin; expected \(t1ExpectedScreenFrame), got \(String(describing: canvasB.tileView(for: t1Id)?.frame))")
 
-        // ── Assertion 11: adaptive bounds (T11) after the move ───────────────────
-        // After move, zone origin is (380,250). Member tile world frames:
-        // t1=(380+20, 250+40, 160, 120)=(400,290,160,120), t2=(380+200, 250+40,160,120)=(580,290,160,120).
-        // Union: (400,290,340,120). With P=ZoneBoundsConfig.defaultPadding (24), H=ZoneChromeNSView.headerHeight (34):
-        // adaptive: x=400-24=376, y=290-24-34=232, w=340+48=388, h=120+48+34=202.
-        let P = ZoneBoundsConfig.defaultPadding      // 24
-        let H = ZoneChromeNSView.headerHeight        // 34
-        let expectedAdaptiveFrame = TileFrame(
-            x: 400 - P, y: 290 - P - H,
-            width: 340 + 2 * P, height: 120 + 2 * P + H
-        )  // = (376, 232, 388, 202)
-        let expectedChromeScreenFrame = CanvasEngine.tileScreenFrame(expectedAdaptiveFrame, viewport: vpB)
+        // ── Assertion 11: chrome follows the STORED placement after the move ─────
+        // M1.10 (`.plans/46`): this asserted the ADAPTIVE hug (T11) — chrome sized
+        // to the union of its members. That was ZoneLayer-only behaviour and it
+        // contradicted the rule Model B already implements (zone-unify P3): a zone
+        // renders at its stored placement frame, so the size the user drew survives
+        // and — the part that matters — the visible rectangle IS the move-grab
+        // header rect, which `zoneHeaderScreenRect` derives from the same
+        // placement. Adaptive chrome means the rectangle you see is not the one you
+        // can grab. Now that `setZones` owns Model B there is one answer.
+        let expectedChromeScreenFrame = CanvasEngine.tileScreenFrame(
+            CanvasEngine.zoneWorldFrame(layerB2.placement), viewport: vpB)
         let actualChromeFrame = canvasB.zoneLayerChromeFrame(for: gzId)
         try expect(actualChromeFrame == expectedChromeScreenFrame,
-                   "assertion 11: chrome screen frame after move must equal adaptive bounds screen frame; expected \(expectedChromeScreenFrame), got \(String(describing: actualChromeFrame))")
+                   "assertion 11: chrome screen frame after move must equal the stored placement's screen frame; expected \(expectedChromeScreenFrame), got \(String(describing: actualChromeFrame))")
+        if let grab = canvasB.qaZoneHeaderGrabRect(gzId), let chrome = actualChromeFrame {
+            try expect(abs(grab.origin.x - chrome.origin.x) < 0.5 && abs(grab.width - chrome.width) < 0.5,
+                       "assertion 11b: the move-grab header must sit on the visible chrome; header \(grab) vs chrome \(chrome)")
+        }
 
         // ── Assertion 12: no drag-snap side effects ───────────────────────────────
         try expect(canvasB.qaDragGhostFrame == nil, "assertion 12: qaDragGhostFrame must be nil after move (no tile snap ghost)")

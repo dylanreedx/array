@@ -29235,8 +29235,20 @@ extension AppDelegate {
         contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
             .appendingPathComponent("Sources/ContinuumRevived/App/ContinuumApp.swift"),
         encoding: .utf8)
-    try expect(appSourceForWalk.contains(
-                "case .managedAgent:\n                    installInitialManagedAgentTile(tile, in: canvasView)"),
+    // M1.10: matched without indentation. This pinned the walk's exact leading
+    // whitespace, so extracting it from `applicationDidFinishLaunching` into
+    // `mountWorkspaceSceneAtBoot` broke it — a false alarm about a real
+    // refactor, while the thing it actually guards (managed agents going through
+    // the wiring installer) was untouched.
+    let walkLines = appSourceForWalk
+        .split(separator: "\n", omittingEmptySubsequences: false)
+        .map { $0.trimmingCharacters(in: .whitespaces) }
+    let walkRoutesManagedAgents = walkLines.indices.contains { index in
+        walkLines[index] == "case .managedAgent:"
+            && index + 1 < walkLines.count
+            && walkLines[index + 1] == "installInitialManagedAgentTile(tile, in: canvasView)"
+    }
+    try expect(walkRoutesManagedAgents,
                "…and the boot-time canvas walk must install a restored managed-agent tile through it")
 
     // H6 · MIXED SELECTIONS ARE NOT HALF-PERFORMED IN SILENCE. A terminal-session row has

@@ -47,6 +47,8 @@ let builtInActionNames = [
     "Fit Canvas to All", "Tidy Canvas", "Focus Current Tile", "Back to Previous View",
     "Go to Previous Tile", "Go to Previous Zone", "Toggle Workspace Sidebar",
     "Replay Getting Started", "New Workspace…",
+    // M1.11 (`.plans/46`): the only add route a workspace with no projects has.
+    "Add Project…",
 ]
 
 let rows = LaunchPaletteModel.makeRows(profiles: [
