@@ -31,6 +31,25 @@ func runStrictAgentHarnessChecks() throws {
     try expect(piArgs == ["-p", "--mode", "json", "--model", "openai-codex/gpt-5.6-sol", "--thinking", "high", "--session-id", AgentSupervisor.sessionId(for: piRecord.id), "PROMPT"],
                "strict Pi argv changed: \(piArgs)")
 
+    // C8: pi subagent spawning had four independent blockers; this is #3 —
+    // whenever `PiAgentRunner.Config.extensionPaths` carries a path (its own
+    // default resolves it from the real ~/.pi/agent/extensions at spawn
+    // time — impure by design, so NOT re-asserted here against host state),
+    // `run()` must forward it into pi's argv as `-e <path>`, or
+    // continuum-spawn-agent.ts never loads no matter what the role allowlist
+    // permits. This pins the pure plumbing with a fixture path; the impure
+    // resolution (does the file actually exist on disk?) is covered
+    // separately by PiExtensionInstallerChecks against an injected throwaway
+    // root — never the real ~/.pi here.
+    let fixtureExtensionPath = "/private/tmp/continuum-c8-fixture/continuum-spawn-agent.ts"
+    let piArgsWithExtension = PiAgentRunner.processArguments(
+        model: piConfig.model, thinking: piConfig.thinking, sessionId: piConfig.sessionId,
+        extraArgs: piConfig.extraArgs, prompt: "PROMPT", extensionPaths: [fixtureExtensionPath])
+    try expect(piArgsWithExtension == ["-p", "--mode", "json", "--model", "openai-codex/gpt-5.6-sol", "--thinking", "high",
+                                       "--session-id", AgentSupervisor.sessionId(for: piRecord.id),
+                                       "-e", fixtureExtensionPath, "PROMPT"],
+               "strict Pi argv's -e must sit right after the session flag, ahead of extras and the prompt, got \(piArgsWithExtension)")
+
     let catalog = AgentModelCatalog()
     catalog.resetForQA(snapshot: .init(harness: .claudeCode, readiness: .ready, models: ["anthropic/opus"], displayNames: ["anthropic/opus": "Claude"], contextWindows: ["anthropic/opus": 1]))
     catalog.resetForQA(snapshot: .init(harness: .codex, readiness: .loggedOut, models: ["openai-codex/gpt-5.6-sol"], displayNames: ["openai-codex/gpt-5.6-sol": "Codex"], contextWindows: ["openai-codex/gpt-5.6-sol": 2]))

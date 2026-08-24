@@ -72,11 +72,25 @@ BRAND_MARK_SOURCE="$ROOT_DIR/docs/38-tickets/96-agent-sidebar-product-redesign/b
 # 2.9.5): bin/ tools + the xcframework live under .build/artifacts/sparkle.
 SPARKLE_FRAMEWORK="$ROOT_DIR/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
 
+# ContinuumRevivedCore declares SwiftPM resources (C8: continuum-spawn-agent.ts,
+# Pi's spawn_agent extension). SwiftPM's generated Bundle.module accessor
+# expects this bundle next to the executable (`Bundle.main.bundleURL`, which
+# for a bare binary IS the executable's directory) — that layout doesn't exist
+# inside a real .app, and codesign refuses to sign an executable with sibling
+# content sitting outside Contents/ ("unsealed contents present in the bundle
+# root"), so the bundle ships at the ordinary Contents/Resources location
+# instead. PiExtensionInstaller resolves it there directly rather than via
+# Bundle.module. Building the bundle but leaving it out of this copy step is
+# exactly the shipped-but-not-bundled failure this ticket exists to end.
+CORE_RESOURCE_BUNDLE="continuum-revived_ContinuumRevivedCore.bundle"
+CORE_RESOURCE_BUNDLE_SOURCE="$BUILD_DIR/$CORE_RESOURCE_BUNDLE"
+
 [[ -x "$EXECUTABLE" ]] || { echo "built executable not found: $EXECUTABLE" >&2; exit 1; }
 [[ -f "$PLIST_SOURCE" ]] || { echo "Info.plist source not found: $PLIST_SOURCE" >&2; exit 1; }
 [[ -f "$ICON_SOURCE" ]] || { echo "icon source not found: $ICON_SOURCE" >&2; exit 1; }
 [[ -d "$BRAND_MARK_SOURCE" ]] || { echo "brand marks not found: $BRAND_MARK_SOURCE" >&2; exit 1; }
 [[ -d "$SPARKLE_FRAMEWORK" ]] || { echo "Sparkle.framework not found: $SPARKLE_FRAMEWORK (run swift build first)" >&2; exit 1; }
+[[ -d "$CORE_RESOURCE_BUNDLE_SOURCE" ]] || { echo "Core resource bundle not found: $CORE_RESOURCE_BUNDLE_SOURCE (run swift build first)" >&2; exit 1; }
 
 rm -rf "$OUTPUT"
 mkdir -p "$OUTPUT/Contents/MacOS" "$OUTPUT/Contents/Resources" "$OUTPUT/Contents/Frameworks"
@@ -84,6 +98,7 @@ cp "$EXECUTABLE" "$OUTPUT/Contents/MacOS/Array"
 chmod 0755 "$OUTPUT/Contents/MacOS/Array"
 cp "$PLIST_SOURCE" "$OUTPUT/Contents/Info.plist"
 cp "$ICON_SOURCE" "$OUTPUT/Contents/Resources/AppIcon.icns"
+ditto "$CORE_RESOURCE_BUNDLE_SOURCE" "$OUTPUT/Contents/Resources/$CORE_RESOURCE_BUNDLE"
 mkdir -p "$OUTPUT/Contents/Resources/BrandMarks"
 for mark in anthropic.svg gemini.svg openai-light.svg xai-light.svg; do
   [[ -f "$BRAND_MARK_SOURCE/$mark" ]] || { echo "brand mark not found: $mark" >&2; exit 1; }

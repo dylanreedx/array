@@ -26,8 +26,11 @@ func runAgentPromptFileReferenceContractChecks() {
            "AgentPrompt emptiness must treat a file reference as sendable while rejecting whitespace-only text")
 
     // Pi: each reference is its own argv segment (spaces survive intact).
+    // extensionPaths: [] isolates this from C8's default `-e` injection
+    // (covered separately by StrictAgentHarnessChecks and
+    // PiExtensionInstallerChecks).
     let piArgs = PiAgentRunner.processArguments(
-        model: model, thinking: thinking, sessionId: nil, extraArgs: [], prompt: refOnly
+        model: model, thinking: thinking, sessionId: nil, extraArgs: [], prompt: refOnly, extensionPaths: []
     )
     expect(Array(piArgs.suffix(2)) == ["--no-session", "@/tmp/one readme.md"],
            "Pi adapter must materialize a file reference as an @path argv token, got \(piArgs)")
@@ -76,7 +79,7 @@ func runAgentPromptFileReferenceContractChecks() {
     let hostilePath = "/tmp/space and $(touch SHOULD_NOT_RUN); `rm -rf nope`.md"
     let hostile = AgentPrompt(text: "look", fileReferences: [fileReference(7, path: hostilePath)])
     let hostileArgs = PiAgentRunner.processArguments(
-        model: model, thinking: thinking, sessionId: nil, extraArgs: [], prompt: hostile
+        model: model, thinking: thinking, sessionId: nil, extraArgs: [], prompt: hostile, extensionPaths: []
     )
     expect(Array(hostileArgs.suffix(2)) == ["look", "@\(hostilePath)"],
            "Pi adapter must preserve a metacharacter reference path as a literal argv element, got \(hostileArgs)")

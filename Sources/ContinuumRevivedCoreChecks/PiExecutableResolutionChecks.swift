@@ -85,14 +85,16 @@ func runPiSessionArgsChecks() {
     let model = AgentModelConfig.defaultModel
     let thinking = AgentModelConfig.defaultThinking
 
+    // extensionPaths: [] isolates session/extras/prompt shape from the C8
+    // default `-e` injection, which PiExtensionLoadArgsChecks covers on its own.
     let withSession = Runner.processArguments(
-        model: model, thinking: thinking, sessionId: "continuum-TILE", extraArgs: [], prompt: "hi")
+        model: model, thinking: thinking, sessionId: "continuum-TILE", extraArgs: [], prompt: "hi", extensionPaths: [])
     expect(withSession == ["-p", "--mode", "json", "--model", model, "--thinking", thinking,
                            "--session-id", "continuum-TILE", "hi"],
            "processArguments(session): must pass --model/--thinking then --session-id for continuity, got \(withSession)")
 
     let ephemeral = Runner.processArguments(
-        model: model, thinking: thinking, sessionId: nil, extraArgs: [], prompt: "hi")
+        model: model, thinking: thinking, sessionId: nil, extraArgs: [], prompt: "hi", extensionPaths: [])
     expect(ephemeral == ["-p", "--mode", "json", "--model", model, "--thinking", thinking,
                          "--no-session", "hi"],
            "processArguments(nil): must be ephemeral --no-session, got \(ephemeral)")
@@ -100,7 +102,7 @@ func runPiSessionArgsChecks() {
     // Prompt is always last (Pi treats the trailing positional as the prompt);
     // extras slot between the session flag and the prompt.
     let withExtras = Runner.processArguments(
-        model: "m", thinking: "low", sessionId: "s", extraArgs: ["--tools", "read"], prompt: "do it")
+        model: "m", thinking: "low", sessionId: "s", extraArgs: ["--tools", "read"], prompt: "do it", extensionPaths: [])
     expect(withExtras.last == "do it" && withExtras.contains("--tools"),
            "processArguments(extras): prompt stays last, extras included, got \(withExtras)")
 

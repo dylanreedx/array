@@ -10788,6 +10788,10 @@ runCanvasMirrorShowOnCanvasChecks()
 runPiEventTranslatorChecks()
 runPiExecutableResolutionChecks()
 runPiSessionArgsChecks()
+
+// Ticket: C8 — pi subagent spawning's installer half (continuum-spawn-agent.ts
+// into ~/.pi/agent/extensions, injected with a throwaway /tmp root here).
+runPiExtensionInstallerChecks()
 runAgentPromptImageContractChecks()
 runAgentPromptFileReferenceContractChecks()
 runAgentContextOccupancyChecks()
@@ -11546,6 +11550,7 @@ runSpawnRequestChecks()
 // Ticket: docs/38-tickets/90-agent-ux/P2D.3-role-registry.md — roles get a home,
 // and a spawn's role decides what it runs with.
 try runItemKindLenientDecodingChecks()
+try runAgentCommandExecutionPlannerChecks()
 try runRoleRegistryChecks()
 
 // Ticket: docs/38-tickets/90-agent-ux/P4.3-auto-settle-inactivity.md — the
@@ -11615,5 +11620,13 @@ runProcessGroupChildChecks()
 // Plan: .plans/45 T1 — the transcript's hover-revealed "sent at" time needs a
 // timestamp in the document, and every transcript already on disk predates it.
 runAgentEntryTimestampChecks()
+
+// Ticket: codex app-server parity harness (.plans/46, "Codex — the decision,
+// settled by measurement", 2026-08-24). De-risking step before any
+// CodexAgentRunner rewrite: pins CodexAppServerEventTranslator's own mapping,
+// single-agent parity against the existing CodexEventTranslator/exec path, and
+// the measured ordering hazard (a delegating child's completion can arrive
+// after the parent's turn/completed).
+runCodexAppServerParityChecks()
 
 print("ContinuumRevivedCoreChecks passed")

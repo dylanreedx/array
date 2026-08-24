@@ -58,7 +58,12 @@ let package = Package(
                 "ContinuumRevivedAgentContent",
                 "ContinuumRevivedAgentUI",
                 .product(name: "GRDB", package: "GRDB.swift")
-            ]
+            ],
+            // C8: continuum-spawn-agent.ts (Pi's spawn_agent extension) must ship
+            // inside the app bundle. SwiftPM resources live under a target's own
+            // directory, so this is Core's — the make-app-bundle.sh copy step
+            // pulls it out of the generated resource bundle into the .app.
+            resources: [.copy("Resources/PiExtensions")]
         ),
         // Sync layer (ticket 06's home; stood up by ticket 05 with the
         // tombstone vocabulary). Pure Swift, depends only on Core.
