@@ -577,3 +577,36 @@ delta-index-oracle, agent-supervisor, agent-first-paint,
 agent-incremental-refresh, CoreChecks. Full matrix + gallery gate still owed
 before any release (S7); S4 row/cluster + T3 corrections, S5 sweep, S6 tail
 un-stomp next.
+
+## Redo milestone — S4.0–S4.2 (turn corrections, action-first row, expanded pane), 2026-08-24
+
+**S4.0 — T3 corrections.** `startsTurn` drops the previous-role clause
+(consecutive queued prompts are distinct turns — fixture gained the u4/u5
+case, teeth: restoring the clause flips the witness); `interTurnSpacing`
+20 → `Space.xl * 2` (32) and the witness floor raised from 1.5× to 2× (teeth:
+20 fails it); the hover witness now drives the REAL `mouseMoved` hit-test via
+`qaHoverAtPointForChecks` + `qaTurnStartPointForChecks` (the entryID bypass is
+gone); `checkTurnSeparation` gains a `.realClaudeTurn` pass (a single exchange
+paints zero rules).
+
+**S4.1 — action-first row.** The presented title is the sentence; the semantic
+tool NAME survives on `presentedToolNameText` (presentation-only, non-Codable)
+for the icon, tooltip and AX label. Trailing column reads "2.1s ✓" on
+completed rows; failures keep their attention label. The view suppresses the
+disclosure's first line when it repeats the title.
+
+**S4.2 — expanded pane.** `presentedOutputText`/`presentedOutputNote`
+(non-Codable, I5) carry the store's sanitized bounded output to the row;
+expanding reveals a `CommandOutputTextView` pane (exact selection, copy
+button) with truncation/redaction surfaced as a note. Never `.commandOutput`
+blocks. The `.realClaudeTurn` fixture now folds its observations through a
+REAL `AgentToolDetailStore` (real sanitizer, real merge; actor bridged
+synchronously in fixture construction) and seeds the surface via
+`seedStoreSanitizedToolDetails` — the untrusted-provider closure path
+deliberately re-redacts URL-bearing output and is the wrong seam for store
+snapshots. Witness: expanding the WebSearch row must reveal >40 chars of
+result text; teeth-verified by severing the output feed.
+
+Legs green after: rhythm, tool-detail, ui-geometry, delta-index-oracle,
+ui-probe, ui-pixel, agent-first-paint, CoreChecks. Next: S4.3 clustering
+(highest risk, lands behind its own witness), then S5/S6/S7.

@@ -968,6 +968,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         layoutSubtreeIfNeeded()
         return transcriptLayout.collectionViewContentSize.height
     }
+    var qaUserRowIndexesForChecks: [Int] {
+        rows.enumerated().filter { $0.element.role == .user }.map(\.offset)
+    }
     var qaPendingRuntimeObservationCount: Int {
         pendingRuntimeObservations.values.reduce(0) { $0 + $1.count }
     }
@@ -1287,11 +1290,16 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     ///
     /// Consecutive assistant/reasoning entries inside one turn stay at the
     /// ordinary inter-block gap.
+    /// Corrected 2026-08-24 (`.plans/45` S4.0): the previous-role clause
+    /// suppressed the boundary between two CONSECUTIVE user prompts (queued
+    /// sends). The entryID inequality already keeps one prompt's own blocks
+    /// together, so a user entry that is not the first row always starts a
+    /// turn.
     static func startsTurn(_ rows: [Row], at index: Int) -> Bool {
         guard index > 0, rows.indices.contains(index), rows.indices.contains(index - 1)
         else { return false }
         guard rows[index].entryID != rows[index - 1].entryID else { return false }
-        return rows[index].role == .user && rows[index - 1].role != .user
+        return rows[index].role == .user
     }
 
     /// Records each entry's `createdAt`. The transcript renders NOTHING for a nil
@@ -1444,7 +1452,10 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
 
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
-        let point = collectionView.convert(event.locationInWindow, from: nil)
+        applyHover(at: collectionView.convert(event.locationInWindow, from: nil))
+    }
+
+    private func applyHover(at point: NSPoint) {
         // Nothing here forces a layout pass: the row is found from already
         // prepared attributes, and only a layer's position and opacity change.
         var hovered: AgentNodeID?
@@ -1481,9 +1492,22 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
 
     var qaHoverTimeVisibleForChecks: Bool { hoverTimeLayer.opacity > 0 }
 
-    func qaHoverTurnForChecks(entryID: AgentNodeID?) {
-        hoveredTurnEntryID = entryID
-        updateHoverTimeLayer()
+    /// Corrected 2026-08-24 (`.plans/45` S4.0): the old entryID-based QA
+    /// bypassed the tracking-area hit-test and its coordinate conversion, so a
+    /// conversion bug stayed green. This runs the REAL `mouseMoved` body on a
+    /// point in the collection view's coordinate space.
+    func qaHoverAtPointForChecks(_ point: NSPoint) {
+        applyHover(at: collectionView.convert(point, from: self))
+    }
+
+    /// A point (in this view's coordinate space) inside the hover band of the
+    /// given turn's start row, or nil when that entry starts no turn — so a
+    /// witness can drive the REAL hit-test without inventing geometry.
+    func qaTurnStartPointForChecks(entryID: AgentNodeID) -> NSPoint? {
+        guard let turn = turnStartRowsByEntry.first(where: { $0.entryID == entryID }),
+              let frame = transcriptLayout.layoutAttributesForItem(
+                  at: IndexPath(item: turn.row, section: 0))?.frame else { return nil }
+        return convert(NSPoint(x: frame.midX, y: frame.midY), from: collectionView)
     }
 
     private func flatten(_ document: AgentDocument) throws -> RowIndex {
@@ -1688,12 +1712,24 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             // semantic document keeps the tool name. The disclosure keeps only
             // the lines the sentence does not already say.
             let collapsed = AgentToolDetailPresenter.collapsed(detail)
+            payload.presentedToolNameText = payload.name
             payload.name = collapsed.actionLine
             // The full disclosure text stays the summary (probes pin that the
             // detail reached presentation); the VIEW suppresses the first line
             // when it repeats the action sentence.
             payload.summary = AgentToolDetailPresenter.observableDisclosureText(detail)
             payload.presentedTrailingDetailText = collapsed.durationText
+            // `.plans/45` S4.2 — the expanded pane's output, from the store's
+            // sanitized bounded text, with its truncation/redaction surfaced
+            // honestly (1c.8, 1c.9). Never from `.commandOutput` blocks.
+            if let output = detail.output {
+                payload.presentedOutputText = output.text
+                var notes: [String] = []
+                if output.truncatedByBytes { notes.append("truncated by size") }
+                if output.truncatedByLines { notes.append("truncated by lines") }
+                if output.redacted { notes.append("redacted") }
+                payload.presentedOutputNote = notes.isEmpty ? nil : "Output \(notes.joined(separator: ", "))"
+            }
             presented.payload = .toolCall(payload)
         case var .diff(payload):
             // A provider-authored semantic file list wins. Otherwise, compose
@@ -1736,6 +1772,18 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             self.toolDetailsByID = Dictionary(uniqueKeysWithValues: details.map { ($0.identity, $0) })
             self.refreshVisibleToolDetails()
         }
+    }
+
+    /// Composition seam for review fixtures (`.plans/45` S4.2): inject records
+    /// that HAVE crossed the real store's sanitizer, exactly as the async
+    /// refresh above does — never raw provider values. The untrusted-provider
+    /// closure path deliberately re-neutralizes URL-bearing output, which is
+    /// correct for closures and wrong for store snapshots; a synchronous
+    /// fixture has no way to await the actor, so this is the snapshot
+    /// equivalent.
+    func seedStoreSanitizedToolDetails(_ records: [AgentToolDetailKey: AgentToolDetailRecord]) {
+        toolDetailsByID = records
+        refreshVisibleToolDetails()
     }
 
     private func refreshVisibleToolDetails() {

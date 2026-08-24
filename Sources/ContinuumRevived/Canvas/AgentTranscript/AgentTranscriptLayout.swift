@@ -1,5 +1,6 @@
 import AppKit
 import ContinuumRevivedAgentContent
+import ContinuumRevivedAgentUI
 
 /// A single-column, flipped-coordinate collection layout. It computes lightweight
 /// attributes for the semantic rows, while NSCollectionView creates views only for
@@ -15,7 +16,11 @@ final class AgentTranscriptLayout: NSCollectionViewLayout {
     /// `_DESIGN.md` §11 asks for a soft hairline for section separation; the rule
     /// is drawn by the list into this gap, so the air and the rule stay one
     /// decision rather than drifting apart.
-    static let interTurnSpacing: CGFloat = 20
+    /// Corrected 2026-08-24 (`.plans/45` S4.0): 20 vs a 12pt row gap was the
+    /// "slightly bigger paragraph gap" the turn witness's own failure message
+    /// forbids — part of what Dylan rejected. `Space.xl * 2`; the final value
+    /// is judged in the S7 gallery, not by this number.
+    static let interTurnSpacing = CGFloat(Space.xl * 2)
     /// Returns the gap to leave ABOVE `index`, or nil for the default `rowSpacing`.
     var spacingBefore: ((Int) -> CGFloat?)?
     /// Cheap digest of where the turn boundaries currently are.
@@ -76,6 +81,13 @@ final class AgentTranscriptLayout: NSCollectionViewLayout {
     /// rule: a witness that asked the rule what it would return would agree with
     /// a rule that is never consulted, which is precisely how a flat 12 survived
     /// being called three tiers of separation.
+    /// The measured gap above one row, from the SAME prepared attributes the
+    /// screen uses (not from the spacing closure, which could disagree).
+    func qaGapAboveForChecks(_ index: Int) -> CGFloat? {
+        guard index > 0, attributes.indices.contains(index) else { return nil }
+        return attributes[index].frame.minY - attributes[index - 1].frame.maxY
+    }
+
     var qaRowGapsForChecks: [CGFloat] {
         guard attributes.count > 1 else { return [] }
         return (1..<attributes.count).map { index in

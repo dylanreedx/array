@@ -108,7 +108,7 @@ enum LabFixtures {
     static let altWorkspaceId = UUID(uuidString: "00000000-0000-0000-0000-0000000000A2")!
     static let selectedZoneId = UUID(uuidString: "00000000-0000-0000-0000-0000000000B1")!
     static let selectedTileId = UUID(uuidString: "00000000-0000-0000-0000-0000000000C1")!
-    static let epoch = Date(timeIntervalSince1970: 1_700_000_000)
+    nonisolated static let epoch = Date(timeIntervalSince1970: 1_700_000_000)
     /// 12 characters from `PairingAlphabet.symbols`, so the pairing card renders
     /// realistic — and identical — data on every draw.
     static let pairingCredential = "K7M2QRTX9BDH"
@@ -138,7 +138,12 @@ enum LabFixtures {
         let loadError: String?
     }
 
-    static let realClaudeTurn: RealClaudeTurnReplay = {
+    static let realClaudeTurn: RealClaudeTurnReplay = makeRealClaudeTurn()
+
+    /// Nonisolated on purpose: the builder touches only Sendable values and
+    /// bridges the store actor synchronously; a @MainActor initial-value
+    /// closure cannot legally mix the two isolations.
+    private nonisolated static func makeRealClaudeTurn() -> RealClaudeTurnReplay {
         let fixtureURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()          // App
             .deletingLastPathComponent()          // ContinuumRevived
@@ -205,13 +210,18 @@ enum LabFixtures {
             )
         }
 
-        // Fold the side channel into per-identity detail records exactly the
-        // way the host does: title from `.itemStarted`, argument fields and the
-        // start instant from `.toolDetail(.started)`, output/exitCode/end
-        // instant folded at `.itemCompleted` with the event's status. The
-        // interleave matters — observations fire during translate, so each
-        // line's new observations are consumed by that line's events.
-        var records: [AgentToolDetailKey: AgentToolDetailRecord] = [:]
+        // Fold the side channel into store operations exactly the way the host
+        // does: title from `.itemStarted`, argument fields and the start
+        // instant from `.toolDetail(.started)`, output/exitCode/end instant
+        // folded into ONE recordEnd at `.itemCompleted` with the event's
+        // status. The ops then run through a REAL `AgentToolDetailStore` —
+        // its sanitizer, its merge — so the review surface presents records
+        // production could have produced, not hand-authored ones.
+        enum StoreOp: Sendable {
+            case start(AgentToolDetailStart)
+            case end(AgentToolDetailEnd)
+        }
+        var ops: [StoreOp] = []
         var identityByItemID: [String: AgentToolDetailKey] = [:]
         var parked: [String: [AgentToolDetailObservation]] = [:]
         var currentTurnID: String?
@@ -242,37 +252,64 @@ enum LabFixtures {
                           let providerID = AgentToolDetailID(itemId) else { break }
                     let identity = AgentToolDetailKey(scope: scope, providerItemID: providerID)
                     identityByItemID[itemId] = identity
-                    var record = AgentToolDetailRecord(
-                        identity: identity, toolName: title ?? "Tool", updatedAt: epoch
-                    )
+                    ops.append(.start(AgentToolDetailStart(identity: identity, toolName: title ?? "Tool")))
                     for detail in parked[itemId] ?? [] where detail.phase == .started {
-                        record.toolName = detail.toolName ?? record.toolName
-                        record.arguments = detail.fields.map {
-                            AgentToolDetailArgument(
-                                key: $0.key, value: AgentToolDetailBoundedText(text: $0.value)
-                            )
-                        }
-                        record.startedAt = detail.observedAt
+                        ops.append(.start(AgentToolDetailStart(
+                            identity: identity,
+                            toolName: detail.toolName ?? title ?? "Tool",
+                            arguments: detail.fields.map { AgentToolDetailField(key: $0.key, value: $0.value) },
+                            startedAt: detail.observedAt
+                        )))
                     }
-                    records[identity] = record
                 case let .itemCompleted(_, itemId, _, status):
-                    guard let identity = identityByItemID[itemId],
-                          var record = records[identity] else { break }
-                    record.status = status == .failed ? .failed
-                        : (status == .declined ? .cancelled : .completed)
-                    for detail in parked[itemId] ?? [] where detail.phase == .ended {
-                        record.output = detail.outputPreview.map { AgentToolDetailBoundedText(text: $0) }
-                            ?? record.output
-                        record.exitCode = detail.exitCode ?? record.exitCode
-                        record.endedAt = detail.observedAt
-                    }
-                    records[identity] = record
+                    guard let identity = identityByItemID[itemId] else { break }
+                    let ended = (parked[itemId] ?? []).last { $0.phase == .ended }
+                    ops.append(.end(AgentToolDetailEnd(
+                        identity: identity,
+                        output: ended?.outputPreview,
+                        status: status == .failed ? .failed : (status == .declined ? .cancelled : .completed),
+                        exitCode: ended?.exitCode,
+                        endedAt: ended?.observedAt
+                    )))
                 default:
                     break
                 }
                 projection.ingest(event.withThreadId("thread-main"))
             }
         }
+
+        final class RecordsBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var value: [AgentToolDetailKey: AgentToolDetailRecord] = [:]
+            func set(_ records: [AgentToolDetailKey: AgentToolDetailRecord]) {
+                lock.withLock { value = records }
+            }
+            func get() -> [AgentToolDetailKey: AgentToolDetailRecord] {
+                lock.withLock { value }
+            }
+        }
+        let recordsBox = RecordsBox()
+        let storeEpoch = epoch
+        let storeOps = ops
+        let semaphore = DispatchSemaphore(value: 0)
+        // Bridging the actor synchronously is confined to fixture construction:
+        // the store runs on the global executor, never the main actor, so this
+        // wait cannot deadlock, and it is what lets a synchronous check render
+        // records the REAL sanitizer produced.
+        let store = AgentToolDetailStore(clock: { storeEpoch }, timeToLive: 3_600, limits: AgentToolDetailLimits())
+        Task.detached {
+            for op in storeOps {
+                switch op {
+                case .start(let start): _ = await store.recordStart(start)
+                case .end(let end): _ = await store.recordEnd(end)
+                }
+            }
+            let all = await store.allDetails()
+            recordsBox.set(Dictionary(uniqueKeysWithValues: all.map { ($0.identity, $0) }))
+            semaphore.signal()
+        }
+        semaphore.wait()
+
         let bindings = projection.document.entries.compactMap { entry -> (AgentNodeID, AgentToolDetailKey)? in
             guard case let .providerItem(provider, itemID?) = entry.provenance,
                   provider == "runtime",
@@ -282,11 +319,11 @@ enum LabFixtures {
         return RealClaudeTurnReplay(
             document: projection.document,
             observations: box.snapshot(),
-            toolDetails: records,
+            toolDetails: recordsBox.get(),
             entryBindings: bindings.map { (entryID: $0.0, identity: $0.1) },
             loadError: nil
         )
-    }()
+    }
 
     static func transcriptReviewDocument(_ state: AgentTranscriptReviewState) -> AgentDocument {
         if state == .realClaudeTurn {
@@ -597,13 +634,22 @@ enum LabFixtures {
                     ]),
                 ]
             }
+            // Two CONSECUTIVE user prompts (queued sends) close the fixture:
+            // the boundary between them is exactly what the first startsTurn
+            // rule suppressed (`.plans/45` S4.0).
+            var queuedFirst = entry("u4", role: .user, blocks: [paragraph("u4-t", [.text("Queued: also check the layout inset.")])])
+            queuedFirst.createdAt = epoch.addingTimeInterval(1_800)
+            var queuedSecond = entry("u5", role: .user, blocks: [paragraph("u5-t", [.text("Queued: and the boundary signature.")])])
+            queuedSecond.createdAt = epoch.addingTimeInterval(1_860)
             return AgentDocument(version: 1, entries:
                 turn(1, ask: "Where does the transcript decide row spacing?",
                      reply: "In AgentTranscriptLayout, as one flat value between every row.")
                 + turn(2, ask: "So a new turn looks the same as a new paragraph?",
                        reply: "Today, yes. That is the tier this milestone adds.")
                 + turn(3, ask: "Show me the boundary.",
-                       reply: "Between each of these three exchanges."))
+                       reply: "Between each of these three exchanges.")
+                + [queuedFirst, queuedSecond,
+                   entry("a4", role: .assistant, blocks: [paragraph("a4-t", [.text("Both queued prompts answered here.")])])])
         }
         return AgentDocument(version: 1, entries: [user, entry("assistant", role: .assistant, blocks: assistantBlocks)])
     }
@@ -1261,16 +1307,14 @@ final class AgentTranscriptReviewSurface: NSView {
 
     init(state: AgentTranscriptReviewState, size: NSSize, theme: TokenTheme) {
         self.state = state
-        // `.plans/45` S3 — the replayed state renders with the SAME host-local
-        // detail supply production has: a provider over records folded from the
-        // capture's real observations, bound per entry the way the tile binds.
-        let reviewDetails = state == .realClaudeTurn ? LabFixtures.realClaudeTurn.toolDetails : nil
-        transcript = AgentTranscriptListView(
-            renderContext: AgentRenderContext(
-                actions: .disabled, tokens: .transcript, appearance: theme
-            ),
-            toolDetailProvider: reviewDetails.map { records in { records[$0] } }
-        )
+        // `.plans/45` S3/S4 — the replayed state renders with the SAME
+        // host-local detail supply production has: records the REAL store's
+        // sanitizer produced from the capture's observations, seeded as the
+        // store snapshot (the trusted path production's async refresh fills),
+        // bound per entry the way the tile binds.
+        transcript = AgentTranscriptListView(renderContext: AgentRenderContext(
+            actions: .disabled, tokens: .transcript, appearance: theme
+        ))
         if state == .realClaudeTurn {
             for binding in LabFixtures.realClaudeTurn.entryBindings {
                 _ = transcript.bindToolDetailIdentity(binding.identity, to: binding.entryID)
@@ -1297,6 +1341,9 @@ final class AgentTranscriptReviewSurface: NSView {
             )
         } catch {
             renderError = error
+        }
+        if state == .realClaudeTurn {
+            transcript.seedStoreSanitizedToolDetails(LabFixtures.realClaudeTurn.toolDetails)
         }
         needsLayout = true
     }

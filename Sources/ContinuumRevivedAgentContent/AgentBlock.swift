@@ -101,6 +101,17 @@ public struct AgentToolCallPayload: Codable, Equatable, Sendable {
     /// host-local detail store. Deliberately excluded from CodingKeys: it is
     /// never document state and never crosses a sync boundary (I5).
     public var presentedTrailingDetailText: String?
+    /// `.plans/45` S4 — when the presented `name` becomes the action sentence,
+    /// the semantic tool name survives here for the icon, tooltip and AX
+    /// label. Presentation-only, excluded from CodingKeys like the field above.
+    public var presentedToolNameText: String?
+    /// `.plans/45` S4 — the store's bounded output preview for the expanded
+    /// pane, plus an honesty note ("Output truncated…" / "Redacted").
+    /// Presentation-only, excluded from CodingKeys: tool output NEVER enters
+    /// the semantic document (I5); this exists only on the ephemeral rendered
+    /// copy the host composes from `AgentToolDetailStore`.
+    public var presentedOutputText: String?
+    public var presentedOutputNote: String?
 
     private enum CodingKeys: String, CodingKey {
         case name, summary, arguments, status

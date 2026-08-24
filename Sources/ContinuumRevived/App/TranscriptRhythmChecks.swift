@@ -219,10 +219,13 @@ enum TranscriptRhythmChecks {
                 + "between all rows, so turn->turn is indistinguishable from paragraph->paragraph."
             )
         }
-        guard let widest = gaps.max(), let narrowest = gaps.min(), widest >= narrowest * 1.5 else {
+        // >= 2x, not 1.5x (`.plans/45` S4.0): 20-vs-12 passed the old floor and
+        // was still visually "a slightly bigger paragraph gap" — the exact look
+        // Dylan rejected. A token nudge cannot satisfy a doubling.
+        guard let widest = gaps.max(), let narrowest = gaps.min(), widest >= narrowest * 2 else {
             throw fail(
-                "turn separation: the widest gap (\(gaps.max() ?? 0)) is not meaningfully larger "
-                + "than the narrowest (\(gaps.min() ?? 0)); a turn boundary must read as a break, "
+                "turn separation: the widest gap (\(gaps.max() ?? 0)) is not at least twice "
+                + "the narrowest (\(gaps.min() ?? 0)); a turn boundary must read as a break, "
                 + "not as a slightly bigger paragraph gap"
             )
         }
@@ -254,18 +257,31 @@ enum TranscriptRhythmChecks {
         else {
             throw fail("turn separation: the fixture must carry both a stamped and an unstamped turn")
         }
-        list.qaHoverTurnForChecks(entryID: nil)
+        // Point-based (`.plans/45` S4.0): the old entryID QA bypassed the real
+        // mouseMoved hit-test and its coordinate conversion. These points come
+        // from the REAL turn-start geometry and run the real hit-test body.
+        _ = stamped
+        guard let stampedPoint = document.entries
+            .filter({ $0.createdAt != nil })
+            .compactMap({ list.qaTurnStartPointForChecks(entryID: $0.id) })
+            .first else {
+            throw fail("hover time: no stamped entry starts a turn in the fixture")
+        }
+        guard let unstampedPoint = list.qaTurnStartPointForChecks(entryID: unstamped.id) else {
+            throw fail("hover time: the unstamped turn produced no turn-start geometry")
+        }
+        list.qaHoverAtPointForChecks(NSPoint(x: -10_000, y: -10_000))
         guard !list.qaHoverTimeVisibleForChecks else {
             throw fail("hover time: visible with nothing hovered")
         }
-        list.qaHoverTurnForChecks(entryID: stamped.id)
+        list.qaHoverAtPointForChecks(stampedPoint)
         guard list.qaHoverTimeVisibleForChecks else {
             throw fail(
                 "hover time: hovering a turn that HAS a createdAt revealed nothing — the producer "
-                + "landed in T1 but the reveal is not reading it"
+                + "landed in T1 but the reveal is not reading it (or the hit-test/conversion broke)"
             )
         }
-        list.qaHoverTurnForChecks(entryID: unstamped.id)
+        list.qaHoverAtPointForChecks(unstampedPoint)
         guard !list.qaHoverTimeVisibleForChecks else {
             throw fail(
                 "hover time: a turn with NO createdAt revealed a time anyway. Every transcript "
@@ -273,7 +289,38 @@ enum TranscriptRhythmChecks {
                 + "timestamp on real history."
             )
         }
-        list.qaHoverTurnForChecks(entryID: nil)
+        list.qaHoverAtPointForChecks(NSPoint(x: -10_000, y: -10_000))
+
+        // Consecutive user prompts (queued sends) are distinct turns: the
+        // boundary between u4 and u5 exists. The first rule shipped with a
+        // previous-role clause that suppressed exactly this.
+        let userRowIndexes = list.qaUserRowIndexesForChecks
+        guard userRowIndexes.count >= 5 else {
+            throw fail("turn separation: the fixture must carry the queued consecutive prompts")
+        }
+        let consecutive = zip(userRowIndexes, userRowIndexes.dropFirst()).first { $1 == $0 + 1 }
+        guard let pair = consecutive else {
+            throw fail("turn separation: no consecutive user rows found in the queued-prompt fixture")
+        }
+        guard let queuedGap = layout.qaGapAboveForChecks(pair.1),
+              queuedGap >= AgentTranscriptLayout.interTurnSpacing * 0.9 else {
+            throw fail(
+                "turn separation: two consecutive user prompts share one visual turn — the "
+                + "boundary between queued sends is suppressed"
+            )
+        }
+
+        // The replayed REAL turn: exactly one boundary (its single exchange has
+        // one prompt), and no rule between the prompt and its own reply's tool
+        // rows.
+        let (realSurface, _) = try render(.realClaudeTurn)
+        let realRules = realSurface.transcript.qaTurnSeparatorCountForChecks
+        guard realRules == 0 else {
+            throw fail(
+                "turn separation: the replayed single-exchange turn painted \(realRules) rule(s); "
+                + "a prompt and its own reply are ONE turn"
+            )
+        }
     }
 
     // MARK: - T7
@@ -496,6 +543,40 @@ enum TranscriptRhythmChecks {
                 "real claude turn: no tool row shows a duration. Rendered rows: "
                 + "\(renderedToolText). The detail store already knows how to say "
                 + "\"Duration: Ns\"; nothing feeds or renders it."
+            )
+        }
+
+        // 4. The expanded pane (`.plans/45` S4.2): expanding the WebSearch row
+        //    must reveal the RESULT text through the command-output machinery
+        //    (real selection + copy), fed from the store — the document itself
+        //    carries no output (I5), so this can only pass through the
+        //    host-local presentation path.
+        let searchBinding = replay.entryBindings.first { binding in
+            replay.toolDetails[binding.identity]?.arguments
+                .contains { $0.value.text.localizedCaseInsensitiveContains("recent sports headline") } == true
+        }
+        guard let searchBinding,
+              let searchEntry = replay.document.entries.first(where: { $0.id == searchBinding.entryID }),
+              let searchBlockID = searchEntry.blocks.first(where: {
+                  if case .toolCall = $0.payload { return true } else { return false }
+              })?.id else {
+            throw fail("real claude turn: the WebSearch entry/binding is missing from the replay")
+        }
+        let (expandSurface, _) = try render(.realClaudeTurn)
+        let expandList = expandSurface.transcript
+        guard expandList.qaPerformToolDisclosureClick(for: searchBlockID) else {
+            throw fail("real claude turn: the WebSearch row offered no disclosure to expand")
+        }
+        expandList.layoutSubtreeIfNeeded()
+        expandList.collectionView.layoutSubtreeIfNeeded()
+        func descendants(in view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        let expandedTool = descendants(in: expandSurface)
+            .compactMap { $0 as? ToolCallView }
+            .first { !$0.outputScrollView.isHidden }
+        guard let expandedTool, expandedTool.outputTextView.string.count > 40 else {
+            throw fail(
+                "real claude turn: expanding the search row revealed no output pane — the "
+                + "result preview is in the store but never reaches the expanded presentation"
             )
         }
     }

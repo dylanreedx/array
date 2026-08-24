@@ -24,13 +24,19 @@ final class ToolCallRenderer: AgentBlockRendering {
             blockID: block.id,
             default: payload.status.agentToolDefaultExpanded
         )
-        return ToolCallView.measuredHeight(summary: payload.summary, width: width, expanded: expanded)
+        return ToolCallView.measuredHeight(
+            summary: payload.summary,
+            outputText: payload.presentedOutputText,
+            outputNote: payload.presentedOutputNote,
+            width: width,
+            expanded: expanded
+        )
     }
 
     func updateAccessibility(view: NSView, block: AgentBlock, context: AgentRenderContext) {
         guard let view = view as? ToolCallView,
               case let .toolCall(payload) = block.payload else { return }
-        view.applyAccessibility(name: payload.name, status: payload.status)
+        view.applyAccessibility(name: payload.presentedToolNameText ?? payload.name, status: payload.status)
     }
 }
 
@@ -45,7 +51,16 @@ final class ToolCallView: NSView {
     private(set) var titleLabel = NSTextField(labelWithString: "Tool")
     private(set) var statusLabel = NSTextField(labelWithString: "")
     private(set) var summaryLabel = NSTextField(wrappingLabelWithString: "")
+    /// `.plans/45` S4.2 — the expanded pane's output, reusing the command
+    /// output machinery (exact selection, dual-format copy) fed raw text from
+    /// the host-local store — never a `.commandOutput` block (I5).
+    private(set) var outputScrollView = NSScrollView(frame: .zero)
+    private(set) var outputTextView = CommandOutputTextView(frame: .zero)
+    private(set) var outputCopyButton = CommandOutputCopyButton(frame: .zero)
+    private(set) var outputNoteLabel = NSTextField(labelWithString: "")
     private(set) var isExpanded = false
+    private var outputText: String?
+    private var outputNote: String?
 
     private var blockID: AgentNodeID?
     private var disclosureText = ""
@@ -75,11 +90,25 @@ final class ToolCallView: NSView {
         summaryLabel.lineBreakMode = .byWordWrapping
         summaryLabel.isSelectable = true
 
+        outputScrollView.drawsBackground = false
+        outputScrollView.borderType = .noBorder
+        outputScrollView.hasVerticalScroller = true
+        outputScrollView.hasHorizontalScroller = true
+        outputScrollView.autohidesScrollers = true
+        outputScrollView.documentView = outputTextView
+        outputCopyButton.target = self
+        outputCopyButton.action = #selector(copyEntireOutput(_:))
+        outputNoteLabel.font = NSFont.token(.caption)
+        outputNoteLabel.lineBreakMode = .byTruncatingTail
+
         addSubview(disclosureButton)
         addSubview(iconView)
         addSubview(titleLabel)
         addSubview(statusLabel)
         addSubview(summaryLabel)
+        addSubview(outputScrollView)
+        addSubview(outputCopyButton)
+        addSubview(outputNoteLabel)
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
     }
@@ -99,8 +128,12 @@ final class ToolCallView: NSView {
             default: payload.status.agentToolDefaultExpanded
         )
         titleLabel.stringValue = Self.safeSingleLine(payload.name, fallback: "Tool")
+        // `.plans/45` S4 — the title is the action sentence; the tool NAME
+        // lives in the icon, the tooltip and the AX label.
+        let toolName = payload.presentedToolNameText ?? payload.name
         iconView.image = CanvasSymbolImage.image(
-            named: Self.symbolName(forToolNamed: payload.name))
+            named: Self.symbolName(forToolNamed: toolName))
+        toolTip = payload.presentedToolNameText.map { Self.safeSingleLine($0, fallback: "Tool") }
         let presentation = payload.status.agentToolStatusPresentation
         // `.plans/45` S3/S4 — the trailing column reads "2.1s ✓" when the
         // host-local detail knows the duration; the wordy status label remains
@@ -122,16 +155,21 @@ final class ToolCallView: NSView {
             disclosureText = lines.joined(separator: "\n")
         }
         compactSummary = lines.first ?? ""
-        hasDisclosureDetail = lines.count > 1
+        outputText = payload.presentedOutputText?.isEmpty == false ? payload.presentedOutputText : nil
+        outputNote = payload.presentedOutputNote
+        hasDisclosureDetail = lines.count > 1 || outputText != nil
         if !hasDisclosureDetail { isExpanded = false }
         summaryLabel.stringValue = isExpanded ? disclosureText : compactSummary
         summaryLabel.maximumNumberOfLines = isExpanded ? 12 : 1
         summaryLabel.isHidden = summaryLabel.stringValue.isEmpty
+        outputTextView.apply(text: outputText ?? "", context: context)
+        outputNoteLabel.stringValue = outputNote ?? ""
+        syncOutputPaneVisibility()
         disclosureButton.isHidden = !hasDisclosureDetail
         disclosureButton.isEnabled = hasDisclosureDetail
         disclosureButton.apply(expanded: isExpanded, title: titleLabel.stringValue)
         identifier = NSUserInterfaceItemIdentifier("agent.toolCall.\(blockID.rawValue)")
-        applyAccessibility(name: titleLabel.stringValue, status: payload.status)
+        applyAccessibility(name: toolName, status: payload.status)
         applyTokens()
         needsLayout = true
     }
@@ -185,11 +223,42 @@ final class ToolCallView: NSView {
             height: titleIntrinsic.height
         ))
         let detailY = Self.rowHeight
+        let outputVisible = !outputScrollView.isHidden
+        let summaryHeight: CGFloat
+        if outputVisible {
+            summaryHeight = summaryLabel.isHidden ? 0 : Self.measuredSummaryHeight(
+                summaryLabel.stringValue, width: bounds.width, expanded: isExpanded)
+        } else {
+            summaryHeight = max(0, bounds.height - detailY - Self.detailBottomInset)
+        }
         place(summaryLabel, NSRect(
             x: inset, y: detailY,
             width: max(1, bounds.width - inset * 2),
-            height: max(0, bounds.height - detailY - Self.detailBottomInset)
+            height: summaryHeight
         ))
+        if outputVisible {
+            var y = summaryLabel.frame.maxY + CGFloat(Space.xs)
+            let copyWidth = outputCopyButton.intrinsicContentSize.width
+            place(outputCopyButton, NSRect(
+                x: max(inset, bounds.maxX - inset - copyWidth), y: y,
+                width: copyWidth, height: CGFloat(Space.xxl)
+            ))
+            if !outputNoteLabel.isHidden {
+                let noteSize = outputNoteLabel.intrinsicContentSize
+                place(outputNoteLabel, NSRect(
+                    x: inset, y: y + (CGFloat(Space.xxl) - noteSize.height) / 2,
+                    width: max(1, outputCopyButton.frame.minX - inset - CGFloat(Space.s)),
+                    height: noteSize.height
+                ))
+            }
+            y = outputCopyButton.frame.maxY + CGFloat(Space.xs)
+            place(outputScrollView, NSRect(
+                x: inset, y: y,
+                width: max(1, bounds.width - inset * 2),
+                height: max(0, bounds.height - y - Self.detailBottomInset)
+            ))
+            outputTextView.sizeDocument(toFit: outputScrollView.contentSize)
+        }
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -219,6 +288,9 @@ final class ToolCallView: NSView {
             : context.tokens.secondaryText.color.nsColor(for: theme)
         disclosureButton.contentTintColor = context.tokens.secondaryText.color.nsColor(for: theme)
         iconView.contentTintColor = context.tokens.secondaryText.color.nsColor(for: theme)
+        outputNoteLabel.textColor = context.tokens.secondaryText.color.nsColor(for: theme)
+        outputCopyButton.contentTintColor = context.tokens.secondaryText.color.nsColor(for: theme)
+        outputTextView.applyTheme(theme)
     }
 
     /// `.plans/45` T11 — one glyph per kind of work, instead of one wrench for
@@ -246,9 +318,35 @@ final class ToolCallView: NSView {
         return fallback
     }
 
-    static func measuredHeight(summary: String?, width: CGFloat, expanded: Bool) -> CGFloat {
-        guard let summary = summary?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !summary.isEmpty else { return rowHeight }
+    static let maximumOutputHeight: CGFloat = 240
+
+    static func measuredHeight(
+        summary: String?,
+        outputText: String? = nil,
+        outputNote: String? = nil,
+        width: CGFloat,
+        expanded: Bool
+    ) -> CGFloat {
+        _ = outputNote
+        var height: CGFloat
+        if let summary = summary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
+            height = rowHeight + measuredSummaryHeight(summary, width: width, expanded: expanded) + detailBottomInset
+        } else {
+            height = rowHeight
+        }
+        // `.plans/45` S4.2 — the expanded output pane: copy row + bounded text.
+        if expanded, let outputText, !outputText.isEmpty {
+            if height == rowHeight { height += detailBottomInset }
+            let outputHeight = min(
+                maximumOutputHeight,
+                max(CommandOutputView.minimumOutputHeight, CommandOutputTextView.measuredSize(outputText).height)
+            )
+            height += CGFloat(Space.xs) + CGFloat(Space.xxl) + CGFloat(Space.xs) + outputHeight
+        }
+        return height
+    }
+
+    static func measuredSummaryHeight(_ summary: String, width: CGFloat, expanded: Bool) -> CGFloat {
         let lines = summary.split(whereSeparator: { $0.isNewline }).map(String.init)
         let measuredText = expanded && lines.count > 1 ? summary : (lines.first ?? "")
         let available = max(1, width - horizontalInset * 2)
@@ -259,7 +357,7 @@ final class ToolCallView: NSView {
         )
         let lineHeight = CGFloat(Metrics.lineHeight(for: .body))
         let lineLimit: CGFloat = expanded ? 12 : 1
-        return rowHeight + min(ceil(rect.height), lineHeight * lineLimit) + detailBottomInset
+        return min(ceil(rect.height), lineHeight * lineLimit)
     }
 
     @objc private func toggleDisclosure(_ sender: Any?) {
@@ -269,10 +367,23 @@ final class ToolCallView: NSView {
         summaryLabel.stringValue = isExpanded ? disclosureText : compactSummary
         summaryLabel.maximumNumberOfLines = isExpanded ? 12 : 1
         summaryLabel.isHidden = summaryLabel.stringValue.isEmpty
+        syncOutputPaneVisibility()
         disclosureButton.apply(expanded: isExpanded, title: titleLabel.stringValue)
         applyAccessibility(name: titleLabel.stringValue, status: status)
         invalidateIntrinsicContentSize()
         needsLayout = true
+    }
+
+    private func syncOutputPaneVisibility() {
+        let visible = isExpanded && outputText != nil
+        outputScrollView.isHidden = !visible
+        outputCopyButton.isHidden = !visible
+        outputNoteLabel.isHidden = !visible || (outputNote ?? "").isEmpty
+    }
+
+    @objc private func copyEntireOutput(_ sender: Any?) {
+        outputTextView.writeEntireOutput(to: .general)
+        if let blockID { context.actions.perform(.copy(blockID: blockID)) }
     }
 
     private static func safeSingleLine(_ value: String, fallback: String) -> String {
