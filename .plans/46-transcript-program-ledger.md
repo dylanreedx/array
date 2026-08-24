@@ -1183,3 +1183,130 @@ coalescing cases), `check-agent-tile-ux-program.sh`,
 **Why this had to come first.** M3 adds a diff parse and a body to this path and M6
 adds up to 16 concurrent child streams. Building either on a budget 6× over is how
 the app becomes unusable and subagents get blamed for it.
+
+---
+
+## Probes — 2026-08-24 (M0)
+
+Three probes ran in throwaway `/tmp` dirs. No user dotfile was touched, no tmux
+server was contacted, and every capture below is scrubbed.
+
+### C1 — a real claude subagent stream (committed as a fixture)
+
+`Sources/ContinuumRevivedCoreChecks/Fixtures/claude-subagent-turn.jsonl`, 55
+lines, captured with production argv **plus** `--forward-subagent-text`:
+
+```
+claude -p --output-format stream-json --verbose --include-partial-messages \
+       --forward-subagent-text "<prompt>"
+```
+
+Every open question C0 rested on is now answered by evidence rather than by
+Anthropic's docs:
+
+- **`parent_tool_use_id` is non-null on 4 frames**, all carrying ONE value, and
+  that value is exactly the `id` of the parent's `tool_use` block whose `name` is
+  `Agent`. Stable across every frame of that child. The four are the child's own
+  `user` text, `assistant` tool_use, `user` tool_result and `assistant` text — so
+  with the flag on, a child transcript is complete, not tool-calls-only.
+- **`input` carries `subagent_type`, `prompt`, `description` and
+  `run_in_background`**, and the content block carries a sibling
+  `caller: {"type":"direct"}`. C7 publishes `subagent_type` (a role id) and never
+  `prompt`.
+- **The terminal `tool_result` carries a `tool_use_result` sidecar** with
+  `agentId`, `agentType`, `resolvedModel`, `totalDurationMs`, `totalTokens`, a
+  full `usage` breakdown and `toolStats`. That is where a child's isolated cost
+  lives.
+- **The `result` frame leaks child cost into the parent.** Its `modelUsage` is a
+  COMBINED parent+child total per model, so a consumer that treats `result` as
+  "this turn's parent cost" double-counts the subagent. `case "result"` at
+  `ClaudeEventTranslator.swift:102` is the one unfiltered case; C7 owes it a
+  decision, and the honest source for a child's cost is the sidecar above.
+- **`capabilities`** = `["interrupt_receipt_v1", "interrupt_cancel_queued_v1",
+  "msg_lifecycle_v1"]`. Feature-detect from this, never from a version string.
+- **A `system/task_started` frame carries `spawn_depth`**, so Claude Code models
+  depth explicitly and Array can read it rather than infer it.
+- Weakness to respect: depth 1 only, one child, so the fixture cannot witness a
+  nested `parent_tool_use_id` chain or two siblings of one parent call.
+
+### B5.0 — does a headless CLI interpret a leading slash?
+
+The answer differs per harness, which settles B5's design: the classifier must be
+per-harness, and the prose fallback is a REGRESSION on two of three.
+
+| harness | verdict | evidence |
+|---|---|---|
+| claude 2.1.241 | **INTERPRETS** | `/help`, `/status`, `/compact` return `model: "<synthetic>"` with `input_tokens: 0`, `output_tokens: 0`, `total_cost_usd: 0` — no model call. `/definitelynotacommand` → `"Unknown command: …"`. Several commands answer `"… isn't available in this environment."` |
+| codex 0.148.0 | **PASSES AS PROSE** | a real turn: 113,485 input / 654 output tokens, the model ran web searches and answered conversationally about what it can help with |
+| pi 0.84.1 | **PASSES AS PROSE** | a real turn, real cost, tool calls investigating "what is pi", conversational reply |
+
+So Array's current serialize-and-send costs a codex or pi user a paid turn and a
+wrong answer for every slash command they type. It is not a neutral fallback.
+claude's own refusals (`/help`, `/status`, `/compact` in `-p`) must also not be
+presented as working.
+
+Flags confirmed verbatim in `claude --help` on 2.1.241: `--forward-subagent-text`
+(documented as "only works with --print and --output-format=stream-json"),
+`--agents <json>`, `--bare`, `--fork-session`, `--input-format <text|stream-json>`.
+`codex app-server --help` self-labels `[experimental]` in its first line and
+carries `daemon`, `proxy`, `generate-ts`, `generate-json-schema` subcommands.
+`pi --help` documents `--mode <text|json|rpc>` and nothing further about rpc.
+
+### pi rpc — and a correction to the data-loss story
+
+The important finding **overturns the framing in `.plans/48` §4.2**. pi's
+persistence is not a property of the mode or of the signal handler. It is
+`SessionManager._persist()` (`session-manager.js:717-751`), shared by json and rpc
+alike, and it is gated on a watermark:
+
+> until a session's file entries contain at least one prior **assistant** message,
+> every completed entry is held in memory only and nothing is written to disk —
+> not even the session file. Once the session has ever produced one assistant
+> message, every subsequent completed message is written with a **synchronous**
+> `appendFileSync`, inline, before the event even reaches stdout.
+
+Measured: a fresh rpc session signalled right after the `prompt` ack exits 143
+with **no session file at all** — identical to one-shot. A session that already
+had one assistant message kept every new message on disk under both SIGTERM and
+SIGINT, and resumed cleanly afterwards.
+
+Also measured: **rpc registers handlers for SIGTERM and SIGHUP only**. SIGINT
+kills it raw, with no `dispose()`.
+
+Consequences for M4 and for B1:
+
+1. **B1's interim notice must be NARROWED, not deleted at M4.** The exposure is
+   the first turn of a brand-new session, in both modes. A long-lived rpc session
+   crosses the watermark once, early, and then loses at most the single in-flight
+   message.
+2. Array must not expect SIGINT to clean anything up in rpc mode.
+3. `abort` is awaited and answers `{"type":"response","command":"abort","success":true}`;
+   the process stays healthy and accepts the next `prompt` on the same connection.
+4. `steer` is documented in `agent-session.js:986` as delivered *after* the
+   current assistant turn finishes executing its tool calls, before the next LLM
+   call — so it is turn-boundary steering, not mid-tool interruption. Do not
+   promise the latter in the UI.
+5. **The event stream really is the same function.** Both `modes/print-mode.js`
+   and `modes/rpc/rpc-mode.js` import `toJsonEvent` from `modes/json-event.js`.
+   Live diff of one prompt through both modes: identical types and identical key
+   sets. rpc adds two protocol-only frame types, `response` and
+   `extension_ui_request`, and omits print-mode's `session` header record (the
+   same data is reachable via `get_state`). **`PiEventTranslator` needs exactly
+   one change: ignore those two new top-level frame types.**
+6. The vocabulary is 31 commands, not 32: `prompt steer follow_up abort
+   new_session get_state set_model cycle_model get_available_models
+   set_thinking_level cycle_thinking_level get_available_thinking_levels
+   set_steering_mode set_follow_up_mode compact set_auto_compaction set_auto_retry
+   abort_retry bash abort_bash get_session_stats export_html switch_session fork
+   clone get_fork_messages get_entries get_tree get_last_assistant_text
+   set_session_name get_messages get_commands`. Note `get_commands` returns the
+   session's SLASH commands, not this vocabulary.
+7. `RpcSessionState` = `{model?, thinkingLevel, isStreaming, isCompacting,
+   steeringMode, followUpMode, sessionFile?, sessionId, sessionName?,
+   autoCompactionEnabled, messageCount, pendingMessageCount}`.
+
+Caveat on what was measurable: this account currently returns an immediate 400
+("Third-party apps now draw from extra usage, not plan limits") for pi model
+calls, so multi-second tool-use turns could not be driven. Q1 and Q2 were
+measured around that with a preflight-ack race and with resumed sessions; Q3 is
+source-read.
