@@ -430,12 +430,43 @@ public struct AgentTranscriptProjection: Sendable {
         }
     }
 
+    /// "" unless joining these two would fuse markup.
+    ///
+    /// Only a WHOLE, well-formed reasoning chunk earns a separator — one that
+    /// both opens and closes its own emphasis ("**Clarifying the date**"), or a
+    /// heading line. A token stream must never gain one: an assistant stream
+    /// legitimately sends a bare `**` to CLOSE a run it opened 5,000 deltas
+    /// earlier, and separating there would corrupt the source. The projection
+    /// checks stream exactly that case, and caught the first version of this.
+    static func separatorBeforeDelta(
+        _ delta: String,
+        tail: String,
+        kind: ContentStreamKind
+    ) -> String {
+        guard kind == .reasoning, let last = tail.last, !last.isNewline else { return "" }
+        let trimmed = delta.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > 4 else { return "" }
+        let isWholeEmphasis = (trimmed.hasPrefix("**") && trimmed.hasSuffix("**"))
+            || (trimmed.hasPrefix("__") && trimmed.hasSuffix("__"))
+        let isHeading = trimmed.hasPrefix("#")
+        return isWholeEmphasis || isHeading ? "\n\n" : ""
+    }
+
     private mutating func markupMutations(
         turnID: String,
         kind: ContentStreamKind,
         delta: String
     ) -> [AgentDocumentMutation] {
         if openStream?.turnID == turnID, openStream?.kind == kind {
+            // `.plans/45` — providers that emit a WHOLE reasoning item per
+            // frame (codex, and pi through its codex provider) hand us
+            // "**Planning sports updates**" and then "**Clarifying the date**"
+            // with no separator, so the buffer joined them into
+            // "...Aug 21****Clarifying...": four literal asterisks and one
+            // run-together line. A block boundary between two emphasis runs is
+            // the honest reading of two separate thoughts.
+            openStream!.buffer.append(
+                Self.separatorBeforeDelta(delta, tail: openStream!.buffer.source, kind: kind))
             openStream!.buffer.append(delta)
             openStream!.scheduler.requestParse()
             return scheduledMarkupMutationsForOpenStream()

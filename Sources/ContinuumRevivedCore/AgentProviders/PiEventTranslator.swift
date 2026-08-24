@@ -350,19 +350,29 @@ public struct PiEventTranslator {
             else { return nil }
             return trimmed
         }
-        switch toolName.lowercased() {
-        case "web_search", "websearch", "web", "search":
-            return string("query").map { [(key: "query", value: $0)] } ?? []
-        case "grep", "find", "glob":
-            return string("pattern").map { [(key: "pattern", value: $0)] } ?? []
-        case "read", "cat", "edit", "write", "multiedit", "apply_patch", "applypatch", "ls":
-            let path = string("path") ?? string("file") ?? string("file_path")
-            return path.map { [(key: "file", value: URL(fileURLWithPath: $0).lastPathComponent)] } ?? []
-        default:
-            // bash/shell/run/exec and unknown tools: no fields. The command
-            // body and unknown arg schemas stay opaque.
-            return []
+        // KEY-driven, deliberately. The first cut switched on the tool NAME and
+        // returned nothing for names it did not recognise, so a pi `search`
+        // whose args used any other shape rendered as the bare word "search"
+        // with no query and nothing to expand. The privacy rule is about KEYS,
+        // not names: these five keys may cross for ANY tool, and everything
+        // else — command bodies, prompts, unknown schemas — never does.
+        var fields: [(key: String, value: String)] = []
+        if let query = string("query") ?? string("q") ?? string("search_query") {
+            fields.append((key: "query", value: query))
         }
+        if let pattern = string("pattern") ?? string("regex") {
+            fields.append((key: "pattern", value: pattern))
+        }
+        if let url = string("url") {
+            fields.append((key: "url", value: url))
+        }
+        if let path = string("path") ?? string("file") ?? string("file_path") {
+            fields.append((key: "file", value: URL(fileURLWithPath: path).lastPathComponent))
+        }
+        if let description = string("description") {
+            fields.append((key: "description", value: description))
+        }
+        return fields
     }
 
     /// A bounded preview of `result.content[].text`. Non-text blocks and

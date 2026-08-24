@@ -1451,7 +1451,10 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         guard let start = entry.createdAt,
               let next = nextEntryDateByEntryID[entry.id] else { return nil }
         let interval = next.timeIntervalSince(start)
-        return interval > 0 ? interval : nil
+        // Providers that deliver a whole reasoning item in one frame stamp the
+        // reasoning entry and the next entry within the same instant, so the
+        // span is real but useless — and "Thought for 0s" reads as a bug.
+        return interval >= 1 ? interval : nil
     }
 
     private func configureTurnChrome() {

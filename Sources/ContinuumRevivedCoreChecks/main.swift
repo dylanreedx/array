@@ -199,6 +199,7 @@ if CommandLine.arguments.contains("--local-transcript-node-check") {
 if CommandLine.arguments.contains("--agent-transcript-compatibility-check") {
     runAgentTranscriptCompatibilityChecks()
     runTurnEndSweepChecks()
+    runReasoningEmphasisJoinChecks()
     Foundation.exit(0)
 }
 
@@ -11561,6 +11562,7 @@ runAgentTranscriptFixtureChecks()
 // document is migrated against.
 runAgentTranscriptCompatibilityChecks()
 runTurnEndSweepChecks()
+runReasoningEmphasisJoinChecks()
 
 // Ticket: docs/38-tickets/91-agent-tile-ux/P1.9-card-compatibility-projection.md —
 // the temporary semantic-document → legacy-card adapter and its one-way

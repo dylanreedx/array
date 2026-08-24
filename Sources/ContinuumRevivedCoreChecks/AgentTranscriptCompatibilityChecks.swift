@@ -516,6 +516,44 @@ private final class DeterministicCompatibilityClock: @unchecked Sendable {
 /// replayed TRUNCATED before the final tool_result, then the turn completes
 /// as interrupted: no block may remain in-progress, and the swept tool must
 /// read interrupted. RED before the sweep existed; teeth: revert it.
+/// `.plans/45` — the reasoning emphasis join. Two whole-item reasoning frames
+/// used to fuse into "...Aug 21****Clarifying..." — four literal asterisks and
+/// a lost boundary, which is exactly what Dylan photographed.
+func runReasoningEmphasisJoinChecks() {
+    var translator = CodexEventTranslator(runToken: "join", now: { Date(timeIntervalSince1970: 0) })
+    var projection = AgentTranscriptProjection(threadId: "join-thread", monotonicNow: { 0 })
+    for line in [
+        #"{"type":"thread.started","thread_id":"019fe980-21f0-7df1-b2a0-49d7839c7937"}"#,
+        #"{"type":"turn.started"}"#,
+        #"{"type":"item.completed","item":{"id":"r1","type":"reasoning","text":"**Planning sports updates for Aug 21**"}}"#,
+        #"{"type":"item.completed","item":{"id":"r2","type":"reasoning","text":"**Clarifying latest sports date**"}}"#,
+        #"{"type":"item.completed","item":{"id":"r3","type":"reasoning","text":"**Compiling concise headlines**"}}"#,
+    ] {
+        for event in translator.translate(line: line) {
+            projection.ingest(event.withThreadId("join-thread"))
+        }
+    }
+    _ = projection.flushPendingStreamingMarkup()
+    let sources = projection.compatibilityMarkupSourcesByEntryID.values.joined(separator: "\n")
+    expect(!sources.contains("****"),
+           "reasoning join: two whole-item reasoning frames fused into four literal asterisks: \(sources.prefix(160))")
+    expect(sources.contains("Aug 21") && sources.contains("Clarifying"),
+           "reasoning join: the separator dropped content: \(sources.prefix(160))")
+    // A PARTIAL delta stream must NOT gain separators — that would break word
+    // joins mid-sentence for claude/pi thinking_delta.
+    var partial = AgentTranscriptProjection(threadId: "join-thread", monotonicNow: { 0 })
+    for delta in ["Let me ", "check the ", "deferred tools"] {
+        partial.ingest(.contentDelta(
+            threadId: "join-thread", turnId: "t1", streamKind: .reasoning, delta: delta))
+    }
+    _ = partial.flushPendingStreamingMarkup()
+    let joined = partial.compatibilityMarkupSourcesByEntryID.values.joined()
+    expect(joined.contains("Let me check the deferred tools"),
+           "reasoning join: a partial delta stream must join verbatim, got \(joined)")
+
+    print("Reasoning emphasis-join checks passed: whole-item frames separate, partial deltas join verbatim")
+}
+
 func runTurnEndSweepChecks() {
     let fixtureURL = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()

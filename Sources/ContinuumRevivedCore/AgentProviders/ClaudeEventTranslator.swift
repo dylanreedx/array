@@ -344,21 +344,20 @@ public struct ClaudeEventTranslator {
             else { return nil }
             return trimmed
         }
-        switch toolName.lowercased() {
-        case "websearch", "toolsearch":
-            return string("query").map { [(key: "query", value: $0)] } ?? []
-        case "webfetch":
-            return string("url").map { [(key: "url", value: $0)] } ?? []
-        case "grep", "glob":
-            return string("pattern").map { [(key: "pattern", value: $0)] } ?? []
-        case "read", "edit", "write", "multiedit", "notebookedit":
-            let path = string("file_path") ?? string("notebook_path") ?? string("path")
-            return path.map { [(key: "file", value: URL(fileURLWithPath: $0).lastPathComponent)] } ?? []
-        case "bash", "task":
-            return string("description").map { [(key: "description", value: $0)] } ?? []
-        default:
-            return []
+        // KEY-driven for the same reason pi's is: a tool name this switch has
+        // never heard of still deserves its query shown, and the privacy rule
+        // is about which KEYS may cross — never `command`, never a prompt.
+        var fields: [(key: String, value: String)] = []
+        if let query = string("query") { fields.append((key: "query", value: query)) }
+        if let pattern = string("pattern") { fields.append((key: "pattern", value: pattern)) }
+        if let url = string("url") { fields.append((key: "url", value: url)) }
+        if let path = string("file_path") ?? string("notebook_path") ?? string("path") {
+            fields.append((key: "file", value: URL(fileURLWithPath: path).lastPathComponent))
         }
+        if let description = string("description") {
+            fields.append((key: "description", value: description))
+        }
+        return fields
     }
 
     /// A bounded plain-text preview of a `tool_result`'s content: the string
