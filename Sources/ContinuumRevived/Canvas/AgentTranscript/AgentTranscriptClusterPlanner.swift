@@ -86,8 +86,16 @@ enum AgentTranscriptClusterPlanner {
             if let liveIndex {
                 // Live run: everything before the first live member folds under
                 // an "N earlier steps" header; the live rows render plain.
+                //
+                // Threshold 3, not 1 (2026-08-24). Folding a single completed
+                // row meant that every time tool k finished and tool k+1 went
+                // live, the row the reader was looking at was DELETED and
+                // replaced by "1 earlier step" — one hard shift per tool call,
+                // mid-read. Keeping the last couple of steps visible is what
+                // makes a running turn followable; the fold is for the tail of
+                // a long run, not for its second entry.
                 let earlier = Array(run[..<liveIndex])
-                if earlier.count >= 1 {
+                if earlier.count >= 3 {
                     items.append(.header(Header(
                         id: headerID(forFirstMember: facts[earlier[0]].id),
                         memberIndexes: earlier,

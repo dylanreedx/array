@@ -860,3 +860,49 @@ PRODUCTION model. Teeth: restoring the nil default flips it.
 The pattern worth keeping: three of these six defects were found by opening a
 PNG and looking, and one by printing internal geometry. The legs were green
 for all of them.
+
+## Stability pass (the flicker's real causes), 2026-08-24
+
+Dylan: "the transcript is also super buggy, hard to read and keep track of the
+responses, some flickering... Codex is so smooth." An investigation traced the
+mechanisms before anything was animated. Four landed; the animation itself is
+NOT done (see the open list below).
+
+1. **The live fold was deleting the row under the reader.** My own S4.3 bug:
+   the live branch folded when `earlier.count >= 1`, and the `tailStreaming`
+   guard sits AFTER that branch so it never applied to a live run. Every time
+   tool k completed and tool k+1 went live, the row being read was removed and
+   replaced by "1 earlier step" — one hard shift per tool call, mid-turn, with
+   `animatingDifferences: false`. Threshold is now 3.
+2. **The fold decision keyed on a boolean that flips several times per turn.**
+   `tailStreaming` was the thinking indicator's visibility, and the indicator
+   hides whenever an assistant/reasoning entry is open and returns between
+   streams — so the last turn's runs folded and unfolded with it. Replaced by
+   an explicit `setTurnInFlight(_:)`, written once per turn boundary by the
+   tile (turnStarted / turnCompleted / runtimeError / optimistic send /
+   refusal).
+3. **The tail path re-applied the snapshot unconditionally**, bypassing the
+   identity guard `applyUnscrolled` has, and was not behind the 30Hz
+   scheduler — a full re-prepare per indicator flip. It now uses the same
+   guard, with the tail's own id folded into the identity so both paths agree.
+4. **Every apply scheduled a tool-detail refresh**, which invalidated the
+   measurement cache for EVERY tool row — a second, ungated geometry mutation
+   per 30Hz apply, one main-thread hop out of phase with the coalesced one.
+   Now it refreshes only when the set of bound identities changes, and
+   invalidates only the blocks whose store `updatedAt` actually moved.
+   (Dropping it outright broke `--tool-detail-check`: a path that binds an
+   identity and applies a document with NO runtime events — a restored tile,
+   and that probe — has no other trigger. Caught and fixed before commit.)
+
+Not yet done, in the recommended order: the actual motion (implicit
+`NSAnimationContext` at the house's 0.14s/easeOut over a final model state, so
+every synchronous count/geometry gate still reads settled values), a
+reduce-motion provider in the injected shape the sidebar uses, and
+`updateRenderContext` wrapping itself in `applyPreservingReaderAnchor` (the one
+path with no anchor policy at all).
+
+Gates that constrain the motion work, for whoever picks it up:
+`qaVisualApplyCount == 1`, `qaLastInvalidatedTopLevelCount == 1`,
+prepare-pass delta ≤ 3 over 5,000 deltas, anchor restores within 0.5pt, and
+`animatingDifferences` must stay false (the diffable apply would go async and
+break the synchronous cluster assertions).

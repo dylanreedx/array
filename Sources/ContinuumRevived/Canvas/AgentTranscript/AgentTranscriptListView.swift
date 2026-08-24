@@ -221,6 +221,14 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     private var tailThinkingIndicatorIsVisible = false
     /// The tail row is showing a settled "Worked for Ns" (gyro hidden).
     private var tailIsSettled = false
+    /// Whether the newest turn is still producing output.
+    ///
+    /// The fold decision USED to key on the thinking indicator's visibility —
+    /// but that flips several times inside one turn (it hides whenever an
+    /// assistant/reasoning entry is open and returns between streams), so the
+    /// last turn's tool runs folded and unfolded with it. This is set once per
+    /// turn boundary instead.
+    private var turnIsInFlight = false
     /// Duration is an optional host-attested presentation input. The current
     /// transcript model has no duration field, so the production default is nil
     /// rather than a locally inferred or fabricated clock.
@@ -251,6 +259,10 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// Rows that belong to an EXPANDED cluster — they render indented behind a
     /// rail so the group is still legible once opened.
     private var clusterMemberIDs: Set<AgentNodeID> = []
+    /// The store `updatedAt` last presented per tool block, so a refresh can
+    /// invalidate only the rows whose detail actually moved.
+    private var lastPresentedToolDetailRevisions: [AgentNodeID: Date] = [:]
+    private var lastRefreshedToolIdentities: Set<AgentToolDetailKey> = []
     private var lastAppliedDisplayIDs: [AgentNodeID]?
     private var entryDatesByID: [AgentNodeID: Date?] = [:]
     private var nextEntryDateByEntryID: [AgentNodeID: Date] = [:]
@@ -892,7 +904,18 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         entryIndexByID = flattened.entryIndexByID
         appliedDocument = document
         renderingError = nil
-        scheduleToolDetailRefresh()
+        // Refresh only when the set of BOUND tool identities changed (2026-08-24).
+        // This used to run on every apply, scheduling a second ungated geometry
+        // mutation per 30Hz apply — a main-thread hop out of phase with the one
+        // the scheduler had just coalesced, invalidating every tool row's
+        // measurement. It cannot simply be dropped: a path that binds an
+        // identity and applies a document WITHOUT runtime events (a restored
+        // tile, and the tool-detail probe) has no other trigger.
+        let boundIdentities = Set(toolDetailIDByBlockID.values)
+        if boundIdentities != lastRefreshedToolIdentities {
+            lastRefreshedToolIdentities = boundIdentities
+            scheduleToolDetailRefresh()
+        }
 
         // Fault injection used only by the deterministic negative witness. It
         // recreates the forbidden permanent-stack architecture directly: one
@@ -942,10 +965,11 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
 
         _ = newIDs
         _ = oldIDs
-        let displayChanged = lastAppliedDisplayIDs != displayIDs
+        let identity = displayIDs + (tailThinkingIndicatorIsVisible ? [tailThinkingIndicatorID] : [])
+        let displayChanged = lastAppliedDisplayIDs != identity
         if displayChanged || appliedVersion == nil {
             dataSource.apply(snapshot, animatingDifferences: false)
-            lastAppliedDisplayIDs = displayIDs
+            lastAppliedDisplayIDs = identity
         }
         // AppKit's snapshot reloadItems replaces NSCollectionViewItem instances.
         // For a content-only patch the snapshot is unchanged and is not re-applied;
@@ -986,6 +1010,16 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// The selected production thinking indicator is transcript-owned, not part
     /// of the compact status row. It is a tail decoration so the status/composer
     /// region retains its measured height and accessibility children.
+    /// One call per turn boundary from the tile. Distinct from the indicator,
+    /// which is a presentation detail of the same turn.
+    func setTurnInFlight(_ inFlight: Bool) {
+        guard turnIsInFlight != inFlight else { return }
+        turnIsInFlight = inFlight
+        applyTailVisibilityWithScrollPreservation()
+    }
+
+    var qaTurnIsInFlightForChecks: Bool { turnIsInFlight }
+
     func setThinkingIndicatorVisible(_ visible: Bool) {
         let wasSettled = tailIsSettled
         tailIsSettled = false
@@ -1065,14 +1099,20 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 // The streaming flag is a fold input: the last turn's settled
                 // run folds only when the turn does (S4.3).
                 rebuildDisplayProjection()
+                // Same identity guard `applyUnscrolled` uses (the tail's own id
+                // is part of the identity here, since its presence changes the
+                // item list). Re-applying an unchanged snapshot on every
+                // indicator flip was a full re-prepare and a visible cut.
+                let identity = displayIDs + (tailThinkingIndicatorIsVisible ? [tailThinkingIndicatorID] : [])
+                guard lastAppliedDisplayIDs != identity else {
+                    layoutSubtreeIfNeeded()
+                    return
+                }
                 var snapshot = NSDiffableDataSourceSnapshot<Int, AgentNodeID>()
                 snapshot.appendSections([0])
-                snapshot.appendItems(displayIDs, toSection: 0)
-                if tailThinkingIndicatorIsVisible {
-                    snapshot.appendItems([tailThinkingIndicatorID], toSection: 0)
-                }
+                snapshot.appendItems(identity, toSection: 0)
                 dataSource.apply(snapshot, animatingDifferences: false)
-                lastAppliedDisplayIDs = displayIDs
+                lastAppliedDisplayIDs = identity
                 transcriptLayout.invalidateForStructureChange()
                 layoutSubtreeIfNeeded()
             }
@@ -1940,7 +1980,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         }
         displayItems = AgentTranscriptClusterPlanner.plan(
             facts: facts,
-            tailStreaming: tailThinkingIndicatorIsVisible,
+            tailStreaming: turnIsInFlight,
             isExpanded: { [disclosureStateStore, disclosureOwnerID] id in
                 disclosureStateStore.explicitState(
                     for: ToolDisclosureKey(agentID: disclosureOwnerID, blockID: id)) ?? false
@@ -2090,6 +2130,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 }
                 dataSource.apply(snapshot, animatingDifferences: false)
                 lastAppliedDisplayIDs = displayIDs
+                    + (tailThinkingIndicatorIsVisible ? [tailThinkingIndicatorID] : [])
                 transcriptLayout.invalidateForStructureChange()
                 layoutSubtreeIfNeeded()
             }
@@ -2191,11 +2232,22 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     }
 
     private func refreshVisibleToolDetails() {
-        let changed = Set(toolDetailIDByBlockID.keys.compactMap { blockID in
-            topLevelIDsByNodeID[blockID]?.first
-        })
+        // Only the blocks whose PRESENTED record actually moved. This used to
+        // invalidate every tool block on every refresh — O(tools x cache) per
+        // pass, and a geometry change for rows whose text had not changed.
+        let changedBlockIDs = toolDetailIDByBlockID.filter { blockID, identity in
+            let previous = lastPresentedToolDetailRevisions[blockID]
+            let current = toolDetailsByID[identity]?.updatedAt
+            return previous != current
+        }.map(\.key)
+        guard !changedBlockIDs.isEmpty else { return }
+        for blockID in changedBlockIDs {
+            lastPresentedToolDetailRevisions[blockID] = toolDetailIDByBlockID[blockID]
+                .flatMap { toolDetailsByID[$0]?.updatedAt }
+        }
+        let changed = Set(changedBlockIDs.compactMap { topLevelIDsByNodeID[$0]?.first })
         guard !changed.isEmpty else { return }
-        for blockID in toolDetailIDByBlockID.keys { measurementCache.invalidate(id: blockID) }
+        for blockID in changedBlockIDs { measurementCache.invalidate(id: blockID) }
         do {
             try scrollController.apply(
                 in: scrollView,

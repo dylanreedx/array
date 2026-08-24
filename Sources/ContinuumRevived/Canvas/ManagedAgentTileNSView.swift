@@ -980,6 +980,7 @@ final class ManagedAgentTileNSView: TileNSView {
         model.appendUserPrompt(id: id, prompt: prompt)
         // final: true — the user's own words must not wait on the 30Hz streaming gate.
         synchronizeV2Transcript(final: true)
+        transcriptCollectionFixture?.setTurnInFlight(true)
         transcriptCollectionFixture?.setThinkingStatusText("Sending")
         transcriptCollectionFixture?.setThinkingIndicatorVisible(true)
     }
@@ -988,6 +989,7 @@ final class ManagedAgentTileNSView: TileNSView {
         guard pendingOptimisticSubmissionID != nil else { return }
         pendingOptimisticSubmissionID = nil
         guard accepted else {
+            transcriptCollectionFixture?.setTurnInFlight(false)
             transcriptCollectionFixture?.setThinkingIndicatorVisible(false)
             showSendRefusedNotice("Message was not sent. Your draft was restored; retry when ready.")
             return
@@ -1158,6 +1160,7 @@ final class ManagedAgentTileNSView: TileNSView {
             }
         case .turnStarted:
             settledTurnStatusText = nil
+            transcriptCollectionFixture?.setTurnInFlight(true)
             compactStatusSession = .init(state: .running, startedAt: nil)
             let start = v2TurnSnapshot?.turnStartedAt
             compactStatusTurn = .active(startedAt: start, stream: nil, streamStartedAt: nil)
@@ -1175,6 +1178,7 @@ final class ManagedAgentTileNSView: TileNSView {
             // wording for interruptions). Anchored at submit when known —
             // provider events alone undercount the duration.
             liveToolVerb = nil
+            transcriptCollectionFixture?.setTurnInFlight(false)
             let anchor = v2TurnSnapshot?.submittedAt ?? v2TurnSnapshot?.turnStartedAt
             if let anchor {
                 let duration = Self.settledDurationText(Date().timeIntervalSince(anchor))
@@ -1197,6 +1201,7 @@ final class ManagedAgentTileNSView: TileNSView {
         case .requestResolved, .userInputResolved:
             compactStatusInteraction = .clear
         case .runtimeError:
+            transcriptCollectionFixture?.setTurnInFlight(false)
             compactStatusTurn = .completed(outcome: .failed, phaseStartedAt: nil)
             compactStatusSession = .init(state: .error, startedAt: nil)
             compactStatusInteraction = .clear
