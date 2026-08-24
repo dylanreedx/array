@@ -356,6 +356,12 @@ public enum AgentLineRole: String, CaseIterable, Sendable {
     case focusRing
     /// Approval, error, warning.
     case attention
+    /// Whose turn this is. The sole authorship signal on a user turn now that
+    /// the turn carries no fill — meaning-bearing by construction, so it
+    /// cannot resolve to `decorativeHairline` (see that case's
+    /// `exemptionReason`). Distinct from `controlBoundary`: a user turn
+    /// bounds no control, it identifies a speaker.
+    case authorship
 
     public var color: TokenColor {
         switch self {
@@ -365,6 +371,7 @@ public enum AgentLineRole: String, CaseIterable, Sendable {
         // The primary attention hue. An attention line takes the hue of the
         // status it reports — see `attentionAccents`.
         case .attention: return AccentToken.accentApproval.color
+        case .authorship: return LineToken.border.color
         }
     }
 
@@ -374,7 +381,7 @@ public enum AgentLineRole: String, CaseIterable, Sendable {
     public var contrastFloor: Double? {
         switch self {
         case .decorativeHairline: return nil
-        case .controlBoundary, .focusRing: return DesignTokens.lineFloor
+        case .controlBoundary, .focusRing, .authorship: return DesignTokens.lineFloor
         // The text floor, not the line floor: this accent is also the label
         // colour for the same state.
         case .attention: return DesignTokens.textFloor
@@ -383,7 +390,7 @@ public enum AgentLineRole: String, CaseIterable, Sendable {
 
     public var exemptionReason: String? {
         switch self {
-        case .controlBoundary, .focusRing, .attention: return nil
+        case .controlBoundary, .focusRing, .attention, .authorship: return nil
         case .decorativeHairline:
             return "Purely decorative: contains and separates content that is "
                 + "already delineated by `controlBoundary`, conveys no state, and "

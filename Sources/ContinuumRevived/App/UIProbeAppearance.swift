@@ -214,8 +214,14 @@ enum UIProbeAppearance {
     /// 169 − 58 + 29 + 1 = 141. A floor left at 169 would have turned this correct
     /// change red for the wrong reason; a floor left at 53 would have stopped
     /// measuring anything at all.
-    private static let minimumThemedViews = 156
-    private static let minimumSentineledSlots = 141
+    ///
+    /// 156 / 141 → 196 / 175 (A1, 2026-08-24). `UserPromptView` became a
+    /// `TokenThemed` conformer (its rule is the sole remaining colour once the
+    /// card fill was removed), adding itself plus its `.rule` slot everywhere
+    /// the fixture renders a user turn. Re-floored AT the measured run's own
+    /// numbers, per the same convention as above — not guessed.
+    private static let minimumThemedViews = 196
+    private static let minimumSentineledSlots = 175
 
     /// P1.10: the tile paints three plain `NSView` container fills, which
     /// `ownedLayers(of:)` cannot attribute to it (a view never answers for a
@@ -234,6 +240,15 @@ enum UIProbeAppearance {
         if let tile = firstDescendant(DescriptorTileNSView.self, in: root) {
             slots += tile.qaTokenPaintedLayers.map {
                 ColorSlot(ownerLabel: "DescriptorTileNSView.\($0.label)", layer: $0.layer, kind: .background)
+            }
+        }
+        // A1: the authorship rule is a plain `NSView` subview of `UserPromptView`
+        // (ruling 3 — a subview, not a border or a `CALayer` sublayer, so a bitmap
+        // probe and `ownedColorSlots`'s view walk both see it), so it is the same
+        // blind spot the two tiles above hand off.
+        if let prompt = firstDescendant(UserPromptView.self, in: root) {
+            slots += prompt.qaTokenPaintedLayers.map {
+                ColorSlot(ownerLabel: "UserPromptView.\($0.label)", layer: $0.layer, kind: .background)
             }
         }
         return slots
@@ -779,6 +794,10 @@ enum UIProbeAppearance {
         "ManagedAgentTileNSView.contentBackdrop",
         "ManagedAgentTileNSView.header",
         "ManagedAgentTileNSView.composeBackdrop",
+        // A1: the turn lost its card; the sole remaining colour is the
+        // authorship rule, a LINE role painted as a FILL on a plain `NSView`
+        // subview — the same hand-off `ManagedAgentTileNSView`'s backdrops use.
+        "UserPromptView.rule",
         // Queue 91/P3: the host-local Home/Where/What band uses the same
         // `tileChrome` surface as the header it extends; its external markers and
         // text use the existing primary/secondary text tokens.
@@ -940,6 +959,12 @@ enum UIProbeAppearance {
             values.insert(hex(AgentSurfaceRole.composer.color.cgColor(for: theme)))
             values.insert(hex(AgentLineRole.focusRing.color.cgColor(for: theme)))
             values.insert(hex(AgentLineRole.decorativeHairline.color.cgColor(for: theme)))
+        case "UserPromptView.rule":
+            // A1 (ticket rulings 1, 3): the authorship rule is a LINE role
+            // (`AgentLineRole.authorship`) painted as a FILL because it is drawn
+            // as a plain `NSView` subview, not a border. Same admission shape as
+            // `ProviderModelPickerView`'s indicator/divider above.
+            values.insert(hex(AgentLineRole.authorship.color.cgColor(for: theme)))
         case "ProviderRailButton", "ChoiceRowView":
             // The rail's interaction ladder mirrors choice rows; the rows are
             // the original owners of it (P4.7). Resting state paints nothing.
@@ -1926,14 +1951,12 @@ enum UIProbeAppearance {
             renderer.update(view: view, block: block, context: context)
             renderer.updateAccessibility(view: view, block: block, context: context)
 
-            let actualFill = view.layer?.backgroundColor.flatMap(NSColor.init(cgColor:))?.usingColorSpace(.sRGB)
-            let expectedFill = UserPromptView.fillToken.color.nsColor(for: theme).usingColorSpace(.sRGB)
-            guard actualFill == expectedFill, view.layer?.borderWidth == 0 else {
-                throw fail("user prompt quiet fill/outline mismatch in \(theme)")
+            guard view.layer?.backgroundColor == nil, view.layer?.cornerRadius == 0 else {
+                throw fail("user prompt lost its card but still paints a fill or a rounded corner in \(theme)")
             }
-            guard view.layer?.cornerRadius == UserPromptView.cornerRadius,
-                  UserPromptView.cornerRadius == CGFloat(AgentTileRadius.artifact) else {
-                throw fail("user prompt did not use the semantic artifact radius role")
+            let expectedRule = AgentLineRole.authorship.color.cgColor(for: theme)
+            guard view.qaTokenPaintedLayers.first?.layer.backgroundColor == expectedRule else {
+                throw fail("user prompt's authorship rule is not painted with AgentLineRole.authorship in \(theme)")
             }
             guard view.accessibilityRole() == .group, view.accessibilityLabel() == "You",
                   assistant.accessibilityLabel() == nil else {
@@ -1950,6 +1973,14 @@ enum UIProbeAppearance {
                 throw fail("user prompt primary text token mismatch in \(theme)")
             }
             assertions += 5
+        }
+        // A1: `UserPromptView.cornerRadius` is gone (the turn lost its card), and
+        // this was the ONLY place `AgentTileRadius.artifact` was asserted as a
+        // ROLE rather than the literal 8 — moved here rather than deleted, or
+        // the radius identity pin is orphaned.
+        let codeBlock = CodeBlockRenderer().makeView() as? CodeBlockView
+        guard codeBlock?.layer?.cornerRadius == CGFloat(AgentTileRadius.artifact) else {
+            throw fail("CodeBlockView did not use the semantic artifact radius role")
         }
         return assertions
     }
@@ -1999,6 +2030,9 @@ enum UIProbeAppearance {
                   assistant?.layer?.backgroundColor == nil,
                   assistant?.layer?.borderWidth == 0,
                   user?.layer?.borderWidth == 0,
+                  // A1: the fill is gone, and `borderWidth == 0` alone would be
+                  // vacuous now that the rule is drawn as a subview, not a border.
+                  user?.layer?.backgroundColor == nil,
                   user?.accessibilityLabel() == "You" else {
                 throw fail(
                     "\(label) quiet hierarchy mismatch: assistant layer \(String(describing: assistant?.layer)), "
@@ -2178,7 +2212,7 @@ enum UIProbeAppearance {
         print("UIProbeAppearance: \(transcriptReviewAssertions) semantic-transcript review assertions hold real light/dark propagation, quiet prose hierarchy, accessibility authorship, and custom-only controls")
         print("UIProbeAppearance: \(proseAssertions) assistant-prose assertions hold tileBody inheritance, primary text, selection, and no card chrome in both appearances")
         print("UIProbeAppearance: \(richInlineAssertions) rich-inline assertions hold nested native styles, link policy, theme repaint, and dual-format copy; unsafe-link negative witness remained inactive")
-        print("UIProbeAppearance: \(userAssertions) user-prompt assertions hold quiet fill, semantic radius, primary text, selection, no visual metadata, and non-color accessibility authorship in both appearances")
+        print("UIProbeAppearance: \(userAssertions) user-prompt assertions hold no fill/no radius, the authorship rule, primary text, selection, no visual metadata, and non-color accessibility authorship in both appearances")
         print("UIProbeAppearance: \(sweep.views) TokenThemed views, \(sweep.slots) layer colours sentinelled and re-applied across a live flip (\(sweep.changed) re-resolved to a different value); \(hostile) hostile-current-appearance assertions held; token fixture holds both leaves; stale-fixture witness failed as required")
         print("UIProbeAppearance: witness message — \(witness)")
     }

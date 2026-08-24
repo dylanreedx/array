@@ -112,6 +112,11 @@ public enum LineWidth {
     /// value `runSidebarSurfaceChecks` pins rather than a convention call
     /// sites remember. `Double`, like every metric here — views convert.
     public static let hairline = 0.5
+    /// An authorship rule: a state-bearing edge, not a decorative boundary, so
+    /// it does not reuse `hairline` or `Space.xs` (a SPACING token that happens
+    /// to share this value today but is not guaranteed to keep doing so in a
+    /// STROKE slot). First consumer: `UserPromptView`'s left-edge rule.
+    public static let rule = 2.0
 }
 
 /// The two padding shapes. Collapsing today's 3/6/8/10/12 into exactly two is

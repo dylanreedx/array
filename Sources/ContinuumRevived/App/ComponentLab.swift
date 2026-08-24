@@ -3718,10 +3718,17 @@ enum LabCatalog {
         for event in managedAgentFixtureEvents(includeApproval: includeApproval) {
             view.ingest(event)
         }
-        // P6.0: a real user turn, so every probe over this fixture sees BOTH prose
-        // presentations — the assistant's, which paints nothing, and yours, whose
-        // `SurfaceToken.cardUserMessage` fill is the only thing distinguishing them.
-        // A fixture with no user turn would leave that fill unrendered and unprobed.
+        // P6.0/A1: a real user turn, so every probe over this fixture sees BOTH
+        // prose presentations — the assistant's, which paints nothing, and yours,
+        // whose `AgentLineRole.authorship` left-edge rule (a state-bearing FILL
+        // painted on a subview, not the card fill this ticket removed) is now the
+        // only thing distinguishing them. A fixture with no user turn would leave
+        // that rule unrendered and unprobed.
+        //
+        // It is also the ONLY user turn in the 60-card Lab catalog, which makes
+        // this fixture `UserPromptView`'s sole entry into the `TokenThemed` census
+        // sweep (`appearance.managedAgentTile`, the sweep's first surface) —
+        // dropping this call would silently un-declare that conformer as swept.
         view.appendUserPrompt("Also check the token refresh path while you're in there.")
         return view
     }

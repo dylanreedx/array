@@ -7372,8 +7372,17 @@ enum UIProbeGeometry {
         let assistantHeight = try host.measuredHeight(
             for: prompt, entryRole: .assistant, width: 320, context: context
         )
+        // A1: this used to pin `height == assistantHeight + verticalInset * 2`
+        // at the SAME width, which held only because the user surface and the
+        // assistant surface measured prose against the same column. They no
+        // longer do — the user prose measures against
+        // `width - UserPromptView.leadingInset` while the assistant measures
+        // against the full width — so the two heights are not required to
+        // agree line-for-line. What must still hold: the user surface adds at
+        // least its own vertical padding on top of an equal-or-narrower-column
+        // wrap, which can only add lines, never remove them.
         guard height > CGFloat(Metrics.lineHeight(for: .body)) * 4,
-              height == assistantHeight + UserPromptView.verticalInset * 2,
+              height >= assistantHeight + UserPromptView.verticalInset * 2 - 0.5,
               host.measurementCache.cachedMeasurementCount == 2 else {
             throw fail("user/assistant role-aware measurement did not wrap or isolate cache entries (user \(height), assistant \(assistantHeight), cache \(host.measurementCache.cachedMeasurementCount))")
         }
@@ -7393,17 +7402,18 @@ enum UIProbeGeometry {
               view.proseView.textFields.allSatisfy({ !$0.stringValue.contains("You ·") && $0.stringValue != "You" }) else {
             throw fail("user prompt lost a semantic Markdown row, selection, or drew a permanent You metadata caption")
         }
-        // Corrected 2026-08-24: this pinned `minX == bounds.minX` exactly, which
-        // is the flush layout Dylan saw — the first glyph against the bubble's
-        // corner radius. The assertion's INTENT is "not a right-aligned
-        // percentage-width chat bubble", and a SYMMETRIC gutter satisfies it.
+        // Corrected 2026-08-24 (A1): the turn lost its card, so there is no
+        // fill to sit symmetrically inside. The rule replaces the leading
+        // gutter (`LineWidth.rule + Space.m`) and the trailing edge is flush —
+        // a trailing gutter would be invisible with no fill and would only
+        // narrow the measure.
         let leadingGutter = view.proseView.frame.minX - view.bounds.minX
         let trailingGutter = view.bounds.maxX - view.proseView.frame.maxX
-        guard leadingGutter >= CGFloat(Space.s),
-              abs(leadingGutter - trailingGutter) <= 0.5 else {
+        guard abs(leadingGutter - UserPromptView.leadingInset) <= 0.5,
+              trailingGutter <= 0.5 else {
             throw fail(
-                "user prompt must sit in a symmetric gutter inside its own fill, not flush against "
-                + "it and not right-aligned: leading \(leadingGutter), trailing \(trailingGutter)"
+                "user prompt must sit \(UserPromptView.leadingInset)pt past its own rule and flush "
+                + "against its trailing edge: leading \(leadingGutter), trailing \(trailingGutter)"
             )
         }
         try expectUserPromptReadableMeasure(
@@ -7442,11 +7452,10 @@ enum UIProbeGeometry {
         surfaceWidth: CGFloat
     ) throws {
         guard surfaceWidth > 0 else { throw fail("user prompt surface has zero width") }
-        // Corrected 2026-08-24: `ratio >= 0.99` forbade ANY gutter, which is the
-        // flush text Dylan saw. The rule is "the full readable measure INSIDE
-        // the card's own gutter, not a narrow chat bubble": the prose spans
-        // exactly the inset width, and nothing narrower.
-        let expected = surfaceWidth - UserPromptView.horizontalInset * 2
+        // Corrected 2026-08-24 (A1): the card and its symmetric gutter are gone.
+        // The prose spans everything past the rule's leading inset, with no
+        // trailing gutter to subtract a second time.
+        let expected = surfaceWidth - UserPromptView.leadingInset
         guard abs(proseWidth - expected) <= 0.5 else {
             throw fail(String(
                 format: "user prompt is not the full readable measure inside its gutter: prose %.1fpt, expected %.1fpt of a %.0fpt surface",
@@ -8425,6 +8434,13 @@ enum UIProbeGeometry {
     // rebuilt, then ran `.build/debug/continuum-revived --ui-geometry-check`;
     // exit 1: "FAIL: user prompt became right-aligned instead of sharing the prose
     // leading edge". The mutation was then reverted and the same check passed.
+
+    // Negative witness (A1, exercised 2026-08-24): zeroed
+    // `UserPromptView.leadingInset` to 0, rebuilt, then ran
+    // `.build/debug/Array --ui-geometry-check`; exit 1: "FAIL: user prompt must
+    // sit 10.0pt past its own rule and flush against its trailing edge: leading
+    // 0.0, trailing 0.0". The mutation was then reverted and the same check
+    // passed.
 
     /// Deterministic P3.2 gate. A durable final-code mutation witness is recorded
     /// by the coordinator alongside this check's positive evidence.

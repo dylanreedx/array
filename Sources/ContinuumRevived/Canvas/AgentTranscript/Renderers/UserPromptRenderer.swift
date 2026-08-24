@@ -50,11 +50,11 @@ final class UserPromptRenderer: AgentBlockRendering {
     }
 
     func measure(block: AgentBlock, width: CGFloat, context: AgentRenderContext) -> CGFloat {
-        // The prose measures against the INSET width, or a bubble whose text is
-        // padded would clip its last line.
+        // The prose measures against the INSET width, or text against the rule's
+        // gutter would clip its last line.
         proseRenderer.measure(
             block: block,
-            width: max(1, width - UserPromptView.horizontalInset * 2),
+            width: max(1, width - UserPromptView.leadingInset),
             context: context
         ) + UserPromptView.verticalInset * 2
     }
@@ -67,18 +67,22 @@ final class UserPromptRenderer: AgentBlockRendering {
 
 /// A quiet, full-measure user surface. “You” exists only in the accessibility
 /// tree; no title, outline, status word, or permanent speaker caption is drawn.
+/// Ticket A1: the turn loses its card — no fill, no rounded corner — and keeps
+/// only a `LineWidth.rule` authorship rule down the left edge. `AssistantProseRenderer`
+/// sets `horizontalReadingInset == 0`, so the shared text column IS the row's
+/// leading edge; there is no interior margin to hang the rule in, hence the
+/// rule sits at `bounds.minX` and the prose is pushed in by `leadingInset`
+/// instead of a symmetric padding pair.
 @MainActor
-final class UserPromptView: NSView {
+final class UserPromptView: NSView, TokenThemed {
     static let verticalInset = CGFloat(Space.m)
-    /// The bubble's text must not sit against its own rounded edge — the fill
-    /// started at x=0 and so did the prose, so the first glyph touched the
-    /// corner radius. Matches the artifact renderers' `Space.l` gutter.
-    static let horizontalInset = CGFloat(Space.l)
-    static let fillToken = SurfaceToken.cardUserMessage
-    static let cornerRadius = CGFloat(AgentTileRadius.artifact)
+    /// Rule width + breathing room before the first glyph. No trailing gutter:
+    /// with no fill, a trailing inset is invisible and only narrows the measure.
+    static let leadingInset = CGFloat(LineWidth.rule) + CGFloat(Space.m)
 
     private let proseRenderer: AssistantProseRenderer
     private(set) var proseView: AssistantProseView
+    private let rule = NSView()
 
     init(proseRenderer: AssistantProseRenderer) {
         self.proseRenderer = proseRenderer
@@ -88,13 +92,16 @@ final class UserPromptView: NSView {
         self.proseView = proseView
         super.init(frame: .zero)
 
+        // The host paints no fill of its own (CLAUDE.md hazard 8: resting states
+        // paint nil, never .clear). Only the rule subview carries a colour.
         wantsLayer = true
-        layer?.cornerRadius = Self.cornerRadius
-        layer?.borderWidth = 0
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel("You")
+        rule.wantsLayer = true
+        addSubview(rule)
         addSubview(proseView)
+        applyTokens()
     }
 
     @available(*, unavailable)
@@ -102,13 +109,25 @@ final class UserPromptView: NSView {
 
     override var isFlipped: Bool { true }
 
+    private var theme: TokenTheme = .dark
+
     func apply(block: AgentBlock, context: AgentRenderContext) {
-        layer?.backgroundColor = Self.fillToken.color.cgColor(for: context.appearance)
+        theme = context.appearance
         proseRenderer.update(view: proseView, block: block, context: context)
         proseView.textFields.forEach { $0.stringPasteboardStyle = .plainText }
         identifier = NSUserInterfaceItemIdentifier("agent.userPrompt.\(block.id.rawValue)")
         applyAccessibility(block: block, context: context)
+        applyTokens()
         needsLayout = true
+    }
+
+    func applyTokens() {
+        rule.layer?.backgroundColor = AgentLineRole.authorship.color.cgColor(for: theme)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
     }
 
     func applyAccessibility(block: AgentBlock, context: AgentRenderContext) {
@@ -118,12 +137,22 @@ final class UserPromptView: NSView {
         proseRenderer.updateAccessibility(view: proseView, block: block, context: context)
     }
 
+    /// The layer colour this view paints on the subview it owns, for
+    /// `UIProbeAppearance`'s sentinel sweep — the same hand-off
+    /// `ManagedAgentTileNSView.qaTokenPaintedLayers` uses, because the sweep
+    /// deliberately never reads a subview's layer and `rule` is a plain `NSView`
+    /// that answers for nothing on its own.
+    var qaTokenPaintedLayers: [(label: String, layer: CALayer)] {
+        rule.layer.map { [(label: "rule", layer: $0)] } ?? []
+    }
+
     override func layout() {
         super.layout()
+        rule.frame = NSRect(x: bounds.minX, y: bounds.minY, width: CGFloat(LineWidth.rule), height: bounds.height)
         proseView.frame = NSRect(
-            x: bounds.minX + Self.horizontalInset,
+            x: bounds.minX + Self.leadingInset,
             y: bounds.minY + Self.verticalInset,
-            width: max(1, bounds.width - Self.horizontalInset * 2),
+            width: max(1, bounds.width - Self.leadingInset),
             height: max(0, bounds.height - Self.verticalInset * 2)
         )
         proseView.layoutSubtreeIfNeeded()

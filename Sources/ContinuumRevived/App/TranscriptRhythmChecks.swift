@@ -30,7 +30,18 @@ enum TranscriptRhythmChecks {
         var description: String { message }
     }
 
+    /// A1's vacuity floor for `checkFilledSurfacesPadTheirText`, measured
+    /// across `.mixed` + `.realClaudeTurn` + `.turnBoundary` after
+    /// `UserPromptView` stopped being a filled surface: `mixed=3,
+    /// real-claude-turn=0, turn-boundary=0` (neither replayed state authors a
+    /// code/diff/plan/approval/command block). Floored AT the measured total,
+    /// the program's convention. Re-measure if a fixture's filled-artifact mix
+    /// changes; a floor left stale in either direction defeats the point (too
+    /// high goes red for no reason, too low stops measuring anything).
+    private static let minimumFilledSurfacesExamined = 3
+
     static func run() throws {
+        try checkUserTurnIsRuledNotFilled()
         try checkHeadingLadder()
         try checkHangingIndents()
         try checkThematicBreak()
@@ -423,8 +434,20 @@ enum TranscriptRhythmChecks {
         // collection item), so comparing raw frames compares different origins
         // and would report a difference that is not on screen.
         let space = mixedSurface.transcript.collectionView
-        let proseX = mixed.compactMap { $0 as? AssistantProseView }
+        // A1: `UserPromptView.proseView` IS an `AssistantProseView` instance (the
+        // renderer is shared), so the old unqualified `AssistantProseView` sweep
+        // silently included the user turn's prose too. That is why this used to
+        // pass without asserting anything about the user surface: the MINIMUM
+        // over both happened to still be the assistant's, and the user turn's
+        // own leading edge only moved from 24 to 22 with nothing here to notice.
+        // Split by owner and assert each edge on purpose.
+        let assistantProseX = mixed.compactMap { $0 as? AssistantProseView }
+            .filter { !($0.superview is UserPromptView) }
             .flatMap(\.textFields)
+            .map { $0.convert($0.bounds, to: space).minX }
+            .min()
+        let userProseX = mixed.compactMap { $0 as? UserPromptView }
+            .flatMap { $0.proseView.textFields }
             .map { $0.convert($0.bounds, to: space).minX }
             .min()
         // Only the renderer views that legitimately keep a fill. A width-based
@@ -438,11 +461,24 @@ enum TranscriptRhythmChecks {
             else { return nil }
             return view.convert(view.bounds, to: space).minX
         }.min()
-        if let proseX, let fillX, abs(proseX - fillX) > 0.5 {
+        if let assistantProseX, let fillX, abs(assistantProseX - fillX) > 0.5 {
             throw fail(
-                "left edges: prose text starts at \(proseX) but the nearest artifact fill starts "
-                + "at \(fillX). AssistantProseView.horizontalReadingInset is added ON TOP of the "
-                + "layout's own contentInsets.left, so card edges and prose never share an edge."
+                "left edges: assistant prose text starts at \(assistantProseX) but the nearest "
+                + "artifact fill starts at \(fillX). AssistantProseView.horizontalReadingInset is "
+                + "added ON TOP of the layout's own contentInsets.left, so card edges and prose "
+                + "never share an edge."
+            )
+        }
+        // A1: the user turn no longer shares the assistant's leading edge — it
+        // sits past its own authorship rule instead, at the row's content
+        // edge (the same edge an artifact fill starts at) plus
+        // `UserPromptView.leadingInset`.
+        if let userProseX, let fillX,
+           abs(userProseX - (fillX + UserPromptView.leadingInset)) > 0.5 {
+            throw fail(
+                "left edges: user prose text starts at \(userProseX), expected the row's leading "
+                + "edge (\(fillX)) plus UserPromptView.leadingInset (\(UserPromptView.leadingInset)) "
+                + "= \(fillX + UserPromptView.leadingInset)"
             )
         }
 
@@ -460,6 +496,91 @@ enum TranscriptRhythmChecks {
                     "fills: a ToolCallView still paints an artifact fill. Only code, diff, plan and "
                     + "approval keep a fill; a routine tool row must sit on the tile body."
                 )
+            }
+        }
+    }
+
+    // MARK: - A1
+
+    /// `.plans/45` A1 — Dylan's decision, replayed: the user turn loses its
+    /// card entirely (no fill, no rounded corner) and keeps only a
+    /// `LineWidth.rule`-wide `AgentLineRole.authorship` rule down the left
+    /// edge. This is the check that MUST gate the redesign: `--component-lab-check`
+    /// and `--ui-baseline-check` are both `MATRIX_KNOWN_RED`, so an assertion
+    /// added to either of those reads as coverage and never actually runs.
+    ///
+    /// Exercised over three states on purpose: `.mixed` (the ordinary single
+    /// turn), `.realClaudeTurn` (a real capture through the real translator,
+    /// not authored prose), and `.turnBoundary` (which — S4.0 — renders two
+    /// CONSECUTIVE user prompts with real `AgentTranscriptLayout.interTurnSpacing`
+    /// between them, so the same assertion also proves two rules never merge
+    /// into one continuous line).
+    private static func checkUserTurnIsRuledNotFilled() throws {
+        for state: AgentTranscriptReviewState in [.mixed, .realClaudeTurn, .turnBoundary] {
+            for theme: TokenTheme in [.light, .dark] {
+                let (_, views) = try render(state, theme: theme)
+                let userViews = views.compactMap { $0 as? UserPromptView }
+                guard !userViews.isEmpty else {
+                    throw fail(
+                        "\(state.rawValue)/\(theme.rawValue): no UserPromptView rendered — the "
+                        + "fixture or the role-aware registry stopped producing one"
+                    )
+                }
+                let expectedHex = AgentLineRole.authorship.color.cgColor(for: theme).hexForChecks
+                for user in userViews {
+                    // 1. No fill left. Comparing to `nil`, not `.clear` — a
+                    //    painted transparent is an unregistered literal to the
+                    //    appearance census (CLAUDE.md hazard 8).
+                    guard user.layer?.backgroundColor == nil else {
+                        throw fail(
+                            "\(state.rawValue)/\(theme.rawValue): a user turn still paints a "
+                            + "background fill — the card was supposed to be removed entirely"
+                        )
+                    }
+                    // 2. Exactly one rule subview, at bounds.minX, LineWidth.rule
+                    //    wide, full row height.
+                    let ruleLayers = user.qaTokenPaintedLayers
+                    guard ruleLayers.count == 1 else {
+                        throw fail(
+                            "\(state.rawValue)/\(theme.rawValue): expected exactly one authorship "
+                            + "rule subview, found \(ruleLayers.count)"
+                        )
+                    }
+                    let ruleFrame = ruleLayers[0].layer.frame
+                    guard abs(ruleFrame.minX - user.bounds.minX) <= 0.01,
+                          abs(ruleFrame.width - CGFloat(LineWidth.rule)) <= 0.01,
+                          abs(ruleFrame.height - user.bounds.height) <= 0.5 else {
+                        throw fail(
+                            "\(state.rawValue)/\(theme.rawValue): the authorship rule is not a full "
+                            + "row-height, LineWidth.rule-wide stripe at bounds.minX — got \(ruleFrame) "
+                            + "against row bounds \(user.bounds)"
+                        )
+                    }
+                    // 3. The rule's resolved colour is AgentLineRole.authorship,
+                    //    in THIS appearance.
+                    guard ruleLayers[0].layer.backgroundColor?.hexForChecks == expectedHex else {
+                        throw fail(
+                            "\(state.rawValue)/\(theme.rawValue): the rule painted "
+                            + "\(ruleLayers[0].layer.backgroundColor?.hexForChecks ?? "nil"), expected "
+                            + "AgentLineRole.authorship (\(expectedHex))"
+                        )
+                    }
+                    // 4. The leftmost prose glyph sits at rule.maxX + Space.m —
+                    //    `AssistantProseRenderer.horizontalReadingInset == 0`, so
+                    //    the shared text column IS the row's leading edge; there
+                    //    is no interior margin to hang the rule in.
+                    let expectedGlyphX = ruleFrame.maxX + CGFloat(Space.m)
+                    let leftmostGlyphX = user.proseView.textFields.map {
+                        $0.convert($0.bounds, to: user).minX
+                    }.min()
+                    guard let leftmostGlyphX, abs(leftmostGlyphX - expectedGlyphX) <= 0.5 else {
+                        throw fail(
+                            "\(state.rawValue)/\(theme.rawValue): leftmost prose glyph is at "
+                            + "\(String(describing: leftmostGlyphX)), expected rule.maxX + Space.m "
+                            + "(\(expectedGlyphX))"
+                        )
+                    }
+                }
             }
         }
     }
@@ -633,17 +754,30 @@ enum TranscriptRhythmChecks {
     /// padded" is a property of the class of filled surfaces and a new one
     /// would otherwise repeat the bug.
     private static func checkFilledSurfacesPadTheirText() throws {
+        // A1: the user turn lost its fill, so it is no longer a filled content
+        // surface at all — leaving it in the list below was a lie the `alpha >
+        // 0.01` guard already hid (a `nil` background never reaches the type
+        // check). Removed rather than left as dead coverage.
+        //
+        // Its removal also shrinks how many filled surfaces this loop actually
+        // examines per state, which is exactly the failure mode a coverage
+        // check like this one can have without anyone noticing: every clause
+        // inside the loop can stay green by never running. A floor on the
+        // count examined is the general cure.
+        var examinedPerState: [AgentTranscriptReviewState: Int] = [:]
         for state in [AgentTranscriptReviewState.mixed, .realClaudeTurn, .turnBoundary] {
             let (surface, views) = try render(state)
             let space = surface.transcript.collectionView
+            var examined = 0
             for view in views {
                 guard let colour = view.layer?.backgroundColor, colour.alpha > 0.01 else { continue }
-                let isFilledContentSurface = view is UserPromptView || view is CodeBlockView
+                let isFilledContentSurface = view is CodeBlockView
                     || view is AgentPlanView || view is AgentDiffSummaryView
                     || view is AgentRequestView || view is CommandOutputView
                 guard isFilledContentSurface else { continue }
                 let fill = view.convert(view.bounds, to: space)
                 guard fill.width > 1 else { continue }
+                examined += 1
                 // An NSTextView carries its own padding as textContainerInset,
                 // which its BOUNDS include — measuring the frame alone reports a
                 // padded code block as flush. Offset to the first glyph's origin.
@@ -678,6 +812,21 @@ enum TranscriptRhythmChecks {
                     )
                 }
             }
+            examinedPerState[state] = examined
+        }
+        // The vacuity floor: every clause above can stay green forever by
+        // simply never running, which is what removing `UserPromptView`
+        // (correctly) just did to `.turnBoundary` — it authors no code/diff/
+        // plan/approval/command block, so it now examines ZERO filled
+        // surfaces. Gate the TOTAL rather than pretend every state must
+        // examine something it does not carry.
+        let totalExamined = examinedPerState.values.reduce(0, +)
+        guard totalExamined >= minimumFilledSurfacesExamined else {
+            throw fail(
+                "filled-surface padding: examined \(totalExamined) filled surface(s) across "
+                + "\(examinedPerState.map { "\($0.key.rawValue)=\($0.value)" }.sorted().joined(separator: ", ")), "
+                + "floor is \(minimumFilledSurfacesExamined) — this check can pass by never running"
+            )
         }
     }
 
