@@ -925,8 +925,8 @@ func runManagedTranscriptCardProjectionChecks() {
            "P1.9 negative witness: cards must be freshly derived from the updated semantic document, not independently mutated or cached")
 
     let equalityClock = DeterministicCompatibilityClock()
-    var equalityLeft = ManagedAgentTranscriptModel(threadId: "P19-equality-window", monotonicNow: equalityClock.now)
-    var equalityRight = ManagedAgentTranscriptModel(threadId: "P19-equality-window", monotonicNow: equalityClock.now)
+    var equalityLeft = ManagedAgentTranscriptModel(threadId: "P19-equality-window", monotonicNow: equalityClock.now, wallClockNow: { nil })
+    var equalityRight = ManagedAgentTranscriptModel(threadId: "P19-equality-window", monotonicNow: equalityClock.now, wallClockNow: { nil })
     let seed = AgentRuntimeEvent.contentDelta(
         threadId: "P19-equality-window", turnId: "turn-raw", streamKind: .assistant, delta: "seed"
     )
@@ -952,8 +952,8 @@ func runManagedTranscriptCardProjectionChecks() {
     expect(equalityLeft != equalityRight,
            "P1.9 ManagedAgentTranscriptModel equality must include raw compatibility source/card state changed inside a coalescing window")
 
-    var equalityCloneA = ManagedAgentTranscriptModel(threadId: "P19-equality-clone", monotonicNow: equalityClock.now)
-    var equalityCloneB = ManagedAgentTranscriptModel(threadId: "P19-equality-clone", monotonicNow: equalityClock.now)
+    var equalityCloneA = ManagedAgentTranscriptModel(threadId: "P19-equality-clone", monotonicNow: equalityClock.now, wallClockNow: { nil })
+    var equalityCloneB = ManagedAgentTranscriptModel(threadId: "P19-equality-clone", monotonicNow: equalityClock.now, wallClockNow: { nil })
     for index in 0..<405 {
         let event = AgentRuntimeEvent.contentDelta(
             threadId: "P19-equality-clone", turnId: "turn-raw", streamKind: .assistant, delta: index == 0 ? "same" : " y"

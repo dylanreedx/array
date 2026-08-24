@@ -943,7 +943,9 @@ public enum AgentToolDetailPresenter {
             lines.append("\(shortLine(argument.key, maxBytes: 48)): \(value)")
         }
         if let exitCode = detail.exitCode { lines.append("Exit code: \(exitCode)") }
-        if let duration = detail.duration { lines.append("Duration: \(formatDuration(duration))") }
+        // No "Duration:" line. `.plans/45` — the row's trailing column already
+        // reads "4.0s ✓"; a second copy underneath is the same echo the query
+        // line was, and it cost a full body line on every settled row.
         return lines.prefix(12).joined(separator: "\n")
     }
 

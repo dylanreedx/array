@@ -248,6 +248,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// Folded member -> its header, for scroll anchors that reference a row
     /// the snapshot no longer contains.
     private var headerIDByFoldedMemberID: [AgentNodeID: AgentNodeID] = [:]
+    /// Rows that belong to an EXPANDED cluster — they render indented behind a
+    /// rail so the group is still legible once opened.
+    private var clusterMemberIDs: Set<AgentNodeID> = []
     private var lastAppliedDisplayIDs: [AgentNodeID]?
     private var entryDatesByID: [AgentNodeID: Date?] = [:]
     private var nextEntryDateByEntryID: [AgentNodeID: Date] = [:]
@@ -1792,7 +1795,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         default:
             return block
         }
-        guard let providerID = toolDetailIDByBlockID[block.id] else { return block }
+        guard let providerID = toolDetailIDByBlockID[block.id] else {
+            return withClusterMembership(block)
+        }
         if let cached = toolDetailsByID[providerID],
            let timeToLive = toolDetailTimeToLive,
            (timeToLive <= 0 || toolDetailClock().timeIntervalSince(cached.updatedAt) >= timeToLive) {
@@ -1824,8 +1829,10 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         }
         guard candidateIsFresh else { return block }
         var presented = block
+        let isClusterMember = clusterMemberIDs.contains(block.id)
         switch block.payload {
         case var .toolCall(payload):
+            payload.presentedIsClusterMember = isClusterMember
             // `.plans/45` S3 — the action-first row: this EPHEMERAL presented
             // copy's name becomes the sentence ("Searched for ...") and the
             // duration rides the presentation-only trailing field, while the
@@ -1948,14 +1955,32 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         )
         clusterHeadersByID = [:]
         headerIDByFoldedMemberID = [:]
+        clusterMemberIDs = []
         for item in displayItems {
             guard case let .header(header) = item else { continue }
             clusterHeadersByID[header.id] = header
-            guard !header.isExpanded else { continue }
+            guard !header.isExpanded else {
+                for memberIndex in header.memberIndexes where rows.indices.contains(memberIndex) {
+                    clusterMemberIDs.insert(rows[memberIndex].id)
+                }
+                continue
+            }
             for memberIndex in header.memberIndexes where rows.indices.contains(memberIndex) {
                 headerIDByFoldedMemberID[rows[memberIndex].id] = header.id
             }
         }
+    }
+
+    /// Marks a tool row as a member of an EXPANDED cluster without otherwise
+    /// touching it — used on every early return out of the detail presentation,
+    /// because membership is a fact about the projection, not about the store.
+    private func withClusterMembership(_ block: AgentBlock) -> AgentBlock {
+        guard clusterMemberIDs.contains(block.id) else { return block }
+        guard case var .toolCall(payload) = block.payload else { return block }
+        payload.presentedIsClusterMember = true
+        var presented = block
+        presented.payload = .toolCall(payload)
+        return presented
     }
 
     private func displayStartsTurn(at index: Int) -> Bool {
@@ -2038,7 +2063,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         if any(["edit", "write", "patch", "changed"]) { return "edit" }
         if any(["read ", "read"]) { return "read" }
         if any(["bash", "shell", "terminal", "command", "ran "]) { return "command" }
-        return "step"
+        // Not "step": the summary already opens with "N steps", and "3 steps ·
+        // 2 reads, 1 step" reads as a counting error.
+        return "tool"
     }
 
     private func toggleCluster(_ id: AgentNodeID) {
@@ -2077,6 +2104,27 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                   let header = clusterHeadersByID[clusterID] else { continue }
             view.setSummaryText(clusterSummaryText(header))
         }
+    }
+
+    /// Opens every disclosure the surface offers — reasoning rows, tool rows and
+    /// cluster headers — through their REAL controls, so a render can show the
+    /// opened transcript.
+    func qaExpandEverythingForChecks() {
+        for id in qaClusterHeaderIDsForChecks { toggleCluster(id) }
+        layoutSubtreeIfNeeded()
+        collectionView.layoutSubtreeIfNeeded()
+        for item in collectionView.visibleItems() {
+            guard let item = item as? AgentTranscriptCollectionItem else { continue }
+            if let disclosure = item.reasoningDisclosureView, !disclosure.isExpanded {
+                disclosure.disclosureButton.performClick(nil)
+            }
+            if let tool = item.hostView?.rendererView as? ToolCallView,
+               !tool.disclosureButton.isHidden, !tool.isExpanded {
+                tool.disclosureButton.performClick(nil)
+            }
+        }
+        layoutSubtreeIfNeeded()
+        collectionView.layoutSubtreeIfNeeded()
     }
 
     // QA seams for the cluster projection (S4.3).
@@ -2379,12 +2427,57 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     }
     @discardableResult
     func qaPerformToolDisclosureClick(for id: AgentNodeID) -> Bool {
-        guard let index = rows.firstIndex(where: { $0.id == id }),
+        // DISPLAY index, not the semantic row index: with clustering the two
+        // differ the moment anything folds above this row (S4.3).
+        guard let index = displayIndexByID[id],
               let item = collectionView.item(at: IndexPath(item: index, section: 0)) as? AgentTranscriptCollectionItem,
               let tool = item.hostView?.rendererView as? ToolCallView else { return false }
         tool.disclosureButton.performClick(nil)
         layoutSubtreeIfNeeded()
         return true
+    }
+
+    /// Clicks a completed-reasoning row's real disclosure control and returns
+    /// the row's measured height before and after, so a witness can assert the
+    /// row actually GREW — the body is clipped to the item, so a toggle that
+    /// does not remeasure renders the thinking text outside its own bounds.
+    func qaPerformReasoningDisclosureClick(for entryID: AgentNodeID) -> (before: CGFloat, after: CGFloat)? {
+        guard let index = displayIndexByID[entryID],
+              let item = collectionView.item(at: IndexPath(item: index, section: 0)) as? AgentTranscriptCollectionItem,
+              let disclosure = item.reasoningDisclosureView else { return nil }
+        let before = transcriptLayout.layoutAttributesForItem(
+            at: IndexPath(item: index, section: 0))?.frame.height ?? 0
+        disclosure.disclosureButton.performClick(nil)
+        layoutSubtreeIfNeeded()
+        collectionView.layoutSubtreeIfNeeded()
+        let after = transcriptLayout.layoutAttributesForItem(
+            at: IndexPath(item: index, section: 0))?.frame.height ?? 0
+        return (before, after)
+    }
+
+    func qaReasoningBodyGeometryForChecks(for entryID: AgentNodeID)
+        -> (viewWidth: CGFloat, containerWidth: CGFloat, hostWidths: [CGFloat])? {
+        guard let index = displayIndexByID[entryID],
+              let item = collectionView.item(at: IndexPath(item: index, section: 0)) as? AgentTranscriptCollectionItem,
+              let disclosure = item.reasoningDisclosureView else { return nil }
+        return disclosure.qaBodyGeometryForChecks
+    }
+
+    func qaReasoningBodyDiagnosticForChecks(for entryID: AgentNodeID) -> String? {
+        guard let index = displayIndexByID[entryID],
+              let item = collectionView.item(at: IndexPath(item: index, section: 0)) as? AgentTranscriptCollectionItem,
+              let disclosure = item.reasoningDisclosureView else { return nil }
+        return disclosure.qaBodyDiagnosticForChecks
+    }
+
+    /// The reasoning body's rendered rect, in the row view's own space, so a
+    /// witness can prove it is INSIDE the row rather than drawn over its
+    /// neighbours (the artifacting Dylan photographed).
+    func qaReasoningBodyOverflowForChecks(for entryID: AgentNodeID) -> CGFloat? {
+        guard let index = displayIndexByID[entryID],
+              let item = collectionView.item(at: IndexPath(item: index, section: 0)) as? AgentTranscriptCollectionItem,
+              let disclosure = item.reasoningDisclosureView else { return nil }
+        return disclosure.qaBodyOverflowForChecks
     }
 
     /// Production-route probe: returns the exact compact text supplied to the

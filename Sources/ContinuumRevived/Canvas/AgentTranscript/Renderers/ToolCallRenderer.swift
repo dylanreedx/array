@@ -42,9 +42,18 @@ final class ToolCallRenderer: AgentBlockRendering {
 
 @MainActor
 final class ToolCallView: NSView {
-    static let rowHeight = CGFloat(Space.xxl + Space.m)
+    // Tightened 2026-08-24: 36pt for a one-line row, plus a 12pt row gap, read
+    // as "spread out too much".
+    static let rowHeight = CGFloat(Space.xxl + Space.xs)
     static let horizontalInset = CGFloat(Space.l)
-    static let detailBottomInset = CGFloat(Space.m)
+    static let detailBottomInset = CGFloat(Space.xs)
+    /// Where the row's own text starts: past the disclosure control and the
+    /// icon. The detail line hangs from the SAME x as the title, so a row reads
+    /// as one block instead of a title with an unrelated sentence beneath it.
+    static var detailIndent: CGFloat { horizontalInset + CGFloat(Space.xxl) * 2 + CGFloat(Space.s) + CGFloat(Space.m) }
+    private var effectiveDetailIndent: CGFloat {
+        Self.detailIndent + (isClusterMember ? Self.clusterIndent : 0)
+    }
 
     private(set) var disclosureButton = AgentDisclosureButton(frame: .zero)
     private(set) var iconView = NSImageView(frame: .zero)
@@ -61,6 +70,10 @@ final class ToolCallView: NSView {
     private(set) var isExpanded = false
     private var outputText: String?
     private var outputNote: String?
+    private var isClusterMember = false
+    /// The group rail drawn down the left of an expanded cluster's members.
+    private let clusterRail = CALayer()
+    static let clusterIndent = CGFloat(Space.l)
 
     private var blockID: AgentNodeID?
     private var disclosureText = ""
@@ -90,6 +103,9 @@ final class ToolCallView: NSView {
         summaryLabel.lineBreakMode = .byWordWrapping
         summaryLabel.isSelectable = true
 
+        outputScrollView.wantsLayer = true
+        outputScrollView.layer?.cornerRadius = CGFloat(AgentTileRadius.artifact)
+        outputScrollView.layer?.masksToBounds = true
         outputScrollView.drawsBackground = false
         outputScrollView.borderType = .noBorder
         outputScrollView.hasVerticalScroller = true
@@ -109,6 +125,9 @@ final class ToolCallView: NSView {
         addSubview(outputScrollView)
         addSubview(outputCopyButton)
         addSubview(outputNoteLabel)
+        clusterRail.isHidden = true
+        clusterRail.actions = ["position": NSNull(), "bounds": NSNull(), "backgroundColor": NSNull()]
+        layer?.addSublayer(clusterRail)
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
     }
@@ -119,6 +138,7 @@ final class ToolCallView: NSView {
     override var isFlipped: Bool { true }
 
     func apply(blockID: AgentNodeID, payload: AgentToolCallPayload, context: AgentRenderContext) {
+        isClusterMember = payload.presentedIsClusterMember
         self.blockID = blockID
         self.status = payload.status
         self.context = context
@@ -195,8 +215,16 @@ final class ToolCallView: NSView {
         func place(_ view: NSView, _ frame: NSRect) {
             if view.frame != frame { view.frame = frame }
         }
-        let inset = Self.horizontalInset
+        let inset = Self.horizontalInset + (isClusterMember ? Self.clusterIndent : 0)
         let buttonSide = CGFloat(Space.xxl)
+        if isClusterMember {
+            clusterRail.isHidden = false
+            clusterRail.frame = CGRect(
+                x: Self.horizontalInset + CGFloat(Space.xs), y: 0,
+                width: max(1, CGFloat(LineWidth.hairline)), height: bounds.height)
+        } else {
+            clusterRail.isHidden = true
+        }
         // Read once each, reused below.
         let statusIntrinsic = statusLabel.intrinsicContentSize
         let titleIntrinsic = titleLabel.intrinsicContentSize
@@ -204,8 +232,11 @@ final class ToolCallView: NSView {
         place(disclosureButton, disclosureButton.isHidden ? .zero : NSRect(
             x: inset, y: (Self.rowHeight - buttonSide) / 2,
             width: buttonSide, height: buttonSide))
+        // The disclosure column is reserved whether or not this row has one, so
+        // titles align down the transcript and the detail line below can hang
+        // from exactly the title's x.
         place(iconView, NSRect(
-            x: disclosureButton.isHidden ? inset : disclosureButton.frame.maxX + CGFloat(Space.s),
+            x: inset + buttonSide + CGFloat(Space.s),
             y: (Self.rowHeight - buttonSide) / 2,
             width: buttonSide, height: buttonSide
         ))
@@ -232,29 +263,30 @@ final class ToolCallView: NSView {
             summaryHeight = max(0, bounds.height - detailY - Self.detailBottomInset)
         }
         place(summaryLabel, NSRect(
-            x: inset, y: detailY,
-            width: max(1, bounds.width - inset * 2),
+            x: effectiveDetailIndent, y: detailY,
+            width: max(1, bounds.width - effectiveDetailIndent - Self.horizontalInset),
             height: summaryHeight
         ))
         if outputVisible {
             var y = summaryLabel.frame.maxY + CGFloat(Space.xs)
+            let paneX = effectiveDetailIndent
             let copyWidth = outputCopyButton.intrinsicContentSize.width
             place(outputCopyButton, NSRect(
-                x: max(inset, bounds.maxX - inset - copyWidth), y: y,
-                width: copyWidth, height: CGFloat(Space.xxl)
+                x: max(paneX, bounds.maxX - inset - copyWidth), y: y,
+                width: copyWidth, height: CGFloat(Space.xl)
             ))
             if !outputNoteLabel.isHidden {
                 let noteSize = outputNoteLabel.intrinsicContentSize
                 place(outputNoteLabel, NSRect(
-                    x: inset, y: y + (CGFloat(Space.xxl) - noteSize.height) / 2,
-                    width: max(1, outputCopyButton.frame.minX - inset - CGFloat(Space.s)),
+                    x: paneX, y: y + (CGFloat(Space.xl) - noteSize.height) / 2,
+                    width: max(1, outputCopyButton.frame.minX - paneX - CGFloat(Space.s)),
                     height: noteSize.height
                 ))
             }
             y = outputCopyButton.frame.maxY + CGFloat(Space.xs)
             place(outputScrollView, NSRect(
-                x: inset, y: y,
-                width: max(1, bounds.width - inset * 2),
+                x: paneX, y: y,
+                width: max(1, bounds.width - paneX - inset),
                 height: max(0, bounds.height - y - Self.detailBottomInset)
             ))
             outputTextView.sizeDocument(toFit: outputScrollView.contentSize)
@@ -288,9 +320,15 @@ final class ToolCallView: NSView {
             : context.tokens.secondaryText.color.nsColor(for: theme)
         disclosureButton.contentTintColor = context.tokens.secondaryText.color.nsColor(for: theme)
         iconView.contentTintColor = context.tokens.secondaryText.color.nsColor(for: theme)
+        clusterRail.backgroundColor = isClusterMember
+            ? AgentLineRole.decorativeHairline.color.cgColor(for: theme)
+            : nil
         outputNoteLabel.textColor = context.tokens.secondaryText.color.nsColor(for: theme)
         outputCopyButton.contentTintColor = context.tokens.secondaryText.color.nsColor(for: theme)
         outputTextView.applyTheme(theme)
+        outputScrollView.layer?.backgroundColor = outputScrollView.isHidden
+            ? nil
+            : context.tokens.codeSurface.color.cgColor(for: theme)
     }
 
     /// `.plans/45` T11 — one glyph per kind of work, instead of one wrench for
@@ -341,15 +379,16 @@ final class ToolCallView: NSView {
                 maximumOutputHeight,
                 max(CommandOutputView.minimumOutputHeight, CommandOutputTextView.measuredSize(outputText).height)
             )
-            height += CGFloat(Space.xs) + CGFloat(Space.xxl) + CGFloat(Space.xs) + outputHeight
+            height += CGFloat(Space.xs) + CGFloat(Space.xl) + CGFloat(Space.xs) + outputHeight
         }
         return height
     }
 
     static func measuredSummaryHeight(_ summary: String, width: CGFloat, expanded: Bool) -> CGFloat {
+        // Measured against the INDENTED width the detail actually gets.
         let lines = summary.split(whereSeparator: { $0.isNewline }).map(String.init)
         let measuredText = expanded && lines.count > 1 ? summary : (lines.first ?? "")
-        let available = max(1, width - horizontalInset * 2)
+        let available = max(1, width - detailIndent - horizontalInset)
         let rect = (measuredText as NSString).boundingRect(
             with: NSSize(width: available, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],

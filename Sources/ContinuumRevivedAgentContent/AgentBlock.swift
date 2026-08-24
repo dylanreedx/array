@@ -112,6 +112,10 @@ public struct AgentToolCallPayload: Codable, Equatable, Sendable {
     /// copy the host composes from `AgentToolDetailStore`.
     public var presentedOutputText: String?
     public var presentedOutputNote: String?
+    /// `.plans/45` — this row is a MEMBER of an expanded tool cluster: it draws
+    /// indented behind a left rail so the group reads as a group. Presentation
+    /// only, excluded from CodingKeys.
+    public var presentedIsClusterMember: Bool = false
 
     private enum CodingKeys: String, CodingKey {
         case name, summary, arguments, status

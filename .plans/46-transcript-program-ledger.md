@@ -802,3 +802,61 @@ asked whether the frame FIT. A witness asserts what you thought to ask; the
 render answers what you didn't.
 
 Gallery iteration 2 published → **Dylan verdict: PENDING.**
+
+## Dylan's live-app review, 2026-08-24 (four findings, all real)
+
+He drove `~/Desktop/Array Transcript.app` on a real turn. Four complaints, and
+the two most serious were only reachable AFTER a click — which is why every
+still, and every green leg, had missed them. The tour now photographs the
+OPENED transcript (`makeExpandedSemanticTranscript` → `*-expanded` shots) so
+that state is reviewable at all.
+
+1. **"expanding thoughts DO NOT WORK ... weird ass artifacting."** Root cause,
+   found by instrumenting rather than guessing: `AgentBlockHostView` pins its
+   renderer view to its own edges with CONSTRAINTS, which puts the host in the
+   layout engine — and `reconcileBody` positioned those hosts by FRAME. The
+   engine solved them back to 0×0 on the next pass (keeping the origin from the
+   autoresizing mirror), so an expanded thought measured tall, drew nothing,
+   and rendered its 1pt-wide text as the vertical dashes in his screenshot.
+   Every other install of that view in the transcript uses constraints; this
+   one now does too (a vertical constraint stack + per-host height constraints
+   updated from the shared measurement cache only when the value changes).
+   Diagnostic that found it: `passes=3 lastBodyWidth=408 frames=[(0,0,0,0),
+   (0,40,0,0), (0,80,0,0)]` — the loop ran, with the right width, and the
+   frames were still zero.
+2. **"the spacing is still so WEIRD."** Three separate causes: the disclosure
+   text repeated "Duration: 4.0s" under a row whose trailing column already
+   read "4.0s ✓" (same echo class as the query line); the detail line hung
+   from the row's left edge instead of its title's x; and reasoning rows
+   reserved a disclosure column but no ICON column, so thoughts started 32pt
+   left of the searches between them. Rows of every kind now share one text
+   column, witnessed by `checkRowsShareOneTextColumn` (teeth: reverting the
+   icon column reports `[52.0, 84.0]`).
+3. **"too much vertical spacing ... spread out too much."** `rowSpacing`
+   12 → 8 (`AssistantProseView` already uses 8 between its own sub-rows, so 12
+   made every row gap wider than the paragraph gaps inside a reply), tool rows
+   36 → 28, reasoning headers 36 → 24, detail bottom inset 12 → 4. The turn
+   boundary carries separation instead, now at 4× the row gap.
+4. **"expanding summarized actions should also look way nicer."** Expanded
+   cluster members indent behind a hairline rail
+   (`presentedIsClusterMember` → `ToolCallView.clusterRail`), so the group
+   survives being opened; the expanded output pane sits on the code surface,
+   indented to the text column, instead of floating full-bleed. The bucket
+   noun for unknown tools is "tool", not "step" — "3 steps · 2 reads, 1 step"
+   read as a counting error.
+
+**Plus a supply bug his screenshot exposed:** his rows said "Thought", not
+"Thought for 6s", while every fixture said the latter.
+`ManagedAgentTileNSView` built its model through
+`ManagedAgentTranscriptModel(threadId:monotonicNow:)`, which constructed the
+projection's INJECTED-clock initializer, whose `wallClockNow` defaults to
+`{ nil }` — so no entry in any LIVE transcript ever carried a `createdAt`: no
+reasoning durations, and the hover-revealed send time never appeared on
+anything the user had actually done. Fixed by defaulting that init to a real
+clock; the four equality checks that need byte-identical documents now pass
+`{ nil }` explicitly. Witness `checkLiveDocumentsCarryTimestamps` drives the
+PRODUCTION model. Teeth: restoring the nil default flips it.
+
+The pattern worth keeping: three of these six defects were found by opening a
+PNG and looking, and one by printing internal geometry. The legs were green
+for all of them.

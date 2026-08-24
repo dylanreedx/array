@@ -119,11 +119,21 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
         semanticProjection = AgentTranscriptProjection(threadId: threadId)
     }
 
+    /// `wallClockNow` defaults to a REAL clock, unlike the projection's
+    /// injected-clock init.
+    ///
+    /// `.plans/45` — the tile called that init and inherited its `{ nil }`
+    /// default, so every entry in a LIVE transcript had no `createdAt`: no
+    /// "Thought for Ns", and the hover-revealed send time never appeared on
+    /// anything the user had actually done. Checks that need byte-identical
+    /// documents keep passing `{ nil }` explicitly.
     public init(
         threadId: String,
-        monotonicNow: @escaping @Sendable () -> TimeInterval
+        monotonicNow: @escaping @Sendable () -> TimeInterval,
+        wallClockNow: @escaping @Sendable () -> Date? = { Date() }
     ) {
-        semanticProjection = AgentTranscriptProjection(threadId: threadId, monotonicNow: monotonicNow)
+        semanticProjection = AgentTranscriptProjection(
+            threadId: threadId, monotonicNow: monotonicNow, wallClockNow: wallClockNow)
     }
 
     public mutating func ingest(_ event: AgentRuntimeEvent) {

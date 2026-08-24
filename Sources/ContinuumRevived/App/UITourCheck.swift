@@ -159,6 +159,35 @@ enum UITourCheck {
         )
     }
 
+    /// `.plans/45` — the transcript AFTER the reader opens things. Dylan's
+    /// review found both defects that only exist in this state: reasoning rows
+    /// that expand without remeasuring, and folded tool runs whose expanded
+    /// members are indistinguishable from ungrouped rows. A still of the
+    /// collapsed surface cannot show either.
+    static func makeExpandedSemanticTranscript(
+        state: AgentTranscriptReviewState,
+        size: NSSize,
+        appearance: NSAppearance.Name
+    ) -> AgentTranscriptReviewSurface {
+        let surface = LabCatalog.makeTranscriptReviewSurface(
+            state: state,
+            size: size,
+            theme: appearance == .darkAqua ? .dark : .light
+        )
+        let host = NSView(frame: surface.frame)
+        host.addSubview(surface)
+        surface.layoutSubtreeIfNeeded()
+        surface.transcript.layoutSubtreeIfNeeded()
+        surface.transcript.collectionView.layoutSubtreeIfNeeded()
+        surface.transcript.qaExpandEverythingForChecks()
+        surface.layoutSubtreeIfNeeded()
+        surface.transcript.layoutSubtreeIfNeeded()
+        surface.transcript.collectionView.layoutSubtreeIfNeeded()
+        surface.removeFromSuperview()
+        surface.frame = NSRect(origin: .zero, size: size)
+        return surface
+    }
+
     /// Surfaces the Component Lab already vends, taken from the catalogue by id so
     /// the tour renders the same fixture the lab and the gates do.
     static let labSurfaces: [(surface: String, entryId: String)] = [
@@ -217,6 +246,18 @@ enum UITourCheck {
                     surface: "semantic-transcript", state: state.rawValue,
                     size: size, appearance: appearance,
                     make: { makeSemanticTranscript(state: state, size: size, appearance: appearance) }
+                ))
+            }
+        }
+        // The OPENED transcript. Two of Dylan's four review findings only exist
+        // after a click, so the tour has to photograph that state too.
+        for state in [AgentTranscriptReviewState.realClaudeTurn, .recededWork] {
+            let size = NSSize(width: 480, height: transcriptReviewHeight)
+            for appearance in appearances {
+                shots.append(Shot(
+                    surface: "semantic-transcript", state: "\(state.rawValue)-expanded",
+                    size: size, appearance: appearance,
+                    make: { makeExpandedSemanticTranscript(state: state, size: size, appearance: appearance) }
                 ))
             }
         }

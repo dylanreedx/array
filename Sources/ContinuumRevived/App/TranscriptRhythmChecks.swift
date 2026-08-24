@@ -1,6 +1,7 @@
 import AppKit
 import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
+import ContinuumRevivedCore
 import Foundation
 
 /// `.plans/45` — the structural gate for the transcript visual overhaul.
@@ -41,6 +42,9 @@ enum TranscriptRhythmChecks {
         try checkClustering()
         try checkFilledSurfacesPadTheirText()
         try checkDiffStatDensity()
+        try checkReasoningExpands()
+        try checkRowsShareOneTextColumn()
+        try checkLiveDocumentsCarryTimestamps()
         print(
             "TranscriptRhythmChecks: heading ladder, hanging indents, thematic break, "
             + "turn separation, error/notice divergence, table structure, surface fills, "
@@ -671,6 +675,107 @@ enum TranscriptRhythmChecks {
                     )
                 }
             }
+        }
+    }
+
+    /// "expanding thoughts DO NOT WORK ... it has some weird ass artifacting."
+    ///
+    /// Clicking a completed-reasoning row's REAL control must grow the row and
+    /// keep the body inside it. The body is clipped to the collection item, so
+    /// a toggle that flips the view's state without remeasuring the row renders
+    /// the thinking text over its neighbours — which is what the artifacting
+    /// was.
+    private static func checkReasoningExpands() throws {
+        let (surface, _) = try render(.realClaudeTurn)
+        let list = surface.transcript
+        let reasoningEntries = LabFixtures.realClaudeTurn.document.entries
+            .filter { $0.role == .reasoning && !$0.blocks.isEmpty }
+        guard let entry = reasoningEntries.first else {
+            throw fail("reasoning expand: the replayed turn carries no completed reasoning entry")
+        }
+        guard let heights = list.qaPerformReasoningDisclosureClick(for: entry.id) else {
+            throw fail("reasoning expand: no reasoning disclosure was installed for \(entry.id.rawValue)")
+        }
+        guard heights.after > heights.before + 1 else {
+            throw fail(
+                "reasoning expand: the row measured \(heights.before)pt collapsed and "
+                + "\(heights.after)pt after clicking its disclosure — the toggle changed the view's "
+                + "state without remeasuring the row, so the thinking text has nowhere to draw"
+            )
+        }
+        // The body must be laid out at the row's real width. A 1pt-wide body
+        // is what produced the vertical dashed artifacts: one glyph per line,
+        // an enormous measured height, and nothing readable.
+        if let geometry = list.qaReasoningBodyGeometryForChecks(for: entry.id) {
+            guard geometry.hostWidths.allSatisfy({ $0 > geometry.viewWidth * 0.5 }) else {
+                throw fail(
+                    "reasoning expand: the body was laid out at \(geometry.hostWidths) inside a "
+                    + "\(geometry.viewWidth)pt row (container \(geometry.containerWidth)pt) — a "
+                    + "collapsed body renders as vertical dashes, not text. "
+                    + (list.qaReasoningBodyDiagnosticForChecks(for: entry.id) ?? "no diagnostic")
+                )
+            }
+        }
+        let overflow = list.qaReasoningBodyOverflowForChecks(for: entry.id) ?? 0
+        guard overflow <= 0.5 else {
+            throw fail(
+                "reasoning expand: the expanded body overflows its row by \(overflow)pt — it is "
+                + "drawing over whatever follows it"
+            )
+        }
+    }
+
+    /// "the spacing is still so WEIRD."
+    ///
+    /// Every row KIND must start its text on one x. A reasoning row reserved a
+    /// disclosure column but no icon column, so thoughts sat 32pt left of the
+    /// searches between them, and a tool row without a disclosure control
+    /// shifted left of the ones with it. Neither is visible in a single row —
+    /// only in a column of them.
+    private static func checkRowsShareOneTextColumn() throws {
+        let (surface, views) = try render(.realClaudeTurn)
+        let space = surface.transcript.collectionView
+        var columns: [String: Set<CGFloat>] = [:]
+        for tool in views.compactMap({ $0 as? ToolCallView }) {
+            let x = (tool.titleLabel.convert(tool.titleLabel.bounds, to: space).minX * 2).rounded() / 2
+            columns["tool", default: []].insert(x)
+        }
+        for reasoning in views.compactMap({ $0 as? CompletedReasoningDisclosureView }) {
+            let x = (reasoning.titleLabel.convert(reasoning.titleLabel.bounds, to: space).minX * 2).rounded() / 2
+            columns["reasoning", default: []].insert(x)
+        }
+        guard !columns.isEmpty else {
+            throw fail("text column: the replayed turn rendered neither a tool nor a reasoning row")
+        }
+        for (kind, xs) in columns where xs.count > 1 {
+            throw fail("text column: \(kind) rows start their text at \(xs.sorted()) — one kind, several columns")
+        }
+        let distinct = Set(columns.values.flatMap { $0 })
+        guard distinct.count == 1 else {
+            throw fail(
+                "text column: row kinds start their text at \(distinct.sorted()) — "
+                + "\(columns.mapValues { $0.sorted() }). Every kind shares one text column."
+            )
+        }
+    }
+
+    /// A LIVE transcript must carry entry timestamps. The tile built its
+    /// projection through the injected-clock initializer, whose wall clock
+    /// defaults to nil, so every live entry had no `createdAt`: no "Thought for
+    /// Ns" and no hover-revealed send time on anything the user had done —
+    /// while every fixture, which passes its own clock, looked correct.
+    private static func checkLiveDocumentsCarryTimestamps() throws {
+        var model = ManagedAgentTranscriptModel(threadId: "live-clock", monotonicNow: { 0 })
+        model.appendUserPrompt("does a live entry know when it happened")
+        guard let entry = model.document.entries.first else {
+            throw fail("live timestamps: appending a prompt produced no entry")
+        }
+        guard entry.createdAt != nil else {
+            throw fail(
+                "live timestamps: a production transcript model stamped no createdAt — the tile is "
+                + "using the injected-clock initializer, so nothing in a live transcript can show "
+                + "when it happened"
+            )
         }
     }
 

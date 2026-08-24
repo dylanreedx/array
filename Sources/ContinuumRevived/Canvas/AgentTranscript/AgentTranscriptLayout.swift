@@ -10,7 +10,12 @@ final class AgentTranscriptLayout: NSCollectionViewLayout {
     var itemCount: () -> Int = { 0 }
     var measuredHeight: (Int, CGFloat) -> CGFloat = { _, _ in 0 }
     /// Separation between two rows of the SAME entry.
-    var rowSpacing: CGFloat = 12
+    ///
+    /// 8, not 12 (2026-08-24): `AssistantProseView` already uses 8pt between
+    /// its own sub-rows, so 12 here made every row-to-row gap wider than the
+    /// paragraph gaps inside a reply — "spread out too much". The turn boundary
+    /// carries the separation instead, at 4x this.
+    var rowSpacing: CGFloat = 8
     /// Separation between two rows belonging to different turns.
     ///
     /// `_DESIGN.md` §11 asks for a soft hairline for section separation; the rule
