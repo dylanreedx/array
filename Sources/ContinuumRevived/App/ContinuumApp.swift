@@ -13981,6 +13981,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if let runtime = workspaceRuntime, let controller = runtime.activeController {
             runtime.repairBootMembership(controller: controller, canvasView: canvasView)
         }
+        // `.plans/45` §5a/§5c, second half: connectors were invisible on every cold
+        // launch. `documentAgentTileIdsProvider` is assigned inside
+        // `configureWorkspaceRuntimeHooks()` at the TOP of this method, and its
+        // `didSet` refresh therefore runs before `agentSupervisor.restore()` and
+        // before the install walk — against an empty tile table and no records. The
+        // other three call sites are a file open and two workspace switches, so
+        // nothing refreshed after boot finished building the scene. Both halves of
+        // the relationship bug had to be fixed: painting them in the right place
+        // does nothing if they are never built.
+        workspaceRuntime?.refreshDocumentRelationships()
 
         try projectStore.saveCanvas(canvasView.canvasState)
     }

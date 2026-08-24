@@ -199,6 +199,17 @@ enum WorkspaceSceneOwnerChecks {
             project: projectPaObj
         )
 
+        // A real agent record bound to one of Pa's tiles, and a persisted document
+        // link from it to another. Both exist BEFORE the mount, which is the cold
+        // launch: the links are on disk and the tiles are not built yet.
+        let linkAgentId = delegate.qaAgentSupervisor.spawn(
+            role: nil, prompt: nil, cwd: paRoot,
+            model: "anthropic/claude-sonnet-4-5", thinking: "off",
+            projectId: projectPa, projectRoot: paRoot, tileId: noteOwn)
+        var docWithLink = runtime.document
+        docWithLink.linkDocument(noteUnstamped, to: linkAgentId)
+        runtime.replaceDocument(docWithLink, for: workspaceWA)
+
         // === The production seam. NOT `install(into:)`. ===
         try delegate.mountWorkspaceSceneAtBoot(
             canvasView: canvas,
@@ -259,6 +270,19 @@ enum WorkspaceSceneOwnerChecks {
                        + "only. \(original.id) went from (\(original.frame.x), \(original.frame.y)) "
                        + "to (\(saved.frame.x), \(saved.frame.y)).")
         }
+
+        // 2c. `.plans/45` §5a/§5c: a persisted document relationship must be VISIBLE
+        //     on a cold launch. `documentAgentTileIdsProvider` is assigned at the
+        //     top of the mount and its `didSet` refresh runs before the supervisor
+        //     restores and before the install walk — against an empty tile table.
+        //     The other three refresh call sites are a file open and two workspace
+        //     switches, so a link that was already on disk drew nothing until the
+        //     user happened to trigger one of those.
+        try expect(canvas.qaDocumentRelationshipSegmentCount == 1,
+                   "cold launch: the persisted agent-document link must produce a connector "
+                   + "after the boot mount; got \(canvas.qaDocumentRelationshipSegmentCount) "
+                   + "segments. Painting connectors in the right place does nothing if they "
+                   + "are never built.")
 
         // 3. A runtime nobody handed a canvas must FAIL, loudly, rather than
         //    silently changing the document. This is the recurrence guard.
