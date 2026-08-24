@@ -185,6 +185,13 @@ final class ManagedAgentTileNSView: TileNSView {
     /// Non-nil between the optimistic paint and its resolution. Guards against a
     /// second echo and against resolving an echo this tile never painted.
     private var pendingOptimisticSubmissionID: AgentNodeID?
+    /// `.plans/45` S6 — the live tool verb for the tail ("Searching \u{201C}...\u{201D}"),
+    /// from the latest `.toolDetail` observation. Store-sourced, never the
+    /// document. Cleared when that item ends or the turn moves on.
+    private var liveToolVerb: (itemID: String, text: String)?
+    /// The last settled turn's "Worked for Ns", measured submit -> completion
+    /// (the user-message anchor; entry timestamps alone undercount).
+    private var settledTurnStatusText: String?
     var onUserInputSubmit: ((String, UserInputAnswers) -> Void)?
     /// Explicit provider response transport for v2 request blocks. Production
     /// binds nothing today because no compiled `AgentAdapter` response conformer
@@ -509,6 +516,7 @@ final class ManagedAgentTileNSView: TileNSView {
         }
         runtimeObservationObserverToken = supervisor.addRuntimeObservationObserver(for: agentID) { [weak self] observation in
             self?.transcriptCollectionFixture?.captureRuntimeObservation(observation)
+            self?.updateLiveToolVerb(for: observation)
         }
         hydrateManagedImagesFromDocument()
         let stream = supervisor.events(for: agentID)
@@ -1149,6 +1157,7 @@ final class ManagedAgentTileNSView: TileNSView {
                 compactStatusInteraction = nil
             }
         case .turnStarted:
+            settledTurnStatusText = nil
             compactStatusSession = .init(state: .running, startedAt: nil)
             let start = v2TurnSnapshot?.turnStartedAt
             compactStatusTurn = .active(startedAt: start, stream: nil, streamStartedAt: nil)
@@ -1162,6 +1171,24 @@ final class ManagedAgentTileNSView: TileNSView {
             compactStatusSession = .init(state: .running, startedAt: nil)
             compactStatusTurn = .active(startedAt: start, stream: streamKind, streamStartedAt: start)
         case let .turnCompleted(_, _, outcome, _):
+            // `.plans/45` S6 — "Worked for Ns" / "You stopped after Ns" (t3's
+            // wording for interruptions). Anchored at submit when known —
+            // provider events alone undercount the duration.
+            liveToolVerb = nil
+            let anchor = v2TurnSnapshot?.submittedAt ?? v2TurnSnapshot?.turnStartedAt
+            if let anchor {
+                let duration = Self.settledDurationText(Date().timeIntervalSince(anchor))
+                switch outcome {
+                case .completed:
+                    settledTurnStatusText = "Worked for \(duration)"
+                case .interrupted, .cancelled:
+                    settledTurnStatusText = "You stopped after \(duration)"
+                case .failed:
+                    settledTurnStatusText = nil
+                }
+            } else {
+                settledTurnStatusText = nil
+            }
             compactStatusTurn = .completed(outcome: outcome, phaseStartedAt: nil)
             compactStatusSession = .init(state: .ready, startedAt: nil)
             compactStatusInteraction = .clear
@@ -1207,7 +1234,7 @@ final class ManagedAgentTileNSView: TileNSView {
                 now: now,
                 contextWindow: compactContextWindow)
             compactStatusRow.apply(presentationWithoutThinkingIndicator(presented))
-            transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: presented.activity))
+            transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: presented.activity, liveToolVerb: liveToolVerb?.text))
             syncCompactStatusTick(for: presented.activity)
             return
         }
@@ -1216,7 +1243,7 @@ final class ManagedAgentTileNSView: TileNSView {
             location: compactLocationPresentation(snapshot, detail: locationPresentation),
             activity: activity,
             context: AgentRadialContextMeterPresenter.present(compactContextWindow))))
-        transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: activity))
+        transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: activity, liveToolVerb: liveToolVerb?.text))
         syncCompactStatusTick(for: activity)
     }
 
@@ -1335,13 +1362,23 @@ final class ManagedAgentTileNSView: TileNSView {
     /// The words that ride the gyro: the live phase and its elapsed reading.
     /// Attention and idle states return nil — those are the footer's, or nobody's.
     private static func tailStatusText(
-        for activity: AgentCompactStatusPresentation.Activity
+        for activity: AgentCompactStatusPresentation.Activity,
+        liveToolVerb: String? = nil
     ) -> String? {
         guard !activity.isSilent, !footerRetainsPhase(activity.phase), !activity.text.isEmpty else {
             return nil
         }
-        guard let elapsed = activity.elapsedText, !elapsed.isEmpty else { return activity.text }
-        return "\(activity.text) · \(elapsed)"
+        // `.plans/45` S6 — the verb carries the detail when the store knows it:
+        // "Searching \u{201C}NBA finals\u{201D} · 31s", never just "searching".
+        let text: String
+        switch activity.phase {
+        case .reading, .searching, .editing, .running:
+            text = liveToolVerb ?? activity.text
+        default:
+            text = activity.text
+        }
+        guard let elapsed = activity.elapsedText, !elapsed.isEmpty else { return text }
+        return "\(text) · \(elapsed)"
     }
 
     /// No authoritative fact means the row says nothing. A visible "Unknown" chip
@@ -1411,7 +1448,7 @@ final class ManagedAgentTileNSView: TileNSView {
             // Same split as production: footer filter, then the gyro's words.
             // A probe that skipped either would witness a surface no user sees.
             compactStatusRow.apply(presentationWithoutThinkingIndicator(presented))
-            transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: presented.activity))
+            transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: presented.activity, liveToolVerb: liveToolVerb?.text))
             syncCompactStatusTick(for: presented.activity)
         } else {
             let detail = AgentLocationStatusPresenter.present(
@@ -1423,7 +1460,7 @@ final class ManagedAgentTileNSView: TileNSView {
                 location: compactLocationPresentation(location, detail: detail),
                 activity: activity,
                 context: AgentRadialContextMeterPresenter.present(contextWindow))))
-            transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: activity))
+            transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: activity, liveToolVerb: liveToolVerb?.text))
             syncCompactStatusTick(for: activity)
         }
     }
@@ -1636,6 +1673,16 @@ final class ManagedAgentTileNSView: TileNSView {
 
     private func refreshTranscriptThinkingIndicator() {
         guard let transcriptCollectionFixture else { return }
+        // `.plans/45` S6 (C4) — the optimistic window. `beginOptimisticSubmission`
+        // turns the indicator on the instant the user sends; the next transcript
+        // synchronize used to re-derive visibility from `descriptor.status ==
+        // .working`, which has not flipped yet, and stomp it off — the "blank
+        // for a while after sending" Dylan rejected. While a submission is
+        // pending acknowledgement, the optimistic answer stands.
+        if pendingOptimisticSubmissionID != nil {
+            transcriptCollectionFixture.setThinkingIndicatorVisible(true)
+            return
+        }
         let statusIsActive: Bool
         if let agentID = attachedAgentID,
            let agentSource,
@@ -1652,7 +1699,59 @@ final class ManagedAgentTileNSView: TileNSView {
         } ?? false
         // A working/configuring status is the only lifecycle authority used here;
         // an open assistant/reasoning entry yields immediately on its first delta.
-        transcriptCollectionFixture.setThinkingIndicatorVisible(statusIsActive && !latestStreamIsVisible)
+        let showsWorkingTail = statusIsActive && !latestStreamIsVisible
+        if !statusIsActive, let settledTurnStatusText {
+            transcriptCollectionFixture.setSettledTailStatus(settledTurnStatusText)
+            return
+        }
+        transcriptCollectionFixture.setThinkingIndicatorVisible(showsWorkingTail)
+    }
+
+    /// `.plans/45` S6 — the live tool verb, derived from whitelisted detail
+    /// fields only (query/url/pattern/basename/description); a command body can
+    /// never reach the tail because it never enters an observation.
+    private func updateLiveToolVerb(for observation: AgentRuntimeObservation) {
+        guard case let .toolDetail(itemID, detail) = observation else { return }
+        switch detail.phase {
+        case .started:
+            guard let verb = Self.liveToolVerbText(for: detail) else { return }
+            liveToolVerb = (itemID, verb)
+            refreshCompactStatus()
+        case .ended:
+            guard liveToolVerb?.itemID == itemID else { return }
+            liveToolVerb = nil
+            refreshCompactStatus()
+        }
+    }
+
+    static func liveToolVerbText(for detail: AgentToolDetailObservation) -> String? {
+        var fields: [String: String] = [:]
+        for field in detail.fields where fields[field.key] == nil {
+            fields[field.key] = field.value
+        }
+        if let query = fields["query"] { return "Searching \u{201C}\(query)\u{201D}" }
+        if let pattern = fields["pattern"] { return "Searching \u{201C}\(pattern)\u{201D}" }
+        if let url = fields["url"] { return "Fetching \(url)" }
+        if let file = fields["file"] {
+            let name = (detail.toolName ?? "").lowercased()
+            return name.contains("read") ? "Reading \(file)" : "Editing \(file)"
+        }
+        if let description = fields["description"], let first = description.first {
+            return first.uppercased() + description.dropFirst()
+        }
+        return nil
+    }
+
+    /// Fine-grained for settled turns (t3's formatter split): "4.3s" under ten
+    /// seconds — with the 9.95s carve-out so it never reads "10.0s" — then
+    /// whole seconds, then "3m 20s".
+    static func settledDurationText(_ interval: TimeInterval) -> String {
+        let clamped = max(0, interval)
+        if clamped < 9.95 { return String(format: "%.1fs", clamped) }
+        if clamped < 60 { return "\(Int(clamped.rounded()))s" }
+        let minutes = Int(clamped) / 60
+        let seconds = Int(clamped) % 60
+        return seconds == 0 ? "\(minutes)m" : "\(minutes)m \(seconds)s"
     }
 
     private var managedImageResourceProvider: AgentImageResourceProvider {
@@ -2173,6 +2272,14 @@ final class ManagedAgentTileNSView: TileNSView {
     /// production updates it through `refreshCompactStatus` above.
     var qaCompactStatusRow: AgentCompactStatusRowView { compactStatusRow }
     var qaThinkingIndicatorVisible: Bool { transcriptCollectionFixture?.qaThinkingIndicatorVisible == true }
+    // `.plans/45` S6 — deterministic seams for the optimistic-window witness.
+    func qaBeginOptimisticSubmissionForChecks(_ text: String) {
+        beginOptimisticSubmission(AgentPrompt(text))
+    }
+    func qaRefreshThinkingIndicatorForChecks() {
+        refreshTranscriptThinkingIndicator()
+    }
+    var qaTranscriptForChecks: AgentTranscriptListView? { transcriptCollectionFixture }
     var qaStatusThinkingIndicatorVisible: Bool { compactStatusRow.qaThinkingSlotVisible }
     var qaCompactStatusPhase: AgentCompactActivityPhase? { compactStatusResolution.phase }
     var qaCompactStatusContextState: AgentRadialContextMeterState { compactStatusRow.qaContextState }

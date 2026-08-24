@@ -644,3 +644,38 @@ capture's searches would fold was wrong and the witness moved fixtures).
 Full guarded sweep green: rhythm, ui-geometry, delta-index-oracle,
 tool-detail, ui-probe, ui-pixel, agent-first-paint, agent-incremental-refresh,
 agent-supervisor, CoreChecks.
+
+## Redo milestone — S5 + S6 (honest status, live feel), 2026-08-24
+
+**S5 — the turn-end sweep (C3).** `AgentTranscriptProjection.turnCompleted`
+stops discarding the outcome: every itemID still in `activeItemIDs` gets
+`completeBlock` (completed turns → `.completed`; failed/interrupted/cancelled
+→ `.interrupted`) + `finishEntry`, and the set clears. Mirrored into the host
+detail feed: identities awaiting an end get a status-only `recordEnd` at
+`.turnCompleted` so the trailing glyph agrees. Witness
+`runTurnEndSweepChecks` (CoreChecks, both call paths): the committed capture
+TRUNCATED before its last tool_result, then `turnCompleted(.interrupted)` →
+zero in-progress, the swept block reads interrupted, entries all finished; a
+completed turn sweeps to completed. Teeth: emptying the sweep loop flipped it.
+
+**S6 — live feel (C4 + C5, design 3).**
+- Un-stomp: `refreshTranscriptThinkingIndicator` respects the optimistic
+  window — while `pendingOptimisticSubmissionID != nil` the indicator stays
+  on; the synchronize path used to re-derive from `descriptor.status ==
+  .working` (not yet flipped) and kill it. Witness
+  `checkOptimisticWindowSurvivesSynchronize` drives the REAL send → refresh
+  sequence on a real tile; teeth: deleting the guard flipped it.
+- Live verb: the tile derives a verb from the latest `.toolDetail` started
+  observation ("Searching “…”", "Fetching …", "Editing Foo.swift", claude's
+  Bash description) and the tail reads "verb · elapsed" on tool phases —
+  store-sourced, cleared when the item ends.
+- "Thought for Ns" shipped in S3's slice (document-derived createdAt spans).
+- "Worked for Ns": at `turnCompleted` the tile measures submit → completion
+  (`submittedAt` anchor — provider events alone undercount; t3's finding) and
+  the tail row settles to the words without the gyro
+  (`setSettledTailStatus`); interruptions read "You stopped after Ns" (t3's
+  wording). The next send reclaims the row. Formatter carve-outs pinned
+  ("4.3s", 9.97→"10s", "1m 15s").
+
+Full guarded sweep green (rhythm, geometry, oracle, tool-detail, probe,
+pixel, first-paint, incremental-refresh, supervisor, CoreChecks).

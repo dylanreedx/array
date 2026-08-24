@@ -512,6 +512,76 @@ private final class DeterministicCompatibilityClock: @unchecked Sendable {
     func now() -> TimeInterval { time }
 }
 
+/// `.plans/45` S5 (C3) — the turn-end sweep. The committed real capture is
+/// replayed TRUNCATED before the final tool_result, then the turn completes
+/// as interrupted: no block may remain in-progress, and the swept tool must
+/// read interrupted. RED before the sweep existed; teeth: revert it.
+func runTurnEndSweepChecks() {
+    let fixtureURL = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/claude-websearch-turn.jsonl", isDirectory: false)
+    guard let text = try? String(contentsOf: fixtureURL, encoding: .utf8) else {
+        expect(false, "turn-end sweep: the committed claude capture is missing")
+        return
+    }
+    let lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+    // Truncate just before the LAST tool_result frame, so the WebSearch item is
+    // still active when the turn ends.
+    guard let lastResultIndex = lines.lastIndex(where: { $0.contains("\"tool_result\"") }) else {
+        expect(false, "turn-end sweep: the capture carries no tool_result to truncate before")
+        return
+    }
+    var translator = ClaudeEventTranslator(
+        runToken: "sweep", now: { Date(timeIntervalSince1970: 1_700_000_000) })
+    var projection = AgentTranscriptProjection(threadId: "thread-main", monotonicNow: { 0 })
+    var sawItemStart = false
+    for line in lines[..<lastResultIndex] {
+        for event in translator.translate(line: line) {
+            if case .itemStarted = event { sawItemStart = true }
+            projection.ingest(event.withThreadId("thread-main"))
+        }
+    }
+    expect(sawItemStart, "turn-end sweep: the truncated stream produced no item at all")
+    expect(projection.activeToolCount > 0,
+           "turn-end sweep: truncation left no active item — the fixture no longer exercises the sweep")
+    projection.ingest(.turnCompleted(
+        threadId: "thread-main", turnId: "sweep-turn", outcome: .interrupted, errorMessage: nil))
+
+    let statuses = projection.document.entries.flatMap(\.blocks).compactMap { block -> AgentItemStatus? in
+        guard case let .toolCall(payload) = block.payload else { return nil }
+        return payload.status
+    }
+    expect(!statuses.isEmpty, "turn-end sweep: no tool blocks in the truncated replay")
+    expect(!statuses.contains(.inProgress) && !statuses.contains(.pending),
+           "turn-end sweep: a tool block is still \(statuses) after turnCompleted — the outcome was discarded (C3)")
+    expect(statuses.contains(.interrupted),
+           "turn-end sweep: the swept block must read interrupted, got \(statuses)")
+    expect(projection.activeToolCount == 0,
+           "turn-end sweep: activeItemIDs must clear with the turn")
+    expect(projection.document.entries.allSatisfy { $0.lifecycle == .finished },
+           "turn-end sweep: an entry is still unfinished after the turn ended")
+
+    // A COMPLETED turn sweeps a straggler as completed, not interrupted.
+    var completedTranslator = ClaudeEventTranslator(
+        runToken: "sweep2", now: { Date(timeIntervalSince1970: 1_700_000_000) })
+    var completedProjection = AgentTranscriptProjection(threadId: "thread-main", monotonicNow: { 0 })
+    for line in lines[..<lastResultIndex] {
+        for event in completedTranslator.translate(line: line) {
+            completedProjection.ingest(event.withThreadId("thread-main"))
+        }
+    }
+    completedProjection.ingest(.turnCompleted(
+        threadId: "thread-main", turnId: "sweep-turn", outcome: .completed, errorMessage: nil))
+    let completedStatuses = completedProjection.document.entries.flatMap(\.blocks).compactMap { block -> AgentItemStatus? in
+        guard case let .toolCall(payload) = block.payload else { return nil }
+        return payload.status
+    }
+    expect(!completedStatuses.contains(.inProgress) && completedStatuses.contains(.completed),
+           "turn-end sweep: a completed turn must sweep stragglers to completed, got \(completedStatuses)")
+
+    print("Turn-end sweep checks passed: truncated real capture resolves every in-flight item with the turn's outcome")
+}
+
 func runAgentTranscriptCompatibilityChecks() {
     let cards = TranscriptProjectionUnderTest.cardModel
     let scripts = TranscriptCompatibilityScripts.self

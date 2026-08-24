@@ -198,8 +198,23 @@ public struct AgentTranscriptProjection: Sendable {
             ]
             return result
 
-        case .turnCompleted(let tid, let turnID, _, let errorMessage) where tid == threadId:
+        case .turnCompleted(let tid, let turnID, let outcome, let errorMessage) where tid == threadId:
             var result = closeStreamingRun()
+            // `.plans/45` S5 (C3) — the sweep. This handler used to DISCARD the
+            // outcome, so any item still active when the turn ended kept
+            // "In progress" forever — Dylan's stale-indicator complaint,
+            // probe-verified to be this and not a missing provider frame. Every
+            // still-active item resolves with the turn: completed turns
+            // complete it, anything else reads as interrupted.
+            let sweptStatus: AgentItemStatus = outcome == .completed ? .completed : .interrupted
+            for itemID in activeItemIDs.sorted() {
+                guard let entryID = itemEntries[itemID] else { continue }
+                if statusableItems.contains(itemID), let blockID = itemBlocks[itemID] {
+                    result.append(.completeBlock(id: blockID, status: sweptStatus))
+                }
+                result.append(.finishEntry(id: entryID))
+            }
+            activeItemIDs.removeAll()
             if let errorMessage, !errorMessage.isEmpty {
                 result += errorMutations(message: errorMessage, provenanceID: turnID, suffix: "turn-error")
             }

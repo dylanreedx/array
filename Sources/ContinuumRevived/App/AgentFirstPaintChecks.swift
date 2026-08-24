@@ -59,7 +59,68 @@ enum AgentFirstPaintChecks {
     static func run() throws {
         try checkEchoPrecedesTheSink()
         try checkRefusalIsSaidOutLoud()
-        print("ContinuumRevivedAgentFirstPaintChecks passed: the prompt echo precedes the action sink, acceptance and refusal both resolve the latch, and the spawn window carries a state, a word, and a clock")
+        try checkOptimisticWindowSurvivesSynchronize()
+        try checkSettledTailStatus()
+        print("ContinuumRevivedAgentFirstPaintChecks passed: the prompt echo precedes the action sink, acceptance and refusal both resolve the latch, the spawn window carries a state, a word, and a clock, the optimistic indicator survives synchronize, and settled turns read their duration")
+    }
+
+    /// `.plans/45` S6 (C4). `beginOptimisticSubmission` turns the indicator on
+    /// with the keystroke; the next transcript synchronize re-derives visibility
+    /// from `descriptor.status == .working` — which has NOT flipped yet — and
+    /// used to stomp it off. That gap is "blank for a while after sending".
+    @MainActor
+    private static func checkOptimisticWindowSurvivesSynchronize() throws {
+        let tile = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(),
+            kind: .managedAgent,
+            title: "first-paint-optimistic",
+            frame: TileFrame(x: 0, y: 0, width: 520, height: 420),
+            zPosition: .fromLegacyRank(1),
+            runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")
+        ))
+        guard !tile.qaThinkingIndicatorVisible else {
+            throw fail("optimistic window: the indicator was on before anything was sent")
+        }
+        tile.qaBeginOptimisticSubmissionForChecks("do the thing")
+        guard tile.qaThinkingIndicatorVisible else {
+            throw fail("optimistic window: sending did not turn the indicator on with the keystroke")
+        }
+        // The REAL re-derivation, with the descriptor still not .working —
+        // exactly the state the first stream event finds.
+        tile.qaRefreshThinkingIndicatorForChecks()
+        guard tile.qaThinkingIndicatorVisible else {
+            throw fail(
+                "optimistic window: the synchronize path stomped the optimistic indicator off "
+                + "before the provider ever reported working — the blank-after-send bug (C4)"
+            )
+        }
+    }
+
+    /// `.plans/45` S6 (Dylan's design 3): a settled turn reads "Worked for Ns"
+    /// on the tail — gyro gone, words kept — and the next send reclaims the row.
+    @MainActor
+    private static func checkSettledTailStatus() throws {
+        for (interval, expected) in [(4.32, "4.3s"), (9.97, "10s"), (42.4, "42s"), (75.0, "1m 15s"), (180.0, "3m")] {
+            let got = ManagedAgentTileNSView.settledDurationText(interval)
+            guard got == expected else {
+                throw fail("settled duration: \(interval) rendered as \(got), expected \(expected)")
+            }
+        }
+        let list = AgentTranscriptListView()
+        list.setSettledTailStatus("Worked for 27s")
+        guard list.qaTailStatusText == "Worked for 27s", list.qaTailIsSettled,
+              !list.qaThinkingIndicatorVisible else {
+            throw fail(
+                "settled tail: expected the words without the gyro, got text "
+                + "'\(list.qaTailStatusText)', settled \(list.qaTailIsSettled), "
+                + "gyro \(list.qaThinkingIndicatorVisible)"
+            )
+        }
+        list.setThinkingIndicatorVisible(true)
+        guard list.qaThinkingIndicatorVisible, !list.qaTailIsSettled else {
+            throw fail("settled tail: the next turn did not reclaim the tail row for the gyro")
+        }
     }
 
     /// THE assertion: acknowledgement is a function of the keystroke, not of how

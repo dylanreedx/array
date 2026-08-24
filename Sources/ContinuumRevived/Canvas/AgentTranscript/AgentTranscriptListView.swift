@@ -210,12 +210,17 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// The normalized item title per identity, so activity/detail merges never
     /// stomp the row's name with an operation gerund (C2a).
     private var runtimeTitles: [AgentToolDetailKey: String] = [:]
+    /// Identities started but not yet completed — swept with the turn (S5), so
+    /// the row's trailing glyph agrees with the projection's swept status.
+    private var identitiesAwaitingEnd: Set<AgentToolDetailKey> = []
     private let tailThinkingIndicator = DualPlaneGyroTiltedThinkingIndicatorView()
     /// The live phase text that rides the gyro (e.g. "Reading Agent.swift · 12s").
     /// Owned here so a tick can re-drive the words without rebuilding the item.
     private let tailStatusLabel = NSTextField(labelWithString: "")
     private let tailThinkingIndicatorID = AgentNodeID(rawValue: "__agent_transcript_tail_thinking_indicator__")!
     private var tailThinkingIndicatorIsVisible = false
+    /// The tail row is showing a settled "Worked for Ns" (gyro hidden).
+    private var tailIsSettled = false
     /// Duration is an optional host-attested presentation input. The current
     /// transcript model has no duration field, so the production default is nil
     /// rather than a locally inferred or fabricated clock.
@@ -979,7 +984,16 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// of the compact status row. It is a tail decoration so the status/composer
     /// region retains its measured height and accessibility children.
     func setThinkingIndicatorVisible(_ visible: Bool) {
-        guard tailThinkingIndicatorIsVisible != visible else { return }
+        let wasSettled = tailIsSettled
+        tailIsSettled = false
+        guard tailThinkingIndicatorIsVisible != visible else {
+            if visible, wasSettled {
+                // Settled -> working reuses the existing tail row: wake the gyro.
+                tailThinkingIndicator.isHidden = false
+                tailThinkingIndicator.startAnimating()
+            }
+            return
+        }
         tailThinkingIndicatorIsVisible = visible
         tailThinkingIndicator.isHidden = !visible
         tailStatusLabel.isHidden = !visible
@@ -991,6 +1005,24 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         }
         applyTailVisibilityWithScrollPreservation()
     }
+
+    /// `.plans/45` S6 (Dylan's design 3) — the settled turn's "Worked for Ns":
+    /// the tail row stays, the gyro stops and hides, the words remain. Cleared
+    /// by the next `setThinkingIndicatorVisible` call in either direction.
+    func setSettledTailStatus(_ text: String) {
+        tailIsSettled = true
+        tailThinkingIndicator.stopAnimating()
+        tailThinkingIndicator.isHidden = true
+        tailStatusLabel.isHidden = false
+        tailStatusLabel.stringValue = text
+        tailStatusLabel.toolTip = text
+        if !tailThinkingIndicatorIsVisible {
+            tailThinkingIndicatorIsVisible = true
+            applyTailVisibilityWithScrollPreservation()
+        }
+    }
+
+    var qaTailIsSettled: Bool { tailIsSettled }
 
     /// Re-drives the words beside the gyro without touching the snapshot: the
     /// elapsed tick calls this once a second, and rebuilding the collection item
@@ -2160,6 +2192,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                   activeRuntimeScope.threadID == threadID else { return nil }
             let identity = AgentToolDetailKey(scope: activeRuntimeScope, providerItemID: providerID)
             runtimeIdentities.insert(identity)
+            identitiesAwaitingEnd.insert(identity)
             let resolvedTitle = title ?? "Tool"
             runtimeTitles[identity] = resolvedTitle
             let pending = pendingRuntimeObservations.removeValue(forKey: identity) ?? []
@@ -2187,6 +2220,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             // output/exitCode/endedAt, this event supplies the status. Split
             // calls would race the store's last-writer-wins end merge.
             let endDetail = pendingEndDetails.removeValue(forKey: identity)
+            identitiesAwaitingEnd.remove(identity)
             Task { [weak self, toolDetailStore] in
                 _ = await toolDetailStore.recordEnd(AgentToolDetailEnd(
                     identity: identity,
@@ -2195,6 +2229,22 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                     exitCode: endDetail?.exitCode,
                     endedAt: endDetail?.observedAt
                 ))
+                self?.refreshToolDetailPresentation()
+            }
+        case let .turnCompleted(threadID, _, outcome, _):
+            // `.plans/45` S5 — mirror the projection's sweep into the detail
+            // store: an item the turn ended without completing gets a
+            // status-only recordEnd so its trailing glyph agrees with the
+            // swept row.
+            guard let scope = activeRuntimeScope, scope.threadID == threadID else { break }
+            let swept = identitiesAwaitingEnd.filter { $0.scope == scope }
+            guard !swept.isEmpty else { break }
+            identitiesAwaitingEnd.subtract(swept)
+            let sweptStatus: AgentItemStatus = outcome == .completed ? .completed : .interrupted
+            Task { [weak self, toolDetailStore] in
+                for identity in swept.sorted(by: { $0.providerItemID.rawValue < $1.providerItemID.rawValue }) {
+                    _ = await toolDetailStore.recordEnd(AgentToolDetailEnd(identity: identity, status: sweptStatus))
+                }
                 self?.refreshToolDetailPresentation()
             }
         default:
