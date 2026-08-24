@@ -143,7 +143,9 @@ final class AgentImageGalleryView: NSView {
 
     func applyTokens() {
         let theme = effectiveTokenTheme
-        layer?.backgroundColor = context.tokens.artifactSurface.color.cgColor(for: theme)
+        // `.plans/45` T6. An image supplies its own content; a card behind it is
+        // one more nested fill for nothing. nil, never .clear (hazard 8).
+        layer?.backgroundColor = nil
         contentView.applyTokens(theme: theme, context: context)
     }
 

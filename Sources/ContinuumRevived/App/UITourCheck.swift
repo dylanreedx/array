@@ -200,6 +200,13 @@ enum UITourCheck {
         }
         for state in [
             AgentTranscriptReviewState.long, .activeTool, .failedTool, .approval,
+            // `.plans/45` T2. Advisory PNGs are the review mechanism for the
+            // whole visual milestone: the transcript owns no committed baseline
+            // and the two image-comparing legs are parked, so before/after tour
+            // renders at every width in both appearances are how this work is
+            // looked at without blessing anything.
+            .headingLadder, .lists, .tableAndBreaks, .errorVsNotice,
+            .turnBoundary, .recededWork,
         ] {
             let size = NSSize(width: 480, height: transcriptReviewHeight)
             for appearance in appearances {

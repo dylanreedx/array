@@ -204,18 +204,30 @@ func runMarkupParserChecks() {
         debugLabel: "markdown.unsupported-structure", value: .string(unsupportedSource)
     )), "unsupported Markdown fallback must preserve the exact source losslessly")
 
-    // GFM tables must render (as monospace code), NOT fall through to the
-    // "Unsupported content: unknown" opaque block — assistant replies use tables
-    // constantly, so the opaque fallback broke the common case.
-    let tableSource = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+    // GFM tables keep their CELLS. `.plans/45` T8 corrected this expectation
+    // rather than relaxing it: it used to require a table to parse to
+    // `.fencedCode`, which pinned the monospace fallback in place — the parser
+    // stored the raw pipe source as one string, so column structure was destroyed
+    // here and no renderer could ever lay a table out. Assistant replies use
+    // tables constantly, so this is the common case, not an edge.
+    let tableSource = "| A | B |\n| --- | ---: |\n| 1 | 2 |"
     let table = parser.parse(tableSource, entryID: entryID, previous: [])
-    expect(table.blocks.count == 1 && table.blocks.first?.kind == .fencedCode,
-           "a GFM table must parse to a fencedCode block, got \(table.blocks.map(\.kind))")
-    guard case let .fencedCode(tablePayload)? = table.blocks.first?.payload else {
-        fail("table fallback must carry a fencedCode payload")
+    expect(table.blocks.count == 1 && table.blocks.first?.kind == .table,
+           "a GFM table must parse to a table block, got \(table.blocks.map(\.kind))")
+    guard case let .table(tablePayload)? = table.blocks.first?.payload else {
+        fail("a table must carry a table payload")
     }
-    expect(tablePayload.code.contains("| A | B |") && tablePayload.code.contains("| 1 | 2 |"),
-           "the table fallback must preserve the literal pipe source, got \(tablePayload.code)")
+    expect(tablePayload.header.map(inlinePlainText) == ["A", "B"],
+           "the header cells must survive parsing, got \(tablePayload.header.map(inlinePlainText))")
+    expect(tablePayload.rows.map { $0.map(inlinePlainText) } == [["1", "2"]],
+           "the body cells must survive parsing, got \(tablePayload.rows.map { $0.map(inlinePlainText) })")
+    expect(tablePayload.columnCount == 2, "a two-column table must report two columns")
+    expect(tablePayload.alignment(forColumn: 1) == .trailing,
+           "the delimiter row's alignment must survive parsing")
+    // The source is retained so copy stays lossless and a renderer that draws
+    // fewer columns than the table has cannot silently destroy the rest.
+    expect(tablePayload.source.contains("| A | B |") && tablePayload.source.contains("| 1 | 2 |"),
+           "the table payload must retain its literal source, got \(tablePayload.source)")
     expect(!table.blocks.contains { $0.kind == .unknown },
            "a table must not produce an Unsupported content: unknown block")
 

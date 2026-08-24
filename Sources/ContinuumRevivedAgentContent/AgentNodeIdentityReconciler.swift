@@ -184,7 +184,7 @@ public enum AgentNodeIdentityReconciler {
     }
 
     private static func compatibleOpenTail(_ lhs: AgentBlock, _ rhs: AgentBlock) -> Bool {
-        let markdownKinds: Set<AgentBlockKind> = [.paragraph, .heading, .list, .listItem, .quote, .thematicBreak, .fencedCode]
+        let markdownKinds: Set<AgentBlockKind> = [.paragraph, .heading, .list, .listItem, .quote, .thematicBreak, .table, .fencedCode]
         guard markdownKinds.contains(lhs.kind) && markdownKinds.contains(rhs.kind) else { return false }
         // A partial fence is parsed as a paragraph until its opening delimiter
         // is complete. It is a new structural node, not an edited paragraph;

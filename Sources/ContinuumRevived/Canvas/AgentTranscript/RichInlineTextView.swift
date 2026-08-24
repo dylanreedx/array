@@ -28,8 +28,30 @@ final class RichInlineTextView: NSTextView, NSTextViewDelegate {
     private var runs: [AgentInline] = []
     private var renderContext = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
     private var textRole: TextRole = .body
+    private var proseStyle: AgentProseTextStyle = .plain
+    private var attributedOverride: NSAttributedString?
     private var blockID: AgentNodeID?
     private(set) var linkRanges: [AgentTextStyleResolver.LinkRange] = []
+
+    /// `.plans/45` T2/T5. The font actually applied to the first rendered glyph.
+    ///
+    /// The heading-ladder witness reads this rather than the renderer's declared
+    /// `textRole`, because the defect it gates is precisely a level that is read
+    /// and then discarded: every rung asks for `.title`, so a role-based
+    /// assertion agrees with itself and stays green while h1 and h6 are
+    /// indistinguishable on screen.
+    var qaFirstFontForChecks: NSFont? {
+        guard textStorage?.length ?? 0 > 0 else { return nil }
+        return textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+    }
+
+    /// Companion to `qaFirstFontForChecks`. The heading ladder is expressed in
+    /// size, weight AND colour, because the type scale has only three usable
+    /// sizes, so a witness that reads size alone cannot see two thirds of it.
+    var qaFirstForegroundForChecks: NSColor? {
+        guard textStorage?.length ?? 0 > 0 else { return nil }
+        return textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+    }
 
     override init(frame frameRect: NSRect, textContainer container: NSTextContainer?) {
         super.init(frame: frameRect, textContainer: container)
@@ -113,12 +135,14 @@ final class RichInlineTextView: NSTextView, NSTextViewDelegate {
         runs: [AgentInline],
         blockID: AgentNodeID,
         context: AgentRenderContext,
-        textRole: TextRole = .body
+        textRole: TextRole = .body,
+        style: AgentProseTextStyle = .plain
     ) {
         self.runs = runs
         self.blockID = blockID
         renderContext = context
         self.textRole = textRole
+        self.proseStyle = style
         repaint()
     }
 
@@ -131,14 +155,18 @@ final class RichInlineTextView: NSTextView, NSTextViewDelegate {
         for runs: [AgentInline],
         width: CGFloat,
         context: AgentRenderContext,
-        textRole: TextRole = .body
+        textRole: TextRole = .body,
+        style: AgentProseTextStyle = .plain
     ) -> CGFloat {
         let availableWidth = max(1, width)
+        // The style reaches measurement as well as paint. An indent changes where
+        // text wraps, so measuring without it silently clips every wrapped line.
         let attributed = AgentTextStyleResolver.attributedString(
             for: runs,
             theme: context.appearance,
             tokens: context.tokens,
-            textRole: textRole
+            textRole: textRole,
+            style: style
         )
         let rect = attributed.boundingRect(
             with: NSSize(width: availableWidth, height: .greatestFiniteMagnitude),
@@ -155,13 +183,54 @@ final class RichInlineTextView: NSTextView, NSTextViewDelegate {
         repaint()
     }
 
+    /// `.plans/45` T8. Renders a caller-composed attributed string instead of
+    /// semantic runs.
+    ///
+    /// A table is laid out with tab stops, which is a paragraph-level decision
+    /// the inline resolver has no vocabulary for. Going through this view anyway
+    /// is what keeps `_DESIGN.md` §2.5 — "NSTextView, text layout, IME, undo,
+    /// selection, accessibility, and pasteboard behavior are retained" — true of
+    /// tables: drawing the cells by hand made them unselectable, invisible to
+    /// accessibility, and absent from the Markdown tile's rendered text.
+    func applyAttributed(
+        _ attributed: NSAttributedString,
+        blockID: AgentNodeID,
+        context: AgentRenderContext
+    ) {
+        self.runs = []
+        self.attributedOverride = attributed
+        self.blockID = blockID
+        renderContext = context
+        repaint()
+    }
+
+    static func measuredHeight(for attributed: NSAttributedString, width: CGFloat) -> CGFloat {
+        let bounding = attributed.boundingRect(
+            with: NSSize(width: max(1, width), height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        )
+        return ceil(bounding.height)
+    }
+
     private func repaint() {
+        if let attributedOverride {
+            let selection = selectedRange()
+            textStorage?.setAttributedString(attributedOverride)
+            linkRanges = []
+            let textLength = (string as NSString).length
+            let location = min(selection.location, textLength)
+            setSelectedRange(NSRange(
+                location: location, length: min(selection.length, textLength - location)))
+            setAccessibilityLabel(string)
+            return
+        }
         let selection = selectedRange()
         let resolved = AgentTextStyleResolver.resolve(
             runs,
             theme: renderContext.appearance,
             tokens: renderContext.tokens,
-            textRole: textRole
+            textRole: textRole,
+            style: proseStyle
         )
         textStorage?.setAttributedString(resolved.attributedString)
         textColor = renderContext.tokens.primaryText.color.nsColor(for: renderContext.appearance)

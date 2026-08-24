@@ -19,10 +19,22 @@ public struct AgentDocumentReducer: Sendable {
     private var topBlockLocations: [AgentNodeID: (entry: Int, block: Int)] = [:]
     private var topRoots: [AgentNodeID: AgentNodeID] = [:]
 
-    public init(document: AgentDocument = AgentDocument()) {
+    /// Supplies `AgentEntry.createdAt` when an entry is begun.
+    ///
+    /// Defaults to `{ nil }` so the reducer stays a pure function of its
+    /// mutations: an unstamped reducer produces byte-identical documents on every
+    /// run, which is what every existing witness compares. Production opts in by
+    /// injecting a real clock from `AgentTranscriptProjection`.
+    private let createdAtProvider: @Sendable () -> Date?
+
+    public init(
+        document: AgentDocument = AgentDocument(),
+        createdAtProvider: @escaping @Sendable () -> Date? = { nil }
+    ) {
         do { try document.validateIdentityInvariants() }
         catch { preconditionFailure("AgentDocumentReducer requires a valid document: \(error)") }
         self.document = document
+        self.createdAtProvider = createdAtProvider
         rebuildIndexes()
     }
 
@@ -41,7 +53,8 @@ public struct AgentDocumentReducer: Sendable {
             guard entryIndexes[id] == nil && blockOwners[id] == nil else {
                 throw AgentDocumentMutationError.duplicateBegin(entryID: id)
             }
-            document.entries.append(AgentEntry(id: id, role: role, provenance: provenance))
+            document.entries.append(AgentEntry(
+                id: id, role: role, provenance: provenance, createdAt: createdAtProvider()))
             entryIndexes[id] = document.entries.count - 1
             inserted = [id]
 
@@ -374,6 +387,7 @@ public struct AgentDocumentReducer: Sendable {
         case .listItem: return block.kind == .listItem
         case .quote: return block.kind == .quote
         case .thematicBreak: return block.kind == .thematicBreak
+        case .table: return block.kind == .table
         case .fencedCode: return block.kind == .fencedCode
         case .toolCall: return block.kind == .toolCall
         case .commandOutput: return block.kind == .commandOutput
@@ -392,7 +406,7 @@ public struct AgentDocumentReducer: Sendable {
     }
 
     private var builtInKinds: Set<AgentBlockKind> {
-        [.paragraph, .heading, .list, .listItem, .quote, .thematicBreak, .fencedCode, .toolCall,
+        [.paragraph, .heading, .list, .listItem, .quote, .thematicBreak, .table, .fencedCode, .toolCall,
          .commandOutput, .plan, .diff, .approval, .question, .image, .imageGallery, .fileReferences, .agentReference, .error, .notice, .unknown]
     }
 

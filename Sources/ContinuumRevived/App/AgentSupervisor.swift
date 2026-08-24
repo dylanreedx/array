@@ -7830,13 +7830,14 @@ private func checkAgentBlockRendererRegistry<Failure: Error>(
     guard registry.isFrozen else {
         throw fail("production block renderer registry is not frozen after bootstrap")
     }
-    // 20, not 16: `ddbf83d` (Render semantic transcript images) added `.image`
+    // 21, not 16: `ddbf83d` (Render semantic transcript images) added `.image`
     // and `.imageGallery` to the fixture and did not move the number with them,
-    // `882316d0` later added `.fileReferences`, and the semantic subagent work
-    // added `.agentReference`. Both halves are pinned — the exact roster size,
-    // and that no kind is listed twice, which a bare count cannot tell apart
-    // from a missing one.
-    guard AgentBlockRendererRegistry.builtInKinds.count == 20,
+    // `882316d0` later added `.fileReferences`, the semantic subagent work added
+    // `.agentReference`, and `.plans/45` T8 added `.table` — GFM tables used to
+    // be flattened into `.fencedCode` at parse time. Both halves are pinned — the
+    // exact roster size, and that no kind is listed twice, which a bare count
+    // cannot tell apart from a missing one.
+    guard AgentBlockRendererRegistry.builtInKinds.count == 21,
           Set(AgentBlockRendererRegistry.builtInKinds).count
             == AgentBlockRendererRegistry.builtInKinds.count else {
         throw fail("block renderer built-in fixture is incomplete or duplicated: \(AgentBlockRendererRegistry.builtInKinds.map(\.rawValue))")

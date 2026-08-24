@@ -7297,9 +7297,16 @@ enum UIProbeGeometry {
               prose.textFields.contains(where: { $0.accessibilityRole() == listItemRole }) else {
             throw fail("assistant prose lost heading or list-item accessibility semantics")
         }
-        let requiredInset = CGFloat(Inset.card.left)
-        guard AssistantProseView.horizontalReadingInset == requiredInset,
-              prose.textFields.allSatisfy({
+        // `.plans/45` T6 corrected this expectation rather than relaxing it. It
+        // used to pin the constant itself to `Inset.card.left`, which encoded the
+        // very decision the milestone changed: prose added a second 12pt on top
+        // of the layout's own 12, so prose text sat at 24 while artifact FILLS
+        // began at 12 and nothing on the page shared a left edge. The invariant
+        // worth gating is that rows start exactly at the reading inset and never
+        // clip or escape — not what that inset happens to be. The alignment
+        // promise itself is asserted in --transcript-rhythm-check.
+        let requiredInset = AssistantProseView.horizontalReadingInset
+        guard prose.textFields.allSatisfy({
                   $0.frame.minX == requiredInset
                       && $0.frame.maxX <= prose.bounds.maxX - requiredInset + 0.5
                       && $0.frame.maxY <= prose.bounds.maxY + 0.5

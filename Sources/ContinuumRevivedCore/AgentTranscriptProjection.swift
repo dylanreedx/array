@@ -44,15 +44,26 @@ public struct AgentTranscriptProjection: Sendable {
     private let monotonicNow: @Sendable () -> TimeInterval
 
     public init(threadId: String) {
-        self.init(threadId: threadId, monotonicNow: { ProcessInfo.processInfo.systemUptime })
+        self.init(
+            threadId: threadId,
+            monotonicNow: { ProcessInfo.processInfo.systemUptime },
+            wallClockNow: { Date() }
+        )
     }
 
+    /// `wallClockNow` defaults to `{ nil }`, not to `Date()`.
+    ///
+    /// This init is the seam checks use, and an entry timestamp is the one piece
+    /// of document state that cannot be reproduced across runs. Leaving it unset
+    /// here keeps every injected-clock witness comparing byte-identical
+    /// documents; the production init above opts in explicitly.
     public init(
         threadId: String,
-        monotonicNow: @escaping @Sendable () -> TimeInterval
+        monotonicNow: @escaping @Sendable () -> TimeInterval,
+        wallClockNow: @escaping @Sendable () -> Date? = { nil }
     ) {
         self.threadId = threadId
-        self.reducer = AgentDocumentReducer()
+        self.reducer = AgentDocumentReducer(createdAtProvider: wallClockNow)
         self.monotonicNow = monotonicNow
     }
 

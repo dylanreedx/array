@@ -8,12 +8,24 @@ import ContinuumRevivedAgentContent
 final class AgentTranscriptLayout: NSCollectionViewLayout {
     var itemCount: () -> Int = { 0 }
     var measuredHeight: (Int, CGFloat) -> CGFloat = { _, _ in 0 }
+    /// Separation between two rows of the SAME entry.
     var rowSpacing: CGFloat = 12
+    /// Separation between two rows belonging to different turns.
+    ///
+    /// `_DESIGN.md` §11 asks for a soft hairline for section separation; the rule
+    /// is drawn by the list into this gap, so the air and the rule stay one
+    /// decision rather than drifting apart.
+    static let interTurnSpacing: CGFloat = 20
+    /// Returns the gap to leave ABOVE `index`, or nil for the default `rowSpacing`.
+    var spacingBefore: ((Int) -> CGFloat?)?
+    /// Cheap digest of where the turn boundaries currently are.
+    var boundarySignature: (() -> Int)?
     var contentInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
 
     private var attributes: [NSCollectionViewLayoutAttributes] = []
     private var contentSize = NSSize.zero
     private var preparedWidthBucket: Int?
+    private var preparedBoundarySignature: Int?
     private(set) var preparePassCount = 0
 
     override func prepare() {
@@ -23,7 +35,13 @@ final class AgentTranscriptLayout: NSCollectionViewLayout {
         let width = max(0, collectionView.bounds.width - contentInsets.left - contentInsets.right)
         let widthBucket = Int(width.rounded())
         let count = itemCount()
-        if preparedWidthBucket == widthBucket, attributes.count == count, !attributes.isEmpty || count == 0 {
+        // The signature is part of the guard, not decoration. Spacing now depends
+        // on a row's NEIGHBOUR, so a change that leaves the row count and the
+        // width alone -- one entry's rows becoming two entries' rows -- would
+        // otherwise early-return with the previous turn boundaries baked in.
+        let signature = boundarySignature?() ?? 0
+        if preparedWidthBucket == widthBucket, preparedBoundarySignature == signature,
+           attributes.count == count, !attributes.isEmpty || count == 0 {
             return
         }
         // Counted below the fast path: a REAL recomputation is what the tick and
@@ -32,6 +50,7 @@ final class AgentTranscriptLayout: NSCollectionViewLayout {
         preparePassCount += 1
 
         preparedWidthBucket = widthBucket
+        preparedBoundarySignature = signature
         attributes.removeAll(keepingCapacity: true)
         attributes.reserveCapacity(count)
         var y = contentInsets.top
@@ -42,13 +61,27 @@ final class AgentTranscriptLayout: NSCollectionViewLayout {
             itemAttributes.frame = NSRect(x: contentInsets.left, y: y, width: width, height: height)
             attributes.append(itemAttributes)
             y += height
-            if index + 1 < count { y += rowSpacing }
+            if index + 1 < count { y += spacingBefore?(index + 1) ?? rowSpacing }
         }
         y += contentInsets.bottom
         contentSize = NSSize(width: collectionView.bounds.width, height: y)
     }
 
     override var collectionViewContentSize: NSSize { contentSize }
+
+    /// `.plans/45` T3. The vertical gaps actually left between consecutive rows,
+    /// read back from the prepared attributes.
+    ///
+    /// Deliberately derived from the frames rather than reported from the spacing
+    /// rule: a witness that asked the rule what it would return would agree with
+    /// a rule that is never consulted, which is precisely how a flat 12 survived
+    /// being called three tiers of separation.
+    var qaRowGapsForChecks: [CGFloat] {
+        guard attributes.count > 1 else { return [] }
+        return (1..<attributes.count).map { index in
+            attributes[index].frame.minY - attributes[index - 1].frame.maxY
+        }
+    }
 
     override func layoutAttributesForElements(in rect: NSRect) -> [NSCollectionViewLayoutAttributes] {
         attributes.filter { $0.frame.intersects(rect) }

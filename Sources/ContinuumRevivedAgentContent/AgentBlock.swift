@@ -52,6 +52,7 @@ public struct AgentBlockKind: RawRepresentable, Codable, Equatable, Hashable, Se
     public static let listItem = Self(rawValue: "list-item")!
     public static let quote = Self(rawValue: "quote")!
     public static let thematicBreak = Self(rawValue: "thematic-break")!
+    public static let table = Self(rawValue: "table")!
     public static let fencedCode = Self(rawValue: "fenced-code")!
     public static let toolCall = Self(rawValue: "tool-call")!
     public static let commandOutput = Self(rawValue: "command-output")!
@@ -302,6 +303,48 @@ public struct AgentReferencePayload: Codable, Equatable, Sendable {
     }
 }
 
+/// A GFM table, kept as cells rather than as its pipe source.
+///
+/// `.plans/45` T8. The parser previously mapped every `Table` to `.fencedCode`
+/// and stored the raw Markdown, which destroyed the column structure at parse
+/// time — the renderer could only ever dump pipes as monospace. Alignment is
+/// per column and comes from the delimiter row.
+public struct AgentTablePayload: Codable, Equatable, Sendable {
+    public enum Alignment: String, Codable, Equatable, Sendable {
+        case leading, center, trailing
+    }
+
+    /// Header cells. Empty means the table had no header row.
+    public var header: [[AgentInline]]
+    public var rows: [[[AgentInline]]]
+    /// One entry per column. Shorter than the widest row means "leading".
+    public var alignments: [Alignment]
+    /// The original Markdown, retained so copy still yields a real table and so
+    /// nothing is lost when a row is wider than the renderer chooses to draw.
+    public var source: String
+
+    public init(
+        header: [[AgentInline]] = [],
+        rows: [[[AgentInline]]] = [],
+        alignments: [Alignment] = [],
+        source: String = ""
+    ) {
+        self.header = header
+        self.rows = rows
+        self.alignments = alignments
+        self.source = source
+    }
+
+    /// Widest row, header included — the column count a renderer must lay out.
+    public var columnCount: Int {
+        max(header.count, rows.map(\.count).max() ?? 0)
+    }
+
+    public func alignment(forColumn index: Int) -> Alignment {
+        index < alignments.count ? alignments[index] : .leading
+    }
+}
+
 /// Typed built-in content. Container block structure lives in `children`, so
 /// list items and quotes do not encode nested blocks into strings.
 public enum AgentBlockPayload: Codable, Equatable, Sendable {
@@ -311,6 +354,7 @@ public enum AgentBlockPayload: Codable, Equatable, Sendable {
     case listItem
     case quote
     case thematicBreak
+    case table(AgentTablePayload)
     case fencedCode(AgentCodePayload)
     case toolCall(AgentToolCallPayload)
     case commandOutput(AgentCommandOutputPayload)

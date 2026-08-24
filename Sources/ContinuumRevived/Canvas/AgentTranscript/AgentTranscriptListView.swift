@@ -136,6 +136,13 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
 
         let content: Content
         let role: AgentEntryRole
+        /// `.plans/45` T3. Which entry this row belongs to.
+        ///
+        /// Entry identity previously lived only in `rowPositions`, which the
+        /// layout cannot see. Without it here, two consecutive assistant entries
+        /// are indistinguishable from one entry's two paragraphs — so a turn
+        /// boundary cannot be found at the point where spacing is decided.
+        let entryID: AgentNodeID
 
         var id: AgentNodeID {
             switch content {
@@ -204,6 +211,20 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     private var dataSource: NSCollectionViewDiffableDataSource<Int, AgentNodeID>!
     private var rows: [Row] = []
     private var rowsByID: [AgentNodeID: Row] = [:]
+    /// `.plans/45` T3. Turn chrome, drawn as LAYERS rather than views.
+    ///
+    /// A separator view per turn and a timestamp label per entry would be two
+    /// more AppKit views per content item on the one surface whose view count has
+    /// already frozen the app (`performance.md` trap 1; 0.4.16 put 725 of ~750
+    /// samples in this file's prose layout). One shape layer holds every rule and
+    /// one text layer serves whichever turn the pointer is over.
+    private let turnSeparatorLayer = CAShapeLayer()
+    private let hoverTimeLayer = CATextLayer()
+    private var turnStartRowsByEntry: [(row: Int, entryID: AgentNodeID, date: Date?)] = []
+    private var entryDatesByID: [AgentNodeID: Date?] = [:]
+    private var hoveredTurnEntryID: AgentNodeID?
+    private var transcriptTrackingArea: NSTrackingArea?
+    private var preparedTurnChromeSignature: Int?
     private var topLevelIDsByNodeID: [AgentNodeID: Set<AgentNodeID>] = [:]
 
     /// Where a presented row lives in the applied document, so a delta that names
@@ -332,6 +353,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         collectionView.backgroundColors = [.clear]
         scrollView.hasVerticalScroller = true
         collectionView.collectionViewLayout = transcriptLayout
+        configureTurnChrome()
         collectionView.isSelectable = true
         collectionView.allowsMultipleSelection = true
         collectionView.register(
@@ -364,6 +386,24 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         transcriptLayout.itemCount = { [weak self] in
             guard let self else { return 0 }
             return rows.count + (tailThinkingIndicatorIsVisible ? 1 : 0)
+        }
+        // `.plans/45` T3. Three tiers of separation, decided where the neighbour
+        // is known. Inside one prose block AssistantProseView already uses 8pt
+        // between its sub-rows, and 12pt separates collection rows; the tier that
+        // did not exist was turn -> turn, so a new user prompt carried exactly as
+        // much weight as the next paragraph.
+        transcriptLayout.spacingBefore = { [weak self] index in
+            guard let self else { return nil }
+            return Self.startsTurn(rows, at: index) ? AgentTranscriptLayout.interTurnSpacing : nil
+        }
+        transcriptLayout.boundarySignature = { [weak self] in
+            guard let self else { return 0 }
+            // Feeds the prepare() fast path. Without it, a row whose ENTRY changed
+            // without the row COUNT changing returns stale geometry, because the
+            // guard only compares width bucket and count.
+            var hasher = Hasher()
+            for row in rows { hasher.combine(row.entryID) }
+            return hasher.finalize()
         }
         transcriptLayout.measuredHeight = { [weak self] index, width in
             guard let self else { return 1 }
@@ -652,6 +692,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// There is intentionally no reloadData path after (or before) initial load.
     private func applyCoalesced(document: AgentDocument) throws {
         prepareToolDetailLifecycle(for: document)
+        captureTurnTimes(from: document)
         // No patch here: this path derives its own changed set by comparing against
         // the cached rows, so the full walk is the only correct option.
         let flattened = try flatten(document)
@@ -675,6 +716,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             throw UpdateError.versionMismatch(expected: appliedVersion, actual: patch.fromVersion)
         }
         prepareToolDetailLifecycle(for: document)
+        captureTurnTimes(from: document)
         // The patch already names the nodes that changed, so a local delta rebuilds
         // only those rows. The full walk is the FALLBACK, not the default: it runs
         // whenever `incrementallyIndexed` declines, which it does for anything
@@ -1035,6 +1077,22 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             item.view.frame = attributes.frame
         }
 
+        // `.plans/45` T3. Turn chrome is rebuilt only when something that can
+        // MOVE a rule changed — the boundary set or the width. Rebuilding a
+        // CGPath on every display cycle would be work proportional to content
+        // repeated per display cycle, which is `performance.md`'s whole thesis.
+        // It must run AFTER `transcriptLayout.prepare()` above: the rules are
+        // positioned from PREPARED attributes, and reading them before the
+        // prepare pass returns nothing, so the path came out empty.
+        var hasher = Hasher()
+        for row in rows { hasher.combine(row.entryID) }
+        hasher.combine(Int(collectionView.bounds.width.rounded()))
+        let signature = hasher.finalize()
+        if signature != preparedTurnChromeSignature {
+            preparedTurnChromeSignature = signature
+            refreshTurnChrome()
+        }
+
         // NSCollectionView's custom layout reports the scrollable content height,
         // but the document view still needs that height in AppKit's clip
         // coordinates. Keeping it at the viewport height makes offscreen layout
@@ -1198,6 +1256,195 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         return candidate
     }
 
+    // MARK: - Turn chrome (`.plans/45` T3)
+
+    /// A turn is a user prompt AND the reply it produced — not one entry.
+    ///
+    /// The first cut treated every entry change as a boundary, which put a rule
+    /// between a prompt and its own answer: the transcript grew a horizontal line
+    /// after every single message and read as a list of unrelated cards. Caught
+    /// by looking at the rendered tour, not by any assertion, because "the gaps
+    /// differ" was true of the wrong answer too.
+    ///
+    /// Consecutive assistant/reasoning entries inside one turn stay at the
+    /// ordinary inter-block gap.
+    static func startsTurn(_ rows: [Row], at index: Int) -> Bool {
+        guard index > 0, rows.indices.contains(index), rows.indices.contains(index - 1)
+        else { return false }
+        guard rows[index].entryID != rows[index - 1].entryID else { return false }
+        return rows[index].role == .user && rows[index - 1].role != .user
+    }
+
+    /// Records each entry's `createdAt`. The transcript renders NOTHING for a nil
+    /// — `AgentSupervisor.replayCap` bounds a rebuilt tile to the last 500 events
+    /// and every transcript persisted before T1 has none, so inventing one would
+    /// put a false timestamp on real history.
+    private func captureTurnTimes(from document: AgentDocument) {
+        entryDatesByID = Dictionary(
+            uniqueKeysWithValues: document.entries.map { ($0.id, $0.createdAt) })
+    }
+
+    private func configureTurnChrome() {
+        collectionView.wantsLayer = true
+        turnSeparatorLayer.fillColor = nil
+        turnSeparatorLayer.actions = ["path": NSNull(), "fillColor": NSNull(), "frame": NSNull()]
+        hoverTimeLayer.actions = ["position": NSNull(), "bounds": NSNull(), "contents": NSNull()]
+        hoverTimeLayer.opacity = 0
+        hoverTimeLayer.contentsScale = window?.backingScaleFactor ?? 2
+        collectionView.layer?.addSublayer(turnSeparatorLayer)
+        collectionView.layer?.addSublayer(hoverTimeLayer)
+    }
+
+    /// Rebuilds the separator path from the layout's PREPARED attributes, so the
+    /// rule sits in the gap the layout actually left rather than in the gap the
+    /// spacing rule intended.
+    func refreshTurnChrome() {
+        // Two different sets, deliberately. A RULE is drawn between turns, so the
+        // first turn has none — there is nothing above it to separate from. But
+        // the first turn is still a turn, and hovering it must reveal its time
+        // like any other, so the hover anchors include row 0.
+        var boundaries: [(row: Int, entryID: AgentNodeID)] = []
+        for index in rows.indices where Self.startsTurn(rows, at: index) {
+            boundaries.append((index, rows[index].entryID))
+        }
+        var starts = boundaries
+        if let first = rows.first { starts.insert((0, first.entryID), at: 0) }
+        turnStartRowsByEntry = starts.map {
+            ($0.row, $0.entryID, entryDatesByID[$0.entryID] ?? nil)
+        }
+
+        let path = CGMutablePath()
+        let inset = transcriptLayout.contentInsets.left
+        let width = max(0, collectionView.bounds.width - inset * 2)
+        let thickness = max(CGFloat(LineWidth.hairline), 1.0 / (window?.backingScaleFactor ?? 2))
+        for boundary in boundaries {
+            guard let frame = transcriptLayout.layoutAttributesForItem(
+                at: IndexPath(item: boundary.row, section: 0))?.frame else { continue }
+            let y = frame.minY - AgentTranscriptLayout.interTurnSpacing / 2
+            path.addRect(CGRect(x: inset, y: y, width: width, height: thickness))
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        turnSeparatorLayer.frame = collectionView.bounds
+        turnSeparatorLayer.path = path
+        turnSeparatorLayer.fillColor = AgentLineRole.decorativeHairline.color
+            .cgColor(for: renderContext.appearance)
+        CATransaction.commit()
+        updateHoverTimeLayer()
+    }
+
+    private func updateHoverTimeLayer() {
+        guard let hoveredTurnEntryID,
+              let turn = turnStartRowsByEntry.first(where: { $0.entryID == hoveredTurnEntryID }),
+              let date = turn.date,
+              let frame = transcriptLayout.layoutAttributesForItem(
+                  at: IndexPath(item: turn.row, section: 0))?.frame
+        else {
+            setHoverTime(opacity: 0)
+            return
+        }
+        hoverTimeLayer.string = NSAttributedString(
+            string: Self.hoverTimeFormatter.string(from: date),
+            attributes: [
+                .font: NSFont.token(.caption),
+                .foregroundColor: renderContext.tokens.secondaryText.color
+                    .nsColor(for: renderContext.appearance),
+            ])
+        let size = hoverTimeLayer.preferredFrameSize()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        // In the left gutter, outside the reading column, so revealing it can
+        // never reflow a line of text.
+        hoverTimeLayer.frame = CGRect(
+            x: max(0, transcriptLayout.contentInsets.left - size.width - CGFloat(Space.s)),
+            y: frame.minY, width: size.width, height: size.height)
+        CATransaction.commit()
+        setHoverTime(opacity: 1)
+    }
+
+    /// Motion is "short and purposeful, and disabled by Reduce Motion"
+    /// (`_DESIGN.md` §11). With that setting on the time still appears — it just
+    /// does not fade.
+    private func setHoverTime(opacity: Float) {
+        guard hoverTimeLayer.opacity != opacity else { return }
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            hoverTimeLayer.opacity = opacity
+            CATransaction.commit()
+        } else {
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = hoverTimeLayer.opacity
+            fade.toValue = opacity
+            fade.duration = 0.12
+            hoverTimeLayer.opacity = opacity
+            hoverTimeLayer.add(fade, forKey: "opacity")
+        }
+    }
+
+    private static let hoverTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let transcriptTrackingArea { removeTrackingArea(transcriptTrackingArea) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow, .inVisibleRect],
+            owner: self
+        )
+        addTrackingArea(area)
+        transcriptTrackingArea = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        let point = collectionView.convert(event.locationInWindow, from: nil)
+        // Nothing here forces a layout pass: the row is found from already
+        // prepared attributes, and only a layer's position and opacity change.
+        var hovered: AgentNodeID?
+        for turn in turnStartRowsByEntry {
+            guard let frame = transcriptLayout.layoutAttributesForItem(
+                at: IndexPath(item: turn.row, section: 0))?.frame else { continue }
+            if point.y >= frame.minY - AgentTranscriptLayout.interTurnSpacing,
+               point.y <= frame.maxY {
+                hovered = turn.entryID
+                break
+            }
+        }
+        guard hovered != hoveredTurnEntryID else { return }
+        hoveredTurnEntryID = hovered
+        updateHoverTimeLayer()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        guard hoveredTurnEntryID != nil else { return }
+        hoveredTurnEntryID = nil
+        updateHoverTimeLayer()
+    }
+
+    /// QA: the turn rules currently painted, and the hover time's visibility.
+    var qaTurnSeparatorCountForChecks: Int {
+        guard let path = turnSeparatorLayer.path else { return 0 }
+        var count = 0
+        path.applyWithBlock { element in
+            if element.pointee.type == .moveToPoint { count += 1 }
+        }
+        return count
+    }
+
+    var qaHoverTimeVisibleForChecks: Bool { hoverTimeLayer.opacity > 0 }
+
+    func qaHoverTurnForChecks(entryID: AgentNodeID?) {
+        hoveredTurnEntryID = entryID
+        updateHoverTimeLayer()
+    }
+
     private func flatten(_ document: AgentDocument) throws -> RowIndex {
         var rows: [Row] = []
         var owners: [AgentNodeID: Set<AgentNodeID>] = [:]
@@ -1233,7 +1480,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                     throw UpdateError.duplicateTopLevelBlock(entry.id)
                 }
                 positions[entry.id] = RowPosition(entryID: entry.id, entryIndex: entryIndex, blockIndex: nil, slot: rows.count)
-                rows.append(Row(content: .completedReasoning(entry), role: .reasoning))
+                rows.append(Row(content: .completedReasoning(entry), role: .reasoning, entryID: entry.id))
                 owners[entry.id] = [entry.id]
                 for block in entry.blocks {
                     index(block, owner: entry.id, detailID: detailID)
@@ -1246,7 +1493,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                     throw UpdateError.duplicateTopLevelBlock(block.id)
                 }
                 positions[block.id] = RowPosition(entryID: entry.id, entryIndex: entryIndex, blockIndex: blockIndex, slot: rows.count)
-                rows.append(Row(content: .block(block), role: entry.role))
+                rows.append(Row(content: .block(block), role: entry.role, entryID: entry.id))
                 index(block, owner: block.id, detailID: detailID)
             }
             owners[entry.id] = []
@@ -1328,7 +1575,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 guard entry.blocks.indices.contains(blockIndex) else { return nil }
                 let block = entry.blocks[blockIndex]
                 guard block.id == rowID else { return nil }
-                newRows[slot] = Row(content: .block(block), role: entry.role)
+                newRows[slot] = Row(content: .block(block), role: entry.role, entryID: entry.id)
                 reindex(block, owner: block.id, detailID: detailID)
             } else {
                 // A completedReasoning row's content IS the entry, and it stops
@@ -1337,7 +1584,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 guard entry.id == rowID, entry.role == .reasoning,
                       entry.lifecycle == .finished, !entry.blocks.isEmpty
                 else { return nil }
-                newRows[slot] = Row(content: .completedReasoning(entry), role: .reasoning)
+                newRows[slot] = Row(content: .completedReasoning(entry), role: .reasoning, entryID: entry.id)
                 owners[entry.id] = [entry.id]
                 for block in entry.blocks { reindex(block, owner: entry.id, detailID: detailID) }
             }

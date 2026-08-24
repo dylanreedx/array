@@ -56,6 +56,11 @@ struct AgentTranscriptCopyController {
             return references.files.map(\.displayName).joined(separator: "\n")
         case let .agentReference(reference):
             return reference.displayNameAtSpawn
+        case let .table(table):
+            // Copy yields the table the user saw. `source` is retained by the
+            // payload precisely so a redesign of the table VIEW can never
+            // silently degrade what lands on the pasteboard.
+            return table.source
         case .list, .listItem, .quote, .thematicBreak, .opaque: return block.children.map(plainText(for:)).joined(separator: "\n")
         }
     }
@@ -72,6 +77,7 @@ struct AgentTranscriptCopyController {
         case let .list(list): return block.children.enumerated().map { list.ordered ? "\($0 + 1). \(markdown(for: $1))" : "- \(markdown(for: $1))" }.joined(separator: "\n")
         case .listItem: return block.children.map(markdown(for:)).joined(separator: "\n")
         case .thematicBreak: return "---"
+        case let .table(table): return table.source
         default: return plainText(for: block)
         }
     }

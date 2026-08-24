@@ -179,7 +179,10 @@ final class CommandOutputView: NSView {
 
     func applyTokens() {
         let theme = effectiveTokenTheme
-        layer?.backgroundColor = context.tokens.artifactSurface.color.cgColor(for: theme)
+        // `.plans/45` T6. Command output is code, not an artifact card: it takes
+        // the code surface, the same one CodeBlockView uses. Keeping a fill here
+        // is deliberate — §11 keeps fills for code, diff, plan and approval.
+        layer?.backgroundColor = context.tokens.codeSurface.color.cgColor(for: theme)
         titleLabel.textColor = context.tokens.primaryText.color.nsColor(for: theme)
         statusLabel.textColor = status == .failed
             ? AgentLineRole.attention.color.nsColor(for: theme)

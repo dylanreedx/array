@@ -63,7 +63,7 @@ final class ToolCallView: NSView {
 
         disclosureButton.target = self
         disclosureButton.action = #selector(toggleDisclosure(_:))
-        iconView.image = CanvasSymbolImage.image(named: "wrench.and.screwdriver")
+        iconView.image = CanvasSymbolImage.image(named: Self.symbolName(forToolNamed: nil))
         iconView.imageScaling = .scaleProportionallyDown
 
         titleLabel.font = NSFont.token(.label)
@@ -99,6 +99,8 @@ final class ToolCallView: NSView {
             default: payload.status.agentToolDefaultExpanded
         )
         titleLabel.stringValue = Self.safeSingleLine(payload.name, fallback: "Tool")
+        iconView.image = CanvasSymbolImage.image(
+            named: Self.symbolName(forToolNamed: payload.name))
         let presentation = payload.status.agentToolStatusPresentation
         statusLabel.stringValue = "\(presentation.glyph) \(presentation.label)"
         let candidateSummary = payload.summary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -129,37 +131,51 @@ final class ToolCallView: NSView {
         setAccessibilityChildren(children)
     }
 
+    /// `.plans/45` T10 (`performance.md` traps 2 and 3, together, on every display
+    /// cycle). This used to assign all five frames unconditionally and read
+    /// `intrinsicContentSize` four times per pass. An unchanged frame on an
+    /// `NSTextField` still costs a TextKit glyph-bounds pass AND re-dirties the
+    /// view — 20 of 34 samples in the 0.4.16 CPU report were exactly that path.
+    /// A tool row is the densest thing in a transcript, so it pays that cost more
+    /// often than anything else on the surface.
     override func layout() {
         super.layout()
+        func place(_ view: NSView, _ frame: NSRect) {
+            if view.frame != frame { view.frame = frame }
+        }
         let inset = Self.horizontalInset
         let buttonSide = CGFloat(Space.xxl)
-        disclosureButton.frame = disclosureButton.isHidden ? .zero : NSRect(
+        // Read once each, reused below.
+        let statusIntrinsic = statusLabel.intrinsicContentSize
+        let titleIntrinsic = titleLabel.intrinsicContentSize
+
+        place(disclosureButton, disclosureButton.isHidden ? .zero : NSRect(
             x: inset, y: (Self.rowHeight - buttonSide) / 2,
-            width: buttonSide, height: buttonSide)
-        iconView.frame = NSRect(
+            width: buttonSide, height: buttonSide))
+        place(iconView, NSRect(
             x: disclosureButton.isHidden ? inset : disclosureButton.frame.maxX + CGFloat(Space.s),
             y: (Self.rowHeight - buttonSide) / 2,
             width: buttonSide, height: buttonSide
-        )
-        let statusWidth = min(ceil(statusLabel.intrinsicContentSize.width) + CGFloat(Space.s), max(0, bounds.width * 0.40))
-        statusLabel.frame = NSRect(
+        ))
+        let statusWidth = min(ceil(statusIntrinsic.width) + CGFloat(Space.s), max(0, bounds.width * 0.40))
+        place(statusLabel, NSRect(
             x: max(iconView.frame.maxX, bounds.maxX - inset - statusWidth),
-            y: (Self.rowHeight - statusLabel.intrinsicContentSize.height) / 2,
-            width: statusWidth, height: statusLabel.intrinsicContentSize.height
-        )
+            y: (Self.rowHeight - statusIntrinsic.height) / 2,
+            width: statusWidth, height: statusIntrinsic.height
+        ))
         let titleX = iconView.frame.maxX + CGFloat(Space.m)
-        titleLabel.frame = NSRect(
+        place(titleLabel, NSRect(
             x: titleX,
-            y: (Self.rowHeight - titleLabel.intrinsicContentSize.height) / 2,
+            y: (Self.rowHeight - titleIntrinsic.height) / 2,
             width: max(1, statusLabel.frame.minX - titleX - CGFloat(Space.m)),
-            height: titleLabel.intrinsicContentSize.height
-        )
+            height: titleIntrinsic.height
+        ))
         let detailY = Self.rowHeight
-        summaryLabel.frame = NSRect(
+        place(summaryLabel, NSRect(
             x: inset, y: detailY,
             width: max(1, bounds.width - inset * 2),
             height: max(0, bounds.height - detailY - Self.detailBottomInset)
-        )
+        ))
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -169,7 +185,19 @@ final class ToolCallView: NSView {
 
     func applyTokens() {
         let theme = effectiveTokenTheme
-        layer?.backgroundColor = context.tokens.artifactSurface.color.cgColor(for: theme)
+        // `.plans/45` T6. No fill. `_DESIGN.md` §11 keeps the surface ladder at
+        // canvas -> tile -> artifact/composer and asks for "fewer nested fills";
+        // a routine tool row is not an artifact, and giving every one of them a
+        // filled card is what made the transcript read as a wall of cards. nil,
+        // never .clear — a painted transparent is an unregistered literal to the
+        // appearance census (hazard 8).
+        layer?.backgroundColor = nil
+        // "Completed routine work recedes" (§11). `Opacity.receded` is 0.88,
+        // derived so faded secondary text still clears AA at break-even 0.8724 —
+        // so it is applied to the row as a whole and never stacked with a further
+        // colour reduction. A failure never recedes: only failures should pull
+        // the eye.
+        alphaValue = status == .completed ? Opacity.receded : Opacity.full
         titleLabel.textColor = context.tokens.primaryText.color.nsColor(for: theme)
         summaryLabel.textColor = context.tokens.primaryText.color.nsColor(for: theme)
         statusLabel.textColor = status == .failed
@@ -177,6 +205,31 @@ final class ToolCallView: NSView {
             : context.tokens.secondaryText.color.nsColor(for: theme)
         disclosureButton.contentTintColor = context.tokens.secondaryText.color.nsColor(for: theme)
         iconView.contentTintColor = context.tokens.secondaryText.color.nsColor(for: theme)
+    }
+
+    /// `.plans/45` T11 — one glyph per kind of work, instead of one wrench for
+    /// everything.
+    ///
+    /// Resolved from the provider-supplied tool NAME, matched on substrings
+    /// because the three harnesses disagree on casing and wording for the same
+    /// operation (codex sends literal `"Shell"` and `"Edit"`, claude sends
+    /// `bash`/`Bash`, pi sends its own). Unknown names keep the wrench, so a new
+    /// provider tool degrades to today's behaviour rather than to a blank column.
+    ///
+    /// The mapping lives here as one static function rather than in `apply` so a
+    /// witness can exercise it without building a view.
+    static func symbolName(forToolNamed name: String?) -> String {
+        let fallback = "wrench.and.screwdriver"
+        guard let name = name?.lowercased(), !name.isEmpty else { return fallback }
+        func any(_ needles: [String]) -> Bool { needles.contains { name.contains($0) } }
+        if any(["bash", "shell", "terminal", "command", "run ", "exec"]) { return "terminal" }
+        if any(["edit", "write", "patch", "apply_patch", "create", "replace"]) { return "square.and.pencil" }
+        if any(["read", "view", "cat ", "open"]) { return "eye" }
+        if any(["search", "grep", "glob", "find"]) { return "magnifyingglass" }
+        if any(["fetch", "web", "http", "url", "browse"]) { return "globe" }
+        if any(["task", "agent", "spawn", "delegate"]) { return "bubble.left" }
+        if any(["todo", "plan"]) { return "checklist" }
+        return fallback
     }
 
     static func measuredHeight(summary: String?, width: CGFloat, expanded: Bool) -> CGFloat {

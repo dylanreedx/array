@@ -208,7 +208,15 @@ extension UIProbeGeometry {
                 && codeView.codeTextView.string == codeText
                 && codeHeight > CodeBlockView.headerHeight
                 && ruleHeight > 0
-                && view.bodyHosts[2].rendererView?.accessibilityLabel() as? String == "Agent thematic-break content"
+                // `.plans/45` T9 corrected this expectation. It pinned the safe
+                // label of AgentDeferredBlockRenderer, i.e. it asserted that a
+                // thematic break was still UNIMPLEMENTED: the deferred renderer
+                // vends a bare NSView measuring 24pt and painting nothing. A rule
+                // now renders, so the contract to gate is the real one — the
+                // splitter role a screen reader needs.
+                && view.bodyHosts[2].rendererView is ThematicBreakView
+                && view.bodyHosts[2].rendererView?.accessibilityRole() == .splitter
+                && view.bodyHosts[2].rendererView?.accessibilityLabel() as? String == "Section break"
                 && unknownView.summaryLabel.stringValue == "Unsupported content: \(unsupportedKind.rawValue)"
                 && unknownHeight == AgentUnknownBlockView.height
                 && !visibleStrings(in: unknownView).contains(opaqueSecret),

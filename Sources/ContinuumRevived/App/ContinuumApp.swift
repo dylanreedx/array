@@ -1041,6 +1041,16 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--transcript-rhythm-check") {
+            do {
+                _ = NSApplication.shared
+                try TranscriptRhythmChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("transcript-rhythm check failed: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--relationship-geometry-check") {
             do {
                 _ = NSApplication.shared

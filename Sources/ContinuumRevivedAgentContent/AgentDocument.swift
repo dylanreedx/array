@@ -66,6 +66,15 @@ public struct AgentEntry: Identifiable, Codable, Equatable, Sendable {
     public var provenance: AgentProvenance
     public var lifecycle: AgentEntryLifecycle
     public var blocks: [AgentBlock]
+    /// Wall clock at which this entry first entered the document, used by the
+    /// transcript's hover-revealed "sent at" time.
+    ///
+    /// Optional on purpose, and it must stay optional. Every transcript already
+    /// persisted in the field predates this field and decodes as nil, and
+    /// `AgentSupervisor.replayCap` bounds a rebuilt tile to the last 500 events,
+    /// so an older entry legitimately has no time. A renderer shows NOTHING for
+    /// nil — never "now", which would be a fabricated timestamp on real history.
+    public var createdAt: Date?
 
     public init(
         id: AgentNodeID,
@@ -73,7 +82,8 @@ public struct AgentEntry: Identifiable, Codable, Equatable, Sendable {
         role: AgentEntryRole,
         provenance: AgentProvenance,
         lifecycle: AgentEntryLifecycle = .open(markupBlockID: nil),
-        blocks: [AgentBlock] = []
+        blocks: [AgentBlock] = [],
+        createdAt: Date? = nil
     ) {
         self.id = id
         self.revision = revision
@@ -81,10 +91,11 @@ public struct AgentEntry: Identifiable, Codable, Equatable, Sendable {
         self.provenance = provenance
         self.lifecycle = lifecycle
         self.blocks = blocks
+        self.createdAt = createdAt
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, revision, role, provenance, lifecycle, blocks
+        case id, revision, role, provenance, lifecycle, blocks, createdAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -96,6 +107,7 @@ public struct AgentEntry: Identifiable, Codable, Equatable, Sendable {
         lifecycle = try container.decodeIfPresent(AgentEntryLifecycle.self, forKey: .lifecycle)
             ?? .open(markupBlockID: nil)
         blocks = try container.decode([AgentBlock].self, forKey: .blocks)
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt)
     }
 }
 

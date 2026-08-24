@@ -28,7 +28,7 @@ enum AgentBlockRendererRegistryError: Error, Equatable, CustomStringConvertible 
 @MainActor
 final class AgentBlockRendererRegistry {
     static let builtInKinds: [AgentBlockKind] = [
-        .paragraph, .heading, .list, .listItem, .quote, .thematicBreak,
+        .paragraph, .heading, .list, .listItem, .quote, .thematicBreak, .table,
         .fencedCode, .toolCall, .commandOutput, .plan, .diff, .approval,
         .question, .image, .imageGallery, .fileReferences, .agentReference, .error, .notice, .unknown
     ]
@@ -65,6 +65,10 @@ final class AgentBlockRendererRegistry {
                     try registry.register(AgentFileReferenceRenderer(), for: kind)
                 } else if kind == .agentReference {
                     try registry.register(AgentReferenceRenderer(), for: kind)
+                } else if kind == .table {
+                    try registry.register(TableRenderer(), for: kind)
+                } else if kind == .thematicBreak {
+                    try registry.register(ThematicBreakRenderer(), for: kind)
                 } else if kind == .error || kind == .notice {
                     try registry.register(ErrorNoticeRenderer(kind: kind), for: kind)
                 } else {

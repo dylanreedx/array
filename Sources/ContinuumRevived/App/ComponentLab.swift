@@ -56,6 +56,16 @@ enum AgentTranscriptReviewState: String, CaseIterable {
     case activeTool = "active-tool"
     case failedTool = "failed-tool"
     case approval
+    // `.plans/45` T2. One state per thing the visual overhaul changes, so a
+    // regression shows up as a named state rather than as "the mixed card looks
+    // different somehow". These are the states the pixel gate and the tour both
+    // enumerate; adding one here is what makes the work reviewable at all.
+    case headingLadder = "heading-ladder"
+    case lists
+    case tableAndBreaks = "table-and-breaks"
+    case errorVsNotice = "error-vs-notice"
+    case turnBoundary = "turn-boundary"
+    case recededWork = "receded-work"
 }
 
 /// P4.10 supervised review states: the full-turn composer across its editing and
@@ -239,6 +249,128 @@ enum LabFixtures {
                 paragraph("approval-intro", [.text("A provider-enforced request pauses only this turn. Its context and available choices stay inline.")]),
                 approval,
             ]
+        case .headingLadder:
+            // Every level, adjacent, with body text between so the STEP between
+            // rungs is what the eye compares. Today all six render identically at
+            // `.title` 15 semibold — this fixture is that defect, on record.
+            assistantBlocks = (1...6).flatMap { level -> [AgentBlock] in
+                [
+                    AgentBlock(
+                        id: id("h\(level)"), revision: 1, kind: .heading,
+                        payload: .heading(level: UInt8(level), content: [
+                            .text("Heading level \(level)"),
+                        ])
+                    ),
+                    paragraph("h\(level)-body", [
+                        .text("Body copy under level \(level), so the size, weight and colour step between this rung and the next is visible rather than inferred."),
+                    ]),
+                ]
+            }
+        case .lists:
+            // Nesting, ordering and a quote together, because the bullet, the
+            // number and the "› " marker are all inserted the SAME wrong way —
+            // concatenated into the text run, so a wrapped line hangs under the
+            // marker instead of under the text.
+            assistantBlocks = [
+                paragraph("lists-intro", [.text("Wrapped list text should align under the text, never under the marker.")]),
+                AgentBlock(
+                    id: id("ul"), revision: 1, kind: .list,
+                    payload: .list(.init(ordered: false)), children: [
+                        AgentBlock(
+                            id: id("ul-1"), revision: 1, kind: .listItem, payload: .listItem,
+                            children: [paragraph("ul-1-t", [.text("A first item long enough to wrap onto a second line at every probed width, which is the only way the hanging indent is visible at all.")])]
+                        ),
+                        AgentBlock(
+                            id: id("ul-2"), revision: 1, kind: .listItem, payload: .listItem,
+                            children: [
+                                paragraph("ul-2-t", [.text("A second item that itself contains a nested list:")]),
+                                AgentBlock(
+                                    id: id("ul-2-sub"), revision: 1, kind: .list,
+                                    payload: .list(.init(ordered: false)), children: [
+                                        AgentBlock(
+                                            id: id("ul-2-sub-1"), revision: 1, kind: .listItem, payload: .listItem,
+                                            children: [paragraph("ul-2-sub-1-t", [.text("A nested item, indented by two literal spaces inside the text run today.")])]
+                                        ),
+                                    ]
+                                ),
+                            ]
+                        ),
+                    ]
+                ),
+                AgentBlock(
+                    id: id("ol"), revision: 1, kind: .list,
+                    payload: .list(.init(ordered: true)), children: [
+                        AgentBlock(
+                            id: id("ol-1"), revision: 1, kind: .listItem, payload: .listItem,
+                            children: [paragraph("ol-1-t", [.text("An ordered item, also long enough to wrap so the number's gutter is testable.")])]
+                        ),
+                        AgentBlock(
+                            id: id("ol-2"), revision: 1, kind: .listItem, payload: .listItem,
+                            children: [paragraph("ol-2-t", [.text("A second ordered item.")])]
+                        ),
+                    ]
+                ),
+                AgentBlock(
+                    id: id("lists-quote"), revision: 1, kind: .quote, payload: .quote,
+                    children: [paragraph("lists-quote-t", [.text("A quotation long enough to wrap, so the marker gutter and the blockquote rule can be told apart.")])]
+                ),
+            ]
+        case .tableAndBreaks:
+            // Parsed from real Markdown ON PURPOSE. A hand-built fixture would
+            // bypass `MarkdownAgentMarkupParser`, which is exactly where the table
+            // defect lives: it maps Table -> .fencedCode and throws the cell
+            // structure away. Going through the parser means this fixture shows
+            // the real before, and the real after, with no fixture edit.
+            let markdown = """
+            Below is a table, then a thematic break, then more prose.
+
+            | file | added | removed |
+            | --- | ---: | ---: |
+            | AgentTranscriptListView.swift | 84 | 19 |
+            | AssistantProseRenderer.swift | 31 | 8 |
+            | AgentTranscriptLayout.swift | 12 | 3 |
+
+            ---
+
+            Text after the break. The rule above should be visible.
+            """
+            assistantBlocks = MarkdownAgentMarkupParser()
+                .parse(markdown, entryID: id("entry-assistant"), previous: []).blocks
+        case .errorVsNotice:
+            // Adjacent, deliberately. They are pixel-identical today apart from a
+            // title string and one status colour, so a compaction notice reads as
+            // a crash. Side by side is the only arrangement where that is obvious.
+            assistantBlocks = [
+                paragraph("evn-intro", [.text("A notice and an error, adjacent. These must not read as the same thing.")]),
+                notice,
+                error,
+            ]
+        case .turnBoundary:
+            // Three turns. The other fixtures are one user entry followed by one
+            // assistant entry, so turn->turn separation cannot be judged in any of
+            // them — the boundary occurs exactly once, at the top.
+            assistantBlocks = assistantProse
+        case .recededWork:
+            // Settled routine work, which `_DESIGN.md` §11 says should recede and
+            // which no renderer currently fades at all.
+            assistantBlocks = [
+                paragraph("receded-intro", [.text("Routine work that has already settled should sit back from the reading path.")]),
+                completedTool,
+                AgentBlock(
+                    id: id("tool-settled-2"), revision: 1, kind: .toolCall,
+                    payload: .toolCall(.init(
+                        name: "List zone layers", summary: "Enumerated installed layers for the active project.", status: .completed
+                    ))
+                ),
+                AgentBlock(
+                    id: id("tool-settled-3"), revision: 1, kind: .toolCall,
+                    payload: .toolCall(.init(
+                        name: "Read canvas.json", summary: "Nine tiles across two zones.", status: .completed
+                    ))
+                ),
+                failedTool,
+                paragraph("receded-outro", [.text("The failed row above must stay legible while the settled rows recede.")]),
+            ]
         case .long:
             let continuation = (1...12).map { index in
                 paragraph(
@@ -247,6 +379,39 @@ enum LabFixtures {
                 )
             }
             assistantBlocks = assistantProse + [completedTool, plan, diff, activeTool, activeOutput, failedTool, failedOutput, error, approval] + continuation + [notice]
+        }
+        if state == .turnBoundary {
+            // Three real turns, so the separation between them is a property of
+            // the document and not of one hand-placed rule.
+            func turn(_ n: Int, ask: String, reply: String) -> [AgentEntry] {
+                // Stamped from the canned epoch, never from `Date()`: a real clock
+                // here would make the fixture -- and every pixel gate over it --
+                // differ on every run. The THIRD turn is deliberately left
+                // unstamped, because a transcript persisted before `createdAt`
+                // existed decodes as nil and the hover reveal must render nothing
+                // for it rather than inventing "now".
+                var user = entry("u\(n)", role: .user, blocks: [paragraph("u\(n)-t", [.text(ask)])])
+                if n < 3 { user.createdAt = epoch.addingTimeInterval(Double(n) * 600) }
+                return [
+                    user,
+                    entry("a\(n)", role: .assistant, blocks: [
+                        paragraph("a\(n)-t", [.text(reply)]),
+                        AgentBlock(
+                            id: id("a\(n)-tool"), revision: 1, kind: .toolCall,
+                            payload: .toolCall(.init(
+                                name: "Read file", summary: "AgentTranscriptLayout.swift", status: .completed
+                            ))
+                        ),
+                    ]),
+                ]
+            }
+            return AgentDocument(version: 1, entries:
+                turn(1, ask: "Where does the transcript decide row spacing?",
+                     reply: "In AgentTranscriptLayout, as one flat value between every row.")
+                + turn(2, ask: "So a new turn looks the same as a new paragraph?",
+                       reply: "Today, yes. That is the tier this milestone adds.")
+                + turn(3, ask: "Show me the boundary.",
+                       reply: "Between each of these three exchanges."))
         }
         return AgentDocument(version: 1, entries: [user, entry("assistant", role: .assistant, blocks: assistantBlocks)])
     }
@@ -4011,6 +4176,11 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
         let expectedMinimumRows: [AgentTranscriptReviewState: Int] = [
             .mixed: 10, .long: 28, .activeTool: 4, .failedTool: 5, .approval: 3,
+            // `.plans/45` T2. Floors, not exact counts: T8 turns one fenced-code
+            // block into one table block, so an equality here would have to be
+            // edited by the very ticket it is meant to gate.
+            .headingLadder: 13, .lists: 5, .tableAndBreaks: 4,
+            .errorVsNotice: 4, .turnBoundary: 9, .recededWork: 6,
         ]
         for state in AgentTranscriptReviewState.allCases {
             let size = NSSize(width: state == .long ? 320 : 480, height: 720)
@@ -4090,6 +4260,14 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
                       }) else {
                     throw fail("approval transcript review state lost its explicit contextual custom request controls")
                 }
+            case .headingLadder, .lists, .tableAndBreaks, .errorVsNotice,
+                 .turnBoundary, .recededWork:
+                // Row floors above only. Every STRUCTURAL assertion for these
+                // states lives in `--transcript-rhythm-check`, deliberately:
+                // this function runs inside `--component-lab-check`, which is in
+                // MATRIX_KNOWN_RED, so an assertion written here would read as
+                // coverage while never running. See `.plans/45` §2.5.
+                break
             }
         }
     }

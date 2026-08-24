@@ -488,6 +488,13 @@ enum UIProbePixels {
         var transcriptReview = Sweep()
         let reviewStates: [(AgentTranscriptReviewState, Double)] = [
             (.mixed, 320), (.activeTool, 480), (.failedTool, 480), (.approval, 480),
+            // `.plans/45` T2. The states the visual overhaul changes, routed into
+            // the one transcript gate that actually runs: --component-lab-check
+            // and --ui-baseline-check, the two legs that compare images, are both
+            // in MATRIX_KNOWN_RED. Blank-bitmap and contrast floors here are what
+            // stops a rhythm change from quietly rendering nothing.
+            (.headingLadder, 480), (.lists, 320), (.tableAndBreaks, 480),
+            (.errorVsNotice, 480), (.turnBoundary, 480), (.recededWork, 480),
         ]
         for (state, width) in reviewStates {
             for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {

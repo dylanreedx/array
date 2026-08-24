@@ -308,6 +308,15 @@ enum UIProbeAppearance {
             // layers resolving in both appearances, which it paints from its
             // content alone. The fixture carries a mismatch line deliberately, so
             // the warning accent is painted here too and not only in theory.
+            // `.plans/45` T8/T9. The two transcript renderers born on tokens. They
+            // are swept through the production review state that contains both,
+            // so the census sees the same view the transcript builds rather than
+            // a stand-in — a hand-made instance would let the real registration
+            // regress while this stayed green.
+            ("appearance.transcriptTableAndBreaks", NSSize(width: 480, height: 720), {
+                LabCatalog.makeTranscriptReviewSurface(
+                    state: .tableAndBreaks, size: NSSize(width: 480, height: 720), theme: .dark)
+            }),
             ("appearance.inboxHoverCard", NSSize(width: 360, height: 220), {
                 let card = InboxHoverCardView(frame: .zero)
                 card.apply(

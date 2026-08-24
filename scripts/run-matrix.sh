@@ -662,6 +662,14 @@ run_app_check .build/debug/Array --file-open-active-context-check
 # NON-ZERO viewport and a zoom other than 1 -- the existing coverage builds its
 # canvas at viewport (0,0), where the offset is exactly zero.
 run_app_check .build/debug/Array --relationship-geometry-check
+# .plans/45: the transcript's rhythm and hierarchy, asserted as RENDERED OUTCOME.
+# Every defect it gates is a value computed and then discarded -- the heading
+# level reaches only the accessibility string, the bullet is built into the text
+# run -- so it reads the font on the glyph and the gap between prepared frames,
+# never what a renderer was asked for. It exists as its own leg because the
+# transcript's other structural witness lives in --component-lab-check, which is
+# KNOWN-RED, so an assertion added there would never run.
+run_app_check .build/debug/Array --transcript-rhythm-check
 # Directory-aware Markdown: a real title-bar mouse click reaches Preview/Edit;
 # unsaved preview, explicit atomic save, clean reload, and conflict overwrite are witnessed.
 run_app_check .build/debug/Array --file-markdown-preview-check

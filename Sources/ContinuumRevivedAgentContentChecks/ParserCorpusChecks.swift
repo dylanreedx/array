@@ -35,6 +35,14 @@ func parserPlainText(_ blocks: [AgentBlock]) -> String {
         case let .notice(notice): own = corpusInlineText(notice.message)
         case let .opaque(opaque):
             if case let .string(value) = opaque.value { own = value } else { own = "" }
+        case let .table(table):
+            // Cell text, in reading order. `.plans/45` T8: a table used to arrive
+            // as `.fencedCode` holding raw pipe source, so this projection saw
+            // the delimiters it exists to exclude.
+            own = ((table.header.isEmpty ? [] : [table.header]) + table.rows)
+                .map { $0.map(corpusInlineText).filter { !$0.isEmpty }.joined(separator: "\t") }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
         case .list, .listItem, .quote, .thematicBreak: own = ""
         }
         return ([own] + block.children.map(project)).filter { !$0.isEmpty }.joined(separator: "\n")

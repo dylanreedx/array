@@ -156,11 +156,10 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
         case is BlockQuote: return .quote
         case is ThematicBreak: return .thematicBreak
         case is CodeBlock: return .fencedCode
-        // GFM tables have no dedicated block kind/renderer; render their literal
-        // pipe source as monospace (see the matching case in convertBlock) so the
-        // alignment reads, instead of the "Unsupported content: unknown" opaque
-        // fallback. Assistant replies use tables constantly — the common case.
-        case is Table: return .fencedCode
+        // Assistant replies use tables constantly — the common case, and until
+        // `.plans/45` T8 they were flattened to `.fencedCode` and dumped as raw
+        // pipes in a monospace block. See the matching case in `convertBlock`.
+        case is Table: return .table
         default: return .unknown
         }
     }
@@ -289,17 +288,37 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
                 ))
             )
         case let table as Table:
-            // Faithful monospace fallback: the raw table markdown preserves the
-            // column pipes so the structure stays legible without a table
-            // renderer. See `blockKind`.
+            // `.plans/45` T8. This used to map every table to `.fencedCode` and
+            // store the raw pipe source, which destroyed the cell structure at
+            // parse time — no renderer could ever lay out columns because none
+            // ever saw any. The original Markdown is still retained on the
+            // payload so copy is lossless and nothing is lost when a renderer
+            // chooses to draw fewer columns than the table has.
+            func cells(_ row: Markup) -> [[AgentInline]] {
+                row.children.map {
+                    convertInlineChildren($0, source: source, depth: depth, diagnostics: &diagnostics)
+                }
+            }
+            let header = table.head.children.map {
+                convertInlineChildren($0, source: source, depth: depth, diagnostics: &diagnostics)
+            }
+            let bodyRows = table.body.children.map(cells)
+            let alignments: [AgentTablePayload.Alignment] = table.columnAlignments.map {
+                switch $0 {
+                case .some(.center): return .center
+                case .some(.right): return .trailing
+                default: return .leading
+                }
+            }
             return AgentBlock(
                 id: id,
-                kind: .fencedCode,
-                payload: .fencedCode(.init(
-                    language: nil,
-                    code: literalSource(for: table, in: source)?
-                        .trimmingCharacters(in: .newlines) ?? "",
-                    isComplete: true
+                kind: .table,
+                payload: .table(.init(
+                    header: header,
+                    rows: bodyRows,
+                    alignments: alignments,
+                    source: literalSource(for: table, in: source)?
+                        .trimmingCharacters(in: .newlines) ?? ""
                 ))
             )
         default:

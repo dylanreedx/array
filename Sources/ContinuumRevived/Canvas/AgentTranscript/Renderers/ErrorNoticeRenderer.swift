@@ -193,8 +193,28 @@ final class AgentErrorNoticeView: NSView {
 
     func applyTokens() {
         let theme = effectiveTokenTheme
-        layer?.backgroundColor = context.tokens.artifactSurface.color.cgColor(for: theme)
-        titleLabel.textColor = context.tokens.primaryText.color.nsColor(for: theme)
+        // `.plans/45` T7. An error and a notice used to be one picture, differing
+        // only by a title string and one status-label colour — so a compaction
+        // notice read as a crash. `_DESIGN.md` §11 draws the line for us: a
+        // strong semantic line is reserved for "selection, keyboard focus,
+        // approval, error, or warning", and everything else recedes.
+        //
+        // Error keeps the artifact fill and gains that semantic outline. Notice
+        // gives up both: it is ordinary history and sits on the tile body. A
+        // resting surface paints nil, never .clear — a painted transparent is an
+        // unregistered literal to the appearance census (hazard 8).
+        if kind == .error {
+            layer?.backgroundColor = context.tokens.artifactSurface.color.cgColor(for: theme)
+            layer?.borderColor = AgentLineRole.attention.color.cgColor(for: theme)
+            layer?.borderWidth = CGFloat(LineWidth.hairline)
+        } else {
+            layer?.backgroundColor = nil
+            layer?.borderColor = nil
+            layer?.borderWidth = 0
+        }
+        titleLabel.textColor = kind == .error
+            ? context.tokens.primaryText.color.nsColor(for: theme)
+            : context.tokens.secondaryText.color.nsColor(for: theme)
         messageLabel.textColor = context.tokens.primaryText.color.nsColor(for: theme)
         metadataLabel.textColor = context.tokens.secondaryText.color.nsColor(for: theme)
         statusLabel.textColor = kind == .error

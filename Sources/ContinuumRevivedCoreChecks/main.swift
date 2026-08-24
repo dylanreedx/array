@@ -11597,4 +11597,8 @@ runCameraArmedZoneChecks()
 
 runProcessGroupChildChecks()
 
+// Plan: .plans/45 T1 — the transcript's hover-revealed "sent at" time needs a
+// timestamp in the document, and every transcript already on disk predates it.
+runAgentEntryTimestampChecks()
+
 print("ContinuumRevivedCoreChecks passed")

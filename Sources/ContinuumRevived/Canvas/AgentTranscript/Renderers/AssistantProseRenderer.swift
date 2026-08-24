@@ -40,10 +40,21 @@ final class AssistantProseRenderer: AgentBlockRendering {
 /// by the semantic container traversal.
 @MainActor
 final class AssistantProseView: NSView {
-    static let horizontalReadingInset: CGFloat = CGFloat(Inset.card.left)
+    /// `.plans/45` T6. Zero, deliberately.
+    ///
+    /// The layout already insets every row by `contentInsets.left` (12), which is
+    /// where an artifact's FILL begins. Prose used to add a second 12 on top, so
+    /// prose text sat at 24 while card edges sat at 12 and nothing on the page
+    /// shared a left edge. Text inside an artifact keeps its own 12pt inset, so
+    /// the result is prose and card edges aligned, with card text indented within
+    /// its own fill — which is what containment should look like.
+    static let horizontalReadingInset: CGFloat = 0
     private static let blockSpacing = CGFloat(Space.m)
 
     private(set) var textFields: [RichInlineTextView] = []
+    /// Pre-built marker glyphs by row index, and the frames to draw them beside.
+    private var markerRuns: [(Int, NSAttributedString)] = []
+    private var markerFrames: [Int: NSRect] = [:]
     private var rows: [Row] = []
     private var renderContext = AgentRenderContext(
         actions: .disabled,
@@ -60,7 +71,23 @@ final class AssistantProseView: NSView {
         let role: NSAccessibility.Role
         let headingLevel: Int?
         let textRole: TextRole
+        var style: AgentProseTextStyle = .plain
+        /// Extra air ABOVE this row, on top of `blockSpacing`.
+        ///
+        /// A heading belongs to what follows it, so it needs more space above
+        /// than below — without that, a section title floats midway between two
+        /// paragraphs and reads as belonging to the one it just ended.
+        var spacingAbove: CGFloat = 0
+        /// The marker ("• ", "3. ", "› ") drawn in the gutter, outside the text
+        /// run. `.plans/45` T4: it used to be concatenated onto `runs`, so a
+        /// wrapped line aligned under the marker instead of under the text.
+        var marker: String = ""
     }
+
+    /// Gutter width per list nesting level, and the width reserved for the marker
+    /// itself. Both are grid values so the reading column stays on the 2pt grid.
+    private static let listIndentPerLevel = CGFloat(Space.l)
+    private static let markerGutter = CGFloat(Space.l)
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -81,13 +108,24 @@ final class AssistantProseView: NSView {
         rows = Self.rows(for: block)
         textFields = rows.map { row in
             let view = RichInlineTextView(frame: .zero)
-            view.apply(runs: row.runs, blockID: row.blockID, context: context, textRole: row.textRole)
+            view.apply(
+                runs: row.runs, blockID: row.blockID, context: context,
+                textRole: row.textRole, style: row.style)
             view.setAccessibilityElement(true)
             view.setAccessibilityRole(row.role)
             view.setAccessibilityLabel(view.string)
             if let level = row.headingLevel { view.setAccessibilityValue(level) }
             addSubview(view)
             return view
+        }
+        markerFrames.removeAll(keepingCapacity: true)
+        markerRuns = rows.enumerated().compactMap { index, row in
+            guard !row.marker.isEmpty else { return nil }
+            let font = NSFont.token(row.textRole)
+            return (index, NSAttributedString(string: row.marker, attributes: [
+                .font: font,
+                .foregroundColor: context.tokens.secondaryText.color.nsColor(for: context.appearance),
+            ]))
         }
         invalidateRowHeights()
         identifier = NSUserInterfaceItemIdentifier("agent.assistantProse.\(block.id.rawValue)")
@@ -156,7 +194,8 @@ final class AssistantProseView: NSView {
                     for: row.runs,
                     width: availableWidth,
                     context: renderContext,
-                    textRole: row.textRole
+                    textRole: row.textRole,
+                    style: row.style
                 )
             }
             cachedWidth = availableWidth
@@ -172,8 +211,36 @@ final class AssistantProseView: NSView {
             // An unchanged frame still costs a TextKit glyph-bounds pass, and it
             // re-dirties the view — which is what kept the display cycle spinning.
             if pair.1.frame != frame { pair.1.frame = frame }
+            markerFrames[index] = frame
             y += height
-            if index + 1 < rows.count { y += Self.blockSpacing }
+            if index + 1 < rows.count {
+                y += Self.blockSpacing + rows[index + 1].spacingAbove
+            }
+        }
+        if !markerRuns.isEmpty { needsDisplay = true }
+    }
+
+    /// List and quote markers are DRAWN, not sub-viewed.
+    ///
+    /// `.plans/45` T4 + `performance.md` trap 1. A marker label per list item is
+    /// one more AppKit view per content item on the surface whose view count
+    /// already froze the app in 0.4.16. The attributed strings are built once in
+    /// `apply` and only stroked here, so a display cycle costs a draw and no
+    /// allocation, measurement or layout.
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard !markerRuns.isEmpty else { return }
+        for (index, marker) in markerRuns {
+            guard let frame = markerFrames[index] else { continue }
+            let indent = rows[index].style.firstLineHeadIndent
+            let size = marker.size()
+            let x = frame.minX + indent - Self.markerGutter
+            // Baseline-align the marker with the first line of its row rather than
+            // centring it in the row: a two-line item would otherwise float its
+            // bullet into the middle of the text.
+            let origin = NSPoint(x: max(frame.minX, x), y: frame.minY)
+            guard dirtyRect.intersects(NSRect(origin: origin, size: size)) else { continue }
+            marker.draw(at: origin)
         }
     }
 
@@ -190,32 +257,41 @@ final class AssistantProseView: NSView {
                 for: $1.runs,
                 width: availableWidth,
                 context: context,
-                textRole: $1.textRole
+                textRole: $1.textRole,
+                style: $1.style
             )
         }
-        return ceil(text + CGFloat(max(0, rows.count - 1)) * blockSpacing)
+        // The leading space of every row after the first is part of the measured
+        // height, or a heading's extra air would be laid out and never measured —
+        // which clips the last row of the block.
+        let leading = rows.dropFirst().reduce(CGFloat.zero) { $0 + $1.spacingAbove }
+        return ceil(text + CGFloat(max(0, rows.count - 1)) * blockSpacing + leading)
     }
 
     private static func rows(for block: AgentBlock, listDepth: Int = 0, itemNumber: Int? = nil) -> [Row] {
         switch block.payload {
         case let .paragraph(content):
-            let prefix = itemPrefix(depth: listDepth, number: itemNumber)
-            let runs = prefix.isEmpty ? content : [.text(prefix)] + content
+            let marker = itemMarker(number: itemNumber)
             return [Row(
                 blockID: block.id,
-                runs: runs,
+                runs: content,
                 role: itemNumber == nil ? .staticText : listItemRole,
                 headingLevel: nil,
-                textRole: .body
+                textRole: .body,
+                style: listStyle(depth: listDepth, hasMarker: !marker.isEmpty),
+                marker: marker
             )] + block.children.flatMap { rows(for: $0, listDepth: listDepth) }
         case let .heading(level, content):
             let clampedLevel = max(1, min(6, Int(level)))
+            let ladder = headingLadder(level: clampedLevel)
             return [Row(
                 blockID: block.id,
                 runs: content,
                 role: headingRole,
                 headingLevel: clampedLevel,
-                textRole: .title
+                textRole: ladder.role,
+                style: ladder.style,
+                spacingAbove: ladder.spaceAbove
             )] + block.children.flatMap { rows(for: $0, listDepth: listDepth) }
         case let .list(payload):
             let start = payload.start ?? 1
@@ -223,14 +299,16 @@ final class AssistantProseView: NSView {
                 rows(for: child, listDepth: listDepth + 1, itemNumber: payload.ordered ? start + index : 0)
             }
         case .listItem:
-            let prefix = itemPrefix(depth: listDepth, number: itemNumber)
+            let marker = itemMarker(number: itemNumber)
             if block.children.isEmpty {
                 return [Row(
                     blockID: block.id,
-                    runs: [.text(prefix)],
+                    runs: [],
                     role: listItemRole,
                     headingLevel: nil,
-                    textRole: .body
+                    textRole: .body,
+                    style: listStyle(depth: listDepth, hasMarker: !marker.isEmpty),
+                    marker: marker
                 )]
             }
             return block.children.enumerated().flatMap { index, child in
@@ -239,12 +317,18 @@ final class AssistantProseView: NSView {
             }
         case .quote:
             return block.children.flatMap { rows(for: $0, listDepth: listDepth) }.map { row in
-                Row(
+                var style = row.style
+                style.firstLineHeadIndent += markerGutter
+                style.headIndent += markerGutter
+                style.secondary = true
+                return Row(
                     blockID: row.blockID,
-                    runs: [.text("› ")] + row.runs,
+                    runs: row.runs,
                     role: row.role,
                     headingLevel: row.headingLevel,
-                    textRole: row.textRole
+                    textRole: row.textRole,
+                    style: style,
+                    marker: row.marker.isEmpty ? "\u{203A}" : row.marker
                 )
             }
         default:
@@ -252,9 +336,41 @@ final class AssistantProseView: NSView {
         }
     }
 
-    private static func itemPrefix(depth: Int, number: Int?) -> String {
+    /// The marker text alone. Nesting is expressed as an indent, never as literal
+    /// spaces inside the run — two spaces per level in a proportional font is not
+    /// a column, and it cannot be aligned against.
+    private static func itemMarker(number: Int?) -> String {
         guard let number else { return "" }
-        let indentation = String(repeating: "  ", count: max(0, depth - 1))
-        return indentation + (number == 0 ? "• " : "\(number). ")
+        return number == 0 ? "\u{2022}" : "\(number)."
+    }
+
+    /// Indents for a list row. `firstLineHeadIndent` and `headIndent` are equal
+    /// because the marker is drawn in the gutter to the LEFT of both, so the
+    /// first line and every wrapped line share one left edge.
+    private static func listStyle(depth: Int, hasMarker: Bool) -> AgentProseTextStyle {
+        guard depth > 0 else { return .plain }
+        let indent = CGFloat(max(0, depth - 1)) * listIndentPerLevel
+            + (hasMarker ? markerGutter : 0)
+        return AgentProseTextStyle(headIndent: indent, firstLineHeadIndent: indent)
+    }
+
+    /// Six visually distinct rungs out of three usable type sizes.
+    ///
+    /// `Typography` has `titleL` 18, `title` 15 and `body` 13 above `label`, and
+    /// `Typography.minimumLadderStep` is gated, so 14 and 16 cannot be slotted in
+    /// between. The remaining hierarchy therefore comes from weight and colour —
+    /// which is also what `_DESIGN.md` §11 asks for ("soft hierarchy, not
+    /// perimeter borders everywhere").
+    private static func headingLadder(
+        level: Int
+    ) -> (role: TextRole, style: AgentProseTextStyle, spaceAbove: CGFloat) {
+        switch level {
+        case 1: return (.titleL, AgentProseTextStyle(bold: true), CGFloat(Space.l))
+        case 2: return (.title, AgentProseTextStyle(), CGFloat(Space.l))
+        case 3: return (.title, AgentProseTextStyle(secondary: true), CGFloat(Space.m))
+        case 4: return (.body, AgentProseTextStyle(bold: true), CGFloat(Space.m))
+        case 5: return (.body, AgentProseTextStyle(bold: true, secondary: true), CGFloat(Space.s))
+        default: return (.label, AgentProseTextStyle(bold: true, secondary: true), CGFloat(Space.s))
+        }
     }
 }

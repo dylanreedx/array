@@ -41,7 +41,7 @@ milestone owns each.
 | **M2** | pi rpc transport | new: turn-state split, P5.1, P5.2, P5.10 | 8 | 0 | 3–4 d |
 | **M3** | pi capability harvest | P5.3, P5.7, P5.6, P5.8, P5.4/5.5, P5.9 | 6 | 0 | 3–4 d |
 | **M4** | Fixtures, tool supply, delta duration | 1a.1–1a.4, 1b.1–1b.6, 1c.0(revised), X.1 | 12 | 0 | 3–4 d |
-| **M5** | The visible overhaul | 1c.1–1c.9, 1d.*, 1e.*, 1f.*, 1g.1, 1h.* | 26 | 0 | 4–6 d |
+| **M5** | The visible overhaul | 1c.1–1c.9, 1d.*, 1e.*, 1f.*, 1g.1, 1h.* | 26 | 12 | 4–6 d |
 | **M6** | Dead air remainder | 2.1–2.9 | 9 | 0 | 2 d |
 | **M7** | claude + codex parity | 4d.1, 4d.3, 3a.*, 3b.*, 3c.*, 3d.1 | 16 | 0 | 4–6 d |
 | **M8** | Note/file linkage | 5a.*, 5b.*, 5c.* | 13 | 0 | 2–3 d |
@@ -99,6 +99,51 @@ different loop.
   tokens and `locationStaleTimer` orphan on every switch. → M1.4
 - Note `AgentSupervisor.replayCap = 500`: a rebuilt agent tile replays at most
   the last 500 events.
+
+---
+
+## M5 partial — the rhythm slice, out of order (2026-08-23)
+
+Dylan asked for the transcript to look better and chose to take the **visible**
+half now rather than after M2/M3. That is a deliberate resequencing, and it is
+safe in one specific way: every ticket below is pure rendering, so none of them
+can repeat this programme's defining mistake of shipping a renderer with no
+producer. The single exception is the hover timestamp, which is why **T1 builds
+its producer first**.
+
+Shipped: T1, T2, 1e.1–1e.9, 1c.2, 1h.3. Not in this slice: 1b, 1c.1/1c.3–1c.9,
+1d, 1f, 1g, 1h.1, 1h.2.
+
+**Four existing witnesses pinned the defects rather than the behaviour**, and
+each was corrected rather than relaxed — the same shape as M1.10's corrections:
+
+| leg | what it pinned | corrected to |
+|---|---|---|
+| `--ui-geometry-check` | `horizontalReadingInset == Inset.card.left` | the clip/escape invariant against whatever the inset is |
+| `MarkupParserChecks` | a GFM table must parse to `.fencedCode` | cells, per-column alignment, retained source |
+| `UIProbeCompletedReasoningDisclosure` | the deferred renderer's safe label | the real splitter role and label |
+| `ComponentLab.runTranscriptReviewCheck` | — | new states get row floors only; every structural assertion moved to a leg that RUNS (this one sits inside KNOWN-RED `--component-lab-check`) |
+
+**Two things only looking at it caught**, neither reachable from an assertion
+that was passing at the time:
+
+1. A turn is a user prompt **and its reply**. Treating every entry change as a
+   boundary drew a rule between a prompt and its own answer — the transcript
+   grew a line after every message. "The gaps differ" was true of that too.
+2. Headings had no extra air above them, so a section title floated midway
+   between two paragraphs and read as belonging to the one it ended.
+
+**One witness of mine had no teeth and was caught by teeth-verifying it**: the
+hanging-indent assertion asked whether SOME row carried an indent, which the
+blockquote satisfied on its own, so it stayed green with list indents entirely
+disabled.
+
+**Still open on this seam, recorded not fixed:** `AgentDiffSummaryView` keeps
+`rebuildFileLabels()` (destroys and recreates up to 8 `NSTextField`s on every
+apply, called unconditionally) and measures with `boundingRect` inside
+`layout()` — 1d.2 and the rest of 1h.3. And 1h.1's twelve `TokenThemed`
+conformances are untouched; the two views born in this slice
+(`ThematicBreakView`, `AgentTableView`) do conform and are swept.
 
 ---
 
@@ -293,7 +338,7 @@ reason. Nothing visible yet.
 |---|---|---|---|
 | 1c.0 | delta path precondition | `run-matrix.sh:618-627` records the cause: `apply(document:patch:)` calls `flatten(document)` regardless of the patch — 36 ms for one revised tail row on 10,000. Fix, then take the leg off KNOWN-RED | TODO |
 | 1c.1 | row geometry | one 32pt row; reserved trailing status column so text never reflows; reserved leading glyph column | TODO |
-| 1c.2 | per-tool iconography | resolved in the **normalizer**, not the view: terminal / square.and.pencil / eye / globe / wrench / bubble.left → SF Symbols in the renderer. Replaces the hardcoded `wrench.and.screwdriver` at `ToolCallRenderer.swift:66` | TODO |
+| 1c.2 | per-tool iconography | **GREEN 2026-08-23** (pulled into the visual milestone by Dylan; no 1b dependency). `ToolCallView.symbolName(forToolNamed:)` matches on substrings because the three harnesses disagree on casing and wording for the same operation; an unknown name keeps the wrench, so a new provider tool degrades to today's behaviour rather than to a blank column. |
 | 1c.3 | status as a glyph | completed uses foreground colour, not green — only failures pull the eye | TODO |
 | 1c.4 | summary/title dedup | `ToolCallRenderer.swift:105` compares only against `presentation.label`, so `Edit` / `Edited Foo.swift` both render | TODO |
 | 1c.5 | cluster consecutive tool calls | one group with a hairline gutter instead of N stacked cards | TODO |
@@ -304,22 +349,24 @@ reason. Nothing visible yet.
 | 1d.1 | inline diff | reuse `GitDiffParser.parse` (`GitDiffEngine.swift:236`, pure) and `DiffReviewTileNSView.render(_:theme:)` (`:317`, static+pure). Bounded with a visible "+N more lines" | TODO |
 | 1d.2 | do not copy the freeze pattern | `AgentDiffSummaryView.rebuildFileLabels()` (`DiffSummaryRenderer.swift:188-200`) removes and recreates up to 8 `NSTextField`s on **every** apply, called unconditionally from `:90` | TODO |
 | 1d.3 | measure-key correctness | any per-row indent must enter `AgentBlockMeasureKey` or a nested row reuses a top-level row's cached height at the wrong width | TODO |
-| 1e.1 | inter-turn separation | `rowSpacing = 12` (`AgentTranscriptLayout.swift:11`) separates collection rows; prose already uses `blockSpacing = 8` (`AssistantProseRenderer.swift:43`). The missing tier is turn→turn (~20 + a turn marker) | TODO |
-| 1e.2 | hanging indents | move `"• "` / `"› "` out of the text run into a gutter | TODO |
-| 1e.3 | heading ladder | `AssistantProseRenderer.swift:211-219` gives every one of h1–h6 `textRole: .title`; level is used only for the AX value (`:88`) | TODO |
-| 1e.4 | fewer fills | only code, diff, plan and approval keep a fill | TODO |
-| 1e.5 | Error ≠ Notice | currently pixel-identical; precondition for Slice 3, where a compaction notice must not read as a failure | TODO |
-| 1e.6 | align the left edge | artifact fills start at 12pt, prose at 24pt | TODO |
-| 1e.7 | table renderer | `MarkdownAgentMarkupParser.swift:163` maps `Table` → `.fencedCode`, payload at `:291-302`. Also a `performance.md` known-slow: a wide table is one enormous single-line measurement at unbounded width. Fix both together | TODO |
-| 1e.8 | thematic breaks | render as 24pt of nothing today | TODO |
-| 1e.9 | `Opacity.receded` | 0.88 exists, no renderer applies it | TODO |
+| T1 | `AgentEntry.createdAt` | **GREEN 2026-08-23**, teeth-verified. The producer for the hover time, landed BEFORE the thing that draws it. Optional and `decodeIfPresent`, so every transcript already on disk still loads; the provider defaults to `{ nil }` so the reducer stays a pure function of its mutations and no existing witness flapped; `AgentTranscriptProjection(threadId:)` (production) opts in, its injected-clock sibling does not. Witnessed in CoreChecks against the PRODUCTION construction path, since the field existing is not the same as the shipping path filling it in | GREEN |
+| T2 | review-state matrix | **GREEN 2026-08-23**. Six new `AgentTranscriptReviewState`s routed into `UIProbePixels` (the only transcript pixel gate that is not KNOWN-RED) and `UITourCheck` (advisory PNGs at 4 widths × 2 appearances — the review mechanism for the whole milestone). No `.staticCard`: a missing baseline is a failure by design, so new static cards would owe committed PNGs and redden two more legs | GREEN |
+| 1e.1 | inter-turn separation | **GREEN 2026-08-23**, `--transcript-rhythm-check`, teeth-verified. `AgentTranscriptLayout.spacingBefore` is an index-keyed closure beside the existing `measuredHeight` one; `Row` gained `entryID` (it lived only in `rowPositions`, which the layout cannot see). **A turn is a user prompt AND its reply** — the first cut treated every entry change as a boundary and put a rule between a prompt and its own answer. No assertion caught that; the rendered tour did. The `prepare()` fast path gained a boundary signature, or a row whose entry changed without the count changing returns stale geometry. Rule + hover time are ONE `CAShapeLayer` and ONE `CATextLayer`, never a view per turn (trap 1). |
+| 1e.2 | hanging indents | **GREEN 2026-08-23**, teeth-verified. New `AgentProseTextStyle` carries `headIndent`/`firstLineHeadIndent` through resolve→append→appendText AND through `measuredHeight`; no transcript text previously set `.paragraphStyle` at all. Markers are DRAWN from cached attributed strings, not sub-viewed. **The first version of the witness had no teeth** — it asked whether SOME row had an indent, which the quote satisfied alone, so it stayed green with list indents entirely disabled. It now counts rows and distinct depths. |
+| 1e.3 | heading ladder | **GREEN 2026-08-23**. Six rungs out of THREE usable sizes: `Typography` has only `titleL` 18 / `title` 15 / `body` 13 above `label`, and `minimumLadderStep = 2.0` is itself gated, so 14 and 16 cannot be slotted in — the ladder is size + weight + colour + space-above. The witness counts distinct rendered (size/weight/colour) triples read off the first glyph, because a witness phrased as "the renderer receives the level" agrees with a renderer that receives it and discards it, which is what it did. |
+| 1e.4 | fewer fills | **GREEN 2026-08-23**. Fill dropped (to `nil`, never `.clear` — hazard 8) on `ToolCallView` and `AgentImageGalleryView`; `CommandOutputView` moved to `codeSurface` because it IS code; code/diff/plan/approval keep theirs per `_DESIGN.md` §11. |
+| 1e.5 | Error ≠ Notice | **GREEN 2026-08-23**. Error keeps the artifact fill and gains an `AgentLineRole.attention` outline — the one case §11 permits a strong semantic line; notice gives up both and sits on the tile body. Witness compares painted fill/border signatures, not title strings. |
+| 1e.6 | align the left edge | **GREEN 2026-08-23**, teeth-verified (24 vs 12). One constant: `horizontalReadingInset` 12 → 0, since the layout already insets every row by `contentInsets.left`. **`--ui-geometry-check` pinned the constant itself** to `Inset.card.left` — an expectation encoding the old decision; corrected to assert the clip/escape invariant against whatever the inset is, with the alignment promise moved into the new leg. |
+| 1e.7 | table renderer | **GREEN 2026-08-23**. New `AgentBlockKind.table` + `AgentTablePayload` (header, rows, per-column alignment, retained source). Six enumeration sites updated — the compiler found each one. Cells are DRAWN, not sub-viewed (a 3×20 table would be 60 TextKit stacks in one row); every measurement is in `measure(...)`, never `layout()`; each cell's contribution to the column solve is capped at 220pt so one long cell cannot produce the unbounded measurement `performance.md` names. **`MarkupParserChecks` pinned `Table → .fencedCode`** — an expectation that encoded the fallback; corrected to assert cells, alignment and retained source. |
+| 1e.8 | thematic breaks | **GREEN 2026-08-23**. `.thematicBreak` was parsed and in `builtInKinds` but matched no registry branch, falling to `AgentDeferredBlockRenderer` — a bare `NSView` measuring 24pt, a 48pt hole with row spacing either side. New `ThematicBreakRenderer`. **`UIProbeCompletedReasoningDisclosure` pinned the deferred renderer's safe label**, i.e. asserted the feature was unimplemented; corrected to the real splitter role. |
+| 1e.9 | `Opacity.receded` | **GREEN 2026-08-23**. Applied to settled (`.completed`) tool rows — §11's "completed routine work recedes". A failure never recedes. Not stacked with a secondary colour: 0.88 is derived to sit just above the AA break-even at 0.8724, and `--ui-contrast-check` is the catcher. |
 | 1f.1 | turn folding | `Worked for 1m 12s · 8 tools · 2 agents`, preserving the terminal assistant message. Never fold a streaming turn; auto-expand a turn interrupted in-session. **Land on top of 1c.5** — folding without clustering re-derives the grouping twice | TODO |
 | 1f.2 | running-turn windowing | show the last tool row, hide the rest behind `+N previous tool calls` | TODO |
 | 1f.3 | fixed chrome heights | fold, toggle and tool rows, so scrolling back through unmeasured content does not jump | TODO |
 | 1g.1 | live-work row | preparing → provider wait → thinking → tool work → writing → input wait → failure → stop → completion, with elapsed and a working Stop. **States come from the phase machine Slice 2 fixes** — will look right and behave wrong until then. Do not ship as done | TODO |
 | 1h.1 | `TokenThemed` ×12 | `ToolCallView`, `CodeBlockView`, `AgentErrorNoticeView`, `AgentPlanView`, `AgentDiffSummaryView`, `AgentRequestView`, `CommandOutputView`, `UserPromptView`, `AgentReferenceChipView`, `AgentUnknownBlockView`, `ImageRenderer.swift:146/580`, `FileReferenceRenderer.swift:100`. **Zero** conformers exist under `Canvas/AgentTranscript/`, so `UIProbeAppearance.swift:128` and the source scan at `:570-583` have never seen any of them. Each needs conformance + a `tokenAdoptedOwners` entry with a ticket comment + paint in both appearances + `nil` at rest, never `.clear` | TODO |
 | 1h.2 | lineage overlay token | `AgentLineageOverlayView.swift:27` uses raw `NSColor.controlAccentColor.withAlphaComponent(0.34)` | TODO |
-| 1h.3 | `ToolCallView.layout()` | `ToolCallRenderer.swift:132-163` assigns all five frames unconditionally **and** reads `intrinsicContentSize` four times per pass (`:145, :148, :154, :155`) — `performance.md` traps 2 and 3 together, on every display cycle | TODO |
+| 1h.3 | `ToolCallView.layout()` | **GREEN 2026-08-23**. All five frames now go through an `if view.frame != frame` guard and each `intrinsicContentSize` is read once. `AgentDiffSummaryView.layout()` has the identical shape plus a `boundingRect` measurement inside `layout()` — **not** fixed here, still open. |
 
 ---
 

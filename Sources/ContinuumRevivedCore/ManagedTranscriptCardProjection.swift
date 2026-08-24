@@ -189,6 +189,9 @@ public enum ManagedTranscriptCardProjection {
         case .toolCall, .plan, .diff, .error, .image, .imageGallery, .fileReferences: own = ""
         case .agentReference(let payload): own = payload.displayNameAtSpawn
         case .thematicBreak: own = "\n"
+        // The legacy card is plain text, so a table projects as the Markdown
+        // source it came from rather than as a flattened cell soup.
+        case .table(let payload): own = payload.source
         case .list, .listItem, .quote, .opaque: own = ""
         }
         // The notice heading is projected as the card title, never duplicated
