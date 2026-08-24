@@ -2770,6 +2770,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         switch kind {
         case .commandExecution, .fileChange, .mcpToolCall, .webSearch: return true
         case .assistantMessage, .reasoning, .plan, .error: return false
+        // A subagent row's detail is the CHILD's transcript, not a host-local
+        // tool record, and an unknown kind has no whitelist to publish through.
+        case .subagent, .unknown: return false
         }
     }
 

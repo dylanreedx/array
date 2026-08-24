@@ -299,6 +299,14 @@ public struct AgentLocationProjector: Sendable {
             return .failed
         case .commandExecution, .mcpToolCall:
             return .inspecting
+        case .subagent:
+            // A parent delegating is still working; the CHILD's own location is
+            // projected from the child's stream, not inferred from this row.
+            return .thinking
+        case .unknown:
+            // A kind a newer build wrote. "Working" is the only honest answer
+            // here; guessing a specific location would be a fabrication.
+            return .thinking
         }
     }
 }

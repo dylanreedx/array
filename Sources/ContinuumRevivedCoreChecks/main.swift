@@ -8229,11 +8229,21 @@ do {
         Foundation.exit(1)
     }
     let declaration = String(source[targetStart.lowerBound..<syncComment.lowerBound])
-    let compactDeclaration = declaration.filter { !$0.isWhitespace }
-    let expectedDeclaration = #".target(name:"ContinuumRevivedCore",dependencies:["ContinuumRevivedAgentContent","ContinuumRevivedAgentUI",.product(name:"GRDB",package:"GRDB.swift")]),"#
+    // C8 added a `resources:` clause (continuum-spawn-agent.ts, Pi's spawn_agent
+    // extension) plus explanatory comments. Strip full-line comments before
+    // compacting so the guard tolerates those without losing its teeth: the
+    // expected string below still pins the dependency list AND the resources
+    // clause exactly, so an added dependency (or a silently dropped/changed
+    // resources clause) still goes red.
+    let declarationWithoutComments = declaration
+        .components(separatedBy: "\n")
+        .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+        .joined(separator: "\n")
+    let compactDeclaration = declarationWithoutComments.filter { !$0.isWhitespace }
+    let expectedDeclaration = #".target(name:"ContinuumRevivedCore",dependencies:["ContinuumRevivedAgentContent","ContinuumRevivedAgentUI",.product(name:"GRDB",package:"GRDB.swift")],resources:[.copy("Resources/PiExtensions")]),"#
     expect(compactDeclaration == expectedDeclaration,
-           "dependencies guard: ContinuumRevivedCore target must include exactly AgentContent, AgentUI, and GRDB, found: \(declaration)")
-    print("dependencies guard: ContinuumRevivedCore target has only AgentContent + AgentUI + GRDB dependencies")
+           "dependencies guard: ContinuumRevivedCore target must include exactly AgentContent, AgentUI, GRDB, and the PiExtensions resource, found: \(declaration)")
+    print("dependencies guard: ContinuumRevivedCore target has only AgentContent + AgentUI + GRDB dependencies, plus the pinned PiExtensions resource")
 }
 
 // MARK: - Ticket 08: Sync/observation type split (ActivityStore)
@@ -11535,6 +11545,7 @@ runSpawnRequestChecks()
 
 // Ticket: docs/38-tickets/90-agent-ux/P2D.3-role-registry.md — roles get a home,
 // and a spawn's role decides what it runs with.
+try runItemKindLenientDecodingChecks()
 try runRoleRegistryChecks()
 
 // Ticket: docs/38-tickets/90-agent-ux/P4.3-auto-settle-inactivity.md — the
