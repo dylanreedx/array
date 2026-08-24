@@ -549,6 +549,27 @@ enum TranscriptRhythmChecks {
             )
         }
 
+        // 3b. A row must not repeat itself. The action sentence carries the
+        //     query; an argument line underneath saying "query: <the same
+        //     thing>" is noise, and it appeared under EVERY tool row of the
+        //     real turn until the presenter suppressed it.
+        for tool in toolViews {
+            let title = tool.titleLabel.stringValue
+            let detail = tool.summaryLabel.stringValue
+            guard !detail.isEmpty else { continue }
+            for line in detail.split(whereSeparator: { $0.isNewline }).map(String.init) {
+                guard let value = line.split(separator: ":", maxSplits: 1).last.map(String.init) else { continue }
+                let trimmed = value.trimmingCharacters(in: .whitespaces)
+                guard trimmed.count >= 4 else { continue }
+                guard !title.contains(trimmed) else {
+                    throw fail(
+                        "real claude turn: the row says '\(title)' and then repeats the same value "
+                        + "underneath as '\(line)' — the disclosure must add facts, not echo the sentence"
+                    )
+                }
+            }
+        }
+
         // 4. The expanded pane (`.plans/45` S4.2): expanding the WebSearch row
         //    must reveal the RESULT text through the command-output machinery
         //    (real selection + copy), fed from the store — the document itself
@@ -700,6 +721,19 @@ enum TranscriptRhythmChecks {
                 "diffstat: additions and removals render in \(colours.count) colour(s) "
                 + "(\(colours.sorted())) — a diffstat distinguishes them"
             )
+        }
+        // No stat may be CLIPPED. The first cut measured intrinsicContentSize on
+        // a field built from an empty string, which under-reported the width and
+        // silently dropped the removal count — visible only by looking at the
+        // render. Assert the frame fits the string it was given.
+        for stat in diff.fileStatLabels {
+            let needed = ceil(stat.attributedStringValue.size().width)
+            guard stat.frame.width + 0.5 >= needed else {
+                throw fail(
+                    "diffstat: the stat label is \(stat.frame.width)pt wide but its text "
+                    + "'\(stat.attributedStringValue.string)' needs \(needed)pt — the counts are clipped"
+                )
+            }
         }
         // The proportional bar exists and is actually proportioned.
         guard diff.fileStatBars.count == diff.fileLabels.count,

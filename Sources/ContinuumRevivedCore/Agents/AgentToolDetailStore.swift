@@ -935,6 +935,11 @@ public enum AgentToolDetailPresenter {
             let value = shortLine(argument.value.text)
             guard !value.isEmpty, !value.contains("[REDACTED]"),
                   !isPathBearingObservableValue(value) else { continue }
+            // `.plans/45` — the action sentence already SAYS the argument
+            // ("Searched for “recent sports headline”"); repeating it as
+            // "query: recent sports headline" underneath is noise, and it was
+            // visible on every row of the real replayed turn.
+            guard !lines[0].contains(value) else { continue }
             lines.append("\(shortLine(argument.key, maxBytes: 48)): \(value)")
         }
         if let exitCode = detail.exitCode { lines.append("Exit code: \(exitCode)") }

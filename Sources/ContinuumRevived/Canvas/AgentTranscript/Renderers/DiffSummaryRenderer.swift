@@ -62,9 +62,10 @@ final class AgentDiffSummaryView: NSView {
         layer?.cornerRadius = CGFloat(AgentTileRadius.artifact)
         layer?.masksToBounds = true
 
-        // A diffstat's subject is its numbers; the word "Changes" is a label,
-        // not a headline. Uppercase tracking keeps it readable at caption size.
-        titleLabel.font = NSFont.token(.label)
+        // A diffstat's subject is its numbers; the word "Changes" is an
+        // EYEBROW, not a headline — uppercase with tracking, secondary colour,
+        // so the summary sentence below it is the thing being read.
+        titleLabel.font = NSFont.token(.caption)
         countsLabel.font = NSFont.monospacedDigitSystemFont(
             ofSize: NSFont.token(.caption).pointSize, weight: .regular)
         countsLabel.lineBreakMode = .byTruncatingTail
@@ -95,7 +96,12 @@ final class AgentDiffSummaryView: NSView {
         self.payload = payload
         self.context = context
         displayedFiles = Array(payload.files.prefix(Self.maximumVisibleFiles))
-        titleLabel.stringValue = "Changes"
+        titleLabel.attributedStringValue = NSAttributedString(
+            string: "CHANGES",
+            attributes: [
+                .font: NSFont.token(.caption),
+                .kern: 0.8,
+            ])
         countsLabel.stringValue = Self.countsText(payload.files)
         summaryLabel.stringValue = Self.safeSummary(payload.summary)
         summaryLabel.isHidden = summaryLabel.stringValue.isEmpty
@@ -148,8 +154,13 @@ final class AgentDiffSummaryView: NSView {
         for (index, label) in fileLabels.enumerated() {
             let barWidth = min(Self.statBarWidth, max(0, bounds.width * 0.22))
             let statLabel = fileStatLabels.indices.contains(index) ? fileStatLabels[index] : nil
+            // Measured from the attributed string itself: an NSTextField created
+            // from an EMPTY string does not reliably re-derive its intrinsic
+            // width when `attributedStringValue` is assigned later, and the
+            // clipped result silently dropped the removal count.
             let statWidth = statLabel.map {
-                min(ceil($0.intrinsicContentSize.width) + CGFloat(Space.xs), max(0, bounds.width * 0.34))
+                min(ceil($0.attributedStringValue.size().width) + CGFloat(Space.s),
+                    max(0, bounds.width * 0.34))
             } ?? 0
             let barX = bounds.width - inset - barWidth
             if fileStatBars.indices.contains(index) {
@@ -193,7 +204,7 @@ final class AgentDiffSummaryView: NSView {
     func applyTokens() {
         let theme = effectiveTokenTheme
         layer?.backgroundColor = context.tokens.artifactSurface.color.cgColor(for: theme)
-        titleLabel.textColor = context.tokens.primaryText.color.nsColor(for: theme)
+        titleLabel.textColor = context.tokens.secondaryText.color.nsColor(for: theme)
         summaryLabel.textColor = context.tokens.primaryText.color.nsColor(for: theme)
         countsLabel.textColor = context.tokens.secondaryText.color.nsColor(for: theme)
         overflowLabel.textColor = context.tokens.secondaryText.color.nsColor(for: theme)
@@ -260,6 +271,7 @@ final class AgentDiffSummaryView: NSView {
 
             let stat = NSTextField(labelWithString: "")
             stat.attributedStringValue = Self.statText(file, added: added, removed: removed)
+            stat.alignment = .right
             stat.lineBreakMode = .byClipping
             stat.setAccessibilityElement(false)
             addSubview(stat)

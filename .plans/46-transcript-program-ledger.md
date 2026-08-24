@@ -764,3 +764,41 @@ exactly right when the baseline is itself the rejected work. Same artifact URL.
 Legs green after: rhythm (incl. both new witnesses), ui-geometry, oracle,
 tool-detail, ui-probe, ui-pixel, first-paint, incremental-refresh, supervisor,
 CoreChecks.
+
+## Gallery iteration 2, 2026-08-24 — and two defects only the RENDER caught
+
+Same URL. Baseline changed on purpose: iteration 1 compared against
+`6926044b`, the milestone Dylan had already rejected, so "the redo from before
+doesn't look much different at all" was a correct reading of a useless
+comparison. Iteration 2 compares against **0.5.10** (`6926044b~1`) — the
+release his workspace app actually runs.
+
+**Reading the render, not the constants, found two defects the green legs did
+not.** Both are now witnessed:
+
+1. **The removal counts were clipped off every diff row** ("+84" rendered,
+   "−19" did not). Cause: `intrinsicContentSize` on an `NSTextField` built from
+   an EMPTY string does not reliably re-derive when `attributedStringValue` is
+   assigned afterwards, and the under-measured frame clipped with
+   `.byClipping`. Fixed by measuring `attributedStringValue.size()` directly
+   and right-aligning the run. Witness: every stat label's frame must fit its
+   own string. Teeth: halving the width flips it ("23.5pt wide but its text
+   '+84 −19' needs 47.0pt").
+2. **Every tool row echoed its own query** — "Searched for “recent sports
+   headline”" followed by "query: recent sports headline" underneath.
+   `observableDisclosureText` now skips an argument whose value already
+   appears in the action sentence. Witness: no disclosure line may repeat a
+   value already in the row's title. Teeth: removing the guard flips it,
+   quoting both strings.
+
+Also from looking: the diff card's title became a real uppercase eyebrow in
+the secondary colour, so the summary sentence is the thing being read rather
+than competing with a shrunken headline.
+
+**The lesson, again, and it is the program's oldest one:** the legs were green
+in both cases. `checkDiffStatDensity` asserted colours, counts and per-file
+height and still passed with the numbers clipped in half, because it never
+asked whether the frame FIT. A witness asserts what you thought to ask; the
+render answers what you didn't.
+
+Gallery iteration 2 published → **Dylan verdict: PENDING.**
