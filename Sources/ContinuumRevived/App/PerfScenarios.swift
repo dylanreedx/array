@@ -929,6 +929,7 @@ enum PerfScenarios {
 
         struct Sample {
             let history: Int
+            let historyScansPerDelta: Double
             let visitsPerDelta: Double
             let rowsPerDelta: Double
             let fullFlattens: Int
@@ -1010,6 +1011,7 @@ enum PerfScenarios {
 
             samples.append(Sample(
                 history: history,
+                historyScansPerDelta: Double(list.qaHistoryScanCount) / Double(deltas),
                 visitsPerDelta: Double(list.qaFlattenNodeVisits) / Double(deltas),
                 rowsPerDelta: Double(list.qaFlattenedRowCount) / Double(deltas),
                 fullFlattens: list.qaFullFlattenCount,
@@ -1025,6 +1027,7 @@ enum PerfScenarios {
               let largest = samples.first(where: { $0.history == historyCounts.last })
         else { throw Failure(message: "transcript-delta is missing a sweep endpoint") }
 
+        let worstHistoryScans = samples.map(\.historyScansPerDelta).max() ?? 0
         let visitSlope = largest.visitsPerDelta - smallest.visitsPerDelta
         let worstVisits = samples.map(\.visitsPerDelta).max() ?? 0
         let totalFullFlattens = samples.reduce(0) { $0 + $1.fullFlattens }
@@ -1039,6 +1042,13 @@ enum PerfScenarios {
         let localityBound = 64.0
 
         var measurements: [PerfMeasurement] = []
+
+        measurements.append(PerfBudget(
+            metric: "transcript-delta.worstHistoryScansPerDelta",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "a content-only delta must not walk the whole applied history; the row index made the INDEX incremental while the presentation half kept rebuilding every per-row structure, which is why the wall clock never moved"
+        ).evaluate(worstHistoryScans))
 
         measurements.append(PerfBudget(
             metric: "transcript-delta.visitSlope",

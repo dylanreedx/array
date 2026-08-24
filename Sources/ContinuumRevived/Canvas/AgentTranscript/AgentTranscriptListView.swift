@@ -621,10 +621,38 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     private(set) var qaFlattenedRowCount = 0
     private(set) var qaFullFlattenCount = 0
 
+    /// QA: how many times ONE apply walked the whole history.
+    ///
+    /// The row index made the *index* incremental and the wall clock did not
+    /// move, because the presentation half of `applyUnscrolled` kept rebuilding
+    /// every per-row structure from scratch — the row dictionary, the cluster
+    /// projection's facts, its id list and its index map. Bisected 2026-08-24:
+    /// the redo took the 10,000-row delta from 36.4ms to 54.0ms, +9.5ms of it in
+    /// the projection alone, while every existing count budget stayed green.
+    ///
+    /// That is why this counter exists and why it is a COUNT. A millisecond
+    /// threshold on shared hardware manufactures flakes; "a content-only delta
+    /// walks the history zero times" cannot be satisfied by a fast machine.
+    /// The rows the incremental index rebuilt, or nil when the apply was
+    /// structural (a full walk). `applyUnscrolled` consumes and clears it: with a
+    /// known, small changed set, every per-row structure below can be PATCHED
+    /// instead of rebuilt. Nil is always the safe answer — it means "rebuild
+    /// everything" — so a new decline path costs correctness nothing.
+    private var pendingIncrementalRowIDs: Set<AgentNodeID>?
+
+    private(set) var qaHistoryScanCount = 0
+
+    /// One walk of the whole applied history, named so a failure says which.
+    private func recordHistoryScan(_ reason: StaticString) {
+        qaHistoryScanCount += 1
+        _ = reason
+    }
+
     func qaResetFlattenStats() {
         qaFlattenNodeVisits = 0
         qaFlattenedRowCount = 0
         qaFullFlattenCount = 0
+        qaHistoryScanCount = 0
     }
 
     /// QA: is the live index indistinguishable from a FROM-SCRATCH walk of the
@@ -881,8 +909,8 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         flattened: RowIndex,
         changedNodeIDs: Set<AgentNodeID>
     ) throws {
-        let oldIDs = rows.map(\.id)
         let oldRowsByID = rowsByID
+        recordHistoryScan("reasoning-entry diff")
         let oldReasoningEntries = Dictionary(
             uniqueKeysWithValues: rows.compactMap { row in
                 row.entry.map { ($0.id, $0) }
@@ -913,6 +941,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             }
         }
         rows = flattened.rows
+        recordHistoryScan("rowsByID rebuild")
         rowsByID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
         rebuildDisplayProjection()
         topLevelIDsByNodeID = flattened.topLevelIDsByNodeID
@@ -947,6 +976,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             }
         }
 
+        recordHistoryScan("newIDs array")
         let newIDs = rows.map(\.id)
         var snapshot = NSDiffableDataSourceSnapshot<Int, AgentNodeID>()
         snapshot.appendSections([0])
@@ -960,6 +990,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         // Entry revisions also advance when one child changes. Do not fan that
         // bookkeeping update out to every sibling; only a role change affects all
         // renderer families in the entry.
+        recordHistoryScan("role-change scan")
         changedTopLevelIDs.formUnion(rows.compactMap { row in
             guard let old = oldRowsByID[row.id], old.role != row.role else { return nil }
             return row.id
@@ -983,7 +1014,6 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         }
 
         _ = newIDs
-        _ = oldIDs
         let identity = displayIDs + (tailThinkingIndicatorIsVisible ? [tailThinkingIndicatorID] : [])
         if !didSeedArrivedDisplayIDs {
             didSeedArrivedDisplayIDs = true
@@ -1346,6 +1376,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     }
 
     private func prepareToolDetailLifecycle(for document: AgentDocument) {
+        recordHistoryScan("tool-detail lifecycle")
         let incoming = Dictionary(uniqueKeysWithValues: document.entries.map { ($0.id, $0) })
         var invalidatedEntryIDs = Set(toolDetailEntryLifecycleByID.keys).subtracting(incoming.keys)
         var removedBlockIDsByEntry: [AgentNodeID: Set<AgentNodeID>] = [:]
@@ -1721,6 +1752,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     }
 
     private func flatten(_ document: AgentDocument) throws -> RowIndex {
+        // A full walk is by definition not incremental: clear any set an earlier
+        // decline left behind, so `applyUnscrolled` cannot patch against it.
+        pendingIncrementalRowIDs = nil
         var rows: [Row] = []
         var owners: [AgentNodeID: Set<AgentNodeID>] = [:]
         var toolDetailIDs: [AgentNodeID: AgentToolDetailKey] = [:]
@@ -1818,6 +1852,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
 
         guard !rowIDsToRebuild.isEmpty else {
             // A bookkeeping-only revision: nothing presented changed.
+            pendingIncrementalRowIDs = []
             return (rows, owners, toolDetails, rowPositions, entryIndexByID)
         }
 
@@ -1867,6 +1902,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
 
         qaFlattenNodeVisits += nodeVisits
         qaFlattenedRowCount += rowIDsToRebuild.count
+        pendingIncrementalRowIDs = rowIDsToRebuild
         return (newRows, owners, toolDetails, rowPositions, entryIndexByID)
     }
 
@@ -1994,6 +2030,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// called once per visual apply / tail flip / fold toggle — the scheduler
     /// already coalesces deltas, so there is no per-delta pass.
     private func rebuildDisplayProjection() {
+        recordHistoryScan("cluster projection")
         let facts = rows.enumerated().map { index, row -> AgentTranscriptClusterPlanner.RowFact in
             var isToolRow = false
             var isFailure = false
