@@ -56,6 +56,22 @@ final class AgentDiffSummaryView: NSView {
     private var payload = AgentDiffPayload(text: "")
     private var context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
 
+    /// QA (A2, `performance.md` traps 1-3): counts the WORK a `--transcript-rhythm-check`
+    /// witness asserts against, never the wall clock. `qaFileViewsCreatedForChecks`
+    /// is every row view actually allocated across N applies (a bounded pool must
+    /// stop creating once it has enough rows); `qaStatMeasurementsForChecks` is
+    /// every real stat-label typesetting pass; `qaFrameWritesForChecks` is every
+    /// frame actually assigned. All three must be flat when nothing changed.
+    private(set) var qaFileViewsCreatedForChecks = 0
+    private(set) var qaStatMeasurementsForChecks = 0
+    private(set) var qaFrameWritesForChecks = 0
+
+    func qaResetCountersForChecks() {
+        qaFileViewsCreatedForChecks = 0
+        qaStatMeasurementsForChecks = 0
+        qaFrameWritesForChecks = 0
+    }
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
@@ -139,16 +155,19 @@ final class AgentDiffSummaryView: NSView {
             width: countsWidth,
             height: countsLabel.intrinsicContentSize.height
         )
+        qaFrameWritesForChecks += 1
         titleLabel.frame = NSRect(
             x: inset,
             y: (Self.headerHeight - titleLabel.intrinsicContentSize.height) / 2,
             width: max(1, countsLabel.frame.minX - inset - CGFloat(Space.m)),
             height: titleLabel.intrinsicContentSize.height
         )
+        qaFrameWritesForChecks += 1
         var y = Self.headerHeight
         if !summaryLabel.isHidden {
             let height = Self.summaryHeight(payload.summary, width: bounds.width)
             summaryLabel.frame = NSRect(x: inset, y: y, width: max(1, bounds.width - inset * 2), height: height)
+            qaFrameWritesForChecks += 1
             y += height + CGFloat(Space.s)
         }
         for (index, label) in fileLabels.enumerated() {
@@ -158,8 +177,9 @@ final class AgentDiffSummaryView: NSView {
             // from an EMPTY string does not reliably re-derive its intrinsic
             // width when `attributedStringValue` is assigned later, and the
             // clipped result silently dropped the removal count.
-            let statWidth = statLabel.map {
-                min(ceil($0.attributedStringValue.size().width) + CGFloat(Space.s),
+            let statWidth = statLabel.map { field -> CGFloat in
+                qaStatMeasurementsForChecks += 1
+                return min(ceil(field.attributedStringValue.size().width) + CGFloat(Space.s),
                     max(0, bounds.width * 0.34))
             } ?? 0
             let barX = bounds.width - inset - barWidth
@@ -169,12 +189,14 @@ final class AgentDiffSummaryView: NSView {
                 bar.frame = NSRect(
                     x: barX, y: y + (Self.fileRowHeight - barHeight) / 2,
                     width: barWidth, height: barHeight)
+                qaFrameWritesForChecks += 1
             }
             if let statLabel {
                 statLabel.frame = NSRect(
                     x: max(inset, barX - CGFloat(Space.s) - statWidth),
                     y: y + (Self.fileRowHeight - statLabel.intrinsicContentSize.height) / 2,
                     width: statWidth, height: statLabel.intrinsicContentSize.height)
+                qaFrameWritesForChecks += 1
             }
             let nameLimit = statLabel?.frame.minX ?? barX
             label.frame = NSRect(
@@ -182,10 +204,12 @@ final class AgentDiffSummaryView: NSView {
                 y: y + (Self.fileRowHeight - label.intrinsicContentSize.height) / 2,
                 width: max(1, nameLimit - inset - CGFloat(Space.s)),
                 height: label.intrinsicContentSize.height)
+            qaFrameWritesForChecks += 1
             y += Self.fileRowHeight
         }
         if !overflowLabel.isHidden {
             overflowLabel.frame = NSRect(x: inset, y: y, width: max(1, bounds.width - inset * 2), height: Self.fileRowHeight)
+            qaFrameWritesForChecks += 1
             y += Self.fileRowHeight
         }
         if !openReviewButton.isHidden {
@@ -193,6 +217,7 @@ final class AgentDiffSummaryView: NSView {
                 x: inset, y: y + CGFloat(Space.xs),
                 width: min(132, max(1, bounds.width - inset * 2)), height: Self.actionHeight
             )
+            qaFrameWritesForChecks += 1
         }
     }
 
@@ -282,6 +307,7 @@ final class AgentDiffSummaryView: NSView {
             bar.applyColors(added: added, removed: removed)
             addSubview(bar)
             bars.append(bar)
+            qaFileViewsCreatedForChecks += 1
         }
         fileLabels = names
         fileStatLabels = stats

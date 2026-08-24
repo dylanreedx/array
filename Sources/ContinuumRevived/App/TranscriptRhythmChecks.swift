@@ -42,6 +42,7 @@ enum TranscriptRhythmChecks {
         try checkClustering()
         try checkFilledSurfacesPadTheirText()
         try checkDiffStatDensity()
+        try checkDiffSummaryReusesFileRows()
         try checkReasoningExpands()
         try checkRowsShareOneTextColumn()
         try checkLiveDocumentsCarryTimestamps()
@@ -856,6 +857,113 @@ enum TranscriptRhythmChecks {
             throw fail(
                 "diffstat: \(diff.bounds.height)pt of card for \(diff.fileLabels.count) file(s) "
                 + "(\(perFile)pt each) — the summary is heavier than the change it summarizes"
+            )
+        }
+    }
+
+    // MARK: - A2
+
+    /// `AgentDiffSummaryView.apply` tore down and rebuilt every file-name/stat/
+    /// bar row on EVERY apply (`rebuildFileLabels`) and `layout()` measured
+    /// each stat label's `attributedStringValue.size()` on every display cycle
+    /// -- `performance.md` traps 1, 2 and 3 together, multiplied by up to
+    /// `maximumVisibleFiles` rows. This drives the real `apply`/`layout` entry
+    /// points directly -- the same ones `DiffSummaryRenderer` calls -- across
+    /// repeated applies and repeated no-op layout passes, and counts the WORK,
+    /// never the wall clock: subviews created, stat measurements taken, frames
+    /// actually written.
+    private static func checkDiffSummaryReusesFileRows() throws {
+        let view = AgentDiffSummaryView()
+        let context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
+        func files(_ count: Int) -> [AgentDiffFileSummary] {
+            (0..<count).map {
+                AgentDiffFileSummary(displayName: "file\($0).swift", addedLineCount: UInt($0 + 1), removedLineCount: UInt($0))
+            }
+        }
+        func apply(_ count: Int) {
+            view.apply(
+                blockID: AgentNodeID(rawValue: "diff-1")!,
+                payload: AgentDiffPayload(text: "", files: files(count), canOpenReview: false),
+                context: context
+            )
+        }
+
+        // First apply: five files. Building the pool for the first time is
+        // allowed to create five rows.
+        apply(5)
+        view.frame = NSRect(x: 0, y: 0, width: 480, height: 400)
+        view.layout()
+        guard view.qaFileViewsCreatedForChecks == 5 else {
+            throw fail(
+                "diff-summary reuse: the first apply of 5 files created "
+                + "\(view.qaFileViewsCreatedForChecks) row view(s), expected 5"
+            )
+        }
+
+        // Re-applying the SAME five files must create zero new views and must
+        // not re-measure a stat label whose file summary did not change.
+        view.qaResetCountersForChecks()
+        apply(5)
+        guard view.qaFileViewsCreatedForChecks == 0 else {
+            throw fail(
+                "diff-summary reuse: an unchanged apply created "
+                + "\(view.qaFileViewsCreatedForChecks) new row view(s) -- rebuildFileLabels is "
+                + "still tearing down and rebuilding every apply"
+            )
+        }
+        guard view.qaStatMeasurementsForChecks == 0 else {
+            throw fail(
+                "diff-summary reuse: an unchanged apply re-measured "
+                + "\(view.qaStatMeasurementsForChecks) stat label(s) that did not change"
+            )
+        }
+
+        // Growing to eight files must create exactly three MORE views, not
+        // eight new ones.
+        view.qaResetCountersForChecks()
+        apply(8)
+        guard view.qaFileViewsCreatedForChecks == 3 else {
+            throw fail(
+                "diff-summary reuse: growing from 5 to 8 files created "
+                + "\(view.qaFileViewsCreatedForChecks) row view(s), expected 3 (the pool should "
+                + "grow by the difference, not rebuild)"
+            )
+        }
+
+        // Shrinking back to five must create zero new views -- the pool holds
+        // the surplus, hidden, rather than tearing anything down.
+        view.qaResetCountersForChecks()
+        apply(5)
+        guard view.qaFileViewsCreatedForChecks == 0 else {
+            throw fail(
+                "diff-summary reuse: shrinking to 5 files created "
+                + "\(view.qaFileViewsCreatedForChecks) new row view(s) instead of hiding the surplus"
+            )
+        }
+        guard view.fileLabels.count == 8 else {
+            throw fail(
+                "diff-summary reuse: the pool shrank to \(view.fileLabels.count) view(s) instead "
+                + "of hiding the surplus 3 (a shrink-then-regrow would recreate them)"
+            )
+        }
+
+        // Ten no-op layout passes on unchanged content must write zero frames
+        // and take zero further measurements -- performance.md traps 2 and 3.
+        view.qaResetCountersForChecks()
+        for _ in 0..<10 {
+            view.needsLayout = true
+            view.layout()
+        }
+        guard view.qaFrameWritesForChecks == 0 else {
+            throw fail(
+                "diff-summary reuse: \(view.qaFrameWritesForChecks) frame write(s) across 10 "
+                + "unchanged layout passes -- frames are assigned unconditionally"
+            )
+        }
+        guard view.qaStatMeasurementsForChecks == 0 else {
+            throw fail(
+                "diff-summary reuse: \(view.qaStatMeasurementsForChecks) stat measurement(s) "
+                + "across 10 unchanged layout passes -- layout() is measuring text"
             )
         }
     }
