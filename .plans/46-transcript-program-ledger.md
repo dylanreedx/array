@@ -610,3 +610,37 @@ result text; teeth-verified by severing the output feed.
 Legs green after: rhythm, tool-detail, ui-geometry, delta-index-oracle,
 ui-probe, ui-pixel, agent-first-paint, CoreChecks. Next: S4.3 clustering
 (highest risk, lands behind its own witness), then S5/S6/S7.
+
+## Redo milestone — S4.3 clustering, 2026-08-24
+
+Dylan's design 2, landed as the recorded approach A: a display projection
+(`AgentTranscriptClusterPlanner`, pure, O(rows) per visual apply) between
+`rows` and the diffable snapshot, with a synthetic header item
+(`AgentToolClusterHeaderItem`, fixed height, no fill — off the TokenThemed
+census like the tail label). `rows == flatten(document)` untouched. Runs =
+maximal consecutive `.toolCall`/`.commandOutput` rows, never crossing
+`startsTurn`, split at failures (failures always plain); runs of 1 never
+cluster; live runs render "N earlier steps" + plain live rows; the streaming
+last turn holds its fold (t3 adoption: fold decisions key on turn lifecycle).
+Cluster identity = first member's block ID; expansion state in
+`disclosureStateStore`, surviving settling. Snapshot from `displayIDs` with
+folded members ABSENT, re-applies guarded by `lastAppliedDisplayIDs`
+(`qaVisualApplyCount == 1` held). All index-based sites moved to display
+indexes: layout closures (signature hashes the display sequence incl. member
+counts), tail item index, scroll anchors (a folded member's anchor maps to
+its header), turn chrome, copy (a collapsed header contributes members'
+copyBlocks), AX children. Header text re-drives directly as durations arrive
+(`refreshVisibleClusterHeaders`), never via snapshot reload.
+
+Witness `checkClustering` on `.recededWork` (3 consecutive settled tools + a
+failure): exactly one header, "N steps · … ✓" line, the failed tool stays a
+plain row, expand restores exactly 3 member rows to the snapshot, collapse
+refolds, `qaClusterProjectionMismatch` nil at every step, semantic row count
+untouched. Teeth: replacing the planner with identity flipped it RED. The
+`.realClaudeTurn` state asserts zero headers (its tools are separated by
+reasoning — a run never crosses a non-tool row; the plan's assumption that the
+capture's searches would fold was wrong and the witness moved fixtures).
+
+Full guarded sweep green: rhythm, ui-geometry, delta-index-oracle,
+tool-detail, ui-probe, ui-pixel, agent-first-paint, agent-incremental-refresh,
+agent-supervisor, CoreChecks.

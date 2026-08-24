@@ -38,10 +38,11 @@ enum TranscriptRhythmChecks {
         try checkTable()
         try checkFillsAndEdges()
         try checkRealClaudeTurn()
+        try checkClustering()
         print(
             "TranscriptRhythmChecks: heading ladder, hanging indents, thematic break, "
-            + "turn separation, error/notice divergence, table structure, surface fills "
-            + "and the replayed real claude turn"
+            + "turn separation, error/notice divergence, table structure, surface fills, "
+            + "the replayed real claude turn and tool-run clustering"
         )
     }
 
@@ -578,6 +579,82 @@ enum TranscriptRhythmChecks {
                 "real claude turn: expanding the search row revealed no output pane — the "
                 + "result preview is in the store but never reaches the expanded presentation"
             )
+        }
+
+        // The replayed turn's tools are separated by reasoning rows, so they
+        // must NOT cluster — a run never crosses a non-tool row.
+        guard replay.document.entries.isEmpty == false,
+              expandList.qaClusterHeaderCountForChecks == 0 else {
+            throw fail(
+                "real claude turn: \(expandList.qaClusterHeaderCountForChecks) cluster header(s) "
+                + "appeared though every tool row is separated by reasoning"
+            )
+        }
+    }
+
+    // MARK: - S4.3
+
+    /// Dylan's design 2: consecutive settled tool rows fold to one line;
+    /// failures never fold; expanding restores the individual rows. Driven on
+    /// `.recededWork`, whose fixture is three consecutive settled tools
+    /// followed by a failed one.
+    private static func checkClustering() throws {
+        let (surface, views) = try render(.recededWork)
+        let list = surface.transcript
+        if let mismatch = list.qaClusterProjectionMismatch() {
+            throw fail("clustering: projection/snapshot mismatch: \(mismatch)")
+        }
+        let headerIDs = list.qaClusterHeaderIDsForChecks
+        guard headerIDs.count == 1, let headerID = headerIDs.first else {
+            throw fail(
+                "clustering: expected the three consecutive settled tools to fold under ONE "
+                + "header, got \(headerIDs.count)"
+            )
+        }
+        let headers = views.compactMap { $0 as? AgentToolClusterHeaderView }
+        guard let header = headers.first else {
+            throw fail("clustering: the header item never rendered")
+        }
+        let summary = header.summaryLabel.stringValue
+        guard summary.range(of: #"^\d+ steps"#, options: .regularExpression) != nil,
+              summary.hasSuffix("✓") else {
+            throw fail(
+                "clustering: the folded line must read 'N steps ... ✓', got '\(summary)'"
+            )
+        }
+
+        // The failure renders as a plain row, outside any fold.
+        let plainTools = views.compactMap { $0 as? ToolCallView }
+        guard plainTools.contains(where: { $0.statusLabel.stringValue.contains("Failed") }) else {
+            throw fail("clustering: the failed tool must stay a plain, legible row — it folded")
+        }
+        let collapsedSnapshotCount = list.qaSnapshotItemCountForChecks
+
+        // Expanding restores the individual rows (and survives settling via the
+        // disclosure store); collapsing folds them again.
+        list.qaToggleClusterForChecks(headerID)
+        list.layoutSubtreeIfNeeded()
+        list.collectionView.layoutSubtreeIfNeeded()
+        if let mismatch = list.qaClusterProjectionMismatch() {
+            throw fail("clustering: projection/snapshot mismatch after expand: \(mismatch)")
+        }
+        guard list.qaSnapshotItemCountForChecks == collapsedSnapshotCount + 3 else {
+            throw fail(
+                "clustering: expanding must restore the 3 member rows to the snapshot, went "
+                + "\(collapsedSnapshotCount) -> \(list.qaSnapshotItemCountForChecks)"
+            )
+        }
+        list.qaToggleClusterForChecks(headerID)
+        list.layoutSubtreeIfNeeded()
+        guard list.qaSnapshotItemCountForChecks == collapsedSnapshotCount else {
+            throw fail("clustering: collapsing did not restore the folded snapshot")
+        }
+        if let mismatch = list.qaClusterProjectionMismatch() {
+            throw fail("clustering: projection/snapshot mismatch after collapse: \(mismatch)")
+        }
+        // The semantic model is untouched by all of this: rows == flatten.
+        guard list.qaSemanticRowCount >= 6 else {
+            throw fail("clustering: the semantic row count changed — the projection leaked into rows")
         }
     }
 }

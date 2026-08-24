@@ -233,6 +233,17 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     private let turnSeparatorLayer = CAShapeLayer()
     private let hoverTimeLayer = CATextLayer()
     private var turnStartRowsByEntry: [(row: Int, entryID: AgentNodeID, date: Date?)] = []
+    /// `.plans/45` S4.3 — the display projection between `rows` and the
+    /// diffable snapshot. `rows == flatten(document)` is untouched; these are
+    /// rebuilt O(rows) once per visual apply.
+    private var displayItems: [AgentTranscriptClusterPlanner.Item] = []
+    private var displayIDs: [AgentNodeID] = []
+    private var displayIndexByID: [AgentNodeID: Int] = [:]
+    private var clusterHeadersByID: [AgentNodeID: AgentTranscriptClusterPlanner.Header] = [:]
+    /// Folded member -> its header, for scroll anchors that reference a row
+    /// the snapshot no longer contains.
+    private var headerIDByFoldedMemberID: [AgentNodeID: AgentNodeID] = [:]
+    private var lastAppliedDisplayIDs: [AgentNodeID]?
     private var entryDatesByID: [AgentNodeID: Date?] = [:]
     private var nextEntryDateByEntryID: [AgentNodeID: Date] = [:]
     private var hoveredTurnEntryID: AgentNodeID?
@@ -377,6 +388,10 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             AgentTranscriptTailItem.self,
             forItemWithIdentifier: NSUserInterfaceItemIdentifier("AgentTranscriptTailItem")
         )
+        collectionView.register(
+            AgentToolClusterHeaderItem.self,
+            forItemWithIdentifier: AgentToolClusterHeaderItem.reuseIdentifier
+        )
         scrollView.documentView = collectionView
         tailThinkingIndicator.isHidden = true
         tailThinkingIndicator.identifier = NSUserInterfaceItemIdentifier("agentTranscript.tailThinkingIndicator")
@@ -398,7 +413,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
 
         transcriptLayout.itemCount = { [weak self] in
             guard let self else { return 0 }
-            return rows.count + (tailThinkingIndicatorIsVisible ? 1 : 0)
+            return displayItems.count + (tailThinkingIndicatorIsVisible ? 1 : 0)
         }
         // `.plans/45` T3. Three tiers of separation, decided where the neighbour
         // is known. Inside one prose block AssistantProseView already uses 8pt
@@ -407,24 +422,45 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         // much weight as the next paragraph.
         transcriptLayout.spacingBefore = { [weak self] index in
             guard let self else { return nil }
-            return Self.startsTurn(rows, at: index) ? AgentTranscriptLayout.interTurnSpacing : nil
+            return displayStartsTurn(at: index) ? AgentTranscriptLayout.interTurnSpacing : nil
         }
         transcriptLayout.boundarySignature = { [weak self] in
             guard let self else { return 0 }
             // Feeds the prepare() fast path. Without it, a row whose ENTRY changed
             // without the row COUNT changing returns stale geometry, because the
-            // guard only compares width bucket and count.
+            // guard only compares width bucket and count. The signature hashes
+            // the DISPLAY sequence including cluster ids and member counts: a
+            // fold changes geometry without changing the row count (S4.3).
             var hasher = Hasher()
-            for row in rows { hasher.combine(row.entryID) }
+            for item in displayItems {
+                switch item {
+                case let .row(index):
+                    hasher.combine(rows[index].entryID)
+                case let .header(header):
+                    hasher.combine(header.id)
+                    hasher.combine(header.memberIndexes.count)
+                    hasher.combine(header.isExpanded)
+                    hasher.combine(header.isLive)
+                }
+            }
             return hasher.finalize()
         }
         transcriptLayout.measuredHeight = { [weak self] index, width in
             guard let self else { return 1 }
-            if index == rows.count, tailThinkingIndicatorIsVisible {
+            if index == displayItems.count, tailThinkingIndicatorIsVisible {
                 return DualPlaneGyroIndicatorModel.side
             }
-            guard rows.indices.contains(index) else { return 1 }
-            let row = rows[index]
+            guard displayItems.indices.contains(index) else { return 1 }
+            let rowIndex: Int
+            switch displayItems[index] {
+            case .header:
+                // Fixed constant: no measurement, no cache entry (S4.3).
+                return AgentToolClusterHeaderView.fixedHeight
+            case let .row(semanticIndex):
+                rowIndex = semanticIndex
+            }
+            guard rows.indices.contains(rowIndex) else { return 1 }
+            let row = rows[rowIndex]
             do {
                 switch row.content {
                 case let .block(block):
@@ -459,6 +495,21 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 guard let item = collectionView.makeItem(withIdentifier: identifier, for: indexPath)
                     as? AgentTranscriptTailItem else { return nil }
                 item.install(indicator: tailThinkingIndicator, statusLabel: tailStatusLabel)
+                return item
+            }
+            if let header = clusterHeadersByID[id] {
+                guard let item = collectionView.makeItem(
+                    withIdentifier: AgentToolClusterHeaderItem.reuseIdentifier, for: indexPath)
+                    as? AgentToolClusterHeaderItem else { return nil }
+                let view = item.install()
+                view.apply(
+                    clusterID: header.id,
+                    summary: clusterSummaryText(header),
+                    expanded: header.isExpanded,
+                    theme: renderContext.appearance,
+                    tokens: renderContext.tokens
+                )
+                view.onToggle = { [weak self] in self?.toggleCluster(header.id) }
                 return item
             }
             guard let row = rowsByID[id] else { return nil }
@@ -599,8 +650,11 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         // order instead of trusting AppKit's reuse-pool traversal order. Each
         // host then forwards its heading/link/code/disclosure/action children.
         let orderedChildren: [(Int, Any)] = collectionView.visibleItems().compactMap { item in
-            guard let item = item as? AgentTranscriptCollectionItem,
-                  let indexPath = collectionView.indexPath(for: item) else { return nil }
+            guard let indexPath = collectionView.indexPath(for: item) else { return nil }
+            if let header = item as? AgentToolClusterHeaderItem, let view = header.headerView {
+                return (indexPath.item, view as Any)
+            }
+            guard let item = item as? AgentTranscriptCollectionItem else { return nil }
             if let host = item.hostView { return (indexPath.item, host as Any) }
             if let disclosure = item.reasoningDisclosureView {
                 return (indexPath.item, disclosure as Any)
@@ -609,7 +663,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         }
         var children: [Any] = orderedChildren.sorted { $0.0 < $1.0 }.map { $0.1 }
         if tailThinkingIndicatorIsVisible,
-           let item = collectionView.item(at: IndexPath(item: rows.count, section: 0)) as? AgentTranscriptTailItem {
+           let item = collectionView.item(at: IndexPath(item: displayItems.count, section: 0)) as? AgentTranscriptTailItem {
             children.append(item)
         }
         if !jumpToLatestButton.isHidden { children.append(jumpToLatestButton) }
@@ -657,10 +711,10 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         // row rather than falling back to row zero; otherwise insertion above the
         // reader's actual content restores against the wrong semantic ID.
         var lastID: AgentNodeID?
-        for (index, row) in rows.enumerated() {
+        for (index, id) in displayIDs.enumerated() {
             guard let frame = collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0))?.frame else { continue }
-            if frame.maxY >= y { return row.id }
-            lastID = row.id
+            if frame.maxY >= y { return id }
+            lastID = id
         }
         return lastID
     }
@@ -668,10 +722,14 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     private func transcriptY(for id: AgentNodeID) -> CGFloat? {
         if id == tailThinkingIndicatorID, tailThinkingIndicatorIsVisible {
             return collectionView.layoutAttributesForItem(
-                at: IndexPath(item: rows.count, section: 0)
+                at: IndexPath(item: displayItems.count, section: 0)
             )?.frame.minY
         }
-        guard let index = rows.firstIndex(where: { $0.id == id }) else { return nil }
+        // A previously-anchored row may have folded since; its header is the
+        // honest restore target (S4.3 — a fold above the viewport must not
+        // jump the reader).
+        let resolvedID = displayIndexByID[id] != nil ? id : (headerIDByFoldedMemberID[id] ?? id)
+        guard let index = displayIndexByID[resolvedID] else { return nil }
         return collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0))?.frame.minY
     }
 
@@ -679,9 +737,23 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         asMarkdown: Bool = false,
         pasteboard: NSPasteboard = .general
     ) {
+        // A selected header contributes its members' blocks (S4.3): folding is
+        // presentation, and copy must not lose the folded work.
         let selectedRows = collectionView.selectionIndexPaths
             .sorted { $0.item < $1.item }
-            .compactMap { rows.indices.contains($0.item) ? rows[$0.item] : nil }
+            .flatMap { path -> [Row] in
+                guard displayItems.indices.contains(path.item) else { return [] }
+                switch displayItems[path.item] {
+                case let .row(index):
+                    guard rows.indices.contains(index) else { return [] }
+                    return [rows[index]]
+                case let .header(header):
+                    guard !header.isExpanded else { return [] }
+                    return header.memberIndexes.compactMap {
+                        rows.indices.contains($0) ? rows[$0] : nil
+                    }
+                }
+            }
         let selected = selectedRows.flatMap(\.copyBlocks)
         guard !selected.isEmpty else { return }
         if asMarkdown {
@@ -803,6 +875,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         }
         rows = flattened.rows
         rowsByID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+        rebuildDisplayProjection()
         topLevelIDsByNodeID = flattened.topLevelIDsByNodeID
         toolDetailIDByBlockID = flattened.toolDetailIDByBlockID
         // One commit point for the caches AND the document they describe, so a
@@ -827,7 +900,10 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         let newIDs = rows.map(\.id)
         var snapshot = NSDiffableDataSourceSnapshot<Int, AgentNodeID>()
         snapshot.appendSections([0])
-        snapshot.appendItems(newIDs, toSection: 0)
+        // Snapshot identity is the DISPLAY sequence: folded member IDs are
+        // absent; the guard below keeps content-only paragraph streams at zero
+        // snapshot re-applies (S4.3).
+        snapshot.appendItems(displayIDs, toSection: 0)
         if tailThinkingIndicatorIsVisible { snapshot.appendItems([tailThinkingIndicatorID], toSection: 0) }
 
         var changedTopLevelIDs = Set(changedNodeIDs.flatMap { topLevelIDsByNodeID[$0] ?? [] })
@@ -856,15 +932,21 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             }
         }
 
-        if oldIDs != newIDs || appliedVersion == nil {
+        _ = newIDs
+        _ = oldIDs
+        let displayChanged = lastAppliedDisplayIDs != displayIDs
+        if displayChanged || appliedVersion == nil {
             dataSource.apply(snapshot, animatingDifferences: false)
+            lastAppliedDisplayIDs = displayIDs
         }
         // AppKit's snapshot reloadItems replaces NSCollectionViewItem instances.
         // For a content-only patch the snapshot is unchanged and is not re-applied;
         // visible stable-ID hosts update directly, while offscreen rows consume the
-        // current row value when reuse materializes them later.
+        // current row value when reuse materializes them later. A member
+        // completing under a visible header updates the header's TEXT directly.
         try updateVisibleHosts(ids: survivingChanged)
-        if oldIDs != newIDs {
+        refreshVisibleClusterHeaders()
+        if displayChanged {
             transcriptLayout.invalidateForStructureChange()
         } else if changedHeight {
             transcriptLayout.invalidate(changedIDs: survivingChanged)
@@ -945,13 +1027,17 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             isSelecting: { [weak self] in self?.hasActiveTextSelection() ?? false },
             update: { [weak self] in
                 guard let self else { return }
+                // The streaming flag is a fold input: the last turn's settled
+                // run folds only when the turn does (S4.3).
+                rebuildDisplayProjection()
                 var snapshot = NSDiffableDataSourceSnapshot<Int, AgentNodeID>()
                 snapshot.appendSections([0])
-                snapshot.appendItems(rows.map(\.id), toSection: 0)
+                snapshot.appendItems(displayIDs, toSection: 0)
                 if tailThinkingIndicatorIsVisible {
                     snapshot.appendItems([tailThinkingIndicatorID], toSection: 0)
                 }
                 dataSource.apply(snapshot, animatingDifferences: false)
+                lastAppliedDisplayIDs = displayIDs
                 transcriptLayout.invalidateForStructureChange()
                 layoutSubtreeIfNeeded()
             }
@@ -962,7 +1048,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     var qaThinkingIndicatorVisible: Bool { tailThinkingIndicatorIsVisible && !tailThinkingIndicator.isHidden }
     var qaTailIsVirtualDocumentRow: Bool {
         tailThinkingIndicatorIsVisible &&
-            collectionView.item(at: IndexPath(item: rows.count, section: 0)) is AgentTranscriptTailItem
+            collectionView.item(at: IndexPath(item: displayItems.count, section: 0)) is AgentTranscriptTailItem
     }
     var qaTranscriptDocumentHeight: CGFloat {
         layoutSubtreeIfNeeded()
@@ -1353,11 +1439,13 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         // the first turn is still a turn, and hovering it must reveal its time
         // like any other, so the hover anchors include row 0.
         var boundaries: [(row: Int, entryID: AgentNodeID)] = []
-        for index in rows.indices where Self.startsTurn(rows, at: index) {
-            boundaries.append((index, rows[index].entryID))
+        for index in displayItems.indices where displayStartsTurn(at: index) {
+            if case let .row(semanticIndex) = displayItems[index] {
+                boundaries.append((index, rows[semanticIndex].entryID))
+            }
         }
         var starts = boundaries
-        if let first = rows.first { starts.insert((0, first.entryID), at: 0) }
+        if let firstEntryID = displayEntryID(at: 0) { starts.insert((0, firstEntryID), at: 0) }
         turnStartRowsByEntry = starts.map {
             ($0.row, $0.entryID, entryDatesByID[$0.entryID] ?? nil)
         }
@@ -1774,6 +1862,239 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         }
     }
 
+    // MARK: - Cluster projection (`.plans/45` S4.3)
+
+    /// Rebuilds the display projection from the CURRENT semantic rows. O(rows),
+    /// called once per visual apply / tail flip / fold toggle — the scheduler
+    /// already coalesces deltas, so there is no per-delta pass.
+    private func rebuildDisplayProjection() {
+        let facts = rows.enumerated().map { index, row -> AgentTranscriptClusterPlanner.RowFact in
+            var isToolRow = false
+            var isFailure = false
+            var isLive = false
+            if let block = row.block {
+                switch block.payload {
+                case let .toolCall(payload):
+                    isToolRow = true
+                    isFailure = payload.status == .failed || payload.status == .interrupted
+                        || payload.status == .cancelled
+                    isLive = payload.status == .pending || payload.status == .inProgress
+                case let .commandOutput(payload):
+                    isToolRow = true
+                    isFailure = payload.status == .failed || payload.status == .interrupted
+                        || payload.status == .cancelled
+                    isLive = payload.status == .pending || payload.status == .inProgress
+                default:
+                    break
+                }
+            }
+            return AgentTranscriptClusterPlanner.RowFact(
+                isToolRow: isToolRow,
+                isFailure: isFailure,
+                isLive: isLive,
+                startsTurn: Self.startsTurn(rows, at: index),
+                id: row.id
+            )
+        }
+        displayItems = AgentTranscriptClusterPlanner.plan(
+            facts: facts,
+            tailStreaming: tailThinkingIndicatorIsVisible,
+            isExpanded: { [disclosureStateStore, disclosureOwnerID] id in
+                disclosureStateStore.explicitState(
+                    for: ToolDisclosureKey(agentID: disclosureOwnerID, blockID: id)) ?? false
+            }
+        )
+        displayIDs = displayItems.map { item in
+            switch item {
+            case let .row(index): return rows[index].id
+            case let .header(header): return header.id
+            }
+        }
+        displayIndexByID = Dictionary(
+            displayIDs.enumerated().map { ($0.element, $0.offset) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        clusterHeadersByID = [:]
+        headerIDByFoldedMemberID = [:]
+        for item in displayItems {
+            guard case let .header(header) = item else { continue }
+            clusterHeadersByID[header.id] = header
+            guard !header.isExpanded else { continue }
+            for memberIndex in header.memberIndexes where rows.indices.contains(memberIndex) {
+                headerIDByFoldedMemberID[rows[memberIndex].id] = header.id
+            }
+        }
+    }
+
+    private func displayStartsTurn(at index: Int) -> Bool {
+        guard displayItems.indices.contains(index) else { return false }
+        guard case let .row(semanticIndex) = displayItems[index] else { return false }
+        return Self.startsTurn(rows, at: semanticIndex)
+    }
+
+    private func displayEntryID(at index: Int) -> AgentNodeID? {
+        guard displayItems.indices.contains(index) else { return nil }
+        switch displayItems[index] {
+        case let .row(semanticIndex):
+            return rows.indices.contains(semanticIndex) ? rows[semanticIndex].entryID : nil
+        case let .header(header):
+            guard let first = header.memberIndexes.first, rows.indices.contains(first) else { return nil }
+            return rows[first].entryID
+        }
+    }
+
+    /// The one line a folded run reads as. Counts bucket by tool kind, the
+    /// duration sums only what the detail store actually knows (honestly
+    /// omitted otherwise), and ✓ appears only when every member completed.
+    private func clusterSummaryText(_ header: AgentTranscriptClusterPlanner.Header) -> String {
+        if header.isLive {
+            let count = header.memberIndexes.count
+            return "\(count) earlier step\(count == 1 ? "" : "s")"
+        }
+        var nounOrder: [String] = []
+        var nounCounts: [String: Int] = [:]
+        var totalDuration: TimeInterval = 0
+        var knowsAnyDuration = false
+        var allCompleted = true
+        for index in header.memberIndexes {
+            guard rows.indices.contains(index), let block = rows[index].block else { continue }
+            var name: String?
+            switch block.payload {
+            case let .toolCall(payload):
+                name = payload.name
+                if payload.status != .completed { allCompleted = false }
+            case let .commandOutput(payload):
+                name = "output"
+                if payload.status != .completed { allCompleted = false }
+            default:
+                continue
+            }
+            let noun = Self.clusterNoun(forToolNamed: name)
+            if nounCounts[noun] == nil { nounOrder.append(noun) }
+            nounCounts[noun, default: 0] += 1
+            if let detailID = toolDetailIDByBlockID[block.id],
+               let duration = toolDetailsByID[detailID]?.duration {
+                totalDuration += duration
+                knowsAnyDuration = true
+            }
+        }
+        let count = header.memberIndexes.count
+        var parts = ["\(count) step\(count == 1 ? "" : "s")"]
+        let buckets = nounOrder.map { noun -> String in
+            let n = nounCounts[noun] ?? 0
+            return "\(n) \(noun)\(n == 1 ? "" : (noun.hasSuffix("h") ? "es" : "s"))"
+        }
+        if !buckets.isEmpty, buckets != ["\(count) step\(count == 1 ? "" : "s")"] {
+            parts.append(buckets.joined(separator: ", "))
+        }
+        if knowsAnyDuration {
+            let formatted = totalDuration < 10
+                ? String(format: "%.1fs", totalDuration)
+                : "\(Int(totalDuration.rounded()))s"
+            parts.append(formatted)
+        }
+        var summary = parts.joined(separator: " · ")
+        if allCompleted { summary += " ✓" }
+        return summary
+    }
+
+    static func clusterNoun(forToolNamed name: String?) -> String {
+        guard let name = name?.lowercased(), !name.isEmpty else { return "step" }
+        func any(_ needles: [String]) -> Bool { needles.contains { name.contains($0) } }
+        if any(["search", "grep", "glob", "find"]) { return "search" }
+        if any(["fetch"]) { return "fetch" }
+        if any(["edit", "write", "patch", "changed"]) { return "edit" }
+        if any(["read ", "read"]) { return "read" }
+        if any(["bash", "shell", "terminal", "command", "ran "]) { return "command" }
+        return "step"
+    }
+
+    private func toggleCluster(_ id: AgentNodeID) {
+        let key = ToolDisclosureKey(agentID: disclosureOwnerID, blockID: id)
+        let expanded = disclosureStateStore.explicitState(for: key) ?? false
+        disclosureStateStore.setExpanded(!expanded, for: key)
+        scrollController.applyPreservingReaderAnchor(
+            in: scrollView,
+            idAtY: { [weak self] y in self?.transcriptID(at: y) },
+            yForID: { [weak self] id in self?.transcriptY(for: id) },
+            update: { [weak self] in
+                guard let self else { return }
+                rebuildDisplayProjection()
+                var snapshot = NSDiffableDataSourceSnapshot<Int, AgentNodeID>()
+                snapshot.appendSections([0])
+                snapshot.appendItems(displayIDs, toSection: 0)
+                if tailThinkingIndicatorIsVisible {
+                    snapshot.appendItems([tailThinkingIndicatorID], toSection: 0)
+                }
+                dataSource.apply(snapshot, animatingDifferences: false)
+                lastAppliedDisplayIDs = displayIDs
+                transcriptLayout.invalidateForStructureChange()
+                layoutSubtreeIfNeeded()
+            }
+        )
+        refreshTurnChrome()
+    }
+
+    /// The `setThinkingStatusText` move for cluster headers: durations and
+    /// statuses arrive after the fold; the visible header's text updates
+    /// directly, never via snapshot reload.
+    private func refreshVisibleClusterHeaders() {
+        for case let item as AgentToolClusterHeaderItem in collectionView.visibleItems() {
+            guard let view = item.headerView,
+                  let clusterID = view.clusterID,
+                  let header = clusterHeadersByID[clusterID] else { continue }
+            view.setSummaryText(clusterSummaryText(header))
+        }
+    }
+
+    // QA seams for the cluster projection (S4.3).
+    var qaDisplayItemCountForChecks: Int { displayItems.count }
+    var qaClusterHeaderCountForChecks: Int { clusterHeadersByID.count }
+    var qaSnapshotItemCountForChecks: Int { dataSource.snapshot().numberOfItems }
+    func qaToggleClusterForChecks(_ id: AgentNodeID) { toggleCluster(id) }
+    var qaClusterHeaderIDsForChecks: [AgentNodeID] { displayItems.compactMap {
+        if case let .header(header) = $0 { return header.id } else { return nil }
+    } }
+    /// Mirrors `qaIndexEquivalenceMismatch`: nil when the projection, the
+    /// snapshot and the semantic rows agree; otherwise a description.
+    func qaClusterProjectionMismatch() -> String? {
+        var expectedIDs = displayItems.map { item -> AgentNodeID in
+            switch item {
+            case let .row(index): return rows[index].id
+            case let .header(header): return header.id
+            }
+        }
+        if tailThinkingIndicatorIsVisible { expectedIDs.append(tailThinkingIndicatorID) }
+        let snapshotIDs = dataSource.snapshot().itemIdentifiers
+        if snapshotIDs != expectedIDs {
+            return "snapshot [\(snapshotIDs.count)] diverged from display projection [\(expectedIDs.count)]"
+        }
+        // Every semantic row is either displayed or covered by exactly one
+        // collapsed header; nothing is dropped and nothing is doubled.
+        var covered = Set<AgentNodeID>()
+        var displayed = Set<AgentNodeID>()
+        for item in displayItems {
+            switch item {
+            case let .row(index): displayed.insert(rows[index].id)
+            case let .header(header):
+                guard !header.isExpanded else { continue }
+                if header.isLive || header.memberIndexes.count >= 2 {
+                    for index in header.memberIndexes { covered.insert(rows[index].id) }
+                } else {
+                    return "header \(header.id.rawValue) covers \(header.memberIndexes.count) member(s)"
+                }
+            }
+        }
+        for row in rows {
+            let isDisplayed = displayed.contains(row.id)
+            let isCovered = covered.contains(row.id)
+            if isDisplayed == isCovered {
+                return "row \(row.id.rawValue) displayed=\(isDisplayed) covered=\(isCovered)"
+            }
+        }
+        return nil
+    }
+
     /// Composition seam for review fixtures (`.plans/45` S4.2): inject records
     /// that HAVE crossed the real store's sanitizer, exactly as the async
     /// refresh above does — never raw provider values. The untrusted-provider
@@ -1807,6 +2128,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         } catch {
             renderingError = UpdateError.renderer(error)
         }
+        refreshVisibleClusterHeaders()
         jumpToLatestButton.isHidden = !scrollController.showsJumpToLatest
     }
 
