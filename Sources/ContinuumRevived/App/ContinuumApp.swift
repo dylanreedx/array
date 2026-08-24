@@ -3927,6 +3927,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         Task.detached { [store = agentTranscriptStore] in
             _ = try? await store.migrateLegacySessionDirectories()
         }
+        // C8's fourth blocker was that nothing ever installed the extension, so
+        // the whole pi spawn path shipped unreachable. This is that call site,
+        // and it is HERE rather than beside `ToolEnvironment.bootstrap()`
+        // deliberately: `applicationDidFinishLaunching` runs only on the
+        // interactive path, after the entire `--*-check` cascade, so no self-check
+        // leg can write into the developer's real `~/.pi/agent/extensions`.
+        // The installer never overwrites a copy whose bytes are not ours.
+        Task.detached {
+            let result = PiExtensionInstaller.install()
+            if case .leftUserModifiedCopy = result {
+                FileHandle.standardError.write(Data(
+                    "PiExtensionInstaller: left a modified continuum-spawn-agent.ts in place\n".utf8))
+            }
+        }
         launchStartTime = QAPerf.timestamp()
         qaPerf = QAPerf()
         navKeymap = NavKeymap.resolve()
