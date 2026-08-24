@@ -127,6 +127,12 @@ public struct CodexEventTranslator {
             // DROP `command` + `aggregated_output` (I5): the command is the
             // sensitive payload, so the title is a generic literal, NOT the
             // command (unlike claude, whose tool NAME is the safe title).
+            // `.plans/45` S2 — the start instant rides the side channel so the
+            // row can show a duration; codex offers no safe argument summary.
+            if let onRuntimeObservation {
+                onRuntimeObservation(.toolDetail(itemId: itemId, detail: AgentToolDetailObservation(
+                    phase: .started, toolName: "Shell", observedAt: now())))
+            }
             return [.itemStarted(threadId: threadId, itemId: itemId, kind: .commandExecution, title: "Shell")]
 
         case "file_change":
@@ -144,11 +150,57 @@ public struct CodexEventTranslator {
                         updatedAt: now(),
                         evidenceSource: .toolEvent)))
             }
+            // `.plans/45` S2 — ALL changed basenames, not just changes[0]
+            // (C1's codex row). Basenames only; full paths stay on the
+            // activity channel above.
+            if let onRuntimeObservation {
+                onRuntimeObservation(.toolDetail(itemId: itemId, detail: AgentToolDetailObservation(
+                    phase: .started,
+                    toolName: "Edit",
+                    fields: changeBasenames(item).map { (key: "file", value: $0) },
+                    observedAt: now()
+                )))
+            }
             return [.itemStarted(threadId: threadId, itemId: itemId, kind: .fileChange, title: "Edit")]
 
+        case "mcp_tool_call":
+            // `.plans/45` S2 — previously swallowed: an MCP call produced NO
+            // row at all. The tool and server names are identifiers, not
+            // payload; arguments stay opaque.
+            let tool = (item["tool"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let title = tool ?? "MCP tool"
+            if let onRuntimeObservation {
+                let server = (item["server"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                onRuntimeObservation(.toolDetail(itemId: itemId, detail: AgentToolDetailObservation(
+                    phase: .started,
+                    toolName: title,
+                    fields: server.map { [(key: "server", value: $0)] } ?? [],
+                    observedAt: now()
+                )))
+            }
+            return [.itemStarted(threadId: threadId, itemId: itemId, kind: .mcpToolCall, title: title)]
+
+        case "web_search":
+            // `.plans/45` S2 — previously swallowed. The query is the same
+            // whitelisted key claude carries.
+            if let onRuntimeObservation {
+                let query = (item["query"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                onRuntimeObservation(.toolDetail(itemId: itemId, detail: AgentToolDetailObservation(
+                    phase: .started,
+                    toolName: "Web search",
+                    fields: query.map { [(key: "query", value: $0)] } ?? [],
+                    observedAt: now()
+                )))
+            }
+            return [.itemStarted(threadId: threadId, itemId: itemId, kind: .webSearch, title: "Web search")]
+
+        case "todo_list":
+            // `.plans/45` S2 — previously swallowed. Item contents (the todo
+            // text) stay out; the row just exists now.
+            return [.itemStarted(threadId: threadId, itemId: itemId, kind: .plan, title: "Plan")]
+
         default:
-            // reasoning/agent_message have no item.started; mcp_tool_call /
-            // web_search / todo_list are not surfaced yet — inert.
+            // reasoning/agent_message have no item.started.
             return []
         }
     }
@@ -175,21 +227,57 @@ public struct CodexEventTranslator {
 
         case "command_execution":
             guard let rawId = item["id"] as? String else { return [] }
-            let succeeded = Self.intValue(item["exit_code"]) == 0
+            let exitCode = Self.intValue(item["exit_code"])
+            // `.plans/45` S2 — the integer exit code (not just its zero-ness)
+            // and a bounded output preview ride the side channel for the
+            // expanded pane. The event still carries only pass/fail.
+            if let onRuntimeObservation {
+                let output = (item["aggregated_output"] as? String)
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .flatMap { $0.isEmpty ? nil : $0 }
+                onRuntimeObservation(.toolDetail(itemId: saltedItemId(rawId), detail: AgentToolDetailObservation(
+                    phase: .ended,
+                    outputPreview: output,
+                    exitCode: exitCode,
+                    observedAt: now()
+                )))
+            }
             return [.itemCompleted(
                 threadId: threadId,
                 itemId: saltedItemId(rawId),
                 kind: .commandExecution,
-                status: succeeded ? .completed : .failed)]
+                status: exitCode == 0 ? .completed : .failed)]
 
         case "file_change":
             guard let rawId = item["id"] as? String else { return [] }
             let ok = (item["status"] as? String) == "completed"
+            // `.plans/45` S2 — an end instant so the row can show a duration;
+            // a file change has no output to preview.
+            if let onRuntimeObservation {
+                onRuntimeObservation(.toolDetail(itemId: saltedItemId(rawId), detail: AgentToolDetailObservation(
+                    phase: .ended, observedAt: now())))
+            }
             return [.itemCompleted(
                 threadId: threadId,
                 itemId: saltedItemId(rawId),
                 kind: .fileChange,
                 status: ok ? .completed : .failed)]
+
+        case "mcp_tool_call", "web_search", "todo_list":
+            // `.plans/45` S2 — previously swallowed alongside their starts.
+            guard let rawId = item["id"] as? String else { return [] }
+            let kind: ItemKind = itemType == "mcp_tool_call" ? .mcpToolCall
+                : itemType == "web_search" ? .webSearch : .plan
+            let failed = (item["status"] as? String) == "failed"
+            if let onRuntimeObservation {
+                onRuntimeObservation(.toolDetail(itemId: saltedItemId(rawId), detail: AgentToolDetailObservation(
+                    phase: .ended, observedAt: now())))
+            }
+            return [.itemCompleted(
+                threadId: threadId,
+                itemId: saltedItemId(rawId),
+                kind: kind,
+                status: failed ? .failed : .completed)]
 
         default:
             return []
@@ -269,6 +357,19 @@ public struct CodexEventTranslator {
     private func firstChangePath(_ item: [String: Any]) -> String? {
         guard let changes = item["changes"] as? [[String: Any]] else { return nil }
         return changes.lazy.compactMap { $0["path"] as? String }.first
+    }
+
+    /// `.plans/45` S2 — every changed file's basename, for the detail fields.
+    /// The observation's own field cap bounds the list.
+    private func changeBasenames(_ item: [String: Any]) -> [String] {
+        guard let changes = item["changes"] as? [[String: Any]] else { return [] }
+        return changes.compactMap { change in
+            guard let path = change["path"] as? String,
+                  !path.isEmpty,
+                  !path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+            else { return nil }
+            return URL(fileURLWithPath: path).lastPathComponent
+        }
     }
 
     private static let maximumObservedPathBytes = 4_096

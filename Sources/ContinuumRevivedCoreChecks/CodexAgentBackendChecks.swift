@@ -255,6 +255,62 @@ private func runCodexTranslatorMappingChecks() {
     expect(capturedThreadIds == [codexTID],
            "CodexEventTranslator: the minted thread_id must project on the observation side channel (STORED continuity), got \(capturedThreadIds)")
 
+    // 5. `.plans/45` S2 — the toolDetail supply. The ended detail for a
+    //    command carries the INTEGER exit code and the aggregated output as a
+    //    bounded preview; a file_change start carries every changed basename;
+    //    and the command body itself never crosses, even host-locally.
+    let details = observed.compactMap { observation -> (String, AgentToolDetailObservation)? in
+        guard case let .toolDetail(itemId, detail) = observation else { return nil }
+        return (itemId, detail)
+    }
+    let commandEnd = details.first { $0.0 == "run1-item_1" && $0.1.phase == .ended }?.1
+    expect(commandEnd?.exitCode == 0 && commandEnd?.outputPreview == "SECRET-OUTPUT",
+           "CodexEventTranslator: the ended detail must carry exit code 0 and the output preview, got \(String(describing: commandEnd))")
+    let failedEnd = details.first { $0.0 == "run1-item_3" && $0.1.phase == .ended }?.1
+    expect(failedEnd?.exitCode == 2 && failedEnd?.outputPreview == "SECRET-FAILURE-OUTPUT",
+           "CodexEventTranslator: the failing command's detail must carry exit code 2 and its output, got \(String(describing: failedEnd))")
+    let editStart = details.first { $0.0 == "run1-item_2" && $0.1.phase == .started }?.1
+    expect(editStart?.fields.map { "\($0.key)=\($0.value)" } == ["file=note.txt"],
+           "CodexEventTranslator: a file_change start must carry the changed basenames only, got \(String(describing: editStart?.fields))")
+    let detailDescription = String(describing: details)
+    for secret in ["SECRET-COMMAND", "SECRET-FAILING-COMMAND", "SECRET-PATH"] {
+        expect(!detailDescription.contains(secret),
+               "CodexEventTranslator: \(secret) leaked into the toolDetail channel")
+    }
+
+    // 6. `.plans/45` S2 — mcp_tool_call / web_search / todo_list stop being
+    //    swallowed: each now produces an item row, and web_search carries its
+    //    query on the detail channel.
+    var unswallowed = CodexEventTranslator(runToken: "run1", now: { observedAt })
+    let unswallowedBox = ObservationBox()
+    unswallowed.onRuntimeObservation = { unswallowedBox.append($0) }
+    let extraEvents = unswallowed.translate(stream: [
+        #"{"type":"thread.started","thread_id":"019fe980-21f0-7df1-b2a0-49d7839c7937"}"#,
+        #"{"type":"turn.started"}"#,
+        #"{"type":"item.started","item":{"id":"item_5","type":"mcp_tool_call","server":"linear","tool":"create_issue","status":"in_progress"}}"#,
+        #"{"type":"item.completed","item":{"id":"item_5","type":"mcp_tool_call","server":"linear","tool":"create_issue","status":"completed"}}"#,
+        #"{"type":"item.started","item":{"id":"item_6","type":"web_search","query":"swift diffable snapshot","status":"in_progress"}}"#,
+        #"{"type":"item.completed","item":{"id":"item_6","type":"web_search","query":"swift diffable snapshot","status":"completed"}}"#,
+        #"{"type":"item.started","item":{"id":"item_7","type":"todo_list","items":[],"status":"in_progress"}}"#,
+        #"{"type":"item.completed","item":{"id":"item_7","type":"todo_list","items":[],"status":"completed"}}"#,
+    ])
+    let itemEvents = extraEvents.compactMap { event -> (String, ItemKind)? in
+        if case let .itemStarted(_, itemId, kind, _) = event { return (itemId, kind) }
+        return nil
+    }
+    expect(itemEvents.map(\.0) == ["run1-item_5", "run1-item_6", "run1-item_7"]
+        && itemEvents.map(\.1) == [.mcpToolCall, .webSearch, .plan],
+           "CodexEventTranslator: mcp_tool_call/web_search/todo_list must produce rows, got \(itemEvents)")
+    expect(extraEvents.filter { if case .itemCompleted = $0 { return true } else { return false } }.count == 3,
+           "CodexEventTranslator: each un-swallowed item must also complete")
+    let searchStart = unswallowedBox.snapshot().compactMap { observation -> AgentToolDetailObservation? in
+        guard case let .toolDetail(itemId, detail) = observation,
+              itemId == "run1-item_6", detail.phase == .started else { return nil }
+        return detail
+    }.first
+    expect(searchStart?.fields.map { "\($0.key)=\($0.value)" } == ["query=swift diffable snapshot"],
+           "CodexEventTranslator: web_search must carry its query on the detail channel, got \(String(describing: searchStart?.fields))")
+
     print("CodexEventTranslator checks passed: \(events.count) events from the real codex-cli 0.145.0 exec --json schema map exactly, whole messages surface once, item ids salted, input_tokens NOT summed, I5-safe by construction, thread_id captured out of band")
 }
 

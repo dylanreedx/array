@@ -495,6 +495,9 @@ enum UIProbePixels {
             // stops a rhythm change from quietly rendering nothing.
             (.headingLadder, 480), (.lists, 320), (.tableAndBreaks, 480),
             (.errorVsNotice, 480), (.turnBoundary, 480), (.recededWork, 480),
+            // `.plans/45` S1. The replayed real capture — the state Dylan's
+            // rejection proved the authored fixtures cannot stand in for.
+            (.realClaudeTurn, 480),
         ]
         for (state, width) in reviewStates {
             for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {

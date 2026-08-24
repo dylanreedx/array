@@ -96,6 +96,15 @@ public struct AgentToolCallPayload: Codable, Equatable, Sendable {
     public var summary: String?
     public var arguments: AgentOpaqueValue?
     public var status: AgentItemStatus
+    /// `.plans/45` S3 — presentation-only trailing detail (the "2.1s" beside
+    /// the status glyph), set on the EPHEMERAL rendered copy from the
+    /// host-local detail store. Deliberately excluded from CodingKeys: it is
+    /// never document state and never crosses a sync boundary (I5).
+    public var presentedTrailingDetailText: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case name, summary, arguments, status
+    }
 
     public init(name: String, summary: String? = nil, arguments: AgentOpaqueValue? = nil, status: AgentItemStatus) {
         self.name = name

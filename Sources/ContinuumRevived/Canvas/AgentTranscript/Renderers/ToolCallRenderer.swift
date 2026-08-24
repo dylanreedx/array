@@ -102,11 +102,25 @@ final class ToolCallView: NSView {
         iconView.image = CanvasSymbolImage.image(
             named: Self.symbolName(forToolNamed: payload.name))
         let presentation = payload.status.agentToolStatusPresentation
-        statusLabel.stringValue = "\(presentation.glyph) \(presentation.label)"
+        // `.plans/45` S3/S4 — the trailing column reads "2.1s ✓" when the
+        // host-local detail knows the duration; the wordy status label remains
+        // the fallback (and the failure presentation keeps its label).
+        if let duration = payload.presentedTrailingDetailText,
+           payload.status == .completed {
+            statusLabel.stringValue = "\(duration) \(presentation.glyph)"
+        } else {
+            statusLabel.stringValue = "\(presentation.glyph) \(presentation.label)"
+        }
         let candidateSummary = payload.summary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         disclosureText = candidateSummary.caseInsensitiveCompare(presentation.label) == .orderedSame
             ? "" : candidateSummary
-        let lines = disclosureText.split(whereSeparator: { $0.isNewline }).map(String.init)
+        var lines = disclosureText.split(whereSeparator: { $0.isNewline }).map(String.init)
+        // `.plans/45` S3 — when the title already IS the action sentence, the
+        // disclosure's first line repeats it; show the additional facts only.
+        if lines.first == titleLabel.stringValue {
+            lines.removeFirst()
+            disclosureText = lines.joined(separator: "\n")
+        }
         compactSummary = lines.first ?? ""
         hasDisclosureDetail = lines.count > 1
         if !hasDisclosureDetail { isExpanded = false }

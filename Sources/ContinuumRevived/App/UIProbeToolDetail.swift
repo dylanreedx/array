@@ -498,6 +498,123 @@ extension UIProbeGeometry {
               stableList.qaPresentedToolSummary(for: stableToolID)?.contains("stable-provider-tool") == true else {
             throw GeometryError(message: "same-ID sibling update discarded disclosure or immutable provider identity")
         }
-        return 18
+
+        try await runRealTranslatorSupplyChecks()
+        return 24
+    }
+
+    /// `.plans/45` S3 (ledger 1b.6) — the store fed by a REAL translator
+    /// sequence through the host's own capture path, not hand-written records.
+    /// The previous shape of this leg was green while production rendered
+    /// empty rows, because it wrote records the supply chain never produced.
+    private static func runRealTranslatorSupplyChecks() async throws {
+        // Claude: the committed S1 capture, translated for real. Deterministic
+        // stepped clock so the duration is a fixed span.
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()          // App
+            .deletingLastPathComponent()          // ContinuumRevived
+            .deletingLastPathComponent()          // Sources
+            .appendingPathComponent(
+                "ContinuumRevivedCoreChecks/Fixtures/claude-websearch-turn.jsonl",
+                isDirectory: false
+            )
+        guard let text = try? String(contentsOf: fixtureURL, encoding: .utf8), !text.isEmpty else {
+            throw GeometryError(message: "the committed claude capture is missing at \(fixtureURL.path)")
+        }
+        final class SteppedClock: @unchecked Sendable {
+            private let lock = NSLock()
+            private var ticks: TimeInterval = 0
+            func next() -> Date {
+                lock.withLock {
+                    ticks += 1
+                    return Date(timeIntervalSince1970: 1_700_000_000 + ticks * 2)
+                }
+            }
+        }
+        let clock = SteppedClock()
+        let store = AgentToolDetailStore()
+        let list = AgentTranscriptListView(toolDetailStore: store)
+        list.bindToolDetailAgent(AgentID(rawValue: UUID(uuidString: "00000000-0000-4000-8000-0000000000AB")!))
+        var translator = ClaudeEventTranslator(runToken: "probe", now: { clock.next() })
+        translator.onRuntimeObservation = { observation in
+            MainActor.assumeIsolated { list.captureRuntimeObservation(observation) }
+        }
+        var searchIdentity: AgentToolDetailKey?
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            for event in translator.translate(line: String(line)) {
+                let identity = list.captureRuntimeEvent(event)
+                if case let .itemStarted(_, itemId, _, title) = event,
+                   title == "WebSearch", identity != nil {
+                    _ = itemId
+                    searchIdentity = identity
+                }
+            }
+        }
+        guard let searchIdentity else {
+            throw GeometryError(message: "the real claude capture produced no WebSearch item through the host capture path")
+        }
+        // The host records via detached tasks; drain them through the same
+        // refresh the production tile awaits.
+        await list.qaWaitForToolDetailRefresh()
+        for _ in 0..<100 {
+            if let detail = await store.detail(for: searchIdentity), detail.status != .inProgress { break }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard let searchDetail = await store.detail(for: searchIdentity) else {
+            throw GeometryError(message: "the WebSearch detail never reached the store from the real translator sequence")
+        }
+        let collapsed = AgentToolDetailPresenter.collapsed(searchDetail)
+        guard collapsed.actionLine.contains("Searched for"),
+              collapsed.actionLine.contains("recent sports headline") else {
+            throw GeometryError(message: "collapsed actionLine must read the query action-first, got \(collapsed.actionLine)")
+        }
+        guard collapsed.durationText != nil else {
+            throw GeometryError(message: "the real sequence carries start+end instants; collapsed duration was nil")
+        }
+        guard searchDetail.toolName == "WebSearch" else {
+            throw GeometryError(message: "the tool name was overwritten (C2a regression), got \(searchDetail.toolName)")
+        }
+        let searchExpanded = AgentToolDetailPresenter.expanded(searchDetail)
+        guard searchExpanded.timingText != nil, searchExpanded.output != nil else {
+            throw GeometryError(message: "expanded presentation must carry timing and the result preview, got timing \(String(describing: searchExpanded.timingText)) output \(String(describing: searchExpanded.output == nil))")
+        }
+
+        // Codex: the exit code reaches the expanded pane as an integer.
+        let codexStore = AgentToolDetailStore()
+        let codexList = AgentTranscriptListView(toolDetailStore: codexStore)
+        codexList.bindToolDetailAgent(AgentID(rawValue: UUID(uuidString: "00000000-0000-4000-8000-0000000000AC")!))
+        var codex = CodexEventTranslator(runToken: "probe", now: { clock.next() })
+        codex.onRuntimeObservation = { observation in
+            MainActor.assumeIsolated { codexList.captureRuntimeObservation(observation) }
+        }
+        var commandIdentity: AgentToolDetailKey?
+        for line in [
+            #"{"type":"thread.started","thread_id":"019fe980-21f0-7df1-b2a0-49d7839c7937"}"#,
+            #"{"type":"turn.started"}"#,
+            #"{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"echo probe","aggregated_output":"","exit_code":null,"status":"in_progress"}}"#,
+            #"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"echo probe","aggregated_output":"probe-output","exit_code":3,"status":"failed"}}"#,
+        ] {
+            for event in codex.translate(line: line) {
+                if let identity = codexList.captureRuntimeEvent(event) { commandIdentity = identity }
+            }
+        }
+        guard let commandIdentity else {
+            throw GeometryError(message: "the codex sequence produced no command identity through the host capture path")
+        }
+        await codexList.qaWaitForToolDetailRefresh()
+        for _ in 0..<100 {
+            if let detail = await codexStore.detail(for: commandIdentity), detail.exitCode != nil { break }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard let commandDetail = await codexStore.detail(for: commandIdentity) else {
+            throw GeometryError(message: "the codex command detail never reached the store")
+        }
+        let commandExpanded = AgentToolDetailPresenter.expanded(commandDetail)
+        guard commandExpanded.exitCodeText == "Exit 3" else {
+            throw GeometryError(message: "the codex integer exit code must reach the expanded pane, got \(String(describing: commandExpanded.exitCodeText))")
+        }
+        guard commandDetail.output?.text.contains("probe-output") == true else {
+            throw GeometryError(message: "the codex aggregated output preview must reach the store, got \(String(describing: commandDetail.output?.text))")
+        }
     }
 }

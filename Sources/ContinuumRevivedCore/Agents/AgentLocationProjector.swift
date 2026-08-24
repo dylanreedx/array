@@ -21,6 +21,70 @@ public enum AgentRuntimeObservation: Equatable, Sendable {
     /// resume the same thread later. Not a location fact: the projector ignores
     /// it.
     case threadId(String)
+    /// Bounded tool detail for `AgentToolDetailStore`, riding the same
+    /// host-local side channel as `threadId` and for the same reason: it must
+    /// never enter `AgentRuntimeEvent` (the I5 sync boundary), and the store —
+    /// non-Codable, TTL-scoped, fail-closed redactor, hard caps — is the
+    /// sanctioned home for argument and output detail
+    /// (`plan-managed-agent-tile-polish.md` §12.3).
+    ///
+    /// `.plans/45` — this is the supply behind the tool rows. The presenter
+    /// already knew how to say "Searched for {query}", "Exit code: 1" and
+    /// "Duration: 8.2s"; production fed it a bare operation gerund, so every
+    /// row rendered as `search` / `searching` / `Completed` and nothing else.
+    /// The location projector ignores this case: it is not a location fact.
+    case toolDetail(itemId: String, detail: AgentToolDetailObservation)
+}
+
+/// One tool call's whitelisted detail, as observed from a provider stream.
+///
+/// Values are BOUNDED AT CONSTRUCTION and the store's sanitizer runs on top —
+/// two independent caps, because this struct crosses from translator code that
+/// handles raw provider JSON. Translators whitelist per tool and per key; a
+/// command BODY never enters (claude's `Bash.description` is the sanctioned
+/// human summary; `command` itself is not carried).
+public struct AgentToolDetailObservation: Equatable, Sendable {
+    public enum Phase: Equatable, Sendable {
+        case started
+        case ended
+    }
+
+    public static let maxFieldValueCharacters = 200
+    public static let maxOutputCharacters = 2000
+    public static let maxFields = 6
+
+    public let phase: Phase
+    public let toolName: String?
+    /// Whitelisted (key, value) pairs, e.g. ("query", "recent sports headline").
+    public let fields: [(key: String, value: String)]
+    public let outputPreview: String?
+    public let exitCode: Int?
+    public let observedAt: Date
+
+    public init(
+        phase: Phase,
+        toolName: String? = nil,
+        fields: [(key: String, value: String)] = [],
+        outputPreview: String? = nil,
+        exitCode: Int? = nil,
+        observedAt: Date
+    ) {
+        self.phase = phase
+        self.toolName = toolName.map { String($0.prefix(80)) }
+        self.fields = fields.prefix(Self.maxFields).map {
+            (key: String($0.key.prefix(48)), value: String($0.value.prefix(Self.maxFieldValueCharacters)))
+        }
+        self.outputPreview = outputPreview.map { String($0.prefix(Self.maxOutputCharacters)) }
+        self.exitCode = exitCode
+        self.observedAt = observedAt
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.phase == rhs.phase && lhs.toolName == rhs.toolName
+            && lhs.fields.elementsEqual(rhs.fields, by: { $0.key == $1.key && $0.value == $1.value })
+            && lhs.outputPreview == rhs.outputPreview && lhs.exitCode == rhs.exitCode
+            && lhs.observedAt == rhs.observedAt
+    }
 }
 
 /// Deterministically folds private provider observations and normalized runtime
@@ -71,6 +135,12 @@ public struct AgentLocationProjector: Sendable {
             // A provider session id is host-local persistence state, not a Home
             // / Where / What fact. The supervisor persists it; the projector has
             // nothing to fold in.
+            break
+
+        case .toolDetail:
+            // Argument/output detail for `AgentToolDetailStore`, not a Home /
+            // Where / What fact. The host consumes it; the projector ignores it
+            // (same shape as `.threadId`).
             break
         }
     }

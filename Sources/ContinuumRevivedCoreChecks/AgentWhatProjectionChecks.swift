@@ -81,11 +81,31 @@ private func checkPiWhatObservationSideChannel() {
     expect(toolActivities.allSatisfy { $0.1.startedAt == observedAt && $0.1.updatedAt == observedAt },
            "Agent What: local observations must carry evidence timestamps")
 
+    // `.plans/45` S2 — the host-local contract, split. The side channel now
+    // deliberately carries what a human would say the tool is DOING — the
+    // search pattern and a bounded result preview, capped at construction and
+    // store-sanitized again before presentation. What stays forbidden even
+    // here: command bodies, edit payloads, reasoning text.
     let localDescription = String(describing: box.observations)
-    for secret in [secretCommand, secretQuery, "SECRET-REASONING-BODY", "SECRET-FILE-BODY", "SECRET-OLD", "SECRET-NEW"] {
+    for secret in [secretCommand, "SECRET-COMMAND-BODY", "SECRET-REASONING-BODY", "SECRET-OLD", "SECRET-NEW"] {
         expect(!localDescription.contains(secret),
-               "Agent What: private observation retained forbidden command/query/body text: \(secret.prefix(40))")
+               "Agent What: private observation retained forbidden command/edit/reasoning text: \(secret.prefix(40))")
     }
+    let toolDetails = box.observations.compactMap { observation -> (String, AgentToolDetailObservation)? in
+        guard case let .toolDetail(itemId, detail) = observation else { return nil }
+        return (itemId, detail)
+    }
+    let grepStart = toolDetails.first { $0.0 == "grep-1" && $0.1.phase == .started }?.1
+    let grepPattern = grepStart?.fields.first { $0.key == "pattern" }?.value
+    expect(grepPattern.map { secretQuery.hasPrefix($0) } == true,
+           "Agent What: the grep pattern must ride the toolDetail channel, got \(String(describing: grepStart?.fields))")
+    expect((grepPattern?.count ?? .max) <= AgentToolDetailObservation.maxFieldValueCharacters,
+           "Agent What: a toolDetail field value must be capped at construction, got \(grepPattern?.count ?? -1) chars")
+    let readEnd = toolDetails.first { $0.0 == "read-1" && $0.1.phase == .ended }?.1
+    expect(readEnd?.outputPreview == "SECRET-FILE-BODY",
+           "Agent What: the read result preview must ride the toolDetail channel, got \(String(describing: readEnd?.outputPreview))")
+    expect(toolDetails.filter { $0.0 == "bash-1" }.allSatisfy { $0.1.fields.isEmpty },
+           "Agent What: a shell call must carry NO detail fields — the command body never crosses")
     expect(!((box.observations[0] as Any) is any Encodable),
            "Agent What: host-local runtime observations must not become Encodable")
 

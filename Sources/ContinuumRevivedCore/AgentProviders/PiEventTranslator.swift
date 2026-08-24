@@ -119,6 +119,19 @@ public struct PiEventTranslator {
                     onRuntimeObservation(.toolActivity(itemId: toolCallId, activity: activity))
                 }
             }
+            // `.plans/45` S2 — the detail supply. Whitelisted argument fields
+            // and the provider-authored start instant go out of band; pi has no
+            // Bash `description`, so a shell call carries NO field rather than
+            // its command body.
+            if let onRuntimeObservation {
+                onRuntimeObservation(.toolDetail(itemId: toolCallId, detail: AgentToolDetailObservation(
+                    phase: .started,
+                    toolName: toolName,
+                    fields: Self.toolDetailFields(
+                        toolName: toolName, args: object["args"] as? [String: Any] ?? [:]),
+                    observedAt: Self.timestamp(from: object) ?? now()
+                )))
+            }
             // title = tool NAME only. Never args (args.path is I5-sensitive).
             return [.itemStarted(
                 threadId: threadId,
@@ -131,6 +144,16 @@ public struct PiEventTranslator {
             guard let toolCallId = object["toolCallId"] as? String,
                   let toolName = object["toolName"] as? String else { return [] }
             let isError = (object["isError"] as? Bool) ?? false
+            // `.plans/45` S2 — this branch used to emit no observation at all:
+            // the result text and the provider-authored end instant were both
+            // parsed upstream and discarded here (C1's pi row of the table).
+            if let onRuntimeObservation {
+                onRuntimeObservation(.toolDetail(itemId: toolCallId, detail: AgentToolDetailObservation(
+                    phase: .ended,
+                    outputPreview: Self.resultPreview(object["result"]),
+                    observedAt: Self.timestamp(from: object) ?? now()
+                )))
+            }
             return [.itemCompleted(
                 threadId: threadId,
                 itemId: toolCallId,
@@ -309,6 +332,62 @@ public struct PiEventTranslator {
             startedAt: observedAt,
             updatedAt: observedAt,
             evidenceSource: .toolEvent)
+    }
+
+    /// `.plans/45` S2 — pi's argument whitelist for `.toolDetail`, per tool
+    /// per key: the query, the pattern, or the file's basename. A shell call
+    /// carries NO field — pi has no `description` summary and the command body
+    /// never crosses.
+    private static func toolDetailFields(
+        toolName: String,
+        args: [String: Any]
+    ) -> [(key: String, value: String)] {
+        func string(_ key: String) -> String? {
+            guard let value = args[key] as? String else { return nil }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty,
+                  !trimmed.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+            else { return nil }
+            return trimmed
+        }
+        switch toolName.lowercased() {
+        case "web_search", "websearch", "web", "search":
+            return string("query").map { [(key: "query", value: $0)] } ?? []
+        case "grep", "find", "glob":
+            return string("pattern").map { [(key: "pattern", value: $0)] } ?? []
+        case "read", "cat", "edit", "write", "multiedit", "apply_patch", "applypatch", "ls":
+            let path = string("path") ?? string("file") ?? string("file_path")
+            return path.map { [(key: "file", value: URL(fileURLWithPath: $0).lastPathComponent)] } ?? []
+        default:
+            // bash/shell/run/exec and unknown tools: no fields. The command
+            // body and unknown arg schemas stay opaque.
+            return []
+        }
+    }
+
+    /// A bounded preview of `result.content[].text`. Non-text blocks and
+    /// unknown result shapes stay opaque.
+    private static func resultPreview(_ result: Any?) -> String? {
+        guard let result = result as? [String: Any],
+              let content = result["content"] as? [[String: Any]] else { return nil }
+        let parts = content.compactMap { block -> String? in
+            guard (block["type"] as? String) == "text" else { return nil }
+            return block["text"] as? String
+        }
+        guard !parts.isEmpty else { return nil }
+        let trimmed = parts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// The provider-authored instant on a tool event, when present. Pi stamps
+    /// `ts` as ISO-8601 on some builds; absent, callers fall back to `now()`.
+    /// Formatters are minted per call — `ISO8601DateFormatter` is not Sendable
+    /// and tool events are rare enough that caching would buy nothing.
+    private static func timestamp(from object: [String: Any]) -> Date? {
+        guard let raw = object["ts"] as? String else { return nil }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: raw) ?? ISO8601DateFormatter().date(from: raw)
     }
 
     private static let maximumObservedPathBytes = 4_096

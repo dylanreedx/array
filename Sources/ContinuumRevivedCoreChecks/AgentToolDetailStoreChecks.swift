@@ -689,8 +689,10 @@ private func runAgentToolDetailPresentationChecks() async throws {
         arguments: [AgentToolDetailField(key: "query", value: "AgentToolDetail")]
     ))
     detail = await store.detail(for: testToolDetailKey("tool-search-summary"))
-    expect(AgentToolDetailPresenter.compact(detail!).summary.hasPrefix("Searched for AgentToolDetail"),
-           "AgentToolDetailPresenter compact: search summary should be useful and sanitized")
+    // `.plans/45` S3 — the action sentence quotes the query (Dylan's
+    // action-first row design).
+    expect(AgentToolDetailPresenter.compact(detail!).summary.hasPrefix("Searched for \u{201C}AgentToolDetail\u{201D}"),
+           "AgentToolDetailPresenter compact: search summary should be useful and sanitized, got \(AgentToolDetailPresenter.compact(detail!).summary)")
 
     _ = await store.recordStart(AgentToolDetailStart(
         identity: testToolDetailKey("tool-edit-summary"),

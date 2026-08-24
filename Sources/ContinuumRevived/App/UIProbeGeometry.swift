@@ -6640,6 +6640,11 @@ enum UIProbeGeometry {
             turnID: "composition-turn", provider: "runtime"
         )!
         let identity = AgentToolDetailKey(scope: scope, providerItemID: itemID)
+        // `.plans/45` S3 — the presented row's TITLE is now the action sentence,
+        // so the disclosure's first line (which repeats it) no longer counts as
+        // expandable content. The exit code keeps this record's disclosure at
+        // two additional lines, which is what the click/remeasure assertions
+        // below exist to witness.
         let record = AgentToolDetailRecord(
             identity: identity,
             toolName: "bash",
@@ -6648,6 +6653,7 @@ enum UIProbeGeometry {
                 value: AgentToolDetailBoundedText(text: String(repeating: "inspect safe output ", count: 12))
             )],
             status: .completed,
+            exitCode: 0,
             updatedAt: Date(timeIntervalSinceReferenceDate: 10)
         )
         let block = AgentBlock(

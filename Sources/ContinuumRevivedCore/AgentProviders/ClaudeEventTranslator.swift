@@ -166,6 +166,19 @@ public struct ClaudeEventTranslator {
                    at: now()) {
                 onRuntimeObservation(.toolActivity(itemId: id, activity: activity))
             }
+            // `.plans/45` S2 — the detail supply behind the tool rows. Same
+            // side channel, one level richer: whitelisted argument FIELDS
+            // (query/url/pattern/basename/description — a command body never),
+            // bound at construction and store-sanitized on top.
+            if let onRuntimeObservation {
+                onRuntimeObservation(.toolDetail(itemId: id, detail: AgentToolDetailObservation(
+                    phase: .started,
+                    toolName: name,
+                    fields: Self.toolDetailFields(
+                        toolName: name, input: block["input"] as? [String: Any] ?? [:]),
+                    observedAt: now()
+                )))
+            }
             let kind = Self.itemKind(forTool: name)
             itemKinds[id] = kind
             events.append(.itemStarted(threadId: threadId, itemId: id, kind: kind, title: name))
@@ -188,6 +201,16 @@ public struct ClaudeEventTranslator {
                   let toolUseId = block["tool_use_id"] as? String
             else { continue }
             let isError = (block["is_error"] as? Bool) ?? false
+            // `.plans/45` S2 — a bounded output preview for the expanded pane.
+            // Emitted BEFORE `.itemCompleted` (observation delivery is FIFO),
+            // so the host can fold it into the one recordEnd it issues there.
+            if let onRuntimeObservation {
+                onRuntimeObservation(.toolDetail(itemId: toolUseId, detail: AgentToolDetailObservation(
+                    phase: .ended,
+                    outputPreview: Self.toolResultPreview(block["content"]),
+                    observedAt: now()
+                )))
+            }
             events.append(.itemCompleted(
                 threadId: threadId,
                 itemId: toolUseId,
@@ -301,6 +324,61 @@ public struct ClaudeEventTranslator {
             startedAt: observedAt,
             updatedAt: observedAt,
             evidenceSource: .toolEvent)
+    }
+
+    /// `.plans/45` S2 — the argument whitelist for `.toolDetail`, per tool per
+    /// key. The rule: preserve what a human would say the tool is DOING (the
+    /// query, the URL, the pattern, the file's basename, claude's own
+    /// `description` summary) and nothing it is doing it WITH. `Bash.command`
+    /// never crosses — `description` is the sanctioned summary; full paths
+    /// stay on the activity channel, only the basename rides here.
+    private static func toolDetailFields(
+        toolName: String,
+        input: [String: Any]
+    ) -> [(key: String, value: String)] {
+        func string(_ key: String) -> String? {
+            guard let value = input[key] as? String else { return nil }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty,
+                  !trimmed.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+            else { return nil }
+            return trimmed
+        }
+        switch toolName.lowercased() {
+        case "websearch", "toolsearch":
+            return string("query").map { [(key: "query", value: $0)] } ?? []
+        case "webfetch":
+            return string("url").map { [(key: "url", value: $0)] } ?? []
+        case "grep", "glob":
+            return string("pattern").map { [(key: "pattern", value: $0)] } ?? []
+        case "read", "edit", "write", "multiedit", "notebookedit":
+            let path = string("file_path") ?? string("notebook_path") ?? string("path")
+            return path.map { [(key: "file", value: URL(fileURLWithPath: $0).lastPathComponent)] } ?? []
+        case "bash", "task":
+            return string("description").map { [(key: "description", value: $0)] } ?? []
+        default:
+            return []
+        }
+    }
+
+    /// A bounded plain-text preview of a `tool_result`'s content: the string
+    /// form, or the joined text blocks. Anything else stays opaque.
+    private static func toolResultPreview(_ content: Any?) -> String? {
+        let text: String
+        if let string = content as? String {
+            text = string
+        } else if let blocks = content as? [[String: Any]] {
+            let parts = blocks.compactMap { block -> String? in
+                guard (block["type"] as? String) == "text" else { return nil }
+                return block["text"] as? String
+            }
+            guard !parts.isEmpty else { return nil }
+            text = parts.joined(separator: "\n")
+        } else {
+            return nil
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private static let maximumObservedPathBytes = 4_096

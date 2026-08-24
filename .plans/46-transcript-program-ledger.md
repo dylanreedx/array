@@ -514,3 +514,66 @@ frame/install split in every spawn path. See
 
 The lesson is M1.12's, repeated: **a ticket is not done until the behaviour has
 been seen by hand.** 178 green legs preceded both of these findings.
+
+## Redo milestone — real supply (S1–S3), 2026-08-24
+
+Dylan rejected the rhythm milestone (`6926044b`) on sight: rows rendered
+`search` / `searching` / `✓ Completed` with nothing else, "In progress" went
+stale, nothing showed timing. Plan:
+`~/.claude/plans/plans-45-transcript-program-handoff-pro-reactive-otter.md`.
+
+**S1 — the replay fixture.** Committed
+`Sources/ContinuumRevivedCoreChecks/Fixtures/claude-websearch-turn.jsonl` — a
+scrubbed REAL claude capture (78 frames), taken with the EXACT production argv
+(`-p --output-format stream-json --verbose --include-partial-messages`). The
+first capture lacked `--include-partial-messages` and replayed to a document
+with no reasoning and no prose at all — the fixture must match the runner's
+argv or it witnesses a stream production never sees. New review state
+`.realClaudeTurn` replays it through `ClaudeEventTranslator` →
+`AgentTranscriptProjection` (pinned runToken, stepped clock), routed into
+UIProbePixels, UITourCheck, ComponentLab row floors, and
+`--transcript-rhythm-check`. New witness `checkRealClaudeTurn` asserts Dylan's
+complaints verbatim: query visible (not the gerund), zero in-progress after the
+complete stream, "Thought for" on reasoning rows, a duration suffix on a tool
+row. Observed RED at every one of those before the fixes; teeth-verified after.
+
+**S2 — translators stop discarding.** `AgentRuntimeObservation.toolDetail`
+(+ `AgentToolDetailObservation`, caps at construction) on the host-local side
+channel; the location projector explicitly ignores it. Claude emits whitelisted
+fields at `tool_use` (query/url/pattern/basename/description — `Bash.command`
+NEVER) and a bounded `tool_result` preview; pi emits args-whitelisted fields,
+result text previews, and `ts` instants (both events — the end branch emitted
+nothing before); codex emits the INTEGER exit code + `aggregated_output`
+preview, all `changes[]` basenames, and stops swallowing
+`mcp_tool_call`/`web_search`/`todo_list` (rows now exist). Witnesses: sentinel
+command strings asserted absent from the detail channel in all three backend
+checks; `AgentWhatProjectionChecks` re-pinned to the split contract (patterns
+and result previews sanctioned host-locally; command/edit/reasoning bodies
+forbidden everywhere). Teeth: nulling the claude preview flipped the witness.
+
+**S3 — the host feeds the store.** C2a fixed (activity merges files only; a
+gerund can never win the name merge — `.toolActivity` starts carry the item
+title and a nil timestamp). `captureRuntimeObservation` consumes `.toolDetail`;
+pending observations hold a LIST per identity; `.ended` details buffer and fold
+into ONE `recordEnd(output/exitCode/endedAt/status)` at `.itemCompleted`.
+`presentedToolBlock` drops both in-progress early-returns (live detail) and
+swaps the EPHEMERAL copy's name to `AgentToolDetailPresenter.collapsed`'s
+actionLine; duration rides a presentation-only non-Codable payload field
+(`presentedTrailingDetailText`, excluded from CodingKeys — I5). The presenter
+quotes queries ("Searched for “…”"), adds a Fetched branch and a
+description-as-sentence fallback, and capitalizes the fallback name (C6).
+Reasoning durations derive from document createdAt spans in the list view
+(next-entry boundary, nil never fabricated) — "Thought for Ns" renders (C5b).
+`--tool-detail-check` now ALSO drives a real translator sequence through the
+host capture path into the store (ledger 1b.6 closed): claude fixture for
+actionLine/timing/preview, codex frames for the integer exit code.
+
+Corrected expectations (defect-pins, not relaxations): quoted search summary in
+`AgentToolDetailStoreChecks`; the geometry disclosure probe's record gains an
+exit code because the action-first title absorbs the disclosure's first line.
+
+Legs run green: rhythm, tool-detail (24), ui-geometry, ui-probe, ui-pixel,
+delta-index-oracle, agent-supervisor, agent-first-paint,
+agent-incremental-refresh, CoreChecks. Full matrix + gallery gate still owed
+before any release (S7); S4 row/cluster + T3 corrections, S5 sweep, S6 tail
+un-stomp next.

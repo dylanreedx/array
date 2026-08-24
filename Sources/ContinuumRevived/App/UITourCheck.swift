@@ -207,6 +207,9 @@ enum UITourCheck {
             // looked at without blessing anything.
             .headingLadder, .lists, .tableAndBreaks, .errorVsNotice,
             .turnBoundary, .recededWork,
+            // `.plans/45` S1. The replayed real capture is what the S7 gallery
+            // is judged on — authored states alone hid the rejected milestone.
+            .realClaudeTurn,
         ] {
             let size = NSSize(width: 480, height: transcriptReviewHeight)
             for appearance in appearances {

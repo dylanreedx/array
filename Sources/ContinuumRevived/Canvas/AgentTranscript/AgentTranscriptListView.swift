@@ -197,7 +197,19 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     private let disclosureStateStore = DisclosureStateStore()
     private let disclosureOwnerID: AgentID
     private var toolDetailAgentID: AgentID?
-    private var pendingRuntimeObservations: [AgentToolDetailKey: AgentRuntimeObservation] = [:]
+    /// Observations parked before their `.itemStarted` arrives (pi publishes
+    /// out of order, and `.plans/45` S2 gives every tool BOTH a `.toolActivity`
+    /// and a `.toolDetail` start). Replayed in arrival order once the item is
+    /// known; a later turn can never consume them (scope-keyed).
+    private var pendingRuntimeObservations: [AgentToolDetailKey: [AgentRuntimeObservation]] = [:]
+    /// `.toolDetail(.ended)` buffered until `.itemCompleted`, so the store gets
+    /// ONE recordEnd carrying output+exitCode+endedAt+status together — a
+    /// status-only end with a nil endedAt would LOSE the merge to an earlier
+    /// timestamped end (store semantics, `.plans/45` S3).
+    private var pendingEndDetails: [AgentToolDetailKey: AgentToolDetailObservation] = [:]
+    /// The normalized item title per identity, so activity/detail merges never
+    /// stomp the row's name with an operation gerund (C2a).
+    private var runtimeTitles: [AgentToolDetailKey: String] = [:]
     private let tailThinkingIndicator = DualPlaneGyroTiltedThinkingIndicatorView()
     /// The live phase text that rides the gyro (e.g. "Reading Agent.swift · 12s").
     /// Owned here so a tick can re-drive the words without rebuilding the item.
@@ -222,6 +234,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     private let hoverTimeLayer = CATextLayer()
     private var turnStartRowsByEntry: [(row: Int, entryID: AgentNodeID, date: Date?)] = []
     private var entryDatesByID: [AgentNodeID: Date?] = [:]
+    private var nextEntryDateByEntryID: [AgentNodeID: Date] = [:]
     private var hoveredTurnEntryID: AgentNodeID?
     private var transcriptTrackingArea: NSTrackingArea?
     private var preparedTurnChromeSignature: Int?
@@ -426,7 +439,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 case let .completedReasoning(entry):
                     return CompletedReasoningDisclosureView.measuredHeight(
                         for: entry,
-                        authoritativeDuration: authoritativeReasoningDuration(entry),
+                        authoritativeDuration: reasoningDuration(for: entry),
                         width: width,
                         context: renderContext,
                         registry: registry
@@ -462,7 +475,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                     let disclosure = item.installCompletedReasoningDisclosure()
                     disclosure.apply(
                         entry: entry,
-                        authoritativeDuration: authoritativeReasoningDuration(entry),
+                        authoritativeDuration: reasoningDuration(for: entry),
                         context: renderContext,
                         registry: registry
                     )
@@ -876,6 +889,8 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         activeRuntimeScope = nil
         runtimeIdentities.removeAll()
         pendingRuntimeObservations.removeAll()
+        pendingEndDetails.removeAll()
+        runtimeTitles.removeAll()
     }
 
     /// The selected production thinking indicator is transcript-owned, not part
@@ -953,7 +968,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         layoutSubtreeIfNeeded()
         return transcriptLayout.collectionViewContentSize.height
     }
-    var qaPendingRuntimeObservationCount: Int { pendingRuntimeObservations.count }
+    var qaPendingRuntimeObservationCount: Int {
+        pendingRuntimeObservations.values.reduce(0) { $0 + $1.count }
+    }
     var qaThinkingIndicatorFrame: NSRect {
         guard tailThinkingIndicator.superview != nil else { return .zero }
         return tailThinkingIndicator.convert(tailThinkingIndicator.bounds, to: self)
@@ -990,7 +1007,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         case let .completedReasoning(entry):
             return CompletedReasoningDisclosureView.measuredHeight(
                 for: entry,
-                authoritativeDuration: authoritativeReasoningDuration(entry),
+                authoritativeDuration: reasoningDuration(for: entry),
                 width: width,
                 context: renderContext,
                 registry: registry
@@ -1011,7 +1028,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                     let disclosure = item.installCompletedReasoningDisclosure()
                     disclosure.apply(
                         entry: entry,
-                        authoritativeDuration: authoritativeReasoningDuration(entry),
+                        authoritativeDuration: reasoningDuration(for: entry),
                         context: renderContext,
                         registry: registry
                     )
@@ -1157,6 +1174,8 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         if incoming.isEmpty {
             runtimeIdentities.removeAll()
             pendingRuntimeObservations.removeAll()
+            pendingEndDetails.removeAll()
+            runtimeTitles.removeAll()
             activeRuntimeScope = nil
         }
         toolDetailEntryLifecycleByID = incoming
@@ -1282,6 +1301,28 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     private func captureTurnTimes(from document: AgentDocument) {
         entryDatesByID = Dictionary(
             uniqueKeysWithValues: document.entries.map { ($0.id, $0.createdAt) })
+        // `.plans/45` S6 — a reasoning span ends when the NEXT entry begins.
+        // Derived from the document alone; an entry with no dated successor
+        // gets nil, never a fabricated duration.
+        nextEntryDateByEntryID.removeAll(keepingCapacity: true)
+        var nextDate: Date?
+        for entry in document.entries.reversed() {
+            if let nextDate { nextEntryDateByEntryID[entry.id] = nextDate }
+            if let createdAt = entry.createdAt { nextDate = createdAt }
+        }
+    }
+
+    /// `.plans/45` S6 (C5b) — "Thought for Ns". The injected closure stays
+    /// authoritative when it answers; otherwise the span is the reasoning
+    /// entry's createdAt to the next entry's createdAt, both provider-backed
+    /// (T1 supply). Missing either side renders the bare title — the
+    /// transcript never invents a timestamp.
+    private func reasoningDuration(for entry: AgentEntry) -> TimeInterval? {
+        if let authoritative = authoritativeReasoningDuration(entry) { return authoritative }
+        guard let start = entry.createdAt,
+              let next = nextEntryDateByEntryID[entry.id] else { return nil }
+        let interval = next.timeIntervalSince(start)
+        return interval > 0 ? interval : nil
     }
 
     private func configureTurnChrome() {
@@ -1600,9 +1641,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// document and its Codable payload remain unchanged.
     private func presentedToolBlock(_ block: AgentBlock) -> AgentBlock {
         switch block.payload {
-        case let .toolCall(payload) where payload.status == .pending || payload.status == .inProgress:
-            return block
         case .toolCall, .diff:
+            // `.plans/45` S3 (1c.6): in-progress blocks are no longer excluded —
+            // the query must show DURING the search, not after it.
             break
         default:
             return block
@@ -1637,15 +1678,22 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         } else {
             candidateIsFresh = true
         }
-        guard candidateIsFresh,
-              candidate.status != .pending,
-              candidate.status != .inProgress else { return block }
+        guard candidateIsFresh else { return block }
         var presented = block
         switch block.payload {
         case var .toolCall(payload):
-            // The observable summary may include a sanitized basename or command
-            // query. Opaque semantic arguments still never enter this presentation.
+            // `.plans/45` S3 — the action-first row: this EPHEMERAL presented
+            // copy's name becomes the sentence ("Searched for ...") and the
+            // duration rides the presentation-only trailing field, while the
+            // semantic document keeps the tool name. The disclosure keeps only
+            // the lines the sentence does not already say.
+            let collapsed = AgentToolDetailPresenter.collapsed(detail)
+            payload.name = collapsed.actionLine
+            // The full disclosure text stays the summary (probes pin that the
+            // detail reached presentation); the VIEW suppresses the first line
+            // when it repeats the action sentence.
             payload.summary = AgentToolDetailPresenter.observableDisclosureText(detail)
+            payload.presentedTrailingDetailText = collapsed.durationText
             presented.payload = .toolCall(payload)
         case var .diff(payload):
             // A provider-authored semantic file list wins. Otherwise, compose
@@ -1732,6 +1780,8 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             pendingRuntimeObservations = pendingRuntimeObservations.filter {
                 $0.key.scope == newScope
             }
+            pendingEndDetails = pendingEndDetails.filter { $0.key.scope == newScope }
+            runtimeTitles = runtimeTitles.filter { $0.key.scope == newScope }
             return nil
         case let .itemStarted(threadID, itemID, kind, title):
             guard Self.isToolDetailKind(kind),
@@ -1740,19 +1790,17 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                   activeRuntimeScope.threadID == threadID else { return nil }
             let identity = AgentToolDetailKey(scope: activeRuntimeScope, providerItemID: providerID)
             runtimeIdentities.insert(identity)
-            let pending = pendingRuntimeObservations.removeValue(forKey: identity)
+            let resolvedTitle = title ?? "Tool"
+            runtimeTitles[identity] = resolvedTitle
+            let pending = pendingRuntimeObservations.removeValue(forKey: identity) ?? []
+            let starts = [AgentToolDetailStart(identity: identity, toolName: resolvedTitle)]
+                + pending.compactMap { self.detailStart(for: identity, observation: $0, title: resolvedTitle) }
+            for case let .toolDetail(_, detail) in pending where detail.phase == .ended {
+                bufferEndDetail(detail, identity: identity)
+            }
             Task { [weak self, toolDetailStore] in
-                _ = await toolDetailStore.recordStart(AgentToolDetailStart(
-                    identity: identity,
-                    toolName: title ?? "Tool"
-                ))
-                if case let .toolActivity(_, activity) = pending {
-                    _ = await toolDetailStore.recordStart(AgentToolDetailStart(
-                        identity: identity,
-                        toolName: activity.operation.rawValue,
-                        affectedFiles: activity.targetPath.map { [$0] } ?? [],
-                        startedAt: activity.startedAt
-                    ))
+                for start in starts {
+                    _ = await toolDetailStore.recordStart(start)
                 }
                 self?.refreshToolDetailPresentation()
             }
@@ -1765,8 +1813,18 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             let identity = AgentToolDetailKey(scope: scope, providerItemID: providerID)
             guard runtimeIdentities.contains(identity) else { return nil }
             let mapped: AgentItemStatus = status == .failed ? .failed : (status == .declined ? .cancelled : .completed)
+            // One combined recordEnd: the buffered `.toolDetail(.ended)` supplies
+            // output/exitCode/endedAt, this event supplies the status. Split
+            // calls would race the store's last-writer-wins end merge.
+            let endDetail = pendingEndDetails.removeValue(forKey: identity)
             Task { [weak self, toolDetailStore] in
-                _ = await toolDetailStore.recordEnd(AgentToolDetailEnd(identity: identity, status: mapped))
+                _ = await toolDetailStore.recordEnd(AgentToolDetailEnd(
+                    identity: identity,
+                    output: endDetail?.outputPreview,
+                    status: mapped,
+                    exitCode: endDetail?.exitCode,
+                    endedAt: endDetail?.observedAt
+                ))
                 self?.refreshToolDetailPresentation()
             }
         default:
@@ -1777,26 +1835,80 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
 
     func captureRuntimeObservation(_ observation: AgentRuntimeObservation) {
         guard let toolDetailStore else { return }
-        guard case let .toolActivity(itemID, activity) = observation,
-              let providerID = AgentToolDetailID(itemID),
+        let itemID: String
+        switch observation {
+        case let .toolActivity(id, _): itemID = id
+        case let .toolDetail(id, _): itemID = id
+        default: return
+        }
+        guard let providerID = AgentToolDetailID(itemID),
               let scope = activeRuntimeScope else { return }
         let identity = AgentToolDetailKey(scope: scope, providerItemID: providerID)
         guard runtimeIdentities.contains(identity) else {
-            // Pi may publish its private observation before the normalized item
-            // event. Hold only the sanitized observation under the complete
+            // Providers may publish their private observations before the
+            // normalized item event (pi does; claude's toolDetail rides the
+            // same frame). Hold them ALL, in arrival order, under the complete
             // immutable agent/thread/turn/provider/item scope; a later turn can
-            // never consume this value, even if Pi reuses the item ID.
-            pendingRuntimeObservations[identity] = observation
+            // never consume these values, even if the provider reuses item IDs.
+            pendingRuntimeObservations[identity, default: []].append(observation)
             return
         }
+        if case let .toolDetail(_, detail) = observation, detail.phase == .ended {
+            bufferEndDetail(detail, identity: identity)
+            return
+        }
+        guard let start = detailStart(
+            for: identity, observation: observation, title: runtimeTitles[identity] ?? "Tool"
+        ) else { return }
         Task { [weak self, toolDetailStore] in
-            _ = await toolDetailStore.recordStart(AgentToolDetailStart(
-                identity: identity,
-                toolName: activity.operation.rawValue,
-                affectedFiles: activity.targetPath.map { [$0] } ?? [],
-                startedAt: activity.startedAt
-            ))
+            _ = await toolDetailStore.recordStart(start)
             self?.refreshToolDetailPresentation()
+        }
+    }
+
+    /// The store-facing start for one parked or live observation.
+    /// `.toolActivity` contributes files only — its toolName is the item title
+    /// and its timestamp stays nil so it can never win the name/argument merge
+    /// away from a richer `.toolDetail` start (C2a, `.plans/45` S3).
+    private func detailStart(
+        for identity: AgentToolDetailKey,
+        observation: AgentRuntimeObservation,
+        title: String
+    ) -> AgentToolDetailStart? {
+        switch observation {
+        case let .toolActivity(_, activity):
+            return AgentToolDetailStart(
+                identity: identity,
+                toolName: title,
+                affectedFiles: activity.targetPath.map { [$0] } ?? []
+            )
+        case let .toolDetail(_, detail) where detail.phase == .started:
+            return AgentToolDetailStart(
+                identity: identity,
+                toolName: detail.toolName ?? title,
+                arguments: detail.fields.map { AgentToolDetailField(key: $0.key, value: $0.value) },
+                startedAt: detail.observedAt
+            )
+        default:
+            return nil
+        }
+    }
+
+    /// Latest end detail wins, but an output/exitCode from an earlier one is
+    /// kept when the newer carries none — the pair is combined into ONE
+    /// recordEnd at `.itemCompleted`.
+    private func bufferEndDetail(_ detail: AgentToolDetailObservation, identity: AgentToolDetailKey) {
+        if let existing = pendingEndDetails[identity] {
+            pendingEndDetails[identity] = AgentToolDetailObservation(
+                phase: .ended,
+                toolName: detail.toolName ?? existing.toolName,
+                fields: detail.fields.isEmpty ? existing.fields : detail.fields,
+                outputPreview: detail.outputPreview ?? existing.outputPreview,
+                exitCode: detail.exitCode ?? existing.exitCode,
+                observedAt: detail.observedAt
+            )
+        } else {
+            pendingEndDetails[identity] = detail
         }
     }
 

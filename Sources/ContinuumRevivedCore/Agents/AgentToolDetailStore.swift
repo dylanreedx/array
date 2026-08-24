@@ -752,6 +752,19 @@ public actor AgentToolDetailStore {
     }
 }
 
+/// `.plans/45` S3 — what a collapsed action-first tool row shows: the action
+/// sentence and, when both instants are known, the duration for the trailing
+/// column. Status stays out; the row renders its lifecycle separately.
+public struct AgentToolDetailCollapsedPresentation: Equatable, Sendable {
+    public let actionLine: String
+    public let durationText: String?
+
+    public init(actionLine: String, durationText: String?) {
+        self.actionLine = actionLine
+        self.durationText = durationText
+    }
+}
+
 public struct AgentToolDetailCompactPresentation: Equatable, Sendable {
     public var title: String
     public var statusText: String
@@ -959,8 +972,12 @@ public enum AgentToolDetailPresenter {
             return "Ran \(command)"
         }
         if let query = safeArgument(detail, keys: ["query", "pattern", "regex", "search"]),
-           ["grep", "search", "rg"].contains(where: { normalizedTool.contains($0) }) {
-            return "Searched for \(query)"
+           ["grep", "search", "rg", "glob", "find"].contains(where: { normalizedTool.contains($0) }) {
+            return "Searched for \u{201C}\(query)\u{201D}"
+        }
+        if let url = safeArgument(detail, keys: ["url"]),
+           ["fetch", "web"].contains(where: { normalizedTool.contains($0) }) {
+            return "Fetched \(url)"
         }
         if ["edit", "write", "patch"].contains(where: { normalizedTool.contains($0) }) {
             if let basename = affectedBasename(detail) ?? safeBasenameArgument(detail, keys: ["path", "file", "target"]) {
@@ -974,7 +991,29 @@ public enum AgentToolDetailPresenter {
             }
             return "Read file"
         }
+        // `.plans/45` S3 — claude's Bash/Task `description` is the sanctioned
+        // human summary and already reads as an action ("List files in the
+        // build directory"); surface it capitalized rather than prefixed.
+        if let description = safeArgument(detail, keys: ["description"]) {
+            return capitalizedPhrase(description)
+        }
         return nil
+    }
+
+    /// `.plans/45` S3 — the collapsed action-first row: the SENTENCE is the
+    /// row ("Searched for \u{201C}...\u{201D}", "Edited Foo.swift"), with the duration for
+    /// the trailing column. The tool name survives only as the fallback, and
+    /// capitalized — pi reports names like "search" in lowercase (C6).
+    public static func collapsed(_ detail: AgentToolDetailRecord) -> AgentToolDetailCollapsedPresentation {
+        AgentToolDetailCollapsedPresentation(
+            actionLine: shortLine(pureSummary(for: detail) ?? capitalizedPhrase(safeToolName(detail.toolName))),
+            durationText: detail.duration.map(formatDuration)
+        )
+    }
+
+    private static func capitalizedPhrase(_ raw: String) -> String {
+        guard let first = raw.first else { return raw }
+        return first.uppercased() + raw.dropFirst()
     }
 
     private static func shortLine(_ raw: String, maxBytes: Int = 180) -> String {

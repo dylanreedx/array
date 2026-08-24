@@ -66,6 +66,13 @@ enum AgentTranscriptReviewState: String, CaseIterable {
     case errorVsNotice = "error-vs-notice"
     case turnBoundary = "turn-boundary"
     case recededWork = "receded-work"
+    // `.plans/45` S1. The one state that is NOT hand-authored: a real claude
+    // CLI capture (`Fixtures/claude-websearch-turn.jsonl`) replayed through the
+    // REAL translator → projection path. The rhythm milestone shipped and was
+    // rejected because every other state renders authored prose while a real
+    // turn renders sparse tool rows; this state is the fixture that makes that
+    // gap visible to every gate that enumerates review states.
+    case realClaudeTurn = "real-claude-turn"
 }
 
 /// P4.10 supervised review states: the full-turn composer across its editing and
@@ -106,7 +113,188 @@ enum LabFixtures {
     /// realistic — and identical — data on every draw.
     static let pairingCredential = "K7M2QRTX9BDH"
 
+    /// `.plans/45` S1 — the replayed REAL claude turn.
+    ///
+    /// The capture is a scrubbed `claude -p … --output-format stream-json`
+    /// probe (thinking → ToolSearch → WebSearch → result, 25 frames), replayed
+    /// through `ClaudeEventTranslator` → `AgentTranscriptProjection` exactly as
+    /// production runs it. Determinism: `runToken` is pinned so turn ids are
+    /// stable, and the wall clock is a stepped counter from `epoch` so entry
+    /// `createdAt` spans are reproducible within a build.
+    struct RealClaudeTurnReplay {
+        let document: AgentDocument
+        /// Everything the translator reported on the host-local side channel,
+        /// in delivery order.
+        let observations: [AgentRuntimeObservation]
+        /// Tool detail folded from the SAME replay, per identity — the review
+        /// surface's synchronous provider. Values come verbatim from the
+        /// translator's observations; the async store path that production
+        /// takes is separately witnessed by the tool-detail leg.
+        let toolDetails: [AgentToolDetailKey: AgentToolDetailRecord]
+        /// entry -> identity bindings, mirroring the tile's exact-item binding.
+        let entryBindings: [(entryID: AgentNodeID, identity: AgentToolDetailKey)]
+        /// Non-nil when the fixture file is missing or empty. Witnesses assert
+        /// nil so a broken path fails loudly instead of rendering a blank card.
+        let loadError: String?
+    }
+
+    static let realClaudeTurn: RealClaudeTurnReplay = {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()          // App
+            .deletingLastPathComponent()          // ContinuumRevived
+            .deletingLastPathComponent()          // Sources
+            .appendingPathComponent(
+                "ContinuumRevivedCoreChecks/Fixtures/claude-websearch-turn.jsonl",
+                isDirectory: false
+            )
+        guard let text = try? String(contentsOf: fixtureURL, encoding: .utf8),
+              !text.isEmpty else {
+            return RealClaudeTurnReplay(
+                document: AgentDocument(),
+                observations: [],
+                toolDetails: [:],
+                entryBindings: [],
+                loadError: "missing capture at \(fixtureURL.path)"
+            )
+        }
+
+        final class ObservationBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var observations: [AgentRuntimeObservation] = []
+            func append(_ observation: AgentRuntimeObservation) {
+                lock.withLock { observations.append(observation) }
+            }
+            func snapshot() -> [AgentRuntimeObservation] {
+                lock.withLock { observations }
+            }
+        }
+        final class SteppedClock: @unchecked Sendable {
+            private let lock = NSLock()
+            private let base: Date
+            private var ticks: TimeInterval = 0
+            init(base: Date) { self.base = base }
+            func next() -> Date {
+                lock.withLock {
+                    ticks += 1
+                    return base.addingTimeInterval(ticks * 2)
+                }
+            }
+        }
+
+        let box = ObservationBox()
+        let clock = SteppedClock(base: epoch)
+        var translator = ClaudeEventTranslator(runToken: "review", now: { clock.next() })
+        translator.onRuntimeObservation = { box.append($0) }
+        var projection = AgentTranscriptProjection(
+            threadId: "thread-main",
+            monotonicNow: { 0 },
+            wallClockNow: { clock.next() }
+        )
+        do {
+            _ = try projection.appendUserPrompt(
+                id: AgentNodeID(rawValue: "review-real-claude-turn-entry-user")!,
+                text: "Search the web for one recent sports headline and summarize it in one sentence."
+            )
+        } catch {
+            return RealClaudeTurnReplay(
+                document: projection.document,
+                observations: box.snapshot(),
+                toolDetails: [:],
+                entryBindings: [],
+                loadError: "user prompt rejected: \(error)"
+            )
+        }
+
+        // Fold the side channel into per-identity detail records exactly the
+        // way the host does: title from `.itemStarted`, argument fields and the
+        // start instant from `.toolDetail(.started)`, output/exitCode/end
+        // instant folded at `.itemCompleted` with the event's status. The
+        // interleave matters — observations fire during translate, so each
+        // line's new observations are consumed by that line's events.
+        var records: [AgentToolDetailKey: AgentToolDetailRecord] = [:]
+        var identityByItemID: [String: AgentToolDetailKey] = [:]
+        var parked: [String: [AgentToolDetailObservation]] = [:]
+        var currentTurnID: String?
+        var deliveredObservations = 0
+        func reviewScope(turnID: String) -> AgentToolDetailScope? {
+            AgentToolDetailScope(
+                agentID: "review-agent", threadID: "thread-main",
+                turnID: turnID, provider: "runtime"
+            )
+        }
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            let events = translator.translate(line: String(line))
+            let delivered = box.snapshot()
+            for observation in delivered.dropFirst(deliveredObservations) {
+                if case let .toolDetail(itemId, detail) = observation {
+                    parked[itemId, default: []].append(detail)
+                }
+            }
+            deliveredObservations = delivered.count
+            for event in events {
+                switch event {
+                case let .turnStarted(_, turnId):
+                    currentTurnID = turnId
+                case let .itemStarted(_, itemId, kind, title):
+                    guard [.commandExecution, .fileChange, .mcpToolCall, .webSearch].contains(kind),
+                          let turnID = currentTurnID,
+                          let scope = reviewScope(turnID: turnID),
+                          let providerID = AgentToolDetailID(itemId) else { break }
+                    let identity = AgentToolDetailKey(scope: scope, providerItemID: providerID)
+                    identityByItemID[itemId] = identity
+                    var record = AgentToolDetailRecord(
+                        identity: identity, toolName: title ?? "Tool", updatedAt: epoch
+                    )
+                    for detail in parked[itemId] ?? [] where detail.phase == .started {
+                        record.toolName = detail.toolName ?? record.toolName
+                        record.arguments = detail.fields.map {
+                            AgentToolDetailArgument(
+                                key: $0.key, value: AgentToolDetailBoundedText(text: $0.value)
+                            )
+                        }
+                        record.startedAt = detail.observedAt
+                    }
+                    records[identity] = record
+                case let .itemCompleted(_, itemId, _, status):
+                    guard let identity = identityByItemID[itemId],
+                          var record = records[identity] else { break }
+                    record.status = status == .failed ? .failed
+                        : (status == .declined ? .cancelled : .completed)
+                    for detail in parked[itemId] ?? [] where detail.phase == .ended {
+                        record.output = detail.outputPreview.map { AgentToolDetailBoundedText(text: $0) }
+                            ?? record.output
+                        record.exitCode = detail.exitCode ?? record.exitCode
+                        record.endedAt = detail.observedAt
+                    }
+                    records[identity] = record
+                default:
+                    break
+                }
+                projection.ingest(event.withThreadId("thread-main"))
+            }
+        }
+        let bindings = projection.document.entries.compactMap { entry -> (AgentNodeID, AgentToolDetailKey)? in
+            guard case let .providerItem(provider, itemID?) = entry.provenance,
+                  provider == "runtime",
+                  let identity = identityByItemID[itemID] else { return nil }
+            return (entry.id, identity)
+        }
+        return RealClaudeTurnReplay(
+            document: projection.document,
+            observations: box.snapshot(),
+            toolDetails: records,
+            entryBindings: bindings.map { (entryID: $0.0, identity: $0.1) },
+            loadError: nil
+        )
+    }()
+
     static func transcriptReviewDocument(_ state: AgentTranscriptReviewState) -> AgentDocument {
+        if state == .realClaudeTurn {
+            // The review surface applies every fixture as one initial 0 -> 1
+            // patch; the replay's entries are the reducer's verbatim, only the
+            // version is renumbered to fit that boundary.
+            return AgentDocument(version: 1, entries: realClaudeTurn.document.entries)
+        }
         func id(_ suffix: String) -> AgentNodeID {
             AgentNodeID(rawValue: "review-\(state.rawValue)-\(suffix)")!
         }
@@ -350,6 +538,10 @@ enum LabFixtures {
             // assistant entry, so turn->turn separation cannot be judged in any of
             // them — the boundary occurs exactly once, at the top.
             assistantBlocks = assistantProse
+        case .realClaudeTurn:
+            // Unreachable: handled by the replay early-return above. The
+            // replayed document is never assembled from authored blocks.
+            assistantBlocks = []
         case .recededWork:
             // Settled routine work, which `_DESIGN.md` §11 says should recede and
             // which no renderer currently fades at all.
@@ -1069,9 +1261,21 @@ final class AgentTranscriptReviewSurface: NSView {
 
     init(state: AgentTranscriptReviewState, size: NSSize, theme: TokenTheme) {
         self.state = state
-        transcript = AgentTranscriptListView(renderContext: AgentRenderContext(
-            actions: .disabled, tokens: .transcript, appearance: theme
-        ))
+        // `.plans/45` S3 — the replayed state renders with the SAME host-local
+        // detail supply production has: a provider over records folded from the
+        // capture's real observations, bound per entry the way the tile binds.
+        let reviewDetails = state == .realClaudeTurn ? LabFixtures.realClaudeTurn.toolDetails : nil
+        transcript = AgentTranscriptListView(
+            renderContext: AgentRenderContext(
+                actions: .disabled, tokens: .transcript, appearance: theme
+            ),
+            toolDetailProvider: reviewDetails.map { records in { records[$0] } }
+        )
+        if state == .realClaudeTurn {
+            for binding in LabFixtures.realClaudeTurn.entryBindings {
+                _ = transcript.bindToolDetailIdentity(binding.identity, to: binding.entryID)
+            }
+        }
         super.init(frame: NSRect(origin: .zero, size: size))
         wantsLayer = true
         addSubview(transcript)
@@ -4181,6 +4385,9 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             // edited by the very ticket it is meant to gate.
             .headingLadder: 13, .lists: 5, .tableAndBreaks: 4,
             .errorVsNotice: 4, .turnBoundary: 9, .recededWork: 6,
+            // `.plans/45` S1. Prompt + 3 reasoning entries + 2 tool rows + the
+            // final prose — a floor, so supply work can only add rows.
+            .realClaudeTurn: 6,
         ]
         for state in AgentTranscriptReviewState.allCases {
             let size = NSSize(width: state == .long ? 320 : 480, height: 720)
@@ -4261,7 +4468,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
                     throw fail("approval transcript review state lost its explicit contextual custom request controls")
                 }
             case .headingLadder, .lists, .tableAndBreaks, .errorVsNotice,
-                 .turnBoundary, .recededWork:
+                 .turnBoundary, .recededWork, .realClaudeTurn:
                 // Row floors above only. Every STRUCTURAL assertion for these
                 // states lives in `--transcript-rhythm-check`, deliberately:
                 // this function runs inside `--component-lab-check`, which is in

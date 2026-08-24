@@ -37,9 +37,11 @@ enum TranscriptRhythmChecks {
         try checkErrorIsNotNotice()
         try checkTable()
         try checkFillsAndEdges()
+        try checkRealClaudeTurn()
         print(
             "TranscriptRhythmChecks: heading ladder, hanging indents, thematic break, "
-            + "turn separation, error/notice divergence, table structure and surface fills"
+            + "turn separation, error/notice divergence, table structure, surface fills "
+            + "and the replayed real claude turn"
         )
     }
 
@@ -402,6 +404,99 @@ enum TranscriptRhythmChecks {
                     + "approval keep a fill; a routine tool row must sit on the tile body."
                 )
             }
+        }
+    }
+
+    // MARK: - S1
+
+    /// `.plans/45` S1 — Dylan's rejection, replayed. The `.realClaudeTurn`
+    /// state runs a scrubbed REAL claude capture through the production
+    /// translator → projection path; these assertions are his complaints,
+    /// verbatim: the search row said "searching" and nothing else, "In
+    /// progress" went stale, and nothing showed how long anything took.
+    /// Each one asserts the RENDERED text, not any intermediate supply.
+    private static func checkRealClaudeTurn() throws {
+        let replay = LabFixtures.realClaudeTurn
+        if let loadError = replay.loadError {
+            throw fail("real claude turn: the capture failed to replay: \(loadError)")
+        }
+
+        // The complete stream must settle every tool row. This is the
+        // regression guard for S5's sweep: a COMPLETE capture already carries
+        // every tool_result, so an in-progress row here means the projection
+        // lost a completion, not that the provider never sent one.
+        let toolStatuses = replay.document.entries
+            .flatMap(\.blocks)
+            .compactMap { block -> AgentItemStatus? in
+                guard case let .toolCall(payload) = block.payload else { return nil }
+                return payload.status
+            }
+        guard !toolStatuses.isEmpty else {
+            throw fail("real claude turn: the replayed document contains no tool rows at all")
+        }
+        if toolStatuses.contains(where: { $0 == .inProgress || $0 == .pending }) {
+            throw fail(
+                "real claude turn: a tool row is still \(toolStatuses) after the COMPLETE "
+                + "stream replayed — the projection dropped a completion it was given."
+            )
+        }
+
+        let (_, views) = try render(.realClaudeTurn)
+        let toolViews = views.compactMap { $0 as? ToolCallView }
+        guard toolViews.count >= 2 else {
+            throw fail(
+                "real claude turn: expected the ToolSearch and WebSearch rows to render, "
+                + "found \(toolViews.count) tool view(s)"
+            )
+        }
+
+        // 1. "WE NEED MORE DETAILS" — the WebSearch row must show its QUERY,
+        //    not the operation gerund. The capture's tool_use carries
+        //    input.query = "recent sports headline August 2026"; today the
+        //    translator throws it away (C1) and the host then overwrites the
+        //    tool name with "searching" (C2a).
+        let renderedToolText = toolViews.map {
+            "\($0.titleLabel.stringValue) \($0.summaryLabel.stringValue) \($0.statusLabel.stringValue)"
+        }
+        guard renderedToolText.contains(where: { $0.localizedCaseInsensitiveContains("recent sports headline") }) else {
+            throw fail(
+                "real claude turn: no tool row shows the search QUERY. Rendered rows: "
+                + "\(renderedToolText). The stream carries input.query verbatim; the row must "
+                + "read action-first (\"Searched for …\"), not as a bare tool label."
+            )
+        }
+
+        // 2. "is the turn being tracked for the proper amount of time???" —
+        //    thinking spans exist in the document (createdAt supply shipped in
+        //    T1), so at least one reasoning row must say "Thought for", not the
+        //    bare base title (C5b: production passes the default nil closure).
+        let reasoningTitles = views
+            .compactMap { $0 as? CompletedReasoningDisclosureView }
+            .map(\.titleLabel.stringValue)
+        guard reasoningTitles.contains(where: { $0.hasPrefix("Thought for") }) else {
+            let entrySummary = replay.document.entries.map {
+                "\($0.role)/\($0.lifecycle)/\($0.blocks.count)b"
+            }.joined(separator: ", ")
+            throw fail(
+                "real claude turn: no reasoning row shows its duration — titles \(reasoningTitles). "
+                + "Entries: [\(entrySummary)]. The document carries createdAt spans; "
+                + "authoritativeReasoningDuration must derive from them."
+            )
+        }
+
+        // 3. A settled tool row must carry a duration suffix ("2.1s ✓" column).
+        let durationPattern = try NSRegularExpression(pattern: "\\d+(\\.\\d+)?s\\b")
+        let showsDuration = renderedToolText.contains {
+            durationPattern.firstMatch(
+                in: $0, range: NSRange($0.startIndex..., in: $0)
+            ) != nil
+        }
+        guard showsDuration else {
+            throw fail(
+                "real claude turn: no tool row shows a duration. Rendered rows: "
+                + "\(renderedToolText). The detail store already knows how to say "
+                + "\"Duration: Ns\"; nothing feeds or renders it."
+            )
         }
     }
 }
