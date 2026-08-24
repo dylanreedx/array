@@ -61,6 +61,7 @@ enum AgentFirstPaintChecks {
         try checkRefusalIsSaidOutLoud()
         try checkOptimisticWindowSurvivesSynchronize()
         try checkSettledTailStatus()
+        try checkReplyOptionsReachTheComposer()
         print("ContinuumRevivedAgentFirstPaintChecks passed: the prompt echo precedes the action sink, acceptance and refusal both resolve the latch, the spawn window carries a state, a word, and a clock, the optimistic indicator survives synchronize, and settled turns read their duration")
     }
 
@@ -120,6 +121,93 @@ enum AgentFirstPaintChecks {
         list.setThinkingIndicatorVisible(true)
         guard list.qaThinkingIndicatorVisible, !list.qaTailIsSettled else {
             throw fail("settled tail: the next turn did not reclaim the tail row for the gyro")
+        }
+    }
+
+    /// Dylan's ask: "selecting options rather than typing options."
+    ///
+    /// The detector has its own pure leg in `ContinuumRevivedAgentContentChecks`.
+    /// This is the half that leg cannot see: that a REAL turn, arriving as real
+    /// runtime events, actually puts chips in front of the user — and that
+    /// pressing one writes text and sends nothing. A detector that is perfect
+    /// while nothing renders is the exact failure the tool-detail vocabulary
+    /// spent months in.
+    @MainActor
+    private static func checkReplyOptionsReachTheComposer() throws {
+        let thread = "thread-main"
+        let tile = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(),
+            kind: .managedAgent,
+            title: "reply-options",
+            frame: TileFrame(x: 0, y: 0, width: 560, height: 460),
+            zPosition: .fromLegacyRank(1),
+            runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")
+        ))
+        tile.layoutSubtreeIfNeeded()
+
+        guard tile.qaReplyOptionChipTitles.isEmpty else {
+            throw fail("reply options: an untouched tile already offered \(tile.qaReplyOptionChipTitles)")
+        }
+
+        let reply = """
+            Two ways to do this. Which do you want?
+
+            - Rewrite the resolver — keeps the API
+            - Patch the call sites — smaller diff
+            """
+        tile.ingest(.turnStarted(threadId: thread, turnId: "turn-1"))
+        tile.ingest(.contentDelta(
+            threadId: thread, turnId: "turn-1", streamKind: .assistant, delta: reply
+        ))
+
+        // Mid-turn the offer must not appear: the list is still being written.
+        guard tile.qaReplyOptionChipTitles.isEmpty else {
+            throw fail(
+                "reply options: chips appeared while the turn was still streaming "
+                + "(\(tile.qaReplyOptionChipTitles)) — they would flicker through every "
+                + "intermediate list the stream writes"
+            )
+        }
+
+        tile.ingest(.turnCompleted(
+            threadId: thread, turnId: "turn-1", outcome: .completed, errorMessage: nil
+        ))
+        tile.layoutSubtreeIfNeeded()
+        let offered = tile.qaReplyOptionChipTitles
+        guard offered == ["Rewrite the resolver", "Patch the call sites"] else {
+            throw fail(
+                "reply options: a settled turn that asked and listed offered \(offered) — the "
+                + "reader still has to type the answer to a question the reply already enumerated"
+            )
+        }
+
+        guard tile.qaPressReplyOptionChip(titled: "Patch the call sites") else {
+            throw fail("reply options: the chip was not a pressable control")
+        }
+        guard tile.qaComposerDraftText == "Patch the call sites" else {
+            throw fail(
+                "reply options: pressing a chip left the composer reading "
+                + "'\(tile.qaComposerDraftText)'"
+            )
+        }
+        // Nothing was SENT. A chip is a composer shortcut; the user still sends,
+        // so a wrong detection costs a word to delete rather than a turn. A send
+        // would have lit the optimistic indicator in the same frame (S6/C4) —
+        // that is the production tell, so it is what this reads.
+        guard !tile.qaThinkingIndicatorVisible else {
+            throw fail(
+                "reply options: pressing a chip started a turn — a detected offer must never "
+                + "dispatch on the user's behalf"
+            )
+        }
+        // And the offer withdraws now that a draft exists, rather than sitting
+        // there ready to overwrite what the user is writing.
+        guard tile.qaReplyOptionChipTitles.isEmpty else {
+            throw fail(
+                "reply options: the chips stayed up over a non-empty draft "
+                + "(\(tile.qaReplyOptionChipTitles)) — pressing one would replace the user's text"
+            )
         }
     }
 

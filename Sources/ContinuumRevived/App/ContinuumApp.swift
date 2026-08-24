@@ -3913,6 +3913,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             NSApp.setActivationPolicy(.prohibited)
             exit(ok ? 0 : 1)
         }
+        // Transcript motion is enabled here and nowhere else: this line runs only
+        // on the interactive launch path, after the whole `--*-check` cascade and
+        // after the component-snapshot early exit above. Every self-check leg,
+        // pixel baseline and tour render therefore photographs a motionless
+        // transcript — a frame captured mid-fade would be a flapping baseline.
+        AgentTranscriptMotion.isEnabled = { true }
         launchStartTime = QAPerf.timestamp()
         qaPerf = QAPerf()
         navKeymap = NavKeymap.resolve()

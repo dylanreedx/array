@@ -264,6 +264,14 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     private var lastPresentedToolDetailRevisions: [AgentNodeID: Date] = [:]
     private var lastRefreshedToolIdentities: Set<AgentToolDetailKey> = []
     private var lastAppliedDisplayIDs: [AgentNodeID]?
+    /// Display IDs the reader has already been shown. New content fades in; the
+    /// history a tile opens with does not — a restored transcript that dissolved
+    /// into view on every open would be a worse jump than the one this fixes.
+    /// Seeded wholesale on the first apply, so only genuinely later arrivals
+    /// animate, and never cleared by scrolling (a row scrolled away and back has
+    /// still been seen).
+    private var arrivedDisplayIDs: Set<AgentNodeID> = []
+    private var didSeedArrivedDisplayIDs = false
     private var entryDatesByID: [AgentNodeID: Date?] = [:]
     private var nextEntryDateByEntryID: [AgentNodeID: Date] = [:]
     private var hoveredTurnEntryID: AgentNodeID?
@@ -515,6 +523,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 guard let item = collectionView.makeItem(withIdentifier: identifier, for: indexPath)
                     as? AgentTranscriptTailItem else { return nil }
                 item.install(indicator: tailThinkingIndicator, statusLabel: tailStatusLabel)
+                presentArrival(of: id, in: item)
                 return item
             }
             if let header = clusterHeadersByID[id] {
@@ -530,6 +539,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                     tokens: renderContext.tokens
                 )
                 view.onToggle = { [weak self] in self?.toggleCluster(header.id) }
+                presentArrival(of: id, in: item)
                 return item
             }
             guard let row = rowsByID[id] else { return nil }
@@ -554,8 +564,17 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             } catch {
                 renderingError = error
             }
+            presentArrival(of: id, in: item)
             return item
         }
+    }
+
+    /// A display item the reader has not been shown before fades up instead of
+    /// popping in. Recycling is not arrival: an ID already in the set — one
+    /// scrolled out of view and back — is materialized at full opacity.
+    private func presentArrival(of id: AgentNodeID, in item: NSCollectionViewItem) {
+        guard arrivedDisplayIDs.insert(id).inserted, didSeedArrivedDisplayIDs else { return }
+        AgentTranscriptMotion.fadeIn(item.view)
     }
 
     /// Queues one valid reducer result. Every document/patch pair and every
@@ -966,6 +985,10 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         _ = newIDs
         _ = oldIDs
         let identity = displayIDs + (tailThinkingIndicatorIsVisible ? [tailThinkingIndicatorID] : [])
+        if !didSeedArrivedDisplayIDs {
+            didSeedArrivedDisplayIDs = true
+            arrivedDisplayIDs = Set(identity)
+        }
         let displayChanged = lastAppliedDisplayIDs != identity
         if displayChanged || appliedVersion == nil {
             dataSource.apply(snapshot, animatingDifferences: false)
@@ -989,10 +1012,31 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     }
 
     func updateRenderContext(_ context: AgentRenderContext) throws {
-        renderContext = contextWithDisclosureState(context)
-        measurementCache.removeAll()
-        transcriptLayout.invalidateForStructureChange()
-        try updateVisibleHosts(ids: Set(rowsByID.keys))
+        // This was the one geometry-mutating path in the transcript with NO
+        // anchor policy: it drops the whole measurement cache and re-measures
+        // every row, so a theme or appearance change mid-read dropped the reader
+        // wherever the raw scroll offset landed. Every other mutation
+        // (`remeasureDisclosure`, `toggleCluster`, tail visibility) already
+        // restores the anchor; this now agrees with them.
+        var thrown: Error?
+        scrollController.applyPreservingReaderAnchor(
+            in: scrollView,
+            idAtY: { [weak self] y in self?.transcriptID(at: y) },
+            yForID: { [weak self] id in self?.transcriptY(for: id) },
+            update: { [weak self] in
+                guard let self else { return }
+                renderContext = contextWithDisclosureState(context)
+                measurementCache.removeAll()
+                transcriptLayout.invalidateForStructureChange()
+                do { try updateVisibleHosts(ids: Set(rowsByID.keys)) }
+                catch { thrown = error }
+                // The anchor restore reads `transcriptY(for:)` immediately after
+                // this closure; the re-measured geometry has to be current for
+                // that to be a position rather than a guess.
+                layoutSubtreeIfNeeded()
+            }
+        )
+        if let thrown { throw thrown }
     }
 
     /// Binds host-local tool detail to the managed agent identity. This is

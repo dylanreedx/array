@@ -45,6 +45,7 @@ enum TranscriptRhythmChecks {
         try checkReasoningExpands()
         try checkRowsShareOneTextColumn()
         try checkLiveDocumentsCarryTimestamps()
+        try checkMotionIsPresentationOnly()
         print(
             "TranscriptRhythmChecks: heading ladder, hanging indents, thematic break, "
             + "turn separation, error/notice divergence, table structure, surface fills, "
@@ -922,6 +923,118 @@ enum TranscriptRhythmChecks {
         // The semantic model is untouched by all of this: rows == flatten.
         guard list.qaSemanticRowCount >= 6 else {
             throw fail("clustering: the semantic row count changed — the projection leaked into rows")
+        }
+    }
+
+    /// "Codex is so smooth and chill… what can we do to smooth out some of the
+    /// transitions and jumps of state in the transcript."
+    ///
+    /// The transcript now animates, and the whole reason it is allowed to is
+    /// that the animation never becomes state. This asserts all four halves of
+    /// that bargain, because each one is a way the feature could quietly rot:
+    ///
+    /// 1. Off by default, so every pixel baseline and tour render photographs a
+    ///    settled frame. An unconditional animation would make those flap, and a
+    ///    flapping fixture is a bug, not a tolerance to widen.
+    /// 2. Enabled, a real disclosure toggle DOES animate — the teeth. Without
+    ///    this the other three pass on a feature that does nothing.
+    /// 3. The model value is already final while the animation runs, which is
+    ///    what lets `--ui-geometry-check` and the appearance census keep reading
+    ///    settled values synchronously.
+    /// 4. The first apply does not animate: a restored transcript's history must
+    ///    not dissolve into view, which would be a worse jump than the one this
+    ///    milestone set out to remove.
+    private static func checkMotionIsPresentationOnly() throws {
+        func runningAnimations(in views: [NSView]) -> [String] {
+            views.compactMap { view in
+                AgentTranscriptMotion.qaRunningOpacityAnimation(view) == nil
+                    ? nil : String(describing: type(of: view))
+            }
+        }
+
+        // 1 + 4. The production default is off, and even with motion ON the
+        // first apply of a document is history, not arrival.
+        for (label, enabled) in [("disabled", false), ("enabled", true)] {
+            var views: [NSView] = []
+            AgentTranscriptMotion.qaWithMotion(enabled: enabled) {
+                views = (try? render(.realClaudeTurn).views) ?? []
+            }
+            guard !views.isEmpty else {
+                throw fail("motion: the replayed turn rendered nothing with motion \(label)")
+            }
+            let animated = runningAnimations(in: views)
+            guard animated.isEmpty else {
+                throw fail(
+                    "motion: rendering a document for the FIRST time animated \(animated) with "
+                    + "motion \(label) — history must materialize settled, and every pixel "
+                    + "baseline depends on a first render being motionless"
+                )
+            }
+        }
+
+        guard let entry = LabFixtures.realClaudeTurn.document.entries
+            .first(where: { $0.role == .reasoning && !$0.blocks.isEmpty }) else {
+            throw fail("motion: the replayed turn carries no completed reasoning entry")
+        }
+
+        /// Expands a reasoning disclosure on a FRESH surface, so the two cases
+        /// below both exercise a first expansion rather than the second one
+        /// collapsing what the first opened.
+        func expandOnce(reducedMotion: Bool) throws
+            -> (animation: CABasicAnimation?, opacity: Float, alpha: CGFloat) {
+            let (surface, views) = try render(.realClaudeTurn)
+            guard let disclosure = views.compactMap({ $0 as? CompletedReasoningDisclosureView })
+                .first(where: { !$0.isHidden }) else {
+                throw fail("motion: no reasoning disclosure rendered")
+            }
+            var result: (CABasicAnimation?, Float, CGFloat) = (nil, -1, -1)
+            AgentTranscriptMotion.qaWithMotion(enabled: true, reducedMotion: reducedMotion) {
+                _ = surface.transcript.qaPerformReasoningDisclosureClick(for: entry.id)
+                result = (
+                    AgentTranscriptMotion.qaRunningOpacityAnimation(disclosure.bodyContainer),
+                    disclosure.bodyContainer.layer?.opacity ?? -1,
+                    disclosure.bodyContainer.alphaValue
+                )
+            }
+            return result
+        }
+
+        // 3a. Reduce-motion is honoured through the injected provider, so the
+        //     setting is respected without the witness touching the real one.
+        guard try expandOnce(reducedMotion: true).animation == nil else {
+            throw fail(
+                "motion: expanding a disclosure animated while reduce-motion was set — the "
+                + "accessibility preference must suppress every transcript animation"
+            )
+        }
+
+        // 2. The teeth: enabled, the same real control animates.
+        let expanded = try expandOnce(reducedMotion: false)
+        let settledOpacity = expanded.opacity
+        let settledAlpha = expanded.alpha
+        guard let animation = expanded.animation else {
+            throw fail(
+                "motion: expanding a reasoning disclosure with motion enabled ran no animation — "
+                + "the body appears in one step, which is the jump this milestone removes"
+            )
+        }
+
+        // 3. Presentation only. `toValue` is the settled model value and the
+        //    model itself was never touched, so a gate reading opacity or
+        //    alphaValue immediately after the toggle reads the final number.
+        guard settledOpacity == 1, settledAlpha == 1 else {
+            throw fail(
+                "motion: mid-animation the body reads opacity \(settledOpacity) / alpha "
+                + "\(settledAlpha) — the animation mutated the model, so every synchronous gate "
+                + "now samples a transient value"
+            )
+        }
+        guard (animation.toValue as? Float) == 1, (animation.fromValue as? Float) == 0 else {
+            throw fail(
+                "motion: the fade runs \(String(describing: animation.fromValue)) -> "
+                + "\(String(describing: animation.toValue)); it must end on the value the model "
+                + "already holds"
+            )
         }
     }
 }

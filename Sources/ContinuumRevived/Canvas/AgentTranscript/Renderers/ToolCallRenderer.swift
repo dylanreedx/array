@@ -139,6 +139,8 @@ final class ToolCallView: NSView {
 
     func apply(blockID: AgentNodeID, payload: AgentToolCallPayload, context: AgentRenderContext) {
         isClusterMember = payload.presentedIsClusterMember
+        let previousBlockID = self.blockID
+        let previousStatus = self.status
         self.blockID = blockID
         self.status = payload.status
         self.context = context
@@ -163,6 +165,18 @@ final class ToolCallView: NSView {
             statusLabel.stringValue = "\(duration) \(presentation.glyph)"
         } else {
             statusLabel.stringValue = "\(presentation.glyph) \(presentation.label)"
+        }
+        // A row resolving under the reader — in progress becoming "2.1s ✓" —
+        // settles rather than swapping. Two conditions, both learned from the
+        // witness: the SAME block (a recycled view arriving with different
+        // content is an arrival, animated once by the list, and settling on
+        // reuse would make rows blink their way down a fast scroll — the very
+        // flicker being fixed), and a real STATUS change. Keying it on the
+        // trailing TEXT instead blinked every completed row a second time when
+        // its duration arrived from the host-local detail store, which is not a
+        // state change and read as exactly the noise this is here to remove.
+        if previousBlockID == blockID, previousStatus != payload.status {
+            AgentTranscriptMotion.settle(statusLabel)
         }
         let candidateSummary = payload.summary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         disclosureText = candidateSummary.caseInsensitiveCompare(presentation.label) == .orderedSame
@@ -415,9 +429,16 @@ final class ToolCallView: NSView {
 
     private func syncOutputPaneVisibility() {
         let visible = isExpanded && outputText != nil
+        let revealed = visible && outputScrollView.isHidden
         outputScrollView.isHidden = !visible
         outputCopyButton.isHidden = !visible
         outputNoteLabel.isHidden = !visible || (outputNote ?? "").isEmpty
+        // The row's HEIGHT still changes in one step — the custom transcript
+        // layout owns that and the reader's anchor is preserved across it. What
+        // this softens is the content: the pane fades up into the space the row
+        // just made, which is what reads as "the row opened" rather than "a
+        // block of text appeared".
+        if revealed { AgentTranscriptMotion.fadeIn(outputScrollView, duration: AgentTranscriptMotion.emphasis) }
     }
 
     @objc private func copyEntireOutput(_ sender: Any?) {

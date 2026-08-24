@@ -2006,6 +2006,7 @@ final class ManagedAgentTileNSView: TileNSView {
         // sessions stalled the main thread.
         let document = model.document
         hydrateManagedImagesFromDocument()
+        refreshReplyOptions(from: document)
         guard document.version != lastForwardedDocumentVersion else { return }
         lastForwardedDocumentVersion = document.version
         let next = AgentDocument(version: v2RenderedDocument.version &+ 1, entries: document.entries)
@@ -2037,6 +2038,19 @@ final class ManagedAgentTileNSView: TileNSView {
         } catch {
             v2RenderError = error
         }
+    }
+
+    /// Offers the choices the last settled turn asked for as composer chips.
+    ///
+    /// Deliberately NOT routed through the request/approval system: no harness
+    /// opened a request here, so there is nothing to resolve and nothing may
+    /// claim otherwise (see `AgentReplyOptionDetector`). A working turn withdraws
+    /// the offer outright — the question it belongs to has already been answered
+    /// by whatever the user just sent.
+    private func refreshReplyOptions(from document: AgentDocument) {
+        guard let composer = v2Composer else { return }
+        let working = v2TurnSnapshot?.state == .working
+        composer.setReplyOptions(working ? [] : AgentReplyOptionDetector.options(in: document))
     }
 
     private func performV2RenderAction(_ action: AgentRenderAction) {
@@ -2334,6 +2348,15 @@ final class ManagedAgentTileNSView: TileNSView {
     func qaV2RequestStatus(_ requestID: String) -> AgentItemStatus? { v2RequestPayload(requestID)?.status }
     func qaV2RequestChoices(_ requestID: String) -> [String]? { v2RequestPayload(requestID)?.choices }
     var qaV2HasCompactRequestEditor: Bool { false }
+    /// The reply-option chips the composer is currently offering, and a press
+    /// through the real button. Read from the installed composer, never from a
+    /// tile-side copy of the detector's answer.
+    var qaReplyOptionChipTitles: [String] { v2Composer?.qaReplyOptionChipTitles ?? [] }
+    var qaComposerDraftText: String { v2Composer?.qaDraftText ?? "" }
+    @discardableResult
+    func qaPressReplyOptionChip(titled title: String) -> Bool {
+        v2Composer?.qaPressReplyOptionChip(titled: title) ?? false
+    }
     var qaV2CanSend: Bool { v2TurnSnapshot?.capabilities.canSend == true }
     var qaV2ActionTitle: String? { v2ActionButton?.presentation.title }
     var qaV2ActionEnabled: Bool { v2ActionButton?.presentation.isEnabled == true }

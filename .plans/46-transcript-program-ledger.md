@@ -906,3 +906,125 @@ Gates that constrain the motion work, for whoever picks it up:
 prepare-pass delta ≤ 3 over 5,000 deltas, anchor restores within 0.5pt, and
 `animatingDifferences` must stay false (the diffable apply would go async and
 break the synchronous cluster assertions).
+
+## Motion, and choices you can click (2026-08-24)
+
+Dylan: "let's start with the finishing touches for UX, i want to take a lot of
+the UX from codex and how smooth the transcript feels" — plus "handle some
+parsing of the response like selecting options rather than typing options IF
+possible… i dont want to go too crazy".
+
+### 1. The motion the stability pass deliberately left undone
+
+`AgentTranscriptMotion` is now the transcript's whole motion vocabulary, and it
+holds to two rules that are the reason it is allowed to exist next to these
+gates:
+
+- **Presentation only.** Every animation is a `CABasicAnimation` whose
+  `toValue` is the value the model ALREADY holds. Nothing assigns `alphaValue`,
+  a frame or a constraint, so a synchronous read straight after the call
+  returns the settled value and `--ui-geometry-check`, the appearance census
+  and the delta oracle see exactly what they saw before. No snapshot is
+  touched, so `animatingDifferences` stays `false` and
+  `qaVisualApplyCount == 1` holds.
+- **Off unless production turns it on.** `isEnabled` defaults to `false`;
+  `applicationDidFinishLaunching` sets it, after the whole `--*-check` cascade
+  and after the component-snapshot early exit. Every self-check leg, pixel
+  baseline and tour render therefore photographs a motionless transcript. A
+  frame caught mid-fade would be a flapping baseline, and a flapping fixture is
+  a bug here, never a tolerance to widen.
+
+What actually moves: a display item the reader has NOT seen before fades up
+(0.18s easeOut); a tool row resolving its status settles (0.16s); a revealed
+tool-output pane and an expanded reasoning body fade into the room the
+remeasure just made. Row HEIGHT still changes in one step — the custom layout
+owns that, and the reader's anchor is preserved across it. Softening the
+content is what reads as "the row opened".
+
+Two rules learned from the witness rather than guessed:
+
+- **The first apply is history, not arrival.** Arrived IDs are seeded wholesale
+  on the first apply, so a restored transcript materializes settled. Dissolving
+  a whole opened tile into view would have been a worse jump than the one this
+  milestone removed.
+- **Settle on a STATUS change, never on the trailing text.** Keyed on text, every
+  completed row blinked a second time when its duration arrived from the
+  host-local detail store — not a state change, and exactly the noise being
+  removed. The witness caught this: it reported two `NSTextField`s animating on
+  a first render.
+
+Also landed: `updateRenderContext` now wraps itself in
+`applyPreservingReaderAnchor`. It was the one geometry-mutating path in the
+transcript with NO anchor policy — it drops the whole measurement cache, so a
+theme or appearance change mid-read dropped the reader wherever the raw offset
+landed.
+
+Witness: `checkMotionIsPresentationOnly` in `--transcript-rhythm-check`, on the
+replayed real claude turn. Asserts all four halves of the bargain (off by
+default, on it animates, the model stays settled mid-flight, first apply never
+animates). Teeth-verified by removing the reasoning-body fade →
+RED "expanding a reasoning disclosure with motion enabled ran no animation".
+
+### 2. Selecting options instead of typing them
+
+`AgentReplyOptionDetector` (in AgentContent, pure) reads a SETTLED assistant
+turn and returns the choices it offered; `ComposerReplyOptionRailView` shows
+them as chips above the editor, and pressing one writes the text into the
+composer through `insertCompletion` — the same primitive a completion uses, so
+the observer fires, the draft is journaled, and the send path sees nothing
+special.
+
+**What this deliberately is NOT.** It does not mint a `.question` block, build
+an `AgentRequestPayload`, or resolve anything. A request is a request because a
+harness OPENED one and is holding it (`.requestOpened` / `.userInputRequested`);
+prose that happens to contain a list is not that, and dressing it up as one
+would fabricate a response contract no harness offered — the same rule
+`AgentTranscriptProjection` already states about empty choice lists. Pressing a
+chip sends nothing: the user still sends, so a wrong detection costs a word to
+delete rather than a turn. (The provider-request path remains unbound in
+production; `onProviderResponse` is still bound only in checks. That is Queue
+90 / M7 and untouched here.)
+
+Detection reads STRUCTURE, not characters: the parser already produced a list
+block with item children. The rules are narrow on purpose, because a false
+positive puts words in the user's mouth at the one surface where a stray click
+reaches a real agent — the last two meaningful blocks must be a paragraph that
+asks (a question mark, or one of a small set of explicit invitations) followed
+by a list of 2-4 short single-line items with distinct labels, and the entry
+must be `.finished`. An item's chip is its leading phrase: "**Rewrite it** —
+keeps the API" chips to "Rewrite it".
+
+The offer withdraws whenever there is a draft (it would otherwise be poised to
+overwrite what the user is writing) and whenever a turn is working (the
+question it belongs to has already been answered by whatever was just sent).
+
+Witnesses, deliberately split:
+
+- `runReplyOptionChecks` (`ContinuumRevivedAgentContentChecks`) drives real
+  Markdown through the real parser — a hand-built block tree would let the
+  detector agree with a shape the parser never produces. Most of its
+  assertions are NEGATIVE, each naming a reply a looser rule would have
+  decorated: a summary list, a list above the prose, five items, one item, an
+  essay item, two items that chip to the same label, a mid-stream turn, and a
+  question the user has already answered. Teeth-verified by removing the
+  question gate → RED on the summary list.
+- `checkReplyOptionsReachTheComposer` (`--agent-first-paint-check`) drives a
+  REAL tile with real runtime events (`turnStarted` → `contentDelta` →
+  `turnCompleted`) and asserts the chips reach the composer, that mid-stream
+  they do not, that pressing one fills the draft, starts no turn, and
+  withdraws the offer. Teeth-verified by neutering the tile's refresh → RED
+  "a settled turn that asked and listed offered []". This half is the one the
+  pure leg cannot see: a perfect detector rendering nothing is precisely the
+  failure the tool-detail vocabulary sat in for months.
+
+Green: `--transcript-rhythm-check`, `--ui-geometry-check`,
+`--transcript-delta-index-oracle-check`, `--agent-first-paint-check`,
+`--tool-detail-check`, `--agent-incremental-refresh-check`, `--ui-probe-check`,
+`--ui-pixel-check`, `--agent-supervisor-check`, `ContinuumRevivedCoreChecks`,
+`ContinuumRevivedAgentContentChecks`. No new `--*-check` flag, so
+`matrix-inventory.txt` is unchanged.
+
+Noted, not fixed: laying a managed agent tile out offscreen logs one
+`NSLayoutConstraint … exceeds internal limits`. It reproduces with the reply
+rail empty, so it is a pre-existing tile-layout condition this new witness is
+merely the first in that leg to surface.

@@ -73,6 +73,9 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     private let attachmentRailHeightConstraint: NSLayoutConstraint
     private let fileReferenceRail: ComposerFileReferenceRailView
     private let fileReferenceRailHeightConstraint: NSLayoutConstraint
+    private let replyOptionRail: ComposerReplyOptionRailView
+    private let replyOptionRailHeightConstraint: NSLayoutConstraint
+    private var replyOptions: [String] = []
     private var attachmentStore: AgentComposerAttachmentStore?
     private var importedAttachments: [AgentPromptImageAttachment] = []
     private var importedFileReferences: [AgentPromptFileReference] = []
@@ -151,6 +154,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         attachmentRailHeightConstraint = attachmentRail.heightAnchor.constraint(equalToConstant: 0)
         fileReferenceRail = ComposerFileReferenceRailView(frame: .zero)
         fileReferenceRailHeightConstraint = fileReferenceRail.heightAnchor.constraint(equalToConstant: 0)
+        replyOptionRail = ComposerReplyOptionRailView(frame: .zero)
+        replyOptionRailHeightConstraint = replyOptionRail.heightAnchor.constraint(equalToConstant: 0)
         super.init(frame: frameRect)
 
         wantsLayer = true
@@ -173,6 +178,11 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         fileReferenceRail.onRemove = { [weak self] reference in
             self?.removeFileReference(reference)
         }
+        replyOptionRail.translatesAutoresizingMaskIntoConstraints = false
+        replyOptionRail.onSelect = { [weak self] option in
+            self?.acceptReplyOption(option)
+        }
+        addSubview(replyOptionRail)
         addSubview(fileReferenceRail)
         addSubview(attachmentRail)
         addSubview(scrollView)
@@ -185,10 +195,14 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         addSubview(placeholderLabel)
 
         NSLayoutConstraint.activate([
+            replyOptionRailHeightConstraint,
+            replyOptionRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.internalPadding),
+            replyOptionRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.internalPadding),
+            replyOptionRail.topAnchor.constraint(equalTo: topAnchor),
             fileReferenceRailHeightConstraint,
             fileReferenceRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.internalPadding),
             fileReferenceRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.internalPadding),
-            fileReferenceRail.topAnchor.constraint(equalTo: topAnchor),
+            fileReferenceRail.topAnchor.constraint(equalTo: replyOptionRail.bottomAnchor),
             attachmentRailHeightConstraint,
             attachmentRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.internalPadding),
             attachmentRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.internalPadding),
@@ -241,9 +255,10 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         }
         let railHeight = attachmentRail.isHidden ? 0 : ComposerImageAttachmentRailView.railHeight + Self.internalPadding
         let fileRailHeight = fileReferenceRail.isHidden ? 0 : ComposerFileReferenceRailView.railHeight
+        let optionRailHeight = replyOptionRail.isHidden ? 0 : ComposerReplyOptionRailView.railHeight
         return NSSize(
             width: NSView.noIntrinsicMetric,
-            height: editorHeight + (Self.internalPadding * 2) + railHeight + fileRailHeight
+            height: editorHeight + (Self.internalPadding * 2) + railHeight + fileRailHeight + optionRailHeight
         )
     }
 
@@ -457,6 +472,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         )
         isApplyingDraft = false
         updatePlaceholder()
+        updateReplyOptionRail()
         editorContentsChanged()
     }
 
@@ -497,6 +513,9 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     func composerTextDidChange(_ textView: ComposerTextView) {
         publishDraftChange()
         updatePlaceholder()
+        // The chips withdraw as soon as there is a draft, and come back if the
+        // user clears it again.
+        updateReplyOptionRail()
         editorContentsChanged()
         refreshCompletionSuggestions()
     }
@@ -1149,6 +1168,40 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         needsLayout = true
     }
 
+    /// The choices the last settled turn offered, from
+    /// `AgentReplyOptionDetector`. The owner recomputes this per document
+    /// version; the composer decides whether to SHOW them, because only it knows
+    /// whether the user has already started writing.
+    func setReplyOptions(_ options: [String]) {
+        guard replyOptions != options else { return }
+        replyOptions = options
+        updateReplyOptionRail()
+    }
+
+    private func updateReplyOptionRail() {
+        // An offer is for a reply not yet started. Once there is a draft — typed,
+        // restored, or a chip already taken — the chips would be competing with
+        // the user's own words, and pressing one would replace them.
+        let visible = draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? replyOptions : []
+        replyOptionRail.setOptions(visible)
+        replyOptionRailHeightConstraint.constant =
+            visible.isEmpty ? 0 : ComposerReplyOptionRailView.railHeight
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
+    /// Writes the choice into the editor as one undo unit, through the same
+    /// primitive a completion uses — so the text arrives exactly as typed text
+    /// does: the observer fires, the draft is journaled, and the send path sees
+    /// nothing special. Deliberately does NOT send: the user presses send, and a
+    /// wrongly-detected chip costs them a word to delete, not a turn.
+    private func acceptReplyOption(_ option: String) {
+        let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
+        textView.insertCompletion(option, replacementRange: fullRange)
+        textView.window?.makeFirstResponder(textView)
+    }
+
     private func updateFileReferenceRail() {
         fileReferenceRail.setReferences(importedFileReferences)
         fileReferenceRailHeightConstraint.constant = importedFileReferences.isEmpty ? 0 : ComposerFileReferenceRailView.railHeight
@@ -1207,6 +1260,12 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     }
 
     // Deterministic AppKit probes; not a tile integration seam.
+    var qaReplyOptionChipTitles: [String] { replyOptionRail.qaChipTitles }
+    var qaDraftText: String { draft.text }
+    @discardableResult
+    func qaPressReplyOptionChip(titled title: String) -> Bool {
+        replyOptionRail.qaPressChip(titled: title)
+    }
     var qaFileReferenceCount: Int { importedFileReferences.count }
     var qaFileReferenceRailNames: [String] { fileReferenceRail.qaDisplayNames }
     var qaFileReferenceRailAccessibilityLabels: [String] { fileReferenceRail.qaAccessibilityLabels }

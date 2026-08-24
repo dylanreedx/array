@@ -673,4 +673,7 @@ runParserCorpusChecks()
 runParserFuzzChecks()
 runParserPerformanceChecks()
 
+// The composer's reply-option offer, judged on real parsed Markdown.
+runReplyOptionChecks()
+
 print("ContinuumRevivedAgentContentChecks passed")

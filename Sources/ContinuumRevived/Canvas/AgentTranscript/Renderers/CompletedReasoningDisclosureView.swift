@@ -234,6 +234,8 @@ final class CompletedReasoningDisclosureView: NSView {
         context.actions.setExpanded(isExpanded, blockID: presentation.entryID)
         disclosureButton.apply(expanded: isExpanded, title: presentation.title)
         bodyContainer.isHidden = !isExpanded
+        // The reasoning body fades up into the room the remeasure makes for it.
+        if isExpanded { AgentTranscriptMotion.fadeIn(bodyContainer, duration: AgentTranscriptMotion.emphasis) }
         applyAccessibility()
         invalidateIntrinsicContentSize()
         needsLayout = true
