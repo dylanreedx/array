@@ -51,6 +51,10 @@ final class AgentDiffSummaryView: NSView {
     private(set) var overflowLabel = NSTextField(labelWithString: "")
     private(set) var openReviewButton = AgentOpenReviewButton(frame: .zero)
     private(set) var displayedFiles: [AgentDiffFileSummary] = []
+    /// The stat label's measured width, one per pooled row, kept alongside the
+    /// pool instead of re-typeset from `layout()`. Populated only when the row's
+    /// file summary actually changed (`syncFileRows`).
+    private var statLabelWidths: [CGFloat] = []
 
     private var blockID: AgentNodeID?
     private var payload = AgentDiffPayload(text: "")
@@ -111,6 +115,7 @@ final class AgentDiffSummaryView: NSView {
         self.blockID = blockID
         self.payload = payload
         self.context = context
+        let previousFiles = displayedFiles
         displayedFiles = Array(payload.files.prefix(Self.maximumVisibleFiles))
         titleLabel.attributedStringValue = NSAttributedString(
             string: "CHANGES",
@@ -121,7 +126,7 @@ final class AgentDiffSummaryView: NSView {
         countsLabel.stringValue = Self.countsText(payload.files)
         summaryLabel.stringValue = Self.safeSummary(payload.summary)
         summaryLabel.isHidden = summaryLabel.stringValue.isEmpty
-        rebuildFileLabels()
+        syncFileRows(previousFiles: previousFiles)
         let overflow = payload.files.count - displayedFiles.count
         overflowLabel.stringValue = overflow > 0 ? "+\(overflow) more files" : ""
         overflowLabel.isHidden = overflow == 0
@@ -136,8 +141,8 @@ final class AgentDiffSummaryView: NSView {
         setAccessibilityLabel("File changes, \(Self.countsText(payload.files))")
         var children: [NSView] = [titleLabel, countsLabel]
         if !summaryLabel.isHidden { children.append(summaryLabel) }
-        for (index, label) in fileLabels.enumerated() {
-            children.append(label)
+        for index in 0..<displayedFiles.count {
+            children.append(fileLabels[index])
             if fileStatLabels.indices.contains(index) { children.append(fileStatLabels[index]) }
         }
         if !overflowLabel.isHidden { children.append(overflowLabel) }
@@ -145,79 +150,83 @@ final class AgentDiffSummaryView: NSView {
         setAccessibilityChildren(children)
     }
 
+    /// A2 (`performance.md` traps 2 and 3). This used to measure every stat
+    /// label's `attributedStringValue.size()` here — a full typesetting pass,
+    /// per file row, on every display cycle a pan/zoom/neighbour resize
+    /// dirties this view — and assign every frame unconditionally. The stat
+    /// widths are now measured once in `syncFileRows`, at apply time, and kept
+    /// alongside the pool; every frame write here is gated on an actual change.
     override func layout() {
         super.layout()
+        func place(_ view: NSView, _ frame: NSRect) {
+            if view.frame != frame {
+                view.frame = frame
+                qaFrameWritesForChecks += 1
+            }
+        }
         let inset = Self.horizontalInset
-        let countsWidth = min(ceil(countsLabel.intrinsicContentSize.width) + CGFloat(Space.s), max(0, bounds.width * 0.50))
-        countsLabel.frame = NSRect(
+        let countsIntrinsic = countsLabel.intrinsicContentSize
+        let countsWidth = min(ceil(countsIntrinsic.width) + CGFloat(Space.s), max(0, bounds.width * 0.50))
+        place(countsLabel, NSRect(
             x: max(inset, bounds.width - inset - countsWidth),
-            y: (Self.headerHeight - countsLabel.intrinsicContentSize.height) / 2,
+            y: (Self.headerHeight - countsIntrinsic.height) / 2,
             width: countsWidth,
-            height: countsLabel.intrinsicContentSize.height
-        )
-        qaFrameWritesForChecks += 1
-        titleLabel.frame = NSRect(
+            height: countsIntrinsic.height
+        ))
+        let titleIntrinsic = titleLabel.intrinsicContentSize
+        place(titleLabel, NSRect(
             x: inset,
-            y: (Self.headerHeight - titleLabel.intrinsicContentSize.height) / 2,
+            y: (Self.headerHeight - titleIntrinsic.height) / 2,
             width: max(1, countsLabel.frame.minX - inset - CGFloat(Space.m)),
-            height: titleLabel.intrinsicContentSize.height
-        )
-        qaFrameWritesForChecks += 1
+            height: titleIntrinsic.height
+        ))
         var y = Self.headerHeight
         if !summaryLabel.isHidden {
             let height = Self.summaryHeight(payload.summary, width: bounds.width)
-            summaryLabel.frame = NSRect(x: inset, y: y, width: max(1, bounds.width - inset * 2), height: height)
-            qaFrameWritesForChecks += 1
+            place(summaryLabel, NSRect(x: inset, y: y, width: max(1, bounds.width - inset * 2), height: height))
             y += height + CGFloat(Space.s)
         }
-        for (index, label) in fileLabels.enumerated() {
+        for index in 0..<displayedFiles.count {
+            let label = fileLabels[index]
             let barWidth = min(Self.statBarWidth, max(0, bounds.width * 0.22))
             let statLabel = fileStatLabels.indices.contains(index) ? fileStatLabels[index] : nil
-            // Measured from the attributed string itself: an NSTextField created
-            // from an EMPTY string does not reliably re-derive its intrinsic
-            // width when `attributedStringValue` is assigned later, and the
-            // clipped result silently dropped the removal count.
-            let statWidth = statLabel.map { field -> CGFloat in
-                qaStatMeasurementsForChecks += 1
-                return min(ceil(field.attributedStringValue.size().width) + CGFloat(Space.s),
-                    max(0, bounds.width * 0.34))
-            } ?? 0
+            // The width was measured once, when this row's text was last set
+            // (`syncFileRows`) — never re-typeset here.
+            let measuredWidth = statLabelWidths.indices.contains(index) ? statLabelWidths[index] : 0
+            let statWidth = statLabel != nil ? min(measuredWidth, max(0, bounds.width * 0.34)) : 0
             let barX = bounds.width - inset - barWidth
             if fileStatBars.indices.contains(index) {
                 let bar = fileStatBars[index]
                 let barHeight = CGFloat(Space.s)
-                bar.frame = NSRect(
+                place(bar, NSRect(
                     x: barX, y: y + (Self.fileRowHeight - barHeight) / 2,
-                    width: barWidth, height: barHeight)
-                qaFrameWritesForChecks += 1
+                    width: barWidth, height: barHeight))
             }
             if let statLabel {
-                statLabel.frame = NSRect(
+                let statIntrinsicHeight = statLabel.intrinsicContentSize.height
+                place(statLabel, NSRect(
                     x: max(inset, barX - CGFloat(Space.s) - statWidth),
-                    y: y + (Self.fileRowHeight - statLabel.intrinsicContentSize.height) / 2,
-                    width: statWidth, height: statLabel.intrinsicContentSize.height)
-                qaFrameWritesForChecks += 1
+                    y: y + (Self.fileRowHeight - statIntrinsicHeight) / 2,
+                    width: statWidth, height: statIntrinsicHeight))
             }
             let nameLimit = statLabel?.frame.minX ?? barX
-            label.frame = NSRect(
+            let labelIntrinsic = label.intrinsicContentSize
+            place(label, NSRect(
                 x: inset,
-                y: y + (Self.fileRowHeight - label.intrinsicContentSize.height) / 2,
+                y: y + (Self.fileRowHeight - labelIntrinsic.height) / 2,
                 width: max(1, nameLimit - inset - CGFloat(Space.s)),
-                height: label.intrinsicContentSize.height)
-            qaFrameWritesForChecks += 1
+                height: labelIntrinsic.height))
             y += Self.fileRowHeight
         }
         if !overflowLabel.isHidden {
-            overflowLabel.frame = NSRect(x: inset, y: y, width: max(1, bounds.width - inset * 2), height: Self.fileRowHeight)
-            qaFrameWritesForChecks += 1
+            place(overflowLabel, NSRect(x: inset, y: y, width: max(1, bounds.width - inset * 2), height: Self.fileRowHeight))
             y += Self.fileRowHeight
         }
         if !openReviewButton.isHidden {
-            openReviewButton.frame = NSRect(
+            place(openReviewButton, NSRect(
                 x: inset, y: y + CGFloat(Space.xs),
                 width: min(132, max(1, bounds.width - inset * 2)), height: Self.actionHeight
-            )
-            qaFrameWritesForChecks += 1
+            ))
         }
     }
 
@@ -273,45 +282,64 @@ final class AgentDiffSummaryView: NSView {
     /// own colours, and a proportional add/remove bar. This is the shape a
     /// diffstat has everywhere else; the old row concatenated all three into
     /// one string, which is why the numbers were unreadable.
-    private func rebuildFileLabels() {
-        fileLabels.forEach { $0.removeFromSuperview() }
-        fileStatLabels.forEach { $0.removeFromSuperview() }
-        fileStatBars.forEach { $0.removeFromSuperview() }
+    ///
+    /// A2: this used to tear down and rebuild all three views for EVERY file on
+    /// EVERY apply (`rebuildFileLabels`), even when nothing changed. The pool
+    /// now only grows — never shrinks — to the largest file count this view has
+    /// ever shown; a smaller apply hides the surplus rather than destroying it,
+    /// and a row whose file summary is unchanged skips its (attributed-string,
+    /// measurement) work entirely.
+    private func syncFileRows(previousFiles: [AgentDiffFileSummary]) {
         let theme = effectiveTokenTheme
         let added = AccentToken.accentDone.color.nsColor(for: theme)
         let removed = AccentToken.accentFailed.color.nsColor(for: theme)
         let monoSize = NSFont.token(.label).pointSize
-        var names: [NSTextField] = []
-        var stats: [NSTextField] = []
-        var bars: [AgentDiffStatBar] = []
-        for file in displayedFiles {
-            let name = Self.safeSingleLine(file.displayName, fallback: "Changed file")
-            let label = NSTextField(labelWithString: name)
+        while fileLabels.count < displayedFiles.count {
+            let label = NSTextField(labelWithString: "")
             label.font = NSFont.monospacedSystemFont(ofSize: monoSize, weight: .regular)
             label.lineBreakMode = .byTruncatingMiddle
             label.isSelectable = true
-            label.setAccessibilityLabel("\(name), \(file.addedLineCount) additions, \(file.removedLineCount) removals")
             addSubview(label)
-            names.append(label)
+            fileLabels.append(label)
 
             let stat = NSTextField(labelWithString: "")
-            stat.attributedStringValue = Self.statText(file, added: added, removed: removed)
             stat.alignment = .right
             stat.lineBreakMode = .byClipping
             stat.setAccessibilityElement(false)
             addSubview(stat)
-            stats.append(stat)
+            fileStatLabels.append(stat)
 
             let bar = AgentDiffStatBar(frame: .zero)
-            bar.apply(added: file.addedLineCount, removed: file.removedLineCount)
-            bar.applyColors(added: added, removed: removed)
             addSubview(bar)
-            bars.append(bar)
+            fileStatBars.append(bar)
+
+            statLabelWidths.append(0)
             qaFileViewsCreatedForChecks += 1
         }
-        fileLabels = names
-        fileStatLabels = stats
-        fileStatBars = bars
+        for index in 0..<displayedFiles.count {
+            let file = displayedFiles[index]
+            let label = fileLabels[index]
+            let stat = fileStatLabels[index]
+            let bar = fileStatBars[index]
+            label.isHidden = false
+            stat.isHidden = false
+            bar.isHidden = false
+            guard !(previousFiles.indices.contains(index) && previousFiles[index] == file) else { continue }
+            let name = Self.safeSingleLine(file.displayName, fallback: "Changed file")
+            if label.stringValue != name { label.stringValue = name }
+            label.setAccessibilityLabel("\(name), \(file.addedLineCount) additions, \(file.removedLineCount) removals")
+            let statString = Self.statText(file, added: added, removed: removed)
+            stat.attributedStringValue = statString
+            qaStatMeasurementsForChecks += 1
+            statLabelWidths[index] = ceil(statString.size().width) + CGFloat(Space.s)
+            bar.apply(added: file.addedLineCount, removed: file.removedLineCount)
+            bar.applyColors(added: added, removed: removed)
+        }
+        for index in displayedFiles.count..<fileLabels.count {
+            fileLabels[index].isHidden = true
+            fileStatLabels[index].isHidden = true
+            fileStatBars[index].isHidden = true
+        }
     }
 
     /// "+42 −3" with each number in its own accent. Monospaced digits so the
