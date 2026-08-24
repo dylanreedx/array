@@ -1028,3 +1028,52 @@ Noted, not fixed: laying a managed agent tile out offscreen logs one
 `NSLayoutConstraint … exceeds internal limits`. It reproduces with the reply
 rail empty, so it is a pre-existing tile-layout condition this new witness is
 merely the first in that leg to surface.
+
+## G0 — the delta budget re-measured, and a regression this milestone caused (2026-08-24)
+
+The first item of the new program (`~/.claude/plans/plans-45-…`, M0) was to
+re-measure `--perf-budget-transcript-delta-check`, because the published 36.3 ms
+and its 56%/35%/8% attribution predated the 2026-08-24 churn reduction that
+landed on exactly the two paths it blamed.
+
+**The number moved the wrong way.** Measured in an isolated worktree, debug (the
+configuration the matrix uses), four consecutive runs at HEAD: 50.202, 50.595,
+50.365, 51.232 ms — under 2% spread, so this is a deterministic number, not host
+noise. Every COUNT budget stays green (visitSlope 0, 1 visit/delta,
+fullFlattens 0, worstInvalidatedTopLevel 1).
+
+**Bisected, one build per commit, same machine, same session:**
+
+| commit | what landed | worst delta @10k |
+|---|---|---|
+| `09de0b0` | 0.5.10, before the redo | **36.394 ms** ← reproduces the published number exactly |
+| `bbc3d086` | S1–S3, real tool-detail supply | 42.967 ms (**+6.6**) |
+| `0105c3cf` | S4.0–4.2, action-first row | 43.535 ms (+0.5) |
+| `c2ceb9dd` | **S4.3, clustering** | 52.979 ms (**+9.5**) |
+| `8a42d708` | stability pass | 53.994 ms (+1.0) |
+| `e8a49cf2` | motion + reply options | 50.202 ms (**−3.8**) |
+
+So the redo added **+17.6 ms** and today's work gave back 3.8. Two causes, both
+per-apply passes over the whole history:
+
+1. **`rebuildDisplayProjection()` — the larger half.** It is O(rows) once per
+   visual apply, which the S4.3 design accepted explicitly on the grounds that
+   "the scheduler already coalesces 5,000 deltas into one apply, so no per-delta
+   O(history) pass." That reasoning is right for a burst and **wrong for this
+   scenario and for slow streaming**: 20 deltas here are 20 applies, and each one
+   pays the full walk. The mistake was reading the coalescer as an amortiser when
+   it only bounds the worst case.
+2. **The S1–S3 supply path — +6.6 ms** before any clustering existed, i.e. the
+   presentation/lifecycle work over every entry.
+
+**Consequences for the program.** 1c.0 is not the "threshold conversation" the
+plan hoped for; it is real work, and it should be pulled forward rather than left
+until M9. Both of the milestones that add to this path — M3 (inline diffs, which
+adds a parse and a body) and M6 (up to 16 concurrent child streams) — would be
+built on top of a budget already 6× over. The fix direction for both causes is
+the same: make the per-apply pass proportional to what changed, not to history.
+
+Method note for whoever repeats this: measure in a worktree with its own
+`.build`, debug configuration, and take at least three runs. The scenario is
+`PerfScenarios.transcriptDelta` and the shape is load-bearing — one entry per
+turn with one block each.
