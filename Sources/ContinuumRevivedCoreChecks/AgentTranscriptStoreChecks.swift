@@ -69,7 +69,14 @@ func runAgentTranscriptKeyMigrationChecks() async throws {
     defer { try? FileManager.default.removeItem(at: root) }
     let store = AgentTranscriptStore(root: root, compactionMutationCount: 3)
 
-    func seed(_ agentID: AgentID, sessionID: String, text: String) async throws {
+    // `savedAt` is stamped EXPLICITLY rather than left to wall-clock ordering.
+    // The store re-snapshots on journal compaction with `Date()`, so a seed's
+    // final timestamp depended on whether compaction happened to fire — which
+    // made "newest wins" a race against the check's own I/O speed. A witness for
+    // an ordering rule must not itself depend on ordering luck.
+    func seed(
+        _ agentID: AgentID, sessionID: String, text: String, savedAt: Date
+    ) async throws {
         let entryID = AgentNodeID(rawValue: "entry.\(text)")!
         try await store.saveSnapshot(agentID: agentID, sessionID: sessionID, document: AgentDocument())
         _ = try await store.append(
@@ -81,7 +88,10 @@ func runAgentTranscriptKeyMigrationChecks() async throws {
                 kind: .paragraph,
                 payload: .paragraph([.text(text)])
             )), agentID: agentID, sessionID: sessionID)
-        _ = try await store.append(.finishEntry(id: entryID), agentID: agentID, sessionID: sessionID)
+        let settled = try await store.append(
+            .finishEntry(id: entryID), agentID: agentID, sessionID: sessionID)
+        try await store.saveSnapshot(
+            agentID: agentID, sessionID: sessionID, document: settled, at: savedAt)
     }
 
     func bodyText(_ document: AgentDocument?) -> String? {
@@ -93,7 +103,8 @@ func runAgentTranscriptKeyMigrationChecks() async throws {
     // 1. One legacy per-tile directory is ADOPTED, with its journal replayed.
     let solo = AgentID(rawValue: UUID(uuidString: "A3000000-0000-4000-8000-000000000001")!)
     let soloLegacy = "managed-\(UUID().uuidString)"
-    try await seed(solo, sessionID: soloLegacy, text: "solo history")
+    let epoch = Date(timeIntervalSince1970: 1_700_000_000)
+    try await seed(solo, sessionID: soloLegacy, text: "solo history", savedAt: epoch)
     let canonical = AgentTranscriptStore.canonicalSessionID(for: solo)
     let beforeMigration = try await store.load(agentID: solo, sessionID: canonical)
     expect(beforeMigration == nil,
@@ -102,9 +113,12 @@ func runAgentTranscriptKeyMigrationChecks() async throws {
     // 2. Two legacy directories: the NEWEST conversation wins, the other is
     //    quarantined rather than deleted. A transcript is the user's own record.
     let duplicated = AgentID(rawValue: UUID(uuidString: "A3000000-0000-4000-8000-000000000002")!)
-    try await seed(duplicated, sessionID: "managed-\(UUID().uuidString)", text: "older reveal")
-    try await Task.sleep(for: .milliseconds(30))
-    try await seed(duplicated, sessionID: "managed-\(UUID().uuidString)", text: "newest reveal")
+    try await seed(
+        duplicated, sessionID: "managed-\(UUID().uuidString)", text: "older reveal",
+        savedAt: epoch)
+    try await seed(
+        duplicated, sessionID: "managed-\(UUID().uuidString)", text: "newest reveal",
+        savedAt: epoch.addingTimeInterval(3600))
 
     let report = try await store.migrateLegacySessionDirectories()
 
@@ -117,7 +131,7 @@ func runAgentTranscriptKeyMigrationChecks() async throws {
         agentID: duplicated,
         sessionID: AgentTranscriptStore.canonicalSessionID(for: duplicated))
     expect(bodyText(adoptedDuplicated) == "newest reveal",
-           "C3: the newest legacy transcript wins when a reveal orphaned earlier ones")
+           "C3: the newest legacy transcript wins when a reveal orphaned earlier ones, got \(String(describing: bodyText(adoptedDuplicated)))")
     expect(report.quarantined[duplicated] == 1,
            "C3: a losing legacy transcript is quarantined, never deleted")
 

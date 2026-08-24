@@ -231,7 +231,7 @@ private func runClaudeCompactBoundaryChecks() {
             maxTokens: nil,
             automaticCompaction: false,
             observedAt: observedAt,
-            source: .unknown("claudeCompactBoundary"),
+            source: .claudeCompactBoundary,
             freshness: .live)),
     ], "ClaudeEventTranslator: compact_boundary must emit one contextWindowUpdated from post_tokens/trigger, got \(compactEvents)")
 

@@ -347,11 +347,17 @@ public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
     /// provider-reported limit.
     case codexRolloutTokenCount
     case providerSessionStats
+    /// claude's `system/compact_boundary` frame. `compact_metadata.post_tokens`
+    /// is the conversation's size AFTER compaction — occupancy stated directly by
+    /// the harness, not a per-turn aggregate to be summed. Without it the ring
+    /// keeps showing the PRE-compaction percentage for the whole following
+    /// interval: a number that is confidently wrong.
+    case claudeCompactBoundary
     case unknown(String)
 
     public var isAuthoritativeForContextOccupancy: Bool {
         switch self {
-        case .providerSessionStats, .codexRolloutTokenCount:
+        case .providerSessionStats, .codexRolloutTokenCount, .claudeCompactBoundary:
             return true
         case .piMessageUsage, .claudeResultUsage, .codexTurnUsage, .unknown:
             return false
@@ -365,6 +371,7 @@ public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
         case .codexTurnUsage: return "codexTurnUsage"
         case .codexRolloutTokenCount: return "codexRolloutTokenCount"
         case .providerSessionStats: return "providerSessionStats"
+        case .claudeCompactBoundary: return "claudeCompactBoundary"
         case .unknown(let raw): return raw
         }
     }
@@ -377,6 +384,7 @@ public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
         case "codexTurnUsage": self = .codexTurnUsage
         case "codexRolloutTokenCount": self = .codexRolloutTokenCount
         case "providerSessionStats": self = .providerSessionStats
+        case "claudeCompactBoundary": self = .claudeCompactBoundary
         default: self = .unknown(raw)
         }
     }

@@ -249,7 +249,7 @@ public struct ClaudeEventTranslator {
             maxTokens: nil,
             automaticCompaction: trigger != "manual",
             observedAt: now(),
-            source: .unknown("claudeCompactBoundary"),
+            source: .claudeCompactBoundary,
             freshness: .live
         ))]
     }
