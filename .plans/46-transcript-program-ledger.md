@@ -694,3 +694,23 @@ images). Iteration 1 published as a PRIVATE artifact:
   `main`, until this gallery (or a later iteration at the same URL) is
   approved. Live checkpoint: `~/Desktop/Array Transcript.app` rebuilt at
   `58336c09` on `~/array-transcript-verify` for a real hand-driven turn.
+
+## Matrix run at `b6dca039`, 2026-08-24 (~02:30, display asleep)
+
+181 legs. Expected KNOWN-RED held (6 of the listed set ran). Five failures —
+`--terminal-tmux-live-integration-check`, `--terminal-theme-fidelity-check`,
+`--terminal-snapshot-tier-check`, `--terminal-fills-tile-check`,
+`--session-resume-check` — are ENVIRONMENTAL, not regressions: bisected by
+rebuilding `6926044b` (yesterday's green matrix) in a worktree and rerunning
+two of them — identical failures ("spawned terminal surface missing",
+timeouts). `system_profiler` reported **Display Asleep: Yes**; these legs
+spawn real Metal-backed Ghostty surfaces. Every transcript/agent leg is
+green. Two follow-ups before any release:
+
+1. One clean matrix run with the display awake (gated behind the gallery
+   verdict anyway).
+2. The summary flagged `--perf-budget-gesture-transition-check` as a
+   KNOWN-RED that PASSED. Do NOT remove it from `MATRIX_KNOWN_RED` on this
+   evidence — a perf gate passing on an idle 2 AM machine with the display
+   asleep is not proof it is fixed (`.plans/44` context). Re-judge on the
+   awake rerun.
