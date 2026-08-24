@@ -1417,3 +1417,187 @@ work, not two.
 runs a non-delegating session end to end and diffs its event shapes against the
 existing `CodexEventTranslator` fixture corpus — answering "is app-server really a
 superset for the path we already ship" without touching production.
+
+## Codex app-server parity harness — the de-risking step, taken (2026-08-24)
+
+Built the harness the previous section called for, without touching
+`CodexAgentRunner` or `CodexEventTranslator` (both stayed read-only). Verdict:
+**single-agent parity holds.** app-server carries a strict superset of the 9
+event shapes the exec-based translator already maps, for the non-delegating
+path Array ships today. The two restructures already named in the decision
+section (streamed deltas, separated token usage) are confirmed live and are
+restructures, not gaps; a third restructure (`turn.failed` folding into
+`turn/completed`) is confirmed too. The ordering hazard is confirmed live and
+independently reproducible — not a one-off.
+
+### The harness
+
+`scripts/codex-appserver-capture.py` drives one `codex app-server` process over
+stdio: `initialize` (`capabilities.experimentalApi: true`, otherwise
+`thread/start`'s `multiAgentMode` field is refused `-32600`) → `initialized` →
+`thread/start` → `turn/start` → poll for the **parent thread's own**
+`turn/completed` (keying on any `turn/completed` conflates a delegating child's
+completion with the parent's — the harness's own first version had this bug) →
+an extra `--drain` window for late child activity → `thread/read`. Raw
+send/recv frames land in an NDJSON capture file with wall-clock timestamps.
+
+Exact argv, mirroring what `CodexAgentRunner.processArguments` already passes
+to `codex exec` (`-c approval_policy=never`, `-c sandbox_mode=workspace-write`,
+never touching `~/.codex/config.toml`):
+
+```
+codex -c approval_policy=never -c sandbox_mode=workspace-write app-server [--enable multi_agent_v2]
+```
+
+(`app-server` takes no `--experimental` flag of its own — that flag belongs to
+`generate-json-schema`; `app-server` itself needs nothing beyond the `-c`
+overrides and `--enable` for the delegating capture.) Model: `gpt-5.6-sol`
+(fully-qualified slug read from `~/.codex/models_cache.json`, never a partial
+pattern). Run against codex-cli 0.148.0, ChatGPT subscription auth, throwaway
+`/tmp` cwds.
+
+One correction the harness needed mid-flight: `thread/start` **mints its own
+thread id** in the response (`result.thread.id`) — it does not accept a
+client-supplied one. The first probe run was 100% `-32600 thread not found`
+because it sent a locally generated UUID to `turn/start`.
+
+### Two committed fixtures
+
+- `Sources/ContinuumRevivedCoreChecks/Fixtures/codex-appserver-single-agent.jsonl`
+  (108 lines) — one turn: run a shell command, then edit a file with the
+  file-editing tool (not a shell redirect), report both. Exercises
+  `commandExecution`, `fileChange`, `reasoning` (empty — reasoning text never
+  streamed live here either, same as exec), `agentMessage` streaming, and
+  `thread/tokenUsage/updated`.
+- `Sources/ContinuumRevivedCoreChecks/Fixtures/codex-appserver-delegating-turn.jsonl`
+  (61 lines) — a real `--enable multi_agent_v2` delegation: parent spawns
+  exactly one subagent to run a slow shell command in the background and
+  finishes its own turn without waiting. Contains real `subAgentActivity`
+  (`kind: started`) and `collabAgentToolCall` items, and the late child
+  completion.
+- `Sources/ContinuumRevivedCoreChecks/Fixtures/codex-exec-single-agent-parity.jsonl`
+  (11 lines) — the SAME two-step task captured separately through
+  `codex exec --json`, for the equivalence check below. Not byte-identical to
+  the app-server fixture (the model is not deterministic across two live
+  runs) — that's why the equivalence check is structural.
+
+All three scrubbed: home paths → `/tmp/fixture`, every thread/turn/item id
+(UUID-shaped or `msg_`/`call_`/`exec-`/`item_`-prefixed) → a stable fake kept
+internally consistent (the delegating fixture's parent→child link still
+resolves after scrubbing — parent mints thread `...0001`, child is
+`...0004`), machine hostname/installation id scrubbed. Grepped clean of
+`/Users/`/`dylan` after scrubbing.
+
+### The ordering hazard, reproduced on demand
+
+Not just present in the original measurement — reliably reproducible by
+prompting the parent to spawn a background subagent and finish its own turn
+without waiting. Timestamped from the committed fixture's original capture:
+
+```
+turn/started    parent
+item/started    subAgentActivity   parent   (kind: started)
+turn/started    child
+turn/completed  parent                                    <- parent's turn closes
+item/started    commandExecution   child
+item/completed  commandExecution   child    (~12s later)  <- the real work
+turn/completed  child                        (~16s later)
+```
+
+### Parity table — the 9 shapes `CodexEventTranslator` handles today
+
+| exec frame | app-server frame(s) | mapping |
+|---|---|---|
+| `thread.started` | `thread/started` (notification) | rename — same role, id lives one level deeper (`params.thread.id` vs `thread_id`) |
+| `turn.started` | `turn/started` | rename; app-server's `turn.id` is a real server-minted id — nothing to synthesize/salt, unlike exec's per-process `runToken` scheme |
+| `item.started` (`command_execution`) | `item/started` (`commandExecution`) | rename (snake_case → camelCase); same fields plus extras (`cwd`, `processId`, `source`, `commandActions`) not needed for the mapping |
+| `item.completed` (`command_execution`) | `item/completed` (`commandExecution`) | rename; `exitCode`/`aggregatedOutput` keys renamed camelCase, same semantics |
+| `item.started` (`file_change`) | `item/started` (`fileChange`) | rename; `changes[].path` is the identical field shape |
+| `item.completed` (`file_change`) | `item/completed` (`fileChange`) | rename |
+| `item.completed` (`agent_message`, whole text) | `item/started` (inert) → N × `item/agentMessage/delta` → `item/completed` (text NOT re-emitted) | **restructure** — real streaming replaces exec's "whole reply arrives at once" (that comment in `CodexEventTranslator` is architecturally false on this transport) |
+| `item.completed` (`reasoning`) | same delta/complete shape as `agentMessage`, keyed by the same `item/agentMessage/delta` method | **restructure**, unconfirmed live either side (reasoning text never streamed in either transport during any capture here) |
+| `turn.completed` (usage inline) | `turn/completed` (no usage) + separate `thread/tokenUsage/updated` (`threadId`/`turnId`-correlated) | **restructure** — usage is unbundled from turn completion, and arrives MORE OFTEN (after every tool call, not just at turn end); `tokenUsage.total` is the same cumulative-accounting figure exec's `usage.input_tokens`/`output_tokens` already are |
+| `turn.failed` (standalone frame, `error.code`) | `turn/completed` with `turn.status == "failed"` and `turn.error` inline | **restructure** — no standalone failure frame; folds into the same notification success uses |
+
+Not part of this ticket's scope (single-agent only), but visible on the wire
+and worth naming for the next ticket: `subAgentActivity`, `collabAgentToolCall`
+(both confirmed live, shapes captured in the delegating fixture),
+`dynamicToolCall`, `imageView`, `sleep`, `imageGeneration`,
+`entered/exitedReviewMode`, `contextCompaction` (none observed live). Also
+unmapped and out of scope: `turn/diff/updated`, `account/rateLimits/updated`,
+`mcpServer/startupStatus/updated`, `remoteControl/status/changed`,
+`thread/status/changed` — none carry timeline-relevant content.
+
+**A genuine improvement, not implemented here:** `thread/tokenUsage/updated`
+also carries `tokenUsage.last` (this request's own tokens, not cumulative) and
+`modelContextWindow` in the SAME notification — exact context occupancy
+without cross-referencing the rollout log the way `CodexRolloutTelemetry` has
+to for exec. Left as a noted opportunity; mapping it would widen scope beyond
+the 9 shapes this ticket committed to.
+
+### The translator sketch and its witness
+
+`Sources/ContinuumRevivedCore/AgentProviders/CodexAppServerEventTranslator.swift`
+— pure, same I5 discipline as `CodexEventTranslator` (command bodies, tool
+output, and paths never cross into an `AgentRuntimeEvent`; generic titles
+`"Shell"`/`"Edit"`), same `AgentRuntimeObservation` side channel for the
+host-local detail store. Does not widen `AgentRuntimeEvent`. Covers the 6
+single-agent-relevant shapes above (leaves the file-edit and command-execution
+resolution logic byte-identical to exec's in spirit); does not attempt the two
+unconfirmed/out-of-scope reasoning and delegation shapes.
+
+`Sources/ContinuumRevivedCoreChecks/CodexAppServerParityChecks.swift`, wired at
+the tail of `main.swift`, in three parts:
+
+1. **Mapping pins** — synthetic app-server JSON-RPC lines (SECRET-marked
+   command/output/path/diff/error-body strings) through the new translator,
+   asserting each of the 9 shapes maps as the table above says, and that none
+   of the secrets cross into an encoded `AgentRuntimeEvent` or even the
+   whitelisted observation channel.
+2. **Single-agent parity equivalence** — replays
+   `codex-exec-single-agent-parity.jsonl` through the EXISTING
+   `CodexEventTranslator` and `codex-appserver-single-agent.jsonl` through the
+   NEW translator, reduces both to a `NormalizedShape` sequence (session/turn/
+   item event kinds, consecutive `contentDelta`s of the same stream collapsed
+   to one block, `tokenUsageUpdated` excluded and checked for presence
+   separately — both restructures are named above, so this equivalence
+   is honest about not requiring exact-count agreement on them) and asserts
+   the two sequences are IDENTICAL. They are: 13 normalized events on each
+   side. `expect(!execEvents.isEmpty && !appServerEvents.isEmpty, …)` guards
+   against the comparison being vacuously true.
+3. **The ordering-hazard witness** — a `NaiveTerminalGateTranslator` built
+   inline in the checks file (mirrors `CodexAgentRunner.emit()`'s real
+   terminal-event gate, per the decision section above: "treats turnCompleted
+   as terminal and fires it at process exit") replays the delegating fixture
+   and is asserted to DROP the child's late `commandExecution` completion and
+   see only one `turn/completed` — **RED**, demonstrated, not hypothetical.
+   The real `CodexAppServerEventTranslator`, which has no such gate (every
+   method switches independently, keyed by the `threadId` the frame itself
+   carries), replays the same fixture and is asserted to keep the child's
+   completion and report BOTH turn completions — **GREEN**.
+
+**Teeth-verified**, both directions: flipping the `commandExecution`
+completed/failed mapping turned the mapping-pin check red (`FAIL: a zero-exit
+commandExecution item/completed must map to .completed`), reverted after
+confirming; reintroducing a real "stop after the primary thread's
+turn/completed" gate into the actual translator (temporarily) turned the
+mapping-pin check red too (a second `turn/completed` in the same test got
+silently dropped) — proving the gate's absence is load-bearing, not
+incidental — reverted after confirming. `swift run ContinuumRevivedCoreChecks`
+green on the reverted state, extending the existing leg (no new matrix leg
+added).
+
+### Verdict
+
+Single-agent parity holds cleanly. The three restructures are real but
+mechanical (rename + re-shape, no lost information for the path Array ships
+today). Nothing here changes the M7/4d.3 conclusion that codex's arm is a
+**runner rewrite, not a flag** — `CodexAgentRunner`'s process-per-turn model,
+its terminal-event gate, its stderr-text resume-failure detection, and its
+no-op `observeSpawnRequests` all still need to change together, and that work
+is still gated on Program B (steering) per the decision section. What this
+ticket buys: the rewrite is no longer a leap of faith about whether app-server
+can carry what exec already carries — it demonstrably can, for the
+non-delegating path, and the one hazard that would silently corrupt a
+delegating session (the parent-closes-before-child ordering) is now pinned by
+a fixture and a witness instead of a paragraph.
