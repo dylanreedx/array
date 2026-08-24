@@ -34,10 +34,13 @@ final class AgentPlanView: NSView {
         var step: AgentPlanStep
     }
 
-    static let headerHeight = CGFloat(Space.xxl + Space.l)
-    static let rowBaseHeight = CGFloat(Space.xxl + Space.s)
+    // Tightened 2026-08-24 alongside the diffstat: a three-step plan cost 40pt
+    // of header, 32pt per row and 16pt of bottom inset. A checklist should read
+    // as a list, not as a panel.
+    static let headerHeight = CGFloat(Space.xxl + Space.xs)
+    static let rowBaseHeight = CGFloat(Space.xl + Space.s)
     static let horizontalInset = CGFloat(Space.l)
-    static let bottomInset = CGFloat(Space.l)
+    static let bottomInset = CGFloat(Space.s)
     static let maximumRows = 100
 
     private(set) var titleLabel = NSTextField(labelWithString: "Plan")
@@ -52,7 +55,9 @@ final class AgentPlanView: NSView {
         wantsLayer = true
         layer?.cornerRadius = CGFloat(AgentTileRadius.artifact)
         layer?.masksToBounds = true
-        titleLabel.font = NSFont.token(.title)
+        // Same call as the diffstat: the steps are the subject, the word
+        // "Plan" is a label.
+        titleLabel.font = NSFont.token(.label)
         titleLabel.lineBreakMode = .byTruncatingTail
         statusLabel.font = NSFont.token(.caption)
         statusLabel.lineBreakMode = .byTruncatingTail

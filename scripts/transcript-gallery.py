@@ -58,10 +58,14 @@ def main() -> int:
     parser.add_argument("--before-label", default="before")
     parser.add_argument("--after-label", default="after")
     parser.add_argument("--changelog", default="")
+    parser.add_argument("--baseline", default="",
+                        help="A THIRD column left of before/after (e.g. the last shipped release).")
+    parser.add_argument("--baseline-label", default="shipped")
     args = parser.parse_args()
 
     before = collect(Path(args.before))
     after = collect(Path(args.after))
+    baseline = collect(Path(args.baseline)) if args.baseline else {}
     if not after:
         print("no semantic-transcript renders in the after directory", file=sys.stderr)
         return 1
@@ -84,22 +88,23 @@ def main() -> int:
                 after_path = after.get((state, width, appearance))
                 if after_path is None:
                     continue
-                before_path = before.get((state, width, appearance))
-                before_cell = (
-                    f'<figure><figcaption>{html.escape(args.before_label)}</figcaption>'
-                    f'<img src="{data_uri(before_path)}" alt="{html.escape(state)} before"></figure>'
-                    if before_path
-                    else '<figure class="absent"><figcaption>'
-                    + html.escape(args.before_label)
-                    + "</figcaption><div class=\"missing\">state did not exist</div></figure>"
-                )
+                def cell(path, label):
+                    if path is None:
+                        return ('<figure class="absent"><figcaption>' + html.escape(label)
+                                + '</figcaption><div class="missing">state did not exist</div></figure>')
+                    return (f'<figure><figcaption>{html.escape(label)}</figcaption>'
+                            f'<img src="{data_uri(path)}" alt="{html.escape(label)}"></figure>')
+
+                cells = []
+                if args.baseline:
+                    cells.append(cell(baseline.get((state, width, appearance)), args.baseline_label))
+                cells.append(cell(before.get((state, width, appearance)), args.before_label))
+                cells.append(cell(after_path, args.after_label))
                 blocks.append(
                     f'<div class="pair" data-appearance="{appearance}">'
-                    f'<div class="pair-label">{appearance} · {width}px</div>'
-                    f'<div class="pair-grid">{before_cell}'
-                    f'<figure><figcaption>{html.escape(args.after_label)}</figcaption>'
-                    f'<img src="{data_uri(after_path)}" alt="{html.escape(state)} after"></figure>'
-                    f"</div></div>"
+                    f'<div class="pair-label">{appearance} \u00b7 {width}px</div>'
+                    f'<div class="pair-grid" data-columns="{len(cells)}">{"".join(cells)}</div>'
+                    f"</div>"
                 )
         note = STATE_NOTES.get(state, "")
         note_html = f'<p class="note">{html.escape(note)}</p>' if note else ""
@@ -144,6 +149,7 @@ section {{ padding: 28px 32px; border-bottom: 1px solid var(--edge); }}
   color: var(--ink-dim); margin-bottom: 8px;
   font-family: "SF Mono", ui-monospace, monospace; }}
 .pair-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }}
+.pair-grid[data-columns="3"] {{ grid-template-columns: repeat(3, 1fr); }}
 figure {{ margin: 0; background: var(--panel); border: 1px solid var(--edge);
   border-radius: 8px; padding: 10px; }}
 figcaption {{ font-size: 12px; color: var(--ink-dim); margin-bottom: 8px;
@@ -155,11 +161,12 @@ figure img {{ max-width: 100%; height: auto; display: block; border-radius: 4px;
 .changelog li {{ margin-bottom: 6px; }}
 .verdict {{ padding: 24px 32px 48px; color: var(--ink-dim); font-size: 13px; max-width: 70ch; }}
 .verdict strong {{ color: var(--good); }}
+@media (max-width: 1100px) {{ .pair-grid[data-columns="3"] {{ grid-template-columns: 1fr; }} }}
 @media (max-width: 760px) {{ .pair-grid {{ grid-template-columns: 1fr; }} }}
 </style>
 <header>
   <h1>Transcript Gallery</h1>
-  <div class="meta">before: {html.escape(args.before_label)} &nbsp;·&nbsp; after: {html.escape(args.after_label)} — semantic-transcript renders from <code>--ui-tour-check</code>, both appearances</div>
+  <div class="meta">{("baseline: " + html.escape(args.baseline_label) + " &nbsp;&middot;&nbsp; ") if args.baseline else ""}before: {html.escape(args.before_label)} &nbsp;·&nbsp; after: {html.escape(args.after_label)} — semantic-transcript renders from <code>--ui-tour-check</code>, both appearances</div>
 </header>
 <nav>{nav}</nav>
 {changelog}

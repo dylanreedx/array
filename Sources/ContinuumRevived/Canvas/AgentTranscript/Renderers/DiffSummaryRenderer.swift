@@ -28,17 +28,26 @@ final class DiffSummaryRenderer: AgentBlockRendering {
 
 @MainActor
 final class AgentDiffSummaryView: NSView {
-    static let headerHeight = CGFloat(Space.xxl + Space.l)
-    static let fileRowHeight = CGFloat(Space.xxl + Space.xs)
-    static let actionHeight = CGFloat(Space.xxl)
+    // Tightened 2026-08-24: the card was 40pt of header + 28pt per file row +
+    // 16pt of bottom inset, so two changed files cost ~120pt of transcript for
+    // four facts. A diffstat is a dense format; this reads as one.
+    static let headerHeight = CGFloat(Space.xxl + Space.xs)
+    static let fileRowHeight = CGFloat(Space.xl + Space.xs)
+    static let actionHeight = CGFloat(Space.xl + Space.xs)
     static let horizontalInset = CGFloat(Space.l)
-    static let bottomInset = CGFloat(Space.l)
+    static let bottomInset = CGFloat(Space.s)
     static let maximumVisibleFiles = 8
+    /// The proportional add/remove bar, git `--stat` style.
+    static let statBarWidth = CGFloat(Space.xxl * 2)
 
     private(set) var titleLabel = NSTextField(labelWithString: "Changes")
     private(set) var countsLabel = NSTextField(labelWithString: "")
     private(set) var summaryLabel = NSTextField(wrappingLabelWithString: "")
+    /// The file NAME labels, one per displayed file (the lab witness counts
+    /// these). Stats and bars are separate, parallel arrays.
     private(set) var fileLabels: [NSTextField] = []
+    private(set) var fileStatLabels: [NSTextField] = []
+    private(set) var fileStatBars: [AgentDiffStatBar] = []
     private(set) var overflowLabel = NSTextField(labelWithString: "")
     private(set) var openReviewButton = AgentOpenReviewButton(frame: .zero)
     private(set) var displayedFiles: [AgentDiffFileSummary] = []
@@ -53,11 +62,14 @@ final class AgentDiffSummaryView: NSView {
         layer?.cornerRadius = CGFloat(AgentTileRadius.artifact)
         layer?.masksToBounds = true
 
-        titleLabel.font = NSFont.token(.title)
-        countsLabel.font = NSFont.token(.caption)
+        // A diffstat's subject is its numbers; the word "Changes" is a label,
+        // not a headline. Uppercase tracking keeps it readable at caption size.
+        titleLabel.font = NSFont.token(.label)
+        countsLabel.font = NSFont.monospacedDigitSystemFont(
+            ofSize: NSFont.token(.caption).pointSize, weight: .regular)
         countsLabel.lineBreakMode = .byTruncatingTail
         summaryLabel.font = NSFont.token(.body)
-        summaryLabel.maximumNumberOfLines = 2
+        summaryLabel.maximumNumberOfLines = 1
         summaryLabel.lineBreakMode = .byWordWrapping
         summaryLabel.isSelectable = true
         overflowLabel.font = NSFont.token(.caption)
@@ -102,7 +114,10 @@ final class AgentDiffSummaryView: NSView {
         setAccessibilityLabel("File changes, \(Self.countsText(payload.files))")
         var children: [NSView] = [titleLabel, countsLabel]
         if !summaryLabel.isHidden { children.append(summaryLabel) }
-        children.append(contentsOf: fileLabels)
+        for (index, label) in fileLabels.enumerated() {
+            children.append(label)
+            if fileStatLabels.indices.contains(index) { children.append(fileStatLabels[index]) }
+        }
         if !overflowLabel.isHidden { children.append(overflowLabel) }
         if !openReviewButton.isHidden { children.append(openReviewButton) }
         setAccessibilityChildren(children)
@@ -130,8 +145,32 @@ final class AgentDiffSummaryView: NSView {
             summaryLabel.frame = NSRect(x: inset, y: y, width: max(1, bounds.width - inset * 2), height: height)
             y += height + CGFloat(Space.s)
         }
-        for label in fileLabels {
-            label.frame = NSRect(x: inset, y: y, width: max(1, bounds.width - inset * 2), height: Self.fileRowHeight)
+        for (index, label) in fileLabels.enumerated() {
+            let barWidth = min(Self.statBarWidth, max(0, bounds.width * 0.22))
+            let statLabel = fileStatLabels.indices.contains(index) ? fileStatLabels[index] : nil
+            let statWidth = statLabel.map {
+                min(ceil($0.intrinsicContentSize.width) + CGFloat(Space.xs), max(0, bounds.width * 0.34))
+            } ?? 0
+            let barX = bounds.width - inset - barWidth
+            if fileStatBars.indices.contains(index) {
+                let bar = fileStatBars[index]
+                let barHeight = CGFloat(Space.s)
+                bar.frame = NSRect(
+                    x: barX, y: y + (Self.fileRowHeight - barHeight) / 2,
+                    width: barWidth, height: barHeight)
+            }
+            if let statLabel {
+                statLabel.frame = NSRect(
+                    x: max(inset, barX - CGFloat(Space.s) - statWidth),
+                    y: y + (Self.fileRowHeight - statLabel.intrinsicContentSize.height) / 2,
+                    width: statWidth, height: statLabel.intrinsicContentSize.height)
+            }
+            let nameLimit = statLabel?.frame.minX ?? barX
+            label.frame = NSRect(
+                x: inset,
+                y: y + (Self.fileRowHeight - label.intrinsicContentSize.height) / 2,
+                width: max(1, nameLimit - inset - CGFloat(Space.s)),
+                height: label.intrinsicContentSize.height)
             y += Self.fileRowHeight
         }
         if !overflowLabel.isHidden {
@@ -140,7 +179,7 @@ final class AgentDiffSummaryView: NSView {
         }
         if !openReviewButton.isHidden {
             openReviewButton.frame = NSRect(
-                x: inset, y: y + CGFloat(Space.s),
+                x: inset, y: y + CGFloat(Space.xs),
                 width: min(132, max(1, bounds.width - inset * 2)), height: Self.actionHeight
             )
         }
@@ -159,6 +198,14 @@ final class AgentDiffSummaryView: NSView {
         countsLabel.textColor = context.tokens.secondaryText.color.nsColor(for: theme)
         overflowLabel.textColor = context.tokens.secondaryText.color.nsColor(for: theme)
         fileLabels.forEach { $0.textColor = context.tokens.primaryText.color.nsColor(for: theme) }
+        let added = AccentToken.accentDone.color.nsColor(for: theme)
+        let removed = AccentToken.accentFailed.color.nsColor(for: theme)
+        for (index, label) in fileStatLabels.enumerated() {
+            guard displayedFiles.indices.contains(index) else { continue }
+            let file = displayedFiles[index]
+            label.attributedStringValue = Self.statText(file, added: added, removed: removed)
+        }
+        for bar in fileStatBars { bar.applyColors(added: added, removed: removed) }
         openReviewButton.contentTintColor = context.tokens.primaryText.color.nsColor(for: theme)
     }
 
@@ -168,7 +215,7 @@ final class AgentDiffSummaryView: NSView {
         if !summary.isEmpty { result += summaryHeight(summary, width: width) + CGFloat(Space.s) }
         result += CGFloat(min(payload.files.count, maximumVisibleFiles)) * fileRowHeight
         if payload.files.count > maximumVisibleFiles { result += fileRowHeight }
-        if payload.canOpenReview { result += CGFloat(Space.s) + actionHeight }
+        if payload.canOpenReview { result += CGFloat(Space.xs) + actionHeight }
         return result + bottomInset
     }
 
@@ -185,18 +232,63 @@ final class AgentDiffSummaryView: NSView {
         return "\(files.count) \(noun) · +\(additions) −\(removals)"
     }
 
+    /// One row per changed file: the path (monospaced, middle-truncated, so a
+    /// long path loses its middle and keeps its filename), the counts in their
+    /// own colours, and a proportional add/remove bar. This is the shape a
+    /// diffstat has everywhere else; the old row concatenated all three into
+    /// one string, which is why the numbers were unreadable.
     private func rebuildFileLabels() {
         fileLabels.forEach { $0.removeFromSuperview() }
-        fileLabels = displayedFiles.map { file in
+        fileStatLabels.forEach { $0.removeFromSuperview() }
+        fileStatBars.forEach { $0.removeFromSuperview() }
+        let theme = effectiveTokenTheme
+        let added = AccentToken.accentDone.color.nsColor(for: theme)
+        let removed = AccentToken.accentFailed.color.nsColor(for: theme)
+        let monoSize = NSFont.token(.label).pointSize
+        var names: [NSTextField] = []
+        var stats: [NSTextField] = []
+        var bars: [AgentDiffStatBar] = []
+        for file in displayedFiles {
             let name = Self.safeSingleLine(file.displayName, fallback: "Changed file")
-            let label = NSTextField(labelWithString: "\(name)   +\(file.addedLineCount) −\(file.removedLineCount)")
-            label.font = NSFont.token(.label)
+            let label = NSTextField(labelWithString: name)
+            label.font = NSFont.monospacedSystemFont(ofSize: monoSize, weight: .regular)
             label.lineBreakMode = .byTruncatingMiddle
             label.isSelectable = true
             label.setAccessibilityLabel("\(name), \(file.addedLineCount) additions, \(file.removedLineCount) removals")
             addSubview(label)
-            return label
+            names.append(label)
+
+            let stat = NSTextField(labelWithString: "")
+            stat.attributedStringValue = Self.statText(file, added: added, removed: removed)
+            stat.lineBreakMode = .byClipping
+            stat.setAccessibilityElement(false)
+            addSubview(stat)
+            stats.append(stat)
+
+            let bar = AgentDiffStatBar(frame: .zero)
+            bar.apply(added: file.addedLineCount, removed: file.removedLineCount)
+            bar.applyColors(added: added, removed: removed)
+            addSubview(bar)
+            bars.append(bar)
         }
+        fileLabels = names
+        fileStatLabels = stats
+        fileStatBars = bars
+    }
+
+    /// "+42 −3" with each number in its own accent. Monospaced digits so the
+    /// columns line up down the card.
+    static func statText(_ file: AgentDiffFileSummary, added: NSColor, removed: NSColor) -> NSAttributedString {
+        let font = NSFont.monospacedDigitSystemFont(
+            ofSize: NSFont.token(.label).pointSize, weight: .medium)
+        let result = NSMutableAttributedString()
+        result.append(NSAttributedString(
+            string: "+\(file.addedLineCount)",
+            attributes: [.font: font, .foregroundColor: added]))
+        result.append(NSAttributedString(
+            string: " \u{2212}\(file.removedLineCount)",
+            attributes: [.font: font, .foregroundColor: removed]))
+        return result
     }
 
     @objc private func openReview(_ sender: Any?) {
@@ -224,6 +316,61 @@ final class AgentDiffSummaryView: NSView {
         let line = value.split(whereSeparator: { $0.isNewline }).first.map(String.init)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return line.isEmpty ? fallback : line
+    }
+}
+
+/// The proportional add/remove bar from a `git --stat` line. Deliberately not
+/// `TokenThemed`: it owns no background and its two colours are assigned by the
+/// parent card's `applyTokens` (hazard 8 — a resting state paints nothing).
+@MainActor
+final class AgentDiffStatBar: NSView {
+    private(set) var addedShare: CGFloat = 0
+    private var addedColor: NSColor = .labelColor
+    private var removedColor: NSColor = .labelColor
+    private var isEmpty = true
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setAccessibilityElement(false)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func apply(added: UInt, removed: UInt) {
+        let total = CGFloat(added) + CGFloat(removed)
+        isEmpty = total == 0
+        addedShare = total == 0 ? 0 : CGFloat(added) / total
+        needsDisplay = true
+    }
+
+    func applyColors(added: NSColor, removed: NSColor) {
+        addedColor = added
+        removedColor = removed
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard !isEmpty, bounds.width > 0 else { return }
+        let radius = bounds.height / 2
+        let addedWidth = (bounds.width * addedShare).rounded()
+        if addedWidth > 0 {
+            addedColor.setFill()
+            NSBezierPath(
+                roundedRect: NSRect(x: 0, y: 0, width: addedWidth, height: bounds.height),
+                xRadius: radius, yRadius: radius
+            ).fill()
+        }
+        let removedWidth = bounds.width - addedWidth
+        if removedWidth > 0 {
+            removedColor.setFill()
+            NSBezierPath(
+                roundedRect: NSRect(x: addedWidth, y: 0, width: removedWidth, height: bounds.height),
+                xRadius: radius, yRadius: radius
+            ).fill()
+        }
     }
 }
 

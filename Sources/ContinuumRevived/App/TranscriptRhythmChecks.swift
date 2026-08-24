@@ -39,6 +39,8 @@ enum TranscriptRhythmChecks {
         try checkFillsAndEdges()
         try checkRealClaudeTurn()
         try checkClustering()
+        try checkFilledSurfacesPadTheirText()
+        try checkDiffStatDensity()
         print(
             "TranscriptRhythmChecks: heading ladder, hanging indents, thematic break, "
             + "turn separation, error/notice divergence, table structure, surface fills, "
@@ -588,6 +590,132 @@ enum TranscriptRhythmChecks {
             throw fail(
                 "real claude turn: \(expandList.qaClusterHeaderCountForChecks) cluster header(s) "
                 + "appeared though every tool row is separated by reasoning"
+            )
+        }
+    }
+
+    // MARK: - Dylan's 2026-08-24 review
+
+    /// Every FILLED surface must inset its own text horizontally.
+    ///
+    /// The user bubble painted its fill from x=0 and laid its prose out from
+    /// x=0 too, so the first glyph sat against the corner radius — the one
+    /// thing Dylan could see in the gallery. Asserted for every filled
+    /// renderer view, in one shared coordinate space, because "the bubble is
+    /// padded" is a property of the class of filled surfaces and a new one
+    /// would otherwise repeat the bug.
+    private static func checkFilledSurfacesPadTheirText() throws {
+        for state in [AgentTranscriptReviewState.mixed, .realClaudeTurn, .turnBoundary] {
+            let (surface, views) = try render(state)
+            let space = surface.transcript.collectionView
+            for view in views {
+                guard let colour = view.layer?.backgroundColor, colour.alpha > 0.01 else { continue }
+                let isFilledContentSurface = view is UserPromptView || view is CodeBlockView
+                    || view is AgentPlanView || view is AgentDiffSummaryView
+                    || view is AgentRequestView || view is CommandOutputView
+                guard isFilledContentSurface else { continue }
+                let fill = view.convert(view.bounds, to: space)
+                guard fill.width > 1 else { continue }
+                // An NSTextView carries its own padding as textContainerInset,
+                // which its BOUNDS include — measuring the frame alone reports a
+                // padded code block as flush. Offset to the first glyph's origin.
+                let texts = descendantTextViews(of: view).compactMap { text -> (CGFloat, String)? in
+                    // A hidden or empty label keeps whatever frame it last had
+                    // (often .zero) and is not on screen — it cannot be the
+                    // gutter. Only VISIBLE text with content counts.
+                    guard !text.isHiddenOrHasHiddenAncestor else { return nil }
+                    if let field = text as? NSTextField,
+                       field.stringValue.isEmpty, field.attributedStringValue.length == 0 { return nil }
+                    if let textView = text as? NSTextView, textView.string.isEmpty { return nil }
+                    let rect = text.convert(text.bounds, to: space)
+                    guard rect.width > 1 else { return nil }
+                    // An NSTextView carries its own padding as textContainerInset,
+                    // which its BOUNDS include — measuring the frame alone reports
+                    // a padded code block as flush.
+                    if let textView = text as? NSTextView {
+                        return (rect.minX + textView.textContainerInset.width
+                            + (textView.textContainer?.lineFragmentPadding ?? 0),
+                            "\(type(of: text))")
+                    }
+                    return (rect.minX, "\(type(of: text)):'\(((text as? NSTextField)?.stringValue ?? "").prefix(24))'")
+                }
+                guard let leftmost = texts.min(by: { $0.0 < $1.0 }) else { continue }
+                let padding = leftmost.0 - fill.minX
+                guard padding >= CGFloat(Space.s) else {
+                    throw fail(
+                        "\(state.rawValue): \(type(of: view)) paints a fill from \(fill.minX) but its "
+                        + "text starts at \(leftmost.0) (\(leftmost.1)) — only \(padding)pt of gutter. "
+                        + "A filled surface must inset its own text, or the first glyph sits on the "
+                        + "corner radius."
+                    )
+                }
+            }
+        }
+    }
+
+    private static func descendantTextViews(of view: NSView) -> [NSView] {
+        var found: [NSView] = []
+        func walk(_ candidate: NSView) {
+            if candidate is NSTextField || candidate is NSTextView { found.append(candidate) }
+            candidate.subviews.forEach(walk)
+        }
+        view.subviews.forEach(walk)
+        return found
+    }
+
+    /// The change summary must read as a DIFFSTAT, not as a panel: the counts
+    /// carry their own colours, the digits are monospaced so columns line up,
+    /// and the whole card stays dense enough that two changed files do not cost
+    /// a third of the viewport.
+    private static func checkDiffStatDensity() throws {
+        let (_, views) = try render(.mixed)
+        guard let diff = views.compactMap({ $0 as? AgentDiffSummaryView }).first else {
+            throw fail("diffstat: the mixed fixture rendered no diff summary")
+        }
+        guard diff.fileStatLabels.count == diff.fileLabels.count, !diff.fileLabels.isEmpty else {
+            throw fail(
+                "diffstat: \(diff.fileLabels.count) name label(s) but "
+                + "\(diff.fileStatLabels.count) stat label(s) — every file row owns both"
+            )
+        }
+        // Additions and removals are DIFFERENT colours in one run: a single
+        // concatenated string cannot satisfy this.
+        var colours: Set<String> = []
+        for stat in diff.fileStatLabels {
+            let attributed = stat.attributedStringValue
+            guard attributed.length > 0 else {
+                throw fail("diffstat: a stat label rendered empty")
+            }
+            attributed.enumerateAttribute(
+                .foregroundColor, in: NSRange(location: 0, length: attributed.length)
+            ) { value, _, _ in
+                if let colour = (value as? NSColor)?.cgColor.hexForChecks { colours.insert(colour) }
+            }
+            guard attributed.string.contains("+"), attributed.string.contains("\u{2212}") else {
+                throw fail("diffstat: a stat label lost its +/− counts: '\(attributed.string)'")
+            }
+        }
+        guard colours.count >= 2 else {
+            throw fail(
+                "diffstat: additions and removals render in \(colours.count) colour(s) "
+                + "(\(colours.sorted())) — a diffstat distinguishes them"
+            )
+        }
+        // The proportional bar exists and is actually proportioned.
+        guard diff.fileStatBars.count == diff.fileLabels.count,
+              diff.fileStatBars.allSatisfy({ $0.addedShare > 0 && $0.addedShare <= 1 }) else {
+            throw fail(
+                "diffstat: expected one proportional bar per file with a real share, got "
+                + "\(diff.fileStatBars.map(\.addedShare))"
+            )
+        }
+        // Density: the card must not spend more than ~34pt per changed file
+        // once its header, summary line and action row are accounted for.
+        let perFile = diff.bounds.height / CGFloat(max(1, diff.fileLabels.count))
+        guard perFile <= 60 else {
+            throw fail(
+                "diffstat: \(diff.bounds.height)pt of card for \(diff.fileLabels.count) file(s) "
+                + "(\(perFile)pt each) — the summary is heavier than the change it summarizes"
             )
         }
     }

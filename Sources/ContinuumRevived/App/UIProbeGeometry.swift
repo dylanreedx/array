@@ -7393,8 +7393,18 @@ enum UIProbeGeometry {
               view.proseView.textFields.allSatisfy({ !$0.stringValue.contains("You ·") && $0.stringValue != "You" }) else {
             throw fail("user prompt lost a semantic Markdown row, selection, or drew a permanent You metadata caption")
         }
-        guard view.proseView.frame.minX == view.bounds.minX else {
-            throw fail("user prompt became right-aligned instead of sharing the prose leading edge")
+        // Corrected 2026-08-24: this pinned `minX == bounds.minX` exactly, which
+        // is the flush layout Dylan saw — the first glyph against the bubble's
+        // corner radius. The assertion's INTENT is "not a right-aligned
+        // percentage-width chat bubble", and a SYMMETRIC gutter satisfies it.
+        let leadingGutter = view.proseView.frame.minX - view.bounds.minX
+        let trailingGutter = view.bounds.maxX - view.proseView.frame.maxX
+        guard leadingGutter >= CGFloat(Space.s),
+              abs(leadingGutter - trailingGutter) <= 0.5 else {
+            throw fail(
+                "user prompt must sit in a symmetric gutter inside its own fill, not flush against "
+                + "it and not right-aligned: leading \(leadingGutter), trailing \(trailingGutter)"
+            )
         }
         try expectUserPromptReadableMeasure(
             proseWidth: view.proseView.frame.width, surfaceWidth: view.bounds.width
@@ -7432,11 +7442,15 @@ enum UIProbeGeometry {
         surfaceWidth: CGFloat
     ) throws {
         guard surfaceWidth > 0 else { throw fail("user prompt surface has zero width") }
-        let ratio = proseWidth / surfaceWidth
-        guard ratio >= 0.99 else {
+        // Corrected 2026-08-24: `ratio >= 0.99` forbade ANY gutter, which is the
+        // flush text Dylan saw. The rule is "the full readable measure INSIDE
+        // the card's own gutter, not a narrow chat bubble": the prose spans
+        // exactly the inset width, and nothing narrower.
+        let expected = surfaceWidth - UserPromptView.horizontalInset * 2
+        guard abs(proseWidth - expected) <= 0.5 else {
             throw fail(String(
-                format: "user prompt became a narrow bubble: prose spans %.3f of its %.0fpt surface",
-                ratio, surfaceWidth
+                format: "user prompt is not the full readable measure inside its gutter: prose %.1fpt, expected %.1fpt of a %.0fpt surface",
+                proseWidth, expected, surfaceWidth
             ))
         }
     }

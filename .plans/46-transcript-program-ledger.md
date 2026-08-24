@@ -714,3 +714,53 @@ green. Two follow-ups before any release:
    evidence — a perf gate passing on an idle 2 AM machine with the display
    asleep is not proof it is fixed (`.plans/44` context). Re-judge on the
    awake rerun.
+
+## Gallery iteration 1 → Dylan's verdict, and the fixes, 2026-08-24
+
+**Verdict on iteration 1: rejected, three specific complaints.** All three were
+real and all three are fixed with witnesses that would have caught them.
+
+1. **"no padding on the left of the user input box."** `UserPromptView` painted
+   its fill from x=0 and laid its prose out from x=0 too, so the first glyph sat
+   on the corner radius. Now a `Space.l` gutter both sides, and the prose
+   MEASURES against the inset width (or a padded bubble clips its last line).
+   New witness `checkFilledSurfacesPadTheirText` asserts the property for the
+   whole CLASS of filled surfaces — user bubble, code, plan, diff, approval,
+   command output — in one shared coordinate space, on three fixtures. Teeth:
+   reverting the inset flips it, naming the view and the text run.
+   Two measurement traps it had to handle: an `NSTextView` carries its padding
+   as `textContainerInset` (its bounds do NOT show it), and hidden/empty labels
+   keep stale `.zero` frames — both produced false positives first.
+2. **"transcript review and changes might be too big."** The plan and diff
+   cards were 40pt headers with 28–32pt rows and 16pt bottom insets. Diff card
+   ~186pt → ~133pt (28% smaller), plan ~152pt → ~120pt (21%); both titles drop
+   from a 15pt `.title` to a `.label` — the steps and the numbers are the
+   subject, "Plan"/"Changes" is a label.
+3. **"i want a proper diff styling."** The diff row was one concatenated string
+   (`"Foo.swift   +42 −3"`) in the body font. Now a real diffstat: the path in
+   monospace with MIDDLE truncation (a long path keeps its filename), `+42` in
+   `accentDone` and `−3` in `accentFailed` as separate runs with monospaced
+   digits so columns align, and a proportional add/remove bar
+   (`AgentDiffStatBar`, git `--stat` style, not `TokenThemed` — it owns no
+   background and the parent card assigns its two colours). Witness
+   `checkDiffStatDensity`: one name label AND one stat label AND one bar per
+   file, ≥2 distinct colours inside the stat runs, both counts present, every
+   bar's share in (0,1], and ≤60pt of card per changed file. Teeth: painting
+   removals with the additions colour flips it.
+
+**Two defect-pinning assertions corrected, not relaxed** (both in
+`UIProbeGeometry`, both pinning the exact flush layout that caused complaint 1):
+`view.proseView.frame.minX == view.bounds.minX` → a SYMMETRIC gutter of at
+least `Space.s` (the intent was "not a right-aligned percentage bubble", which
+a symmetric inset satisfies); and `proseWidth / surfaceWidth >= 0.99` → the
+prose spans exactly `surfaceWidth - 2 * horizontalInset` (the intent was "the
+full readable measure, not a narrow chat bubble").
+
+**Gallery iteration 2** adds a THIRD column: the last SHIPPED release
+(`6926044b~1`), because iteration 1 compared only against the milestone Dylan
+had already rejected — "the redo from before doesn't look much different" is
+exactly right when the baseline is itself the rejected work. Same artifact URL.
+
+Legs green after: rhythm (incl. both new witnesses), ui-geometry, oracle,
+tool-detail, ui-probe, ui-pixel, first-paint, incremental-refresh, supervisor,
+CoreChecks.

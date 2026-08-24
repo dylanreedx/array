@@ -50,8 +50,13 @@ final class UserPromptRenderer: AgentBlockRendering {
     }
 
     func measure(block: AgentBlock, width: CGFloat, context: AgentRenderContext) -> CGFloat {
-        proseRenderer.measure(block: block, width: width, context: context)
-            + UserPromptView.verticalInset * 2
+        // The prose measures against the INSET width, or a bubble whose text is
+        // padded would clip its last line.
+        proseRenderer.measure(
+            block: block,
+            width: max(1, width - UserPromptView.horizontalInset * 2),
+            context: context
+        ) + UserPromptView.verticalInset * 2
     }
 
     func updateAccessibility(view: NSView, block: AgentBlock, context: AgentRenderContext) {
@@ -65,6 +70,10 @@ final class UserPromptRenderer: AgentBlockRendering {
 @MainActor
 final class UserPromptView: NSView {
     static let verticalInset = CGFloat(Space.m)
+    /// The bubble's text must not sit against its own rounded edge — the fill
+    /// started at x=0 and so did the prose, so the first glyph touched the
+    /// corner radius. Matches the artifact renderers' `Space.l` gutter.
+    static let horizontalInset = CGFloat(Space.l)
     static let fillToken = SurfaceToken.cardUserMessage
     static let cornerRadius = CGFloat(AgentTileRadius.artifact)
 
@@ -112,9 +121,9 @@ final class UserPromptView: NSView {
     override func layout() {
         super.layout()
         proseView.frame = NSRect(
-            x: bounds.minX,
+            x: bounds.minX + Self.horizontalInset,
             y: bounds.minY + Self.verticalInset,
-            width: bounds.width,
+            width: max(1, bounds.width - Self.horizontalInset * 2),
             height: max(0, bounds.height - Self.verticalInset * 2)
         )
         proseView.layoutSubtreeIfNeeded()
