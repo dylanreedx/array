@@ -14,6 +14,7 @@ import Foundation
 func runClaudeAgentBackendChecks() {
     runClaudeTranslatorMappingChecks()
     runClaudeTranslatorGateChecks()
+    runClaudeCompactBoundaryChecks()
     runClaudeRunnerArgvChecks()
     runClaudeBackendPolicyChecks()
     runClaudeCatalogUnionChecks()
@@ -182,6 +183,59 @@ private func runClaudeTranslatorGateChecks() {
     ], "ClaudeEventTranslator: error result must fail the turn with the subtype and skip zero usage, got \(errorEvents)")
 
     print("ClaudeEventTranslator gate checks passed: failed-resume shape silent, error results carry the subtype only")
+}
+
+// B6.1: `compact_boundary` used to fall through the `subtype == "init"` gate
+// with every other non-init system frame, so an automatic compaction left the
+// context ring showing the pre-compaction percentage indefinitely. Replayed
+// against the real frame captured live (claude 2.1.241, `/compact` on a
+// resumed session; see Fixtures/claude-compact-boundary.jsonl) — with the old
+// `guard subtype == "init" else { return [] }` restored, this fixture
+// produces ZERO events (not "wrong number"), which is the failure this check
+// must catch.
+private func runClaudeCompactBoundaryChecks() {
+    let fixtureURL = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/claude-compact-boundary.jsonl", isDirectory: false)
+    guard let text = try? String(contentsOf: fixtureURL, encoding: .utf8) else {
+        expect(false, "ClaudeEventTranslator: the committed compact_boundary capture is missing")
+        return
+    }
+    let lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+    expect(lines.count == 3,
+           "ClaudeEventTranslator: the compact_boundary fixture must carry init + an ordinary status frame + the boundary, got \(lines.count) lines")
+
+    let sid = "00000000-0000-4000-8000-000000000001"
+    let observedAt = Date(timeIntervalSinceReferenceDate: 456)
+    var translator = ClaudeEventTranslator(runToken: "run1", now: { observedAt })
+
+    // Line 1 (init) starts the session/turn as usual.
+    let initEvents = translator.translate(line: lines[0])
+    expect(initEvents.count == 3,
+           "ClaudeEventTranslator: init must still emit its usual 3 events, got \(initEvents.count)")
+
+    // Line 2: an ORDINARY system frame (subtype "status", not init and not
+    // compact_boundary) must still emit nothing — the fix must not widen the
+    // gate beyond the one new subtype.
+    let statusEvents = translator.translate(line: lines[1])
+    expect(statusEvents.isEmpty,
+           "ClaudeEventTranslator: an ordinary system/status frame must still emit nothing, got \(statusEvents)")
+
+    // Line 3: the real compact_boundary frame must produce exactly one
+    // contextWindowUpdated event, built from `compact_metadata.post_tokens`
+    // and `trigger`.
+    let compactEvents = translator.translate(line: lines[2])
+    expect(compactEvents == [
+        .contextWindowUpdated(threadId: sid, snapshot: AgentContextWindowSnapshot(
+            usedTokens: 2140,
+            maxTokens: nil,
+            automaticCompaction: false,
+            observedAt: observedAt,
+            source: .unknown("claudeCompactBoundary"),
+            freshness: .live)),
+    ], "ClaudeEventTranslator: compact_boundary must emit one contextWindowUpdated from post_tokens/trigger, got \(compactEvents)")
+
+    print("ClaudeEventTranslator compact_boundary checks passed: the real captured frame maps to one contextWindowUpdated, an ordinary system frame still emits nothing")
 }
 
 private func runClaudeRunnerArgvChecks() {

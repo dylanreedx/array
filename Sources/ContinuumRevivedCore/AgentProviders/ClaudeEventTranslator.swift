@@ -69,7 +69,11 @@ public struct ClaudeEventTranslator {
 
         switch type {
         case "system":
-            guard (object["subtype"] as? String) == "init" else { return [] }
+            let subtype = object["subtype"] as? String
+            if subtype == "compact_boundary" {
+                return translateCompactBoundary(object)
+            }
+            guard subtype == "init" else { return [] }
             if let id = object["session_id"] as? String {
                 threadId = id
             }
@@ -219,6 +223,35 @@ public struct ClaudeEventTranslator {
             ))
         }
         return events
+    }
+
+    // MARK: - system/compact_boundary (context reset)
+
+    /// A compaction just rewrote this session's history: the LLM's context
+    /// dropped from `pre_tokens` to `post_tokens`. Without this, the ring kept
+    /// showing the pre-compaction percentage for the whole following interval
+    /// — a confidently wrong number — because the guard above discarded every
+    /// non-init system frame. Captured live (claude 2.1.241, `/compact` on a
+    /// resumed session): `compact_metadata.trigger`/`pre_tokens`/`post_tokens`
+    /// are real fields; `messages_summarized`, speculated from binary strings,
+    /// did not appear and is not read.
+    //
+    // No `maxTokens` here: this frame states the new token count, not the
+    // model's window size, so the ring's denominator is left to whatever the
+    // next authoritative reading provides — never fabricated from this event.
+    private func translateCompactBoundary(_ object: [String: Any]) -> [AgentRuntimeEvent] {
+        guard let metadata = object["compact_metadata"] as? [String: Any],
+              let postTokens = Self.intValue(metadata["post_tokens"])
+        else { return [] }
+        let trigger = metadata["trigger"] as? String
+        return [.contextWindowUpdated(threadId: threadId, snapshot: AgentContextWindowSnapshot(
+            usedTokens: postTokens,
+            maxTokens: nil,
+            automaticCompaction: trigger != "manual",
+            observedAt: now(),
+            source: .unknown("claudeCompactBoundary"),
+            freshness: .live
+        ))]
     }
 
     // MARK: - result (usage + turn completion)
