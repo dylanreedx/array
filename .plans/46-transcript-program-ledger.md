@@ -679,3 +679,18 @@ completed turn sweeps to completed. Teeth: emptying the sweep loop flipped it.
 
 Full guarded sweep green (rhythm, geometry, oracle, tool-detail, probe,
 pixel, first-paint, incremental-refresh, supervisor, CoreChecks).
+
+## Redo milestone — S7 gallery iteration 1, 2026-08-24
+
+`scripts/transcript-gallery.py` pairs two `--ui-tour-check` runs into one
+self-contained page (semantic-transcript surface, both appearances, data-URI
+images). Iteration 1 published as a PRIVATE artifact:
+
+- **URL (stable across iterations):**
+  https://claude.ai/code/artifact/5a4f0368-43cc-440d-bfeb-28b374091c68
+- before: `6926044b` (the rejected milestone, rendered from a worktree)
+- after: `58336c09` (redo S1–S6)
+- gallery published → **Dylan verdict: PENDING.** No release cut, no push to
+  `main`, until this gallery (or a later iteration at the same URL) is
+  approved. Live checkpoint: `~/Desktop/Array Transcript.app` rebuilt at
+  `58336c09` on `~/array-transcript-verify` for a real hand-driven turn.
