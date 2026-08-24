@@ -20,7 +20,7 @@ import Foundation
 //
 // Negative tests observed red at exit 1 with the final code are quoted at each
 // assertion.
-func runRoleRegistryChecks() {
+func runRoleRegistryChecks() throws {
     let repoRoot = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()          // ContinuumRevivedCoreChecks
         .deletingLastPathComponent()          // Sources
@@ -185,6 +185,8 @@ func runRoleRegistryChecks() {
     expect(fixture.toolsArguments(roleId: "no-such-role").isEmpty && fixture.toolsArguments(roleId: nil).isEmpty,
            "RoleRegistry: an unknown or absent role must pass no --tools")
 
+    try runRoleRegistryHarnessConvergenceChecks()
+
     print("RoleRegistry checks passed: \(listed.count) roles listed from this repository (all \(ticketRoles.count) the ticket names, code-scout's frontmatter verbatim), a nameless .md excluded, an unknown id nil-and-throwing, no role inheriting verbatim, and the harness/managed-agent paths agreeing on \(harnessFlags.count) flags")
 }
 
@@ -197,4 +199,84 @@ private func flagPairs(in arguments: [String], flags: [String]) -> [String: Stri
         pairs[argument] = arguments[index + 1]
     }
     return pairs
+}
+
+
+/// C0b — one role concept, three roots, and the reason pi subagents were dead.
+///
+/// All three harnesses declare subagent roles as a directory of markdown files
+/// with YAML frontmatter and differ only in the dot-dir. And pi's spawn verb was
+/// denied to every roled agent because each role file declares a `tools:`
+/// allowlist and none of them lists `spawn_agent` — the fourth of four
+/// independent reasons pi spawning shipped unreachable.
+func runRoleRegistryHarnessConvergenceChecks() throws {
+    let temp = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-role-harness-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: temp) }
+
+    let piModel = AgentModelConfig.modelOptions(for: .pi)[1]
+    func writeRole(_ harness: AgentHarness, name: String, tools: String) throws {
+        let directory = temp.appendingPathComponent(
+            RoleRegistry.directoryName(for: harness), isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try """
+        ---
+        name: \(name)
+        model: \(piModel)
+        reasoning: high
+        tools: \(tools)
+        ---
+        Body.
+        """.write(to: directory.appendingPathComponent("\(name).md"), atomically: true, encoding: .utf8)
+    }
+
+    try writeRole(.pi, name: "pi-orchestrator", tools: "read, grep")
+    try writeRole(.claudeCode, name: "claude-reviewer", tools: "Read, Grep")
+    try writeRole(.codex, name: "codex-reader", tools: "read")
+
+    // Each harness reads ITS OWN directory and never another's. A registry that
+    // fell back across roots would run a claude role's instructions under pi.
+    for (harness, expected, foreign) in [
+        (AgentHarness.pi, "pi-orchestrator", "claude-reviewer"),
+        (AgentHarness.claudeCode, "claude-reviewer", "codex-reader"),
+        (AgentHarness.codex, "codex-reader", "pi-orchestrator"),
+    ] {
+        let registry = RoleRegistry(projectRoot: temp, harness: harness)
+        expect(registry.role(id: expected) != nil,
+               "C0b: \(harness.rawValue) must read \(RoleRegistry.directoryName(for: harness))")
+        expect(registry.role(id: foreign) == nil,
+               "C0b: \(harness.rawValue) must not read another harness's role directory")
+    }
+
+    // The default stays pi, so every existing caller keeps its meaning.
+    expect(RoleRegistry(projectRoot: temp).role(id: "pi-orchestrator") != nil,
+           "C0b: the default harness must remain pi for existing callers")
+
+    // C8(4): the spawn verb is appended by ARRAY, at Array's own depth cap, so a
+    // role file never has to track a code-level limit it cannot see.
+    let pi = RoleRegistry(projectRoot: temp, harness: .pi)
+    expect(pi.toolsArguments(roleId: "pi-orchestrator") == ["--tools", "read, grep"],
+           "C8: the default must stay the role's own allowlist, unchanged")
+    expect(pi.toolsArguments(roleId: "pi-orchestrator", allowingSpawn: false) == ["--tools", "read, grep"],
+           "C8: below the cap the spawn verb must be withheld, not refused later")
+    expect(pi.toolsArguments(roleId: "pi-orchestrator", allowingSpawn: true)
+            == ["--tools", "read, grep, spawn_agent"],
+           "C8: a roled pi agent allowed to spawn must actually be offered spawn_agent")
+
+    // Idempotent: a role that already lists the verb is not given it twice.
+    try writeRole(.pi, name: "pi-spawner", tools: "read, spawn_agent")
+    let respawned = RoleRegistry(projectRoot: temp, harness: .pi)
+    expect(respawned.toolsArguments(roleId: "pi-spawner", allowingSpawn: true)
+            == ["--tools", "read, spawn_agent"],
+           "C8: a role that already declares spawn_agent must not have it appended twice")
+
+    // A role with no tool list keeps having none: pi's default already includes
+    // spawning and inventing a list would NARROW what the agent may do.
+    expect(respawned.toolsArguments(roleId: "no-such-role", allowingSpawn: true).isEmpty,
+           "C8: an unknown role must still pass no --tools even when spawning is allowed")
+
+    expect(RoleRegistry.spawnToolNames(for: .claudeCode) == ["Agent", "Task"],
+           "C0b: claude's spawn verb must be detected under BOTH its current and former name")
+
+    print("RoleRegistry harness convergence checks passed: three roots read independently, pi default preserved, and Array's depth cap withholds the spawn verb instead of refusing it")
 }

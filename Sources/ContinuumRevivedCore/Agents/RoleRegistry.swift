@@ -16,10 +16,40 @@ import Foundation
 public struct RoleRegistry: Sendable {
     /// Where a project keeps its roles, relative to its root. The same directory
     /// `HarnessRoleRunBuilder` runs `--system-prompt` out of.
+    ///
+    /// Kept as pi's path because every existing caller means pi; a harness-aware
+    /// caller asks `directoryName(for:)` instead.
     public static let directoryName = ".pi/agents"
+
+    /// All three harnesses declare subagent roles the same way — a directory of
+    /// markdown files with YAML frontmatter — and differ only in which dot-dir
+    /// they read. That is one concept with three roots, not three integrations.
+    ///
+    /// codex additionally accepts `.toml` role files and `[agents.<name>]` blocks
+    /// in `config.toml`; neither is parsed here, and a codex project that uses
+    /// only those reports no roles rather than guessing at them.
+    public static func directoryName(for harness: AgentHarness) -> String {
+        switch harness {
+        case .pi: return ".pi/agents"
+        case .claudeCode: return ".claude/agents"
+        case .codex: return ".codex/agents"
+        }
+    }
+
+    /// The tool a harness exposes for spawning a subagent. claude renamed `Task`
+    /// to `Agent`, so detection must accept both — which is exactly why Array's
+    /// tool-detail whitelist is key-driven rather than tool-driven.
+    public static func spawnToolNames(for harness: AgentHarness) -> [String] {
+        switch harness {
+        case .pi: return ["spawn_agent"]
+        case .claudeCode: return ["Agent", "Task"]
+        case .codex: return ["spawn_agent"]
+        }
+    }
 
     private let ordered: [HarnessRole]
     private let byID: [String: HarnessRole]
+    private let harness: AgentHarness
 
     /// Scans `<projectRoot>/.pi/agents/*.md` once, at init.
     ///
@@ -29,8 +59,10 @@ public struct RoleRegistry: Sendable {
     /// permissive (it falls back to a display name derived from the filename), so
     /// the requirement is applied here rather than by loosening the parser other
     /// callers share.
-    public init(projectRoot: URL, fileManager: FileManager = .default) {
-        let directory = projectRoot.appendingPathComponent(RoleRegistry.directoryName, isDirectory: true)
+    public init(projectRoot: URL, harness: AgentHarness = .pi, fileManager: FileManager = .default) {
+        self.harness = harness
+        let directory = projectRoot.appendingPathComponent(
+            RoleRegistry.directoryName(for: harness), isDirectory: true)
         let declared = ((try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [])
             .map(\.path)
             .filter { HarnessRoleParser.frontmatter(path: $0)["name"] != nil }
@@ -51,8 +83,32 @@ public struct RoleRegistry: Sendable {
     /// unknown role, or one that names no tools, is what Pi ran with before roles
     /// carried a list.
     public func toolsArguments(roleId: String?) -> [String] {
+        toolsArguments(roleId: roleId, allowingSpawn: false)
+    }
+
+    /// `allowingSpawn` is C8's fix for the reason pi subagents were unreachable
+    /// even once the extension loaded: **all twelve `.pi/agents/*.md` roles declare
+    /// a `tools:` allowlist and none lists `spawn_agent`**, so the tool was denied
+    /// for every roled agent. Appending it here rather than hand-editing twelve
+    /// markdown files is deliberate — those files would then have to stay in sync
+    /// with a code-level depth cap they cannot see.
+    ///
+    /// The caller passes `allowingSpawn: depth < maxSpawnDepth`, so **Array's cap
+    /// is the binding one and the model is never offered a verb it cannot use.**
+    /// That is the same shape as withholding claude's `Agent` tool with
+    /// `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`: better than refusing after the fact,
+    /// because the model never proposes what it cannot have.
+    ///
+    /// A role that declares NO tool list is left alone: pi's default is not ours
+    /// to invent, and it already includes spawning.
+    public func toolsArguments(roleId: String?, allowingSpawn: Bool) -> [String] {
         guard let roleId, let tools = byID[roleId]?.tools else { return [] }
-        return ["--tools", tools]
+        guard allowingSpawn, let spawnTool = RoleRegistry.spawnToolNames(for: harness).first else {
+            return ["--tools", tools]
+        }
+        let declared = tools.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard !declared.contains(spawnTool) else { return ["--tools", tools] }
+        return ["--tools", (declared + [spawnTool]).joined(separator: ", ")]
     }
 
     /// What a role runs with: the flags an agent started for it must carry.

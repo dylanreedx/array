@@ -11535,7 +11535,7 @@ runSpawnRequestChecks()
 
 // Ticket: docs/38-tickets/90-agent-ux/P2D.3-role-registry.md — roles get a home,
 // and a spawn's role decides what it runs with.
-runRoleRegistryChecks()
+try runRoleRegistryChecks()
 
 // Ticket: docs/38-tickets/90-agent-ux/P4.3-auto-settle-inactivity.md — the
 // window that lets the inbox drain itself, and the rule it feeds.
