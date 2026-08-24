@@ -1,9 +1,13 @@
 import AppKit
 import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
+import ContinuumRevivedCore
 
-/// Bounded semantic summary of provider-supplied change metadata. Raw unified
-/// diff text is deliberately neither parsed nor displayed here.
+/// Bounded semantic summary of provider-supplied change metadata, plus a
+/// bounded inline preview of the raw unified diff (A3): the raw text is
+/// parsed with `GitDiffParser.parse` and rendered with the same pure
+/// `DiffReviewTileNSView.render` the full diff-review tile uses, truncated to
+/// `AgentDiffSummaryView.bodyMaxLines` with a "+N more lines" affordance.
 @MainActor
 final class DiffSummaryRenderer: AgentBlockRendering {
     let kind: AgentBlockKind = .diff
@@ -12,12 +16,12 @@ final class DiffSummaryRenderer: AgentBlockRendering {
 
     func update(view: NSView, block: AgentBlock, context: AgentRenderContext) {
         guard let view = view as? AgentDiffSummaryView, case let .diff(payload) = block.payload else { return }
-        view.apply(blockID: block.id, payload: payload, context: context)
+        view.apply(blockID: block.id, revision: block.revision, payload: payload, context: context)
     }
 
     func measure(block: AgentBlock, width: CGFloat, context: AgentRenderContext) -> CGFloat {
         guard case let .diff(payload) = block.payload else { return 0 }
-        return AgentDiffSummaryView.measuredHeight(payload: payload, width: width)
+        return AgentDiffSummaryView.measuredHeight(blockID: block.id, revision: block.revision, payload: payload, width: width)
     }
 
     func updateAccessibility(view: NSView, block: AgentBlock, context: AgentRenderContext) {
@@ -39,6 +43,12 @@ final class AgentDiffSummaryView: NSView {
     static let maximumVisibleFiles = 8
     /// The proportional add/remove bar, git `--stat` style.
     static let statBarWidth = CGFloat(Space.xxl * 2)
+    /// A3: the bound on the inline raw-diff preview. Lines beyond this become
+    /// the "+N more lines" affordance rather than growing the card unbounded
+    /// (`performance.md` trap 1's lesson one level up — the number of hunks a
+    /// provider hands back is as unbounded as a file the user opens).
+    static let bodyMaxLines = 30
+    static let bodySpacing = CGFloat(Space.s)
 
     private(set) var titleLabel = NSTextField(labelWithString: "Changes")
     private(set) var countsLabel = NSTextField(labelWithString: "")
@@ -51,12 +61,31 @@ final class AgentDiffSummaryView: NSView {
     private(set) var overflowLabel = NSTextField(labelWithString: "")
     private(set) var openReviewButton = AgentOpenReviewButton(frame: .zero)
     private(set) var displayedFiles: [AgentDiffFileSummary] = []
+    /// A3: one view for the whole inline diff body (`performance.md` trap 1 —
+    /// never one view per line). Non-editable, non-scrolling; the enclosing
+    /// transcript scrolls. Created lazily, once, the first time a block
+    /// actually has parseable diff text.
+    private(set) var bodyTextView: NSTextView?
+    private(set) var bodyOverflowLabel = NSTextField(labelWithString: "")
+    private var bodyShownLineCount = 0
+    private var bodyTotalLineCount = 0
+    /// The (blockID, revision) this view last actually rendered the body for,
+    /// so a repeated `apply` with unchanged content skips re-rendering the
+    /// attributed string (the parse itself is cached separately, at the type
+    /// level, in `Self.parsedModel`).
+    private var lastRenderedBodyRevision: UInt64?
+    private var lastRenderedBodyTheme: TokenTheme?
+    /// `performance.md` trap 2: the body's bounding-rect measurement is cached
+    /// by the width it was taken at, exactly like `FileMarkdownDocumentView`'s
+    /// fix, and only invalidated when `syncBody` actually re-renders.
+    private var bodyHeightCache: (width: CGFloat, height: CGFloat)?
     /// The stat label's measured width, one per pooled row, kept alongside the
     /// pool instead of re-typeset from `layout()`. Populated only when the row's
     /// file summary actually changed (`syncFileRows`).
     private var statLabelWidths: [CGFloat] = []
 
     private var blockID: AgentNodeID?
+    private var revision: UInt64 = 0
     private var payload = AgentDiffPayload(text: "")
     private var context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
 
@@ -69,11 +98,104 @@ final class AgentDiffSummaryView: NSView {
     private(set) var qaFileViewsCreatedForChecks = 0
     private(set) var qaStatMeasurementsForChecks = 0
     private(set) var qaFrameWritesForChecks = 0
+    /// A3: every time `bodyTextView` is actually allocated (must be at most 1
+    /// per view instance) and every time the body's attributed string is
+    /// actually re-rendered from a parsed model (must be 0 across a repeated
+    /// apply of the same blockID/revision/theme).
+    private(set) var qaDiffBodyViewsCreatedForChecks = 0
+    private(set) var qaDiffBodyRendersForChecks = 0
+    /// Every time `layout()` actually took the body's bounding-rect
+    /// measurement (a cache miss on `bodyHeightCache`) rather than reusing it.
+    private(set) var qaDiffBodyHeightMeasurementsForChecks = 0
 
     func qaResetCountersForChecks() {
         qaFileViewsCreatedForChecks = 0
         qaStatMeasurementsForChecks = 0
         qaFrameWritesForChecks = 0
+        qaDiffBodyViewsCreatedForChecks = 0
+        qaDiffBodyRendersForChecks = 0
+        qaDiffBodyHeightMeasurementsForChecks = 0
+    }
+
+    /// A3: the parse cache is keyed by (blockID, revision), not scoped to one
+    /// view instance — `DiffSummaryRenderer` (and so this cache) is the single
+    /// process-wide singleton every transcript surface shares
+    /// (`AgentBlockRendererRegistry.production`), and `measuredHeight` below is
+    /// a `static func` with no view to hold instance state. Bounded FIFO so an
+    /// arbitrarily long session cannot grow this without limit.
+    private static var parseCache: [AgentNodeID: (revision: UInt64, model: GitDiffModel)] = [:]
+    private static var parseCacheOrder: [AgentNodeID] = []
+    private static let parseCacheCapacity = 128
+    private(set) static var qaDiffParsesForChecks = 0
+
+    static func qaResetDiffParseCacheForChecks() {
+        parseCache.removeAll()
+        parseCacheOrder.removeAll()
+        qaDiffParsesForChecks = 0
+    }
+
+    private static func parsedModel(blockID: AgentNodeID, revision: UInt64, text: String) -> GitDiffModel {
+        if let cached = parseCache[blockID], cached.revision == revision {
+            return cached.model
+        }
+        let model = GitDiffParser.parse(text)
+        qaDiffParsesForChecks += 1
+        if parseCache[blockID] == nil {
+            parseCacheOrder.append(blockID)
+            if parseCacheOrder.count > parseCacheCapacity {
+                let oldest = parseCacheOrder.removeFirst()
+                parseCache.removeValue(forKey: oldest)
+            }
+        }
+        parseCache[blockID] = (revision, model)
+        return model
+    }
+
+    /// Truncates a parsed diff to `bodyMaxLines` hunk lines (added/removed/
+    /// context together — a diff's "line" is one row of the body, whichever
+    /// kind), reusing `DiffReviewTileNSView.render` for the actual attributed
+    /// text so the inline preview and the full review tile share one painter.
+    /// Cheap to redo per apply/measure once the parse itself is cached: it
+    /// walks at most `bodyMaxLines` lines of output.
+    private static func truncatedBody(
+        model: GitDiffModel, theme: TokenTheme
+    ) -> (attributed: NSAttributedString, shown: Int, total: Int) {
+        var shown = 0
+        var total = 0
+        var files: [GitDiffFile] = []
+        for file in model.files {
+            var hunks: [GitDiffHunk] = []
+            for hunk in file.hunks {
+                total += hunk.lines.count
+                guard shown < bodyMaxLines else { continue }
+                let remaining = bodyMaxLines - shown
+                let taken = Array(hunk.lines.prefix(remaining))
+                shown += taken.count
+                hunks.append(GitDiffHunk(
+                    oldStart: hunk.oldStart, oldCount: hunk.oldCount,
+                    newStart: hunk.newStart, newCount: hunk.newCount,
+                    header: hunk.header, lines: taken
+                ))
+            }
+            files.append(GitDiffFile(
+                oldPath: file.oldPath, newPath: file.newPath,
+                change: file.change, hunks: hunks, isBinary: file.isBinary
+            ))
+        }
+        let attributed = DiffReviewTileNSView.render(GitDiffModel(files: files), theme: theme)
+        return (attributed, shown, total)
+    }
+
+    /// Wraps at `width` — colour never affects this, so both `layout()` (cached
+    /// per width) and the static `measuredHeight` (cached one layer up, by
+    /// `AgentBlockMeasurementCache`) can call it directly.
+    private static func measuredBodyHeight(_ attributed: NSAttributedString, width: CGFloat) -> CGFloat {
+        guard attributed.length > 0 else { return 0 }
+        let rect = attributed.boundingRect(
+            with: NSSize(width: width, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        )
+        return ceil(rect.height)
     }
 
     override init(frame frameRect: NSRect) {
@@ -94,6 +216,7 @@ final class AgentDiffSummaryView: NSView {
         summaryLabel.lineBreakMode = .byWordWrapping
         summaryLabel.isSelectable = true
         overflowLabel.font = NSFont.token(.caption)
+        bodyOverflowLabel.font = NSFont.token(.caption)
         openReviewButton.target = self
         openReviewButton.action = #selector(openReview(_:))
 
@@ -101,6 +224,7 @@ final class AgentDiffSummaryView: NSView {
         addSubview(countsLabel)
         addSubview(summaryLabel)
         addSubview(overflowLabel)
+        addSubview(bodyOverflowLabel)
         addSubview(openReviewButton)
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
@@ -111,8 +235,9 @@ final class AgentDiffSummaryView: NSView {
 
     override var isFlipped: Bool { true }
 
-    func apply(blockID: AgentNodeID, payload: AgentDiffPayload, context: AgentRenderContext) {
+    func apply(blockID: AgentNodeID, revision: UInt64 = 0, payload: AgentDiffPayload, context: AgentRenderContext) {
         self.blockID = blockID
+        self.revision = revision
         self.payload = payload
         self.context = context
         let previousFiles = displayedFiles
@@ -132,9 +257,78 @@ final class AgentDiffSummaryView: NSView {
         overflowLabel.isHidden = overflow == 0
         openReviewButton.isHidden = !payload.canOpenReview
         identifier = NSUserInterfaceItemIdentifier("agent.diff.\(blockID.rawValue)")
+        syncBody(blockID: blockID, revision: revision, text: payload.text)
         applyAccessibility(payload: payload)
         applyTokens()
         needsLayout = true
+    }
+
+    /// A3. Renders at most `bodyMaxLines` of `payload.text` (parsed via the
+    /// cached `Self.parsedModel`) into the single `bodyTextView`, and updates
+    /// the "+N more lines" affordance. Skips the parse-cache lookup entirely
+    /// when there is no text, and skips re-rendering the attributed string
+    /// when this exact (blockID, revision, theme) was already the last thing
+    /// rendered — the repeated-apply case the count witness asserts against.
+    private func syncBody(blockID: AgentNodeID, revision: UInt64, text: String) {
+        guard !text.isEmpty else {
+            bodyTextView?.isHidden = true
+            bodyOverflowLabel.isHidden = true
+            bodyShownLineCount = 0
+            bodyTotalLineCount = 0
+            bodyHeightCache = nil
+            lastRenderedBodyRevision = nil
+            lastRenderedBodyTheme = nil
+            return
+        }
+        let theme = effectiveTokenTheme
+        if lastRenderedBodyRevision == revision, lastRenderedBodyTheme == theme, bodyTextView != nil {
+            bodyTextView?.isHidden = false
+            bodyOverflowLabel.isHidden = bodyTotalLineCount <= bodyShownLineCount
+            return
+        }
+        let model = Self.parsedModel(blockID: blockID, revision: revision, text: text)
+        let rendered = Self.truncatedBody(model: model, theme: theme)
+        bodyShownLineCount = rendered.shown
+        bodyTotalLineCount = rendered.total
+        qaDiffBodyRendersForChecks += 1
+        guard rendered.shown > 0 || rendered.total > 0 else {
+            // Nothing parsed (a malformed/opaque `text`, or a diff with no
+            // hunks) — never fall back to showing the raw string.
+            bodyTextView?.isHidden = true
+            bodyOverflowLabel.isHidden = true
+            bodyHeightCache = nil
+            lastRenderedBodyRevision = revision
+            lastRenderedBodyTheme = theme
+            return
+        }
+        let view = bodyTextViewCreatingIfNeeded()
+        view.textStorage?.setAttributedString(rendered.attributed)
+        view.isHidden = false
+        bodyHeightCache = nil
+        bodyOverflowLabel.stringValue = rendered.total > rendered.shown
+            ? "+\(rendered.total - rendered.shown) more lines" : ""
+        bodyOverflowLabel.isHidden = rendered.total <= rendered.shown
+        lastRenderedBodyRevision = revision
+        lastRenderedBodyTheme = theme
+    }
+
+    private func bodyTextViewCreatingIfNeeded() -> NSTextView {
+        if let bodyTextView { return bodyTextView }
+        let view = NSTextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.isRichText = true
+        view.drawsBackground = false
+        view.textContainerInset = .zero
+        view.textContainer?.lineFragmentPadding = 0
+        view.textContainer?.widthTracksTextView = true
+        view.isVerticallyResizable = false
+        view.isHorizontallyResizable = false
+        view.setAccessibilityRole(.staticText)
+        addSubview(view)
+        bodyTextView = view
+        qaDiffBodyViewsCreatedForChecks += 1
+        return view
     }
 
     func applyAccessibility(payload: AgentDiffPayload) {
@@ -146,6 +340,8 @@ final class AgentDiffSummaryView: NSView {
             if fileStatLabels.indices.contains(index) { children.append(fileStatLabels[index]) }
         }
         if !overflowLabel.isHidden { children.append(overflowLabel) }
+        if let bodyTextView, !bodyTextView.isHidden { children.append(bodyTextView) }
+        if !bodyOverflowLabel.isHidden { children.append(bodyOverflowLabel) }
         if !openReviewButton.isHidden { children.append(openReviewButton) }
         setAccessibilityChildren(children)
     }
@@ -222,6 +418,29 @@ final class AgentDiffSummaryView: NSView {
             place(overflowLabel, NSRect(x: inset, y: y, width: max(1, bounds.width - inset * 2), height: Self.fileRowHeight))
             y += Self.fileRowHeight
         }
+        // A3: the inline diff body. Its height is measured once per width
+        // (`bodyHeightCache`), never here — `performance.md` trap 2. A pan,
+        // zoom or neighbour-resize that keeps the same width reuses the cache
+        // on every one of these `layout()` passes.
+        if let bodyTextView, !bodyTextView.isHidden {
+            y += Self.bodySpacing
+            let bodyWidth = max(1, bounds.width - inset * 2)
+            let bodyHeight: CGFloat
+            if let cache = bodyHeightCache, cache.width == bodyWidth {
+                bodyHeight = cache.height
+            } else {
+                bodyHeight = Self.measuredBodyHeight(bodyTextView.attributedString(), width: bodyWidth)
+                bodyHeightCache = (bodyWidth, bodyHeight)
+                qaDiffBodyHeightMeasurementsForChecks += 1
+            }
+            place(bodyTextView, NSRect(x: inset, y: y, width: bodyWidth, height: bodyHeight))
+            y += bodyHeight
+        }
+        if !bodyOverflowLabel.isHidden {
+            y += CGFloat(Space.xs)
+            place(bodyOverflowLabel, NSRect(x: inset, y: y, width: max(1, bounds.width - inset * 2), height: Self.fileRowHeight))
+            y += Self.fileRowHeight
+        }
         if !openReviewButton.isHidden {
             place(openReviewButton, NSRect(
                 x: inset, y: y + CGFloat(Space.xs),
@@ -242,6 +461,7 @@ final class AgentDiffSummaryView: NSView {
         summaryLabel.textColor = context.tokens.primaryText.color.nsColor(for: theme)
         countsLabel.textColor = context.tokens.secondaryText.color.nsColor(for: theme)
         overflowLabel.textColor = context.tokens.secondaryText.color.nsColor(for: theme)
+        bodyOverflowLabel.textColor = context.tokens.secondaryText.color.nsColor(for: theme)
         fileLabels.forEach { $0.textColor = context.tokens.primaryText.color.nsColor(for: theme) }
         let added = AccentToken.accentDone.color.nsColor(for: theme)
         let removed = AccentToken.accentFailed.color.nsColor(for: theme)
@@ -252,14 +472,30 @@ final class AgentDiffSummaryView: NSView {
         }
         for bar in fileStatBars { bar.applyColors(added: added, removed: removed) }
         openReviewButton.contentTintColor = context.tokens.primaryText.color.nsColor(for: theme)
+        // The diff body's colours are baked into its attributed string (same
+        // reason `DiffReviewTileNSView.applyTokens` re-renders): re-run
+        // `syncBody` so an appearance flip repaints it. The parse stays cached;
+        // only the bounded, cheap re-render happens again.
+        if let blockID {
+            syncBody(blockID: blockID, revision: revision, text: payload.text)
+        }
     }
 
-    static func measuredHeight(payload: AgentDiffPayload, width: CGFloat) -> CGFloat {
+    static func measuredHeight(blockID: AgentNodeID, revision: UInt64, payload: AgentDiffPayload, width: CGFloat) -> CGFloat {
         var result = headerHeight
         let summary = safeSummary(payload.summary)
         if !summary.isEmpty { result += summaryHeight(summary, width: width) + CGFloat(Space.s) }
         result += CGFloat(min(payload.files.count, maximumVisibleFiles)) * fileRowHeight
         if payload.files.count > maximumVisibleFiles { result += fileRowHeight }
+        if !payload.text.isEmpty {
+            let model = parsedModel(blockID: blockID, revision: revision, text: payload.text)
+            let rendered = truncatedBody(model: model, theme: .dark)
+            if rendered.shown > 0 {
+                let bodyWidth = max(1, width - horizontalInset * 2)
+                result += bodySpacing + measuredBodyHeight(rendered.attributed, width: bodyWidth)
+                if rendered.total > rendered.shown { result += CGFloat(Space.xs) + fileRowHeight }
+            }
+        }
         if payload.canOpenReview { result += CGFloat(Space.xs) + actionHeight }
         return result + bottomInset
     }

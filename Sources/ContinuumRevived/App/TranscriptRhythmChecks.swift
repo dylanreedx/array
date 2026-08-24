@@ -43,6 +43,7 @@ enum TranscriptRhythmChecks {
         try checkFilledSurfacesPadTheirText()
         try checkDiffStatDensity()
         try checkDiffSummaryReusesFileRows()
+        try checkDiffBodyRendersInline()
         try checkReasoningExpands()
         try checkRowsShareOneTextColumn()
         try checkLiveDocumentsCarryTimestamps()
@@ -964,6 +965,148 @@ enum TranscriptRhythmChecks {
             throw fail(
                 "diff-summary reuse: \(view.qaStatMeasurementsForChecks) stat measurement(s) "
                 + "across 10 unchanged layout passes -- layout() is measuring text"
+            )
+        }
+    }
+
+    // MARK: - A3
+
+    /// `AgentDiffPayload.text` carries the raw unified diff and, before this
+    /// ticket, was parsed and shown nowhere -- only the safe file summary
+    /// rendered. This drives `AgentDiffSummaryView.apply`/`layout` directly
+    /// with a REAL unified diff (every other diff fixture in this file and in
+    /// `ComponentLab` uses opaque/malformed compatibility text on purpose, to
+    /// prove raw text is never dumped verbatim -- this one proves the parsed
+    /// structure DOES render). Asserts: added/removed lines carry the right
+    /// tokens in both appearances, the body truncates at
+    /// `AgentDiffSummaryView.bodyMaxLines` with the correct "+N more lines"
+    /// affordance, and re-applying the identical (blockID, revision) creates
+    /// zero new body views and re-parses zero times -- extending the same
+    /// work-counting shape `checkDiffSummaryReusesFileRows` (A2) established,
+    /// per `performance.md` traps 1-3 one layer up: the diff body itself.
+    private static func checkDiffBodyRendersInline() throws {
+        // 40 added lines: bodyMaxLines (30) leaves room for the leading context
+        // + deletion line and 28 of the 40 additions, so the overflow must read
+        // "+12 more lines" (42 hunk lines total, 30 shown).
+        let addedLines = (1...40).map { "+added line \($0)" }.joined(separator: "\n")
+        let diffText = """
+        diff --git a/Sample.swift b/Sample.swift
+        index aaaaaaa..bbbbbbb 100644
+        --- a/Sample.swift
+        +++ b/Sample.swift
+        @@ -1,2 +1,41 @@
+         context line
+        -removed line
+        \(addedLines)
+        """
+        let blockID = AgentNodeID(rawValue: "diff-body-1")!
+        AgentDiffSummaryView.qaResetDiffParseCacheForChecks()
+
+        func makeContext(appearance: TokenTheme) -> AgentRenderContext {
+            AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: appearance)
+        }
+        let payload = AgentDiffPayload(
+            text: diffText, summary: "Sample change",
+            files: [.init(displayName: "Sample.swift", addedLineCount: 40, removedLineCount: 1)],
+            canOpenReview: false
+        )
+
+        let view = AgentDiffSummaryView()
+        // Off-window: `effectiveTokenTheme` (which the view's colouring uses,
+        // matching `applyTokens`/`syncFileRows`) reads the real AppKit
+        // appearance, not `context.appearance` — force it, the same way
+        // `UIProbeGeometry`/`ComponentLab` do for an offline theme sweep.
+        view.appearance = NSAppearance(named: .darkAqua)
+        view.apply(blockID: blockID, revision: 1, payload: payload, context: makeContext(appearance: .dark))
+        view.frame = NSRect(x: 0, y: 0, width: 480, height: 1400)
+        view.layout()
+
+        guard let body = view.bodyTextView, !body.isHidden else {
+            throw fail("diff body: no inline body view appeared for a real unified diff")
+        }
+        guard body.string.contains("added line 28\n") || body.string.hasSuffix("added line 28"),
+              !body.string.contains("added line 29") else {
+            throw fail(
+                "diff body: did not truncate at \(AgentDiffSummaryView.bodyMaxLines) shown lines "
+                + "(expected line 28 present, 29 absent)"
+            )
+        }
+        guard !view.bodyOverflowLabel.isHidden, view.bodyOverflowLabel.stringValue == "+12 more lines" else {
+            throw fail(
+                "diff body: overflow affordance wrong, got '\(view.bodyOverflowLabel.stringValue)' "
+                + "hidden=\(view.bodyOverflowLabel.isHidden)"
+            )
+        }
+        guard view.qaDiffBodyViewsCreatedForChecks == 1 else {
+            throw fail("diff body: first apply should allocate exactly one body view, got \(view.qaDiffBodyViewsCreatedForChecks)")
+        }
+
+        func foregroundColor(containing needle: String) throws -> NSColor {
+            guard let range = body.string.range(of: needle) else {
+                throw fail("diff body: expected substring '\(needle)' not found while checking colour")
+            }
+            let nsRange = NSRange(range, in: body.string)
+            guard let color = body.textStorage?.attribute(.foregroundColor, at: nsRange.location, effectiveRange: nil) as? NSColor else {
+                throw fail("diff body: no foreground colour attribute at '\(needle)'")
+            }
+            return color
+        }
+
+        for theme: TokenTheme in [.dark, .light] {
+            // `AgentDiffSummaryView` colours the body via `effectiveTokenTheme`
+            // (the view's real AppKit appearance), matching every other colour
+            // in this view (`applyTokens`, `syncFileRows`) — not
+            // `context.appearance`. Off-window, that has to be forced the same
+            // way `UIProbeGeometry`/`ComponentLab` force it for a theme sweep.
+            view.appearance = NSAppearance(named: theme == .dark ? .darkAqua : .aqua)
+            view.apply(blockID: blockID, revision: 1, payload: payload, context: makeContext(appearance: theme))
+            view.layoutSubtreeIfNeeded()
+            let addedColor = try foregroundColor(containing: "added line 1\n")
+            let removedColor = try foregroundColor(containing: "removed line\n")
+            let expectedAdded = AccentToken.accentDone.color.nsColor(for: theme)
+            let expectedRemoved = AccentToken.accentFailed.color.nsColor(for: theme)
+            guard addedColor.usingColorSpace(.sRGB) == expectedAdded.usingColorSpace(.sRGB) else {
+                throw fail("diff body (\(theme)): added line did not carry the accentDone token colour")
+            }
+            guard removedColor.usingColorSpace(.sRGB) == expectedRemoved.usingColorSpace(.sRGB) else {
+                throw fail("diff body (\(theme)): removed line did not carry the accentFailed token colour")
+            }
+        }
+
+        // Re-applying the IDENTICAL (blockID, revision, theme) must create zero
+        // new body views, re-render the attributed string zero times, and
+        // re-parse the diff zero times -- the count witness the ticket asked
+        // for, in the same shape as A2's file-row counters.
+        view.qaResetCountersForChecks()
+        let parsesBeforeRepeat = AgentDiffSummaryView.qaDiffParsesForChecks
+        view.apply(blockID: blockID, revision: 1, payload: payload, context: makeContext(appearance: .light))
+        guard view.qaDiffBodyViewsCreatedForChecks == 0 else {
+            throw fail("diff body: an unchanged re-apply created \(view.qaDiffBodyViewsCreatedForChecks) new body view(s)")
+        }
+        guard view.qaDiffBodyRendersForChecks == 0 else {
+            throw fail("diff body: an unchanged re-apply re-rendered the body \(view.qaDiffBodyRendersForChecks) time(s)")
+        }
+        guard AgentDiffSummaryView.qaDiffParsesForChecks == parsesBeforeRepeat else {
+            throw fail(
+                "diff body: an unchanged re-apply re-parsed the diff "
+                + "(\(AgentDiffSummaryView.qaDiffParsesForChecks - parsesBeforeRepeat) more parse(s)) "
+                + "-- the (blockID, revision) parse cache is not being hit"
+            )
+        }
+
+        // Ten no-op layout passes at the same width must not re-measure the
+        // body's bounding rect -- `performance.md` trap 2, one layer up from A2.
+        view.layout()
+        view.qaResetCountersForChecks()
+        for _ in 0..<10 {
+            view.needsLayout = true
+            view.layout()
+        }
+        guard view.qaDiffBodyHeightMeasurementsForChecks == 0 else {
+            throw fail(
+                "diff body: \(view.qaDiffBodyHeightMeasurementsForChecks) bounding-rect "
+                + "measurement(s) across 10 unchanged layout passes -- layout() is measuring "
+                + "the body text instead of reusing bodyHeightCache"
             )
         }
     }
