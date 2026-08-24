@@ -55,6 +55,22 @@ public actor AgentTranscriptStore {
         self.compactionMutationCount = max(1, compactionMutationCount)
     }
 
+    /// The ONE storage key for an agent's transcript.
+    ///
+    /// It used to be the TILE's thread id (`"managed-<tileId>"`), which is not
+    /// merely unreadable but UNSTABLE: revealing an existing agent mints a fresh
+    /// tile id, so every reveal orphaned the previous directory and the agent
+    /// appeared to lose its history. The reader, meanwhile, asked for the literal
+    /// `"thread-main"` and therefore never found anything at all.
+    ///
+    /// A transcript belongs to the AGENT; a tile is one view of it. This is
+    /// deliberately the same string `AgentSupervisor.sessionId(for:)` hands pi as
+    /// `--session-id`, and that function now calls this one so the two cannot
+    /// drift apart into two names for one conversation.
+    public nonisolated static func canonicalSessionID(for agentID: AgentID) -> String {
+        "array-agent-\(agentID.rawValue.uuidString)"
+    }
+
     public func saveSnapshot(
         agentID: AgentID,
         sessionID: String,
@@ -161,6 +177,116 @@ public actor AgentTranscriptStore {
     private func directory(agentID: AgentID, sessionID: String) -> URL {
         root.appendingPathComponent(agentID.rawValue.uuidString, isDirectory: true)
             .appendingPathComponent(Self.sessionKey(sessionID), isDirectory: true)
+    }
+
+    // MARK: - Migration to the canonical key
+
+    public struct MigrationReport: Equatable, Sendable {
+        /// Agents whose one legacy directory was adopted under the canonical key.
+        public var adopted: [AgentID] = []
+        /// Agents that already stored under the canonical key; nothing moved.
+        public var alreadyCanonical: [AgentID] = []
+        /// Agents where several legacy directories existed: the newest by its own
+        /// `savedAt` won and this many were quarantined rather than deleted.
+        public var quarantined: [AgentID: Int] = [:]
+        /// Directories that could not be read at all; left exactly as they were.
+        public var skipped: [String] = []
+
+        public init() {}
+    }
+
+    /// Adopts pre-2026-08-24 per-tile transcript directories under
+    /// `canonicalSessionID(for:)`. **Migrates, never wipes**, and is idempotent:
+    /// running it twice reports the second run as `alreadyCanonical`.
+    ///
+    /// The legacy session id is read out of the archive itself rather than
+    /// reverse-engineered from the directory name, because the name is an FNV-1a
+    /// hash and is not invertible. Recovery goes through the ordinary `load`,
+    /// so an uncompacted journal's mutations survive the move; the document is
+    /// then written afresh under the canonical key. That also rewrites the
+    /// `sessionID` field INSIDE both files, without which `load` would refuse the
+    /// migrated transcript with `identityMismatch` — a rename alone is not a
+    /// migration here.
+    @discardableResult
+    public func migrateLegacySessionDirectories() throws -> MigrationReport {
+        var report = MigrationReport()
+        let manager = FileManager.default
+        guard let agentDirs = try? manager.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+        ) else { return report }
+
+        for agentDir in agentDirs {
+            guard (try? agentDir.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true,
+                  let uuid = UUID(uuidString: agentDir.lastPathComponent)
+            else { continue }
+            let agentID = AgentID(rawValue: uuid)
+            let canonical = Self.sessionKey(Self.canonicalSessionID(for: agentID))
+            guard let sessionDirs = try? manager.contentsOfDirectory(
+                at: agentDir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+            ) else {
+                report.skipped.append(agentDir.lastPathComponent)
+                continue
+            }
+            let legacy = sessionDirs.filter {
+                (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+                    && $0.lastPathComponent != canonical
+                    && !$0.lastPathComponent.hasPrefix("quarantine-")
+            }
+            let hasCanonical = sessionDirs.contains { $0.lastPathComponent == canonical }
+            if legacy.isEmpty {
+                if hasCanonical { report.alreadyCanonical.append(agentID) }
+                continue
+            }
+
+            // Newest first, by the archive's OWN `savedAt` rather than by file
+            // mtime: a backup rewrite touches the file without advancing the
+            // conversation, and the newest conversation is the one to keep.
+            let dated: [(url: URL, archive: AgentTranscriptArchive)] = legacy.compactMap { url in
+                let reader = AtomicWriter(
+                    backupsDirectory: url.appendingPathComponent("backups", isDirectory: true),
+                    retainedBackups: 2,
+                    prettyPrint: false)
+                guard let archive: AgentTranscriptArchive = try? reader.read(
+                    at: url.appendingPathComponent("snapshot.json"))
+                else { return nil }
+                return (url, archive)
+            }.sorted { $0.archive.savedAt > $1.archive.savedAt }
+
+            guard let winner = dated.first, !hasCanonical else {
+                // Either nothing readable, or a canonical transcript already
+                // exists and wins by construction. Quarantine, never delete: a
+                // transcript is the user's own record of their work.
+                var count = 0
+                for url in legacy {
+                    let destination = agentDir.appendingPathComponent(
+                        "quarantine-\(url.lastPathComponent)", isDirectory: true)
+                    guard (try? manager.moveItem(at: url, to: destination)) != nil else { continue }
+                    count += 1
+                }
+                if count > 0 { report.quarantined[agentID] = count }
+                if hasCanonical { report.alreadyCanonical.append(agentID) }
+                continue
+            }
+
+            let recovered = (try? load(agentID: agentID, sessionID: winner.archive.sessionID))
+                ?? winner.archive.document
+            try saveSnapshot(
+                agentID: agentID,
+                sessionID: Self.canonicalSessionID(for: agentID),
+                document: recovered
+            )
+            report.adopted.append(agentID)
+            var quarantinedCount = 0
+            for entry in dated.dropFirst() {
+                let destination = agentDir.appendingPathComponent(
+                    "quarantine-\(entry.url.lastPathComponent)", isDirectory: true)
+                guard (try? manager.moveItem(at: entry.url, to: destination)) != nil else { continue }
+                quarantinedCount += 1
+            }
+            if quarantinedCount > 0 { report.quarantined[agentID] = quarantinedCount }
+            try? manager.removeItem(at: winner.url)
+        }
+        return report
     }
 
     private static func sessionKey(_ value: String) -> String {
