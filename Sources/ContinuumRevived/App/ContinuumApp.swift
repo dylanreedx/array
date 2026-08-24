@@ -3919,6 +3919,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // pixel baseline and tour render therefore photographs a motionless
         // transcript — a frame captured mid-fade would be a flapping baseline.
         AgentTranscriptMotion.isEnabled = { true }
+        // C3: adopt any pre-2026-08-24 per-tile transcript directory under the
+        // agent-stable key. Detached and non-blocking because it only ever moves
+        // history the app is not yet reading, and idempotent, so a crash halfway
+        // through costs the next launch one more pass and nothing else. Runs on
+        // the interactive path only, for the same reason motion does.
+        Task.detached { [store = agentTranscriptStore] in
+            _ = try? await store.migrateLegacySessionDirectories()
+        }
         launchStartTime = QAPerf.timestamp()
         qaPerf = QAPerf()
         navKeymap = NavKeymap.resolve()
@@ -8451,11 +8459,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             },
             transcriptDocument: { rawAgentID in
                 let agentID = AgentID(rawValue: rawAgentID)
+                // C3: this asked for the literal "thread-main" while the writer
+                // used the TILE's thread id, so the companion never once found a
+                // transcript. Both ends now name the agent.
+                let sessionID = AgentTranscriptStore.canonicalSessionID(for: agentID)
                 guard let document = try? await transcriptStore.load(
                     agentID: agentID,
-                    sessionID: "thread-main"
+                    sessionID: sessionID
                 ) else { return nil }
-                return (sessionID: "thread-main", document: document)
+                return (sessionID: sessionID, document: document)
             },
             stopAgent: { rawAgentID in
                 await MainActor.run {
@@ -11789,8 +11801,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         view.onRevealAgent = { [weak self] childID, _ in
             _ = self?.revealAgentFromInbox(childID.rawValue)
         }
-        view.onSemanticTranscriptUpdated = { [weak self] persistedAgentID, sessionID, document, final in
+        view.onSemanticTranscriptUpdated = { [weak self] persistedAgentID, _, document, final in
             guard let self else { return }
+            // C3: the tile's thread id is a runtime EVENT-ROUTING concept and is
+            // minted fresh on every reveal, so using it as the storage key
+            // orphaned the previous directory each time. Storage names the agent.
+            let sessionID = AgentTranscriptStore.canonicalSessionID(for: persistedAgentID)
             self.transcriptPersistenceTasks[persistedAgentID]?.cancel()
             self.transcriptPersistenceTasks[persistedAgentID] = Task { [weak self] in
                 if !final { try? await Task.sleep(for: .milliseconds(200)) }
