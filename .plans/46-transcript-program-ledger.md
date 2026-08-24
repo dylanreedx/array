@@ -1310,3 +1310,110 @@ Caveat on what was measurable: this account currently returns an immediate 400
 calls, so multi-second tool-use turns could not be driven. Q1 and Q2 were
 measured around that with a preflight-ack race and with resumed sessions; Q3 is
 source-read.
+
+---
+
+## Codex — the decision, settled by measurement (2026-08-24)
+
+`.plans/48` §4.3 was right about the shape and wrong about the risk, in both
+directions. A driven probe (codex-cli 0.148.0, ChatGPT auth, throwaway `/tmp`,
+no user dotfile touched) settles it.
+
+**The bug we were designing around does not reproduce.** #33267's "Encrypted
+function output content could not be decrypted or decoded" did not occur.
+`codex exec --json -c features.multi_agent_v2=true` ran clean on this auth, and
+so did V1. Delegation genuinely happens — the child wrote real files, confirmed
+on disk.
+
+**And `exec --json` still cannot see any of it.** Every distinct frame across
+three runs: `thread.started`, `turn.started`, `item.started`, `item.completed`,
+`turn.completed`, with item types `agent_message`, `collab_tool_call`,
+`command_execution`. The `collab_tool_call` frame is, verbatim and identically in
+V1 and V2:
+
+```json
+{"type":"item.started","item":{"id":"item_1","type":"collab_tool_call","tool":"wait",
+ "sender_thread_id":"<uuid>","receiver_thread_ids":[],"prompt":null,
+ "agents_states":{},"status":"in_progress"}}
+```
+
+`receiver_thread_ids` and `agents_states` stayed **empty while real subagent work
+was happening underneath**, and the child's file write never appeared as an item
+event at all. So our original probe's "empty wait" reading was not a
+misconfiguration after all — it is what this transport always shows. Setting the
+feature flag buys Array **nothing**, which is the same conclusion the closed
+`ThreadItemDetails` enum predicted, now measured rather than inferred.
+
+**`app-server` does see it, and it is more real than "[experimental]" suggests.**
+Driven end to end over stdio: `initialize` → `thread/start` → `turn/start` →
+`turn/completed` → `thread/read`, with a genuine child thread running.
+
+- `subAgentActivity` is a real `ThreadItem` variant: `{type, kind, agentThreadId,
+  agentPath, id}`. **Its `kind` enum is `started | interacted | interrupted` —
+  there is no `completed`.** `.plans/48` claimed four values; that was wrong.
+- `thread/list` accepts `sourceKinds`, whose enum is `cli, vscode, exec,
+  appServer, subAgent, subAgentThreadSpawn, subAgentReview, subAgentCompact,
+  subAgentOther, unknown`. Filtering by `parentThreadId` returned the child.
+- `thread/read` with `includeTurns` returns the child's turns including its
+  `subAgentActivity` items.
+- The handshake **requires** `capabilities: {"experimentalApi": true}`; without it
+  `thread/start.multiAgentMode` is refused `-32600 requires experimentalApi
+  capability`. And `multiAgentMode` is `explicitRequestOnly | proactive |
+  {custom: String}` — **not** `"v2"`. The CLI feature flag and the per-thread mode
+  are two separate knobs.
+- Ownership, confirmed live against a running child rather than read out of a
+  test suite: `turn/start` and `turn/steer` are both refused with exactly
+  `-32600 direct app-server input is not allowed for multi-agent v2 sub-agents`,
+  while `thread/read`, `thread/list` and `turn/interrupt` are allowed
+  (`turn/interrupt` failed only on a deliberately wrong `turnId`, naming the real
+  one).
+
+**The ordering hazard is real and Array would hit it immediately.** Timestamped:
+
+```
+857797  turn/completed   thread=PARENT      <- the parent's turn closes
+861409  item/started     commandExecution  thread=CHILD
+872237  item/started     fileChange        thread=CHILD   (the real write)
+878213  turn/completed   thread=CHILD
+```
+
+The child's work arrived **20 seconds after** the parent's `turn/completed`.
+`CodexAgentRunner.emit()` treats `turnCompleted` as terminal and fires it at
+process exit, so a naive port truncates or misfiles every late child event.
+
+### So the codex arm is a RUNNER rewrite, not a flag
+
+`CodexEventTranslator` is adaptable — 9 handled shapes, most needing renames.
+Three need genuinely new mapping: `agent_message`/`reasoning` **stream real token
+deltas** on app-server (`item/agentMessage/delta`) rather than arriving whole, so
+the translator's "the whole reply arrives at once" comment is architecturally
+false there; token usage arrives as a **separate** `thread/tokenUsage/updated`
+notification correlated by `threadId`/`turnId` instead of inline on
+`turn.completed`; and eight item kinds have no coverage at all today
+(`subAgentActivity`, `collabAgentToolCall`, `dynamicToolCall`, `imageView`,
+`sleep`, `imageGeneration`, `entered/exitedReviewMode`, `contextCompaction`) —
+safely dropped by the `default:` discipline, but that is also why codex shows
+nothing.
+
+`CodexAgentRunner` is the hard part, and its premise is what breaks:
+
+1. **Process-per-turn.** `runOnce()` spawns a fresh `codex exec` and blocks on
+   `spawned.wait()` (`:389`). app-server is one long-lived connection for the
+   agent's whole life. Everything downstream assumes "process exit == turn done".
+2. **The terminal-event gate** (`:451-457`) is precisely the ordering hazard.
+3. **Resume** relaunches `codex exec resume <thread_id>` and self-heals on
+   **stderr text matching** (`isUnknownSessionFailure`, `:85-88`). app-server has
+   no relaunch, and failure is a JSON-RPC code, not stderr text.
+4. **`stop()`** SIGTERMs a process group (`:302-309`); the analogue is
+   `turn/interrupt` over the live connection.
+5. **`observeSpawnRequests`** (`:311-313`) is a no-op whose comment — "Codex has
+   no `spawn_agent` side channel" — is now measurably false.
+
+That rewrite is the same one that brings `turn/steer` and `turn/interrupt` to
+Program B, so codex's subagent arm and codex's steering arm are one piece of
+work, not two.
+
+**De-risking step, taken first:** a single-agent app-server parity harness that
+runs a non-delegating session end to end and diffs its event shapes against the
+existing `CodexEventTranslator` fixture corpus — answering "is app-server really a
+superset for the path we already ship" without touching production.
