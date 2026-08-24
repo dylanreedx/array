@@ -426,7 +426,7 @@ zoom, pinch and the pinch glide):
   glide in ONE commit — the property whose absence was the tracking error a
   hand read as transition lag.
 
-### `transcript.delta` — KNOWN-RED on duration, green on every count
+### `transcript.delta` — GREEN since 2026-08-24
 
 ```sh
 .build/debug/Array --perf-budget-transcript-delta-check
@@ -437,15 +437,16 @@ actually produces, where the open block's revision advances while its id and
 position stay put — over histories of 10 / 100 / 1,000 / 10,000 rows, one entry
 per turn with one block in each.
 
-| metric | budget | before | after the row index |
-|---|---|---|---|
-| `transcript-delta.worstVisitsPerDelta` | ≤ 64 | 10,000 | **1** |
-| `transcript-delta.visitSlope` | == 0 | 9,990 | **0** |
-| `transcript-delta.fullFlattens` | == 0 | 80 | **0** |
-| `transcript-delta.rowsLost` | == 0 (teeth) | 0 | 0 |
-| `transcript-delta.deltasWithoutInvalidation` | == 0 (teeth) | 0 | 0 |
-| `transcript-delta.worstInvalidatedTopLevel` | ≤ 2 | 1 | 1 |
-| `transcript-delta.worstDeltaDuration` | ≤ 8.3 ms | 43.7 ms | **36.3 ms** |
+| metric | budget | before | after the row index | after the presentation fix |
+|---|---|---|---|---|
+| `transcript-delta.worstVisitsPerDelta` | ≤ 64 | 10,000 | **1** | 1 |
+| `transcript-delta.visitSlope` | == 0 | 9,990 | **0** | 0 |
+| `transcript-delta.fullFlattens` | == 0 | 80 | **0** | 0 |
+| `transcript-delta.rowsLost` | == 0 (teeth) | 0 | 0 | 0 |
+| `transcript-delta.deltasWithoutInvalidation` | == 0 (teeth) | 0 | 0 | 0 |
+| `transcript-delta.worstInvalidatedTopLevel` | ≤ 2 | 1 | 1 | 1 |
+| `transcript-delta.worstHistoryScansPerDelta` | == 0 | — | 6 | **0** |
+| `transcript-delta.worstDeltaDuration` | ≤ 8.3 ms | 43.7 ms | 36.3 ms → 50.2 ms | **5.7 ms** |
 
 **The fixture's SHAPE is load-bearing, and the first version got it wrong.** It
 originally held one entry with `history` blocks, which exercises the row walk but
@@ -456,7 +457,7 @@ measured cost *worse* (36.0 → 43.7 ms), which is the only reason that second p
 was ever visible. A fix validated against the original fixture would have read
 greener than the truth.
 
-**Why it is still RED, and why that is the useful part.**
+**Why it was RED for months, and what finally moved it.**
 `apply(document:patch:)` took a patch naming its changed nodes and called
 `flatten(document)` anyway. The row index fixed that completely — 10,000 block
 visits per delta became 1 — and **the wall clock did not move**. This is the same
@@ -469,11 +470,35 @@ cost underneath it. A profile of 1,598 main-thread samples at 10,000 rows:
 | `prepareToolDetailLifecycle` | ~35% | a dictionary over every entry, plus block-id sets |
 | the incremental path itself | ~8% | **a slot lookup rebuilt over every row — introduced by the fix and removed after the profile named it** |
 
-Both remaining costs are named in `.plans/22` Slice 4 and neither is started.
 That last row is worth keeping: the count witness did not watch the new code's own
 work, so only the duration alarm caught it. This is exactly the split the two-gate
 rule exists for — counts name the defect, duration notices what the counts do not
 watch.
+
+**The 2026-08-24 fix, and the count budget that made it tractable.** Re-measuring
+found the number had gone the WRONG way — 36.4 ms at `09de0b0` to 50.2 ms at
+`e8a49cf2` — and a per-commit bisect put +6.6 ms on the S1–S3 tool-detail supply
+and +9.5 ms on S4.3's cluster projection. The reasoning error is worth recording:
+S4.3 justified an O(rows) `rebuildDisplayProjection()` per visual apply on the
+grounds that "the 30 Hz scheduler already coalesces 5,000 deltas into one apply".
+That is true of a BURST and false of slow streaming — twenty deltas arriving a
+second apart are twenty applies, and each paid the full walk. **A coalescer bounds
+the worst case; it does not amortise.**
+
+The duration alarm had said "something is slow" for months and named nothing. So
+the fix was gated on a COUNT first: `worstHistoryScansPerDelta`, committed RED at
+**6** before a line of the fix existed, with `recordHistoryScan(_:)` called at each
+offending pass so a failure says which. The six were the reasoning-entry diff, the
+`rowsByID` rebuild, the cluster projection, the role-change scan, the `newIDs`
+array, and `prepareToolDetailLifecycle`. Three more O(history) passes that the
+counter did not watch — the row-dictionary copy-on-write, the diffable snapshot
+being built whether or not it was applied, and `captureTurnTimes` rebuilding both
+date maps — were caught by the duration alarm afterwards, at 12.8 ms.
+
+Every one of them is now patched against the changed set that
+`incrementallyIndexed` already knew and used to throw away
+(`pendingIncrementalRowIDs`). Nil means "structural, rebuild everything", so a new
+decline path in the index stays correct here without being taught about.
 
 **Correctness is a separate leg, deliberately.**
 `--transcript-delta-index-oracle-check` exists because every count budget above

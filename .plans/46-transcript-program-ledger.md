@@ -336,16 +336,16 @@ reason. Nothing visible yet.
 
 | id | ticket | detail | status |
 |---|---|---|---|
-| 1c.0 | delta path precondition | `run-matrix.sh:618-627` records the cause: `apply(document:patch:)` calls `flatten(document)` regardless of the patch — 36 ms for one revised tail row on 10,000. Fix, then take the leg off KNOWN-RED | TODO |
-| 1c.1 | row geometry | one 32pt row; reserved trailing status column so text never reflows; reserved leading glyph column | TODO |
+| 1c.0 | delta path precondition | `run-matrix.sh:618-627` records the cause: `apply(document:patch:)` calls `flatten(document)` regardless of the patch — 36 ms for one revised tail row on 10,000. Fix, then take the leg off KNOWN-RED | **DONE** 2026-08-24 — see G0 below; leg off KNOWN-RED |
+| 1c.1 | row geometry | one 32pt row; reserved trailing status column so text never reflows; reserved leading glyph column | **DONE** S4.0–4.2 (`0105c3cf`) |
 | 1c.2 | per-tool iconography | **GREEN 2026-08-23** (pulled into the visual milestone by Dylan; no 1b dependency). `ToolCallView.symbolName(forToolNamed:)` matches on substrings because the three harnesses disagree on casing and wording for the same operation; an unknown name keeps the wrench, so a new provider tool degrades to today's behaviour rather than to a blank column. |
-| 1c.3 | status as a glyph | completed uses foreground colour, not green — only failures pull the eye | TODO |
-| 1c.4 | summary/title dedup | `ToolCallRenderer.swift:105` compares only against `presentation.label`, so `Edit` / `Edited Foo.swift` both render | TODO |
-| 1c.5 | cluster consecutive tool calls | one group with a hairline gutter instead of N stacked cards | TODO |
-| 1c.6 | detail while running | `presentedToolBlock` returns early at `AgentTranscriptListView.swift:1354-1356`, second gate `:1394-1396` | TODO |
+| 1c.3 | status as a glyph | completed uses foreground colour, not green — only failures pull the eye | **DONE** S4.0–4.2 (`0105c3cf`) |
+| 1c.4 | summary/title dedup | `ToolCallRenderer.swift:105` compares only against `presentation.label`, so `Edit` / `Edited Foo.swift` both render | **DONE** S4.0–4.2 (`0105c3cf`) |
+| 1c.5 | cluster consecutive tool calls | one group with a hairline gutter instead of N stacked cards | **DONE** S4.3 (`c2ceb9dd`) |
+| 1c.6 | detail while running | `presentedToolBlock` returns early at `AgentTranscriptListView.swift:1354-1356`, second gate `:1394-1396` | **DONE** S1–S3 (`bbc3d086`) |
 | 1c.7 | distrust provider status | sniff `exited with exit code N`, `ENOENT`, "no such file" — providers report `completed` on failing commands | TODO |
-| 1c.8 | expanded body as fields | render `AgentToolDetailExpandedPresentation` as an argument table, output pane, exit code, duration. `CommandOutputView` (`CommandOutputRenderer.swift:39`) is that pane and is dead code — give it its first production caller | TODO |
-| 1c.9 | surface truncation flags | `truncatedByBytes`, `truncatedByLines`, `redacted`. Never silently truncate | TODO |
+| 1c.8 | expanded body as fields | render `AgentToolDetailExpandedPresentation` as an argument table, output pane, exit code, duration. `CommandOutputView` (`CommandOutputRenderer.swift:39`) is that pane and is dead code — give it its first production caller | **DONE** S1–S3 (`bbc3d086`) |
+| 1c.9 | surface truncation flags | `truncatedByBytes`, `truncatedByLines`, `redacted`. Never silently truncate | **DONE** S1–S3 (`bbc3d086`) |
 | 1d.1 | inline diff | reuse `GitDiffParser.parse` (`GitDiffEngine.swift:236`, pure) and `DiffReviewTileNSView.render(_:theme:)` (`:317`, static+pure). Bounded with a visible "+N more lines" | TODO |
 | 1d.2 | do not copy the freeze pattern | `AgentDiffSummaryView.rebuildFileLabels()` (`DiffSummaryRenderer.swift:188-200`) removes and recreates up to 8 `NSTextField`s on **every** apply, called unconditionally from `:90` | TODO |
 | 1d.3 | measure-key correctness | any per-row indent must enter `AgentBlockMeasureKey` or a nested row reuses a top-level row's cached height at the wrong width | TODO |
@@ -1077,3 +1077,109 @@ Method note for whoever repeats this: measure in a worktree with its own
 `.build`, debug configuration, and take at least three runs. The scenario is
 `PerfScenarios.transcriptDelta` and the shape is load-bearing — one entry per
 turn with one block each.
+
+
+---
+
+## G0 — the delta path stops walking the history (2026-08-24, M0)
+
+**A8 first.** The Slice 1c–1h table above marked 1c.0, 1c.1, 1c.3–1c.6, 1c.8 and
+1c.9 `TODO` while all seven had shipped in the S1–S7 sections of this same file. A
+stale table is how work gets done twice; corrected in this commit.
+
+### What was wrong
+
+`--perf-budget-transcript-delta-check` had been KNOWN-RED on wall clock for months
+while every count budget stayed green. Re-measuring found the number had moved the
+WRONG way. Debug configuration, isolated worktree, one build per commit, same
+machine, worst of 20 tail-revision deltas at 10,000 rows:
+
+| commit | what landed | worst delta |
+|---|---|---|
+| `09de0b0` | before the redo | 36.394 ms |
+| `bbc3d086` | S1–S3 supply | 42.967 (+6.6) |
+| `0105c3cf` | S4.0–4.2 row | 43.535 (+0.5) |
+| `c2ceb9dd` | **S4.3 clustering** | 52.979 (+9.5) |
+| `8a42d708` | stability pass | 53.994 (+1.0) |
+| `e8a49cf2` | motion | 50.202 (−3.8) |
+
+Four consecutive runs at `e8a49cf2`: 50.202 / 50.595 / 50.365 / 51.232 — under 2%
+spread, so deterministic, not host noise.
+
+**The reasoning error, recorded so it is not repeated.** S4.3 justified an O(rows)
+`rebuildDisplayProjection()` per visual apply on the grounds that "the scheduler
+already coalesces 5,000 deltas into one apply". That is true of a BURST and false
+of slow streaming: twenty deltas arriving a second apart are twenty applies and
+each paid the full walk. **A coalescer bounds the worst case; it does not
+amortise.**
+
+### The witness came first, and it is a COUNT
+
+`transcript-delta.worstHistoryScansPerDelta`, limit `.exactly(0)`, committed RED at
+**6** in `5cba885d` with the fix unwritten and the commit message saying so.
+`recordHistoryScan(_:)` is called at each offending pass so a failure names which.
+A millisecond threshold could not have done this job: it had been red for months
+and named nothing, and "a content-only delta walks the history zero times" cannot
+be satisfied by a fast machine.
+
+### The nine passes
+
+Six the counter watched, all in `applyUnscrolled` unless noted:
+
+1. the reasoning-entry diff — only needed to purge disclosure state for REMOVED
+   reasoning entries, and the incremental index refuses every structural patch, so
+   on that path the removed set is provably empty. Skipped.
+2. the `rowsByID` rebuild — patched at the changed slots.
+3. `rebuildDisplayProjection()` — the planner's `RowFact`s are now cached.
+   A content-only delta recomputes the changed slots and their successors
+   (`startsTurn` reads `rows[index - 1]`), COMPARES them, and replans only when a
+   fact or the tail-streaming flag actually moved. Facts are compared rather than
+   assumed stable because a tool row's STATUS is a projection input and a
+   content-only delta changes it.
+4. the role-change scan — restricted to the rebuilt rows; no other row can carry a
+   new role, by identity.
+5. the `newIDs` array — `changedTopLevelIDs.intersection(newIDs)` became a filter
+   on `rowsByID`, whose key set is exactly `rows.map(\.id)`.
+6. `prepareToolDetailLifecycle` (called from `apply`) — a restricted pass that
+   examines only the entries a content-only patch could have touched and patches
+   the cache instead of rebuilding it. It refuses anything it cannot verify and
+   falls back to the full pass.
+
+Three more the counter did **not** watch, caught by the duration alarm afterwards
+at 12.807 ms — worth recording, because it is the second time this axis has shown
+that a count witness is blind to work it was not taught about:
+
+7. `let oldRowsByID = rowsByID` was free while the dictionary was about to be
+   REPLACED, and became a 10,000-key copy-on-write the moment the patched path
+   mutated it in place. It now captures only the rows that can differ.
+8. the diffable snapshot was built on every apply and applied only when the
+   display identity moved. Now it is built inside that branch.
+9. the identity itself was a CONCATENATED array (`displayIDs + [tailID]`), so
+   comparing it allocated and walked the whole display sequence every delta. The
+   tail flag is now kept beside the list instead of inside it, which hits Array's
+   shared-buffer fast path whenever the projection was skipped.
+10. `captureTurnTimes` rebuilt both date maps over every entry on every apply. A
+    content-only patch cannot add, remove or reorder an entry, so the only way
+    they go stale is an updated entry whose `createdAt` moved — which costs the
+    changed set to check.
+
+### Result
+
+| | before | after |
+|---|---|---|
+| `worstHistoryScansPerDelta` | 6 | **0** |
+| worst delta @ 10,000 rows | 50.202 ms | **5.749 ms** |
+| scaling 10 / 100 / 1k / 10k | 0.37 / 0.73 / 4.8 / 50.2 | 0.34 / 0.42 / 0.75 / 5.75 |
+
+`--perf-budget-transcript-delta-check` is **removed from `MATRIX_KNOWN_RED` in this
+commit** — a listed leg that passes is reported as a stale allowlist.
+
+Green in the same run: `--transcript-delta-index-oracle-check` (the live index is
+still indistinguishable from a full walk), `--transcript-rhythm-check`,
+`--ui-geometry-check` (including the 10,000-row virtualization and the 5,000-delta
+coalescing cases), `check-agent-tile-ux-program.sh`,
+`check-sidebar-native-ux-program.sh`.
+
+**Why this had to come first.** M3 adds a diff parse and a body to this path and M6
+adds up to 16 concurrent child streams. Building either on a budget 6× over is how
+the app becomes unusable and subagents get blamed for it.

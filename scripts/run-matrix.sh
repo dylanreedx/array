@@ -124,18 +124,6 @@ MATRIX_KNOWN_RED=(
   # always-render-live constraint forbids. Published in
   # docs/internals/performance-budgets.md; do NOT bisect it as a regression.
   --perf-budget-magnify-slope-check
-  # The streaming axis's product target. Still RED, but NOT for the reason it was
-  # published: the incremental row index (.plans/22 Slice 4) took the delta from
-  # 10,000 block visits to 1, with fullFlattens 0 and slope 0, and the wall clock
-  # did not move — exactly the pattern the retained world plane hit one axis over.
-  # Every COUNT budget is green; only worstDeltaDuration is over. A profile puts
-  # the remaining 36 ms in two other per-delta O(history) passes that the row
-  # index never touched: prepareToolDetailLifecycle rebuilding a dictionary over
-  # every entry (~35%), and applyUnscrolled's presentation passes — the rowsByID
-  # rebuild, the snapshot append, the role-change scan (~56%). Both are named in
-  # Slice 4 and neither is started. Published in
-  # docs/internals/performance-budgets.md; do NOT bisect it as a regression.
-  --perf-budget-transcript-delta-check
   # Inherited host-calibration red on macOS 26.6.1 / SDK 26.5 (2026-08-21).
   # The exact 0.5.7 release commit fails 3/3 at 8.93-10.20 ms and this candidate
   # fails 3/3 at 10.80-11.35 ms against the 8.3 ms coarse worst-step alarm.
