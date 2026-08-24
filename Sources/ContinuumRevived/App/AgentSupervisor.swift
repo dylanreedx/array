@@ -2165,6 +2165,18 @@ final class AgentSupervisor {
         id: UUID?
     ) -> String? {
         let bounded = String(prompt.text.prefix(AgentNameOneShot.maximumPromptLength))
+        // B7.0: a COMMAND INVOCATION IS NOT A NAME, and this is the only place
+        // that can tell — the redaction below strips the leading `/compact` as
+        // path-shaped text, so by the time the shared resolver sees the prompt
+        // the command is already gone and only its ARGUMENTS are left. That is
+        // what named a tile "focus on the auth work" after `/compact focus on
+        // the auth work`, with `displayNameSource` left at `.prompt` so the
+        // funnel never re-armed and no later prompt could rename it.
+        //
+        // A bare `/clear` was accidentally safe for the same reason — the
+        // redactor ate the whole thing — which is exactly why the rule needs to
+        // be stated rather than inherited from a side effect.
+        guard !AgentName.isCommandInvocation(bounded) else { return nil }
         // Reject identifiers before stripping local-path-shaped text. Model ids
         // contain a slash, so sanitizing first could turn `provider/model` into
         // the plausible-looking title `provider` and bypass the shared guard.
@@ -6818,6 +6830,35 @@ private func checkAgentNameContract<Failure: Error>(
           supervisor.records[manuallyKeptSentinel]?.displayName == AgentRecord.defaultAgentName,
           supervisor.records[manuallyKeptSentinel]?.displayNameSource == .manual else {
         throw fail("a manual sentinel rename was overwritten by the next prompt")
+    }
+
+    // B7.0: a slash command must never name the tile. The funnel must stay
+    // armed at `.sentinel` through a `/`-prefixed first prompt, so a later
+    // ordinary prompt is still free to name it.
+    let commandFirst = supervisor.spawn(
+        role: "operator", prompt: nil, cwd: cwd,
+        model: config.model, thinking: config.thinking
+    )
+    let beforeCommandRunCount = runner.runCount
+    supervisor.send("/compact focus on the auth work", to: commandFirst)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        runner.runCount == beforeCommandRunCount + 1 && !supervisor.isRunning(commandFirst)
+    }) else {
+        throw fail("the slash-command first prompt did not finish in the deterministic naming runner")
+    }
+    guard supervisor.records[commandFirst]?.displayName == AgentRecord.defaultAgentName,
+          supervisor.records[commandFirst]?.displayNameSource == .sentinel else {
+        throw fail("a slash command named the tile: \(String(describing: supervisor.records[commandFirst]?.displayName)), source \(String(describing: supervisor.records[commandFirst]?.displayNameSource))")
+    }
+    supervisor.send("Actually rename me", to: commandFirst)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        runner.runCount == beforeCommandRunCount + 2 && !supervisor.isRunning(commandFirst)
+    }) else {
+        throw fail("the ordinary prompt after a slash command did not finish")
+    }
+    guard supervisor.records[commandFirst]?.displayName == "Actually rename me",
+          supervisor.records[commandFirst]?.displayNameSource == .prompt else {
+        throw fail("displayNameSource did not stay armed after a slash command, so a later real prompt could not name the tile: \(String(describing: supervisor.records[commandFirst]?.displayName)), source \(String(describing: supervisor.records[commandFirst]?.displayNameSource))")
     }
 
     // P4.3: the generation marker is durable, and both halves of the CAS are

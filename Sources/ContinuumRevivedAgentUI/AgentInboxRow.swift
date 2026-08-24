@@ -15,6 +15,28 @@ public enum AgentName {
     /// Human-cased prompt twin of `WorktreeManager.slug`: preserve case and
     /// punctuation, collapse whitespace, discard controls, then apply the one
     /// cap. A prompt with no drawable content leaves the sentinel in place.
+    /// Is this prompt a COMMAND INVOCATION rather than a request?
+    ///
+    /// B7.0: `/clear` as the first prompt in a fresh tile named the tile "/clear"
+    /// permanently, because naming it also left `displayNameSource` at `.prompt`
+    /// and the funnel never re-armed.
+    ///
+    /// The test is the first whitespace-delimited token, and it is deliberately
+    /// narrow: a slash, then one command-shaped word. A pasted POSIX path
+    /// (`/Users/dylan/notes.md — what is this?`) carries further slashes in that
+    /// token and is still a perfectly good name for a tile.
+    public static func isCommandInvocation(_ prompt: String) -> Bool {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let token = trimmed.split(
+            separator: " ", maxSplits: 1, omittingEmptySubsequences: true).first,
+            token.hasPrefix("/"), token.count > 1
+        else { return false }
+        let body = token.dropFirst()
+        guard let initial = body.first, initial.isLetter else { return false }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_:."))
+        return body.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
     public static func fromPrompt(_ prompt: String) -> String? {
         normalizedLabel(prompt)
     }
