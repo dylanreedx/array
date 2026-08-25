@@ -66,7 +66,8 @@ enum AgentFirstPaintChecks {
         try checkReplyOptionsReachTheComposer()
         try checkAttachmentMidTurnUsesWorkingDraftIntent()
         try checkPopoverCommandEchoesLikeATypedSend()
-        print("ContinuumRevivedAgentFirstPaintChecks passed: the prompt echo precedes the action sink, acceptance and refusal both resolve the latch, the spawn window carries a state, a word, and a clock, the optimistic indicator survives synchronize, settled turns read their duration, a mid-turn attachment resolves honestly instead of forcing sendPrompt, and a popover-selected command echoes exactly like a typed one")
+        try checkMirroredAgentOffersNoComposerOrStop()
+        print("ContinuumRevivedAgentFirstPaintChecks passed: the prompt echo precedes the action sink, acceptance and refusal both resolve the latch, the spawn window carries a state, a word, and a clock, the optimistic indicator survives synchronize, settled turns read their duration, a mid-turn attachment resolves honestly instead of forcing sendPrompt, and a popover-selected command echoes exactly like a typed one, and an agent Array only mirrors offers no composer, no provider controls and no Stop")
     }
 
     /// `.plans/45` S6 (C4). `beginOptimisticSubmission` turns the indicator on
@@ -387,6 +388,60 @@ enum AgentFirstPaintChecks {
         }
         guard presented.status == .working else {
             throw fail("first-paint: the spawn window presents status \(presented.status), which paints no motion while a process is starting")
+        }
+    }
+}
+
+extension AgentFirstPaintChecks {
+    /// C5 — an agent Array MIRRORS must not offer a composer, provider controls
+    /// or a Stop.
+    ///
+    /// A claude `Agent` subagent has no process of Array's. Rendering an enabled
+    /// Stop over one is exactly the dishonesty this program exists to remove, and
+    /// a merely DISABLED composer is still wrong: disabled says try later, and
+    /// there is no later.
+    ///
+    /// Drives the real tile's own presentation update through a real
+    /// `AgentTileTurnSnapshot`, the same value `AgentSupervisor.turnSnapshot(for:)`
+    /// produces — a check that re-derived the decision itself would pass while the
+    /// tile still painted the controls.
+    @MainActor
+    static func checkMirroredAgentOffersNoComposerOrStop() throws {
+        func makeTile(_ title: String) -> ManagedAgentTileNSView {
+            ManagedAgentTileNSView(tile: Tile(
+                id: UUID(),
+                kind: .managedAgent,
+                title: title,
+                frame: TileFrame(x: 0, y: 0, width: 520, height: 420),
+                zPosition: .fromLegacyRank(1),
+                runtimeRef: nil,
+                metadata: TileMetadata(launchProfileId: "managed")
+            ))
+        }
+
+        // An ordinary managed agent, idle: the controls ARE offered. Without this
+        // half the assertion below would pass over a tile that never shows a
+        // composer at all.
+        let managed = makeTile("mirrored-check-managed")
+        managed.qaApplyTurnSnapshotForChecks(AgentTileTurnSnapshot(
+            state: .ready,
+            capabilities: .sendStop(canSend: true, canStop: false),
+            turnStartedAt: nil))
+        guard managed.qaComposerIsOffered, managed.qaProviderControlsAreOffered else {
+            throw fail("mirrored: an ordinary managed agent stopped offering its composer/provider controls — the positive half of this witness is what keeps the negative half meaningful")
+        }
+
+        let mirrored = makeTile("mirrored-check-observed")
+        mirrored.qaApplyTurnSnapshotForChecks(AgentTileTurnSnapshot(
+            state: .working,
+            capabilities: .sendStop(canSend: false, canStop: false),
+            turnStartedAt: Date(),
+            isMirrored: true))
+        guard !mirrored.qaComposerIsOffered else {
+            throw fail("mirrored: the tile offers a composer for an agent Array does not run")
+        }
+        guard !mirrored.qaProviderControlsAreOffered else {
+            throw fail("mirrored: the tile offers provider/model/effort controls and a Stop for an agent Array does not run")
         }
     }
 }

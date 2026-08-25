@@ -148,6 +148,9 @@ final class ManagedAgentTileNSView: TileNSView {
     /// footer owns their presentation and emits partial writes; this tile remains
     /// the production composition root and the supervisor remains state owner.
     private let providerFooter = AgentComposerFooterView()
+    /// The provider/model/effort controls and the primary action, kept so C5 can
+    /// take them off screen for an agent Array only mirrors.
+    private weak var v2FooterRow: NSStackView?
     private var v2ComposeColumn: NSStackView?
     /// What the two custom controls are currently showing. Seeded from the global default
     /// (`AgentModelConfig`) for a tile with no agent, and replaced by the RECORD's
@@ -1608,6 +1611,7 @@ final class ManagedAgentTileNSView: TileNSView {
         // feared zero-width labels at the 320 pt floor) and was never what the
         // owner reviewed (P5.5 defect 4).
         let footerRow = NSStackView(views: [providerFooter, actionButton])
+        v2FooterRow = footerRow
         footerRow.orientation = .horizontal
         footerRow.alignment = .centerY
         footerRow.spacing = CGFloat(Space.m)
@@ -2129,6 +2133,21 @@ final class ManagedAgentTileNSView: TileNSView {
         } else {
             snapshot = v2TurnSnapshot
         }
+        // C5 — an agent Array MIRRORS has no runner behind it, so the composer and
+        // the Stop are not "unavailable right now", they are not applicable at
+        // all. A disabled control says try later; there is no later. The
+        // transcript and the status row stay: watching is the whole point.
+        let mirrored = snapshot?.isMirrored ?? false
+        v2Composer?.isHidden = mirrored
+        v2FooterRow?.isHidden = mirrored
+        if mirrored {
+            button.presentation = .resolve(
+                state: .ready,
+                capabilities: .init(canSend: false, canStop: false, canSteer: false, canQueue: false),
+                hasDraft: false)
+            providerFooter.controlsEnabled = false
+            return
+        }
         let capabilities = snapshot?.capabilities ?? .init()
         // With a snapshot, its execution state alone decides; the legacy
         // `descriptor.status` OR-terms re-imported the disagreeing derivation this
@@ -2358,6 +2377,18 @@ final class ManagedAgentTileNSView: TileNSView {
         v2Composer?.qaPressReplyOptionChip(titled: title) ?? false
     }
     var qaV2CanSend: Bool { v2TurnSnapshot?.capabilities.canSend == true }
+    /// C5's witness surface: what a mirrored agent's tile actually offers.
+    /// Drives the SAME presentation update production drives, from a snapshot of
+    /// the shape `AgentSupervisor.turnSnapshot(for:)` produces. A check that set
+    /// the hidden flags itself would pass while the tile still painted them.
+    func qaApplyTurnSnapshotForChecks(_ snapshot: AgentTileTurnSnapshot) {
+        v2TurnSnapshot = snapshot
+        v2Composer?.updateTurnSnapshot(snapshot)
+        updateV2ComposerPresentation()
+    }
+
+    var qaComposerIsOffered: Bool { !(v2Composer?.isHidden ?? true) }
+    var qaProviderControlsAreOffered: Bool { !(v2FooterRow?.isHidden ?? true) }
     var qaV2ActionTitle: String? { v2ActionButton?.presentation.title }
     var qaV2ActionEnabled: Bool { v2ActionButton?.presentation.isEnabled == true }
     @discardableResult

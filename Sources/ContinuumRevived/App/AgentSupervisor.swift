@@ -3404,7 +3404,7 @@ final class AgentSupervisor {
     }
 
     func turnSnapshot(for id: AgentID) -> AgentTileTurnSnapshot? {
-        guard records[id] != nil else { return nil }
+        guard let record = records[id] else { return nil }
         let facts = turnFacts[id] ?? TurnFacts()
         let state: AgentTileOperationalState
         if let requestID = facts.requestOrder.first(where: { facts.pendingRequests[$0] != nil }),
@@ -3432,22 +3432,27 @@ final class AgentSupervisor {
         }
 
         let occupied = runners[id] != nil
+        // C5 — `AgentCapabilities` becomes load-bearing here, its first production
+        // use. A mirrored child has no runner of Array's, so no send and no stop
+        // are honest at ANY moment, not merely at this one.
+        let mirrored = !record.capabilities.locallyManaged
         return AgentTileTurnSnapshot(
             state: state,
             capabilities: .sendStop(
-                canSend: !occupied && state.acceptsNewTurn,
+                canSend: !mirrored && !occupied && state.acceptsNewTurn,
                 // In flight = stoppable, full stop (P5.5 consolidation): `stop()`
                 // genuinely kills a spawning (pre-turnStarted) or draining
                 // (post-settle) process, so gating on `execution == .working`
                 // under-advertised the transport — and painted the two windows
                 // "Unavailable" on the composer.
-                canStop: occupied
+                canStop: !mirrored && occupied && record.capabilities.canStop
             ),
             // P3.3: carried, never derived here. A consumer that wanted an elapsed
             // reading had to reach for the event ring instead, which is why the
             // sidebar and the tile header measured different durations for one turn.
             turnStartedAt: facts.turnStartedAt,
-            submittedAt: facts.submittedAt
+            submittedAt: facts.submittedAt,
+            isMirrored: mirrored
         )
     }
 

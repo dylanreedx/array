@@ -151,6 +151,17 @@ public struct AgentTileTurnSnapshot: Equatable, Sendable {
     /// presenter reads (§5.2).
     public var turnStartedAt: Date?
 
+    /// C5 — Array MIRRORS this agent; it does not run it.
+    ///
+    /// A claude `Agent` subagent has no process of Array's, so the tile must not
+    /// offer a composer or a Stop at all. That is different from "cannot send
+    /// right now": a disabled control says try later, and there is no later.
+    ///
+    /// Carried as its own fact rather than inferred from `canSend == false`,
+    /// because an ordinary busy agent has that too and the two must not render
+    /// the same.
+    public var isMirrored: Bool = false
+
     /// When the user's prompt was accepted, independent of whether the provider
     /// has started a turn yet.
     ///
@@ -165,12 +176,14 @@ public struct AgentTileTurnSnapshot: Equatable, Sendable {
         state: AgentTileOperationalState,
         capabilities: AgentTurnCapabilities,
         turnStartedAt: Date?,
-        submittedAt: Date? = nil
+        submittedAt: Date? = nil,
+        isMirrored: Bool = false
     ) {
         self.state = state
         self.capabilities = capabilities
         self.turnStartedAt = turnStartedAt
         self.submittedAt = submittedAt
+        self.isMirrored = isMirrored
     }
 
     public var executionState: AgentTurnExecutionState {
