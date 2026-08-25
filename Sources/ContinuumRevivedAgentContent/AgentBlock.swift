@@ -292,17 +292,23 @@ public struct AgentNoticePayload: Codable, Equatable, Sendable {
     }
 }
 
-/// B6.2 — a claude `compact_boundary` reached the transcript. Rendered
-/// collapsed and attributed to the harness, never to the user or assistant.
-/// Fields are exactly what `compact_metadata` carries (`pre_tokens` is absent
-/// on a resumed session, hence optional) — never a fabricated field like a
-/// summarized-message count the real frame does not send.
+/// B6.2/B6.3 — a compaction boundary reached the transcript, from either
+/// harness. Rendered collapsed and attributed to the harness, never to the
+/// user or assistant. Fields are exactly what each provider's own frame
+/// carries — never a fabricated field the real frame does not send. claude's
+/// `compact_boundary` gives all three (`pre_tokens` only absent on a resumed
+/// session); pi's persisted `compaction` session entry gives only
+/// `tokensBefore` — no post-compaction size (the runtime estimates one in
+/// memory but never persists it) and no manual/automatic distinction (its
+/// `fromHook` flag means "an extension supplied the summary", not "triggered
+/// automatically") — so `postTokens` and `automaticCompaction` are optional
+/// here rather than guessed.
 public struct AgentCompactionPayload: Codable, Equatable, Sendable {
     public var preTokens: Int?
-    public var postTokens: Int
-    public var automaticCompaction: Bool
+    public var postTokens: Int?
+    public var automaticCompaction: Bool?
 
-    public init(preTokens: Int?, postTokens: Int, automaticCompaction: Bool) {
+    public init(preTokens: Int?, postTokens: Int?, automaticCompaction: Bool?) {
         self.preTokens = preTokens
         self.postTokens = postTokens
         self.automaticCompaction = automaticCompaction
@@ -315,8 +321,8 @@ extension AgentCompactionPayload {
     /// (I5 forbids widening the event itself with dedicated fields). Never
     /// displayed raw; `AgentTranscriptProjection` decodes it back into this
     /// typed payload immediately.
-    public static func encodeTitle(preTokens: Int?, postTokens: Int, automaticCompaction: Bool) -> String {
-        "compaction:pre=\(preTokens.map(String.init) ?? "");post=\(postTokens);auto=\(automaticCompaction)"
+    public static func encodeTitle(preTokens: Int?, postTokens: Int?, automaticCompaction: Bool?) -> String {
+        "compaction:pre=\(preTokens.map(String.init) ?? "");post=\(postTokens.map(String.init) ?? "");auto=\(automaticCompaction.map(String.init) ?? "")"
     }
 
     public init?(decodingTitle title: String?) {
@@ -334,7 +340,6 @@ extension AgentCompactionPayload {
             default: break
             }
         }
-        guard let post, let auto else { return nil }
         self.init(preTokens: pre, postTokens: post, automaticCompaction: auto)
     }
 }

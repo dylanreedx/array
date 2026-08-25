@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentContent
 import ContinuumRevivedCore
 import Foundation
 
@@ -120,10 +121,20 @@ private func runPiSessionTranscriptParseChecks() {
         #"{"type":"message","message":{"role":"toolResult","toolCallId":"call_1","toolName":"read","isError":false,"content":[{"type":"text","text":"file body"}]}}"#,
         #"{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"PI_ANSWER_TWO"},{"type":"toolCall","id":"call_2","name":"write","arguments":{"file_path":"/z"}}]}}"#,
         #"{"type":"message","message":{"role":"toolResult","toolCallId":"call_2","toolName":"write","isError":true,"content":[{"type":"text","text":"denied"}]}}"#,
-        #"{"type":"compaction","summary":"old history"}"#,
+        #"{"type":"compaction","summary":"old history","tokensBefore":26268}"#,
     ]
     let transcript = PiSessionTranscriptReader.parse(lines: lines, threadId: threadId)
 
+    // B6.3 — pi never rewrites or truncates the session file at compaction
+    // (verified against `dist/core/session-manager.js`: `appendCompaction`/
+    // `_appendEntry` are strictly append-only), so every message above still
+    // replays in full; only the boundary itself used to vanish. It now
+    // surfaces as the same compaction item kind B6.2 gave claude, carrying the
+    // one real field pi's persisted entry has (`tokensBefore`) — never the
+    // `summary` prose, and never a fabricated post-compaction size or
+    // manual/automatic flag pi's session file does not carry.
+    let compactionKind = ItemKind(rawValue: "compaction")
+    let compactionTitle = AgentCompactionPayload.encodeTitle(preTokens: 26268, postTokens: nil, automaticCompaction: nil)
     let expected: [RehydratedTranscriptStep] = [
         .userPrompt("PI_PROMPT_ONE"),
         .event(.turnStarted(threadId: threadId, turnId: "rehydrated-t1")),
@@ -134,14 +145,16 @@ private func runPiSessionTranscriptParseChecks() {
         .event(.contentDelta(threadId: threadId, turnId: "rehydrated-t1", streamKind: .assistant, delta: "PI_ANSWER_TWO")),
         .event(.itemStarted(threadId: threadId, itemId: "call_2", kind: .fileChange, title: "write")),
         .event(.itemCompleted(threadId: threadId, itemId: "call_2", kind: .fileChange, status: .failed)),
+        .event(.itemStarted(threadId: threadId, itemId: "pi-compaction-1", kind: compactionKind, title: compactionTitle)),
+        .event(.itemCompleted(threadId: threadId, itemId: "pi-compaction-1", kind: compactionKind, status: .completed)),
         .event(.turnCompleted(threadId: threadId, turnId: "rehydrated-t1", outcome: .completed, errorMessage: nil)),
     ]
     expect(transcript.steps == expected,
            "PiSessionTranscriptReader: steps drifted.\n  got: \(transcript.steps)\n  want: \(expected)")
     expect(transcript.restoredMessageCount == 3,
-           "PiSessionTranscriptReader: expected 3 restored messages (1 user + 2 assistant), got \(transcript.restoredMessageCount)")
+           "PiSessionTranscriptReader: expected 3 restored messages (1 user + 2 assistant; the compaction boundary is not a conversational message), got \(transcript.restoredMessageCount)")
 
-    // The `compaction` summary is not replayed as transcript content.
+    // The `compaction` summary prose is never replayed as transcript content.
     expect(!stepsDescription(transcript).contains("old history"),
            "PiSessionTranscriptReader: a compaction summary leaked into the transcript")
 }

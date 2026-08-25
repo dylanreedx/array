@@ -544,7 +544,7 @@ public struct AgentTranscriptProjection: Sendable {
         // spelling carried it.
         if Self.isCompactionKind(kind) {
             let payload = AgentCompactionPayload(decodingTitle: title)
-                ?? AgentCompactionPayload(preTokens: nil, postTokens: 0, automaticCompaction: false)
+                ?? AgentCompactionPayload(preTokens: nil, postTokens: nil, automaticCompaction: nil)
             return AgentBlock(id: id, kind: .compaction, payload: .compaction(payload))
         }
         switch kind {

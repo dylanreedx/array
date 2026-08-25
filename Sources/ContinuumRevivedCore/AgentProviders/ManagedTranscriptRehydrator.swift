@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import Foundation
 
@@ -83,7 +84,7 @@ public struct RehydrationLimits: Equatable, Sendable {
 /// Provider-neutral intermediate the two readers normalize into, so the
 /// turn-boundary/cap assembly has exactly one definition.
 struct NormalizedTranscriptMessage: Equatable {
-    enum Role: Equatable { case userPrompt, assistant, toolResult }
+    enum Role: Equatable { case userPrompt, assistant, toolResult, compaction }
     struct ToolCall: Equatable { var id: String; var name: String; var detail: String? = nil }
 
     var role: Role
@@ -100,6 +101,10 @@ struct NormalizedTranscriptMessage: Equatable {
     /// toolResult: which tool call it completes, and whether it failed.
     var toolCallId: String = ""
     var toolFailed: Bool = false
+    /// B6.3 — compaction: pi's persisted `tokensBefore`, the one real field its
+    /// session-file `compaction` entry carries (see `AgentCompactionPayload`'s
+    /// doc comment for what it does not carry).
+    var compactionTokensBefore: Int?
 }
 
 public enum ManagedTranscriptRehydrator {
@@ -152,6 +157,7 @@ public enum ManagedTranscriptRehydrator {
         var openTurnId: String?
         var itemKinds: [String: ItemKind] = [:]
         var messageCount = 0
+        var compactionCounter = 0
 
         func closeTurn() {
             guard let turnId = openTurnId else { return }
@@ -204,6 +210,21 @@ public enum ManagedTranscriptRehydrator {
                     itemId: message.toolCallId,
                     kind: kind,
                     status: message.toolFailed ? .failed : .completed)))
+            case .compaction:
+                // B6.3 — mirrors B6.2's claude compaction item exactly (same
+                // ItemKind, same decodable title), so the same projection
+                // logic renders it collapsed and attributed to the harness.
+                // Not wrapped in a turn: like claude's compact_boundary, this
+                // is a system-level boundary, not part of a turn's own work.
+                compactionCounter += 1
+                let itemID = "pi-compaction-\(compactionCounter)"
+                let title = AgentCompactionPayload.encodeTitle(
+                    preTokens: message.compactionTokensBefore, postTokens: nil, automaticCompaction: nil)
+                let compactionKind = ItemKind(rawValue: "compaction")
+                steps.append(.event(.itemStarted(
+                    threadId: threadId, itemId: itemID, kind: compactionKind, title: title)))
+                steps.append(.event(.itemCompleted(
+                    threadId: threadId, itemId: itemID, kind: compactionKind, status: .completed)))
             }
         }
         closeTurn()
