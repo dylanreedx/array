@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentContent
 import Foundation
 
 // Plan: .plans/01-provider-cli-backends.md (claude CLI backend, first slice).
@@ -34,6 +35,9 @@ public struct ClaudeEventTranslator {
     /// same kind the start event carried.
     private var itemKinds: [String: ItemKind] = [:]
     private var seenItemIds = Set<String>()
+    /// B6.2 — a compaction boundary has no tool_use id of its own, so this
+    /// mints a stable-enough one for the item's begin/finish pair.
+    private var compactionCounter: Int = 0
     private var workingDirectory: URL?
     private let now: @Sendable () -> Date
 
@@ -260,19 +264,32 @@ public struct ClaudeEventTranslator {
     // No `maxTokens` here: this frame states the new token count, not the
     // model's window size, so the ring's denominator is left to whatever the
     // next authoritative reading provides — never fabricated from this event.
-    private func translateCompactBoundary(_ object: [String: Any]) -> [AgentRuntimeEvent] {
+    private mutating func translateCompactBoundary(_ object: [String: Any]) -> [AgentRuntimeEvent] {
         guard let metadata = object["compact_metadata"] as? [String: Any],
               let postTokens = Self.intValue(metadata["post_tokens"])
         else { return [] }
         let trigger = metadata["trigger"] as? String
-        return [.contextWindowUpdated(threadId: threadId, snapshot: AgentContextWindowSnapshot(
-            usedTokens: postTokens,
-            maxTokens: nil,
-            automaticCompaction: trigger != "manual",
-            observedAt: now(),
-            source: .claudeCompactBoundary,
-            freshness: .live
-        ))]
+        let preTokens = Self.intValue(metadata["pre_tokens"])
+        let automatic = trigger != "manual"
+        // B6.2 — the compaction block kind. `itemStarted`/`itemCompleted` fire
+        // back-to-back because the boundary is already resolved by the time
+        // claude reports it; there is no in-progress interval to show.
+        compactionCounter += 1
+        let itemID = "compaction#\(runToken)-\(compactionCounter)"
+        let title = AgentCompactionPayload.encodeTitle(
+            preTokens: preTokens, postTokens: postTokens, automaticCompaction: automatic)
+        return [
+            .itemStarted(threadId: threadId, itemId: itemID, kind: ItemKind(rawValue: "compaction"), title: title),
+            .itemCompleted(threadId: threadId, itemId: itemID, kind: ItemKind(rawValue: "compaction"), status: .completed),
+            .contextWindowUpdated(threadId: threadId, snapshot: AgentContextWindowSnapshot(
+                usedTokens: postTokens,
+                maxTokens: nil,
+                automaticCompaction: automatic,
+                observedAt: now(),
+                source: .claudeCompactBoundary,
+                freshness: .live
+            )),
+        ]
     }
 
     // MARK: - result (usage + turn completion)

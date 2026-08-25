@@ -151,9 +151,11 @@ public struct AgentTranscriptProjection: Sendable {
             // Match the compatibility model's activity semantics: every
             // structured item except an error is active until completion.
             if kind != .error { activeItemIDs.insert(itemID) }
-            // Diff/error payloads do not carry lifecycle state in AgentContent;
-            // every other mapped payload does and receives completeBlock.
-            if kind != .fileChange && kind != .error { statusableItems.insert(itemID) }
+            // Diff/error/compaction payloads do not carry lifecycle state in
+            // AgentContent; every other mapped payload does and receives
+            // completeBlock. A compaction is already resolved the instant it
+            // is reported, so it never needs a status transition.
+            if kind != .fileChange && kind != .error && !Self.isCompactionKind(kind) { statusableItems.insert(itemID) }
             result += [
                 .beginEntry(id: entryID, role: role(for: kind), provenance: .providerItem(provider: "runtime", itemID: itemID)),
                 .upsertStructured(entryID: entryID, block: block)
@@ -534,6 +536,17 @@ public struct AgentTranscriptProjection: Sendable {
 
     private func structuredBlock(id: AgentNodeID, kind: ItemKind, title: String?) -> AgentBlock {
         let label = title ?? kind.rawValue
+        // B6.2 — a compaction boundary. `ItemKind` stays `.unknown("compaction")`
+        // rather than gaining a literal case: `AgentTranscriptListView.swift`'s
+        // `isToolDetailKind` switch is exhaustive over `ItemKind` and off-limits
+        // for this ticket, so a new named case there would not build. The
+        // decoded payload is fully structured regardless of which `ItemKind`
+        // spelling carried it.
+        if Self.isCompactionKind(kind) {
+            let payload = AgentCompactionPayload(decodingTitle: title)
+                ?? AgentCompactionPayload(preTokens: nil, postTokens: 0, automaticCompaction: false)
+            return AgentBlock(id: id, kind: .compaction, payload: .compaction(payload))
+        }
         switch kind {
         case .plan:
             return AgentBlock(id: id, kind: .plan, payload: .plan(.init(title: title, status: .inProgress)))
@@ -553,6 +566,11 @@ public struct AgentTranscriptProjection: Sendable {
                 name: label, summary: nil, arguments: nil, status: .inProgress
             )))
         }
+    }
+
+    fileprivate static func isCompactionKind(_ kind: ItemKind) -> Bool {
+        if case .unknown("compaction") = kind { return true }
+        return false
     }
 
     private func role(for kind: ItemKind) -> AgentEntryRole {

@@ -264,6 +264,35 @@ func runAgentTranscriptProjectionChecks() {
            "P1.5 must not invent or interpolate raw tool arguments absent from AgentRuntimeEvent")
 
     print(String(format: "Agent transcript projection checks passed: six compatibility kinds, stable provenance, stream boundaries, command/error typing, thread filter, and 5,000-delta production projection+replaceMarkup in %.3f s (%d parses, %d finalized raw source)", productionProjectionSeconds, coalesced.streamingMarkupParseCount, coalesced.finalizedCompatibilityMarkupSourceCount))
+
+    // B6.2 — the compaction block kind. `ItemKind(rawValue: "compaction")`
+    // decodes to `.unknown("compaction")` (ItemKind has no literal case for
+    // it — see AgentTranscriptProjection.isCompactionKind), and the
+    // projection must still recognize it, attribute it to the harness (never
+    // user/assistant), decode its title back into real pre/post/automatic
+    // fields, and never throw trying to complete a status this payload does
+    // not carry.
+    var compaction = AgentTranscriptProjection(threadId: thread)
+    let compactionTitle = AgentCompactionPayload.encodeTitle(preTokens: 26268, postTokens: 2140, automaticCompaction: false)
+    compaction.ingest(.itemStarted(
+        threadId: thread, itemId: "compaction-1",
+        kind: ItemKind(rawValue: "compaction"), title: compactionTitle))
+    compaction.ingest(.itemCompleted(
+        threadId: thread, itemId: "compaction-1",
+        kind: ItemKind(rawValue: "compaction"), status: .completed))
+    expect(compaction.rejectedMutationCount == 0,
+           "B6.2: a compaction item must complete without a rejected status-transition mutation")
+    let compactionEntry = compaction.document.entries.first { $0.blocks.first?.kind == .compaction }
+    expect(compactionEntry?.role == .system,
+           "B6.2: a compaction block must be attributed to the harness (.system), got \(String(describing: compactionEntry?.role))")
+    if case .compaction(let payload) = compactionEntry?.blocks.first?.payload {
+        expect(payload == AgentCompactionPayload(preTokens: 26268, postTokens: 2140, automaticCompaction: false),
+               "B6.2: the compaction payload must carry the real pre/post tokens and trigger, got \(payload)")
+    } else {
+        expect(false, "B6.2: a compaction item must project to AgentBlockPayload.compaction, got \(String(describing: compactionEntry?.blocks.first?.payload))")
+    }
+
+    print("Agent compaction block checks passed: harness-attributed, real pre/post/automatic fields, no rejected status mutation")
 }
 
 func runLocalTranscriptNodeChecks() {

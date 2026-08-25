@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentContent
 import ContinuumRevivedCore
 import Foundation
 
@@ -221,11 +222,15 @@ private func runClaudeCompactBoundaryChecks() {
     expect(statusEvents.isEmpty,
            "ClaudeEventTranslator: an ordinary system/status frame must still emit nothing, got \(statusEvents)")
 
-    // Line 3: the real compact_boundary frame must produce exactly one
-    // contextWindowUpdated event, built from `compact_metadata.post_tokens`
-    // and `trigger`.
+    // Line 3: the real compact_boundary frame must produce the B6.2 compaction
+    // item (begin/finish, real pre/post tokens from `compact_metadata`) plus
+    // the one contextWindowUpdated built from `post_tokens`/`trigger`.
     let compactEvents = translator.translate(line: lines[2])
+    let compactionKind = ItemKind(rawValue: "compaction")
+    let compactionTitle = AgentCompactionPayload.encodeTitle(preTokens: 26268, postTokens: 2140, automaticCompaction: false)
     expect(compactEvents == [
+        .itemStarted(threadId: sid, itemId: "compaction#run1-1", kind: compactionKind, title: compactionTitle),
+        .itemCompleted(threadId: sid, itemId: "compaction#run1-1", kind: compactionKind, status: .completed),
         .contextWindowUpdated(threadId: sid, snapshot: AgentContextWindowSnapshot(
             usedTokens: 2140,
             maxTokens: nil,
@@ -233,9 +238,9 @@ private func runClaudeCompactBoundaryChecks() {
             observedAt: observedAt,
             source: .claudeCompactBoundary,
             freshness: .live)),
-    ], "ClaudeEventTranslator: compact_boundary must emit one contextWindowUpdated from post_tokens/trigger, got \(compactEvents)")
+    ], "ClaudeEventTranslator: compact_boundary must emit the compaction item pair (real pre/post tokens) then contextWindowUpdated, got \(compactEvents)")
 
-    print("ClaudeEventTranslator compact_boundary checks passed: the real captured frame maps to one contextWindowUpdated, an ordinary system frame still emits nothing")
+    print("ClaudeEventTranslator compact_boundary checks passed: the real captured frame maps to a compaction item plus one contextWindowUpdated, an ordinary system frame still emits nothing")
 }
 
 private func runClaudeRunnerArgvChecks() {

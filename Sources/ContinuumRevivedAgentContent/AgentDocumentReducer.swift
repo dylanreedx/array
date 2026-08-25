@@ -401,13 +401,14 @@ public struct AgentDocumentReducer: Sendable {
         case .agentReference: return block.kind == .agentReference
         case .error: return block.kind == .error
         case .notice: return block.kind == .notice
+        case .compaction: return block.kind == .compaction
         case .opaque: return block.kind == .unknown || !builtInKinds.contains(block.kind)
         }
     }
 
     private var builtInKinds: Set<AgentBlockKind> {
         [.paragraph, .heading, .list, .listItem, .quote, .thematicBreak, .table, .fencedCode, .toolCall,
-         .commandOutput, .plan, .diff, .approval, .question, .image, .imageGallery, .fileReferences, .agentReference, .error, .notice, .unknown]
+         .commandOutput, .plan, .diff, .approval, .question, .image, .imageGallery, .fileReferences, .agentReference, .error, .notice, .compaction, .unknown]
     }
 
     private func normalizedNew(_ block: AgentBlock) -> AgentBlock {
