@@ -1749,3 +1749,101 @@ publishable); `prompt` on the same tool stays out. `Agent`/`Task` reached
 
 The witness first asserts the FIXTURE carries non-null `parent_tool_use_id`
 frames — a fixture-backed check whose fixture is empty witnesses nothing.
+
+---
+
+## M4–M6 landings — 2026-08-24 (continued)
+
+### `9c3be0b3` + `87c79afb` — codex reaches app-server, opt-in
+
+Single-agent parity holds: all 9 shapes `CodexEventTranslator` handles map to
+app-server frames — 6 renames, 3 real restructures, no gaps. The three
+restructures are worth naming because each breaks an assumption the exec
+translator states out loud: `agent_message`/`reasoning` **stream** as
+`item/agentMessage/delta` rather than arriving whole, so "the whole reply arrives
+at once" is architecturally false there; token usage arrives as a **separate**
+`thread/tokenUsage/updated` correlated by `threadId`/`turnId`; and `turn.failed`
+folds into `turn/completed` with inline error info.
+
+`CONTINUUM_CODEX_TRANSPORT=app-server` opts in; `exec` stays the default and the
+anti-cheat baseline. Two RED→GREEN findings from the ticket's own checks:
+app-server sends **no `thread/started` on `thread/resume`** (only on
+`thread/start`), unlike exec which re-emits it on every resume — so a resumed
+turn's session-ready events never fired until the notification was synthesized;
+and `run()` could hang forever if the process died before posting
+`turn/completed`, because nothing else could unblock the completion semaphore.
+
+Deliberately NOT achieved: one long-lived process for the agent's whole life.
+`AgentSupervisor` builds a fresh runner per send, which is the seam B2.2 below
+opens. Subagent mapping stays a no-op; only the comment claiming codex has no
+side channel was corrected, since that is now measurably false.
+
+### `a903f424` — pi's rpc session transport
+
+One long-lived `pi --mode rpc` child, `{id}`-correlated commands, and the event
+stream forwarded unchanged. **`PiEventTranslator`'s entire diff is two ignored
+frame types** (`response`, `extension_ui_request`) — which is exactly why pi went
+first and claude second.
+
+The ticket's teeth surfaced a real latent bug: the transport's EOF handler did not
+clear `readabilityHandler`, so process exit busy-spun.
+
+One field was inferred rather than driven — the `prompt`/`steer` payload's text
+key — because the M0 probe could not run a real multi-second turn on this
+account's billing. **Now confirmed as `message` against pi's own
+`dist/modes/rpc/rpc-types.d.ts`**, which also documents `images?: ImageContent[]`
+on the same commands (how attachments will ride) and
+`streamingBehavior?: "steer" | "followUp"` on `prompt`. Confirmed-by-declaration
+is not the same as driven, so the transport still defaults off.
+
+### `98ab78ba` — B2.2, the seam both migrations stopped at
+
+Neither transport could reach the supervisor, for the same reason: a fresh runner
+per send and no notion of one that outlives a turn. `AgentSessionRunning` is a
+REFINEMENT of `AgentRunning`, so the three one-shot runners do not conform and
+compile untouched, keeping `.sendStop(...)` as their floor.
+
+The load-bearing part is where capabilities come from: **the bound runner, never
+`record.harness`.** A harness-name table lies for the entire migration window,
+when pi-one-shot and pi-rpc are both live in one build — so a pi tile advertises
+Steer when it is running on rpc and does not when it is running one-shot, from the
+same record.
+
+### `24a80cea` — B1, narrowed to what was measured
+
+The notice fires only for pi, and only before the session has crossed pi's
+persistence watermark. The narrowness IS the design: a notice that fired on every
+Stop would be ignored, and being ignored is the same as being absent. Three
+negative cases carry most of the witness.
+
+It survives M4 rather than dying with it — rpc's SIGTERM/SIGHUP handlers looked
+like the fix, but persistence is gated by the watermark in both modes.
+
+### `31e9b3a6` + `2da3dd35` — A4, turn folding
+
+`turnRanges(facts:)` extracted first as a pure no-op with a byte-identical-output
+witness, committed alone; then `foldTurns` as a second pass over the same `[Item]`
+list. It reuses `AgentToolClusterHeaderItem` via a new `Header.scope`, so **no new
+view type**, and it runs only on the existing `factsChanged` replan path — not on
+every delta. Delta budget after: 5.9–7.0 ms against 8.3.
+
+### `6e7e2e00` — A6, and an honest stop
+
+`AgentRequestView` conformed; floors re-measured 196/175 → 198/177.
+**`ToolCallView` deliberately left unconformed**: its slots paint only
+conditionally and the fixture's single tool call trips neither, so conforming it
+today would trade one red for another. That is the audit the ticket asked for
+doing its job.
+
+### A7 — the gesture leg stays KNOWN-RED, and the re-judgement was not trustworthy
+
+`--perf-budget-gesture-transition-check` was re-run three times: **pass, 10.461 ms,
+9.835 ms** against an 8.3 ms budget. It still flaps, so the `MATRIX_KNOWN_RED`
+entry stays.
+
+But the honest note is that the machine had three agents building concurrently
+during those runs, which makes any wall-clock leg untrustworthy in both
+directions. **Re-judge this one on a quiet machine before acting on it either
+way** — the same lesson the 02:30 run taught when five terminal failures bisected
+to an asleep display rather than to the milestone. Its structural budgets are
+green, which is the part that carries information.
