@@ -21,6 +21,10 @@ public struct SpawnRequest: Equatable, Sendable {
     /// keeps this from becoming a general "expose tool arguments" channel.
     public static let toolName = "spawn_agent"
 
+    /// claude's spawn verb, under BOTH its names. The tool was renamed `Task` →
+    /// `Agent`, and a build in the wild may still be emitting either.
+    public static let claudeToolNames = ["Agent", "Task"]
+
     /// Role id matching a `.pi/agents/<role>.md`, when the caller named one.
     public let role: String?
     /// The child's task. Model-authored text: I5-sensitive, local only.
@@ -30,12 +34,27 @@ public struct SpawnRequest: Equatable, Sendable {
     /// Opaque provider item identity used only to position the resulting child
     /// milestone beside the tool call that created it.
     public let sourceItemID: String?
+    /// The child is the HARNESS's, not Array's.
+    ///
+    /// A pi or codex `spawn_agent` asks Array to start a process it will own. A
+    /// claude `Agent` call reports one claude has ALREADY started inside itself:
+    /// Array can watch it and must never claim to run it. That difference is what
+    /// decides the child's `AgentCapabilities`, and getting it from the request
+    /// rather than from a harness name keeps it true during a migration.
+    public let observedOnly: Bool
 
-    public init(role: String?, prompt: String, isolated: Bool, sourceItemID: String? = nil) {
+    public init(
+        role: String?,
+        prompt: String,
+        isolated: Bool,
+        sourceItemID: String? = nil,
+        observedOnly: Bool = false
+    ) {
         self.role = role
         self.prompt = prompt
         self.isolated = isolated
         self.sourceItemID = sourceItemID
+        self.observedOnly = observedOnly
     }
 
     /// Parses the `args` object of an observed tool call, as JSON text.
@@ -72,5 +91,40 @@ public struct SpawnRequest: Equatable, Sendable {
         // agent in the shared checkout the flag exists to keep it out of.
         let isolated = (args["isolated"] as? Bool) ?? false
         return SpawnRequest(role: role, prompt: prompt, isolated: isolated, sourceItemID: sourceItemID)
+    }
+
+    /// The claude analogue: an `Agent` (formerly `Task`) tool call.
+    ///
+    /// Claude has already started the child by the time this call appears, so the
+    /// result is `observedOnly` and `toolUseID` is REQUIRED — it is the id every
+    /// one of that child's frames carries in `parent_tool_use_id`, and therefore
+    /// the only stable way to tie the child's work to the call that made it. A
+    /// child announcement Array cannot re-identify later is not worth minting.
+    ///
+    /// `isolation: "worktree"` is claude's spelling of the same `isolated`
+    /// semantics pi expresses as a boolean, and it is read as a fact about the
+    /// child rather than as an instruction to Array — Array is not making this
+    /// worktree.
+    public static func parseClaudeAgentTool(
+        toolName: String,
+        args: [String: Any],
+        toolUseID: String
+    ) -> SpawnRequest? {
+        guard claudeToolNames.contains(toolName) else { return nil }
+        guard !toolUseID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        guard let prompt = args["prompt"] as? String,
+              !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return nil
+        }
+        var role = (args["subagent_type"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if role?.isEmpty == true { role = nil }
+        return SpawnRequest(
+            role: role,
+            prompt: prompt,
+            isolated: (args["isolation"] as? String) == "worktree",
+            sourceItemID: toolUseID,
+            observedOnly: true)
     }
 }

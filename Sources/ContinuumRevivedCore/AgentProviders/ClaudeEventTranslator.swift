@@ -43,6 +43,17 @@ public struct ClaudeEventTranslator {
     /// normalized event is returned.
     public var onRuntimeObservation: (@Sendable (AgentRuntimeObservation) -> Void)?
 
+    /// C7 — an observed claude subagent, announced by an `Agent` (formerly
+    /// `Task`) tool call. Exactly pi's `onSpawnRequest` seam and for exactly the
+    /// same reason: **it never widens `AgentRuntimeEvent`** (I5), which is
+    /// test-pinned, and `SpawnRequest` is deliberately non-Codable so a
+    /// model-authored prompt cannot leave this host.
+    ///
+    /// The difference from pi is `observedOnly`: pi asks Array to START a child,
+    /// while claude reports one it has ALREADY started inside itself. Array may
+    /// watch that child; it must never claim to run it.
+    public var onSpawnRequest: (@Sendable (SpawnRequest) -> Void)?
+
     public init(
         workingDirectory: URL? = nil,
         runToken: String = UUID().uuidString.lowercased().prefix(8).description,
@@ -182,6 +193,16 @@ public struct ClaudeEventTranslator {
                         toolName: name, input: block["input"] as? [String: Any] ?? [:]),
                     observedAt: now()
                 )))
+            }
+            // The tool call IS the announcement. `id` is what every one of that
+            // child's frames carries in `parent_tool_use_id`, so it is the only
+            // stable way to tie the child's work back to the call that made it.
+            if let onSpawnRequest,
+               let request = SpawnRequest.parseClaudeAgentTool(
+                   toolName: name,
+                   args: block["input"] as? [String: Any] ?? [:],
+                   toolUseID: id) {
+                onSpawnRequest(request)
             }
             let kind = Self.itemKind(forTool: name)
             itemKinds[id] = kind
@@ -390,6 +411,13 @@ public struct ClaudeEventTranslator {
         if let description = string("description") {
             fields.append((key: "description", value: description))
         }
+        // A ROLE ID, and role ids are publishable — `RoleRegistry` reads them out
+        // of project files and the inbox already shows them. `prompt` on the same
+        // tool stays out: it is a model-authored command body, and bodies never
+        // cross this boundary.
+        if let subagentType = string("subagent_type") {
+            fields.append((key: "subagent_type", value: subagentType))
+        }
         return fields
     }
 
@@ -474,6 +502,11 @@ public struct ClaudeEventTranslator {
             return .fileChange
         case "websearch", "webfetch":
             return .webSearch
+        case "agent", "task":
+            // Fell to `.commandExecution` through `default:`. Delegating to a
+            // child is not running a command, and the row that says so is the
+            // parent's index into work that happened somewhere else.
+            return .subagent
         default:
             return .commandExecution
         }

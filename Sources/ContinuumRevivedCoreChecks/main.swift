@@ -16,6 +16,12 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+if CommandLine.arguments.contains("--codex-appserver-runner-check") {
+    runCodexAppServerRunnerChecks()
+    print("CodexAppServerRunnerChecks passed")
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--command-center-check") {
     runCommandCenterChecks()
     print("CommandCenterChecks passed")
@@ -11551,6 +11557,7 @@ runSpawnRequestChecks()
 // and a spawn's role decides what it runs with.
 try runItemKindLenientDecodingChecks()
 try runAgentCommandExecutionPlannerChecks()
+runClaudeSubagentSupplyChecks()
 try runRoleRegistryChecks()
 
 // Ticket: docs/38-tickets/90-agent-ux/P4.3-auto-settle-inactivity.md — the
@@ -11628,5 +11635,12 @@ runAgentEntryTimestampChecks()
 // the measured ordering hazard (a delegating child's completion can arrive
 // after the parent's turn/completed).
 runCodexAppServerParityChecks()
+
+// Ticket: codex app-server migration (.plans/46). The impure half the parity
+// ticket left for later: CodexAppServerTransport's JSON-RPC request/response
+// correlation and error surfacing, and CodexAgentRunner's app-server run path
+// (fresh/resume, the JSON-RPC-error self-heal, stop()'s turn/interrupt) driven
+// end to end against a scripted fake `codex app-server` standing in on PATH.
+runCodexAppServerRunnerChecks()
 
 print("ContinuumRevivedCoreChecks passed")
