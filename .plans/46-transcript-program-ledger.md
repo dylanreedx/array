@@ -2246,3 +2246,33 @@ supervisor's own warnings debugs blind.
 pre-insertion query", immediately after a 23 s build. 4/4 clean on a quiet
 machine, and HEAD passes 3/3 — it is the known load flake in this leg, not a
 regression.
+
+## Gate: full matrix, 2026-08-25
+
+**181 legs run, 6 expected KNOWN-RED, no unexpected passes, no real failures.
+Matrix passed.**
+
+KNOWN-RED, all pre-existing and none of them touched here: `--nav-mode-check`,
+`--perf-budget-zoom-check`, `--canvas-zoom-invalidation-probe-check`,
+`--perf-budget-gesture-transition-check`, `--perf-budget-magnify-slope-check`,
+`scripts/check-root-docs.sh`.
+
+**Two process findings, both about judging a run rather than about the code.**
+
+1. **The first run halted on the iOS build and I nearly read it as a pass.** The
+   two new protocol conformances sat outside the `#if os(macOS)` blocks their
+   runner types live in, so `swift build --product Array` was green and the iOS
+   target could not find the types. Every leg after the build was voided.
+   `swift build` (no `--product`) would have caught it; `--product Array` cannot.
+2. **The second run aborted at `git diff --check`** on trailing newlines the same
+   edit introduced, so `matrix_report` never printed — and the shell's exit code
+   was 0 anyway, because it reflected the backgrounded wrapper rather than the
+   script. Six legs had run out of 181. **The leg COUNT is the thing a halt hides;
+   the exit code is not evidence.** This is the same lesson as `865b0d3` (4 of 135
+   legs), arriving in a new costume: last time the halt was a failing leg, this
+   time it was a whitespace check.
+
+**`--perf-budget-gesture-transition-check` re-judged.** The earlier note that it
+PASSED while listed was one observation. It failed here, so it stays on the
+allowlist and the note is withdrawn — the flapping is real and the entry is
+correct.
