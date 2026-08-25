@@ -9182,12 +9182,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // reveal landed — arming focus on an agent you failed to reach would suppress
         // the next mark for a row you never saw.
         agentSupervisor.focus(agentID: agentId)
+        // C11: the parent's WHOLE visible fan, not just the child that was
+        // revealed — every sibling that already has a reachable tile gets its
+        // own edge, bounded to `InboxSort.maxVisibleChildren` inside
+        // `showContextualAgentLineage(edges:)` (the same cap the inbox itself
+        // enforces on a parent's visible children).
         if let parentAgentID = agentSupervisor.records[agentId]?.parentAgentID,
            let parentTileID = agentSupervisor.records[parentAgentID]?.tileId,
            canvasView?.tileView(for: parentTileID) != nil {
-            canvasView?.showContextualAgentLineage(
-                parentTileID: parentTileID,
-                childTileID: tileId)
+            let siblingEdges = agentSupervisor.records.values
+                .filter { $0.parentAgentID == parentAgentID }
+                .compactMap { record -> (parentTileID: UUID, childTileID: UUID)? in
+                    guard let siblingTileID = record.tileId,
+                          canvasView?.tileView(for: siblingTileID) != nil else { return nil }
+                    return (parentTileID, siblingTileID)
+                }
+            canvasView?.showContextualAgentLineage(edges: siblingEdges)
         }
         // The mark is a fact the rows carry, so the list has to be told; a
         // cross-workspace reveal has already reloaded, and a same-workspace one has

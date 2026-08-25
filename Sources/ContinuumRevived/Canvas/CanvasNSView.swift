@@ -93,7 +93,11 @@ final class CanvasNSView: NSView, TokenThemed {
     /// See `withAutoLayoutSuppressed` (M1.2, `.plans/46`).
     private var _suppressesAutoLayoutForHydration = false
     private var agentLineageOverlay: AgentLineageOverlayView?
-    private var contextualAgentLineage: (parentTileID: UUID, childTileID: UUID)?
+    /// C11: N edges, not one — a fan-out reveal shows the parent's whole
+    /// visible fan, bounded the same way the inbox bounds visible children
+    /// (`InboxSort.maxVisibleChildren`, enforced in
+    /// `showContextualAgentLineage(edges:)`).
+    private var contextualAgentLineage: [(parentTileID: UUID, childTileID: UUID)] = []
     private var showsZoneChrome: Bool
     private var zoneChromeViews: [UUID: ZoneChromeNSView] = [:]
     private var navModeOverlayView: NavModeOverlayNSView?
@@ -1693,20 +1697,36 @@ final class CanvasNSView: NSView, TokenThemed {
         return nil
     }
 
-    /// Shows one contextual direct edge. No lineage is persisted here; callers
-    /// derive it from `AgentRecord.parentAgentID` and current tile bindings.
+    /// Shows one contextual direct edge. Convenience for the common single-edge
+    /// caller; routes through `showContextualAgentLineage(edges:)`.
     func showContextualAgentLineage(parentTileID: UUID, childTileID: UUID) {
-        guard parentTileID != childTileID,
-              let parent = tileView(for: parentTileID),
-              tileView(for: childTileID) != nil else {
+        showContextualAgentLineage(edges: [(parentTileID, childTileID)])
+    }
+
+    /// C11 — a fan-out reveal has more than one live edge to show: the
+    /// parent's whole VISIBLE fan, not just the one agent that was clicked.
+    /// No lineage is persisted here; callers derive edges from
+    /// `AgentRecord.parentAgentID` and current tile bindings.
+    ///
+    /// Bounded to `InboxSort.maxVisibleChildren` — the same cap the inbox
+    /// itself enforces on a parent's visible children (`boundedForInbox`) —
+    /// so the canvas never draws more fan-out than the inbox would ever show
+    /// at once. A degenerate edge (parent == child) or one naming a tile this
+    /// canvas does not hold is dropped rather than failing the whole set.
+    func showContextualAgentLineage(edges: [(parentTileID: UUID, childTileID: UUID)]) {
+        let resolved = edges
+            .filter { $0.parentTileID != $0.childTileID }
+            .filter { tileView(for: $0.parentTileID) != nil && tileView(for: $0.childTileID) != nil }
+            .prefix(InboxSort.maxVisibleChildren)
+        guard let anyParent = resolved.first.flatMap({ tileView(for: $0.parentTileID) }) else {
             clearContextualAgentLineage()
             return
         }
-        contextualAgentLineage = (parentTileID, childTileID)
+        contextualAgentLineage = Array(resolved)
         let overlay = agentLineageOverlay ?? AgentLineageOverlayView()
         agentLineageOverlay = overlay
         if overlay.superview == nil {
-            worldPlane.addSubview(overlay, positioned: .below, relativeTo: parent)
+            worldPlane.addSubview(overlay, positioned: .below, relativeTo: anyParent)
             reorderTileSubviewsByZIndex()
         }
         overlay.reducesMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -1714,25 +1734,24 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     func clearContextualAgentLineage() {
-        contextualAgentLineage = nil
+        contextualAgentLineage = []
         agentLineageOverlay?.removeFromSuperview()
     }
 
     private func updateContextualAgentLineageGeometry() {
-        guard let relation = contextualAgentLineage,
-              let parent = tileView(for: relation.parentTileID),
-              let child = tileView(for: relation.childTileID),
-              let overlay = agentLineageOverlay else { return }
+        guard !contextualAgentLineage.isEmpty, let overlay = agentLineageOverlay else { return }
         overlay.frame = worldPlane.bounds
-        let parentRect = overlay.convert(parent.bounds, from: parent)
-        let childRect = overlay.convert(child.bounds, from: child)
-        let travelsRight = childRect.midX >= parentRect.midX
-        overlay.startPoint = CGPoint(
-            x: travelsRight ? parentRect.maxX : parentRect.minX,
-            y: parentRect.midY)
-        overlay.endPoint = CGPoint(
-            x: travelsRight ? childRect.minX : childRect.maxX,
-            y: childRect.midY)
+        overlay.edges = contextualAgentLineage.compactMap { relation -> (start: CGPoint, end: CGPoint)? in
+            guard let parent = tileView(for: relation.parentTileID),
+                  let child = tileView(for: relation.childTileID) else { return nil }
+            let parentRect = overlay.convert(parent.bounds, from: parent)
+            let childRect = overlay.convert(child.bounds, from: child)
+            let travelsRight = childRect.midX >= parentRect.midX
+            return (
+                start: CGPoint(x: travelsRight ? parentRect.maxX : parentRect.minX, y: parentRect.midY),
+                end: CGPoint(x: travelsRight ? childRect.minX : childRect.maxX, y: childRect.midY)
+            )
+        }
     }
 
     func setDocumentRelationships(_ links: [DocumentAgentLink], agentTileIds: [AgentID: UUID]) {
@@ -1774,10 +1793,11 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     /// T8: the lineage overlay's painted endpoints, in the canvas's own space.
-    var qaLineageEndpointsInCanvasSpace: (start: CGPoint, end: CGPoint)? {
-        guard let overlay = agentLineageOverlay else { return nil }
-        return (overlay.convert(overlay.startPoint, to: self),
-                overlay.convert(overlay.endPoint, to: self))
+    /// C11: one entry per painted edge, in the same order `showContextualAgentLineage`
+    /// resolved them — never more than `InboxSort.maxVisibleChildren`.
+    var qaLineageEndpointsInCanvasSpace: [(start: CGPoint, end: CGPoint)] {
+        guard let overlay = agentLineageOverlay else { return [] }
+        return overlay.edges.map { (overlay.convert($0.start, to: self), overlay.convert($0.end, to: self)) }
     }
 
     var qaDocumentRelationshipRoutes: [DocumentRelationshipOverlayView.Route] {
@@ -2251,8 +2271,18 @@ final class CanvasNSView: NSView, TokenThemed {
     /// WKWebView, flush note save, purge descriptor) is the caller's
     /// responsibility — `removeTile` is the canvas-side teardown only.
     func removeTile(id: UUID) {
-        if contextualAgentLineage?.parentTileID == id || contextualAgentLineage?.childTileID == id {
+        // C11: the shared parent going away leaves every edge unanchored, so the
+        // whole set clears; a single child going away only drops its own edge —
+        // the rest of the parent's fan is still real and still on screen.
+        if contextualAgentLineage.contains(where: { $0.parentTileID == id }) {
             clearContextualAgentLineage()
+        } else if contextualAgentLineage.contains(where: { $0.childTileID == id }) {
+            let remaining = contextualAgentLineage.filter { $0.childTileID != id }
+            if remaining.isEmpty {
+                clearContextualAgentLineage()
+            } else {
+                showContextualAgentLineage(edges: remaining)
+            }
         }
         if let view = tileViews[id] {
             focusBroker?.unregister(view.focusSurfaceID)

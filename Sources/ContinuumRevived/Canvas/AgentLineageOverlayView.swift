@@ -1,11 +1,15 @@
 import AppKit
 
-/// Ephemeral direct parent→child relationship. Identity remains in
+/// Ephemeral direct parent→child relationship(s). Identity remains in
 /// `AgentRecord.parentAgentID`; this view stores only current presentation.
+///
+/// C11: a fan-out reveal draws the parent's whole visible fan, not just one
+/// child — `edges` holds every currently-resolved (start, end) pair, bounded
+/// upstream by `CanvasNSView.showContextualAgentLineage(edges:)` to
+/// `InboxSort.maxVisibleChildren`.
 @MainActor
 final class AgentLineageOverlayView: NSView {
-    var startPoint: CGPoint = .zero { didSet { needsDisplay = true } }
-    var endPoint: CGPoint = .zero { didSet { needsDisplay = true } }
+    var edges: [(start: CGPoint, end: CGPoint)] = [] { didSet { needsDisplay = true } }
     var reducesMotion = false { didSet { needsDisplay = true } }
 
     override var isFlipped: Bool { true }
@@ -13,6 +17,12 @@ final class AgentLineageOverlayView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        for edge in edges {
+            drawEdge(from: edge.start, to: edge.end)
+        }
+    }
+
+    private func drawEdge(from startPoint: CGPoint, to endPoint: CGPoint) {
         guard startPoint != endPoint else { return }
         let path = NSBezierPath()
         path.move(to: startPoint)
