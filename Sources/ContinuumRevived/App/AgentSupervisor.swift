@@ -2164,6 +2164,7 @@ final class AgentSupervisor {
                     // the flag was set would still overwrite the stopped state. It
                     // also covers any runner that has not adopted `AgentRunStopped`.
                     if runnerSaidStopped || self.stopRequestedAgents.contains(id) {
+                        self.noticePiConversationLoss(id)
                         self.deliver(
                             .turnCompleted(
                                 threadId: threadId,
@@ -2180,6 +2181,46 @@ final class AgentSupervisor {
             DispatchQueue.main.async { self?.clearRunner(runner, for: id) }
         }
         return true
+    }
+
+    /// Agents whose provider has produced enough output that pi would have written
+    /// its session file. See `deliver`.
+    private var piPersistenceWatermarkReached: Set<AgentID> = []
+
+    /// B1 — say it out loud at the moment of loss.
+    ///
+    /// Measured 2026-08-22 and re-measured 2026-08-24: signalling a pi process
+    /// before its session has produced one assistant message leaves the session
+    /// directory created and EMPTY, and a rerun with the same `--session-id`
+    /// reports no session found and starts fresh. M1.7 made that quieter, not
+    /// better: the error row that used to hint at it became a clean "Interrupted"
+    /// over a destroyed conversation.
+    ///
+    /// Deliberately narrow. It is not every stop — a long-lived session crosses the
+    /// watermark once, early, and then loses at most the in-flight message — and it
+    /// is not every harness: claude's SIGINT ends the turn and keeps the session,
+    /// and codex is unaffected. A warning that fired on every Stop would be
+    /// ignored, and being ignored is the same as being absent.
+    ///
+    /// It also survives the rpc migration rather than dying with it: rpc registers
+    /// SIGTERM/SIGHUP handlers that one-shot mode does not, but persistence is
+    /// gated by the watermark in BOTH modes, so the first turn stays exposed.
+    private func noticePiConversationLoss(_ id: AgentID) {
+        guard records[id]?.harness == .pi else { return }
+        guard !piPersistenceWatermarkReached.contains(id) else { return }
+        let threadId = Self.threadId(for: id)
+        deliver(.itemStarted(
+            threadId: threadId,
+            itemId: "pi-session-discarded:\(threadId)",
+            kind: .error,
+            title: "Stopped before Pi saved anything — this conversation was discarded, and the next message starts fresh."
+        ), to: id)
+        deliver(.itemCompleted(
+            threadId: threadId,
+            itemId: "pi-session-discarded:\(threadId)",
+            kind: .error,
+            status: .failed
+        ), to: id)
     }
 
     /// Why a prompt for `id` would be refused right now, or nil if it would be
@@ -4136,7 +4177,17 @@ final class AgentSupervisor {
     }
 
     private func scheduleTranscriptPersist(for id: AgentID, final: Bool) {
-        guard let store = transcriptStore, let document = transcriptProjections[id]?.document else { return }
+        guard let store = transcriptStore else { return }
+        // Assistant/reasoning content deltas parse into blocks off a scheduled
+        // deadline (the tile drove that off a real `RunLoop` timer); nothing
+        // here runs that clock, so a boundary write must flush the pending
+        // streaming markup itself or the just-streamed reply is silently
+        // absent from what gets saved.
+        if final, var projection = transcriptProjections[id] {
+            _ = projection.flushPendingStreamingMarkup()
+            transcriptProjections[id] = projection
+        }
+        guard let document = transcriptProjections[id]?.document else { return }
         let sessionID = AgentTranscriptStore.canonicalSessionID(for: id)
         transcriptPersistenceTasks[id]?.cancel()
         transcriptPersistenceTasks[id] = Task { [weak self] in
@@ -4183,6 +4234,27 @@ final class AgentSupervisor {
     }
 
     private func deliver(_ event: AgentRuntimeEvent, to id: AgentID, now: Date = Date()) {
+        // B1 — pi's persistence watermark, tracked because a stop before it costs
+        // the user the whole conversation and Array is the only thing that can say
+        // so. `SessionManager._persist()` (`session-manager.js:717-751`, shared by
+        // json and rpc alike) holds every completed entry in memory until the
+        // session has produced ONE assistant message; after that each message is
+        // written synchronously before its event even reaches stdout.
+        //
+        // So the exposure is the FIRST turn of a brand-new session, not every stop
+        // — which is why this is a watermark and not a blanket warning. Approximated
+        // conservatively from the normalized stream: any assistant content or any
+        // completed turn means pi has almost certainly crossed it.
+        switch event {
+        case let .itemStarted(_, _, kind, _) where kind == .assistantMessage:
+            piPersistenceWatermarkReached.insert(id)
+        case .contentDelta:
+            piPersistenceWatermarkReached.insert(id)
+        case let .turnCompleted(_, _, outcome, _) where outcome == .completed:
+            piPersistenceWatermarkReached.insert(id)
+        default:
+            break
+        }
         switch event {
         case let .turnCompleted(_, _, outcome, _):
             if outcome == .completed {
@@ -11087,23 +11159,33 @@ private func checkTranscriptPersistenceWithoutTile(
     }
 
     let sessionID = AgentTranscriptStore.canonicalSessionID(for: id)
-    func containsPrompt(_ document: AgentDocument) -> Bool {
+    func containsParagraphText(_ document: AgentDocument, matching predicate: (String) -> Bool) -> Bool {
         document.entries.contains { entry in
             entry.blocks.contains { block in
                 if case let .paragraph(inlines) = block.payload {
-                    return inlines.contains { if case let .text(text) = $0 { return text == promptText }; return false }
+                    return inlines.contains { if case let .text(text) = $0 { return predicate(text) }; return false }
                 }
                 return false
             }
         }
     }
+    func containsPrompt(_ document: AgentDocument) -> Bool {
+        containsParagraphText(document) { $0 == promptText }
+    }
+    // Proves `ingestTranscriptEvent` (the provider-event half, distinct from
+    // the prompt echo) actually ran without a tile — a witness that only
+    // checked the prompt would stay green even if provider events were still
+    // gated behind a tile, because the prompt echo is a separate code path.
+    func containsAssistantReply(_ document: AgentDocument) -> Bool {
+        containsParagraphText(document) { $0.contains("assistant-reply-text") }
+    }
 
     // Debounced, not immediate — poll rather than assert on the first read.
     var loaded: AgentDocument?
     let deadline = Date().addingTimeInterval(3)
-    while loaded == nil || !containsPrompt(loaded!) {
+    while loaded == nil || !containsPrompt(loaded!) || !containsAssistantReply(loaded!) {
         loaded = try await transcriptStore.load(agentID: id, sessionID: sessionID)
-        if let loaded, containsPrompt(loaded) { break }
+        if let loaded, containsPrompt(loaded), containsAssistantReply(loaded) { break }
         if Date() >= deadline { break }
         try await Task.sleep(for: .milliseconds(50))
     }
@@ -11112,6 +11194,9 @@ private func checkTranscriptPersistenceWithoutTile(
     }
     guard containsPrompt(document) else {
         throw fail("the tile-less agent's persisted transcript does not contain its own prompt \(promptText.debugDescription)")
+    }
+    guard containsAssistantReply(document) else {
+        throw fail("the tile-less agent's persisted transcript does not contain the assistant's streamed reply — provider events are not reaching the supervisor's own persistence path without a tile")
     }
     guard !document.entries.isEmpty else {
         throw fail("the tile-less agent's persisted transcript has no entries at all")

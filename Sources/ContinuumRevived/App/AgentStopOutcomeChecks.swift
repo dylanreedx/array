@@ -203,7 +203,107 @@ enum AgentStopOutcomeChecks {
                    + "previous turn's stop must not keep laundering errors; got "
                    + "\(String(describing: act4Supervisor.records[act4ID]?.latestTerminalEvent?.outcome))")
 
+        try checkPiConversationLossIsSaidOutLoud(root: root, cwd: cwd)
+
         print("AgentStopOutcomeChecks: a named stop, a plain error after a stop, a genuine "
-              + "unstopped failure and a failure after a stop were each recorded correctly")
+              + "unstopped failure and a failure after a stop were each recorded correctly, and a "
+              + "pi turn stopped before its session was ever written says so while claude, codex "
+              + "and a pi session past the watermark stay silent")
     }
+
+    /// B1 — a stop that DESTROYS the conversation says so, and only then.
+    ///
+    /// Measured against pi 0.84.1: signalling before the session has produced one
+    /// assistant message leaves the session directory created and EMPTY, and a
+    /// rerun with the same `--session-id` reports no session found and starts
+    /// fresh. `SessionManager._persist()` holds every completed entry in memory
+    /// until that watermark, then writes each one synchronously — so the exposure
+    /// is the FIRST turn of a new session, in json and rpc mode alike.
+    ///
+    /// M1.7 made this quieter rather than better: the error row that used to hint
+    /// at it became a clean "Interrupted" over a destroyed conversation.
+    ///
+    /// The three negative cases are the point. A notice that fired on every Stop
+    /// would be ignored, and being ignored is the same as being absent.
+    @MainActor
+    private static func checkPiConversationLossIsSaidOutLoud(root: URL, cwd: URL) throws {
+        func act(
+            _ name: String,
+            harness: AgentHarness,
+            producesAssistantOutput: Bool
+        ) throws -> [AgentRuntimeEvent] {
+            let storeRoot = root.appendingPathComponent("loss-\(name)", isDirectory: true)
+            try FileManager.default.createDirectory(at: storeRoot, withIntermediateDirectories: true)
+            let store = AgentStore(applicationSupportDirectory: storeRoot)
+            let config = AgentModelConfig.resolvedFromDefaults(harness: harness)
+            var script: [AgentRuntimeEvent] = [
+                .turnStarted(threadId: "loss-\(name)", turnId: "loss-\(name)#1")
+            ]
+            if producesAssistantOutput {
+                // Crossing pi's watermark the way a real turn does.
+                script.append(.itemStarted(
+                    threadId: "loss-\(name)", itemId: "msg1",
+                    kind: .assistantMessage, title: nil))
+            }
+            // A stopError is what makes this the REAL shape: production's stop() is
+            // non-throwing and the CLI's run() throws on the way out.
+            let runner = ScriptedAgentRunner(
+                script: script, holdUntilStopped: true,
+                stopError: AgentRunStopped(detail: "terminated"))
+            let supervisor = AgentSupervisor(store: store, makeRunner: { _ in runner })
+            let id = supervisor.spawn(
+                role: nil, prompt: nil, cwd: cwd, harness: harness,
+                model: config.model, thinking: config.thinking)
+            let collected = EventCollector()
+            let stream = supervisor.events(for: id)
+            let task = Task { @MainActor in for await event in stream { collected.append(event) } }
+            defer { task.cancel() }
+            try expect(supervisor.send("go", to: id), "\(name): the prompt must be accepted")
+            try expect(waitUntil { supervisor.turnSnapshot(for: id)?.state == .working },
+                       "\(name): the turn must be in flight before it is stopped")
+            supervisor.stop(id)
+            try expect(waitUntil { runner.completedRuns == 1 }, "\(name): the blocked run must return")
+            try expect(waitUntil {
+                collected.events.contains {
+                    if case let .turnCompleted(_, _, outcome, _) = $0 { return outcome == .interrupted }
+                    return false
+                }
+            }, "\(name): the stop must produce an interrupted turn")
+            return collected.events
+        }
+
+        func mentionsLoss(_ events: [AgentRuntimeEvent]) -> Bool {
+            events.contains {
+                if case let .itemStarted(_, itemId, _, _) = $0 {
+                    return itemId.hasPrefix("pi-session-discarded:")
+                }
+                return false
+            }
+        }
+
+        let exposed = try act("pi-first-turn", harness: .pi, producesAssistantOutput: false)
+        try expect(mentionsLoss(exposed),
+                   "B1: a pi turn stopped before its session was ever written said nothing — the "
+                   + "user keeps a transcript on screen for a conversation the provider discarded")
+
+        let past = try act("pi-past-watermark", harness: .pi, producesAssistantOutput: true)
+        try expect(!mentionsLoss(past),
+                   "B1: a pi session past its persistence watermark was warned anyway; a notice on "
+                   + "every Stop is a notice nobody reads")
+
+        for harness in [AgentHarness.claudeCode, .codex] {
+            let other = try act("\(harness.rawValue)-first-turn", harness: harness,
+                                producesAssistantOutput: false)
+            try expect(!mentionsLoss(other),
+                       "B1: \(harness.rawValue) was told its conversation was discarded, which is "
+                       + "only measured for pi")
+        }
+    }
+}
+
+/// Main-actor-safe collector for a supervisor's own event stream.
+@MainActor
+private final class EventCollector {
+    private(set) var events: [AgentRuntimeEvent] = []
+    func append(_ event: AgentRuntimeEvent) { events.append(event) }
 }
