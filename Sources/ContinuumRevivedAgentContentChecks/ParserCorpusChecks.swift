@@ -33,6 +33,11 @@ func parserPlainText(_ blocks: [AgentBlock]) -> String {
         case let .agentReference(reference): own = reference.displayNameAtSpawn
         case let .error(error): own = error.message
         case let .notice(notice): own = corpusInlineText(notice.message)
+        // A compaction boundary carries counts, not prose. It projects to nothing
+        // for the same reason a horizontal rule does: this corpus is what a COPY
+        // of the transcript should contain, and a boundary is chrome around the
+        // text rather than part of it.
+        case .compaction: own = ""
         case let .opaque(opaque):
             if case let .string(value) = opaque.value { own = value } else { own = "" }
         case let .table(table):
