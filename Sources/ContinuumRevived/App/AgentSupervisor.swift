@@ -2240,6 +2240,17 @@ final class AgentSupervisor {
         /// P2D.3 — the request named a role this project does not define, or defines
         /// with a model/thinking value Pi would have to guess at.
         case roleUnresolved
+        /// C12 — the parent runs codex. `codex exec --json` (measured, `.plans/46`)
+        /// emits no wire representation for subagent activity at all: even with
+        /// `features.multi_agent_v2=true` set and delegation genuinely happening,
+        /// Array receives nothing about the child on the transport it runs. The
+        /// honest refusal is about OBSERVABILITY, not capability — codex itself can
+        /// spawn; Array cannot see it happen, so it will not pretend to run it.
+        case codexSubagentsUnobservable
+        /// C12 — the parent is a claude `Agent` subagent Array only mirrors
+        /// (`AgentCapabilities.observedReadOnly`): read-only transcript, not
+        /// locally managed, no runner. There is nothing for a spawn to go through.
+        case observedParentCannotSpawn
         /// What the parent's transcript says. `worktreeFailed` deliberately does not
         /// name the git error: `WorktreeManager`'s failures quote paths. `roleUnresolved`
         /// deliberately does not name the role id either — not because an id is unsafe
@@ -2258,6 +2269,10 @@ final class AgentSupervisor {
                 return "its isolated checkout could not be created"
             case .roleUnresolved:
                 return "the requested role is not defined in this project"
+            case .codexSubagentsUnobservable:
+                return "Array cannot observe codex subagents on the transport it runs"
+            case .observedParentCannotSpawn:
+                return "this agent is mirrored, not run, and has no runner to spawn through"
             }
         }
     }
@@ -2281,9 +2296,22 @@ final class AgentSupervisor {
         guard let parent = records[parentId] else {
             return refuseSpawn(.unknownParent, for: parentId)
         }
+        // C12 — a mirrored subagent has no runner behind it at all: refuse before
+        // even asking what harness it claims, since that field describes who
+        // PRODUCED it, not something Array can spawn through.
+        guard parent.capabilities != .observedReadOnly else {
+            return refuseSpawn(.observedParentCannotSpawn, for: parentId)
+        }
         guard let parentHarness = parent.harness else {
             warn("AgentSupervisor.handleSpawnRequest: child of \(parentId.rawValue.uuidString) not spawned: parent harness ownership is unresolved")
             return refuseSpawn(.roleUnresolved, for: parentId)
+        }
+        // C12 — codex delegation may genuinely be happening; Array's transport
+        // (`codex exec --json`) has no wire representation for it, so refuse
+        // honestly about observability rather than silently producing nothing or
+        // claiming codex itself cannot spawn.
+        guard parentHarness != .codex else {
+            return refuseSpawn(.codexSubagentsUnobservable, for: parentId)
         }
         let depth = depth(of: parentId) + 1
         guard depth <= Self.maxSpawnDepth else {
@@ -10336,8 +10364,120 @@ private func checkSpawnFromToolCall(
         throw fail("I5: a role refusal echoes the requested role id or a host path: \(roleRefusalTitles)")
     }
 
+    // MARK: 8 · C12 — a codex parent is refused honestly about OBSERVABILITY
+
+    // `codex exec --json` (measured, `.plans/46`) has no wire representation for
+    // subagent activity at all, so Array cannot say a codex parent spawned
+    // anything even where codex itself may be delegating. The refusal must not
+    // claim codex cannot spawn — that would be false — only that this transport
+    // cannot see it.
+    let codexConfig = AgentModelConfig.resolvedFromDefaults(harness: .codex)
+    let codexParentId = supervisor.spawn(
+        role: nil, prompt: nil, cwd: repo,
+        harness: .codex, model: codexConfig.model, thinking: codexConfig.thinking,
+        projectId: projectId)
+    let codexInbox = EventInbox()
+    let codexStream = supervisor.events(for: codexParentId)
+    let codexTask = Task { @MainActor in for await event in codexStream { codexInbox.append(event) } }
+    defer { codexTask.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { supervisor.subscriberCount(for: codexParentId) == 1 }) else {
+        throw fail("the codex parent's subscriber never registered")
+    }
+    let beforeCodexRefusal = supervisor.records.count
+    guard supervisor.handleSpawnRequest(
+        SpawnRequest(role: nil, prompt: "delegate this to a subagent", isolated: false),
+        from: codexParentId
+    ) == nil else {
+        throw fail("a codex parent was allowed to spawn — Array has no transport evidence of what would happen to the child")
+    }
+    guard supervisor.records.count == beforeCodexRefusal else {
+        throw fail("the refused codex spawn still created a record: \(supervisor.records.count), expected \(beforeCodexRefusal)")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        codexInbox.events.contains { event in
+            if case let .itemStarted(_, _, kind, title) = event {
+                return kind == .error && (title ?? "").contains(AgentSupervisor.SpawnRefusal.codexSubagentsUnobservable.reason)
+            }
+            return false
+        }
+    }) else {
+        throw fail("a codex parent's spawn was refused silently — nothing on its transcript: \(codexInbox.events)")
+    }
+    let codexRefusalTitles = codexInbox.events.compactMap { event -> String? in
+        if case let .itemStarted(_, _, _, title) = event, (title ?? "").contains("refused") { return title }
+        return nil
+    }
+    guard codexRefusalTitles.allSatisfy({ !$0.contains("delegate this to a subagent") && !$0.contains(root.path) }) else {
+        throw fail("I5: a codex refusal echoes the requested prompt or a host path: \(codexRefusalTitles)")
+    }
+    guard !codexRefusalTitles.contains(where: { $0.localizedCaseInsensitiveContains("cannot spawn") }) else {
+        throw fail("the codex refusal claims codex cannot spawn, which is false — it says Array cannot observe it: \(codexRefusalTitles)")
+    }
+    supervisor.stop(codexParentId)
+
+    // MARK: 9 · C12 — a mirrored (observedReadOnly) parent has no runner to spawn through
+
+    // This is a claude `Agent` subagent Array only mirrors — read-only transcript,
+    // not locally managed. Persist it through the real store/restore path (the
+    // same one a relaunch uses) rather than reaching into `records` directly, so
+    // this witness exercises production adoption too.
+    let observedId = AgentID(rawValue: UUID())
+    let now = Date()
+    let observedRecord = AgentRecord(
+        id: observedId,
+        displayName: "Mirrored subagent",
+        role: nil,
+        harness: .claudeCode,
+        model: piConfig.model,
+        thinking: piConfig.thinking,
+        cwd: repo.path,
+        projectId: projectId,
+        capabilities: .observedReadOnly,
+        createdAt: now,
+        lastActivityAt: now
+    )
+    try store.upsert(observedRecord)
+    supervisor.restore()
+    guard supervisor.records[observedId]?.capabilities == .observedReadOnly else {
+        throw fail("the mirrored record did not restore with observedReadOnly capabilities")
+    }
+    let observedInbox = EventInbox()
+    let observedStream = supervisor.events(for: observedId)
+    let observedTask = Task { @MainActor in for await event in observedStream { observedInbox.append(event) } }
+    defer { observedTask.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { supervisor.subscriberCount(for: observedId) == 1 }) else {
+        throw fail("the mirrored agent's subscriber never registered")
+    }
+    let beforeObservedRefusal = supervisor.records.count
+    guard supervisor.handleSpawnRequest(
+        SpawnRequest(role: nil, prompt: "spawn a helper", isolated: false),
+        from: observedId
+    ) == nil else {
+        throw fail("a mirrored (observedReadOnly) agent was allowed to spawn a child through a runner it does not own")
+    }
+    guard supervisor.records.count == beforeObservedRefusal else {
+        throw fail("the refused mirrored-parent spawn still created a record: \(supervisor.records.count), expected \(beforeObservedRefusal)")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        observedInbox.events.contains { event in
+            if case let .itemStarted(_, _, kind, title) = event {
+                return kind == .error && (title ?? "").contains(AgentSupervisor.SpawnRefusal.observedParentCannotSpawn.reason)
+            }
+            return false
+        }
+    }) else {
+        throw fail("a mirrored parent's spawn was refused silently — nothing on its transcript: \(observedInbox.events)")
+    }
+    let observedRefusalTitles = observedInbox.events.compactMap { event -> String? in
+        if case let .itemStarted(_, _, _, title) = event, (title ?? "").contains("refused") { return title }
+        return nil
+    }
+    guard observedRefusalTitles.allSatisfy({ !$0.contains("spawn a helper") && !$0.contains(root.path) }) else {
+        throw fail("I5: a mirrored-parent refusal echoes the requested prompt or a host path: \(observedRefusalTitles)")
+    }
+
     for id in supervisor.children(of: parentId) + [grandchildId] { supervisor.stop(id) }
-    return "the captured spawn_agent call produced 1 child (role \(capturedRole) at \(scoutModel)/\(scoutThinking) and --tools from its role file, isolated on \(branch), parent linked in the store) that ran the requested prompt, prompt/role absent from \(parentInbox.events.count) parent events and \(published.count) published activity events while tool.\(SpawnRequest.toolName) crossed, a grandchild got a sibling worktree, depth capped at \(AgentSupervisor.maxSpawnDepth) and children at \(AgentSupervisor.maxChildrenPerParent) with the refusal said in the requesting agent's transcript, \(workers.count) role-only children inherited the parent's settings, and an undefined role was refused without echoing its id"
+    return "the captured spawn_agent call produced 1 child (role \(capturedRole) at \(scoutModel)/\(scoutThinking) and --tools from its role file, isolated on \(branch), parent linked in the store) that ran the requested prompt, prompt/role absent from \(parentInbox.events.count) parent events and \(published.count) published activity events while tool.\(SpawnRequest.toolName) crossed, a grandchild got a sibling worktree, depth capped at \(AgentSupervisor.maxSpawnDepth) and children at \(AgentSupervisor.maxChildrenPerParent) with the refusal said in the requesting agent's transcript, \(workers.count) role-only children inherited the parent's settings, an undefined role was refused without echoing its id, a codex parent was refused honestly about transport observability rather than a false claim it cannot spawn, and a mirrored observedReadOnly parent restored from the store was refused for having no runner to spawn through — neither refusal echoing its request"
 }
 
 /// P2C.2 — an isolated spawn works in its OWN checkout.
