@@ -11564,6 +11564,7 @@ runSpawnRequestChecks()
 try runItemKindLenientDecodingChecks()
 try runAgentCommandExecutionPlannerChecks()
 runClaudeSubagentSupplyChecks()
+runPiDelegateSupplyChecks()
 try runRoleRegistryChecks()
 
 // Ticket: docs/38-tickets/90-agent-ux/P4.3-auto-settle-inactivity.md — the

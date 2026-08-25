@@ -142,6 +142,101 @@ public struct SpawnRequest: Equatable, Sendable {
             observedOnly: true,
             displayLabel: label)
     }
+
+    /// pi's OTHER delegation verb, from the third-party `harness-agents`
+    /// extension the user installs themselves.
+    ///
+    /// Deliberately not folded into `parse`: `spawn_agent` is Array's own inert
+    /// extension, whose tool CALL is the whole API and whose child Array then
+    /// starts and owns. `delegate_agent` has already dispatched the child as its
+    /// own detached `pi --mode json -p --no-session` process before this call is
+    /// even reported, so the child is `observedOnly` — Array can watch it and must
+    /// never claim to run it or offer a Stop for it. Blurring the two would put a
+    /// composer on a process Array cannot prompt.
+    ///
+    /// Every argument name differs from `spawn_agent`'s, which is why the existing
+    /// parser returns nil for these calls twice over: `agent` not `role`, `task`
+    /// not `prompt`, `worktree` not `isolated`.
+    ///
+    /// `toolUseID` is REQUIRED and is what identifies the child. The `runId` — the
+    /// thing that actually names the transcript on disk — only arrives later, on
+    /// `tool_execution_end`, and it embeds a timestamp and a random suffix, so it
+    /// is not re-derivable and a `runId`-keyed identity would mint a fresh child
+    /// on every re-observation.
+    ///
+    /// `worktree: true` is recorded as a fact about the child, not an instruction:
+    /// the extension makes that worktree, not Array.
+    public static let piDelegateToolName = "delegate_agent"
+
+    public static func parsePiDelegateTool(
+        toolName: String,
+        args: [String: Any],
+        toolUseID: String
+    ) -> SpawnRequest? {
+        guard toolName == piDelegateToolName else { return nil }
+        guard !toolUseID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        guard let task = args["task"] as? String,
+              !task.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return nil
+        }
+        var role = (args["agent"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if role?.isEmpty == true { role = nil }
+        return SpawnRequest(
+            role: role,
+            prompt: task,
+            // Strictly a Bool, for the same reason `parse` refuses to coerce
+            // `isolated`: the schema declares one, so a string means something
+            // else was sent.
+            isolated: (args["worktree"] as? Bool) ?? false,
+            sourceItemID: toolUseID,
+            observedOnly: true,
+            // The tool has no `description` field, so the child's title comes from
+            // its role — "code-scout" reads far better than a `call_…` id, and the
+            // ordinal ladder in `resolveDerivedDisplayName` handles collisions.
+            displayLabel: role)
+    }
+}
+
+/// Where an observed pi child's transcript actually lives.
+///
+/// A `delegate_agent` child does NOT appear on the parent's stream — it runs as
+/// its own `pi --mode json -p --no-session` process, and the parent's node
+/// process appends that child's stdout to
+/// `<cwd>/.pi/agent-runs/<runId>/events.jsonl`. So unlike claude, where the
+/// child's frames arrive inline keyed by `parent_tool_use_id`, pi's child has to
+/// be read from a file — and the file's name is only known once the tool call
+/// completes.
+///
+/// This is the second half of the identity, delivered separately from the
+/// `SpawnRequest` for that reason. `toolUseID` ties it back to the child the
+/// request already minted; `runId` says where to read. Local-only and
+/// non-Codable, for the same I5 reason `SpawnRequest` is.
+public struct ObservedRunHandle: Equatable, Sendable {
+    public let toolUseID: String
+    public let runId: String
+
+    public init(toolUseID: String, runId: String) {
+        self.toolUseID = toolUseID
+        self.runId = runId
+    }
+
+    /// `runId` becomes a path component, so it is validated as one. Rejects
+    /// anything with a separator, a parent reference, a control character, or a
+    /// leading dot — a model-adjacent string must never be able to name a
+    /// directory outside the run store.
+    public static func validated(toolUseID: String, runId: String) -> ObservedRunHandle? {
+        let trimmedID = toolUseID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = runId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedID.isEmpty, !trimmed.isEmpty, trimmed.count <= 256 else { return nil }
+        guard !trimmed.hasPrefix("."), trimmed != "..", !trimmed.contains("/"), !trimmed.contains("\\") else {
+            return nil
+        }
+        guard trimmed.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) else {
+            return nil
+        }
+        return ObservedRunHandle(toolUseID: trimmedID, runId: trimmed)
+    }
 }
 
 /// What the supervisor hands its runner factory: the record, plus the one fact
