@@ -60,6 +60,13 @@ public struct RoleRegistry: Sendable {
     private let byID: [String: HarnessRole]
     private let harness: AgentHarness
 
+    /// Whether this project declares any roles for this harness at all.
+    ///
+    /// Distinguishes "you asked for a role that does not exist" from "there are no
+    /// roles here to ask for" — two different problems with two different fixes,
+    /// and the second one is the actionable one.
+    public var definesNoRoles: Bool { ordered.isEmpty }
+
     /// Scans `<projectRoot>/.pi/agents/*.md` once, at init.
     ///
     /// A `.md` file with no frontmatter `name` is NOT a role: the registry's whole

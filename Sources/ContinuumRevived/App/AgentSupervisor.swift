@@ -2470,6 +2470,12 @@ final class AgentSupervisor {
         /// P2D.3 — the request named a role this project does not define, or defines
         /// with a model/thinking value Pi would have to guess at.
         case roleUnresolved
+        /// The project declares NO roles at all for this harness, so every named
+        /// role would refuse. Split from `roleUnresolved` because the two have
+        /// different fixes and only this one is actionable: "the requested role is
+        /// not defined in this project" reads as a typo when the truth is that the
+        /// project has no `.pi/agents` directory. Observed live on 2026-08-25.
+        case projectDeclaresNoRoles(directory: String)
         /// C12 — the parent runs codex. `codex exec --json` (measured, `.plans/46`)
         /// emits no wire representation for subagent activity at all: even with
         /// `features.multi_agent_v2=true` set and delegation genuinely happening,
@@ -2491,6 +2497,12 @@ final class AgentSupervisor {
             switch self {
             case .unknownParent:
                 return "the requesting agent is not known to this session"
+            case let .projectDeclaresNoRoles(directory):
+                // The DIRECTORY name, never the requested role id — the P2D.2
+                // witness holds the role out of every event on the parent's stream
+                // and a reason that echoed it would be the one hole in that. A
+                // relative directory name is project structure, not host state.
+                return "this project defines no agent roles — add one to \(directory) to delegate"
             case let .depthCapped(depth, cap):
                 return "spawn depth \(depth) exceeds the cap of \(cap)"
             case let .childCapped(children, cap):
@@ -2872,8 +2884,17 @@ final class AgentSupervisor {
         // refused anyway is refused for the reason that actually stopped it.
         let projectRoot = Self.repositoryRoot(of: parent)
         let resolvedRole: RoleRegistry.Resolution
+        let registry = RoleRegistry(projectRoot: projectRoot)
+        // A named role in a project with no roles is not a typo, and saying "the
+        // requested role is not defined" invites reading it as one. Checked before
+        // `resolve`, because resolve cannot tell the two apart.
+        if request.role != nil, registry.definesNoRoles {
+            return refuseSpawn(
+                .projectDeclaresNoRoles(directory: RoleRegistry.directoryName(for: parentHarness)),
+                for: parentId)
+        }
         do {
-            resolvedRole = try RoleRegistry(projectRoot: projectRoot).resolve(
+            resolvedRole = try registry.resolve(
                 roleId: request.role,
                 inheriting: AgentModelConfig.Resolution(model: parent.model, thinking: parent.thinking)
             )
@@ -7168,9 +7189,10 @@ func runAgentSupervisorChecks() async throws {
 
     let clearCommandReport = try await checkClearCommandTransaction(config: config, cwd: cwd, fail: fail)
     let piDelegateReport = try await checkPiDelegatedRunTailing(fail: fail)
+    let refusalReport = try await checkRefusedSpawnIsActionableAndLeavesNothing(fail: fail)
 
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport); \(piDelegateReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport); \(piDelegateReport); \(refusalReport)")
 }
 
 /// B7.2 — `/clear`'s one-transaction contract, driven through the real
@@ -11189,6 +11211,90 @@ private final class SpawnedRunnerFactory {
         runners[record.id] = runner
         return runner
     }
+}
+
+/// T7 — a refused spawn says something actionable, and leaves nothing behind.
+///
+/// Observed live 2026-08-25 on a scratch project with no `.pi/agents` directory:
+/// the model was offered `spawn_agent` (a roleless pi agent sends no `--tools`, so
+/// pi permits every tool), called it with a role it invented, and got
+/// "spawn_agent refused: the requested role is not defined in this project" —
+/// which reads as a typo when the truth is the project has no roles at all.
+///
+/// The second assertion is the one Dylan's question was really about: a refusal
+/// must mint NO record, NO chip and therefore NO openable tile. A refusal that
+/// left a half-built child would be worse than the dead end it replaced.
+@MainActor
+private func checkRefusedSpawnIsActionableAndLeavesNothing(
+    fail: (String) -> Error
+) async throws -> String {
+    let config = AgentModelConfig.resolvedFromDefaults(harness: .pi)
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-refusal-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    // Deliberately NO .pi/agents directory — the live condition.
+    let cwd = root.appendingPathComponent("project", isDirectory: true)
+    try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+    let store = AgentStore(applicationSupportDirectory: root)
+    let supervisor = AgentSupervisor(store: store, makeRunner: { _ in
+        ScriptedAgentRunner(script: [.sessionStateChanged(.ready)])
+    }, warn: { _ in })
+    let parentId = supervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, harness: .pi,
+        model: config.model, thinking: config.thinking)
+
+    let inbox = EventInbox()
+    let stream = supervisor.events(for: parentId)
+    let task = Task { @MainActor in for await e in stream { inbox.append(e) } }
+    defer { task.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.subscriberCount(for: parentId) == 1
+    }) else {
+        throw fail("T7: the parent's subscriber never registered")
+    }
+
+    // The real production dispatch, with a role the project cannot define.
+    let refused = supervisor.handleSpawnRequest(
+        SpawnRequest(role: "researcher", prompt: "look it up", isolated: false),
+        from: parentId)
+    guard refused == nil else {
+        throw fail("T7: a role in a project with no roles was not refused")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        inbox.events.contains { "\($0)".contains("refused") }
+    }) else {
+        throw fail("T7: the refusal was never said in the parent's transcript")
+    }
+    let said = inbox.events.map { "\($0)" }.joined(separator: "\n")
+    guard said.contains(RoleRegistry.directoryName(for: .pi)) else {
+        throw fail("T7: the refusal did not name the directory a role would go in, so it is not actionable: \(said)")
+    }
+    // And it still must not echo the requested role — the P2D.2 witness holds that
+    // out of every event on the parent's stream and this reason would be the hole.
+    guard !said.contains("researcher") else {
+        throw fail("T7: the refusal echoed the requested role id onto the parent's stream")
+    }
+    // THE second half: nothing was created. No record, so no chip and no tile.
+    guard supervisor.children(of: parentId).isEmpty else {
+        throw fail("T7: a REFUSED spawn left \(supervisor.children(of: parentId).count) child record(s) behind — an openable tile for an agent that never existed")
+    }
+    guard !said.contains("childAgentSpawned") else {
+        throw fail("T7: a refused spawn announced a child, which mints a chip for an agent that does not exist")
+    }
+
+    // A role that IS defined still spawns, so the new guard is not a blanket refusal.
+    let rolesDir = cwd.appendingPathComponent(RoleRegistry.directoryName(for: .pi), isDirectory: true)
+    try FileManager.default.createDirectory(at: rolesDir, withIntermediateDirectories: true)
+    try "---\nname: researcher\ndescription: Looks things up.\ntools: read, grep\n---\nLook things up.\n"
+        .write(to: rolesDir.appendingPathComponent("researcher.md"), atomically: true, encoding: .utf8)
+    guard supervisor.handleSpawnRequest(
+        SpawnRequest(role: "researcher", prompt: "look it up", isolated: false),
+        from: parentId) != nil
+    else {
+        throw fail("T7: a role the project DOES define was refused — the guard is too broad")
+    }
+
+    return "a spawn naming a role in a project with no roles refuses with the directory to add one to, without echoing the role, and leaves no record, no chip and no tile; a defined role still spawns"
 }
 
 /// T6 — a pi `delegate_agent` child gets a tile, a transcript, and an honest end.

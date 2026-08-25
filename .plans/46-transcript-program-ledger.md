@@ -2276,3 +2276,49 @@ KNOWN-RED, all pre-existing and none of them touched here: `--nav-mode-check`,
 PASSED while listed was one observation. It failed here, so it stays on the
 allowlist and the note is withdrawn — the flapping is real and the entry is
 correct.
+
+## T7 — a refused spawn says something actionable (2026-08-25, from a live run)
+
+Dylan, driving the build: *"using pi delegating agents failed... but then it looks
+like it worked, but why can i open the sub agent tile?"* with
+`spawn_agent refused: the requested role is not defined in this project`.
+
+**Two findings, and the first is the good news.** `spawn_agent` was OFFERED and
+CALLED — which is what T5 was for. It then refused because
+`~/array-transcript-verify` has no `.pi/agents` directory at all.
+
+**Correction worth recording: T5.2 did not cause this and could not have
+prevented it.** The agent in question is ROLELESS, so `toolsArguments` returns
+`[]`, no `--tools` reaches pi, and pi treats an absent allowlist as
+permit-everything — so a roleless pi agent has always had `spawn_agent`. T5 fixed
+*roled* agents. This refusal is pre-existing behaviour meeting an empty project.
+
+**The message was the defect.** "The requested role is not defined in this
+project" reads as a typo when the truth is that the project defines no roles at
+all. Split into `projectDeclaresNoRoles(directory:)`, which names the directory to
+add a role to and still refuses to echo the requested role id — the P2D.2 witness
+holds that out of every event on the parent's stream and this reason would have
+been the one hole in it.
+
+**The tile question, answered from the store rather than from reasoning.** The
+refusal minted nothing: `refuseSpawn` emits an error item and returns nil. Checked
+the live dev store — zero `agentReference` blocks anywhere (transcripts, canvas,
+managed-sessions), and the only two child records are **claude** children of
+`A11B2A43…`, both still titled `toolu_…`, i.e. stale records from before the
+naming fix in `52a57d0a`. **No pi child was created, so there is no pi subagent
+tile.** The openable ones are old claude subagents.
+
+**Witness:** `checkRefusedSpawnIsActionableAndLeavesNothing` in
+`--agent-supervisor-check`, driving the real `handleSpawnRequest`. Asserts the
+refusal names the directory, does NOT echo the role, and — the half Dylan's
+question was actually about — leaves **no record, no `childAgentSpawned`, and
+therefore no openable tile**. Plus a negative leg: a role the project DOES define
+still spawns, so the guard is not a blanket refusal.
+
+*Teeth:* removing the guard fails with the exact string from the screenshot.
+
+**Still open, and bigger than this ticket.** `spawn_agent` is inert by design — the
+extension returns `spawned: <role>` whatever happens — so the MODEL is told its
+delegation succeeded while Array refuses it. The transcript is honest to the user
+and dishonest to the model, and the model then reasons about children that do not
+exist. That is a real design problem and it is not fixed here.
