@@ -1483,7 +1483,8 @@ final class TileSpawner {
         agentKind: AgentKind = .managed,
         at worldPoint: CGPoint? = nil,
         launchSelection: AgentLaunchSelection? = nil,
-        providerSettings: AgentModelConfig.Resolution? = nil
+        providerSettings: AgentModelConfig.Resolution? = nil,
+        mirrored: Bool = false
     ) -> ManagedAgentOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
         let creationScope = creationScopeProvider?()
@@ -1539,7 +1540,14 @@ final class TileSpawner {
             providerSettings: resolvedProviderSettings
         )
         view.ingest(.sessionStateChanged(.ready))
-        view.ingest(.contentDelta(threadId: threadId, turnId: "bootstrap", streamKind: .assistant, delta: "Ready. Type a prompt below to run \(spawnModelName) in this tile."))
+        // C5: an agent Array only MIRRORS cannot be prompted, so inviting a
+        // prompt is the tile's first lie. Its own frames replace this line as
+        // soon as they arrive; until then it says what the tile is for.
+        view.ingest(.contentDelta(
+            threadId: threadId, turnId: "bootstrap", streamKind: .assistant,
+            delta: mirrored
+                ? "Watching this subagent. It runs inside its parent, so it takes no prompts here."
+                : "Ready. Type a prompt below to run \(spawnModelName) in this tile."))
         let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: creationScope?.zoneId)
 
         do {
@@ -1666,7 +1674,9 @@ final class TileSpawner {
         _ agentID: AgentID,
         supervisor: AgentSupervisor
     ) -> ManagedAgentOutcome {
-        spawnManagedAgent(launchSelection: supervisor.launchSelection(for: agentID))
+        spawnManagedAgent(
+            launchSelection: supervisor.launchSelection(for: agentID),
+            mirrored: supervisor.records[agentID]?.capabilities.locallyManaged == false)
     }
 
     /// Deterministic witness for ⌘K's explicit-model spawn contract.

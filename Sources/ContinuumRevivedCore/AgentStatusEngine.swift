@@ -241,6 +241,12 @@ public enum ItemKind: RawRepresentable, Codable, Equatable, Hashable, Sendable {
     /// `Agent` tool (formerly `Task`); pi and codex through `spawn_agent`. It is
     /// not a command execution, which is where `default:` used to send it.
     case subagent
+    /// A context-compaction boundary: the point where the provider dropped
+    /// earlier turns. It is a real kind, not a tool, and B6.2 shipped it as
+    /// `.unknown("compaction")` only because an exhaustive switch sat behind a
+    /// file that ticket could not edit — which is the opposite of why this enum
+    /// was made lenient.
+    case compaction
     /// A kind some other build knows and this one does not. Preserved verbatim
     /// so a round trip through an older build does not silently rewrite it.
     case unknown(String)
@@ -256,6 +262,7 @@ public enum ItemKind: RawRepresentable, Codable, Equatable, Hashable, Sendable {
         case .plan: return "plan"
         case .error: return "error"
         case .subagent: return "subagent"
+        case .compaction: return "compaction"
         case let .unknown(raw): return raw
         }
     }
@@ -271,6 +278,7 @@ public enum ItemKind: RawRepresentable, Codable, Equatable, Hashable, Sendable {
         case "plan": self = .plan
         case "error": self = .error
         case "subagent": self = .subagent
+        case "compaction": self = .compaction
         default: self = .unknown(rawValue)
         }
     }

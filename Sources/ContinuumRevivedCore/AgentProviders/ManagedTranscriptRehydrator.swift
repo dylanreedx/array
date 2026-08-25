@@ -220,7 +220,7 @@ public enum ManagedTranscriptRehydrator {
                 let itemID = "pi-compaction-\(compactionCounter)"
                 let title = AgentCompactionPayload.encodeTitle(
                     preTokens: message.compactionTokensBefore, postTokens: nil, automaticCompaction: nil)
-                let compactionKind = ItemKind(rawValue: "compaction")
+                let compactionKind = ItemKind.compaction
                 steps.append(.event(.itemStarted(
                     threadId: threadId, itemId: itemID, kind: compactionKind, title: title)))
                 steps.append(.event(.itemCompleted(

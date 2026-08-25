@@ -536,12 +536,17 @@ public struct AgentTranscriptProjection: Sendable {
 
     private func structuredBlock(id: AgentNodeID, kind: ItemKind, title: String?) -> AgentBlock {
         let label = title ?? kind.rawValue
-        // B6.2 — a compaction boundary. `ItemKind` stays `.unknown("compaction")`
-        // rather than gaining a literal case: `AgentTranscriptListView.swift`'s
-        // `isToolDetailKind` switch is exhaustive over `ItemKind` and off-limits
-        // for this ticket, so a new named case there would not build. The
-        // decoded payload is fully structured regardless of which `ItemKind`
-        // spelling carried it.
+        // B6.2 — a compaction boundary, carried by `ItemKind.compaction`.
+        //
+        // It shipped as `.unknown("compaction")` for a day, because an
+        // exhaustive switch sat in a file that ticket could not edit. The wire
+        // spelling was identical either way, so the named case is a pure
+        // clarification — but the old shape made a real kind claim to be one
+        // this build had never heard of, which is the opposite of what the
+        // lenient decoder exists for.
+        //
+        // `isCompactionKind` stays because a transcript persisted during that
+        // day decodes as `.unknown("compaction")` and must still be recognized.
         if Self.isCompactionKind(kind) {
             let payload = AgentCompactionPayload(decodingTitle: title)
                 ?? AgentCompactionPayload(preTokens: nil, postTokens: nil, automaticCompaction: nil)
@@ -569,6 +574,10 @@ public struct AgentTranscriptProjection: Sendable {
     }
 
     fileprivate static func isCompactionKind(_ kind: ItemKind) -> Bool {
+        if kind == .compaction { return true }
+        // The spelling B6.2 shipped for one day, before `.compaction` became a
+        // named case. A transcript persisted in that window decodes to this, and
+        // dropping it would render those boundaries as an unknown item instead.
         if case .unknown("compaction") = kind { return true }
         return false
     }

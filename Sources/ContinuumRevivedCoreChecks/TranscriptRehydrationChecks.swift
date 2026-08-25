@@ -133,7 +133,7 @@ private func runPiSessionTranscriptParseChecks() {
     // one real field pi's persisted entry has (`tokensBefore`) — never the
     // `summary` prose, and never a fabricated post-compaction size or
     // manual/automatic flag pi's session file does not carry.
-    let compactionKind = ItemKind(rawValue: "compaction")
+    let compactionKind = ItemKind.compaction
     let compactionTitle = AgentCompactionPayload.encodeTitle(preTokens: 26268, postTokens: nil, automaticCompaction: nil)
     let expected: [RehydratedTranscriptStep] = [
         .userPrompt("PI_PROMPT_ONE"),

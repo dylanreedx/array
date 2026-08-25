@@ -207,7 +207,15 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         case .start: sessionArgs = ["--session-id", sessionId]
         case .fork: sessionArgs = ["--resume", sessionId, "--fork-session"]
         }
-        return ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]
+        // C7: `--forward-subagent-text` is what makes a child's PROSE arrive.
+        // Without it the stream carries a subagent's tool_use/tool_result blocks
+        // and nothing it said, so a child transcript would be tool calls with no
+        // answer in them. Documented for 2.1.211+ with the env twin
+        // CLAUDE_CODE_FORWARD_SUBAGENT_TEXT; verified present in `claude --help`
+        // on the installed 2.1.241, where it also states it only works with
+        // --print and --output-format=stream-json, which is exactly this argv.
+        return ["-p", "--output-format", "stream-json", "--verbose",
+                "--include-partial-messages", "--forward-subagent-text"]
             + ["--model", model]
             + (effort.map { ["--effort", $0] } ?? [])
             + ["--dangerously-skip-permissions"]
@@ -367,6 +375,15 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     /// launch one.
     public func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {
         queue.sync { translator.onSpawnRequest = handler }
+    }
+
+    /// C7 — one observed child's own events, keyed by the spawning `Agent`
+    /// call's `tool_use` id. Only `ClaudeAgentRunner` has these; pi and codex
+    /// children are processes Array owns and stream on their own runners.
+    public func observeSubagentEvents(
+        _ handler: @escaping @Sendable (String, AgentRuntimeEvent) -> Void
+    ) {
+        queue.sync { translator.onSubagentEvent = handler }
     }
 
     public func observeRuntimeObservations(

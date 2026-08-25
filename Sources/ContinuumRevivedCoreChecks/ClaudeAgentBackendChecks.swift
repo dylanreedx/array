@@ -6,7 +6,8 @@ import Foundation
 //
 // Pins the claude → AgentRuntimeEvent mapping against the REAL stream-json
 // schema captured live from claude 2.1.226 on 2026-08-09 (`-p --output-format
-// stream-json --verbose --include-partial-messages`, haiku turns with a Bash
+// stream-json --verbose --include-partial-messages --forward-subagent-text`,
+// haiku turns with a Bash
 // tool round-trip). Fixture lines are the actual shapes, curated and with the
 // cwd/command/output payloads kept deliberately "secret" so the I5 assertion
 // has something to catch. Also pins the runner's argv, the resume-first
@@ -237,7 +238,7 @@ private func runClaudeCompactBoundaryChecks() {
     // item (begin/finish, real pre/post tokens from `compact_metadata`) plus
     // the one contextWindowUpdated built from `post_tokens`/`trigger`.
     let compactEvents = translator.translate(line: lines[2])
-    let compactionKind = ItemKind(rawValue: "compaction")
+    let compactionKind = ItemKind.compaction
     let compactionTitle = AgentCompactionPayload.encodeTitle(preTokens: 26268, postTokens: 2140, automaticCompaction: false)
     expect(compactEvents == [
         .itemStarted(threadId: sid, itemId: "compaction#run1-1", kind: compactionKind, title: compactionTitle),
@@ -269,6 +270,11 @@ private func runClaudeRunnerArgvChecks() {
     )
     expect(resume == [
         "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+        // C7: without this the stream carries a subagent's tool_use/tool_result
+        // blocks and nothing it SAID, so a child transcript is tool calls with no
+        // answer in them. Pinned in the exact argv because that is the only place
+        // a silently-dropped flag would show up.
+        "--forward-subagent-text",
         "--model", "claude-haiku-4-5-20251001",
         "--effort", "high",
         "--dangerously-skip-permissions",
@@ -286,6 +292,11 @@ private func runClaudeRunnerArgvChecks() {
     )
     expect(start == [
         "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+        // C7: without this the stream carries a subagent's tool_use/tool_result
+        // blocks and nothing it SAID, so a child transcript is tool calls with no
+        // answer in them. Pinned in the exact argv because that is the only place
+        // a silently-dropped flag would show up.
+        "--forward-subagent-text",
         "--model", "claude-haiku-4-5-20251001",
         "--dangerously-skip-permissions",
         "--session-id", claudeSID,

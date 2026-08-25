@@ -2197,6 +2197,17 @@ final class AgentSupervisor {
                 self?.ingestRuntimeObservation(observation, for: id)
             }
         }
+        // C7: a claude subagent's own work, routed to the CHILD rather than the
+        // parent. The child's id is re-derived from the same (parent, tool_use_id)
+        // pair the announcement used, so a frame that arrives before, after, or
+        // without its announcement still lands on the right agent.
+        if let claudeRunner = runner as? ClaudeAgentRunner {
+            claudeRunner.observeSubagentEvents { [weak self] toolUseID, event in
+                DispatchQueue.main.async {
+                    self?.deliverSubagentEvent(event, parent: id, toolUseID: toolUseID)
+                }
+            }
+        }
         let threadId = Self.threadId(for: id)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
@@ -2469,6 +2480,35 @@ final class AgentSupervisor {
     ///
     /// Returns nil on a refusal, having said so in the parent's transcript.
     @discardableResult
+    /// Routes one frame of a claude subagent's work to the child it belongs to.
+    ///
+    /// The child is found by re-deriving its id, never by looking up a table the
+    /// announcement had to populate first. Claude does not promise that the
+    /// `Agent` tool_use block is flushed before the child's first frame, and a
+    /// race there would silently drop the opening of every child transcript. If
+    /// the record does not exist yet the announcement simply has not landed, so
+    /// the frame is held and replayed once it does.
+    private func deliverSubagentEvent(_ event: AgentRuntimeEvent, parent: AgentID, toolUseID: String) {
+        let childID = AgentID(rawValue: AgentRecord.observedChildID(
+            parentAgentID: parent.rawValue, toolUseID: toolUseID))
+        guard records[childID] != nil else {
+            pendingSubagentEvents[childID, default: []].append(event)
+            return
+        }
+        flushPendingSubagentEvents(for: childID)
+        deliver(event.withThreadId(Self.threadId(for: childID)), to: childID)
+    }
+
+    /// Frames that arrived before their child's record existed.
+    private var pendingSubagentEvents: [AgentID: [AgentRuntimeEvent]] = [:]
+
+    private func flushPendingSubagentEvents(for childID: AgentID) {
+        guard let held = pendingSubagentEvents.removeValue(forKey: childID), !held.isEmpty
+        else { return }
+        let threadId = Self.threadId(for: childID)
+        for event in held { deliver(event.withThreadId(threadId), to: childID) }
+    }
+
     /// Mints the read-only record for a subagent the HARNESS runs.
     ///
     /// The whole design turns on `AgentCapabilities.observedReadOnly` — declared
@@ -2530,13 +2570,21 @@ final class AgentSupervisor {
             thinking: parent.thinking,
             projectId: parent.projectId,
             parentAgentID: parentId,
-            sourceItemId: toolUseID,
-            tileId: nil
+            // NOT the tool_use id. That is an identity, not a name, and letting
+            // it reach the naming funnel is what titled every child tile
+            // `toolu_01NFqGS…`. The label the model wrote for its own call is
+            // the honest title; its role is the fallback; and if it gave
+            // neither, the parent-relative ordinal already handles it.
+            sourceItemId: nil,
+            tileId: nil,
+            displayName: request.displayLabel ?? request.role
         )
         guard var child = records[childID] else { return nil }
         child.capabilities = .observedReadOnly
         records[childID] = child
         persist(child)
+        // Anything that arrived before the record existed replays now, in order.
+        flushPendingSubagentEvents(for: childID)
         deliver(.childAgentSpawned(
             threadId: Self.threadId(for: parentId),
             childAgentID: childID.rawValue,

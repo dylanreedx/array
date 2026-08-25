@@ -42,19 +42,30 @@ public struct SpawnRequest: Equatable, Sendable {
     /// decides the child's `AgentCapabilities`, and getting it from the request
     /// rather than from a harness name keeps it true during a migration.
     public let observedOnly: Bool
+    /// A short human label for the child, when the caller supplied one.
+    ///
+    /// claude's `Agent` tool carries `description` beside `prompt` — a few words
+    /// the model writes to say what it is delegating ("Research sports news").
+    /// It is already whitelisted as publishable on the tool-detail channel, and
+    /// it is the only thing in the call that makes a decent tile title. Without
+    /// it a child ends up named after its `tool_use` id, which is what shipped
+    /// first and looked exactly as bad as it sounds.
+    public let displayLabel: String?
 
     public init(
         role: String?,
         prompt: String,
         isolated: Bool,
         sourceItemID: String? = nil,
-        observedOnly: Bool = false
+        observedOnly: Bool = false,
+        displayLabel: String? = nil
     ) {
         self.role = role
         self.prompt = prompt
         self.isolated = isolated
         self.sourceItemID = sourceItemID
         self.observedOnly = observedOnly
+        self.displayLabel = displayLabel
     }
 
     /// Parses the `args` object of an observed tool call, as JSON text.
@@ -120,11 +131,15 @@ public struct SpawnRequest: Equatable, Sendable {
         var role = (args["subagent_type"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if role?.isEmpty == true { role = nil }
+        var label = (args["description"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if label?.isEmpty == true { label = nil }
         return SpawnRequest(
             role: role,
             prompt: prompt,
             isolated: (args["isolation"] as? String) == "worktree",
             sourceItemID: toolUseID,
-            observedOnly: true)
+            observedOnly: true,
+            displayLabel: label)
     }
 }

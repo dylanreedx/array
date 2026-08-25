@@ -40,11 +40,15 @@ func runClaudeSubagentSupplyChecks() {
     final class Collected: @unchecked Sendable {
         var requests: [SpawnRequest] = []
         var details: [(String, [(key: String, value: String)])] = []
+        var subagentEvents: [(String, AgentRuntimeEvent)] = []
     }
     let collected = Collected()
     var translator = ClaudeEventTranslator(
         runToken: "run1", now: { Date(timeIntervalSinceReferenceDate: 900) })
     translator.onSpawnRequest = { collected.requests.append($0) }
+    translator.onSubagentEvent = { toolUseID, event in
+        collected.subagentEvents.append((toolUseID, event))
+    }
     translator.onRuntimeObservation = { observation in
         if case let .toolDetail(itemId, detail) = observation {
             collected.details.append((itemId, detail.fields))
@@ -102,5 +106,38 @@ func runClaudeSubagentSupplyChecks() {
         }
     }
 
-    print("Claude subagent supply checks passed: one observed-only child announced from the real capture, keyed by the id its own frames carry, rendered as a subagent rather than a command execution, with the role id published and the prompt withheld")
+    // 5. THE HALF THAT WAS MISSING. Announcing a child and never delivering its
+    //    work produces exactly what shipped first: a chip, an empty tile, and a
+    //    parent that looks hung. Every frame the child authored must arrive on
+    //    the child channel keyed by the id that spawned it, and NONE of it may
+    //    reach the parent's own timeline — the parent stays an index.
+    let childEvents = collected.subagentEvents
+    expect(!childEvents.isEmpty,
+           "C7: the child's own frames produced no events — the child transcript can never fill")
+    expect(Set(childEvents.map(\.0)) == [toolUseID],
+           "C7: child events are keyed by \(Set(childEvents.map(\.0))), expected only \(toolUseID)")
+
+    // The child said something, not merely called tools. That is what
+    // `--forward-subagent-text` buys, and without the flag this is empty.
+    let childSpoke = childEvents.contains { _, event in
+        if case .contentDelta = event { return true }
+        if case let .itemStarted(_, _, kind, _) = event { return kind == .assistantMessage }
+        return false
+    }
+    expect(childSpoke,
+           "C7: the child produced no prose at all — capture argv is missing --forward-subagent-text, or its text frames are being dropped")
+
+    // And the parent's timeline never carried the child's work.
+    let parentItemIDs = Set(events.compactMap { event -> String? in
+        if case let .itemStarted(_, itemId, _, _) = event { return itemId }
+        return nil
+    })
+    let childItemIDs = Set(childEvents.compactMap { _, event -> String? in
+        if case let .itemStarted(_, itemId, _, _) = event { return itemId }
+        return nil
+    })
+    expect(parentItemIDs.isDisjoint(with: childItemIDs),
+           "C7: the parent's timeline carried the child's items \(parentItemIDs.intersection(childItemIDs)) — a parent is an index, not a mirror")
+
+    print("Claude subagent supply checks passed: one observed-only child announced from the real capture, keyed by the id its own frames carry, rendered as a subagent rather than a command execution, with the role id published and the prompt withheld, and the child's own frames - prose included - routed to the child while the parent's timeline stayed an index")
 }

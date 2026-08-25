@@ -703,8 +703,11 @@ func runAgentTileTokenChecks() {
     //    applies to `SurfaceToken`, so a new fill cannot be a dark-only literal.
     expect(AgentSurfaceRole.allCases.count == 5,
            "AgentTileTokens: expected 5 tile surfaces, got \(AgentSurfaceRole.allCases.count)")
-    expect(AgentLineRole.allCases.count == 4,
-           "AgentTileTokens: expected 4 line roles, got \(AgentLineRole.allCases.count)")
+    // Five since A1 added `authorship`. The count is a TOTALITY pin: it is what
+    // makes the role→token table below a covering table rather than a sample, so
+    // it moves only alongside that table.
+    expect(AgentLineRole.allCases.count == 5,
+           "AgentTileTokens: expected 5 line roles, got \(AgentLineRole.allCases.count)")
     for surface in AgentSurfaceRole.allCases {
         let token = surface.color
         expect(token.light.hexKey != token.dark.hexKey,
@@ -778,7 +781,12 @@ func runAgentTileTokenChecks() {
         (.decorativeHairline, LineToken.separator.rawValue, LineToken.separator.color),
         (.controlBoundary, LineToken.border.rawValue, LineToken.border.color),
         (.focusRing, LineToken.borderStrong.rawValue, LineToken.borderStrong.color),
-        (.attention, AccentToken.accentApproval.rawValue, AccentToken.accentApproval.color)
+        (.attention, AccentToken.accentApproval.rawValue, AccentToken.accentApproval.color),
+        // A1: the rule down a user turn's leading edge. It deliberately shares
+        // `border` with `controlBoundary` — two roles, one gated value — because
+        // the point of the role is the MEANING, and introducing a new token value
+        // would have moved the pinned worst-background table for nothing.
+        (.authorship, LineToken.border.rawValue, LineToken.border.color)
     ]
     expect(Set(expectedSources.map(\.role)) == Set(AgentLineRole.allCases),
            "AgentTileTokens: the role→token table must cover every role (table \(expectedSources.map(\.role.rawValue).sorted()) vs roles \(AgentLineRole.allCases.map(\.rawValue).sorted()))")
@@ -845,7 +853,10 @@ func runAgentTileTokenChecks() {
             }
         }
     }
-    expect(pairs.count == 30, "AgentTileTokens: expected 30 documented tile pairs, got \(pairs.count)")
+    // 35 since A1's `authorship` role: five surfaces × one more gated line role.
+    // The missing/extra comparison below is what checks correctness; this count
+    // is the vacuity floor that stops the table quietly shrinking.
+    expect(pairs.count == 35, "AgentTileTokens: expected 35 documented tile pairs, got \(pairs.count)")
     let actualKeys = pairs.map { "\($0.foreground)|\($0.background)|\(fmt($0.floor))" }
     expect(Set(actualKeys).count == actualKeys.count,
            "AgentTileTokens: the tile pairs contain duplicates (\(actualKeys.count) pairs, \(Set(actualKeys).count) distinct) — a duplicated easy pair can hide a lost hard one")
@@ -898,6 +909,11 @@ func runAgentTileTokenChecks() {
         ("textPrimary", .light, "rowSelected", 13.98), ("textPrimary", .dark, "rowSelected", 11.20),
         ("textSecondary", .light, "rowSelected", 5.56), ("textSecondary", .dark, "rowSelected", 6.04),
         ("controlBoundary", .light, "rowSelected", 3.27), ("controlBoundary", .dark, "rowSelected", 3.18),
+        // A1's authorship rule. Identical to `controlBoundary` by construction —
+        // both resolve to `LineToken.border`, so on the same worst background
+        // they measure the same. Pinned separately anyway: if either role is ever
+        // repointed at a different token, this is where that shows up.
+        ("authorship", .light, "rowSelected", 3.27), ("authorship", .dark, "rowSelected", 3.18),
         ("focusRing", .light, "rowSelected", 6.42), ("focusRing", .dark, "rowSelected", 5.64),
         ("attention(accentApproval)", .light, "rowSelected", 5.23),
         ("attention(accentApproval)", .dark, "rowSelected", 6.92),

@@ -265,10 +265,10 @@ func runAgentTranscriptProjectionChecks() {
 
     print(String(format: "Agent transcript projection checks passed: six compatibility kinds, stable provenance, stream boundaries, command/error typing, thread filter, and 5,000-delta production projection+replaceMarkup in %.3f s (%d parses, %d finalized raw source)", productionProjectionSeconds, coalesced.streamingMarkupParseCount, coalesced.finalizedCompatibilityMarkupSourceCount))
 
-    // B6.2 — the compaction block kind. `ItemKind(rawValue: "compaction")`
-    // decodes to `.unknown("compaction")` (ItemKind has no literal case for
-    // it — see AgentTranscriptProjection.isCompactionKind), and the
-    // projection must still recognize it, attribute it to the harness (never
+    // B6.2 — the compaction block kind. The projection must recognize
+    // `ItemKind.compaction` AND the `.unknown("compaction")` spelling it
+    // shipped as for one day (see AgentTranscriptProjection.isCompactionKind),
+    // attribute it to the harness (never
     // user/assistant), decode its title back into real pre/post/automatic
     // fields, and never throw trying to complete a status this payload does
     // not carry.
@@ -276,10 +276,10 @@ func runAgentTranscriptProjectionChecks() {
     let compactionTitle = AgentCompactionPayload.encodeTitle(preTokens: 26268, postTokens: 2140, automaticCompaction: false)
     compaction.ingest(.itemStarted(
         threadId: thread, itemId: "compaction-1",
-        kind: ItemKind(rawValue: "compaction"), title: compactionTitle))
+        kind: ItemKind.compaction, title: compactionTitle))
     compaction.ingest(.itemCompleted(
         threadId: thread, itemId: "compaction-1",
-        kind: ItemKind(rawValue: "compaction"), status: .completed))
+        kind: ItemKind.compaction, status: .completed))
     expect(compaction.rejectedMutationCount == 0,
            "B6.2: a compaction item must complete without a rejected status-transition mutation")
     let compactionEntry = compaction.document.entries.first { $0.blocks.first?.kind == .compaction }

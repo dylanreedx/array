@@ -21,9 +21,13 @@ func runItemKindLenientDecodingChecks() throws {
     }
 
     // 1. A kind this build does not know decodes instead of throwing.
-    let futureBytes = Data(#"{"kind":"compaction","title":"a boundary"}"#.utf8)
+    // Deliberately a kind NO build here has. `"compaction"` was used originally
+    // and then became a real case, which would have quietly turned this check
+    // into an assertion about a known value — the exact way a leniency witness
+    // stops witnessing leniency.
+    let futureBytes = Data(#"{"kind":"holographicPreview","title":"a boundary"}"#.utf8)
     let future = try decoder.decode(Envelope.self, from: futureBytes)
-    expect(future.kind == .unknown("compaction"),
+    expect(future.kind == .unknown("holographicPreview"),
            "B6.2: an unknown ItemKind must decode as .unknown, not throw the event away")
     expect(future.title == "a boundary",
            "B6.2: the surrounding event must survive an unknown kind")
@@ -34,7 +38,7 @@ func runItemKindLenientDecodingChecks() throws {
     let restored = try decoder.decode(Envelope.self, from: reencoded)
     expect(restored == future,
            "B6.2: an unknown ItemKind must round-trip verbatim, never collapse to a default")
-    expect(String(data: reencoded, encoding: .utf8)?.contains("\"compaction\"") == true,
+    expect(String(data: reencoded, encoding: .utf8)?.contains("\"holographicPreview\"") == true,
            "B6.2: re-encoding an unknown kind must emit the original raw value")
 
     // 3. Every known case still encodes to exactly the string it always did —
@@ -49,6 +53,7 @@ func runItemKindLenientDecodingChecks() throws {
         (.plan, "plan"),
         (.error, "error"),
         (.subagent, "subagent"),
+        (.compaction, "compaction"),
     ] {
         let bytes = try encoder.encode(Envelope(kind: kind, title: raw))
         expect(String(data: bytes, encoding: .utf8)?.contains("\"\(raw)\"") == true,
@@ -57,5 +62,5 @@ func runItemKindLenientDecodingChecks() throws {
         expect(back.kind == kind, "B6.2: \(raw) must survive a round trip")
     }
 
-    print("ItemKind lenient decoding checks passed: an unknown kind decodes and round-trips verbatim, and all nine known kinds keep their wire spelling")
+    print("ItemKind lenient decoding checks passed: an unknown kind decodes and round-trips verbatim, and all ten known kinds keep their wire spelling")
 }

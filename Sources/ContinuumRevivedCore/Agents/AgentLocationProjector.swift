@@ -313,6 +313,9 @@ public struct AgentLocationProjector: Sendable {
             return .failed
         case .commandExecution, .mcpToolCall:
             return .inspecting
+        case .compaction:
+            // A boundary is bookkeeping, not a place the agent is working.
+            return .thinking
         case .subagent:
             // A parent delegating is still working; the CHILD's own location is
             // projected from the child's stream, not inferred from this row.
