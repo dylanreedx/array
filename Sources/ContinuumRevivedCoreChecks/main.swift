@@ -11649,4 +11649,13 @@ runCodexAppServerParityChecks()
 // end to end against a scripted fake `codex app-server` standing in on PATH.
 runCodexAppServerRunnerChecks()
 
+// M2 pi rpc transport (`.plans/46`, "pi rpc" probe). `PiRpcTransport` (request/
+// response correlation surviving interleaving, malformed-frame tolerance) and
+// `PiRpcAgentRunner` (one process serving many turns, abort keeping the
+// connection alive, steer not itself ending the turn) driven end to end
+// against a scripted fake `pi --mode rpc` standing in on PATH, plus the
+// two-frame-type `PiEventTranslator` addition (`response`,
+// `extension_ui_request`).
+runPiRpcTransportChecks()
+
 print("ContinuumRevivedCoreChecks passed")

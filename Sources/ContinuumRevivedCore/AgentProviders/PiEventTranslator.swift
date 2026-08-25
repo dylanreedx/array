@@ -172,6 +172,18 @@ public struct PiEventTranslator {
         case "agent_settled":
             return [.sessionStateChanged(.ready)]
 
+        // M2 (`.plans/46`): the two rpc-only protocol frame types. The event
+        // stream is the SAME function print-mode and rpc-mode both use
+        // (`toJsonEvent` in `modes/json-event.js`); these two are the only
+        // types rpc adds on top of it, and neither is part of the turn
+        // transcript -- `response` is request/response correlation (handled
+        // by `PiRpcTransport`, never reaching this translator in practice),
+        // `extension_ui_request` is a UI prompt pi's own extension host
+        // answers. Explicit here (rather than relying on `default:`) so the
+        // ignore is a decision, not an accident of the fallthrough.
+        case "response", "extension_ui_request":
+            return []
+
         default:
             // session/user message echoes, agent_end transcript dump, etc.
             return []
