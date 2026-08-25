@@ -502,6 +502,18 @@ final class ManagedAgentTileNSView: TileNSView {
                 }
                 return true
             }
+            // B4: direct manipulation of Array's own queue. Neither touches the
+            // turn in flight — the primary composer control keeps one meaning.
+            composer.onCancelQueuedMessage = { [weak supervisor] messageID in
+                supervisor?.cancelQueuedMessage(messageID, for: agentID)
+            }
+            composer.onClearQueuedMessages = { [weak supervisor] in
+                supervisor?.clearQueuedMessages(for: agentID)
+            }
+            composer.updateQueuedMessages(
+                supervisor.queuedMessages(for: agentID),
+                paused: supervisor.isQueuePaused(for: agentID)
+            )
             if let v2AttachmentStore { composer.bindAttachmentStore(v2AttachmentStore, agentID: agentID) }
             if let v2DraftStore { composer.bindDraftStore(v2DraftStore, agentID: agentID) }
             if let v2PromptHistory { composer.bindPromptHistory(v2PromptHistory, agentID: agentID) }
@@ -1516,6 +1528,15 @@ final class ManagedAgentTileNSView: TileNSView {
            let snapshot = agentSource?.turnSnapshot(for: agentID) {
             v2TurnSnapshot = snapshot
             v2Composer?.updateTurnSnapshot(snapshot)
+            // B4: the queue mutates on the same seam (enqueue, drain, cancel,
+            // clear all route through `notifyTurnCapabilitiesChanged`), so the
+            // chips stay in lockstep with the primary control's own repaint.
+            if let supervisor = agentSource {
+                v2Composer?.updateQueuedMessages(
+                    supervisor.queuedMessages(for: agentID),
+                    paused: supervisor.isQueuePaused(for: agentID)
+                )
+            }
         }
         let status: AgentStatus
         if let snapshot = v2TurnSnapshot {
@@ -1944,7 +1965,37 @@ final class ManagedAgentTileNSView: TileNSView {
             },
             tokens: .transcript,
             appearance: effectiveTokenTheme,
-            imageResources: managedImageResourceProvider
+            imageResources: managedImageResourceProvider,
+            agentStatus: agentReferenceStatusSource
+        )
+    }
+
+    /// C10: built from `agentSource` (the supervisor), never from anything the
+    /// document carries. `turnSnapshot(for:)` and `addTurnCapabilitiesObserver`
+    /// are both already tile-independent production seams — the same ones a
+    /// headless/cross-project agent's row already resolves through — so a chip
+    /// referencing a tile-less child works exactly like one referencing a
+    /// tiled one.
+    private var agentReferenceStatusSource: AgentReferenceStatusSource {
+        guard let supervisor = agentSource else { return .unavailable }
+        return AgentReferenceStatusSource(
+            current: { [weak supervisor] rawAgentID in
+                guard let supervisor else { return nil }
+                let agentID = AgentID(rawValue: rawAgentID)
+                guard let snapshot = supervisor.turnSnapshot(for: agentID) else { return nil }
+                return InboxState.state(forSnapshot: snapshot)
+            },
+            subscribe: { [weak supervisor] rawAgentID, callback in
+                guard let supervisor else { return nil }
+                let agentID = AgentID(rawValue: rawAgentID)
+                return supervisor.addTurnCapabilitiesObserver { [weak supervisor] changedID in
+                    guard changedID == agentID, let supervisor else { return }
+                    callback(supervisor.turnSnapshot(for: agentID).map { InboxState.state(forSnapshot: $0) })
+                }
+            },
+            unsubscribe: { [weak supervisor] token in
+                supervisor?.removeTurnCapabilitiesObserver(token)
+            }
         )
     }
 

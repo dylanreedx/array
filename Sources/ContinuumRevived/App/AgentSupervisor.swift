@@ -948,6 +948,27 @@ final class AgentSupervisor {
     /// racing a successful confirmation and makes replay/rebind idempotent.
     private var submissionRecoveryTasks: [AgentID: Task<Void, Never>] = [:]
 
+    // MARK: - B4 follow-up queue
+    //
+    /// Mirrors `AgentComposerDraftStore`'s durable per-agent queue for
+    /// synchronous UI reads (pending chips). The store is the source of truth;
+    /// this cache is refreshed after every mutation this supervisor performs
+    /// and hydrated lazily on first read for an agent restored across launch.
+    private var queuedMessagesCache: [AgentID: [AgentComposerQueuedMessage]] = [:]
+    /// Queue mutations against the durable store are serialized per agent, the
+    /// same reason `submissionRecoveryTasks` is: back-to-back UI actions and a
+    /// `turnCompleted` drain must not race each other's read-modify-write.
+    private var queueOpTasks: [AgentID: Task<Void, Never>] = [:]
+    /// Set on `.interrupted`. A user who interrupted wants to look first, so
+    /// the held queue is not auto-drained into a turn they did not ask for.
+    /// Cleared by the next explicit `.send`/`.sendPrompt` or `resumeQueue`.
+    private var pausedQueues: Set<AgentID> = []
+    /// The outcome of the turn that just freed a runner slot, read by
+    /// `clearRunner` — the one moment the slot is actually free to accept the
+    /// next send. Set in `deliver`'s `.turnCompleted` handling, same as the
+    /// submission-recovery branch beside it.
+    private var pendingQueueOutcome: [AgentID: TurnOutcome] = [:]
+
     /// Provider facts used by the v2 tile. Deliberately separate from `runners`:
     /// a provider process may remain alive while its turn is ready, and that must
     /// never paint Working. `runners` is consulted only when deciding whether the
@@ -1130,12 +1151,18 @@ final class AgentSupervisor {
     /// pass through as `--effort` only on exact match, and the role's
     /// pi-specific `--tools` args are deliberately not forwarded — claude
     /// runs its own toolset.
+    ///
+    /// B7.1: `claudeSessionId(for:)` is the SEED — what a fresh agent (no
+    /// adopted id yet) uses. `record.providerSessionId`, when set, is what
+    /// claude itself has reported since (captured from `system/init`), which
+    /// is authoritative once `--fork-session` (B7.2) has minted an id Array
+    /// could not have predicted.
     nonisolated static func claudeRunnerConfig(for record: AgentRecord) -> ClaudeAgentRunner.Config {
         ClaudeAgentRunner.Config(
             model: ClaudeCLIBackend.modelArgument(forCatalogId: record.model),
             effort: ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
             cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
-            sessionId: claudeSessionId(for: record.id),
+            sessionId: record.providerSessionId ?? claudeSessionId(for: record.id),
             // An agent that has never had a turn cannot have a conversation to
             // resume, so resume-first would spawn a CLI process purely to be told
             // so. `latestTurnAt` is stamped on `.turnStarted` and persisted, which
@@ -1184,7 +1211,12 @@ final class AgentSupervisor {
             model: record.model,
             thinking: record.thinking,
             cwd: cwd,
-            sessionId: sessionId(for: record.id),
+            // B7.1: `sessionId(for:)` is the SEED a fresh agent uses;
+            // `record.providerSessionId` — nothing populates it for pi today,
+            // since Array's own `--session-id` is authoritative there, but the
+            // field is provider-neutral (mirrors `codexThreadId`) — would win
+            // if a future pi path ever needed to adopt an id it did not mint.
+            sessionId: record.providerSessionId ?? sessionId(for: record.id),
             // Only scan for roles when this agent HAS one. `toolsArguments(roleId:)`
             // returns [] for nil, so building a registry first was a directory
             // enumeration plus a frontmatter parse of every role file — on the main
@@ -1275,6 +1307,17 @@ final class AgentSupervisor {
             guard record.codexThreadId != value else { return }
             var updated = record
             updated.codexThreadId = value
+            records[id] = updated
+            persist(updated)
+            return
+        }
+        // B7.1 — claude's own reported session id. Same shape and same
+        // inequality guard as `.threadId` above (a no-op when `system/init`
+        // re-echoes the id a normal, non-forked resume already has).
+        if case let .providerSessionId(value) = observation {
+            guard record.providerSessionId != value else { return }
+            var updated = record
+            updated.providerSessionId = value
             records[id] = updated
             persist(updated)
             return
@@ -3562,13 +3605,18 @@ final class AgentSupervisor {
         // use. A mirrored child has no runner of Array's, so no send and no stop
         // are honest at ANY moment, not merely at this one.
         let mirrored = !record.capabilities.locallyManaged
-        // B2.2 — steer and queue are facts about the BOUND RUNNER, composed only
-        // when a session runner is actually bound. `.sendStop(...)` remains the
-        // floor for the three one-shot runners, so a harness mid-migration never
-        // advertises a verb the process behind it cannot perform.
+        // B2.2 — steer is a fact about the BOUND RUNNER, composed only when a
+        // session runner is actually bound: it is real mid-turn delivery into
+        // that runner's own process, so a harness mid-migration never advertises
+        // a verb the process behind it cannot perform.
         let session = mirrored ? nil : (runners[id] as? AgentSessionRunning)
         let steerable = session?.sessionCapabilities.supportedCommands.contains("steer") ?? false
-        let queueable = session?.sessionCapabilities.supportedCommands.contains("follow_up") ?? false
+        // B4 — queue is Array's own capability, not the harness's. Queueing never
+        // asks the bound runner to do anything while it is busy; Array holds the
+        // text and sends it as an ORDINARY prompt once `turnCompleted` frees the
+        // runner. That is honest for every harness with an occupied runner,
+        // one-shot or session-backed alike — there is no RPC to gate on.
+        let queueable = occupied && !mirrored
         return AgentTileTurnSnapshot(
             state: state,
             capabilities: AgentTurnCapabilities(
@@ -3606,6 +3654,9 @@ final class AgentSupervisor {
                 PreparedAgentPrompt(prompt: AgentPrompt(prompt), expectedAgentID: agentID),
                 to: agentID
             ) else { return .refused(.invalidAttachment) }
+            // B4: an explicit Send releases a queue this agent's last turn left
+            // paused after an interrupt — the user looked, and is choosing to act.
+            pausedQueues.remove(agentID)
             return .accepted
         case .sendPrompt(let draft):
             var prompt = draft
@@ -3634,6 +3685,7 @@ final class AgentSupervisor {
                 warn("AgentSupervisor.accept: attachment preparation refused for agent \(agentID.rawValue.uuidString): invalid managed attachment")
                 return .refused(.invalidAttachment)
             }
+            pausedQueues.remove(agentID)
             return .accepted
         case .stop:
             guard snapshot.capabilities.canStop, runners[agentID] != nil else {
@@ -3643,17 +3695,85 @@ final class AgentSupervisor {
             return .accepted
         case .providerCommand(let invocation):
             guard invocation.surface != .cli else { return .refused(.unsupported) }
-            let native = invocation.nativeSlashText.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !native.isEmpty else { return .refused(.emptyDraft) }
-            guard snapshot.capabilities.canSend else { return .refused(.turnNotReady) }
-            guard sendPrepared(
-                PreparedAgentPrompt(prompt: AgentPrompt(native), expectedAgentID: agentID),
-                to: agentID
-            ) else { return .refused(.invalidAttachment) }
+            // B5 — routed through the classifier instead of unconditionally
+            // serializing and sending. `AgentCommandExecutionPlanner` decides per
+            // invocation whether Array performs it, the harness does, it expands
+            // into an ordinary prompt, or it cannot run here at all — never
+            // derived from `record.harness`, always from the BOUND runner (the
+            // same rule `turnSnapshot` already follows for steer/queue).
+            guard let descriptor = AgentCommandCatalog.allBaselines()
+                .first(where: { $0.id == invocation.descriptorID }) else {
+                return .refused(.unsupported)
+            }
+            switch AgentCommandExecutionPlanner.resolve(
+                descriptor, capabilities: sessionCommandCapabilities(for: agentID)
+            ) {
+            case .arrayOwned:
+                // Array performs it and authors the reply itself as a `.system`
+                // notice — it never reaches the CLI as text, so no runtime event
+                // is invented and no turn is spent.
+                guard snapshot.capabilities.canSend else { return .refused(.turnNotReady) }
+                appendArrayOwnedCommandNotice(descriptor, for: agentID)
+                return .accepted
+            case .harnessDelegated, .skillTemplate:
+                let native = invocation.nativeSlashText.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !native.isEmpty else { return .refused(.emptyDraft) }
+                guard snapshot.capabilities.canSend else { return .refused(.turnNotReady) }
+                guard sendPrepared(
+                    PreparedAgentPrompt(prompt: AgentPrompt(native), expectedAgentID: agentID),
+                    to: agentID
+                ) else { return .refused(.invalidAttachment) }
+                return .accepted
+            case .unavailable:
+                // Disabled with a reason, never degraded into prose: codex and pi
+                // hand a leading slash straight to the model, spending a real paid
+                // turn answering conversationally about a command that means
+                // nothing to them in this mode.
+                return .refused(.unsupported)
+            }
+        case .queue(let draft):
+            // B4 — this REVERSES the prohibition that used to sit here. That rule
+            // was aimed at faking steering by silently replaying a send later; about
+            // THAT it stays correct. Queueing is a different act: the user explicitly
+            // asked to hold this message until the current turn ends, and Array must
+            // be the one holding it, because neither claude nor pi exposes a
+            // cancel-the-queue verb (claude reports `still_queued` with no cancel;
+            // pi's rpc surface has `abort`/`abort_bash`/`abort_retry` and no
+            // `cancel_follow_up`). Write-ahead into the harness's own queue would
+            // make "cancel what I queued" unimplementable, so the harness never
+            // holds more than one pending message and retaining text in a local
+            // queue is exactly the mechanism that keeps a cancel honest.
+            var prompt = draft
+            prompt.text = prompt.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !prompt.isEmpty else { return .refused(.emptyDraft) }
+            guard snapshot.capabilities.canQueue, let store = submissionRecoveryStore else {
+                return .refused(.unsupported)
+            }
+            let draftImageAttachments = prompt.imageAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) }
+            do {
+                // Validate now, the same way an ordinary send does, so a queued
+                // message cannot die silently for an attachment reason the user
+                // had no chance to see at the moment they asked to queue it.
+                _ = try await attachmentStore.preparePromptAttachments(for: agentID, draftAttachments: draftImageAttachments)
+            } catch {
+                warn("AgentSupervisor.accept: attachment preparation refused for queued message, agent \(agentID.rawValue.uuidString)")
+                return .refused(.invalidAttachment)
+            }
+            let fileReferences = prompt.fileReferences.map {
+                AgentComposerDraftFileReference(displayName: $0.displayName, contentType: $0.contentType, path: $0.fileURL.path)
+            }
+            _ = await store.enqueueMessage(
+                text: prompt.text,
+                imageAttachments: draftImageAttachments,
+                fileReferences: fileReferences,
+                for: agentID
+            )
+            queuedMessagesCache[agentID] = await store.queuedMessages(for: agentID)
+            notifyTurnCapabilitiesChanged(agentID)
             return .accepted
-        case .steer, .queue, .command:
-            // Today's compiled runner has none of these RPCs. Never simulate one by
-            // replaying send or retaining text in a local queue.
+        case .steer, .command:
+            // Today's compiled runner exercises neither of these. Never simulate
+            // one by replaying send.
             return .refused(.unsupported)
         }
     }
@@ -4164,6 +4284,61 @@ final class AgentSupervisor {
         scheduleTranscriptPersist(for: id, final: true)
     }
 
+    // MARK: - B5 command classifier
+
+    /// Capability facts for `AgentCommandExecutionPlanner`, from the BOUND
+    /// runner's harness rather than a stored preference — the same rule
+    /// `turnSnapshot` already follows for steer/queue. Every compiled runner
+    /// today is one-shot, so this is a harness lookup for now; a session
+    /// runner would replace it with its own measured capabilities the same way
+    /// `AgentSessionRunning.sessionCapabilities` does for steer.
+    ///
+    /// Measured 2026-08-24: `claude -p` interprets `/help`, `/status`,
+    /// `/compact` itself (synthetic zero-token replies); `codex exec --json`
+    /// and `pi -p --mode json` both hand the literal text to the model, which
+    /// spends a real paid turn answering conversationally.
+    private func sessionCommandCapabilities(for id: AgentID) -> AgentSessionCommandCapabilities {
+        switch records[id]?.harness {
+        case .claudeCode: return .claudeOneShot
+        case .codex, .pi, nil: return .oneShotProse
+        }
+    }
+
+    /// Tier A of the classifier: Array performs the command itself and authors
+    /// the reply as a `.system` notice, never as text sent to the CLI. No new
+    /// runtime event, no I5 pressure — `AgentTranscriptProjection.appendNotice`
+    /// is already idempotent and already carries `provenance: .localNotice`.
+    private func appendArrayOwnedCommandNotice(_ descriptor: AgentCommandDescriptor, for id: AgentID) {
+        guard transcriptStore != nil else { return }
+        let (title, body) = Self.arrayOwnedCommandNoticeText(descriptor, record: records[id])
+        var projection = transcriptProjections[id]
+            ?? ManagedAgentTranscriptModel(threadId: Self.threadId(for: id))
+        projection.appendNotice(id: "array-command-\(descriptor.id)", title: title, text: body)
+        transcriptProjections[id] = projection
+        scheduleTranscriptPersist(for: id, final: true)
+    }
+
+    private static func arrayOwnedCommandNoticeText(
+        _ descriptor: AgentCommandDescriptor, record: AgentRecord?
+    ) -> (title: String, body: String) {
+        switch descriptor.name {
+        case "clear":
+            return (
+                "Conversation cleared",
+                "Array marked a fresh boundary here. Earlier turns remain in this transcript but are no longer part of the active context."
+            )
+        case "status":
+            let harness = record?.harness?.rawValue ?? "unassigned"
+            let model = record?.model ?? "default"
+            return ("Agent status", "Harness: \(harness) · Model: \(model)")
+        case "help":
+            let names = AgentCommandCatalog.arrayCommands().map { "/\($0.name)" }.joined(separator: ", ")
+            return ("Array commands", names)
+        default:
+            return (descriptor.name.capitalized, descriptor.detail ?? "Handled by Array.")
+        }
+    }
+
     /// A turn's outcome or an error/stop is a real boundary worth writing
     /// immediately; everything else (principally `contentDelta`, which arrives
     /// per token) is debounced the same 200ms the tile used to debounce it by.
@@ -4195,6 +4370,128 @@ final class AgentSupervisor {
             guard !Task.isCancelled, let self else { return }
             try? await store.saveSnapshot(agentID: id, sessionID: sessionID, document: document)
             self.transcriptPersistenceTasks.removeValue(forKey: id)
+        }
+    }
+
+    // MARK: - B4 follow-up queue
+
+    /// Synchronous snapshot for the tile/composer to render pending chips.
+    /// Hydrates the cache from durable storage on first read for an agent this
+    /// process has not queued anything for yet (e.g. restored across launch).
+    func queuedMessages(for id: AgentID) -> [AgentComposerQueuedMessage] {
+        if queuedMessagesCache[id] == nil { hydrateQueueCache(for: id) }
+        return queuedMessagesCache[id] ?? []
+    }
+
+    /// Whether this agent's queue is held after an interrupted turn — the UI
+    /// paints chips distinctly rather than implying they are about to run.
+    func isQueuePaused(for id: AgentID) -> Bool {
+        pausedQueues.contains(id)
+    }
+
+    private func hydrateQueueCache(for id: AgentID) {
+        guard let store = submissionRecoveryStore else { return }
+        queuedMessagesCache[id] = []
+        Task { @MainActor [weak self] in
+            let messages = await store.queuedMessages(for: id)
+            guard let self else { return }
+            self.queuedMessagesCache[id] = messages
+            if !messages.isEmpty { self.notifyTurnCapabilitiesChanged(id) }
+        }
+    }
+
+    /// Deletes one visible chip. Direct manipulation of Array's own queue,
+    /// never the turn in flight — the two-verb Stop stays two verbs: the
+    /// primary control still means only "interrupt the current turn".
+    func cancelQueuedMessage(_ messageID: UUID, for id: AgentID) {
+        guard let store = submissionRecoveryStore else { return }
+        queuedMessagesCache[id]?.removeAll { $0.id == messageID }
+        notifyTurnCapabilitiesChanged(id)
+        runQueueOp(for: id) { await store.removeQueuedMessage(id: messageID, for: id) }
+    }
+
+    /// "Clear queued" — every chip at once, still without touching the turn in
+    /// flight.
+    func clearQueuedMessages(for id: AgentID) {
+        guard let store = submissionRecoveryStore else { return }
+        queuedMessagesCache[id] = []
+        notifyTurnCapabilitiesChanged(id)
+        runQueueOp(for: id) { await store.clearQueue(for: id) }
+    }
+
+    /// Explicit resume after an interrupt, distinct from the next Send: this
+    /// keeps the composer untouched and drains immediately if the runner is
+    /// already free.
+    func resumeQueue(for id: AgentID) {
+        guard pausedQueues.contains(id) else { return }
+        pausedQueues.remove(id)
+        notifyTurnCapabilitiesChanged(id)
+        if runners[id] == nil { drainQueue(for: id) }
+    }
+
+    private func runQueueOp(for id: AgentID, _ operation: @escaping @Sendable () async -> Void) {
+        guard let store = submissionRecoveryStore else { return }
+        let previous = queueOpTasks[id]
+        queueOpTasks[id] = Task { @MainActor [weak self] in
+            if let previous { await previous.value }
+            await operation()
+            guard let self else { return }
+            self.queuedMessagesCache[id] = await store.queuedMessages(for: id)
+            self.notifyTurnCapabilitiesChanged(id)
+        }
+    }
+
+    /// Called from `clearRunner`, the one moment a runner slot actually frees.
+    /// `.interrupted` holds the queue instead of draining it (see
+    /// `pausedQueues`); every other outcome (`.completed`, `.failed`,
+    /// `.cancelled`) writes the next queued item as an ordinary send.
+    private func handleQueueOnTurnCompleted(outcome: TurnOutcome, for id: AgentID) {
+        guard submissionRecoveryStore != nil else { return }
+        if outcome == .interrupted {
+            pausedQueues.insert(id)
+            notifyTurnCapabilitiesChanged(id)
+            return
+        }
+        guard !pausedQueues.contains(id) else { return }
+        drainQueue(for: id)
+    }
+
+    private func drainQueue(for id: AgentID) {
+        guard let store = submissionRecoveryStore else { return }
+        let previous = queueOpTasks[id]
+        queueOpTasks[id] = Task { @MainActor [weak self] in
+            if let previous { await previous.value }
+            guard let self else { return }
+            guard let message = await store.dequeueNextQueuedMessage(for: id) else { return }
+            self.queuedMessagesCache[id] = await store.queuedMessages(for: id)
+            self.notifyTurnCapabilitiesChanged(id)
+            let prompt: AgentPrompt
+            do {
+                let prepared = try await self.attachmentStore.preparePromptAttachments(
+                    for: id,
+                    draftAttachments: message.imageAttachments
+                )
+                let fileReferences = message.fileReferences.map {
+                    AgentPromptFileReference(
+                        displayName: $0.displayName,
+                        contentType: $0.contentType,
+                        fileURL: URL(fileURLWithPath: $0.path)
+                    )
+                }
+                prompt = AgentPrompt(text: message.text, imageAttachments: prepared, fileReferences: fileReferences)
+            } catch {
+                self.warn("AgentSupervisor: dropping queued message for agent \(id.rawValue.uuidString): attachment no longer valid")
+                return
+            }
+            guard self.sendPrepared(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id), to: id) else {
+                // The runner became busy again in the same beat (a fresh
+                // interactive send won the race) — put the message back rather
+                // than lose it.
+                await store.requeueMessageAtFront(message, for: id)
+                self.queuedMessagesCache[id] = await store.queuedMessages(for: id)
+                self.notifyTurnCapabilitiesChanged(id)
+                return
+            }
         }
     }
 
@@ -4262,6 +4559,11 @@ final class AgentSupervisor {
             } else {
                 enqueueSubmissionRecovery(.restore, for: id)
             }
+            // B4: recorded here, read by `clearRunner` — the one moment the
+            // runner slot is actually free to accept the next send. This event
+            // still fires while `runners[id]` holds the OLD runner (the process
+            // hop that clears it is dispatched separately, after this one).
+            pendingQueueOutcome[id] = outcome
         case .runtimeError, .sessionStateChanged(.stopped), .sessionStateChanged(.error):
             enqueueSubmissionRecovery(.restore, for: id)
         default:
@@ -4508,6 +4810,13 @@ final class AgentSupervisor {
         if runners[id] === runner {
             runners[id] = nil
             notifyTurnCapabilitiesChanged(id)
+            // B4: this is the actual moment the runner slot frees, not the
+            // `.turnCompleted` event itself — that event still fires while
+            // `runners[id]` holds this very runner, so draining there would
+            // refuse against an occupied slot every time.
+            if let outcome = pendingQueueOutcome.removeValue(forKey: id) {
+                handleQueueOnTurnCompleted(outcome: outcome, for: id)
+            }
         }
     }
 
@@ -6484,8 +6793,12 @@ func runAgentSupervisorChecks() async throws {
 
     let turnStateReport = try await checkCapabilityDrivenTurnStates(config: config, cwd: cwd, fail: fail)
 
+    // MARK: 21 · a status tick never rewrites the document (C10)
+
+    let agentReferenceStatusReport = try await checkAgentReferenceLiveStatus(config: config, cwd: cwd, fail: fail)
+
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport)")
 }
 
 @MainActor
