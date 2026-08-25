@@ -243,9 +243,6 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
     }
 }
 
-#endif  // os(macOS)
-
-
 extension PiRpcAgentRunner: ObservedRunReporting {
     /// Where a `delegate_agent` child's transcript will be. Same confinement as
     /// `observeSpawnRequests`: set before `run`, delivered on the runner's serial
@@ -254,3 +251,5 @@ extension PiRpcAgentRunner: ObservedRunReporting {
         queue.sync { translator.onObservedRun = handler }
     }
 }
+
+#endif  // os(macOS)

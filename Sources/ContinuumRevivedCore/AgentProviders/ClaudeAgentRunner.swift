@@ -485,9 +485,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     }
 }
 
-#endif  // os(macOS)
-
-
 /// The method already existed verbatim; this only names the capability so the
 /// supervisor can ask for it instead of downcasting to this class.
 extension ClaudeAgentRunner: SubagentEventObserving {}
+
+#endif  // os(macOS)
