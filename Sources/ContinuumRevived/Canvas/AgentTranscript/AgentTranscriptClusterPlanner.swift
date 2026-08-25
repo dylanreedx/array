@@ -47,6 +47,32 @@ enum AgentTranscriptClusterPlanner {
         AgentNodeID(rawValue: "__cluster__\(id.rawValue)") ?? id
     }
 
+    /// `.plans/45` A4.1 — the turn boundaries `plan()` already computed as a
+    /// single index (`lastTurnStart`), pulled out as its own pure function so
+    /// A4.2's turn-level fold pass can share it instead of re-deriving turn
+    /// starts a second way. Every fact belongs to exactly one contiguous
+    /// range; a `RowFact.startsTurn` at index `i` (`i > 0` by construction —
+    /// see `AgentTranscriptListView.startsTurn`) closes the range ending at
+    /// `i` and opens the next one.
+    ///
+    /// This is a NO-OP extraction: `plan()`'s only use of turn boundaries
+    /// (`lastTurnStart`) is `turnRanges(facts: facts).last?.lowerBound ?? 0`,
+    /// which is exactly what the old inline
+    /// `facts.lastIndex(where: { $0.startsTurn }) ?? 0` computed. The
+    /// equivalence is asserted directly in
+    /// `TranscriptRhythmChecks.checkTurnRangesMatchLegacyLastTurnStart`.
+    static func turnRanges(facts: [RowFact]) -> [Range<Int>] {
+        guard !facts.isEmpty else { return [] }
+        var ranges: [Range<Int>] = []
+        var start = 0
+        for index in facts.indices where index > 0 && facts[index].startsTurn {
+            ranges.append(start..<index)
+            start = index
+        }
+        ranges.append(start..<facts.count)
+        return ranges
+    }
+
     /// - Parameters:
     ///   - tailStreaming: the transcript's thinking indicator is up — the LAST
     ///     turn is still producing output, and folding must not flicker through
@@ -59,7 +85,7 @@ enum AgentTranscriptClusterPlanner {
     ) -> [Item] {
         var items: [Item] = []
         items.reserveCapacity(facts.count)
-        let lastTurnStart = facts.lastIndex(where: { $0.startsTurn }) ?? 0
+        let lastTurnStart = turnRanges(facts: facts).last?.lowerBound ?? 0
 
         var index = 0
         while index < facts.count {

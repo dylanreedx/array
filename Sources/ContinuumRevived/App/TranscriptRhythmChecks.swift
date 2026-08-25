@@ -59,6 +59,7 @@ enum TranscriptRhythmChecks {
         try checkRowsShareOneTextColumn()
         try checkLiveDocumentsCarryTimestamps()
         try checkMotionIsPresentationOnly()
+        try checkTurnRangesMatchLegacyLastTurnStart()
         print(
             "TranscriptRhythmChecks: heading ladder, hanging indents, thematic break, "
             + "turn separation, error/notice divergence, table structure, surface fills, "
@@ -1436,6 +1437,149 @@ enum TranscriptRhythmChecks {
                 + "already holds"
             )
         }
+    }
+
+    // MARK: - A4.1 turn ranges (no-op extraction)
+
+    /// A4.1 extracted `turnRanges(facts:)` out of `plan()`'s inline
+    /// `lastTurnStart` computation. It must change no rendered output — the
+    /// witness for that is a replay: several representative fact corpora are
+    /// run both through the shipped `plan()` (which now derives its turn
+    /// start from `turnRanges`) and through `legacyPlan`, a byte-for-byte copy
+    /// of `plan()` as it read before the extraction, and the two `[Item]`
+    /// lists must match exactly.
+    private static func checkTurnRangesMatchLegacyLastTurnStart() throws {
+        func legacyLastTurnStart(_ facts: [AgentTranscriptClusterPlanner.RowFact]) -> Int {
+            facts.lastIndex(where: { $0.startsTurn }) ?? 0
+        }
+        func fact(
+            tool: Bool = false, failure: Bool = false, live: Bool = false, turn: Bool = false,
+            id: String
+        ) -> AgentTranscriptClusterPlanner.RowFact {
+            AgentTranscriptClusterPlanner.RowFact(
+                isToolRow: tool, isFailure: failure, isLive: live, startsTurn: turn,
+                id: AgentNodeID(rawValue: id)!
+            )
+        }
+        let corpora: [[AgentTranscriptClusterPlanner.RowFact]] = [
+            [],
+            [fact(id: "0")],
+            [fact(id: "0"), fact(tool: true, id: "1"), fact(tool: true, id: "2")],
+            [
+                fact(id: "0"), fact(tool: true, id: "1"), fact(tool: true, id: "2"),
+                fact(turn: true, id: "3"), fact(tool: true, id: "4"), fact(tool: true, id: "5"),
+                fact(tool: true, id: "6"), fact(tool: true, live: true, id: "7"),
+            ],
+            [
+                fact(id: "0"), fact(tool: true, failure: true, id: "1"),
+                fact(turn: true, id: "2"), fact(tool: true, id: "3"),
+            ],
+            [
+                fact(id: "0"), fact(tool: true, id: "1"), fact(turn: true, id: "2"),
+                fact(tool: true, id: "3"), fact(tool: true, id: "4"), fact(tool: true, id: "5"),
+            ],
+            // Boundary case: the settled run starts EXACTLY at the last turn's
+            // start (no leading non-tool row), so `run[0] >= lastTurnStart` is
+            // decided by the exact value, not merely which side of it — an
+            // off-by-one in `turnRanges` flips this comparison's outcome.
+            [fact(tool: true, id: "0"), fact(tool: true, id: "1")],
+        ]
+        for facts in corpora {
+            let expectedStart = legacyLastTurnStart(facts)
+            let actualStart = AgentTranscriptClusterPlanner.turnRanges(facts: facts).last?.lowerBound ?? 0
+            guard actualStart == expectedStart else {
+                throw fail(
+                    "turnRanges: last range lowerBound \(actualStart) != legacy lastTurnStart "
+                    + "\(expectedStart) for a \(facts.count)-fact corpus"
+                )
+            }
+            for tailStreaming in [false, true] {
+                let viaShipped = AgentTranscriptClusterPlanner.plan(
+                    facts: facts, tailStreaming: tailStreaming, isExpanded: { _ in false })
+                let viaLegacy = legacyPlan(
+                    facts: facts, tailStreaming: tailStreaming, lastTurnStart: expectedStart,
+                    isExpanded: { _ in false })
+                guard viaShipped == viaLegacy else {
+                    throw fail(
+                        "turnRanges: plan() diverged from the pre-extraction algorithm for a "
+                        + "\(facts.count)-fact corpus (tailStreaming=\(tailStreaming))"
+                    )
+                }
+            }
+        }
+    }
+
+    /// A byte-for-byte copy of `plan()` as it read before A4.1's extraction,
+    /// parameterised on `lastTurnStart` instead of deriving it inline. Exists
+    /// ONLY so `checkTurnRangesMatchLegacyLastTurnStart` can assert the
+    /// extraction changed no output — do not evolve this alongside the real
+    /// `plan()`; a copy that quietly tracks future changes stops witnessing
+    /// anything.
+    private static func legacyPlan(
+        facts: [AgentTranscriptClusterPlanner.RowFact],
+        tailStreaming: Bool,
+        lastTurnStart: Int,
+        isExpanded: (AgentNodeID) -> Bool
+    ) -> [AgentTranscriptClusterPlanner.Item] {
+        typealias Item = AgentTranscriptClusterPlanner.Item
+        typealias Header = AgentTranscriptClusterPlanner.Header
+        var items: [Item] = []
+        items.reserveCapacity(facts.count)
+        var index = 0
+        while index < facts.count {
+            let fact = facts[index]
+            guard fact.isToolRow, !fact.isFailure else {
+                items.append(.row(index))
+                index += 1
+                continue
+            }
+            var run: [Int] = [index]
+            var next = index + 1
+            while next < facts.count,
+                  facts[next].isToolRow,
+                  !facts[next].isFailure,
+                  !facts[next].startsTurn {
+                run.append(next)
+                next += 1
+            }
+            defer { index = next }
+
+            let liveIndex = run.firstIndex { facts[$0].isLive }
+            if let liveIndex {
+                let earlier = Array(run[..<liveIndex])
+                if earlier.count >= 3 {
+                    let id = AgentTranscriptClusterPlanner.headerID(forFirstMember: facts[earlier[0]].id)
+                    items.append(.header(Header(
+                        id: id, memberIndexes: earlier, isLive: true, isExpanded: isExpanded(id)
+                    )))
+                    if isExpanded(id) {
+                        items.append(contentsOf: earlier.map(Item.row))
+                    }
+                }
+                items.append(contentsOf: run[liveIndex...].map(Item.row))
+                continue
+            }
+
+            if tailStreaming, run[0] >= lastTurnStart {
+                items.append(contentsOf: run.map(Item.row))
+                continue
+            }
+
+            guard run.count >= 2 else {
+                items.append(.row(run[0]))
+                continue
+            }
+
+            let id = AgentTranscriptClusterPlanner.headerID(forFirstMember: facts[run[0]].id)
+            let expanded = isExpanded(id)
+            items.append(.header(Header(
+                id: id, memberIndexes: run, isLive: false, isExpanded: expanded
+            )))
+            if expanded {
+                items.append(contentsOf: run.map(Item.row))
+            }
+        }
+        return items
     }
 }
 
