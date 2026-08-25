@@ -1601,3 +1601,151 @@ can carry what exec already carries — it demonstrably can, for the
 non-delegating path, and the one hazard that would silently corrupt a
 delegating session (the parent-closes-before-child ordering) is now pinned by
 a fixture and a witness instead of a paragraph.
+
+---
+
+## M0–M2 landings — 2026-08-24
+
+One section per landing, newest last. Commit hashes are on `array/transcript-ux`.
+
+### `a4ec37ef` — G0, the delta path (see the G0 section above)
+
+### `c5831e5d` — C1's capture and the three probe findings (see Probes above)
+
+### `4eb92ef9` + `88d00168` — C3, one stable transcript key
+
+The writer was the TILE's thread id (`"managed-<tileId>"`) and the only reader
+asked for the literal `"thread-main"`, so the companion had **never once** found
+a transcript — two ends of one channel that never named the same thing. Fixing
+the reader to match the writer would not have been enough: revealing an existing
+agent mints a fresh tile id, so every reveal orphaned the previous directory.
+The key itself was unstable.
+
+`AgentTranscriptStore.canonicalSessionID(for:)` is the key, deliberately the same
+string `AgentSupervisor.sessionId(for:)` hands pi as `--session-id` so the two
+cannot drift into two names for one conversation. The tile keeps its own thread
+id — a runtime event-routing concept, legitimately per-tile; what it stops being
+is the name of a file on disk.
+
+`migrateLegacySessionDirectories()` **adopts, never wipes.** The legacy session id
+is read out of the archive because the directory name is an FNV-1a hash and is not
+invertible; recovery goes through the ordinary `load` so an uncompacted journal
+survives; and the document is rewritten under the canonical key, which also
+rewrites the `sessionID` field INSIDE both files — without that, `load` refuses
+the migrated transcript with `identityMismatch`. **A rename alone is not a
+migration here.** Where a reveal left several directories the newest wins by its
+own `savedAt` and the losers are quarantined. Idempotent. Runs detached at launch,
+on the interactive path only.
+
+Witness teeth: stubbing the migration call fails on "both legacy agents must be
+adopted under the canonical key". The newest-wins clause later had to be made
+deterministic (`8e6e35bd`) — it was failing about two runs in three because the
+store re-snapshots on compaction with `Date()`, so the seed's timestamp depended
+on whether compaction happened to fire. **A witness for an ordering rule must not
+itself depend on ordering luck.**
+
+### `983282f2` — C0b, one role concept and three roots
+
+All three harnesses declare roles as a directory of markdown files with YAML
+frontmatter and differ only in the dot-dir, so `RoleRegistry` takes a harness and
+reads `.pi/agents`, `.claude/agents` or `.codex/agents`. The default stays pi.
+
+`toolsArguments(roleId:allowingSpawn:)` is C8's fourth blocker — the one that
+would have made shipping the other three still ship a dead feature. All twelve
+`.pi/agents/*.md` roles declare a `tools:` allowlist and none lists
+`spawn_agent`, so pi denied the verb to every roled agent even with the extension
+loaded. Array appends it, at Array's own depth cap, rather than twelve markdown
+files being hand-edited into tracking a code-level limit they cannot see.
+**Withholding beats refusing after the fact: the model never proposes what it
+cannot have** — the same shape as `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`.
+
+### `0969f281` — `ItemKind` stops throwing away the event that carried it
+
+A `String`-raw enum with a synthesized decoder threw on a value it had not heard
+of. These values are persisted in activity events and cross to the companion, so
+that is data loss: an older build meeting a newer kind loses the **event**, not
+the field. It mattered now because both B6.2 (`.compaction`) and C7 (`.subagent`)
+add a case, and adding one to the old shape would have reopened it on every
+install that had not updated. `AgentContextWindowFreshness` in the same file had
+already solved it; `ItemKind` now agrees.
+
+### `5e4ac132` + `65643eb2` — C8, pi spawning reaches the model
+
+Four independent blockers, all four or nothing. The extension is bundled
+(`Sources/ContinuumRevivedCore/Resources/PiExtensions/`), `make-app-bundle.sh`
+copies the generated resource bundle into `Contents/Resources` — placing it at the
+app's top level makes `codesign` refuse to seal the executable, verified
+empirically — an idempotent installer writes it to `~/.pi/agent/extensions/`
+(confirmed as pi's auto-discovery root by reading `dist/core/resource-loader.js`),
+and `pi --help` confirms `--extension, -e <path>`.
+
+Two corrections during the ticket, both worth keeping. `processArguments` is
+documented **pure so the matrix can pin it**, and the first version made it read
+the host's home directory — the resolution moved to `Config.extensionPaths` with
+an impure default, the same pattern the file already uses for `model`/`thinking`.
+And a `-e` pointing at a file that does not exist would fail a pi launch for a
+feature the user is not using, so `installedExtensionPaths()` resolves to `[]`
+when the file is absent.
+
+The installer's call site is `applicationDidFinishLaunching`, **not** beside
+`ToolEnvironment.bootstrap()`: that runs only on the interactive path, after the
+whole `--*-check` cascade, so no self-check leg can write into the developer's
+real `~/.pi`. Deliberately not witnessed: whether the file reached the real home
+directory. That is host state, and asserting it would make the matrix depend on a
+home directory.
+
+### `4dd62163` — B7.0, and it is sharper than the handoff said
+
+`/clear` alone was **accidentally** safe: `SecretRedactor.removeLocalPathReferences`
+eats it whole as path-shaped text. But a command WITH ARGUMENTS gets only its verb
+eaten, so `/compact focus on the auth work` named the tile *"focus on the auth
+work"* and set `displayNameSource` to `.prompt` — which disarms the naming funnel
+permanently, so no later real prompt could ever rename it.
+
+The guard goes in `visibleNamingText` because that is the only place that can
+still tell; by the time the shared resolver sees the prompt, the verb has already
+been redacted away. **A rule inherited from a side effect is not a rule.**
+
+### `8e6e35bd` — B5's classifier, and compaction reaching the ring
+
+`AgentCommandExecutionPlanner` resolves an invocation to `arrayOwned`,
+`harnessDelegated`, `skillTemplate` or `unavailable(reason:)`. Capability comes
+from the BOUND RUNNER, never `record.harness`. Discovery narrows only once it has
+happened — claude's `slash_commands` arrives per turn, so refusing on a nil list
+would disable every command until the first turn ran.
+
+B6.1's `compact_boundary` event could not reach the context ring: it was tagged
+`.unknown("claudeCompactBoundary")` because the enum lived in a file that ticket
+could not touch, and `AgentContextOccupancy.promptTokens` returns nil for
+`.unknown` — so the correctness fix was a **no-op**. The case is now named and
+authoritative. Worth recording as a pattern: *a ticket scoped away from the file
+it needs will find a way to look finished.*
+
+### `9759887c` — C2, the two fan-out bugs that hid each other
+
+`harness:` was a parameter of `fanOut` never forwarded to `spawn`, so every child
+silently ran the SETTINGS default regardless of what the caller asked for or what
+the parent was running. And `fanOut` never emitted `.childAgentSpawned`, so a
+child got durable parentage in the record and no chip in the parent's transcript.
+`handleSpawnRequest` had always emitted it; the two spawn paths simply disagreed,
+and each bug made the other harder to notice. The witness asks for a harness that
+is deliberately **not** the settings default, so a regression reads as a real
+difference rather than an accidental match.
+
+### `f575ed1e` — C7, translator half
+
+An `Agent` (formerly `Task`) call is claude announcing a child it has **already
+started inside itself**, so the request is `observedOnly`: Array may watch that
+child and must never claim to run it. That distinction comes from the request
+rather than from a harness name, which keeps it true during a migration.
+
+The announcement is keyed by the `tool_use` id, because that is the value every
+one of the child's frames carries in `parent_tool_use_id`. **A child announcement
+Array cannot re-identify later is not worth minting.**
+
+`subagent_type` joins the tool-detail whitelist (a role id, and role ids are
+publishable); `prompt` on the same tool stays out. `Agent`/`Task` reached
+`.commandExecution` through `default:`, which it is not.
+
+The witness first asserts the FIXTURE carries non-null `parent_tool_use_id`
+frames — a fixture-backed check whose fixture is empty witnesses nothing.
