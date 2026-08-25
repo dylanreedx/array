@@ -65,7 +65,34 @@ extension AgentRunning {
     }
 }
 
+/// B2.2 — a REFINEMENT, deliberately not a wider `AgentRunning`.
+///
+/// A session runner holds one provider process for the agent's whole life, which
+/// is what makes mid-turn steering and a clean interrupt possible at all. The
+/// three one-shot runners do not conform and compile untouched, keeping
+/// `.sendStop(...)` as their conservative floor; the supervisor composes real
+/// capabilities only when a session runner is actually bound.
+///
+/// **Capabilities come from the BOUND RUNNER, never from `record.harness`.** A
+/// harness-name table lies for the entire migration window, when pi-one-shot and
+/// pi-rpc are both live in one build — and the thing that will execute the intent
+/// is the only honest source for what it can do.
+protocol AgentSessionRunning: AgentRunning {
+    var sessionCapabilities: PiRpcSessionCapabilities { get }
+    /// Turn-boundary steering. pi documents delivery as AFTER the current
+    /// assistant turn finishes its tool calls and before the next LLM call
+    /// (`agent-session.js:986`) — it is not mid-tool interruption, and no comment
+    /// or UI string may promise that it is.
+    func steer(_ text: String) throws
+    /// Clean, awaited, no signal — and therefore no lost session file.
+    func interrupt() throws
+    @discardableResult
+    func command(_ type: String, payload: [String: Any]) throws -> [String: Any]
+}
+
 extension PiAgentRunner: AgentRunning {}
+extension PiRpcAgentRunner: AgentRunning {}
+extension PiRpcAgentRunner: AgentSessionRunning {}
 extension ClaudeAgentRunner: AgentRunning {}
 extension CodexAgentRunner: AgentRunning {}
 
@@ -880,6 +907,11 @@ final class AgentSupervisor {
     /// subscriptions so launch failures and provider rejection restore drafts
     /// even when no tile remains bound.
     private let submissionRecoveryStore: AgentComposerDraftStore?
+    /// C4: persistence must not require a tile. `nil` in every check that does
+    /// not pass one (the overwhelming majority), so building/ingesting the
+    /// per-agent projection below is skipped entirely rather than adding
+    /// per-event cost to hundreds of unrelated fixtures.
+    private let transcriptStore: AgentTranscriptStore?
 
     /// The records this supervisor owns, in memory. `AgentStore` is the durable
     /// copy; this is the live one.
@@ -890,6 +922,13 @@ final class AgentSupervisor {
     private var runners: [AgentID: AgentRunning] = [:]
     private var subscribers: [AgentID: [UUID: AsyncStream<AgentRuntimeEvent>.Continuation]] = [:]
     private var history: [AgentID: [AgentRuntimeEvent]] = [:]
+    /// C4: the semantic document, built here so it exists whether or not any
+    /// tile is attached — a tile-less child (the common case at fan-out) used
+    /// to persist nothing, because the only `saveSnapshot` call site lived
+    /// inside the tile's own event hook. Uninjected (no `transcriptStore`)
+    /// means this stays empty; a check that never passes a store pays nothing.
+    private var transcriptProjections: [AgentID: ManagedAgentTranscriptModel] = [:]
+    private var transcriptPersistenceTasks: [AgentID: Task<Void, Never>] = [:]
     /// Queue 91 P2 host-local projection. Never persisted or published: it carries
     /// concrete checkout/current/tool-target URLs that are outside I5's wire model.
     private var locationProjectors: [AgentID: AgentLocationProjector] = [:]
@@ -962,7 +1001,8 @@ final class AgentSupervisor {
         nameGenerationTimeout: TimeInterval = AgentNameOneShot.timeout,
         attachmentStore: AgentComposerAttachmentStore? = nil,
         submissionRecoveryStore: AgentComposerDraftStore? = nil,
-        codexRestoredContextSnapshot: (@Sendable (AgentRecord) -> AgentContextWindowSnapshot?)? = nil
+        codexRestoredContextSnapshot: (@Sendable (AgentRecord) -> AgentContextWindowSnapshot?)? = nil,
+        transcriptStore: AgentTranscriptStore? = nil
     ) {
         self.store = store
         self.makeRunner = makeRunner
@@ -974,6 +1014,7 @@ final class AgentSupervisor {
             applicationSupportDirectory: store.layout.applicationSupportDirectory
         )
         self.submissionRecoveryStore = submissionRecoveryStore
+        self.transcriptStore = transcriptStore
         self.codexRestoredContextSnapshot = codexRestoredContextSnapshot ?? { record in
             guard let threadId = record.codexThreadId else { return nil }
             return CodexRolloutTelemetry.latestSnapshot(threadId: threadId, freshness: .stale)
@@ -1049,8 +1090,33 @@ final class AgentSupervisor {
     }
 
     /// The only `PiAgentRunner(` construction in the app.
+    ///
+    /// M4: the rpc session transport is opt-in, and the one-shot path stays on
+    /// disk as both the fallback and the anti-cheat baseline — a leg that proves
+    /// the new transport translates identically has to be able to run the old one.
+    /// It defaults OFF because one field of the rpc command payload had not been
+    /// verified against a live multi-second turn when it was written; the shape is
+    /// confirmed against pi's own `rpc-types.d.ts`, but confirmed-by-declaration is
+    /// not the same as driven.
     nonisolated static func piRunner(for record: AgentRecord) -> AgentRunning {
-        PiAgentRunner(config: runnerConfig(for: record))
+        guard piSessionTransportEnabled() else {
+            return PiAgentRunner(config: runnerConfig(for: record))
+        }
+        return PiRpcAgentRunner(config: runnerConfig(for: record))
+    }
+
+    /// Env-gated, like the codex transport switch, so a self-check leg and a
+    /// release build both take the shipped path unless a developer asks.
+    nonisolated static func piSessionTransportEnabled() -> Bool {
+        ProcessInfo.processInfo.environment["CONTINUUM_PI_TRANSPORT"] == "rpc"
+    }
+
+    /// The session runner bound to this agent RIGHT NOW, or nil.
+    ///
+    /// The one honest source for what the composer may offer. Reading it from the
+    /// bound runner rather than from `record.harness` is the whole point of B2.2.
+    func sessionRunner(for id: AgentID) -> AgentSessionRunning? {
+        runners[id] as? AgentSessionRunning
     }
 
     /// The only `ClaudeAgentRunner(` construction in the app, mirroring
@@ -2035,6 +2101,13 @@ final class AgentSupervisor {
         records[id] = record
         persist(record)
 
+        // C4: the user's own words, echoed into the same durable transcript the
+        // provider's events land in. Without this a tile-less agent's saved
+        // transcript would be missing the prompt that started every turn — the
+        // tile used to supply this echo itself (`appendUserPrompt`), which is
+        // exactly the tile-shaped dependency this ticket removes.
+        recordTranscriptUserPrompt(prompt, for: id)
+
         // Stamp the spawn-window anchor BEFORE the runner is built, so the
         // interval covers makeRunner (which for pi walks `.pi/agents`) and the
         // dispatch, not just the provider's silence.
@@ -2829,6 +2902,18 @@ final class AgentSupervisor {
         for continuation in (subscribers[id] ?? [:]).values { continuation.finish() }
         subscribers.removeValue(forKey: id)
         restoredIDs.remove(id)
+        // C4: cancel a pending save before quarantining, so a debounced write
+        // in flight cannot land AFTER the move and recreate the directory the
+        // move just cleared out. The transcript is the user's own record of
+        // their work (the same rule the C3 migration follows) — quarantined,
+        // never `rm`'d, so a deleted agent's history is still on disk if
+        // someone goes looking for it.
+        transcriptPersistenceTasks[id]?.cancel()
+        transcriptPersistenceTasks.removeValue(forKey: id)
+        transcriptProjections.removeValue(forKey: id)
+        if let transcriptStore {
+            Task.detached { _ = await transcriptStore.quarantineTranscript(agentID: id) }
+        }
         // P6.4: the in-memory watermark throttle goes with the agent. The durable
         // watermark is deleted with the record, and a recycled id must not inherit
         // this supervisor's write cadence.
@@ -3436,16 +3521,25 @@ final class AgentSupervisor {
         // use. A mirrored child has no runner of Array's, so no send and no stop
         // are honest at ANY moment, not merely at this one.
         let mirrored = !record.capabilities.locallyManaged
+        // B2.2 — steer and queue are facts about the BOUND RUNNER, composed only
+        // when a session runner is actually bound. `.sendStop(...)` remains the
+        // floor for the three one-shot runners, so a harness mid-migration never
+        // advertises a verb the process behind it cannot perform.
+        let session = mirrored ? nil : (runners[id] as? AgentSessionRunning)
+        let steerable = session?.sessionCapabilities.supportedCommands.contains("steer") ?? false
+        let queueable = session?.sessionCapabilities.supportedCommands.contains("follow_up") ?? false
         return AgentTileTurnSnapshot(
             state: state,
-            capabilities: .sendStop(
+            capabilities: AgentTurnCapabilities(
                 canSend: !mirrored && !occupied && state.acceptsNewTurn,
                 // In flight = stoppable, full stop (P5.5 consolidation): `stop()`
                 // genuinely kills a spawning (pre-turnStarted) or draining
                 // (post-settle) process, so gating on `execution == .working`
                 // under-advertised the transport — and painted the two windows
                 // "Unavailable" on the composer.
-                canStop: !mirrored && occupied && record.capabilities.canStop
+                canStop: !mirrored && occupied && record.capabilities.canStop,
+                canSteer: steerable && occupied,
+                canQueue: queueable && occupied
             ),
             // P3.3: carried, never derived here. A consumer that wanted an elapsed
             // reading had to reach for the event ring instead, which is why the
@@ -4001,6 +4095,58 @@ final class AgentSupervisor {
         if subscribers[id]?.isEmpty == true { subscribers.removeValue(forKey: id) }
     }
 
+    // MARK: - Transcript persistence (C4)
+
+    /// Feeds one provider event into the durable semantic document, then
+    /// schedules a save. A no-op with no `transcriptStore` injected, which is
+    /// every check that does not pass one.
+    private func ingestTranscriptEvent(_ event: AgentRuntimeEvent, for id: AgentID) {
+        guard transcriptStore != nil else { return }
+        var projection = transcriptProjections[id]
+            ?? ManagedAgentTranscriptModel(threadId: Self.threadId(for: id))
+        projection.ingest(event)
+        transcriptProjections[id] = projection
+        scheduleTranscriptPersist(for: id, final: Self.isTranscriptPersistBoundary(event))
+    }
+
+    /// Echoes the user's own prompt into the durable document. `send` used to
+    /// rely entirely on the tile calling `appendUserPrompt` for this; a
+    /// tile-less agent (fan-out's common case) never had a tile to ask.
+    private func recordTranscriptUserPrompt(_ prompt: AgentPrompt, for id: AgentID) {
+        guard transcriptStore != nil else { return }
+        guard let promptID = AgentNodeID(rawValue: "supervisor-prompt-\(UUID().uuidString)") else { return }
+        var projection = transcriptProjections[id]
+            ?? ManagedAgentTranscriptModel(threadId: Self.threadId(for: id))
+        projection.appendUserPrompt(id: promptID, prompt: prompt)
+        transcriptProjections[id] = projection
+        // A user's own words must not wait behind the streaming debounce below.
+        scheduleTranscriptPersist(for: id, final: true)
+    }
+
+    /// A turn's outcome or an error/stop is a real boundary worth writing
+    /// immediately; everything else (principally `contentDelta`, which arrives
+    /// per token) is debounced the same 200ms the tile used to debounce it by.
+    private static func isTranscriptPersistBoundary(_ event: AgentRuntimeEvent) -> Bool {
+        switch event {
+        case .turnCompleted, .runtimeError, .sessionStateChanged(.stopped), .sessionStateChanged(.error):
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func scheduleTranscriptPersist(for id: AgentID, final: Bool) {
+        guard let store = transcriptStore, let document = transcriptProjections[id]?.document else { return }
+        let sessionID = AgentTranscriptStore.canonicalSessionID(for: id)
+        transcriptPersistenceTasks[id]?.cancel()
+        transcriptPersistenceTasks[id] = Task { [weak self] in
+            if !final { try? await Task.sleep(for: .milliseconds(200)) }
+            guard !Task.isCancelled, let self else { return }
+            try? await store.saveSnapshot(agentID: id, sessionID: sessionID, document: document)
+            self.transcriptPersistenceTasks.removeValue(forKey: id)
+        }
+    }
+
     private enum SubmissionRecoveryAction {
         case confirmSuccess(Date)
         case restore
@@ -4064,6 +4210,13 @@ final class AgentSupervisor {
             buffer.removeFirst(buffer.count - Self.replayCap)
         }
         history[id] = buffer
+
+        // C4: fed here rather than by the tile, so a child that never gets a
+        // tile (the common case at fan-out) is not silently unsaved. `deliver`
+        // is where every event already carries this agent's own thread id
+        // (restamped before this point), the same precondition the tile's
+        // model relied on.
+        ingestTranscriptEvent(event, for: id)
 
         if var record = records[id] {
             record.lastActivityAt = max(record.lastActivityAt, now)
@@ -6218,6 +6371,10 @@ func runAgentSupervisorChecks() async throws {
 
     let cleanupReport = try await checkArchiveCleanup(config: config, fail: fail)
 
+    // MARK: 11b · a tile-less agent still persists, and archive quarantines its transcript (C4)
+
+    let transcriptPersistenceReport = try await checkTranscriptPersistenceWithoutTile(config: config, cwd: cwd, fail: fail)
+
     // MARK: 12 · a tile SAYS which checkout its agent is about to touch (P2C.4)
 
     let branchReport = try await checkBranchChip(config: config, fail: fail)
@@ -6256,7 +6413,7 @@ func runAgentSupervisorChecks() async throws {
     let turnStateReport = try await checkCapabilityDrivenTurnStates(config: config, cwd: cwd, fail: fail)
 
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport)")
 }
 
 @MainActor
@@ -10886,6 +11043,117 @@ private func checkIsolatedSpawn(
 /// assertion below. One mutation that is deliberately NOT red is recorded at MARK 2:
 /// deleting the branch without the `isMerged` guard is caught by `git branch -d`
 /// instead, and the destructive form of it (`-D`) is red in `runWorktreeMergedBranchCheck`.
+/// C4 — persistence must not require a tile, and archiving quarantines rather
+/// than deletes the transcript directory.
+///
+/// The sole production `saveSnapshot` call site used to live inside the TILE's
+/// own event hook (`ContinuumApp.wireManagedAgentTile`'s `onSemanticTranscriptUpdated`),
+/// so a child spawned without a tile — fan-out's common case at up to 16
+/// concurrent children — persisted nothing at all. This agent is spawned with a
+/// prompt and NEVER attached to a view.
+@MainActor
+private func checkTranscriptPersistenceWithoutTile(
+    config: AgentModelConfig.Resolution,
+    cwd: URL,
+    fail: (String) -> Error
+) async throws -> String {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-transcript-persist-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support", isDirectory: true))
+    let transcriptRoot = root.appendingPathComponent("agent-transcripts", isDirectory: true)
+    let transcriptStore = AgentTranscriptStore(root: transcriptRoot)
+
+    let scripted = ScriptedAgentRunner(script: [
+        .turnStarted(threadId: "provider-thread", turnId: "turn-1"),
+        .contentDelta(threadId: "provider-thread", turnId: "turn-1", streamKind: .assistant, delta: "assistant-reply-text"),
+        .turnCompleted(threadId: "provider-thread", turnId: "turn-1", outcome: .completed, errorMessage: nil)
+    ])
+    let supervisor = AgentSupervisor(store: store, makeRunner: { _ in scripted }, transcriptStore: transcriptStore)
+
+    let promptText = "the-users-own-prompt-text-\(UUID().uuidString)"
+    let id = supervisor.spawn(
+        role: nil,
+        prompt: promptText,
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking
+    )
+    guard supervisor.records[id]?.tileId == nil else {
+        throw fail("transcript-persistence check: the spawned agent unexpectedly has a tile binding")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { !supervisor.isRunning(id) }) else {
+        throw fail("transcript-persistence check: the scripted run never completed")
+    }
+
+    let sessionID = AgentTranscriptStore.canonicalSessionID(for: id)
+    func containsPrompt(_ document: AgentDocument) -> Bool {
+        document.entries.contains { entry in
+            entry.blocks.contains { block in
+                if case let .paragraph(inlines) = block.payload {
+                    return inlines.contains { if case let .text(text) = $0 { return text == promptText }; return false }
+                }
+                return false
+            }
+        }
+    }
+
+    // Debounced, not immediate — poll rather than assert on the first read.
+    var loaded: AgentDocument?
+    let deadline = Date().addingTimeInterval(3)
+    while loaded == nil || !containsPrompt(loaded!) {
+        loaded = try await transcriptStore.load(agentID: id, sessionID: sessionID)
+        if let loaded, containsPrompt(loaded) { break }
+        if Date() >= deadline { break }
+        try await Task.sleep(for: .milliseconds(50))
+    }
+    guard let document = loaded else {
+        throw fail("a tile-less agent persisted NOTHING under its canonical session id — the only saveSnapshot call site lived inside the tile")
+    }
+    guard containsPrompt(document) else {
+        throw fail("the tile-less agent's persisted transcript does not contain its own prompt \(promptText.debugDescription)")
+    }
+    guard !document.entries.isEmpty else {
+        throw fail("the tile-less agent's persisted transcript has no entries at all")
+    }
+
+    // MARK: archiving quarantines the directory, never `rm`s it
+
+    let agentDirectory = transcriptRoot.appendingPathComponent(id.rawValue.uuidString, isDirectory: true)
+    guard FileManager.default.fileExists(atPath: agentDirectory.path) else {
+        throw fail("the transcript directory does not exist before archive: \(agentDirectory.path)")
+    }
+    supervisor.archive(id)
+    // The archive-time quarantine move races the debounce timer only in theory
+    // (the timer is cancelled synchronously inside `archive`); still poll, since
+    // the move itself happens on a detached task.
+    let quarantineDirectory = transcriptRoot.appendingPathComponent(
+        "quarantine-\(id.rawValue.uuidString)", isDirectory: true)
+    var quarantined = false
+    let quarantineDeadline = Date().addingTimeInterval(3)
+    while !quarantined {
+        quarantined = FileManager.default.fileExists(atPath: quarantineDirectory.path)
+        if quarantined { break }
+        if Date() >= quarantineDeadline { break }
+        try await Task.sleep(for: .milliseconds(50))
+    }
+    guard quarantined else {
+        throw fail("archiving an agent did not quarantine its transcript directory to \(quarantineDirectory.path) — a transcript is the user's own record of their work and must not be silently rm'd")
+    }
+    guard !FileManager.default.fileExists(atPath: agentDirectory.path) else {
+        throw fail("archiving an agent left its transcript directory at the ORIGINAL path as well as the quarantined one: \(agentDirectory.path)")
+    }
+    // `moveItem` renames the whole subtree, so the session directory (and the
+    // snapshot inside it) rode along; a directory that exists but is EMPTY
+    // would mean something silently emptied it first.
+    let quarantinedContents = (try? FileManager.default.contentsOfDirectory(atPath: quarantineDirectory.path)) ?? []
+    guard !quarantinedContents.isEmpty else {
+        throw fail("the quarantined transcript directory is empty — content was lost, not just moved")
+    }
+
+    return "tile-less agent persisted its own prompt without a tile, and archive quarantined (not deleted) its transcript directory"
+}
+
 @MainActor
 private func checkArchiveCleanup(
     config: AgentModelConfig.Resolution,
