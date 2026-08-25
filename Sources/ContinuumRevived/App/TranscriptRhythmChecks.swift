@@ -62,10 +62,12 @@ enum TranscriptRhythmChecks {
         try checkTurnRangesMatchLegacyLastTurnStart()
         try checkASupersededToolRowIsFoldedOut()
         try checkTurnFolding()
+        try checkARowSaysEachThingOnce()
+        try checkGlyphsDistinguishRowKinds()
         print(
             "TranscriptRhythmChecks: heading ladder, hanging indents, thematic break, "
             + "turn separation, error/notice divergence, table structure, surface fills, "
-            + "the replayed real claude turn and tool-run clustering"
+            + "the replayed real claude turn, tool-run clustering, one line per fact, and a glyph vocabulary that distinguishes row kinds"
         )
     }
 
@@ -1829,4 +1831,100 @@ extension TranscriptRhythmChecks {
             throw Failure(message: "superseded fold: an unsuperseded tool row was folded anyway, got \(untouched)")
         }
     }
+
+    /// Dylan, driving the build: "there is a lot of doubling."
+    ///
+    /// Every tool row printed its title and then a second line restating it —
+    /// "Bash" over "bash", "Read foo.js" over "Read: …/dir/foo.js". Two tool
+    /// calls made four lines of almost nothing.
+    ///
+    /// The root cause is in the PRESENTER, and it is witnessed there
+    /// (`AgentToolDetailStoreChecks`, over a real store, with independent teeth
+    /// for both halves). This is the render-level wall, and it is here because
+    /// the presenter's two strings are composed in different files with
+    /// different fallbacks — so an exact, case-sensitive dedupe was always going
+    /// to miss. It drives a real `ToolCallView` with the exact payload the bug
+    /// produced rather than sweeping a fixture corpus: the review fixtures do
+    /// not populate the host-local detail store at all, so a sweep over them
+    /// sees `summary == nil` on every row and would read as coverage while
+    /// asserting nothing. (Checked: reverting either half of the presenter fix
+    /// left such a sweep green.)
+    private static func checkARowSaysEachThingOnce() throws {
+        let view = ToolCallView(frame: NSRect(x: 0, y: 0, width: 480, height: 44))
+        let context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
+        guard let blockID = AgentNodeID(rawValue: "doubling-row") else {
+            throw fail("doubling: could not mint a block id")
+        }
+
+        // The shape the presenter used to emit: a title that is only the tool
+        // name, over a body line that is the same word in another case.
+        var doubled = AgentToolCallPayload(name: "Bash", status: .completed)
+        doubled.summary = "bash"
+        doubled.presentedToolNameText = "bash"
+        view.apply(blockID: blockID, payload: doubled, context: context)
+        view.layoutSubtreeIfNeeded()
+        guard view.summaryLabel.isHidden || view.summaryLabel.stringValue.isEmpty else {
+            throw fail(
+                "doubling: a row titled 'Bash' still showed "
+                + "'\(view.summaryLabel.stringValue)' underneath it — the same fact twice, "
+                + "differing only in case"
+            )
+        }
+
+        // And the wall is not a blanket mute: a body line that genuinely adds
+        // something must survive, or the fix would be hiding real detail.
+        var informative = AgentToolCallPayload(name: "Ran tests", status: .completed)
+        informative.summary = "Exit code: 1"
+        informative.presentedToolNameText = "bash"
+        view.apply(blockID: blockID, payload: informative, context: context)
+        view.layoutSubtreeIfNeeded()
+        guard !view.summaryLabel.isHidden, view.summaryLabel.stringValue.contains("Exit code: 1") else {
+            throw fail(
+                "doubling: suppression swallowed a body line that added a fact the title did "
+                + "not carry — visible summary was '\(view.summaryLabel.stringValue)'"
+            )
+        }
+    }
+
+    /// The icon column has to carry information. `bubble.left` was BOTH the
+    /// reasoning glyph and the glyph for every delegation verb, so a
+    /// `delegate_agent` row rendered as a thought. Two dead needles ("run " and
+    /// "cat " carried trailing spaces) could never match a bare tool name, and an
+    /// unavailable SF Symbol resolved to nil straight into `iconView.image` —
+    /// which is a genuinely blank column, contradicting the mapping's own promise
+    /// to "degrade to today's behaviour rather than to a blank column".
+    private static func checkGlyphsDistinguishRowKinds() throws {
+        let delegation = ToolCallView.symbolName(forToolNamed: "delegate_agent")
+        guard delegation != CompletedReasoningDisclosureView.symbolName else {
+            throw fail(
+                "glyphs: delegation and reasoning both render '\(delegation)', so a delegated "
+                + "agent reads as a thought"
+            )
+        }
+        for name in ["Agent", "Task", "spawn_agent", "delegate_agent"] {
+            guard ToolCallView.symbolName(forToolNamed: name) == delegation else {
+                throw fail(
+                    "glyphs: '\(name)' is a delegation verb but renders "
+                    + "'\(ToolCallView.symbolName(forToolNamed: name))'"
+                )
+            }
+        }
+        for (name, expected) in [("run", "terminal"), ("cat", "eye"), ("bash", "terminal"),
+                                 ("Read", "eye"), ("grep", "magnifyingglass")] {
+            guard ToolCallView.symbolName(forToolNamed: name) == expected else {
+                throw fail(
+                    "glyphs: '\(name)' resolved to "
+                    + "'\(ToolCallView.symbolName(forToolNamed: name))', expected '\(expected)'"
+                )
+            }
+        }
+        // No route to a blank column, including for a name this OS has no symbol
+        // for and for the nil the row is first built with.
+        for name in [nil, "", "delegate_agent", "bash", "Read", "utterly_unknown_tool"] {
+            guard ToolCallView.symbolImage(forToolNamed: name) != nil else {
+                throw fail("glyphs: '\(name ?? "<nil>")' left the icon column blank")
+            }
+        }
+    }
+
 }

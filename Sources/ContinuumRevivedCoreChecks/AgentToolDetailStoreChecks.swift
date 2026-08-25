@@ -703,10 +703,35 @@ private func runAgentToolDetailPresentationChecks() async throws {
     expect(AgentToolDetailPresenter.compact(detail!).summary.hasPrefix("Edited File.swift"),
            "AgentToolDetailPresenter compact: edit summary should use safe basename")
     let disclosure = AgentToolDetailPresenter.observableDisclosureText(detail!)
-    expect(disclosure.contains("Edited File.swift\nChanged: …/project/File.swift"),
-           "AgentToolDetailPresenter disclosure: expanded edit detail should identify its abbreviated target, got \(disclosure)")
-    expect(!disclosure.contains("/tmp/") && !disclosure.contains("/Users/"),
-           "AgentToolDetailPresenter disclosure: expanded target must not print an absolute host path, got \(disclosure)")
+    // T2 (2026-08-25) — this used to pin the DOUBLING:
+    // "Edited File.swift\nChanged: …/project/File.swift", a title and a body line
+    // naming the same file. Dylan: "there is a lot of doubling." The title
+    // already names the basename, so the body line is suppressed and the
+    // directory stays available expanded.
+    expect(disclosure == "Edited File.swift",
+           "AgentToolDetailPresenter disclosure: a title that already names the file must not be repeated underneath it, got \(disclosure)")
+
+    // The abbreviation guarantee still needs a live case, or removing the line
+    // above would leave the path-safety assertions below vacuous. A tool whose
+    // title does NOT name the file keeps its file line, and that is where the
+    // "never an absolute host path" rule is actually exercised.
+    _ = await store.recordStart(AgentToolDetailStart(
+        identity: testToolDetailKey("tool-file-line-survives"),
+        toolName: "bash",
+        affectedFiles: [URL(fileURLWithPath: "/tmp/project/File.swift")]
+    ))
+    let unnamed = await store.detail(for: testToolDetailKey("tool-file-line-survives"))
+    let unnamedDisclosure = AgentToolDetailPresenter.observableDisclosureText(unnamed!)
+    expect(unnamedDisclosure.contains("File: …/project/File.swift"),
+           "AgentToolDetailPresenter disclosure: a title that does NOT name the file must still identify its abbreviated target, got \(unnamedDisclosure)")
+    // And the tool name alone is never a body line: the title is already
+    // "Bash", so "bash" underneath it was the same word twice in two cases.
+    expect(!unnamedDisclosure.lowercased().split(separator: "\n").contains("bash"),
+           "AgentToolDetailPresenter disclosure: the bare tool name must not be a body line under a title that is the same tool name, got \(unnamedDisclosure)")
+    for text in [disclosure, unnamedDisclosure] {
+        expect(!text.contains("/tmp/") && !text.contains("/Users/"),
+               "AgentToolDetailPresenter disclosure: expanded target must not print an absolute host path, got \(text)")
+    }
     expect(!AgentToolDetailPresenter.compact(detail!).accessibilitySummary.contains("File.swift"),
            "AgentToolDetailPresenter compact: accessibility summary must not expose raw file names")
 }

@@ -131,6 +131,11 @@ public enum ManagedTranscriptRehydrator {
             return .fileChange
         case "websearch", "webfetch":
             return .webSearch
+        // Matching `ClaudeEventTranslator` means matching its `.subagent` case
+        // too, or a REHYDRATED transcript buckets a delegation as a command
+        // while the live one does not.
+        case "agent", "task", "spawn_agent", "delegate_agent":
+            return .subagent
         default:
             return .commandExecution
         }

@@ -7,6 +7,11 @@ import ContinuumRevivedAgentUI
 /// of role-aware AgentBlockHostView instances rather than flattened presentation.
 @MainActor
 final class CompletedReasoningDisclosureView: NSView {
+    /// Named so the glyph vocabulary can be asserted as a whole. Delegation used
+    /// to resolve to this same symbol, which made a delegated agent read as a
+    /// thought.
+    static let symbolName = "bubble.left"
+
     static let headerHeight = CGFloat(Space.xl + Space.xs)
     static let horizontalInset = CGFloat(Space.l)
     static let titleSpacing = CGFloat(Space.s)
@@ -48,7 +53,7 @@ final class CompletedReasoningDisclosureView: NSView {
         bodyContainer.setAccessibilityElement(false)
 
         addSubview(disclosureButton)
-        iconView.image = CanvasSymbolImage.image(named: "bubble.left")
+        iconView.image = CanvasSymbolImage.image(named: Self.symbolName)
         iconView.imageScaling = .scaleProportionallyDown
         iconView.setAccessibilityElement(false)
         addSubview(iconView)

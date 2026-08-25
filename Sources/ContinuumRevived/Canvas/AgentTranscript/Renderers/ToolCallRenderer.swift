@@ -91,7 +91,7 @@ final class ToolCallView: NSView {
 
         disclosureButton.target = self
         disclosureButton.action = #selector(toggleDisclosure(_:))
-        iconView.image = CanvasSymbolImage.image(named: Self.symbolName(forToolNamed: nil))
+        iconView.image = Self.symbolImage(forToolNamed: nil)
         iconView.imageScaling = .scaleProportionallyDown
 
         titleLabel.font = NSFont.token(.label)
@@ -153,8 +153,7 @@ final class ToolCallView: NSView {
         // `.plans/45` S4 — the title is the action sentence; the tool NAME
         // lives in the icon, the tooltip and the AX label.
         let toolName = payload.presentedToolNameText ?? payload.name
-        iconView.image = CanvasSymbolImage.image(
-            named: Self.symbolName(forToolNamed: toolName))
+        iconView.image = Self.symbolImage(forToolNamed: toolName)
         toolTip = payload.presentedToolNameText.map { Self.safeSingleLine($0, fallback: "Tool") }
         let presentation = payload.status.agentToolStatusPresentation
         // `.plans/45` S3/S4 — the trailing column reads "2.1s ✓" when the
@@ -184,7 +183,14 @@ final class ToolCallView: NSView {
         var lines = disclosureText.split(whereSeparator: { $0.isNewline }).map(String.init)
         // `.plans/45` S3 — when the title already IS the action sentence, the
         // disclosure's first line repeats it; show the additional facts only.
-        if lines.first == titleLabel.stringValue {
+        // Case-INSENSITIVE, matching the idiom three lines above. It was exact,
+        // and the two strings it compares are composed in different places with
+        // different fallbacks — `capitalizedPhrase(toolName)` for the title,
+        // bare `safeToolName` for the body — so "Bash" over "bash" slipped
+        // through every time a tool produced no action sentence. The presenter
+        // no longer emits that line at all; this is the second wall, and it is
+        // what makes a render-level witness for the doubling possible.
+        if lines.first?.caseInsensitiveCompare(titleLabel.stringValue) == .orderedSame {
             lines.removeFirst()
             disclosureText = lines.joined(separator: "\n")
         }
@@ -356,16 +362,41 @@ final class ToolCallView: NSView {
     ///
     /// The mapping lives here as one static function rather than in `apply` so a
     /// witness can exercise it without building a view.
+    /// The mapping's doc comment promises it "degrades to today's behaviour
+    /// rather than to a blank column", but `CanvasSymbolImage.image(named:)`
+    /// returns nil for any symbol this OS does not have and the result went
+    /// straight into `iconView.image` — so an unavailable symbol WAS a blank
+    /// column. Fall back to the generic tool glyph, and only then to nothing.
+    static func symbolImage(forToolNamed name: String?) -> NSImage? {
+        if let image = CanvasSymbolImage.image(named: symbolName(forToolNamed: name)) {
+            return image
+        }
+        return CanvasSymbolImage.image(named: fallbackSymbolName)
+    }
+
+    static let fallbackSymbolName = "wrench.and.screwdriver"
+
     static func symbolName(forToolNamed name: String?) -> String {
-        let fallback = "wrench.and.screwdriver"
+        let fallback = fallbackSymbolName
         guard let name = name?.lowercased(), !name.isEmpty else { return fallback }
         func any(_ needles: [String]) -> Bool { needles.contains { name.contains($0) } }
-        if any(["bash", "shell", "terminal", "command", "run ", "exec"]) { return "terminal" }
+        // Delegation FIRST, and not a bubble. `bubble.left` is what
+        // `CompletedReasoningDisclosureView` paints for reasoning, so a
+        // `delegate_agent` row rendered as a thought — Dylan saw exactly that.
+        // This rhymes with the chip the row becomes instead
+        // (`AgentReferenceRenderer` paints `person.crop.circle.badge.arrow.forward`).
+        // It is tested before "read"/"search" because a delegation tool name can
+        // contain either.
+        if any(["subagent", "delegate", "spawn_agent", "task", "agent"]) {
+            return "person.2"
+        }
+        // "run"/"cat" without the trailing space they used to carry: `"run "` and
+        // `"cat "` could not match a bare tool name, only a sentence.
+        if any(["bash", "shell", "terminal", "command", "run", "exec"]) { return "terminal" }
         if any(["edit", "write", "patch", "apply_patch", "create", "replace"]) { return "square.and.pencil" }
-        if any(["read", "view", "cat ", "open"]) { return "eye" }
+        if any(["read", "view", "cat", "open"]) { return "eye" }
         if any(["search", "grep", "glob", "find"]) { return "magnifyingglass" }
         if any(["fetch", "web", "http", "url", "browse"]) { return "globe" }
-        if any(["task", "agent", "spawn", "delegate"]) { return "bubble.left" }
         if any(["todo", "plan"]) { return "checklist" }
         return fallback
     }

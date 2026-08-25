@@ -2004,3 +2004,64 @@ suppressed while an assistant entry was streaming". Verified.
 paragraph, and turning `jumpToLatestButton` into a live badge — it is a plain
 text button that cannot distinguish "content arriving now" from "you scrolled up
 ten minutes ago". Both worth doing; neither is what was reported.
+
+## T2/T4 — One row says each thing once, and the icon column carries information (2026-08-25)
+
+Dylan: *"there is a lot of doubling."* His screenshot: `Bash` over `bash`,
+`Delegate_agent` over `delegate_agent`, `Read docxFeedingZoneGenerator.js` over
+`Read: …/feedingZone/docxFeedingZoneGenerator.js`. Two tool calls made four lines
+of almost nothing.
+
+**Two independent causes, both in `observableDisclosureText`.**
+
+*Case-only.* The title takes `pureSummary ?? capitalizedPhrase(safeToolName)`;
+the body's first line took `pureSummary ?? safeToolName` — the same fallback
+*un*-capitalized. The renderer's dedupe was exact and case-sensitive, three lines
+below a `caseInsensitiveCompare` that was already the idiom. Fixed at the source:
+when there is no action sentence, a line that is only the tool name adds nothing
+over a title that is only the tool name, so none is emitted.
+
+*File echo.* The file line restated the basename the title already named. The
+argument loop right below it has had exactly this suppression since `.plans/45`;
+the file line never did.
+
+Also fixed on the way: that argument guard read `lines[0]`, which this change
+could have made an out-of-bounds crash — and which was the wrong string anyway
+whenever the title was the fallback. Both now read one `echo` value.
+
+**The witness lesson, and it cost the most time here.** I first wrote the
+render-level check as a sweep over the review fixture corpus, with a vacuity
+floor. It passed — and it *kept* passing with **either** half of the presenter fix
+reverted. The review fixtures never populate the host-local detail store, so
+`payload.summary` is nil on every row and the doubling cannot appear in that
+surface at all. A floor counting rows with a visible second line does not save a
+check whose surface cannot produce the defect. Re-sited:
+
+- **Root cause, `AgentToolDetailStoreChecks`** over a real store, with
+  independent teeth for each half. Its old assertion *pinned the doubling*
+  (`"Edited File.swift\nChanged: …/project/File.swift"`) and is now the opposite.
+  A `bash`-with-affected-files case was added so the abbreviation and
+  no-absolute-path assertions still have a live file line to run against —
+  otherwise removing the doubled line would have left them vacuous.
+- **Render-level wall, `--transcript-rhythm-check`**, driving a real
+  `ToolCallView` with the exact payload the bug produced, plus a negative leg: a
+  body line that genuinely adds a fact must survive, or the fix is just muting
+  detail. The renderer dedupe is now case-insensitive, which is what makes that
+  witness able to fail.
+
+*Teeth, all verified:* reverting the file suppression, the first-line
+suppression, or the case-insensitive compare each fails with its own message.
+
+**T4, the glyph vocabulary.** `bubble.left` was *both* the reasoning glyph and the
+glyph for every delegation verb, so `delegate_agent` rendered as a thought.
+Delegation now resolves to `person.2`, tested before `read`/`search` because a
+delegation tool name can contain either, and rhyming with the chip the row
+becomes. `"run "` and `"cat "` carried trailing spaces and so could never match a
+bare tool name. And `CanvasSymbolImage.image(named:)` returns nil for a symbol
+this OS lacks, straight into `iconView.image` — a genuinely blank column,
+contradicting the mapping's own promise to "degrade to today's behaviour rather
+than to a blank column"; `symbolImage(forToolNamed:)` now falls back.
+
+`PiEventTranslator` and `ManagedTranscriptRehydrator` both lacked the `.subagent`
+case `ClaudeEventTranslator` has, so a rehydrated delegation bucketed as a
+command while the live one did not.

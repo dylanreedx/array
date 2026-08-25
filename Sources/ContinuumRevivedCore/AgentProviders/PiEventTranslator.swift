@@ -450,6 +450,10 @@ public struct PiEventTranslator {
             return .fileChange
         case "web_search", "websearch", "web":
             return .webSearch
+        // Delegation is not a command. Both pi delegation verbs bucket here:
+        // Array's own inert extension tool and the third-party `delegate_agent`.
+        case "spawn_agent", "delegate_agent":
+            return .subagent
         default:
             return .commandExecution
         }
