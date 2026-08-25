@@ -300,6 +300,9 @@ struct AgentRenderContext {
     var tokens: AgentRenderTokens
     var appearance: TokenTheme
     var imageResources: AgentImageResourceProvider = .unavailable
+    /// C10: `AgentReferenceRenderer`'s seam for a live status, deliberately
+    /// outside the semantic document (see `AgentReferenceStatusSource`).
+    var agentStatus: AgentReferenceStatusSource = .unavailable
 }
 
 /// One AppKit renderer for one semantic block family. `update` and
