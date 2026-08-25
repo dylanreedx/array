@@ -2577,10 +2577,16 @@ final class AgentSupervisor {
                 continue
             }
             do {
+                // C2: `harness` was accepted by this function and never forwarded,
+                // so every fan-out child silently took `AgentHarnessConfig.resolved()`
+                // — the SETTINGS default — regardless of what the caller asked for
+                // or what the parent was running. Settings seed new agents; they do
+                // not get to re-decide an existing one's runner.
                 let id = try spawn(
                     role: role,
                     prompt: item.prompt,
                     cwd: cwd,
+                    harness: harness,
                     model: model,
                     thinking: thinking,
                     projectId: projectId,
@@ -2590,6 +2596,22 @@ final class AgentSupervisor {
                     displayName: item.displayName
                 )
                 report.launched.append((item.id, id))
+                // C2: and `fanOut` never emitted this, so a fan-out child got
+                // durable parentage in the record and NO chip in the parent's
+                // transcript — the one surface where an orchestrator can see what
+                // it started. `handleSpawnRequest` has always emitted it; the two
+                // spawn paths simply disagreed.
+                if let parentAgentID {
+                    deliver(.childAgentSpawned(
+                        threadId: Self.threadId(for: parentAgentID),
+                        childAgentID: id.rawValue,
+                        parentAgentID: parentAgentID.rawValue,
+                        displayName: records[id]?.humanDisplayName ?? "Subagent",
+                        sourceItemID: item.id,
+                        provider: harness.rawValue,
+                        spawnedAt: Date()
+                    ), to: parentAgentID)
+                }
             } catch {
                 warn("AgentSupervisor.fanOut: no agent for item \(item.id): \(error)")
                 report.refused.append((item.id, .worktreeFailed))
@@ -7733,7 +7755,7 @@ private func checkCapabilityDrivenTurnStates<Failure: Error>(
         throw fail("turn-state negative witness: empty choices fabricated a freeform response capability")
     }
 
-    guard await supervisor.accept(.queue("not supported"), for: id) == .refused(.unsupported) else {
+    guard await supervisor.accept(.queue(AgentPrompt("not supported")), for: id) == .refused(.unsupported) else {
         throw fail("turn-state: conservative runtime accepted a fabricated queue intent")
     }
     let draftBeforeRefusal = "keep this draft"
@@ -12877,8 +12899,75 @@ func runAgentFanOutChecks() async throws {
         throw fail("a tile installed after a completion would not show it — the install branch never replays completedFanOutItems:\n\(installBranch)")
     }
 
+    // MARK: 8 · C2 — a fan-out child takes the asked-for harness, and shows up
+    //
+    // Two bugs that shipped together and hid each other. `harness:` was a
+    // parameter of `fanOut` that was never forwarded to `spawn`, so every child
+    // silently ran `AgentHarnessConfig.resolved()`; and `fanOut` never emitted
+    // `.childAgentSpawned`, so children got durable parentage in the record and
+    // no chip in the parent's transcript. `handleSpawnRequest` had always emitted
+    // it — the two spawn paths simply disagreed.
+    //
+    // The harness asked for here is deliberately NOT the settings default, so a
+    // regression that drops the parameter again reads as a real difference rather
+    // than an accidental match.
+    let chipParent = supervisor.spawn(
+        role: "chip-orchestrator", prompt: nil, cwd: repo,
+        model: config.model, thinking: config.thinking)
+    let askedHarness: AgentHarness = AgentHarnessConfig.resolved() == .pi ? .claudeCode : .pi
+    // A model the ASKED harness owns. A cross-harness model would have the
+    // supervisor refuse the send for an unrelated reason and mask what this
+    // section is actually about.
+    guard let askedModel = AgentModelConfig.modelOptions(for: askedHarness).first else {
+        throw fail("no catalogue model for \(askedHarness.rawValue)")
+    }
+    var parentEvents: [AgentRuntimeEvent] = []
+    let parentStream = supervisor.events(for: chipParent)
+    let collector = Task { @MainActor in
+        for await event in parentStream { parentEvents.append(event) }
+    }
+    let chipItems = (1 ... 2).map {
+        AgentSupervisor.FanOutItem(id: "CHIP-\($0)", prompt: "chip item \($0)")
+    }
+    let chipReport = supervisor.fanOut(
+        items: chipItems, role: nil, cwd: repo, harness: askedHarness,
+        model: askedModel, thinking: config.thinking,
+        parentAgentID: chipParent, isolated: false)
+    try requireAccounted(chipReport, chipItems, "the chip fan-out")
+    guard chipReport.launched.count == 2 else {
+        throw fail("the chip fan-out launched \(chipReport.launched.count) of 2 (\(chipReport.summary))")
+    }
+    // Let the multicast drain before reading what the parent saw.
+    for _ in 0 ..< 50 where parentEvents.count < chipReport.launched.count {
+        try? await Task.sleep(for: .milliseconds(20))
+    }
+    collector.cancel()
+
+    for (itemId, childID) in chipReport.launched {
+        guard let childHarness = supervisor.records[childID]?.harness else {
+            throw fail("the fan-out child for \(itemId) persisted no harness at all")
+        }
+        guard childHarness == askedHarness else {
+            throw fail("the fan-out child for \(itemId) runs \(childHarness.rawValue), but the batch asked for \(askedHarness.rawValue) — `harness:` was accepted and never forwarded to spawn")
+        }
+    }
+
+    let spawnChips = parentEvents.compactMap { event -> (UUID, String)? in
+        guard case let .childAgentSpawned(_, childAgentID, _, _, sourceItemID, provider, _) = event
+        else { return nil }
+        return (childAgentID, "\(sourceItemID ?? "-")|\(provider)")
+    }
+    guard spawnChips.count == chipReport.launched.count else {
+        throw fail("the parent's stream carried \(spawnChips.count) childAgentSpawned events for \(chipReport.launched.count) launched children — a fan-out child with no chip is invisible to the orchestrator that started it")
+    }
+    for (itemId, childID) in chipReport.launched {
+        guard spawnChips.contains(where: { $0.0 == childID.rawValue && $0.1 == "\(itemId)|\(askedHarness.rawValue)" }) else {
+            throw fail("no childAgentSpawned named child \(childID.rawValue.uuidString) for item \(itemId) at harness \(askedHarness.rawValue); saw \(spawnChips.map(\.1))")
+        }
+    }
+
     supervisor.stopAll()
-    print("AgentSupervisor fan-out: 3 rows → 3 agents on 3 worktrees with 3 prompts, completing one checked off exactly that row, \(capReport.summary) at the cap, a repeat refused, the mapping survived a relaunch, and a parented batch fell to cap \(childReport.cap)")
+    print("AgentSupervisor fan-out: 3 rows → 3 agents on 3 worktrees with 3 prompts, completing one checked off exactly that row, \(capReport.summary) at the cap, a repeat refused, the mapping survived a relaunch, a parented batch fell to cap \(childReport.cap), and \(chipReport.launched.count) fan-out children took the asked-for \(askedHarness.rawValue) harness with one chip each on the parent's stream")
 }
 
 /// The scripted runners a fan-out produced, keyed by the item their agent was
