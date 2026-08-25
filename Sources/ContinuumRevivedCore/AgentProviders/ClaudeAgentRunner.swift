@@ -328,7 +328,13 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     /// Claude has no `spawn_agent` — its Task tool spawns claude-internal
     /// sub-agents that surface as ordinary tool items. The handler is
     /// accepted for seam parity and never fires.
-    public func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {}
+    /// C7 — this was a no-op, so every claude subagent announcement was dropped
+    /// before it could reach the supervisor. It is the same seam pi uses; what
+    /// arrives through it is an OBSERVED child (`observedOnly`), not a request to
+    /// launch one.
+    public func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {
+        queue.sync { translator.onSpawnRequest = handler }
+    }
 
     public func observeRuntimeObservations(
         _ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void

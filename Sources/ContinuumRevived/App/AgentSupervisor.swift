@@ -2292,9 +2292,96 @@ final class AgentSupervisor {
     ///
     /// Returns nil on a refusal, having said so in the parent's transcript.
     @discardableResult
+    /// Mints the read-only record for a subagent the HARNESS runs.
+    ///
+    /// The whole design turns on `AgentCapabilities.observedReadOnly` — declared
+    /// since P2 and, until now, used nowhere in production. A claude `Agent`
+    /// subagent has no process of Array's, so it must never offer a composer or a
+    /// working Stop; and it needs no new `AgentRuntimeEvent`, because
+    /// `.childAgentSpawned` and the durable `agentReference` block already carry
+    /// nesting for children Array owns. Minting a real record is what lets a
+    /// harness-run child reuse all of it — `parentAgentID` alone then makes
+    /// `InboxSort` nest it, `ChildRollup` count it, and the lineage overlay draw
+    /// it, with no widening of the sync boundary anywhere.
+    ///
+    /// **Idempotent by construction.** The same child is announced again on every
+    /// restore and re-observation, and the id is derived from
+    /// `(parentAgentID, tool_use_id)`, so a second sighting converges on the same
+    /// record instead of minting a duplicate.
+    private func adoptObservedChild(
+        _ request: SpawnRequest,
+        from parentId: AgentID,
+        parent: AgentRecord
+    ) -> AgentID? {
+        guard let toolUseID = request.sourceItemID, !toolUseID.isEmpty else {
+            // Without the announcing call's id there is no stable identity, and a
+            // child Array cannot re-identify later is not worth minting.
+            return refuseSpawn(.roleUnresolved, for: parentId)
+        }
+        let childID = AgentID(rawValue: AgentRecord.observedChildID(
+            parentAgentID: parentId.rawValue, toolUseID: toolUseID))
+        if records[childID] != nil { return childID }
+
+        // The caps still bind. They are the only thing bounding a MODEL-authored
+        // spawn request, and an observed child costs a row, a sidebar slot and a
+        // live subscription even though it costs no process.
+        let depth = depth(of: parentId) + 1
+        guard depth <= Self.maxSpawnDepth else {
+            return refuseSpawn(.depthCapped(depth: depth, cap: Self.maxSpawnDepth), for: parentId)
+        }
+        let siblings = children(of: parentId).count
+        guard siblings < Self.maxChildrenPerParent else {
+            return refuseSpawn(.childCapped(children: siblings, cap: Self.maxChildrenPerParent), for: parentId)
+        }
+
+        let projectRoot = Self.repositoryRoot(of: parent)
+        // `prompt: nil` deliberately: the child is already running its task inside
+        // claude, and sending it one here would start a SECOND conversation that
+        // Array would then be unable to stop.
+        _ = makeAgent(
+            id: childID,
+            role: request.role,
+            prompt: nil,
+            cwd: projectRoot,
+            projectRoot: projectRoot,
+            checkoutRoot: projectRoot,
+            homeRelativePath: parent.homeRelativePath,
+            worktreeId: nil,
+            worktreeBranch: nil,
+            harness: parent.harness ?? AgentHarnessConfig.resolved(),
+            model: parent.model,
+            thinking: parent.thinking,
+            projectId: parent.projectId,
+            parentAgentID: parentId,
+            sourceItemId: toolUseID,
+            tileId: nil
+        )
+        guard var child = records[childID] else { return nil }
+        child.capabilities = .observedReadOnly
+        records[childID] = child
+        persist(child)
+        deliver(.childAgentSpawned(
+            threadId: Self.threadId(for: parentId),
+            childAgentID: childID.rawValue,
+            parentAgentID: parentId.rawValue,
+            displayName: child.humanDisplayName,
+            sourceItemID: toolUseID,
+            provider: (parent.harness ?? AgentHarnessConfig.resolved()).rawValue,
+            spawnedAt: Date()
+        ), to: parentId)
+        return childID
+    }
+
     func handleSpawnRequest(_ request: SpawnRequest, from parentId: AgentID) -> AgentID? {
         guard let parent = records[parentId] else {
             return refuseSpawn(.unknownParent, for: parentId)
+        }
+        // C7: an OBSERVED child is not a spawn at all. claude has already started
+        // it inside itself by the time the `Agent` call reaches us, so there is
+        // nothing to launch — only a record to mint so the child's own frames have
+        // somewhere to land and the parent gets a chip.
+        if request.observedOnly {
+            return adoptObservedChild(request, from: parentId, parent: parent)
         }
         // C12 — a mirrored subagent has no runner behind it at all: refuse before
         // even asking what harness it claims, since that field describes who
@@ -10476,8 +10563,96 @@ private func checkSpawnFromToolCall(
         throw fail("I5: a mirrored-parent refusal echoes the requested prompt or a host path: \(observedRefusalTitles)")
     }
 
+    // MARK: 10 · C7 — an OBSERVED claude subagent is adopted, not spawned
+    //
+    // An `Agent` (formerly `Task`) call is claude reporting a child it has already
+    // started inside itself. Array mints a read-only record so the child's own
+    // frames have somewhere to land and the parent gets a chip — and must never
+    // start a process for it.
+    let observedParent = supervisor.spawn(
+        role: nil, prompt: nil, cwd: repo, harness: .claudeCode,
+        model: piConfig.model, thinking: piConfig.thinking, projectId: projectId)
+    let observedParentInbox = EventInbox()
+    let observedParentStream = supervisor.events(for: observedParent)
+    let observedParentTask = Task { @MainActor in
+        for await event in observedParentStream { observedParentInbox.append(event) }
+    }
+    defer { observedParentTask.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.subscriberCount(for: observedParent) == 1
+    }) else {
+        throw fail("the observed parent's subscriber never registered")
+    }
+
+    let toolUseID = "toolu_0164hvbb7oKHD8HqnBRJVh8E"
+    let announcement = SpawnRequest(
+        role: "general-purpose",
+        prompt: "read notes.txt and report its contents",
+        isolated: false,
+        sourceItemID: toolUseID,
+        observedOnly: true)
+    guard let adopted = supervisor.handleSpawnRequest(announcement, from: observedParent) else {
+        throw fail("a claude Agent announcement produced no child record, so its frames would have nowhere to land")
+    }
+    guard let adoptedRecord = supervisor.records[adopted] else {
+        throw fail("the adopted child is not in the supervisor's records")
+    }
+    guard adoptedRecord.capabilities == .observedReadOnly else {
+        throw fail("the adopted child has capabilities \(adoptedRecord.capabilities) — a child Array only mirrors must not advertise a composer or a working Stop")
+    }
+    guard adoptedRecord.parentAgentID == observedParent else {
+        throw fail("the adopted child is not parented, so the inbox cannot nest it and the lineage overlay cannot draw it")
+    }
+    // No process. `handleSpawnRequest` returning a child that is RUNNING would
+    // mean Array had started a second conversation claude already owns.
+    guard !supervisor.isRunning(adopted) else {
+        throw fail("Array started a runner for a child claude is already running")
+    }
+
+    // Deterministic identity: the same announcement is replayed on every restore
+    // and re-observation, and a random id would mint a duplicate agent each time.
+    let beforeReadopt = supervisor.records.count
+    guard supervisor.handleSpawnRequest(announcement, from: observedParent) == adopted else {
+        throw fail("re-observing the same Agent call minted a different child — a restore would duplicate every subagent")
+    }
+    guard supervisor.records.count == beforeReadopt else {
+        throw fail("re-observing the same Agent call added a record: \(supervisor.records.count), expected \(beforeReadopt)")
+    }
+    guard adopted.rawValue == AgentRecord.observedChildID(
+        parentAgentID: observedParent.rawValue, toolUseID: toolUseID) else {
+        throw fail("the adopted child's id is not derived from (parent, tool_use_id), so it cannot be re-derived on restore")
+    }
+
+    // The parent gets exactly one chip, and it names the announcing call.
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        observedParentInbox.events.contains { event in
+            if case let .childAgentSpawned(_, childAgentID, _, _, sourceItemID, _, _) = event {
+                return childAgentID == adopted.rawValue && sourceItemID == toolUseID
+            }
+            return false
+        }
+    }) else {
+        throw fail("the observed child produced no chip on the parent's transcript: \(observedParentInbox.events)")
+    }
+    let chipCount = observedParentInbox.events.filter {
+        if case .childAgentSpawned = $0 { return true }
+        return false
+    }.count
+    guard chipCount == 1 else {
+        throw fail("the parent saw \(chipCount) chips for one child — re-observation must converge, not accumulate")
+    }
+    // I5: the model-authored prompt must not reach the parent's published stream.
+    let observedTitles = observedParentInbox.events.compactMap { event -> String? in
+        if case let .itemStarted(_, _, _, title) = event { return title }
+        if case let .childAgentSpawned(_, _, _, displayName, _, _, _) = event { return displayName }
+        return nil
+    }
+    guard observedTitles.allSatisfy({ !$0.contains("read notes.txt") && !$0.contains(root.path) }) else {
+        throw fail("I5: an observed-child event echoes the model-authored prompt or a host path: \(observedTitles)")
+    }
+
     for id in supervisor.children(of: parentId) + [grandchildId] { supervisor.stop(id) }
-    return "the captured spawn_agent call produced 1 child (role \(capturedRole) at \(scoutModel)/\(scoutThinking) and --tools from its role file, isolated on \(branch), parent linked in the store) that ran the requested prompt, prompt/role absent from \(parentInbox.events.count) parent events and \(published.count) published activity events while tool.\(SpawnRequest.toolName) crossed, a grandchild got a sibling worktree, depth capped at \(AgentSupervisor.maxSpawnDepth) and children at \(AgentSupervisor.maxChildrenPerParent) with the refusal said in the requesting agent's transcript, \(workers.count) role-only children inherited the parent's settings, an undefined role was refused without echoing its id, a codex parent was refused honestly about transport observability rather than a false claim it cannot spawn, and a mirrored observedReadOnly parent restored from the store was refused for having no runner to spawn through — neither refusal echoing its request"
+    return "the captured spawn_agent call produced 1 child (role \(capturedRole) at \(scoutModel)/\(scoutThinking) and --tools from its role file, isolated on \(branch), parent linked in the store) that ran the requested prompt, prompt/role absent from \(parentInbox.events.count) parent events and \(published.count) published activity events while tool.\(SpawnRequest.toolName) crossed, a grandchild got a sibling worktree, depth capped at \(AgentSupervisor.maxSpawnDepth) and children at \(AgentSupervisor.maxChildrenPerParent) with the refusal said in the requesting agent's transcript, \(workers.count) role-only children inherited the parent's settings, an undefined role was refused without echoing its id, a codex parent was refused honestly about transport observability rather than a false claim it cannot spawn, and a mirrored observedReadOnly parent restored from the store was refused for having no runner to spawn through — neither refusal echoing its request; and a claude Agent announcement was ADOPTED as one observedReadOnly, parented, process-less child at a (parent, tool_use_id)-derived id that re-observation converges on, with exactly one chip on the parent and no prompt in it"
 }
 
 /// P2C.2 — an isolated spawn works in its OWN checkout.

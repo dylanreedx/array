@@ -1,4 +1,5 @@
 import ContinuumRevivedAgentUI
+import CryptoKit
 import Foundation
 
 // Ticket: docs/38-tickets/90-agent-ux/P2A.1-agent-record.md
@@ -483,6 +484,31 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// ladder: explicit name, first prompt, source item, then parent-relative
     /// ordinal. Identifier-shaped automatic candidates are skipped rather than
     /// promoted into the subject line; model, role, and UUID remain metadata.
+    /// The identity of a child Array OBSERVES rather than runs.
+    ///
+    /// C7: a claude `Agent` subagent has no process of Array's and no id of its
+    /// own, so its `AgentID` is DERIVED from the parent and the `tool_use` id that
+    /// announced it. That has to be deterministic, because the same child is
+    /// announced again on every restore and re-observation — a random id would
+    /// mint a duplicate agent each time, which is exactly the duplicate-per-tile
+    /// failure the shared `.array/` directory already taught this project once.
+    ///
+    /// SHA-256 over a domain-separated string, truncated to 16 bytes and stamped
+    /// as a v4-shaped UUID so nothing downstream has to learn a second id format.
+    /// The domain tag keeps this from colliding with any other derived id.
+    public static func observedChildID(parentAgentID: UUID, toolUseID: String) -> UUID {
+        let seed = "array.observed-child.v1|\(parentAgentID.uuidString)|\(toolUseID)"
+        var digest = Array(SHA256.hash(data: Data(seed.utf8)).prefix(16))
+        digest[6] = (digest[6] & 0x0F) | 0x40
+        digest[8] = (digest[8] & 0x3F) | 0x80
+        return UUID(uuid: (
+            digest[0], digest[1], digest[2], digest[3],
+            digest[4], digest[5], digest[6], digest[7],
+            digest[8], digest[9], digest[10], digest[11],
+            digest[12], digest[13], digest[14], digest[15]
+        ))
+    }
+
     public static func resolveDerivedDisplayName(
         explicitName: String? = nil,
         firstPrompt: String? = nil,
