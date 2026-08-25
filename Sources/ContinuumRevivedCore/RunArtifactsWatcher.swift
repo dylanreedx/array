@@ -38,6 +38,17 @@ public final class RunArtifactsWatcher: @unchecked Sendable {
     private var firstDirtyAt: Date?
     private var readWindowStartedAt: Date?
     private var readsInWindow = 0
+    /// When non-nil, ONLY these run ids are stat'ed.
+    ///
+    /// T6: not an optimisation. `.pi/agent-runs` accumulates one directory per
+    /// delegated run forever — 143 of them in Array's own checkout — and an
+    /// unfiltered watcher stats four paths in every one of them on every poll,
+    /// then marks all of them dirty on its first scan and reads them at the rate
+    /// cap for half a minute. Array only ever cares about the runs a tool call in
+    /// THIS session bound, so an allowlist keeps the work O(bound runs) instead of
+    /// O(history). nil means unfiltered, which is what the pre-existing
+    /// run-artifacts tile wants.
+    private var watchedRunIds: Set<String>?
 
     public init(
         rootURL: URL,
@@ -133,7 +144,35 @@ public final class RunArtifactsWatcher: @unchecked Sendable {
         }
     }
 
+    /// Restrict this watcher to the named runs, or pass nil to watch every
+    /// directory under the root. Applied on the watcher's own queue so a change
+    /// cannot interleave with a scan.
+    public func setWatchedRunIds(_ ids: Set<String>?) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.watchedRunIds = ids
+            // Drop signatures and dirt for runs no longer watched, so unwatching
+            // and re-watching a run does not replay it from a stale signature.
+            if let ids {
+                self.lastSignatures = self.lastSignatures.filter { ids.contains($0.key) }
+                self.dirtyRunIds = self.dirtyRunIds.filter { ids.contains($0) }
+                if self.dirtyRunIds.isEmpty { self.firstDirtyAt = nil }
+            }
+        }
+    }
+
     private func currentRunSignatures() -> [String: String] {
+        // With an allowlist, address the directories directly rather than
+        // enumerating the root: enumeration is the cost being avoided.
+        if let watchedRunIds {
+            var signatures: [String: String] = [:]
+            for runId in watchedRunIds {
+                let child = rootURL.appendingPathComponent(runId, isDirectory: true)
+                guard (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+                signatures[runId] = directorySignature(child)
+            }
+            return signatures
+        }
         guard fileManager.fileExists(atPath: rootURL.path),
               let children = try? fileManager.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
         else { return [:] }

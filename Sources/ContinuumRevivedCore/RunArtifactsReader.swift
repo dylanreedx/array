@@ -30,6 +30,16 @@ public struct RunArtifact: Equatable, Sendable {
     public var cwd: String?
     public var createdAt: String?
     public var updatedAt: String?
+    /// The delegated child process's pid, when the run recorded one.
+    ///
+    /// T6.6 — `status: "running"` in a run.json is NOT evidence that the run is
+    /// live. The parent `pi` process is what writes these files, so if Array has
+    /// restarted, any run still marked running was abandoned mid-flight and the
+    /// status is simply stale. Treating a stale "running" as live is the
+    /// resurrection bug: Array would wait forever for a child that died with the
+    /// last session. Measured: this is the CHILD pi's pid, a direct child of the
+    /// parent pi.
+    public var pid: Int?
     public var rawJSON: String?
 
     public init(
@@ -40,6 +50,7 @@ public struct RunArtifact: Equatable, Sendable {
         cwd: String?,
         createdAt: String?,
         updatedAt: String?,
+        pid: Int? = nil,
         rawJSON: String?
     ) {
         self.id = id
@@ -49,6 +60,7 @@ public struct RunArtifact: Equatable, Sendable {
         self.cwd = cwd
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.pid = pid
         self.rawJSON = rawJSON
     }
 }
@@ -105,6 +117,7 @@ public enum RunArtifactsReader {
             cwd: object["cwd"] as? String,
             createdAt: object["createdAt"] as? String,
             updatedAt: object["updatedAt"] as? String,
+            pid: (object["pid"] as? NSNumber)?.intValue,
             rawJSON: raw
         )
     }
@@ -133,5 +146,32 @@ public enum RunArtifactsReader {
         guard fileManager.fileExists(atPath: url.path) else { return nil }
         guard let data = try? Data(contentsOf: url) else { return nil }
         return String(data: data, encoding: .utf8)
+    }
+}
+
+
+extension RunArtifact {
+    /// Whether this run is finished as far as Array is concerned.
+    ///
+    /// A terminal status is terminal. A `running` status is trusted only while the
+    /// recorded pid is still alive — `kill(pid, 0)`, the same probe the extension's
+    /// own `markStaleRuns` uses. With no pid to check, a `running` run is treated as
+    /// finished rather than hung: the alternative is a watcher that never stops.
+    public func isFinished(isProcessAlive: (Int) -> Bool = RunArtifact.processIsAlive) -> Bool {
+        switch status {
+        case .done, .failed, .killed, .stale: return true
+        case .queued, .running:
+            guard let pid, pid > 0 else { return true }
+            return !isProcessAlive(pid)
+        case .unknown: return true
+        }
+    }
+
+    /// `kill(pid, 0)` succeeds for a live process, and fails with EPERM for one
+    /// this user cannot signal — which still means it exists.
+    public static func processIsAlive(_ pid: Int) -> Bool {
+        guard pid > 0 else { return false }
+        if kill(pid_t(pid), 0) == 0 { return true }
+        return errno == EPERM
     }
 }

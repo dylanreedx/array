@@ -263,3 +263,24 @@ public struct AgentRunnerLaunch: Sendable {
         self.spawnDepth = spawnDepth
     }
 }
+
+/// A runner that can report one of ITS OWN children's frames, keyed by the tool
+/// call that spawned it.
+///
+/// Refines nothing about `AgentRunning` and widens no event: this is the seam the
+/// supervisor uses instead of downcasting to a concrete runner class, so a runner
+/// that later gains the capability plugs in without the supervisor learning its
+/// name. `ClaudeAgentRunner` already had this exact method.
+public protocol SubagentEventObserving: AnyObject {
+    func observeSubagentEvents(_ handler: @escaping @Sendable (String, AgentRuntimeEvent) -> Void)
+}
+
+/// A runner that can report where an observed child's transcript will be found.
+///
+/// pi's `delegate_agent` child does not stream on the parent at all — it writes to
+/// its own run directory — so its runner reports a location rather than frames.
+/// Distinct protocol from `SubagentEventObserving` for that reason: the two are
+/// genuinely different mechanisms, and a runner may have either, both, or neither.
+public protocol ObservedRunReporting: AnyObject {
+    func observeObservedRuns(_ handler: @escaping @Sendable (ObservedRunHandle) -> Void)
+}

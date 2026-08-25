@@ -1545,6 +1545,13 @@ final class AgentSupervisor {
             restoredIDs.insert(record.id)
             report.restored.append(record.id)
         }
+        // T6.6: every observed pi child restored above may have a delegated run
+        // that died with the previous session. Settle each one's fate from its
+        // `run.json` — one read, never `events.jsonl`, and never a watcher — so a
+        // child tile does not sit apparently mid-turn forever. Runs at the END,
+        // because it needs every restored record in `records` to resolve a child's
+        // parent.
+        reconcileObservedRunsAfterRestore()
         return report
     }
 
@@ -2216,10 +2223,26 @@ final class AgentSupervisor {
         // parent. The child's id is re-derived from the same (parent, tool_use_id)
         // pair the announcement used, so a frame that arrives before, after, or
         // without its announcement still lands on the right agent.
-        if let claudeRunner = runner as? ClaudeAgentRunner {
-            claudeRunner.observeSubagentEvents { [weak self] toolUseID, event in
+        //
+        // T6.5: asked for as a CAPABILITY, not as a class. The downcast was
+        // `runner as? ClaudeAgentRunner`, which made this whole path unreachable
+        // for every other harness — including pi, whose delegation Dylan was
+        // actually using.
+        if let observing = runner as? SubagentEventObserving {
+            observing.observeSubagentEvents { [weak self] toolUseID, event in
                 DispatchQueue.main.async {
                     self?.deliverSubagentEvent(event, parent: id, toolUseID: toolUseID)
+                }
+            }
+        }
+        // T6: pi's delegated child does not stream on the parent at all — it
+        // writes its own run directory — so its runner reports a LOCATION and the
+        // supervisor tails it. Different mechanism, same destination: the child's
+        // own thread, through `deliverSubagentEvent`.
+        if let reporting = runner as? ObservedRunReporting {
+            reporting.observeObservedRuns { [weak self] handle in
+                DispatchQueue.main.async {
+                    self?.bindObservedRun(handle, parent: id)
                 }
             }
         }
@@ -2404,6 +2427,10 @@ final class AgentSupervisor {
         stopRequestedAgents.insert(id)
         runners[id]?.stop()
         runners[id] = nil
+        // T6: the parent's process group is what runs its delegated children, so
+        // stopping the parent kills them. Keeping a watcher polling their run
+        // directories afterwards would poll files nothing will ever write again.
+        stopObservedRuns(for: id)
         notifyTurnCapabilitiesChanged(id)
         deliver(.sessionStateChanged(.stopped), to: id)
     }
@@ -2480,6 +2507,191 @@ final class AgentSupervisor {
         }
     }
 
+    // MARK: - Observed pi runs (T6)
+
+    /// One bound `delegate_agent` run: which child it feeds, how far it has been
+    /// read, and the translator carrying that child's stream position.
+    private struct ObservedRunBinding {
+        let childID: AgentID
+        let toolUseID: String
+        var consumedEventCount = 0
+        var closed = false
+        /// Per child, because a `PiEventTranslator` carries stream state (thread id,
+        /// turn counter). One shared translator would interleave two children's
+        /// turns into one.
+        ///
+        /// `replayingCompletedMessages` is the whole reason this path can show the
+        /// child's prose: the extension rewrites `events.jsonl` when the run ends
+        /// and the rewrite strips every `message_update`, so a completed run holds
+        /// its text only in `message_end`.
+        var translator: PiEventTranslator
+    }
+
+    /// Bind a delegated run to the child it belongs to, and start watching for it.
+    ///
+    /// Called on the main actor from the runner's report. The child may not exist
+    /// yet — `tool_execution_end` can be translated before the main-actor hop that
+    /// adopted the child from `tool_execution_start` has run — so the binding is
+    /// keyed by the tool call id and `deliverSubagentEvent` buffers anything that
+    /// arrives early, exactly as the claude path does.
+    private func bindObservedRun(_ handle: ObservedRunHandle, parent: AgentID) {
+        guard let parentRecord = records[parent] else { return }
+        let childID = AgentID(rawValue: AgentRecord.observedChildID(
+            parentAgentID: parent.rawValue, toolUseID: handle.toolUseID))
+        // Re-observation converges: the same (parent, toolUseID) pair rebinds the
+        // same cursor rather than starting a second one. Keyed on the tool call id
+        // and never on the runId, which embeds a timestamp and a random suffix.
+        if observedRunBindings[handle.runId] != nil { return }
+        observedRunBindings[handle.runId] = ObservedRunBinding(
+            childID: childID,
+            toolUseID: handle.toolUseID,
+            translator: PiEventTranslator(
+                workingDirectory: URL(fileURLWithPath: parentRecord.lastObservedWhere, isDirectory: true),
+                replayingCompletedMessages: true))
+        // The runId is persisted on the CHILD, in the existing provider-neutral
+        // field, so a relaunch can reconcile the run's fate without a schema
+        // change. It is deliberately NOT used to resume tailing — see
+        // `reconcileObservedRunsAfterRestore`.
+        if var child = records[childID], child.providerSessionId != handle.runId {
+            child.providerSessionId = handle.runId
+            records[childID] = child
+            try? upsertRecord(child)
+        }
+        startObservedRunWatcher(for: parent, parentRecord: parentRecord)
+    }
+
+    /// One watcher per PARENT, not per child: the run store is a single directory
+    /// and four children of one parent are four subdirectories of it.
+    private func startObservedRunWatcher(for parent: AgentID, parentRecord: AgentRecord) {
+        let root = URL(fileURLWithPath: parentRecord.lastObservedWhere, isDirectory: true)
+            .appendingPathComponent(".pi/agent-runs", isDirectory: true)
+        let watched = Set(observedRunBindings.filter { !$0.value.closed }.keys)
+        if let existing = observedRunWatchers[parent] {
+            existing.setWatchedRunIds(watched)
+            return
+        }
+        let watcher = RunArtifactsWatcher(rootURL: root)
+        observedRunWatchers[parent] = watcher
+        // MANDATORY, not a tuning knob: `.pi/agent-runs` accumulates a directory
+        // per run forever (143 in Array's own checkout), and an unfiltered watcher
+        // stats four paths in every one of them every 0.25s.
+        watcher.setWatchedRunIds(watched)
+        watcher.start { [weak self] update in
+            DispatchQueue.main.async {
+                self?.ingestObservedRunUpdate(update, parent: parent)
+            }
+        }
+    }
+
+    private func ingestObservedRunUpdate(_ update: RunArtifactsWatcherUpdate, parent: AgentID) {
+        for (runId, snapshot) in update.snapshots {
+            guard var binding = observedRunBindings[runId], !binding.closed else { continue }
+            let events = snapshot.events.events
+            // The file was REWRITTEN, not appended: the extension compacts it at
+            // completion via temp-file + rename, which also changes the inode.
+            // Reading by path each time is what makes that safe; clamping and
+            // closing is what stops the shrink being read as new content. Losing a
+            // few post-compaction lines beats duplicating a transcript.
+            if events.count < binding.consumedEventCount {
+                binding.consumedEventCount = events.count
+                binding.closed = true
+                observedRunBindings[runId] = binding
+                refreshObservedRunWatchers()
+                continue
+            }
+            if events.count > binding.consumedEventCount {
+                // A partial trailing line needs no special handling: it fails to
+                // parse, is counted as bad, and is simply absent from this array —
+                // so it arrives at this same index on the next read.
+                for artifact in events[binding.consumedEventCount..<events.count] {
+                    for event in binding.translator.translate(line: artifact.rawJSON) {
+                        deliverSubagentEvent(
+                            event, parent: parent, toolUseID: binding.toolUseID)
+                    }
+                }
+                binding.consumedEventCount = events.count
+            }
+            if snapshot.run.isFinished() {
+                binding.closed = true
+            }
+            observedRunBindings[runId] = binding
+        }
+        refreshObservedRunWatchers()
+    }
+
+    /// Narrow every watcher to the runs still open, and stop the ones with none —
+    /// so a parent that finished delegating stops polling entirely.
+    private func refreshObservedRunWatchers() {
+        let open = Set(observedRunBindings.filter { !$0.value.closed }.keys)
+        for (parent, watcher) in observedRunWatchers {
+            let mine = open.filter { runId in
+                observedRunBindings[runId].map { binding in
+                    records[binding.childID]?.parentAgentID == parent
+                } ?? false
+            }
+            if mine.isEmpty {
+                watcher.stop()
+                observedRunWatchers.removeValue(forKey: parent)
+            } else {
+                watcher.setWatchedRunIds(Set(mine))
+            }
+        }
+    }
+
+    /// Stop watching this parent's runs, and forget their cursors.
+    func stopObservedRuns(for parent: AgentID) {
+        observedRunWatchers.removeValue(forKey: parent)?.stop()
+        for (runId, binding) in observedRunBindings
+        where records[binding.childID]?.parentAgentID == parent {
+            observedRunBindings.removeValue(forKey: runId)
+        }
+    }
+
+    /// After a restore, settle what happened to every observed run — and never
+    /// resume tailing one.
+    ///
+    /// The cursor is deliberately not persisted. The child's events were already
+    /// written to its transcript as they were delivered, so replaying the file
+    /// would duplicate a transcript. And Array's own parent `pi` process is what
+    /// writes these runs, so an app relaunch GUARANTEES the run is defunct: a
+    /// `status: "running"` that survives a restart is stale, and believing it is
+    /// the resurrection bug — Array would wait forever for a child that died with
+    /// the previous session. One `run.json` read per child, never `events.jsonl`,
+    /// and no watcher.
+    func reconcileObservedRunsAfterRestore() {
+        for (childID, record) in records
+        where record.capabilities == .observedReadOnly && record.harness == .pi {
+            guard let runId = record.providerSessionId,
+                  let parentID = record.parentAgentID,
+                  let parentRecord = records[parentID]
+            else { continue }
+            let runJSON = URL(fileURLWithPath: parentRecord.lastObservedWhere, isDirectory: true)
+                .appendingPathComponent(".pi/agent-runs", isDirectory: true)
+                .appendingPathComponent(runId, isDirectory: true)
+                .appendingPathComponent("run.json", isDirectory: false)
+            let run = RunArtifactsReader.readRunJSON(at: runJSON)
+            guard run.isFinished() else { continue }
+            noteObservedRunEndedBeforeRestore(childID: childID, status: run.status)
+        }
+    }
+
+    /// Say out loud that a delegated run did not survive the restart, rather than
+    /// leaving a child tile apparently mid-turn forever.
+    private func noteObservedRunEndedBeforeRestore(
+        childID: AgentID, status: RunArtifact.Status
+    ) {
+        guard observedRunsReconciled.insert(childID).inserted else { return }
+        let outcome: TurnOutcome = status == .done ? .completed : .interrupted
+        deliver(.turnCompleted(
+            threadId: Self.threadId(for: childID),
+            turnId: "\(Self.threadId(for: childID))#observed",
+            outcome: outcome,
+            errorMessage: status == .done
+                ? nil
+                : "This delegated run ended with the previous session (\(status.rawValue))."
+        ), to: childID)
+    }
+
     /// Turns an observed `spawn_agent` call into a real child agent.
     ///
     /// THE TOOL CALL IS THE API (P2D.1): the extension is inert, so this is the only
@@ -2515,6 +2727,13 @@ final class AgentSupervisor {
     }
 
     /// Frames that arrived before their child's record existed.
+    /// Bound `delegate_agent` runs, keyed by runId. See `bindObservedRun`.
+    private var observedRunBindings: [String: ObservedRunBinding] = [:]
+    /// One watcher per parent over its `.pi/agent-runs` directory.
+    private var observedRunWatchers: [AgentID: RunArtifactsWatcher] = [:]
+    /// Children already told their run died with the last session, so a second
+    /// restore pass cannot say it twice.
+    private var observedRunsReconciled: Set<AgentID> = []
     private var pendingSubagentEvents: [AgentID: [AgentRuntimeEvent]] = [:]
 
     private func flushPendingSubagentEvents(for childID: AgentID) {
@@ -6948,9 +7167,10 @@ func runAgentSupervisorChecks() async throws {
     // MARK: 22 · B7.2 — `/clear` is one transaction, not a notice alone
 
     let clearCommandReport = try await checkClearCommandTransaction(config: config, cwd: cwd, fail: fail)
+    let piDelegateReport = try await checkPiDelegatedRunTailing(fail: fail)
 
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport); \(piDelegateReport)")
 }
 
 /// B7.2 — `/clear`'s one-transaction contract, driven through the real
@@ -10899,6 +11119,7 @@ final class FixtureStreamRunner: AgentRunning, @unchecked Sendable {
     private let lock = NSLock()
     private var spawnHandler: (@Sendable (SpawnRequest) -> Void)?
     private var runtimeObservationHandler: (@Sendable (AgentRuntimeObservation) -> Void)?
+    private var observedRunHandler: (@Sendable (ObservedRunHandle) -> Void)?
     private var promptsStorage: [String] = []
     private var agentPromptsStorage: [AgentPrompt] = []
 
@@ -10919,6 +11140,9 @@ final class FixtureStreamRunner: AgentRunning, @unchecked Sendable {
         if let handler = lock.withLock({ runtimeObservationHandler }) {
             translator.onRuntimeObservation = handler
         }
+        if let handler = lock.withLock({ observedRunHandler }) {
+            translator.onObservedRun = handler
+        }
         for line in lines {
             for event in translator.translate(line: line) { onEvent(event) }
         }
@@ -10934,6 +11158,15 @@ final class FixtureStreamRunner: AgentRunning, @unchecked Sendable {
         _ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void
     ) {
         lock.withLock { runtimeObservationHandler = handler }
+    }
+}
+
+/// The fixture runner reports observed runs too, so the supervisor's
+/// `runner as? ObservedRunReporting` wiring is exercised by the real production
+/// path rather than bypassed by a check that calls `bindObservedRun` itself.
+extension FixtureStreamRunner: ObservedRunReporting {
+    func observeObservedRuns(_ handler: @escaping @Sendable (ObservedRunHandle) -> Void) {
+        lock.withLock { observedRunHandler = handler }
     }
 }
 
@@ -10956,6 +11189,215 @@ private final class SpawnedRunnerFactory {
         runners[record.id] = runner
         return runner
     }
+}
+
+/// T6 — a pi `delegate_agent` child gets a tile, a transcript, and an honest end.
+///
+/// Driven entirely through production: a real `AgentSupervisor`, the real
+/// `PiEventTranslator` inside a runner, the real `runner as? ObservedRunReporting`
+/// wiring, the real `RunArtifactsWatcher`, and the real `restore()`. Nothing here
+/// calls `bindObservedRun` or `ingestObservedRunUpdate` directly — a check that
+/// did would pass on a supervisor that never subscribed, which is precisely the
+/// defect being fixed (the subscription used to be `runner as? ClaudeAgentRunner`,
+/// so it was unreachable for pi).
+///
+/// Six properties:
+///   1. The parent's `delegate_agent` call mints exactly ONE child, read-only,
+///      keyed on the tool call id — and the child's `task` reaches no event.
+///   2. The child's own work, read from its run directory, lands on the CHILD.
+///   3. Appending more lines delivers only the new ones — no re-delivery.
+///   4. The completion REWRITE (temp-file + rename, which also changes the inode)
+///      closes the run instead of being read as new content.
+///   5. A relaunch over the same store adds no children and replays no events,
+///      and says out loud that the run died with the previous session.
+///   6. A run still marked `running` with a dead pid is treated as finished, not
+///      waited on forever.
+@MainActor
+private func checkPiDelegatedRunTailing(
+    fail: (String) -> Error
+) async throws -> String {
+    // A pi-owned model: the harness gate in `send` refuses anything else, and the
+    // suite's shared `config` is claude's.
+    let config = AgentModelConfig.resolvedFromDefaults(harness: .pi)
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-pi-delegate-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let cwd = root.appendingPathComponent("project", isDirectory: true)
+    try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+
+    func fixture(_ name: String) throws -> [String] {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("ContinuumRevivedCoreChecks/Fixtures/\(name)", isDirectory: false)
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+            throw fail("T6: missing fixture \(name) at \(url.path)")
+        }
+        return text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+    }
+    let parentLines = try fixture("pi-delegate-agent-turn.jsonl")
+    let childLines = try fixture("pi-delegate-run-events.jsonl")
+    let runId = "code-scout-20260825T141759Z-a23808"
+    let taskText = "Survey the recipe column helpers and report what they share."
+
+    let runDir = cwd.appendingPathComponent(".pi/agent-runs/\(runId)", isDirectory: true)
+    try FileManager.default.createDirectory(at: runDir, withIntermediateDirectories: true)
+    let eventsURL = runDir.appendingPathComponent("events.jsonl", isDirectory: false)
+    let runJSONURL = runDir.appendingPathComponent("run.json", isDirectory: false)
+    // Only the first half is on disk when the parent's call is observed — the child
+    // is still working.
+    let firstHalf = Array(childLines.prefix(9))
+    try (firstHalf.joined(separator: "\n") + "\n").write(to: eventsURL, atomically: true, encoding: .utf8)
+    // A live pid so the run is not read as already finished. Our own pid is alive
+    // by construction, which beats inventing one that might be recycled.
+    let livePid = ProcessInfo.processInfo.processIdentifier
+    func writeRunJSON(status: String, pid: Int32) throws {
+        try #"{"id":"\#(runId)","role":"code-scout","status":"\#(status)","pid":\#(pid)}"#
+            .write(to: runJSONURL, atomically: true, encoding: .utf8)
+    }
+    try writeRunJSON(status: "running", pid: livePid)
+
+    let store = AgentStore(applicationSupportDirectory: root)
+    let delegateWarnings = NSMutableArray()
+    let parentRunner = FixtureStreamRunner(lines: parentLines)
+    var supervisor: AgentSupervisor! = AgentSupervisor(
+        store: store,
+        makeRunner: { launch -> AgentRunning in
+            launch.record.parentAgentID == nil
+                ? parentRunner
+                : ScriptedAgentRunner(script: [.sessionStateChanged(.ready)])
+        },
+        warn: { delegateWarnings.add($0) })
+    // Spawned WITHOUT a prompt so the id exists before the runner is needed, and
+    // so the subscriber is attached before the fixture stream replays — the
+    // fixture runner emits its whole stream synchronously inside `run`.
+    let parentId = supervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, harness: .pi,
+        model: config.model, thinking: config.thinking)
+
+    // MARK: 1 · one observed child, and the task body stays out of the events
+
+    let parentInbox = EventInbox()
+    let parentStream = supervisor.events(for: parentId)
+    let parentTask = Task { @MainActor in for await e in parentStream { parentInbox.append(e) } }
+    defer { parentTask.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.subscriberCount(for: parentId) == 1
+    }) else {
+        throw fail("T6: the parent's subscriber never registered")
+    }
+    supervisor.send("delegate the survey", to: parentId)
+
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, {
+        supervisor.records.values.contains { $0.parentAgentID == parentId }
+    }) else {
+        throw fail("T6: the delegate_agent call produced no child at all; records \(supervisor.records.count); warnings \(delegateWarnings); parent events \(parentInbox.events.map { "\($0)" }.prefix(20))")
+    }
+    let children = supervisor.records.values.filter { $0.parentAgentID == parentId }
+    guard children.count == 1, let child = children.first else {
+        throw fail("T6: expected one delegated child, got \(children.count)")
+    }
+    guard child.capabilities == AgentCapabilities.observedReadOnly else {
+        throw fail("T6: a delegated child must be observedReadOnly — Array does not run it; got \(child.capabilities)")
+    }
+    let expectedChildID = AgentID(rawValue: AgentRecord.observedChildID(
+        parentAgentID: parentId.rawValue, toolUseID: "call_fixture_delegate_1"))
+    guard child.id == expectedChildID else {
+        throw fail("T6: the child is not keyed on its tool call id, so re-observation would mint a duplicate")
+    }
+    for event in parentInbox.events {
+        guard !"\(event)".contains(taskText) else {
+            throw fail("T6: the child's task body crossed the parent's event boundary: \(event)")
+        }
+    }
+
+    // MARK: 2 · the child's own work arrives on the child
+
+    let childInbox = EventInbox()
+    let childStream = supervisor.events(for: child.id)
+    let childTask = Task { @MainActor in for await e in childStream { childInbox.append(e) } }
+    defer { childTask.cancel() }
+
+    func childText() -> String { childInbox.events.map { "\($0)" }.joined(separator: "\n") }
+    guard await waitUntil(timeout: 15, pollInterval: 0.05, {
+        childText().contains("grep") || childText().contains("read")
+    }) else {
+        throw fail("T6: the delegated child received none of its own work — the run was never tailed")
+    }
+    let afterFirstHalf = childInbox.events.count
+
+    // MARK: 3 · appending delivers only what is new
+
+    try (childLines.joined(separator: "\n") + "\n").write(to: eventsURL, atomically: true, encoding: .utf8)
+    guard await waitUntil(timeout: 15, pollInterval: 0.05, {
+        childText().contains("shared descriptor")
+    }) else {
+        throw fail("T6: the child's completed prose never arrived — a finished run keeps its text only in message_end")
+    }
+    let readCount = childInbox.events.filter { "\($0)".contains("grep") }.count
+    guard readCount <= 1 else {
+        throw fail("T6: the child's grep call was delivered \(readCount) times — the cursor re-read consumed lines")
+    }
+    guard childInbox.events.count > afterFirstHalf else {
+        throw fail("T6: appending to the run delivered nothing")
+    }
+
+    // MARK: 4 · the completion rewrite closes the run rather than replaying it
+
+    // The extension compacts via temp-file + rename, so the file SHRINKS and the
+    // inode changes. A shrink must close the binding, never be read as new content.
+    try (Array(childLines.prefix(4)).joined(separator: "\n") + "\n")
+        .write(to: eventsURL, atomically: true, encoding: .utf8)
+    try writeRunJSON(status: "done", pid: livePid)
+    let settled = childInbox.events.count
+    try? await Task.sleep(nanoseconds: 2_000_000_000)
+    guard childInbox.events.count == settled else {
+        throw fail("T6: the compaction rewrite was read as new content and replayed \(childInbox.events.count - settled) events")
+    }
+
+    // MARK: 5 · a relaunch adds nothing and says the run is over
+
+    supervisor = nil
+    let relaunched = AgentSupervisor(store: store, makeRunner: { _ in
+        ScriptedAgentRunner(script: [.sessionStateChanged(.ready)])
+    }, warn: { _ in })
+    let relaunchInbox = EventInbox()
+    _ = relaunched.restore()
+    guard relaunched.records.values.filter({ $0.parentAgentID == parentId }).count == 1 else {
+        throw fail("T6: the relaunch minted a duplicate child — identity is not stable across a restart")
+    }
+    let relaunchedChildStream = relaunched.events(for: child.id)
+    let relaunchTask = Task { @MainActor in
+        for await e in relaunchedChildStream { relaunchInbox.append(e) }
+    }
+    defer { relaunchTask.cancel() }
+    try? await Task.sleep(nanoseconds: 1_500_000_000)
+    // The cursor is deliberately not persisted, so a relaunch must NOT re-read the
+    // file: the child's events were already written to its transcript when they
+    // were delivered, and replaying would duplicate a transcript.
+    guard !relaunchInbox.events.contains(where: { "\($0)".contains("shared descriptor") }) else {
+        throw fail("T6: the relaunch replayed the child's run and duplicated its transcript")
+    }
+
+    // MARK: 6 · a stale `running` is finished, not waited on
+
+    // Array's own parent pi process writes these files, so a `running` status that
+    // survives a restart is stale by construction. A dead pid must read as over.
+    let stale = RunArtifact(
+        id: runId, role: "code-scout", status: .running, task: nil, cwd: nil,
+        createdAt: nil, updatedAt: nil, pid: 999_999_999, rawJSON: nil)
+    guard stale.isFinished(isProcessAlive: { _ in false }) else {
+        throw fail("T6: a `running` run with a dead pid was treated as live — Array would wait for a child that died with the last session")
+    }
+    let live = RunArtifact(
+        id: runId, role: "code-scout", status: .running, task: nil, cwd: nil,
+        createdAt: nil, updatedAt: nil, pid: 4242, rawJSON: nil)
+    guard !live.isFinished(isProcessAlive: { _ in true }) else {
+        throw fail("T6: a genuinely running run was treated as finished, which would stop tailing a live child")
+    }
+
+    return "one pi delegate_agent call became one read-only child keyed on its tool call id, its run was tailed into the child's own transcript without re-delivery, a completion rewrite closed it instead of replaying it, a relaunch added no child and no duplicate events, and a stale running status with a dead pid reads as over"
 }
 
 /// P2D.2 — an observed `spawn_agent` call becomes a real child agent.

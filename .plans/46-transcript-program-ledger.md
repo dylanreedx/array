@@ -2162,3 +2162,87 @@ asserting the outcome, and that the grandchild AT the cap is offered nothing.
 
 *Teeth, verified:* reverting the call site to `allowingSpawn: false` fails at
 depth 0; changing `<` to `<=` fails at the cap.
+
+## T6 — a pi delegated child gets a tile, a transcript, and an honest end (2026-08-25)
+
+The other half of *"delegate agent in Pi doesn't work."* `delegate_agent` runs its
+child as a separate `pi --mode json -p --no-session` process and the parent
+appends that child's stdout to `.pi/agent-runs/<runId>/events.jsonl`. So the
+claude design — route the child's frames off the parent's stream by
+`parent_tool_use_id` — has no pi analogue. The child has to be read from a file.
+
+**Two probes ran first, in a throwaway /tmp repo, and both mattered.**
+
+1. **Does the parent outlive a background child?** Everything rests on it.
+   Measured: yes, decisively. A `background: true` delegation returns its tool
+   result in milliseconds but the parent PROCESS blocks until the child exits — it
+   sat idle for 79 s waiting on a 75 s child and exited 41 ms after the child's
+   `finished` line. So Array can tail the run for the child's whole life from
+   inside the parent's runner. (The extension's own source comment predicts the
+   opposite for one-shot sessions; it is wrong for this path.)
+2. **Is the child's prose recoverable?** This one changed the design.
+   `message_update` deltas exist *during* the run and the completion rewrite
+   strips **every one of them** (24 → 0). A completed run holds its text only in
+   `message_end`. Replaying a finished run without reading completed messages
+   yields tools, turns and usage and **not one word**.
+
+Two more measured facts that shaped the code: compaction is temp-file + rename, so
+the **inode changes** — an fd-holding tailer would keep reading a deleted inode
+forever; and `result.details` carries `runId` *and* `task`, so the prompt body is
+on the parent's wire and has to be deliberately not read.
+
+**What landed.**
+
+- `SpawnRequest.parsePiDelegateTool` — its own parser, not folded into `parse`,
+  because a `delegate_agent` child is already running and must be `observedOnly`.
+  Every argument name differs (`agent`/`task`/`worktree`), which is why the
+  existing parser returned nil twice over.
+- Identity on the **tool call id**, never the `runId`: the runId embeds a
+  timestamp and a random suffix, so a runId-keyed identity mints a fresh child on
+  every re-observation. The runId arrives separately, validated as a path
+  component, on `onObservedRun`.
+- `PiEventTranslator(replayingCompletedMessages:)`, default off so the live path
+  stays byte-identical. `role == "user"` is skipped unconditionally: in a child's
+  own file that line is the `Task: …` prompt body.
+- `RunArtifactsWatcher.setWatchedRunIds` — **mandatory, not tuning**. Array's own
+  checkout has 143 run directories; unfiltered, the watcher stats four paths in
+  every one of them every 0.25 s and reads them all on first scan.
+- `RunArtifact.pid` + `isFinished(isProcessAlive:)`. Array's own parent process
+  writes these runs, so a `running` status that survives a restart is stale by
+  construction, and believing it is the resurrection bug.
+- The claude-only `runner as? ClaudeAgentRunner` downcast became two capability
+  protocols. **That downcast is why this whole path was unreachable for pi.**
+- Cursors are never persisted and tailing never resumes after a relaunch: the
+  child's events were already written to its transcript when delivered, so
+  replaying would duplicate a transcript. A relaunch does one `run.json` read per
+  child and says out loud if the run died with the last session.
+
+**Witness.** `checkPiDelegatedRunTailing` in `--agent-supervisor-check`, driven
+entirely through production — a real supervisor, the real translator, the real
+`runner as? ObservedRunReporting` wiring, the real watcher, the real `restore()`.
+`FixtureStreamRunner` was given the new capability so the subscription is
+exercised rather than bypassed; a check that called `bindObservedRun` itself would
+pass on a supervisor that never subscribed, which is *exactly* the defect. Six
+properties: one read-only child keyed on the tool call id with the task body off
+the event boundary; the child's own work on the child; appending delivers only
+what is new; the completion rewrite closes the run instead of replaying it; a
+relaunch adds no child and no duplicate events; a stale `running` with a dead pid
+reads as over.
+
+*Teeth:* removing the `ObservedRunReporting` subscription fails with "the
+delegated child received none of its own work — the run was never tailed".
+Removing the parse fails with "expected exactly one delegation, got 0". Dropping
+the replay flag fails with "recovered no assistant prose".
+
+**Two process notes.** The witness first failed for two reasons that were mine,
+not the code's: the fixture runner emits its whole stream synchronously inside
+`run`, so a parent spawned WITH a prompt replays before a subscriber can attach
+(the existing spawn check already knew this — spawn with `prompt: nil`, subscribe,
+then `send`); and the suite's shared `config` is claude's, so a pi agent refuses
+it. `warn: { _ in }` hid both for three iterations — a check that swallows the
+supervisor's own warnings debugs blind.
+
+`--agent-supervisor-check` failed once on "one Undo did not restore the complete
+pre-insertion query", immediately after a 23 s build. 4/4 clean on a quiet
+machine, and HEAD passes 3/3 — it is the known load flake in this leg, not a
+regression.

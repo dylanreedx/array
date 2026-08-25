@@ -387,3 +387,13 @@ public final class PiAgentRunner: @unchecked Sendable {
 }
 
 #endif  // os(macOS)
+
+
+extension PiAgentRunner: ObservedRunReporting {
+    /// Where a `delegate_agent` child's transcript will be. Same confinement as
+    /// `observeSpawnRequests`: set before `run`, delivered on the runner's serial
+    /// queue, so a caller needing the main actor hops itself.
+    public func observeObservedRuns(_ handler: @escaping @Sendable (ObservedRunHandle) -> Void) {
+        queue.sync { translator.onObservedRun = handler }
+    }
+}
