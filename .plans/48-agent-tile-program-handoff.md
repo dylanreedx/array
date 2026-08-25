@@ -1,5 +1,30 @@
 # 48 — Agent tile: transcript, UX, and native harness capabilities
 
+> **SUPERSEDED IN PART, 2026-08-24 (same day).** The program in this file was
+> then executed. **`.plans/46` is the current record** — read its "M0–M2
+> landings", "M4–M6 landings", "Probes" and "Codex" sections before acting on
+> anything below.
+>
+> What this file still gets right: §4's harness capability survey, §7's
+> verification doctrine, §8's traps. What it gets wrong, corrected by
+> measurement rather than by argument:
+>
+> - **§5's delta budget is history.** The nine per-delta history walks are gone;
+>   50.202 ms → 5.749 ms, and the leg is off `MATRIX_KNOWN_RED`.
+> - **§4.2's pi data-loss story was too broad.** Persistence is gated by an
+>   assistant-message watermark shared by json and rpc, so the exposure is the
+>   first turn of a new session, not every stop.
+> - **§4.3's codex risk was wrong in both directions.** #33267 does not
+>   reproduce here and delegation genuinely works — and `exec --json` still
+>   cannot see any of it, measured with the child's file write confirmed on disk
+>   and absent from the stream. `SubAgentActivityKind` has no `completed`;
+>   `multiAgentMode` is `explicitRequestOnly | proactive | {custom}`, not `"v2"`.
+> - **B7.0 was sharper than described.** `/clear` alone is accidentally safe; a
+>   command with ARGUMENTS named the tile after its arguments.
+> - **One item did not reproduce at all**: `ChoiceListView`'s swallowed bare
+>   Enter. Its init already falls back to the first enabled item.
+
+
 **The single handoff for finishing the agent tile.** Written 2026-08-24 at
 `5cba885d` on `array/transcript-ux`, after a session that shipped the transcript
 redo, reviewed it live with Dylan three times, and then planned everything that
