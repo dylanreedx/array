@@ -1847,3 +1847,97 @@ directions. **Re-judge this one on a quiet machine before acting on it either
 way** — the same lesson the 02:30 run taught when five terminal failures bisected
 to an asleep display rather than to the milestone. Its structural budgets are
 green, which is the part that carries information.
+
+---
+
+## M5, M6 and M8 closeout — 2026-08-24
+
+### `fec35f6c` (+ supervisor core inside `24a80cea`/`248b074e`) — C4, persistence without a tile
+
+The sole `saveSnapshot` call site lived inside `wireManagedAgentTile`, so a
+tile-less agent persisted **nothing** — and at up to 16 concurrent children,
+tile-less is the common case, not an edge case. Persistence moved into the
+supervisor, fed from the same restamped `deliver()` stream every subscriber
+already sees, debounced 200 ms with an immediate write on a turn boundary and a
+flush of pending streaming markup before the final write. The tile is a reader.
+
+**Archive quarantines, never deletes** — `<root>/<agentID>/` becomes
+`<root>/quarantine-<agentID>/`, the same rule C3's migration already follows: a
+transcript is the user's own record of their work. Teeth: gating both ingest
+paths behind `tileId != nil` fails with "the only saveSnapshot call site lived
+inside the tile."
+
+### `69a53018` — C10, status at render time
+
+`AgentReferencePayload` still carries no status, so a tick can never rewrite
+history. Status resolves in the renderer from `turnSnapshot(for:)` through
+`InboxState.state(forSnapshot:)` — P3.3's single status owner — subscribed **per
+visible chip** and unsubscribed on reuse and deinit, because at 16 children an
+unconditional subscription is a leak.
+
+The teeth that matter are the second clause: the carrying `AgentDocument` is
+encoded to `Data` twice with `.sortedKeys` and asserted **byte-identical** across
+the status change. A Swift `==` would have passed over a field that round-trips
+differently. Verified by inserting `document.version += 1` between the encodes.
+Delta budget after: 5.68–5.78 ms against 8.3.
+
+### `e4f7ec3f` — C11, lineage at fan-out scale
+
+`showContextualAgentLineage(edges:)` draws N edges bounded by
+`InboxSort.maxVisibleChildren`, and reveal-from-inbox now shows the parent's whole
+visible sibling fan rather than the one revealed agent.
+
+The fixture pins **arithmetic, not literals**: `maxChildrenPerParent² == 16` and
+`maxChildrenPerParent × 2 == InboxSort.maxVisibleChildren`, mirroring the
+`maxDepth` precedent. A witness that hardcodes 8 goes quietly wrong the day
+someone changes a cap; one that pins the relationship fails loudly.
+
+### `60e87939` + `c60ba336` — B6.2 and B6.3
+
+The compaction block kind, rendered collapsed and attributed to the harness,
+built from the real captured fields. Safe to add because `ItemKind` had already
+been made lenient — the prerequisite that would otherwise have been a data-loss
+bug in a one-line diff.
+
+**B6.3 shrank, correctly.** The probe found pi's session file is **append-only**
+through compaction, so the pre-compaction history is pi's loss and not Array's to
+recover. Surfacing the boundary honestly is the whole ticket. A negative result
+with the source read is a complete result.
+
+### `248b074e` — B4 and B5's wiring
+
+See the commit message for the reversal of the local-queue prohibition and why it
+had to be Array-side. Two honest limits recorded at the time: the sidebar does not
+change at all, because `AgentInboxRowBuilder` folds `.queued` onto `.working`; and
+claude's per-turn `slash_commands` discovery is still unwired, so every provider
+command takes the "nothing discovered yet" branch and the *"this agent doesn't
+have that command"* refusal is **unreachable** until that lands. It is the one
+piece of B5 that is designed and not delivered.
+
+A claim from the plan was also checked rather than inherited: `.notice` is **not**
+pixel-identical to `.error` in this build — a `.plans/45` T7 landing already gave
+it a distinct title, no failure badge and no retry affordance — so the caveat
+about an Array-authored `/status` reading as a failure did not apply.
+
+---
+
+## Two process findings worth keeping
+
+**The shared index bit four times in one day.** Running many agents in one
+worktree means `git add` sees everyone's work. Three agents and then I myself
+swept a peer's file into a commit; twice it was caught by `git show --stat` and
+undone, once it was left in place deliberately and said so in the commit message.
+`git commit -- <paths>` is not the fix — it commits the WORKING-TREE version of a
+shared file, not the staged hunks. The reliable pattern is: stage explicit paths,
+commit, then `git show --stat HEAD` **immediately**, and `git reset --soft HEAD~1`
+if a peer's file appears. For a partial stage on a shared file, build a patch and
+`git apply --cached`, then commit with no pathspec.
+
+**Two `--agent-supervisor-check` assertions flake under load**, and one agent
+misread them as a SIGSEGV. They are not crashes. Both sit behind
+`waitUntil(timeout: 5, pollInterval: 0.02, …)` wrapped around a real one-shot
+naming subprocess — "normal/input-failure supervisor paths did not release their
+slots" and "the capped burst did not release both accepted names" — and both pass
+on rerun. They correlate with how many agents are compiling. **Do not bisect them
+on a loaded machine**, and consider whether a five-second budget for a real
+subprocess is honest on a busy host.
