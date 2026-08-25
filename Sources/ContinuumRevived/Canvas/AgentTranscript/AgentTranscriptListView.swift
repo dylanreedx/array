@@ -2402,8 +2402,30 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     }
 
     /// The one line a folded run reads as. Counts bucket by tool kind, the
-    /// duration sums only what the detail store actually knows (honestly
-    /// omitted otherwise), and ✓ appears only when every member completed.
+    /// duration is the SPAN the run occupied (honestly omitted when unknown),
+    /// and ✓ appears only when every member completed.
+    ///
+    /// T3 (2026-08-25). This used to `+=` each member's own
+    /// `endedAt - startedAt`, which excluded every gap between tools — all the
+    /// model's thinking time. Three 30 ms `Bash` calls read "0.1s" no matter how
+    /// long the run actually took, and the turn-scope header's "Worked for …"
+    /// used the same sum, so the one figure claiming to describe a whole turn was
+    /// the least accurate number on screen. Dylan: "the working time isn't
+    /// cumulative, it restarts often?"
+    ///
+    /// A span needs endpoints, and the two scopes have different ones:
+    ///
+    /// - A tool cluster spans its members' detail records, earliest `startedAt`
+    ///   to latest `endedAt`. Still host-local, still expires with the record.
+    /// - A TURN spans its entries' `createdAt`, which is document state and so
+    ///   survives what the 1 h detail TTL does not. It is also the same quantity
+    ///   the settled tail already reports as "Worked for Ns" from
+    ///   `submittedAt → turnCompleted`, so the two agree instead of contradicting
+    ///   each other a few rows apart.
+    ///
+    /// `createdAt` is optional — nil for transcripts persisted before it existed
+    /// and beyond `AgentSupervisor.replayCap` — so the clause is omitted rather
+    /// than faked. A missing number is honest; a wrong one is what this removes.
     private func clusterSummaryText(_ header: AgentTranscriptClusterPlanner.Header) -> String {
         if header.isLive {
             let count = header.memberIndexes.count
@@ -2411,11 +2433,19 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         }
         var nounOrder: [String] = []
         var nounCounts: [String: Int] = [:]
-        var totalDuration: TimeInterval = 0
-        var knowsAnyDuration = false
+        var earliestStart: Date?
+        var latestEnd: Date?
+        var earliestEntryDate: Date?
+        var latestEntryDate: Date?
         var allCompleted = true
         for index in header.memberIndexes {
             guard rows.indices.contains(index), let block = rows[index].block else { continue }
+            // Member entry dates are the tool cluster's last-resort endpoints
+            // once the detail records have expired.
+            if let entryDate = entryDatesByID[rows[index].entryID] ?? nil {
+                if earliestEntryDate == nil || entryDate < earliestEntryDate! { earliestEntryDate = entryDate }
+                if latestEntryDate == nil || entryDate > latestEntryDate! { latestEntryDate = entryDate }
+            }
             var name: String?
             switch block.payload {
             case let .toolCall(payload):
@@ -2431,15 +2461,44 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             if nounCounts[noun] == nil { nounOrder.append(noun) }
             nounCounts[noun, default: 0] += 1
             if let detailID = toolDetailIDByBlockID[block.id],
-               let duration = toolDetailsByID[detailID]?.duration {
-                totalDuration += duration
-                knowsAnyDuration = true
+               let detail = toolDetailsByID[detailID] {
+                if let started = detail.startedAt,
+                   earliestStart == nil || started < earliestStart! { earliestStart = started }
+                if let ended = detail.endedAt,
+                   latestEnd == nil || ended > latestEnd! { latestEnd = ended }
             }
         }
+        // A turn's span comes from the document, so it is not lost to the detail
+        // TTL and it matches what the settled tail already says. Measured over the
+        // turn's whole range, not its folded members: the members are usually all
+        // in ONE assistant entry, and the endpoints that carry the duration — the
+        // user prompt that opened the turn, and the reply that closed it — are the
+        // two rows a turn header deliberately leaves outside itself.
+        let turnSpan: TimeInterval? = {
+            guard let range = header.turnRange else { return nil }
+            var first: Date?
+            var last: Date?
+            for index in range where rows.indices.contains(index) {
+                guard let date = entryDatesByID[rows[index].entryID] ?? nil else { continue }
+                if first == nil || date < first! { first = date }
+                if last == nil || date > last! { last = date }
+            }
+            guard let first, let last else { return nil }
+            let span = last.timeIntervalSince(first)
+            return span > 0 ? span : nil
+        }()
+        // A tool cluster's span is the wall-clock the run occupied, gaps included.
+        let clusterSpan: TimeInterval? = {
+            guard let start = earliestStart, let end = latestEnd else { return nil }
+            let span = end.timeIntervalSince(start)
+            return span > 0 ? span : nil
+        }()
         if header.scope == .turn {
             let toolCount = nounCounts.values.reduce(0, +)
             var summary = "Worked"
-            if knowsAnyDuration { summary += " for \(Self.formatWorkedDuration(totalDuration))" }
+            if let span = turnSpan ?? clusterSpan {
+                summary += " for \(Self.formatWorkedDuration(span))"
+            }
             if toolCount > 0 { summary += " · \(toolCount) tool\(toolCount == 1 ? "" : "s")" }
             return summary
         }
@@ -2453,10 +2512,17 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         if !buckets.isEmpty, buckets != ["\(count) step\(count == 1 ? "" : "s")"] {
             parts.append(buckets.joined(separator: ", "))
         }
-        if knowsAnyDuration {
-            let formatted = totalDuration < 10
-                ? String(format: "%.1fs", totalDuration)
-                : "\(Int(totalDuration.rounded()))s"
+        // Falls back to the entry span when the detail records have expired: a
+        // fold of a restored transcript still has honest document timestamps.
+        let memberEntrySpan: TimeInterval? = {
+            guard let first = earliestEntryDate, let last = latestEntryDate else { return nil }
+            let span = last.timeIntervalSince(first)
+            return span > 0 ? span : nil
+        }()
+        if let span = clusterSpan ?? memberEntrySpan {
+            let formatted = span < 10
+                ? String(format: "%.1fs", span)
+                : "\(Int(span.rounded()))s"
             parts.append(formatted)
         }
         var summary = parts.joined(separator: " · ")

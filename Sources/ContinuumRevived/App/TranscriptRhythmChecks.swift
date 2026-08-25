@@ -63,6 +63,7 @@ enum TranscriptRhythmChecks {
         try checkASupersededToolRowIsFoldedOut()
         try checkTurnFolding()
         try checkARowSaysEachThingOnce()
+        try checkAFoldedTurnReportsASpanNotASum()
         try checkGlyphsDistinguishRowKinds()
         print(
             "TranscriptRhythmChecks: heading ladder, hanging indents, thematic break, "
@@ -1924,6 +1925,102 @@ extension TranscriptRhythmChecks {
             guard ToolCallView.symbolImage(forToolNamed: name) != nil else {
                 throw fail("glyphs: '\(name ?? "<nil>")' left the icon column blank")
             }
+        }
+    }
+
+
+    /// Dylan: "the working time isn't cumulative, it restarts often?"
+    ///
+    /// The fold headers summed each member's own `endedAt - startedAt`, so every
+    /// interval where the model was thinking was excluded. Three 30 ms `Bash`
+    /// calls read "0.1s" however long the run took, and the turn-scope header's
+    /// "Worked for …" used the same sum — the one figure claiming to describe a
+    /// whole turn was the least accurate on screen.
+    ///
+    /// This fixture carries NO host-local detail records at all, which is the
+    /// sharpest form of the defect: the old code's `knowsAnyDuration` was false,
+    /// so it printed no duration whatsoever, while the document had honest
+    /// timestamps the whole time. It also proves the figure survives the detail
+    /// store's 1 h TTL, which is why a turn reads its span from `createdAt`
+    /// rather than from the records.
+    private static func checkAFoldedTurnReportsASpanNotASum() throws {
+        func id(_ suffix: String) -> AgentNodeID { AgentNodeID(rawValue: "span-\(suffix)")! }
+        func tool(_ suffix: String, name: String) -> AgentBlock {
+            AgentBlock(
+                id: id(suffix), revision: 1, kind: .toolCall,
+                payload: .toolCall(.init(name: name, summary: nil, status: .completed))
+            )
+        }
+        func paragraph(_ suffix: String, _ text: String) -> AgentBlock {
+            AgentBlock(id: id(suffix), revision: 1, kind: .paragraph, payload: .paragraph([.text(text)]))
+        }
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        // Four brief tools spread over 45s of real time: the sum of what a detail
+        // store could know about them is ~0, the span is 45s.
+        let entries: [AgentEntry] = [
+            AgentEntry(
+                id: id("entry-u"), revision: 1, role: .user,
+                provenance: .localPrompt(promptID: "span"), lifecycle: .finished,
+                blocks: [paragraph("u-t", "Find the slow query.")], createdAt: base),
+            AgentEntry(
+                id: id("entry-a"), revision: 1, role: .assistant,
+                provenance: .providerItem(provider: "fixture", itemID: "a"),
+                lifecycle: .finished,
+                blocks: [
+                    tool("t1", name: "Read file"), tool("t2", name: "Grep codebase"),
+                    tool("t3", name: "Run tests"), tool("t4", name: "Read file"),
+                    paragraph("a-t", "A missing index on the join column."),
+                ],
+                createdAt: base.addingTimeInterval(45)),
+            AgentEntry(
+                id: id("entry-u2"), revision: 1, role: .user,
+                provenance: .localPrompt(promptID: "span2"), lifecycle: .finished,
+                blocks: [paragraph("u2-t", "Add it.")], createdAt: base.addingTimeInterval(60)),
+            AgentEntry(
+                id: id("entry-a2"), revision: 1, role: .assistant,
+                provenance: .providerItem(provider: "fixture", itemID: "a2"),
+                lifecycle: .finished, blocks: [paragraph("a2-t", "Added.")],
+                createdAt: base.addingTimeInterval(61)),
+        ]
+        let document = AgentDocument(version: 1, entries: entries)
+        let list = AgentTranscriptListView()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 720),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        let host = NSView(frame: window.contentRect(forFrameRect: window.frame))
+        host.addSubview(list)
+        window.contentView = host
+        list.frame = host.bounds
+        list.layoutSubtreeIfNeeded()
+        try list.apply(
+            document: document,
+            patch: AgentDocumentPatch(
+                fromVersion: 0, toVersion: document.version,
+                inserted: document.entries.flatMap(\.blocks).map(\.id)
+            )
+        )
+        list.layout()
+        list.collectionView.layout()
+        func descendants(in view: NSView) -> [NSView] {
+            [view] + view.subviews.flatMap(descendants)
+        }
+        let headers = descendants(in: list).compactMap { $0 as? AgentToolClusterHeaderView }
+        let summaries = headers.map(\.summaryLabel.stringValue).filter { !$0.isEmpty }
+        guard !summaries.isEmpty else {
+            throw fail("span: the folded turn rendered no cluster header at all")
+        }
+        guard let worked = summaries.first(where: { $0.hasPrefix("Worked") }) else {
+            throw fail("span: no turn-scope header among \(summaries)")
+        }
+        // 45s is the entry span. A sum over members that have no detail records
+        // is zero, and the old code printed no duration clause at all.
+        guard worked.contains("45s") else {
+            throw fail(
+                "span: the turn header read '\(worked)' — the document says the turn spanned 45s, "
+                + "and a duration derived from per-tool records excludes every interval where the "
+                + "model was thinking (and vanishes entirely once those records expire)"
+            )
         }
     }
 

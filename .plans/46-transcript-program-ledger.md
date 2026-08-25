@@ -2065,3 +2065,48 @@ than to a blank column"; `symbolImage(forToolNamed:)` now falls back.
 `PiEventTranslator` and `ManagedTranscriptRehydrator` both lacked the `.subagent`
 case `ClaudeEventTranslator` has, so a rehydrated delegation bucketed as a
 command while the live one did not.
+
+## T3 — A folded duration is a span, not a sum (2026-08-25)
+
+Dylan: *"the working time isn't cumulative, it restarts often? for a new tool
+call?"*
+
+`clusterSummaryText` accumulated `totalDuration += detail.duration` over each
+member's own `endedAt - startedAt`. Its doc comment admitted the shape — "sums
+only what the detail store actually knows" — but the consequence was not written
+down: **every interval between tools was excluded**, which is all of the model's
+thinking time. Three 30 ms `Bash` calls read `0.1s` however long the run took.
+And the turn-scope header's "Worked for …" used the same sum, so the one figure
+claiming to describe a whole turn was the least accurate number on screen.
+
+Two scopes, two sets of endpoints:
+
+- **A tool cluster** spans its members' detail records, earliest `startedAt` to
+  latest `endedAt`. Still host-local, still expires with the record — so it falls
+  back to the members' entry dates.
+- **A turn** spans its entries' `createdAt`, which is document state and
+  therefore survives the 1 h detail TTL.
+
+**The thing that made this more than a `min`/`max` swap.** A turn header
+deliberately omits the turn-start row — the user prompt stays rendered because
+the turn separator and the hover "sent at" reveal both key off it — and may omit a
+terminal assistant row. Those two omitted rows are *exactly* the endpoints a
+turn's duration needs, and every folded member usually belongs to one assistant
+entry. So the first implementation measured a span over `memberIndexes`, got zero,
+and printed no duration at all — indistinguishable from the old bug. `Header`
+now carries `turnRange` for turn scope, which is not derivable from its members.
+
+**Witness:** `checkAFoldedTurnReportsASpanNotASum` in the gating
+`--transcript-rhythm-check`, over a document with **no host-local detail records
+at all** — the sharpest form of the defect, because the old code's
+`knowsAnyDuration` was then false and it printed no duration while the document
+had honest timestamps the whole time. Four brief tools spread over 45 s; the
+header must read 45 s. RED first, twice, and for two different real reasons:
+`Worked · 4 tools` at HEAD, and again on the member-span implementation.
+
+**One thing the plan asked for that I did not do.** It said the turn header and
+the settled tail's "Worked for Ns" should be asserted to agree. They measure
+genuinely different quantities — the tail anchors on `submittedAt`, which precedes
+the first entry and so includes spawn/cold-start dead air the document cannot see.
+They will read close, not equal. Asserting equality would have pinned a falsehood,
+so the two are left as what they honestly are.

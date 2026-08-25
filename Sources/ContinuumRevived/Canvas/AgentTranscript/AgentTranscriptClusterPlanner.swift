@@ -59,6 +59,15 @@ enum AgentTranscriptClusterPlanner {
         let isLive: Bool
         let isExpanded: Bool
         var scope: Scope = .toolCluster
+        /// T3 — the whole turn's semantic row range, for a `.turn` header only.
+        ///
+        /// NOT derivable from `memberIndexes`: a turn header deliberately omits
+        /// the turn-start row (the user prompt stays rendered, because the turn
+        /// separator and the hover "sent at" reveal both key off it) and may omit
+        /// a terminal assistant row. Those two are exactly the endpoints a turn's
+        /// DURATION needs, and every folded member usually belongs to one entry —
+        /// so a span measured over members alone is zero.
+        var turnRange: Range<Int>?
     }
 
     enum Item: Equatable {
@@ -185,7 +194,7 @@ enum AgentTranscriptClusterPlanner {
             let id = headerID(forTurnFirstMember: facts[range.lowerBound].id)
             let header = Header(
                 id: id, memberIndexes: coveredIndexes, isLive: false, isExpanded: isExpanded(id),
-                scope: .turn
+                scope: .turn, turnRange: range
             )
             result.append(leading)
             result.append(.header(header))
