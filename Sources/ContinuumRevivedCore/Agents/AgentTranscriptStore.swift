@@ -289,6 +289,30 @@ public actor AgentTranscriptStore {
         return report
     }
 
+    // MARK: - Archive (C4)
+
+    /// A deleted agent's whole transcript directory (every session under it),
+    /// moved aside rather than removed. Same rule the migration above already
+    /// follows: **a transcript is the user's own record of their work**, and an
+    /// `AgentSupervisor.archive` is a person deleting the AGENT, not asking for
+    /// its history to disappear too. Quarantining beside `migrateLegacySessionDirectories`'s
+    /// own `quarantine-` directories means one cleanup sweep can find both kinds
+    /// later; nothing reads them back today.
+    ///
+    /// Returns `false` (no-op) when the agent has no transcript directory —
+    /// true for a tile-less child that was archived before its first save, and
+    /// harmless if this is ever called twice for the same agent id (a UUID is
+    /// not recycled, so a second call simply finds nothing to move).
+    @discardableResult
+    public func quarantineTranscript(agentID: AgentID) -> Bool {
+        let manager = FileManager.default
+        let source = root.appendingPathComponent(agentID.rawValue.uuidString, isDirectory: true)
+        guard manager.fileExists(atPath: source.path) else { return false }
+        let destination = root.appendingPathComponent(
+            "quarantine-\(agentID.rawValue.uuidString)", isDirectory: true)
+        return (try? manager.moveItem(at: source, to: destination)) != nil
+    }
+
     private static func sessionKey(_ value: String) -> String {
         // FNV-1a keeps provider session text out of filesystem paths while
         // remaining deterministic across launches.

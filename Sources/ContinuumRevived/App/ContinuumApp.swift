@@ -3742,7 +3742,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private lazy var agentSupervisor = AgentSupervisor(
         store: AgentStore(smokeTest: smokeTestEnabled),
         attachmentStore: agentComposerAttachmentStore,
-        submissionRecoveryStore: agentComposerDraftStore
+        submissionRecoveryStore: agentComposerDraftStore,
+        transcriptStore: agentTranscriptStore
     )
     /// Host-local only: drafts are persisted by AgentID and accepted prompt history
     /// remains memory-only. Neither value enters AgentRecord or companion sync.
@@ -3836,7 +3837,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         root: RegistryStore.defaultApplicationSupportDirectory()
             .appendingPathComponent("agent-transcripts", isDirectory: true)
     )
-    private var transcriptPersistenceTasks: [AgentID: Task<Void, Never>] = [:]
     private var localPairingListener: LocalPairingEndpointListener?
     private var companionSyncService: DesktopCompanionSyncService?
     /// Set when the service runs in relay mode (D4-R1); used to register
@@ -11815,24 +11815,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         view.onRevealAgent = { [weak self] childID, _ in
             _ = self?.revealAgentFromInbox(childID.rawValue)
         }
-        view.onSemanticTranscriptUpdated = { [weak self] persistedAgentID, _, document, final in
-            guard let self else { return }
-            // C3: the tile's thread id is a runtime EVENT-ROUTING concept and is
-            // minted fresh on every reveal, so using it as the storage key
-            // orphaned the previous directory each time. Storage names the agent.
-            let sessionID = AgentTranscriptStore.canonicalSessionID(for: persistedAgentID)
-            self.transcriptPersistenceTasks[persistedAgentID]?.cancel()
-            self.transcriptPersistenceTasks[persistedAgentID] = Task { [weak self] in
-                if !final { try? await Task.sleep(for: .milliseconds(200)) }
-                guard !Task.isCancelled, let self else { return }
-                try? await self.agentTranscriptStore.saveSnapshot(
-                    agentID: persistedAgentID,
-                    sessionID: sessionID,
-                    document: document
-                )
-                self.transcriptPersistenceTasks.removeValue(forKey: persistedAgentID)
-            }
-        }
+        // C4: transcript persistence moved to `AgentSupervisor` itself, fed from
+        // the same restamped event stream every consumer sees, so a tile-less
+        // agent (fan-out's common case) is no longer silently unsaved. The tile
+        // is a reader of the agent's stream, same as before; it no longer owns
+        // the write.
         // Replays the agent's history, then follows the tail; re-wiring the same
         // tile to the same agent is a no-op inside `attach`, so none of the three
         // call sites can double-ingest. Project NAME is supplied by the app's
