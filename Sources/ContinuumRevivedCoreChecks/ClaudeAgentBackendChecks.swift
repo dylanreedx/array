@@ -132,6 +132,17 @@ private func runClaudeTranslatorMappingChecks() {
     expect(observedDirectories == ["/private/tmp/SECRET-PATH/claude-probe"],
            "ClaudeEventTranslator: init.cwd must project out of band, got \(observedDirectories)")
 
+    // B7.1 — the same side channel carries claude's own reported session id,
+    // so a later `--fork-session` can be adopted instead of re-derived. The
+    // event's own threadId cannot carry this (the supervisor rebinds it to
+    // the agent's derived id before delivery), hence the observation.
+    let observedProviderSessionIds = observed.compactMap { observation -> String? in
+        guard case let .providerSessionId(value) = observation else { return nil }
+        return value
+    }
+    expect(observedProviderSessionIds == [claudeSID],
+           "ClaudeEventTranslator: system/init's session_id must project out of band as .providerSessionId, got \(observedProviderSessionIds)")
+
     // 5. `.plans/45` S2 — the toolDetail supply. One started+ended pair per
     //    TOP-LEVEL tool in stream order (sub-agent frames still skipped); the
     //    edit start carries the basename only; the result body rides as the

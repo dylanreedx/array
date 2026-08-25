@@ -8872,6 +8872,28 @@ func runAgentRestoreChecks() async throws {
     guard AgentSupervisor.sessionId(for: tiled.id) == "array-agent-\(tiled.id.rawValue.uuidString)" else {
         throw fail("the restored agent's Pi session id is not derived from its id: \(AgentSupervisor.sessionId(for: tiled.id))")
     }
+    // B7.1 — the pure seed functions above must still hold for a FRESH agent
+    // (this is the cheap way that ticket goes wrong: a resolver that shadows
+    // the seed for every agent, not just one that has adopted a real id).
+    // `tiled.providerSessionId` is nil, so both the claude and pi runner
+    // configs must still derive from the agent id exactly as before.
+    guard let tiledRecord = supervisor.records[tiled.id], tiledRecord.providerSessionId == nil else {
+        throw fail("fixture setup drifted: the restored fresh agent already carries a providerSessionId")
+    }
+    guard AgentSupervisor.claudeRunnerConfig(for: tiledRecord).sessionId
+            == AgentSupervisor.claudeSessionId(for: tiled.id),
+          AgentSupervisor.runnerConfig(for: tiledRecord).sessionId
+            == AgentSupervisor.sessionId(for: tiled.id) else {
+        throw fail("a fresh agent's runner configs must still use the derived seed, not a nil providerSessionId")
+    }
+    // And once claude has reported its own id (captured via the
+    // `.providerSessionId` runtime observation, `--fork-session`'s case),
+    // the claude runner config must adopt it instead of re-deriving.
+    var adopted = tiledRecord
+    adopted.providerSessionId = "claude-forked-session-id"
+    guard AgentSupervisor.claudeRunnerConfig(for: adopted).sessionId == "claude-forked-session-id" else {
+        throw fail("the claude runner config did not adopt a stored providerSessionId over the derived seed")
+    }
     // THE REASON THE BOOT WALK NEEDS THIS: the tile finds its own agent instead of
     // spawning a second one over the top of a surviving record.
     guard supervisor.agent(forTile: tileId) == tiled.id else {

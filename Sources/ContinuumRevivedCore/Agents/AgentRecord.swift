@@ -313,6 +313,19 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// MUST branch on) stays put.
     public var codexThreadId: String?
 
+    /// B7.1 — the session id claude itself reported (`system/init`'s
+    /// `session_id`), when it differs from Array's own guess. `sessionId(for:)`/
+    /// `claudeSessionId(for:)` on `AgentSupervisor` derive a seed from the agent
+    /// id and that seed is what a fresh agent still uses (nothing here to
+    /// adopt yet); this field is what a later turn resumes once claude has
+    /// minted an id Array could not predict — `--fork-session` (B7.2) is the
+    /// case that forces this, but any resumed session's own echoed id adopts
+    /// here just as validly. `nil` ⇒ still on the derived seed. Provider-
+    /// neutral name/shape (mirrors `codexThreadId`) since a future harness
+    /// could need the same adoption. Host-bound like everything here; the
+    /// sync boundary never sees an `AgentRecord`.
+    public var providerSessionId: String?
+
     // Ticket: docs/38-tickets/90-agent-ux/P4.1-lifecycle-state.md
     //
     // The four STORED lifecycle facts. Nothing here is derived — the four-case
@@ -576,6 +589,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         tileId: UUID? = nil,
         lastContextWindow: AgentContextWindowSnapshot? = nil,
         codexThreadId: String? = nil,
+        providerSessionId: String? = nil,
         settledOverride: SettledOverride = .default,
         settledAt: Date? = nil,
         snoozedUntil: Date? = nil,
@@ -616,6 +630,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         self.tileId = tileId
         self.lastContextWindow = lastContextWindow
         self.codexThreadId = codexThreadId
+        self.providerSessionId = providerSessionId
         self.settledOverride = settledOverride
         self.settledAt = settledAt
         self.snoozedUntil = snoozedUntil
@@ -725,6 +740,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         case tileId
         case lastContextWindow
         case codexThreadId
+        case providerSessionId
         // P4.1. The three lifecycle dates take reference intervals for exactly
         // the reason above — a settled-at that drifts on reload reorders
         // history.
@@ -816,6 +832,10 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         // Optional, tolerant, no schema bump — the snoozedAt/sourceItemId
         // precedent. A record from before this plan decodes it as absent.
         codexThreadId = try container.decodeIfPresent(String.self, forKey: .codexThreadId)
+        // B7.1. Same optional, tolerant, no-schema-bump convention: a record
+        // from before this ticket decodes it as absent (still on the derived
+        // seed).
+        providerSessionId = try container.decodeIfPresent(String.self, forKey: .providerSessionId)
         // P4.1. Decoded through `SettledOverride(persistedRawValue:)` rather
         // than as the enum directly: a record written by a newer build with a
         // case this one has never heard of must read as `.neutral`, not throw
@@ -880,6 +900,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         try container.encodeIfPresent(tileId, forKey: .tileId)
         try container.encodeIfPresent(lastContextWindow, forKey: .lastContextWindow)
         try container.encodeIfPresent(codexThreadId, forKey: .codexThreadId)
+        try container.encodeIfPresent(providerSessionId, forKey: .providerSessionId)
         // P4.1. `.neutral` is written as ABSENCE, the same way a headless
         // record omits `tileId`: the default is "nobody has said anything", and
         // a stored word saying so is noise that also makes every pre-P4.1

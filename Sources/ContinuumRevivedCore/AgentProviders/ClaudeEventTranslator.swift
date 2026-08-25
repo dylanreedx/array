@@ -91,6 +91,14 @@ public struct ClaudeEventTranslator {
             guard subtype == "init" else { return [] }
             if let id = object["session_id"] as? String {
                 threadId = id
+                // B7.1 — claude's own reported session id, over the host-local
+                // side channel (same shape as codex's `.threadId`, distinct
+                // case: see `AgentRuntimeObservation.providerSessionId`). The
+                // supervisor rebinds every event's threadId to the agent's own
+                // derived id before delivery, so this is the only way the
+                // value captured here survives to be adopted — it matters once
+                // `--fork-session` (B7.2) mints an id Array could not predict.
+                onRuntimeObservation?(.providerSessionId(id))
             }
             if let cwd = object["cwd"] as? String,
                let directory = Self.absoluteDirectory(cwd) {
