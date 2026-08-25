@@ -25,6 +25,18 @@ enum AgentTranscriptClusterPlanner {
         let startsTurn: Bool
         /// The row's top-level node ID (block or reasoning entry).
         let id: AgentNodeID
+        /// A LATER row already says everything this one does.
+        ///
+        /// One claude `Agent` call produces two rows: the tool call, and the
+        /// durable `agentReference` chip that names the child it started. The
+        /// chip carries the child's name, its live status and a way to open it;
+        /// the tool row carries the word "Agent". Rendering both is how a single
+        /// delegation came to occupy two rows and say less in each.
+        ///
+        /// Superseded rows are folded out of the DISPLAY list only. `rows` still
+        /// equals `flatten(document)` and the block stays in the document, so
+        /// nothing is lost — the same contract tool clustering already keeps.
+        var isSuperseded: Bool = false
     }
 
     struct Header: Equatable {
@@ -203,6 +215,7 @@ enum AgentTranscriptClusterPlanner {
 
         var index = 0
         while index < facts.count {
+            if facts[index].isSuperseded { index += 1; continue }
             let fact = facts[index]
             guard fact.isToolRow, !fact.isFailure else {
                 items.append(.row(index))

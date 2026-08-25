@@ -60,6 +60,7 @@ enum TranscriptRhythmChecks {
         try checkLiveDocumentsCarryTimestamps()
         try checkMotionIsPresentationOnly()
         try checkTurnRangesMatchLegacyLastTurnStart()
+        try checkASupersededToolRowIsFoldedOut()
         try checkTurnFolding()
         print(
             "TranscriptRhythmChecks: heading ladder, hanging indents, thematic break, "
@@ -1764,5 +1765,68 @@ extension CGColor {
             Int((c[0] * 255).rounded()), Int((c[1] * 255).rounded()),
             Int((c[2] * 255).rounded()), Int((a * 255).rounded())
         )
+    }
+}
+
+
+extension TranscriptRhythmChecks {
+    /// One delegation is ONE row.
+    ///
+    /// A claude `Agent` call produces two: the tool call, and the durable
+    /// `agentReference` chip naming the child it started. The chip carries the
+    /// child's name, its live status and a way to open it; the tool row carries
+    /// the word "Agent". Both shipped, so a single delegation occupied two rows
+    /// and said less in each — with two subagents that is four rows of almost
+    /// nothing, which is what Dylan saw.
+    ///
+    /// The fold is a DISPLAY projection, so the block stays in the document and
+    /// `rows == flatten(document)` still holds. That is the same contract tool
+    /// clustering keeps, and it is what makes this safe to do at all.
+    static func checkASupersededToolRowIsFoldedOut() throws {
+        func fact(
+            tool: Bool = false, superseded: Bool = false, id: String
+        ) -> AgentTranscriptClusterPlanner.RowFact {
+            AgentTranscriptClusterPlanner.RowFact(
+                isToolRow: tool, isFailure: false, isLive: false, startsTurn: false,
+                id: AgentNodeID(rawValue: id)!, isSuperseded: superseded)
+        }
+        func rowIDs(_ items: [AgentTranscriptClusterPlanner.Item],
+                    _ facts: [AgentTranscriptClusterPlanner.RowFact]) -> [String] {
+            items.compactMap { item in
+                guard case let .row(index) = item else { return nil }
+                return facts[index].id.rawValue
+            }
+        }
+
+        // prose, the Agent tool call, then the chip that supersedes it.
+        let facts = [
+            fact(id: "prose"),
+            fact(tool: true, superseded: true, id: "toolu_agent"),
+            fact(id: "chip")
+        ]
+        let planned = AgentTranscriptClusterPlanner.plan(
+            facts: facts, tailStreaming: false, isExpanded: { _ in false })
+        let displayed = rowIDs(planned, facts)
+        guard !displayed.contains("toolu_agent") else {
+            throw Failure(message: "superseded fold: the Agent tool row is still displayed alongside its chip — one delegation is rendering as two rows")
+        }
+        guard displayed == ["prose", "chip"] else {
+            throw Failure(message: "superseded fold: expected [prose, chip], got \(displayed) — the fold must remove ONLY the superseded row")
+        }
+
+        // And nothing folds when nothing is superseded: without this the check
+        // would pass over a planner that dropped every tool row.
+        let unmarked = [
+            fact(id: "prose"),
+            fact(tool: true, id: "toolu_agent"),
+            fact(id: "chip")
+        ]
+        let untouched = rowIDs(
+            AgentTranscriptClusterPlanner.plan(
+                facts: unmarked, tailStreaming: false, isExpanded: { _ in false }),
+            unmarked)
+        guard untouched == ["prose", "toolu_agent", "chip"] else {
+            throw Failure(message: "superseded fold: an unsuperseded tool row was folded anyway, got \(untouched)")
+        }
     }
 }

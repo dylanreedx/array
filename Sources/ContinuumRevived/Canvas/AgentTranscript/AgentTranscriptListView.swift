@@ -253,6 +253,11 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// The planner inputs the last plan was built from, kept so a content-only
     /// delta can patch the two slots it touched instead of walking the history.
     private var cachedRowFacts: [AgentTranscriptClusterPlanner.RowFact] = []
+    /// Block IDs a later `agentReference` chip already speaks for — the `Agent`
+    /// tool call that started the child. Recomputed on a full rebuild and patched
+    /// alongside the row dictionary, so it costs the changed set on a delta.
+    /// Chips are rare, so this stays a handful of entries even at fan-out scale.
+    private var supersededRowIDs: Set<AgentNodeID> = []
     /// The tail-streaming flag the cached plan was built under. A flip is a
     /// projection input, so a patch that finds it changed must replan.
     private var lastPlannedTailStreaming: Bool?
@@ -2243,8 +2248,17 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             isFailure: isFailure,
             isLive: isLive,
             startsTurn: Self.startsTurn(rows, at: index),
-            id: row.id
+            id: row.id,
+            isSuperseded: supersededRowIDs.contains(row.id)
         )
+    }
+
+    /// The tool call a chip supersedes, if this row is a chip naming one.
+    private static func supersededID(of row: Row) -> AgentNodeID? {
+        guard let block = row.block, case let .agentReference(payload) = block.payload,
+              let source = payload.sourceItemID, !source.isEmpty
+        else { return nil }
+        return AgentNodeID(rawValue: source)
     }
 
     /// Patches the projection for a content-only delta instead of rebuilding it.
@@ -2276,6 +2290,15 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             slots.insert(slot)
             if rows.indices.contains(slot + 1) { slots.insert(slot + 1) }
         }
+        // A rebuilt row can BECOME a chip, which supersedes an earlier row that
+        // is not itself in the changed set — so the affected slot has to join it.
+        for id in changedRowIDs {
+            guard let row = rowsByID[id], let superseded = Self.supersededID(of: row),
+                  supersededRowIDs.insert(superseded).inserted,
+                  let slot = rowPositions[superseded]?.slot, rows.indices.contains(slot)
+            else { continue }
+            slots.insert(slot)
+        }
         var factsChanged = false
         for slot in slots {
             let fact = rowFact(at: slot)
@@ -2293,6 +2316,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// flip and a fold toggle.
     private func rebuildDisplayProjection() {
         recordHistoryScan("cluster projection")
+        supersededRowIDs = Set(rows.compactMap(Self.supersededID))
         cachedRowFacts = rows.indices.map { rowFact(at: $0) }
         replanDisplayProjection()
     }

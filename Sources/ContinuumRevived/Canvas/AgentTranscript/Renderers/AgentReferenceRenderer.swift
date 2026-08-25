@@ -51,7 +51,10 @@ final class AgentReferenceRenderer: AgentBlockRendering {
 
 @MainActor
 final class AgentReferenceChipView: NSButton {
-    static let height = CGFloat(38)
+    /// The transcript's action-first row height, shared with every tool row.
+    /// A subagent milestone is one line about work that happened elsewhere, so
+    /// it sits in the same rhythm rather than in a taller card of its own.
+    static let height = CGFloat(28)
     private var blockID: AgentNodeID?
     private var payload: AgentReferencePayload?
     private var renderContext = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
@@ -74,7 +77,6 @@ final class AgentReferenceChipView: NSButton {
         font = NSFont.token(.label)
         focusRingType = .exterior
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(AgentTileRadius.artifact)
         setAccessibilityRole(.button)
     }
 
@@ -92,8 +94,7 @@ final class AgentReferenceChipView: NSButton {
         self.blockID = blockID
         self.payload = payload
         renderContext = context
-        title = Self.safeName(payload.displayNameAtSpawn)
-        toolTip = "Open subagent \(title)"
+        toolTip = "Open subagent \(Self.safeName(payload.displayNameAtSpawn))"
         identifier = NSUserInterfaceItemIdentifier("agent.reference.\(payload.agentID.uuidString)")
         // A reused host (virtualization) or a rebuilt context both mean the
         // OLD subscription may be watching the wrong agent or calling back
@@ -130,12 +131,39 @@ final class AgentReferenceChipView: NSButton {
 
     private func applyTokens() {
         let theme = effectiveTokenTheme
-        layer?.backgroundColor = renderContext.tokens.artifactSurface.color.cgColor(for: theme)
-        if let accent = currentInboxState?.accent {
-            contentTintColor = accent.color.nsColor(for: theme)
-        } else {
-            contentTintColor = renderContext.tokens.secondaryText.color.nsColor(for: theme)
-        }
+        // NO FILL. This was a filled `artifactSurface` slab spanning the whole row
+        // — the one card left in a transcript that had already moved to unfilled
+        // action-first rows, which is exactly why it read as a grey banner with an
+        // id in it. The row is now the same shape as every tool row: a glyph, what
+        // happened, and the state at the end.
+        layer?.backgroundColor = nil
+        let accent = currentInboxState?.accent
+        contentTintColor = (accent?.color ?? renderContext.tokens.secondaryText.color)
+            .nsColor(for: theme)
+        attributedTitle = composedTitle(theme: theme)
+    }
+
+    /// `Name · Working` — the name in primary text, the live state trailing it in
+    /// secondary. Status is COMPOSED here rather than stored, so it still never
+    /// touches the document; and it is rendered as TEXT rather than only as a
+    /// tint, because a colour alone told the reader nothing about what the child
+    /// was doing.
+    private func composedTitle(theme: TokenTheme) -> NSAttributedString {
+        let name = Self.safeName(payload?.displayNameAtSpawn ?? "")
+        let composed = NSMutableAttributedString(
+            string: name,
+            attributes: [
+                .font: NSFont.token(.label),
+                .foregroundColor: renderContext.tokens.primaryText.color.nsColor(for: theme)
+            ])
+        guard let label = currentInboxState?.label, !label.isEmpty else { return composed }
+        composed.append(NSAttributedString(
+            string: "  ·  \(label)",
+            attributes: [
+                .font: NSFont.token(.label),
+                .foregroundColor: renderContext.tokens.secondaryText.color.nsColor(for: theme)
+            ]))
+        return composed
     }
 
     func refreshAccessibilityLabel() {
