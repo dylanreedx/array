@@ -2300,9 +2300,21 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     private func replanDisplayProjection() {
         lastPlannedTailStreaming = turnIsInFlight
         let facts = cachedRowFacts
-        displayItems = AgentTranscriptClusterPlanner.plan(
+        let clusteredItems = AgentTranscriptClusterPlanner.plan(
             facts: facts,
             tailStreaming: turnIsInFlight,
+            isExpanded: { [disclosureStateStore, disclosureOwnerID] id in
+                disclosureStateStore.explicitState(
+                    for: ToolDisclosureKey(agentID: disclosureOwnerID, blockID: id)) ?? false
+            }
+        )
+        // A4.2 — a second pass, at TURN granularity, over the same [Item] list:
+        // folds an entire completed turn under one "Worked for …" header,
+        // preserving its terminal answer row. Never touches `rows`.
+        displayItems = AgentTranscriptClusterPlanner.foldTurns(
+            items: clusteredItems,
+            facts: facts,
+            turnRanges: AgentTranscriptClusterPlanner.turnRanges(facts: facts),
             isExpanded: { [disclosureStateStore, disclosureOwnerID] id in
                 disclosureStateStore.explicitState(
                     for: ToolDisclosureKey(agentID: disclosureOwnerID, blockID: id)) ?? false
@@ -2400,6 +2412,14 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 knowsAnyDuration = true
             }
         }
+        if header.scope == .turn {
+            let toolCount = nounCounts.values.reduce(0, +)
+            var summary = "Worked"
+            if knowsAnyDuration { summary += " for \(Self.formatWorkedDuration(totalDuration))" }
+            if toolCount > 0 { summary += " · \(toolCount) tool\(toolCount == 1 ? "" : "s")" }
+            return summary
+        }
+
         let count = header.memberIndexes.count
         var parts = ["\(count) step\(count == 1 ? "" : "s")"]
         let buckets = nounOrder.map { noun -> String in
@@ -2418,6 +2438,17 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         var summary = parts.joined(separator: " · ")
         if allCompleted { summary += " ✓" }
         return summary
+    }
+
+    /// "1m 12s" past a minute, "12s" under one — the turn-fold header's
+    /// duration clause. Distinct from the tool-cluster clause above, which
+    /// stays sub-minute-oriented ("12.4s") because a single fold rarely
+    /// crosses a minute; a whole turn often does.
+    static func formatWorkedDuration(_ duration: TimeInterval) -> String {
+        let totalSeconds = Int(duration.rounded())
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
+        return minutes > 0 ? "\(minutes)m \(seconds)s" : "\(seconds)s"
     }
 
     static func clusterNoun(forToolNamed name: String?) -> String {

@@ -28,6 +28,16 @@ enum AgentTranscriptClusterPlanner {
     }
 
     struct Header: Equatable {
+        /// A4.2 — distinguishes a `plan()` tool-cluster header ("6 steps ·
+        /// 5 searches, 1 fetch · 12.4s ✓") from a `foldTurns()` whole-turn
+        /// header ("Worked for 1m 12s · 8 tools"). The two share every other
+        /// mechanism (fixed height, disclosure toggle, snapshot coverage) —
+        /// only the summary text formatting branches on this.
+        enum Scope: Equatable {
+            case toolCluster
+            case turn
+        }
+
         /// Stable while members append: derived from the FIRST member's ID, so
         /// the snapshot keeps the header instance and only member IDs churn.
         let id: AgentNodeID
@@ -36,6 +46,7 @@ enum AgentTranscriptClusterPlanner {
         let memberIndexes: [Int]
         let isLive: Bool
         let isExpanded: Bool
+        var scope: Scope = .toolCluster
     }
 
     enum Item: Equatable {
@@ -71,6 +82,109 @@ enum AgentTranscriptClusterPlanner {
         }
         ranges.append(start..<facts.count)
         return ranges
+    }
+
+    static func headerID(forTurnFirstMember id: AgentNodeID) -> AgentNodeID {
+        AgentNodeID(rawValue: "__turn__\(id.rawValue)") ?? id
+    }
+
+    /// A4.2 — a SECOND pass over the `[Item]` list `plan()` already produced,
+    /// folding an entire completed turn (everything but its terminal answer
+    /// row) under one header, so a long-settled turn reads as one line instead
+    /// of the whole exchange. This does not touch `rows == flatten(document)`
+    /// either — same discipline as `plan()`, one layer up.
+    ///
+    /// Eligibility, deliberately narrow:
+    /// - Only turns before the LAST one fold — the last turn is what the
+    ///   reader is following now, streaming or not; `plan()` already gives the
+    ///   same treatment to its tool runs via `tailStreaming`.
+    /// - A turn containing any `isFailure` row never folds — `isFailure`
+    ///   already covers `.interrupted`/`.cancelled`, so an interrupted turn
+    ///   is naturally left fully visible rather than needing a separate
+    ///   auto-expand rule.
+    /// - The terminal item (the turn's last `.row`, when it is not a tool
+    ///   row) is preserved OUTSIDE the fold so a folded turn still shows its
+    ///   answer — it is excluded from `memberIndexes` for exactly this
+    ///   reason: `AgentTranscriptListView.qaClusterProjectionMismatch`
+    ///   requires every row be either displayed or covered, never both.
+    /// - Folding fewer than 2 rows away is not worth a header — mirrors
+    ///   `plan()`'s "runs of 1 never cluster".
+    static func foldTurns(
+        items: [Item],
+        facts: [RowFact],
+        turnRanges: [Range<Int>],
+        isExpanded: (AgentNodeID) -> Bool
+    ) -> [Item] {
+        guard turnRanges.count > 1 else { return items }
+        let foldableRanges = turnRanges.dropLast()
+
+        func representativeRow(_ item: Item) -> Int {
+            switch item {
+            case let .row(index): return index
+            case let .header(header): return header.memberIndexes.first ?? 0
+            }
+        }
+
+        var result: [Item] = []
+        result.reserveCapacity(items.count)
+        var itemIndex = 0
+        for range in foldableRanges {
+            let sliceStart = itemIndex
+            while itemIndex < items.count, range.contains(representativeRow(items[itemIndex])) {
+                itemIndex += 1
+            }
+            let slice = items[sliceStart..<itemIndex]
+            // The turn-start row (the user prompt) is left in place, always —
+            // `AgentTranscriptListView`'s turn separator and hover "sent at"
+            // reveal both key off it being a plain, rendered `.row`
+            // (`qaTurnStartPointForChecks`). Folding begins after it.
+            guard let leading = slice.first, slice.count > 2,
+                  !range.contains(where: { facts[$0].isFailure })
+            else {
+                result.append(contentsOf: slice)
+                continue
+            }
+            let middle = slice.dropFirst()
+
+            var terminalItem: Item?
+            if case let .row(row)? = middle.last, !facts[row].isToolRow {
+                terminalItem = middle.last
+            }
+            let terminalRow: Int? = {
+                if case let .row(row)? = terminalItem { return row }
+                return nil
+            }()
+            let coveredIndexes = (terminalRow.map { terminal in
+                range.filter { $0 != range.lowerBound && $0 != terminal }
+            } ?? range.filter { $0 != range.lowerBound })
+            // Threshold 3 tool rows, not 2 (mirrors `plan()`'s live-run
+            // threshold, `.plans/45` 2026-08-24). A turn with one or two tool
+            // calls reads fine in full; the fold earns its keep only once a
+            // turn's middle is long enough that "Worked for …" is a genuine
+            // compression, not a trade of three visible rows for one. This
+            // floor is also what keeps every pre-existing rhythm fixture
+            // (`.turnBoundary`'s three one-tool-call turns among them)
+            // untouched by this pass — none of them clears it.
+            guard coveredIndexes.filter({ facts[$0].isToolRow }).count >= 3 else {
+                result.append(contentsOf: slice)
+                continue
+            }
+
+            let id = headerID(forTurnFirstMember: facts[range.lowerBound].id)
+            let header = Header(
+                id: id, memberIndexes: coveredIndexes, isLive: false, isExpanded: isExpanded(id),
+                scope: .turn
+            )
+            result.append(leading)
+            result.append(.header(header))
+            if isExpanded(id) {
+                result.append(contentsOf: middle)
+            } else if let terminalItem {
+                result.append(terminalItem)
+            }
+        }
+        result.append(contentsOf: items[itemIndex...])
+        return result
     }
 
     /// - Parameters:

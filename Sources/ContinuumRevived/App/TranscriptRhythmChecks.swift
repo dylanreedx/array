@@ -60,6 +60,7 @@ enum TranscriptRhythmChecks {
         try checkLiveDocumentsCarryTimestamps()
         try checkMotionIsPresentationOnly()
         try checkTurnRangesMatchLegacyLastTurnStart()
+        try checkTurnFolding()
         print(
             "TranscriptRhythmChecks: heading ladder, hanging indents, thematic break, "
             + "turn separation, error/notice divergence, table structure, surface fills, "
@@ -1436,6 +1437,171 @@ enum TranscriptRhythmChecks {
                 + "\(String(describing: animation.toValue)); it must end on the value the model "
                 + "already holds"
             )
+        }
+    }
+
+    // MARK: - A4.2 turn folding
+
+    /// A4.2 — a completed turn with a genuinely long tail of tool work folds
+    /// under one "Worked for … · N tools" header, while the turn's own
+    /// opening prompt and closing answer stay put as ordinary rows. Drives
+    /// the REAL production entry point (`AgentTranscriptListView.apply`)
+    /// with a hand-built two-turn document — deliberately not routed through
+    /// `ComponentLab`'s `AgentTranscriptReviewState` enum, since every case
+    /// there is also a `--ui-pixel-check` / `--ui-baseline-check` fixture and
+    /// this feature must not grow either gate a new baseline this leg cannot
+    /// bless.
+    private static func checkTurnFolding() throws {
+        func id(_ suffix: String) -> AgentNodeID { AgentNodeID(rawValue: "turnfold-\(suffix)")! }
+        func paragraph(_ suffix: String, _ text: String) -> AgentBlock {
+            AgentBlock(id: id(suffix), revision: 1, kind: .paragraph, payload: .paragraph([.text(text)]))
+        }
+        func tool(_ suffix: String, name: String) -> AgentBlock {
+            AgentBlock(
+                id: id(suffix), revision: 1, kind: .toolCall,
+                payload: .toolCall(.init(name: name, summary: "done", status: .completed))
+            )
+        }
+        func entry(_ suffix: String, role: AgentEntryRole, blocks: [AgentBlock]) -> AgentEntry {
+            AgentEntry(
+                id: id("entry-\(suffix)"), revision: 1, role: role,
+                provenance: role == .user
+                    ? .localPrompt(promptID: "turnfold")
+                    : .providerItem(provider: "fixture", itemID: suffix),
+                lifecycle: .finished, blocks: blocks
+            )
+        }
+        let longTurn: [AgentEntry] = [
+            entry("u1", role: .user, blocks: [paragraph("u1-t", "Investigate the slow query.")]),
+            entry("a1", role: .assistant, blocks: [
+                tool("t1", name: "Read file"),
+                tool("t2", name: "Grep codebase"),
+                tool("t3", name: "Run tests"),
+                tool("t4", name: "Read file"),
+                paragraph("a1-t", "Found it — a missing index on the join column."),
+            ]),
+        ]
+        let currentTurn: [AgentEntry] = [
+            entry("u2", role: .user, blocks: [paragraph("u2-t", "Add the index.")]),
+            entry("a2", role: .assistant, blocks: [paragraph("a2-t", "Added.")]),
+        ]
+        let document = AgentDocument(version: 1, entries: longTurn + currentTurn)
+        let list = AgentTranscriptListView()
+        // Mirrors `AgentTranscriptReviewSurface.init` exactly (a real, if
+        // borderless, window; frame set and an initial layout pass BEFORE
+        // `apply`; a second layout pass after) — a bare, windowless NSView
+        // never resolves the scroll view's AutoLayout constraints, so the
+        // collection view materializes no item views at all.
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 720),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        let host = NSView(frame: window.contentRect(forFrameRect: window.frame))
+        host.addSubview(list)
+        window.contentView = host
+        list.frame = host.bounds
+        list.layoutSubtreeIfNeeded()
+        try list.apply(
+            document: document,
+            patch: AgentDocumentPatch(
+                fromVersion: 0, toVersion: document.version,
+                inserted: document.entries.flatMap(\.blocks).map(\.id)
+            )
+        )
+        list.layout()
+        list.collectionView.layout()
+        func descendants(in view: NSView) -> [NSView] {
+            [view] + view.subviews.flatMap(descendants)
+        }
+
+        if let mismatch = list.qaClusterProjectionMismatch() {
+            throw fail("turn folding: projection/snapshot mismatch: \(mismatch)")
+        }
+        let headerIDs = list.qaClusterHeaderIDsForChecks
+        guard headerIDs.count == 1, let headerID = headerIDs.first else {
+            throw fail(
+                "turn folding: expected the long completed turn to fold under ONE header, got "
+                + "\(headerIDs.count)"
+            )
+        }
+        // The turn's own prompt stays a plain, findable row — the turn
+        // separator and hover reveal both key off it.
+        guard list.qaTurnStartPointForChecks(entryID: id("entry-u1")) != nil else {
+            throw fail("turn folding: the folded turn's own opening prompt lost its turn-start row")
+        }
+        let allViews = descendants(in: list)
+        let headers = allViews.compactMap { $0 as? AgentToolClusterHeaderView }
+        guard let header = headers.first(where: { $0.clusterID == headerID }) else {
+            throw fail("turn folding: the header item never rendered")
+        }
+        guard header.summaryLabel.stringValue.hasPrefix("Worked"),
+              header.summaryLabel.stringValue.contains("4 tools") else {
+            throw fail(
+                "turn folding: the folded line must read 'Worked ... 4 tools', got "
+                + "'\(header.summaryLabel.stringValue)'"
+            )
+        }
+        // The terminal answer survives the fold, unfolded, right after the header.
+        let proseTexts = textViews(allViews).map(\.string)
+        guard proseTexts.contains(where: { $0.contains("missing index") }) else {
+            throw fail("turn folding: the folded turn's terminal answer is not visible")
+        }
+        let collapsedSnapshotCount = list.qaSnapshotItemCountForChecks
+        list.qaToggleClusterForChecks(headerID)
+        list.layoutSubtreeIfNeeded()
+        if let mismatch = list.qaClusterProjectionMismatch() {
+            throw fail("turn folding: projection/snapshot mismatch after expand: \(mismatch)")
+        }
+        // Expanding restores what `plan()`'s OWN tool-cluster fold already made
+        // of the 4 tool rows (S4.3 folds a settled run of >= 2 to one header
+        // BEFORE `foldTurns` ever sees the item list) — one more item, that
+        // nested header, not four raw rows. The turn fold layers on `plan()`'s
+        // output; it does not unfold it.
+        guard list.qaSnapshotItemCountForChecks == collapsedSnapshotCount + 1 else {
+            throw fail(
+                "turn folding: expanding must restore the nested tool-cluster header, went "
+                + "\(collapsedSnapshotCount) -> \(list.qaSnapshotItemCountForChecks)"
+            )
+        }
+        list.qaToggleClusterForChecks(headerID)
+        list.layoutSubtreeIfNeeded()
+        guard list.qaSnapshotItemCountForChecks == collapsedSnapshotCount else {
+            throw fail("turn folding: collapsing did not restore the folded snapshot")
+        }
+        guard list.qaSemanticRowCount == 8 else {
+            throw fail("turn folding: the semantic row count changed — the projection leaked into rows")
+        }
+
+        // A turn with a failed tool call never folds, however long.
+        func failedTool(_ suffix: String, name: String) -> AgentBlock {
+            AgentBlock(
+                id: id(suffix), revision: 1, kind: .toolCall,
+                payload: .toolCall(.init(name: name, summary: "failed", status: .failed))
+            )
+        }
+        let failingTurn: [AgentEntry] = [
+            entry("fu1", role: .user, blocks: [paragraph("fu1-t", "Try the migration.")]),
+            entry("fa1", role: .assistant, blocks: [
+                tool("ft1", name: "Read file"), tool("ft2", name: "Read file"),
+                failedTool("ft3", name: "Run migration"),
+                paragraph("fa1-t", "That failed — here is why."),
+            ]),
+        ]
+        let failingDocument = AgentDocument(version: 1, entries: failingTurn + currentTurn)
+        let failingList = AgentTranscriptListView()
+        try failingList.apply(
+            document: failingDocument,
+            patch: AgentDocumentPatch(
+                fromVersion: 0, toVersion: failingDocument.version,
+                inserted: failingDocument.entries.flatMap(\.blocks).map(\.id)
+            )
+        )
+        // The two settled tool rows before the failure still cluster under
+        // plan()'s OWN S4.3 rule (unrelated to turn folding) — what must be
+        // absent is specifically a TURN-scoped header.
+        guard !failingList.qaClusterHeaderIDsForChecks.contains(where: { $0.rawValue.hasPrefix("__turn__") })
+        else {
+            throw fail("turn folding: a turn containing a failed tool call must never fold")
         }
     }
 
