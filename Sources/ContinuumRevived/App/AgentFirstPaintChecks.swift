@@ -36,6 +36,7 @@ enum AgentFirstPaintChecks {
     private final class OrderRecordingSink: AgentTileActionSink {
         private(set) var acceptEntered = false
         private(set) var events: [String] = []
+        private(set) var receivedIntents: [AgentComposerIntent] = []
         private let acceptance: IntentAcceptance
         private let hold: (@MainActor () async -> Void)?
 
@@ -48,6 +49,7 @@ enum AgentFirstPaintChecks {
 
         func accept(_ intent: AgentComposerIntent, for agentID: AgentID) async -> IntentAcceptance {
             acceptEntered = true
+            receivedIntents.append(intent)
             events.append("accept-entered")
             await hold?()
             events.append("accept-returned")
@@ -62,7 +64,8 @@ enum AgentFirstPaintChecks {
         try checkOptimisticWindowSurvivesSynchronize()
         try checkSettledTailStatus()
         try checkReplyOptionsReachTheComposer()
-        print("ContinuumRevivedAgentFirstPaintChecks passed: the prompt echo precedes the action sink, acceptance and refusal both resolve the latch, the spawn window carries a state, a word, and a clock, the optimistic indicator survives synchronize, and settled turns read their duration")
+        try checkAttachmentMidTurnUsesWorkingDraftIntent()
+        print("ContinuumRevivedAgentFirstPaintChecks passed: the prompt echo precedes the action sink, acceptance and refusal both resolve the latch, the spawn window carries a state, a word, and a clock, the optimistic indicator survives synchronize, settled turns read their duration, and a mid-turn attachment resolves honestly instead of forcing sendPrompt")
     }
 
     /// `.plans/45` S6 (C4). `beginOptimisticSubmission` turns the indicator on
@@ -275,6 +278,52 @@ enum AgentFirstPaintChecks {
         }
         guard composer.textView.string == "this will be refused" else {
             throw fail("first-paint: a refused submission lost the user's draft (\(composer.textView.string))")
+        }
+    }
+
+    /// `.plans/45` fix 1: an attachment used to force `.sendPrompt` regardless of
+    /// `executionState`, so attaching a file mid-turn was refused as
+    /// `.turnNotReady` and the optimistic bubble rolled back — silently losing
+    /// the message. The intent must be computed honestly (working-draft
+    /// steer/queue) instead of overridden by the presence of an attachment.
+    @MainActor
+    private static func checkAttachmentMidTurnUsesWorkingDraftIntent() throws {
+        let composer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 320, height: 80))
+        composer.apply(.init(text: "steer this turn", selection: NSRange(location: 16, length: 0), revision: 1))
+
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("first-paint-attachment-\(UUID().uuidString).txt")
+        FileManager.default.createFile(atPath: tempURL.path, contents: Data("hi".utf8))
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        composer.qaAddFileReferenceForChecks(AgentPromptFileReference(
+            displayName: "note.txt", contentType: "text/plain", fileURL: tempURL
+        ))
+
+        let sink = OrderRecordingSink(.accepted)
+        composer.bindActionSink(sink, agentID: AgentID(rawValue: UUID()), snapshot: .init(
+            state: .working,
+            capabilities: AgentTurnCapabilities(canSend: false, canStop: true, canSteer: true, canQueue: false),
+            turnStartedAt: Date()
+        ))
+
+        composer.composerRequestedSend(composer.textView)
+
+        let deadline = Date().addingTimeInterval(2)
+        while sink.receivedIntents.isEmpty && Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        guard let intent = sink.receivedIntents.first else {
+            throw fail("attachment mid-turn: composerRequestedSend produced no intent at all — an attachment must still route to the sink while a turn is working")
+        }
+        guard case let .steer(prompt) = intent else {
+            throw fail(
+                "attachment mid-turn: expected the working-draft intent (.steer), got \(intent) — "
+                + "an attachment forced .sendPrompt while a turn was running, which the supervisor "
+                + "refuses as .turnNotReady and rolls back the optimistic bubble"
+            )
+        }
+        guard prompt.text == "steer this turn", prompt.fileReferences.count == 1 else {
+            throw fail("attachment mid-turn: the resolved steer intent lost the draft text or the attachment")
         }
     }
 

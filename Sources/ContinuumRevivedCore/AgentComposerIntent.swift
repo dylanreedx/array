@@ -13,8 +13,8 @@ public enum AgentComposerIntent: Equatable, Sendable {
     /// itself grows an attachment surface.
     case sendPrompt(AgentPrompt)
     case stop
-    case steer(String)
-    case queue(String)
+    case steer(AgentPrompt)
+    case queue(AgentPrompt)
     case command(String)
     /// A completion-selected provider or harness command. The invocation stays
     /// typed until the supervisor/adapter serializes it for the active runtime.
@@ -236,8 +236,15 @@ public struct AgentComposerIntentState: Equatable, Sendable {
     /// when both future capabilities are present; queue remains independently
     /// discoverable through `allowedWorkingDraftIntents`.
     public func workingDraftIntent(draft: String) -> AgentComposerIntent? {
+        workingDraftIntent(prompt: AgentPrompt(Self.normalized(draft)))
+    }
+
+    /// Attachment-carrying counterpart of `workingDraftIntent(draft:)`. A
+    /// mid-turn attachment must route through the same honest resolution as
+    /// text alone rather than being forced to `.sendPrompt` — see the composer's
+    /// `composerRequestedSend`.
+    public func workingDraftIntent(prompt: AgentPrompt) -> AgentComposerIntent? {
         guard executionState == .working else { return nil }
-        let prompt = Self.normalized(draft)
         guard !prompt.isEmpty else { return nil }
         if capabilities.canSteer { return .steer(prompt) }
         if capabilities.canQueue { return .queue(prompt) }

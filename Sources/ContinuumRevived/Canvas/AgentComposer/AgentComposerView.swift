@@ -623,11 +623,22 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
             )
             let intent: AgentComposerIntent?
             if !importedAttachments.isEmpty || !importedFileReferences.isEmpty {
-                intent = .sendPrompt(AgentPrompt(
+                let attachedPrompt = AgentPrompt(
                     text: prompt,
                     imageAttachments: importedAttachments,
                     fileReferences: importedFileReferences
-                ))
+                )
+                switch snapshot.executionState {
+                case .ready:
+                    intent = .sendPrompt(attachedPrompt)
+                case .working:
+                    // Honest resolution, not a forced send: a mid-turn attachment
+                    // must go through the same steer/queue gate as text alone, or
+                    // be refused, rather than blindly retrying `.sendPrompt` while
+                    // a turn is running (which the supervisor refuses as
+                    // `.turnNotReady`, rolling back the optimistic bubble).
+                    intent = resolver.workingDraftIntent(prompt: attachedPrompt)
+                }
             } else {
                 intent = snapshot.executionState == .working
                     ? resolver.workingDraftIntent(draft: prompt)
@@ -1277,6 +1288,13 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
 
     func qaImportFileReferences(from pasteboard: NSPasteboard) {
         importFileReferences(ComposerFileReferencePasteboardDecoder.decodedReferences(from: pasteboard))
+    }
+
+    /// Test-only attachment injection that skips the pasteboard decode path —
+    /// used to drive the mid-turn attachment intent witness without a real drag
+    /// or paste.
+    func qaAddFileReferenceForChecks(_ reference: AgentPromptFileReference) {
+        addFileReferences([reference])
     }
 
     func qaRemoveFileReference(at index: Int) {

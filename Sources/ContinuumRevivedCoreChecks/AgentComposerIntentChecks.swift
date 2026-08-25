@@ -9,7 +9,7 @@ func runAgentComposerIntentNegativeWitness() {
     // Deliberately demand the forbidden result from the compiled Core resolver.
     // The parent check requires this exact assertion to be observed red.
     expect(
-        state.workingDraftIntent(draft: "not logged") == .steer("not logged"),
+        state.workingDraftIntent(draft: "not logged") == .steer(AgentPrompt("not logged")),
         "agent composer intent negative witness: working without an explicit RPC advertised Steer"
     )
 }
@@ -51,9 +51,9 @@ func runAgentComposerIntentChecks() throws {
                 if executionState != .working || !hasDraft {
                     expectedWorkingDraft = nil
                 } else if capabilities.canSteer {
-                    expectedWorkingDraft = .steer("next turn")
+                    expectedWorkingDraft = .steer(AgentPrompt("next turn"))
                 } else if capabilities.canQueue {
-                    expectedWorkingDraft = .queue("next turn")
+                    expectedWorkingDraft = .queue(AgentPrompt("next turn"))
                 } else {
                     expectedWorkingDraft = nil
                 }
