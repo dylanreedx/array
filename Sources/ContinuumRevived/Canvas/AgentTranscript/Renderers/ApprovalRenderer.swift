@@ -24,8 +24,13 @@ final class ApprovalRenderer: AgentBlockRendering {
     }
 }
 
+/// A6 (`.plans/45`) — the approval/question dock always fills itself with
+/// `AgentSurfaceRole.artifact` in `applyTokens()` (no resting-nil branch: an
+/// open request is always an artifact surface), so it is a real conformer,
+/// not a decoration exemption. Swept on `appearance.managedAgentTile` via
+/// the fixture's default `includeApproval: true`.
 @MainActor
-final class AgentRequestView: NSView {
+final class AgentRequestView: NSView, TokenThemed {
     enum Mode { case approval, question }
 
     static let headerHeight = CGFloat(Space.xxl + Space.l)

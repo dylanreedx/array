@@ -220,8 +220,16 @@ enum UIProbeAppearance {
     /// card fill was removed), adding itself plus its `.rule` slot everywhere
     /// the fixture renders a user turn. Re-floored AT the measured run's own
     /// numbers, per the same convention as above — not guessed.
-    private static let minimumThemedViews = 196
-    private static let minimumSentineledSlots = 175
+    ///
+    /// 196 / 175 → 198 / 177 (A6, 2026-08-24). `AgentRequestView` became a
+    /// `TokenThemed` conformer (its one fill, `AgentSurfaceRole.artifact`, is
+    /// painted unconditionally in `applyTokens()`). +2/+2, not +1/+1: this
+    /// sweep's own surface opens a user-input request (`Mode.question`)
+    /// ALONGSIDE the fixture's approval-1 request (`Mode.approval`) — both
+    /// instances of the one class. Re-floored AT the measured run's own
+    /// numbers.
+    private static let minimumThemedViews = 198
+    private static let minimumSentineledSlots = 177
 
     /// P1.10: the tile paints three plain `NSView` container fills, which
     /// `ownedLayers(of:)` cannot attribute to it (a view never answers for a
@@ -896,7 +904,12 @@ enum UIProbeAppearance {
         // view painted in `init` whether or not it is on screen. So the fill and the
         // outline are held to the palette from the first frame; the WORDS on it are
         // covered by section K of `--agent-inbox-check` rather than by a pixel.
-        "InboxUndoToast"
+        "InboxUndoToast",
+        // A6 (`.plans/45`): the approval/question dock's one fill,
+        // `AgentSurfaceRole.artifact`, painted unconditionally in
+        // `applyTokens()` — an open request is always an artifact surface,
+        // never a resting-nil state.
+        "AgentRequestView"
     ]
 
     /// Still painting literals, each with the ticket that retires them.
@@ -980,6 +993,11 @@ enum UIProbeAppearance {
             values.insert(hex(AgentSurfaceRole.composer.color.cgColor(for: theme)))
             values.insert(hex(AccentToken.accentInput.color.cgColor(for: theme)))
             values.insert(hex(AccentToken.accentFailed.color.cgColor(for: theme)))
+        case "AgentRequestView":
+            // A6: the dock's sole fill is the `artifact` role — distinct from
+            // the `SurfaceToken` family `legalValues(for:)` already admits,
+            // so it needs the same owner-scoped admission as the roles above.
+            values.insert(hex(AgentSurfaceRole.artifact.color.cgColor(for: theme)))
         case "AgentInboxCardView":
             // 94/P1.2: the sidebar's interaction ladder, owner-scoped exactly like
             // the roles above. The THREE emphases only — `resting` is deliberately
