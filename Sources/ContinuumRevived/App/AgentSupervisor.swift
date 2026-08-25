@@ -1158,7 +1158,22 @@ final class AgentSupervisor {
     /// is authoritative once `--fork-session` (B7.2) has minted an id Array
     /// could not have predicted.
     nonisolated static func claudeRunnerConfig(for record: AgentRecord) -> ClaudeAgentRunner.Config {
-        ClaudeAgentRunner.Config(
+        // B7.2 — a pending `/clear` rotation overrides the normal sessionId
+        // choice entirely: this ONE launch resumes-and-forks the OLD session
+        // (`record.pendingSessionForkFrom`) instead of continuing on
+        // `providerSessionId`/the derived seed. `AgentSupervisor
+        // .ingestRuntimeObservation` clears the pending marker the moment the
+        // forked id comes back and is adopted into `providerSessionId`.
+        if let forkFrom = record.pendingSessionForkFrom {
+            return ClaudeAgentRunner.Config(
+                model: ClaudeCLIBackend.modelArgument(forCatalogId: record.model),
+                effort: ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
+                cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
+                sessionId: forkFrom,
+                forkSession: true
+            )
+        }
+        return ClaudeAgentRunner.Config(
             model: ClaudeCLIBackend.modelArgument(forCatalogId: record.model),
             effort: ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
             cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
@@ -1315,9 +1330,14 @@ final class AgentSupervisor {
         // inequality guard as `.threadId` above (a no-op when `system/init`
         // re-echoes the id a normal, non-forked resume already has).
         if case let .providerSessionId(value) = observation {
-            guard record.providerSessionId != value else { return }
+            // B7.2: a pending fork clears the moment its new id is adopted —
+            // checked before the inequality shortcut below, since the whole
+            // point of a fork was to stop using the id `record.providerSessionId`
+            // held before it, and that stale marker must not survive a no-op.
+            guard record.providerSessionId != value || record.pendingSessionForkFrom != nil else { return }
             var updated = record
             updated.providerSessionId = value
+            updated.pendingSessionForkFrom = nil
             records[id] = updated
             persist(updated)
             return
@@ -3713,7 +3733,14 @@ final class AgentSupervisor {
                 // notice — it never reaches the CLI as text, so no runtime event
                 // is invented and no turn is spent.
                 guard snapshot.capabilities.canSend else { return .refused(.turnNotReady) }
-                appendArrayOwnedCommandNotice(descriptor, for: agentID)
+                if descriptor.name == "clear" {
+                    // B7.2 — `/clear` is not just a notice: it is one transaction
+                    // over session rotation, the stale context meter, naming, and
+                    // subagent chips, or it is worse than doing nothing.
+                    performClearCommand(descriptor, for: agentID)
+                } else {
+                    appendArrayOwnedCommandNotice(descriptor, for: agentID)
+                }
                 return .accepted
             case .harnessDelegated, .skillTemplate:
                 let native = invocation.nativeSlashText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4302,6 +4329,64 @@ final class AgentSupervisor {
         case .claudeCode: return .claudeOneShot
         case .codex, .pi, nil: return .oneShotProse
         }
+    }
+
+    /// B7.2 — `/clear`, in one transaction. `/clear` alone used to be
+    /// accidentally-fine only because nothing else was wired: it appended a
+    /// notice and left the stale context meter, the disarmed naming funnel,
+    /// the orphaned subagent chips, and the un-reset replay/telemetry state
+    /// all in place. Every effect below commits together in this one method
+    /// (all in-memory writes, then one persist, then the notice); there is no
+    /// intermediate state where only some of them have happened.
+    private func performClearCommand(_ descriptor: AgentCommandDescriptor, for id: AgentID) {
+        guard var record = records[id] else { return }
+
+        // 1. Rotate the session. claude only — pi's session id is Array's own
+        //    (no forking needed) and codex has no established rotate
+        //    mechanism. `/clear` spends no turn, same as every other
+        //    Array-owned command, so this MARKS the next launch to
+        //    `--resume <current> --fork-session` rather than eagerly
+        //    spawning a claude process here; `ingestRuntimeObservation`
+        //    adopts the forked id and clears the marker once that launch's
+        //    `system/init` reports it.
+        if record.harness == .claudeCode {
+            record.pendingSessionForkFrom = record.providerSessionId ?? Self.claudeSessionId(for: id)
+        }
+
+        // 2. The stale-but-numeric context meter must not re-seed from a
+        //    conversation the harness is about to forget.
+        record.lastContextWindow = nil
+
+        // 3. Re-arm naming: both fields the funnel actually checks
+        //    (`displayNameSource == .sentinel && namingRequest == nil`) —
+        //    B7.0 is exactly the story of a half-disarm going unnoticed.
+        record.displayNameSource = .sentinel
+        record.namingRequest = nil
+
+        records[id] = record
+        persist(record)
+
+        // 4. Drop subagent chips: sever the parent link for every child
+        //    spawned under this thread, so the supervisor's own bookkeeping
+        //    agrees with the fact that a forked/cleared conversation cannot
+        //    see them anymore — the disagreement C10 was making visible.
+        for childID in children(of: id) {
+            guard var child = records[childID] else { continue }
+            child.parentAgentID = nil
+            records[childID] = child
+            persist(child)
+        }
+
+        // 5. Clear the 500-entry replay buffer (`history[id]`) and the live
+        //    cumulative context-window cache (`contextWindowSnapshots[id]`
+        //    — the in-memory counterpart to the persisted
+        //    `record.lastContextWindow` cleared in step 2).
+        history[id] = []
+        contextWindowSnapshots[id] = nil
+
+        // 6. The boundary, as a Tier A notice — the transcript keeps its
+        //    history and says where the model's memory ends.
+        appendArrayOwnedCommandNotice(descriptor, for: id)
     }
 
     /// Tier A of the classifier: Array performs the command itself and authors
@@ -6797,8 +6882,177 @@ func runAgentSupervisorChecks() async throws {
 
     let agentReferenceStatusReport = try await checkAgentReferenceLiveStatus(config: config, cwd: cwd, fail: fail)
 
+    // MARK: 22 · B7.2 — `/clear` is one transaction, not a notice alone
+
+    let clearCommandReport = try await checkClearCommandTransaction(config: config, cwd: cwd, fail: fail)
+
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport)")
+}
+
+/// B7.2 — `/clear`'s one-transaction contract, driven through the real
+/// production dispatch (`AgentSupervisor.accept(.providerCommand(…))`) rather
+/// than calling `performClearCommand` directly, so a regression that only
+/// wires the classifier back to the OLD notice-only path still fails here.
+///
+/// Every one of the five stored/live effects is seeded through a REAL prior
+/// state (a delivered `.contextWindowUpdated`, a disarmed naming source, a
+/// real child record, a populated replay buffer) rather than asserting
+/// against a hand-built "already cleared" fixture, so a `/clear` that does
+/// nothing to a field that started out already-clear would not pass by
+/// accident.
+@MainActor
+func checkClearCommandTransaction(
+    config: AgentModelConfig.Resolution,
+    cwd: URL,
+    fail: (String) -> Error
+) async throws -> String {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-clear-command-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = AgentStore(applicationSupportDirectory: root)
+
+    let createdAt = Date(timeIntervalSinceReferenceDate: 800_000_000)
+    let parentID = AgentID(rawValue: UUID())
+    let childID = AgentID(rawValue: UUID())
+
+    // Seeded pre-cleared so every assertion below proves a real transition,
+    // not an already-clear fixture read back unchanged.
+    let parent = AgentRecord(
+        id: parentID,
+        displayName: "old prompt-derived name",
+        displayNameSource: .prompt,
+        namingRequest: NamingRequest(expectedName: "old prompt-derived name"),
+        harness: .claudeCode,
+        model: config.model,
+        thinking: config.thinking,
+        cwd: cwd.path,
+        createdAt: createdAt,
+        lastActivityAt: createdAt,
+        lastContextWindow: AgentContextWindowSnapshot(
+            usedTokens: 9_000, maxTokens: 10_000, observedAt: createdAt,
+            source: .claudeResultUsage, freshness: .live),
+        providerSessionId: "claude-old-session-id"
+    )
+    let child = AgentRecord(
+        id: childID,
+        displayName: "child",
+        model: config.model,
+        thinking: config.thinking,
+        cwd: cwd.path,
+        parentAgentID: parentID,
+        createdAt: createdAt,
+        lastActivityAt: createdAt
+    )
+    try store.upsert(parent)
+    try store.upsert(child)
+
+    let transcriptStore = AgentTranscriptStore(
+        root: root.appendingPathComponent("agent-transcripts", isDirectory: true))
+    let supervisor = AgentSupervisor(store: store, makeRunner: { _ in
+        ScriptedAgentRunner(script: [], holdUntilStopped: false)
+    }, transcriptStore: transcriptStore)
+    supervisor.restore()
+
+    guard supervisor.children(of: parentID) == [childID] else {
+        throw fail("clear-command fixture: the seeded child did not restore as a child of the parent")
+    }
+    // The in-memory cumulative telemetry cache and the replay buffer both need
+    // real prior content — a live `.contextWindowUpdated` populates
+    // `contextWindowSnapshots[id]` (distinct from the persisted
+    // `record.lastContextWindow` seeded above) and `history[id]`, exactly like
+    // a real turn would.
+    let liveSnapshot = AgentContextWindowSnapshot(
+        usedTokens: 9_500, maxTokens: 10_000, observedAt: createdAt,
+        source: .claudeResultUsage, freshness: .live)
+    supervisor.qaDeliver(.contextWindowUpdated(threadId: "does-not-matter", snapshot: liveSnapshot), to: parentID)
+    guard supervisor.contextWindowSnapshot(for: parentID) == liveSnapshot else {
+        throw fail("clear-command fixture: the live contextWindowUpdated did not seed the cumulative telemetry cache")
+    }
+    var preClearReplay: [AgentRuntimeEvent] = []
+    for await event in supervisor.events(for: parentID) { preClearReplay.append(event); break }
+    guard preClearReplay == [.contextWindowUpdated(threadId: "does-not-matter", snapshot: liveSnapshot)] else {
+        throw fail("clear-command fixture: the replay buffer did not carry the delivered event")
+    }
+
+    let invocation = AgentCommandInvocation(descriptorID: "array:clear", name: "clear", surface: .array)
+    let outcome = await supervisor.accept(.providerCommand(invocation), for: parentID)
+    guard case .accepted = outcome else {
+        throw fail("clear command: expected .accepted, got \(outcome)")
+    }
+
+    // 1 · session rotation MARKED (claude only) — an eager launch is not what
+    //     `/clear` does; it defers to the next real turn (see
+    //     `performClearCommand`'s doc comment).
+    guard supervisor.records[parentID]?.pendingSessionForkFrom == "claude-old-session-id" else {
+        throw fail("clear command: did not mark the old session for --fork-session rotation, got \(String(describing: supervisor.records[parentID]?.pendingSessionForkFrom))")
+    }
+    guard AgentSupervisor.claudeRunnerConfig(for: supervisor.records[parentID]!).forkSession,
+          AgentSupervisor.claudeRunnerConfig(for: supervisor.records[parentID]!).sessionId == "claude-old-session-id" else {
+        throw fail("clear command: the next claude runner config did not route through the fork")
+    }
+
+    // 2 · lastContextWindow cleared (persisted).
+    guard supervisor.records[parentID]?.lastContextWindow == nil,
+          try store.load(id: parentID)?.lastContextWindow == nil else {
+        throw fail("clear command: lastContextWindow survived, would re-seed a stale meter after relaunch")
+    }
+
+    // 3 · naming re-armed — both fields the funnel actually gates on.
+    guard supervisor.records[parentID]?.displayNameSource == .sentinel,
+          supervisor.records[parentID]?.namingRequest == nil else {
+        throw fail("clear command: naming was not re-armed (source=\(String(describing: supervisor.records[parentID]?.displayNameSource)), request=\(String(describing: supervisor.records[parentID]?.namingRequest)))")
+    }
+
+    // 4 · subagent chip dropped — the supervisor's own parent/child bookkeeping
+    //     now agrees that the cleared thread cannot see this child anymore.
+    guard supervisor.children(of: parentID).isEmpty,
+          supervisor.records[childID]?.parentAgentID == nil,
+          try store.load(id: childID)?.parentAgentID == nil else {
+        throw fail("clear command: the child's parent link was not severed")
+    }
+
+    // 5 · the 500-entry replay buffer AND the live cumulative telemetry cache
+    //     both reset — the persisted lastContextWindow (assertion 2) is a
+    //     DIFFERENT storage location from this in-memory cache.
+    guard supervisor.contextWindowSnapshot(for: parentID) == nil else {
+        throw fail("clear command: the live cumulative context-window cache survived")
+    }
+    // `events(for:)` replays its buffer then stays open on the live stream, so
+    // proving "empty" needs a bounded read: deliver one new sentinel and
+    // confirm IT comes first. If the pre-clear event had survived, FIFO replay
+    // order would hand it back before the sentinel.
+    let sentinelSnapshot = AgentContextWindowSnapshot(
+        usedTokens: 1, maxTokens: 2, observedAt: createdAt,
+        source: .claudeResultUsage, freshness: .live)
+    supervisor.qaDeliver(.contextWindowUpdated(threadId: "sentinel", snapshot: sentinelSnapshot), to: parentID)
+    var firstReplayedAfterClear: AgentRuntimeEvent?
+    for await event in supervisor.events(for: parentID) { firstReplayedAfterClear = event; break }
+    guard firstReplayedAfterClear == .contextWindowUpdated(threadId: "sentinel", snapshot: sentinelSnapshot) else {
+        throw fail("clear command: the replay buffer was not cleared — got \(String(describing: firstReplayedAfterClear)) before the post-clear sentinel")
+    }
+
+    // 6 · the boundary, as a Tier A notice: the transcript keeps its history.
+    // Debounced persistence (`scheduleTranscriptPersist`), so poll rather than
+    // assert on the first read.
+    let sessionID = AgentTranscriptStore.canonicalSessionID(for: parentID)
+    var noticeDocument: AgentDocument?
+    let deadline = Date().addingTimeInterval(3)
+    while noticeDocument == nil {
+        noticeDocument = try await transcriptStore.load(agentID: parentID, sessionID: sessionID)
+        if noticeDocument != nil { break }
+        if Date() >= deadline { break }
+        try await Task.sleep(for: .milliseconds(50))
+    }
+    guard let document = noticeDocument,
+          document.entries.contains(where: { entry in
+              guard case .localNotice = entry.provenance else { return false }
+              return true
+          }) else {
+        throw fail("clear command: no Tier A notice was appended to the persisted transcript")
+    }
+
+    return "B7.2 clear-command transaction: session fork marked and routed, lastContextWindow cleared, naming re-armed, subagent chip dropped, replay buffer and cumulative telemetry reset, boundary notice appended — all through the real .providerCommand dispatch"
 }
 
 @MainActor

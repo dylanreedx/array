@@ -326,6 +326,16 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// sync boundary never sees an `AgentRecord`.
     public var providerSessionId: String?
 
+    /// B7.2 — set by `/clear` for a claude-backed agent: the session id to
+    /// resume-and-fork FROM on the agent's next launch (`claude --resume
+    /// <this> --fork-session`), rather than the normal resume/start choice.
+    /// `/clear` spends no turn (same as every other Array-owned command), so
+    /// this defers the actual rotation to whenever the conversation next
+    /// continues; `AgentSupervisor.ingestRuntimeObservation` clears it back
+    /// to `nil` the moment the forked id is captured and adopted into
+    /// `providerSessionId`. `nil` ⇒ no rotation pending.
+    public var pendingSessionForkFrom: String?
+
     // Ticket: docs/38-tickets/90-agent-ux/P4.1-lifecycle-state.md
     //
     // The four STORED lifecycle facts. Nothing here is derived — the four-case
@@ -590,6 +600,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         lastContextWindow: AgentContextWindowSnapshot? = nil,
         codexThreadId: String? = nil,
         providerSessionId: String? = nil,
+        pendingSessionForkFrom: String? = nil,
         settledOverride: SettledOverride = .default,
         settledAt: Date? = nil,
         snoozedUntil: Date? = nil,
@@ -631,6 +642,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         self.lastContextWindow = lastContextWindow
         self.codexThreadId = codexThreadId
         self.providerSessionId = providerSessionId
+        self.pendingSessionForkFrom = pendingSessionForkFrom
         self.settledOverride = settledOverride
         self.settledAt = settledAt
         self.snoozedUntil = snoozedUntil
@@ -741,6 +753,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         case lastContextWindow
         case codexThreadId
         case providerSessionId
+        case pendingSessionForkFrom
         // P4.1. The three lifecycle dates take reference intervals for exactly
         // the reason above — a settled-at that drifts on reload reorders
         // history.
@@ -836,6 +849,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         // from before this ticket decodes it as absent (still on the derived
         // seed).
         providerSessionId = try container.decodeIfPresent(String.self, forKey: .providerSessionId)
+        pendingSessionForkFrom = try container.decodeIfPresent(String.self, forKey: .pendingSessionForkFrom)
         // P4.1. Decoded through `SettledOverride(persistedRawValue:)` rather
         // than as the enum directly: a record written by a newer build with a
         // case this one has never heard of must read as `.neutral`, not throw
@@ -901,6 +915,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         try container.encodeIfPresent(lastContextWindow, forKey: .lastContextWindow)
         try container.encodeIfPresent(codexThreadId, forKey: .codexThreadId)
         try container.encodeIfPresent(providerSessionId, forKey: .providerSessionId)
+        try container.encodeIfPresent(pendingSessionForkFrom, forKey: .pendingSessionForkFrom)
         // P4.1. `.neutral` is written as ABSENCE, the same way a headless
         // record omits `tileId`: the default is "nobody has said anything", and
         // a stored word saying so is noise that also makes every pre-P4.1

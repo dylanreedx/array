@@ -24,6 +24,12 @@ import Foundation
 public enum ClaudeSessionMode: Sendable, Equatable {
     case resume
     case start
+    /// B7.2 — `/clear`'s session rotation: resume the OLD session id one last
+    /// time with `--fork-session`, so claude mints a NEW id Array could not
+    /// have predicted. Never part of the resume/start retry pair — a fork
+    /// either succeeds outright or the rotation failed outright; retrying it
+    /// as an ordinary resume or start would silently abandon the rotation.
+    case fork
 }
 
 public enum ClaudeCLIBackend {
@@ -111,6 +117,12 @@ public enum ClaudeCLIBackend {
         switch mode {
         case .resume: return isUnknownSessionFailure(stderr: stderr)
         case .start: return isSessionInUseFailure(stderr: stderr)
+        case .fork:
+            // Unreachable in production: `ClaudeAgentRunner.run` never routes a
+            // `.fork` attempt through this predicate (B7.2's rotation is a
+            // single non-retryable attempt). False, never true, so a future
+            // caller cannot accidentally wire a retry for it.
+            return false
         }
     }
 
@@ -145,6 +157,11 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         ///
         /// Defaults to true, which is the historical resume-first behavior.
         public var conversationMayExist: Bool
+        /// B7.2 — when true, `sessionId` is the OLD session to resume-and-fork
+        /// FROM (`/clear`'s rotation), not the session to resume/start. Bypasses
+        /// the resume/start ordering entirely: `run` makes exactly one
+        /// `--fork-session` attempt with no retry.
+        public var forkSession: Bool
 
         public init(
             model: String,
@@ -152,7 +169,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             cwd: URL,
             sessionId: String,
             extraArgs: [String] = [],
-            conversationMayExist: Bool = true
+            conversationMayExist: Bool = true,
+            forkSession: Bool = false
         ) {
             self.model = model
             self.effort = effort
@@ -160,6 +178,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             self.sessionId = sessionId
             self.extraArgs = extraArgs
             self.conversationMayExist = conversationMayExist
+            self.forkSession = forkSession
         }
     }
 
@@ -186,6 +205,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         switch sessionMode {
         case .resume: sessionArgs = ["--resume", sessionId]
         case .start: sessionArgs = ["--session-id", sessionId]
+        case .fork: sessionArgs = ["--resume", sessionId, "--fork-session"]
         }
         return ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]
             + ["--model", model]
@@ -284,6 +304,19 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     /// waited for it to fail, and only then spawned the real one — a guaranteed
     /// wasted CLI launch in front of the user's very first prompt.
     public func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+        // B7.2 — `/clear`'s rotation is a single, non-retryable attempt: it
+        // either forks (and the new id is adopted from `system/init` over the
+        // runtime-observation channel) or it fails outright. Falling back to
+        // an ordinary resume/start on failure would silently abandon the
+        // rotation and keep talking to the OLD, un-cleared session.
+        if config.forkSession {
+            let result = try runOnce(mode: .fork, prompt: prompt, onEvent: onEvent)
+            if result.exitCode != 0 {
+                try throwStoppedIfRequested(stderr: result.stderr)
+                throw RunError.claudeFailed(exitCode: result.exitCode, stderr: result.stderr)
+            }
+            return
+        }
         let order = ClaudeCLIBackend.sessionModeOrder(
             conversationMayExist: config.conversationMayExist)
         let first = try runOnce(mode: order.first, prompt: prompt, onEvent: onEvent)
