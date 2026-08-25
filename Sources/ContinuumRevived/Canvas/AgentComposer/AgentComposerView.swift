@@ -820,6 +820,17 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
             DispatchQueue.main.async { [weak self] in self?.refreshCompletionSuggestions() }
         case .skill, .promptTemplate, .runtimeCommand, .command:
             guard onCompletionAction?(completion.payload) == true else { return }
+            // Fix 2a: a command picked from this popover used to skip the
+            // optimistic echo that `submitBoundIntent` paints for a typed send,
+            // so invoking the exact same command two ways produced two
+            // different appearances — silent here, an immediate bubble there.
+            // Echo the same text a typed acceptance would have shown.
+            if case let .command(invocation) = completion.payload {
+                let echoText = invocation.arguments.isEmpty
+                    ? completion.insertionText
+                    : "\(completion.insertionText) \(invocation.arguments.joined(separator: " "))"
+                onSubmissionStarted?(AgentPrompt(echoText))
+            }
             textView.insertCompletion("", replacementRange: replacementRange)
         }
     }
@@ -1285,6 +1296,13 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     var qaImageAttachmentContentTypes: [String?] { importedAttachments.map(\.metadata.contentType) }
     var qaImageImportFailureCount: Int { imageImportFailureCount }
     var qaImageImportFailureCategories: [String] { imageImportFailureCategories }
+
+    /// Drives the exact method a completion accept — whether from a click, an
+    /// arrow-navigated Enter, or typeahead — funnels through, so a check can
+    /// exercise the real acceptance path without a live popover window.
+    func qaAcceptCompletionForChecks(_ completion: AgentCompletion, replacementRange: NSRange) {
+        acceptCompletion(completion, replacementRange: replacementRange)
+    }
 
     func qaImportFileReferences(from pasteboard: NSPasteboard) {
         importFileReferences(ComposerFileReferencePasteboardDecoder.decodedReferences(from: pasteboard))

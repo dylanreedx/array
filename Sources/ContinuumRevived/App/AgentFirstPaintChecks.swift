@@ -65,7 +65,8 @@ enum AgentFirstPaintChecks {
         try checkSettledTailStatus()
         try checkReplyOptionsReachTheComposer()
         try checkAttachmentMidTurnUsesWorkingDraftIntent()
-        print("ContinuumRevivedAgentFirstPaintChecks passed: the prompt echo precedes the action sink, acceptance and refusal both resolve the latch, the spawn window carries a state, a word, and a clock, the optimistic indicator survives synchronize, settled turns read their duration, and a mid-turn attachment resolves honestly instead of forcing sendPrompt")
+        try checkPopoverCommandEchoesLikeATypedSend()
+        print("ContinuumRevivedAgentFirstPaintChecks passed: the prompt echo precedes the action sink, acceptance and refusal both resolve the latch, the spawn window carries a state, a word, and a clock, the optimistic indicator survives synchronize, settled turns read their duration, a mid-turn attachment resolves honestly instead of forcing sendPrompt, and a popover-selected command echoes exactly like a typed one")
     }
 
     /// `.plans/45` S6 (C4). `beginOptimisticSubmission` turns the indicator on
@@ -324,6 +325,40 @@ enum AgentFirstPaintChecks {
         }
         guard prompt.text == "steer this turn", prompt.fileReferences.count == 1 else {
             throw fail("attachment mid-turn: the resolved steer intent lost the draft text or the attachment")
+        }
+    }
+
+    /// `.plans/45` fix 2a: a command chosen from the completion popover
+    /// dispatched straight to `onCompletionAction` and never painted the same
+    /// optimistic echo a typed-and-sent command gets from `submitBoundIntent`.
+    /// Invoking the identical command two ways therefore looked different: an
+    /// immediate bubble for one, silence for the other.
+    @MainActor
+    private static func checkPopoverCommandEchoesLikeATypedSend() throws {
+        let composer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 320, height: 80))
+        var echoed: [AgentPrompt] = []
+        composer.onSubmissionStarted = { echoed.append($0) }
+        composer.onCompletionAction = { _ in true }
+
+        let invocation = AgentCommandInvocation(
+            descriptorID: "array.compact",
+            name: "compact",
+            arguments: ["now"],
+            surface: .array
+        )
+        let completion = AgentCompletion(
+            id: "array.compact",
+            title: "compact",
+            insertionText: "/compact",
+            payload: .command(invocation)
+        )
+        composer.qaAcceptCompletionForChecks(completion, replacementRange: NSRange(location: 0, length: 0))
+
+        guard let echo = echoed.first else {
+            throw fail("popover command echo: selecting a command from the completion popover painted no optimistic echo at all — invoking the same command by typing it does")
+        }
+        guard echo.text == "/compact now" else {
+            throw fail("popover command echo: expected the same text a typed send would have shown ('/compact now'), got '\(echo.text)'")
         }
     }
 
