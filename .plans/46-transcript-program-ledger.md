@@ -1941,3 +1941,66 @@ slots" and "the capped burst did not release both accepted names" — and both p
 on rerun. They correlate with how many agents are compiling. **Do not bisect them
 on a loaded machine**, and consider whether a five-second budget for a real
 subprocess is honest on a busy host.
+
+## T1 — A streaming response keeps a liveness signal (2026-08-25)
+
+Dylan, driving the build: *"the response looks dead... there is no indicator that
+the response is streaming in."*
+
+The transcript has exactly **one** animated element, the gyro on the tail, and
+`refreshTranscriptThinkingIndicator` switched it off the moment the last entry
+became an open assistant or reasoning entry — the whole duration of the answer.
+The predicate was `statusIsActive && !latestStreamIsVisible`, and its own comment
+said the yield was intended: "an open assistant/reasoning entry yields
+immediately on its first delta."
+
+Nothing replaced it, and that is the part that made it a real defect rather than
+a taste call. The compact status row is deliberately silent for exactly the live
+phases — `presentationWithoutThinkingIndicator` strips them and
+`footerRetainsPhase` returns `false` for
+`.thinking/.responding/.reading/.searching/.editing/.running` — *because the gyro
+was supposed to carry them*. So both surfaces went quiet together for the longest
+and most-watched part of a turn. Everything else on screen is static: an
+in-flight tool row is the string `"◐ In progress"` (`◐` is a glyph, not a
+spinner), and there is no `NSProgressIndicator`, no `repeatCount` and no `Timer`
+anywhere in the transcript renderers.
+
+Growing glyphs are not a signal. A partial paragraph is pixel-identical to a
+finished one, and a pause between sentences is indistinguishable from a stall.
+
+**Fix:** a working status is the whole authority. Side effect worth naming: a
+tool call running mid-answer now keeps the tail up too — the old predicate
+suppressed it whether or not work was happening, because it keyed on the open
+entry rather than on the work.
+
+**Two things NOT changed, having checked them.** `syncCompactStatusTick` is
+gated on `presented.activity`, the *unstripped* activity, so the 1 Hz tick and
+`setThinkingStatusText` were already correct — the words were right and only the
+visibility was wrong. And `setSettledTailStatus` still stops the gyro and keeps
+"Worked for Ns"; a settled turn must still yield.
+
+**The witness, and why this shipped in the first place.**
+`AgentTranscriptMotion.isEnabled` defaults to `false` and production flips it
+once at `ContinuumApp.swift:3921`, so every check leg and every pixel baseline
+photographs a motionless transcript. **No screenshot gate could ever have caught
+this.** So `checkStreamingResponseKeepsALivenessSignal`
+(`--agent-first-paint-check`) asserts the *decision*: it ingests real
+`turnStarted`/`contentDelta` events through the real reducer, proves the
+document actually ends in an open assistant entry (the fixture's own teeth —
+otherwise the check would pass vacuously if entry shapes drifted), then asserts
+the rule holds. Plus a negative leg (settled ⇒ no tail) and a reduce-motion leg
+(the fixed-pose fallback must keep the signal).
+
+`showsWorkingTail(statusIsActive:document:)` was extracted as a static rule for
+one reason: `statusIsActive` needs a live `AgentSupervisor` and the rule does
+not, so the witness drives the real decision without standing one up. `document`
+is taken and deliberately unread so reintroducing the old term has somewhere to
+go wrong — which is what the teeth-verification exercises.
+
+*Teeth:* restoring `&& !latestStreamIsVisible` fails with "the tail was
+suppressed while an assistant entry was streaming". Verified.
+
+**Not built, and stated as a choice:** a caret or shimmer on the streaming
+paragraph, and turning `jumpToLatestButton` into a live badge — it is a plain
+text button that cannot distinguish "content arriving now" from "you scrolled up
+ten minutes ago". Both worth doing; neither is what was reported.

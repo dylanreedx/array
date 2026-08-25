@@ -1698,6 +1698,36 @@ final class ManagedAgentTileNSView: TileNSView {
         return root
     }
 
+    /// Whether the transcript tail carries the gyro and its words.
+    ///
+    /// The tail does NOT yield to streaming text. It used to: this returned
+    /// `statusIsActive && !latestStreamIsVisible`, where `latestStreamIsVisible`
+    /// meant "the last entry is an OPEN assistant or reasoning entry" — which is
+    /// the entire duration of the answer. So the gyro, the ONLY animated element
+    /// in the transcript, switched off on the first delta and nothing replaced
+    /// it: the compact row is deliberately silent for exactly the live phases
+    /// (`presentationWithoutThinkingIndicator`, `footerRetainsPhase`) BECAUSE the
+    /// gyro was supposed to carry them, so both surfaces went quiet for the
+    /// longest and most-watched part of a turn. Dylan: "the response looks
+    /// dead... there is no indicator that the response is streaming in."
+    ///
+    /// Growing glyphs are not a liveness signal — a partial paragraph is
+    /// pixel-identical to a finished one, and a pause between sentences is
+    /// indistinguishable from a stall. A working status is now the whole
+    /// authority, which also means a tool call running MID-answer keeps the tail
+    /// up; the old predicate suppressed it whether or not work was happening,
+    /// because it keyed on the open entry rather than on the work.
+    ///
+    /// `document` is taken, and deliberately unread, so that the witness for this
+    /// rule can hand it a real streaming document and so that reintroducing the
+    /// old term has somewhere to go wrong. Extracted from the body only because
+    /// `statusIsActive` needs a live supervisor and this rule does not: a witness
+    /// can drive the real decision without standing one up.
+    static func showsWorkingTail(statusIsActive: Bool, document: AgentDocument) -> Bool {
+        _ = document
+        return statusIsActive
+    }
+
     private func refreshTranscriptThinkingIndicator() {
         guard let transcriptCollectionFixture else { return }
         // `.plans/45` S6 (C4) — the optimistic window. `beginOptimisticSubmission`
@@ -1719,14 +1749,8 @@ final class ManagedAgentTileNSView: TileNSView {
         } else {
             statusIsActive = false
         }
-        let latestStreamIsVisible = model.document.entries.last.map { entry in
-            guard entry.role == .assistant || entry.role == .reasoning else { return false }
-            if case .open = entry.lifecycle { return true }
-            return false
-        } ?? false
-        // A working/configuring status is the only lifecycle authority used here;
-        // an open assistant/reasoning entry yields immediately on its first delta.
-        let showsWorkingTail = statusIsActive && !latestStreamIsVisible
+        let showsWorkingTail = Self.showsWorkingTail(
+            statusIsActive: statusIsActive, document: model.document)
         if !statusIsActive, let settledTurnStatusText {
             transcriptCollectionFixture.setSettledTailStatus(settledTurnStatusText)
             return
@@ -2363,6 +2387,7 @@ final class ManagedAgentTileNSView: TileNSView {
         refreshTranscriptThinkingIndicator()
     }
     var qaTranscriptForChecks: AgentTranscriptListView? { transcriptCollectionFixture }
+    var qaDocumentForChecks: AgentDocument { model.document }
     var qaStatusThinkingIndicatorVisible: Bool { compactStatusRow.qaThinkingSlotVisible }
     var qaCompactStatusPhase: AgentCompactActivityPhase? { compactStatusResolution.phase }
     var qaCompactStatusContextState: AgentRadialContextMeterState { compactStatusRow.qaContextState }

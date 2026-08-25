@@ -67,7 +67,8 @@ enum AgentFirstPaintChecks {
         try checkAttachmentMidTurnUsesWorkingDraftIntent()
         try checkPopoverCommandEchoesLikeATypedSend()
         try checkMirroredAgentOffersNoComposerOrStop()
-        print("ContinuumRevivedAgentFirstPaintChecks passed: the prompt echo precedes the action sink, acceptance and refusal both resolve the latch, the spawn window carries a state, a word, and a clock, the optimistic indicator survives synchronize, settled turns read their duration, a mid-turn attachment resolves honestly instead of forcing sendPrompt, and a popover-selected command echoes exactly like a typed one, and an agent Array only mirrors offers no composer, no provider controls and no Stop")
+        try checkStreamingResponseKeepsALivenessSignal()
+        print("ContinuumRevivedAgentFirstPaintChecks passed: the prompt echo precedes the action sink, acceptance and refusal both resolve the latch, the spawn window carries a state, a word, and a clock, the optimistic indicator survives synchronize, settled turns read their duration, a mid-turn attachment resolves honestly instead of forcing sendPrompt, and a popover-selected command echoes exactly like a typed one, an agent Array only mirrors offers no composer, no provider controls and no Stop, and a streaming response keeps a liveness signal instead of going dead")
     }
 
     /// `.plans/45` S6 (C4). `beginOptimisticSubmission` turns the indicator on
@@ -444,4 +445,91 @@ extension AgentFirstPaintChecks {
             throw fail("mirrored: the tile offers provider/model/effort controls and a Stop for an agent Array does not run")
         }
     }
+
+    /// Dylan, driving the build: "the response looks dead... there is no
+    /// indicator that the response is streaming in."
+    ///
+    /// The transcript has exactly ONE animated element — the gyro on the tail —
+    /// and `showsWorkingTail` used to switch it off the moment the last entry
+    /// became an open assistant entry, i.e. for the whole answer. Nothing
+    /// replaced it, because the compact status row is deliberately silent for
+    /// exactly those live phases on the grounds that the gyro carries them.
+    ///
+    /// This asserts the DECISION, not the animation, and it has to.
+    /// `AgentTranscriptMotion.isEnabled` defaults to false and production flips
+    /// it once at launch, so every check leg — and every pixel baseline — sees a
+    /// motionless transcript. No screenshot gate could ever have caught this, and
+    /// that is why it shipped.
+    @MainActor
+    private static func checkStreamingResponseKeepsALivenessSignal() throws {
+        let thread = "thread-main"
+        let tile = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(),
+            kind: .managedAgent,
+            title: "streaming-liveness",
+            frame: TileFrame(x: 0, y: 0, width: 560, height: 460),
+            zPosition: .fromLegacyRank(1),
+            runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")
+        ))
+        tile.layoutSubtreeIfNeeded()
+
+        // Real events through the real reducer — not a hand-built document.
+        tile.ingest(.turnStarted(threadId: thread, turnId: "turn-1"))
+        tile.ingest(.contentDelta(
+            threadId: thread, turnId: "turn-1", streamKind: .assistant,
+            delta: "Here is the first half of an answer"))
+
+        // The fixture's own teeth. If an open assistant entry stops being what a
+        // mid-stream document ends with, this witness would pass vacuously while
+        // saying nothing — so prove the state under test actually exists first.
+        let document = tile.qaDocumentForChecks
+        guard let last = document.entries.last else {
+            throw fail("streaming liveness: ingesting a delta produced no entry at all")
+        }
+        guard last.role == .assistant else {
+            throw fail(
+                "streaming liveness: a mid-stream document ended with a \(last.role) entry, so "
+                + "this check no longer exercises the state it was written for"
+            )
+        }
+        guard case .open = last.lifecycle else {
+            throw fail(
+                "streaming liveness: the streaming entry was already \(last.lifecycle), so the "
+                + "suppression this guards could not have applied — fixture is toothless"
+            )
+        }
+
+        // THE assertion: mid-answer, with work genuinely in flight, the tail stays.
+        guard ManagedAgentTileNSView.showsWorkingTail(statusIsActive: true, document: document) else {
+            throw fail(
+                "streaming liveness: the tail was suppressed while an assistant entry was "
+                + "streaming — the gyro is the only animated element in the transcript and the "
+                + "compact row is silent for live phases, so the turn looks dead exactly while "
+                + "the model is answering"
+            )
+        }
+
+        // And the tail is not simply always on: a settled turn must still yield.
+        guard !ManagedAgentTileNSView.showsWorkingTail(statusIsActive: false, document: document) else {
+            throw fail(
+                "streaming liveness: the tail stayed up with no work in flight — a liveness "
+                + "signal that is always on carries no information"
+            )
+        }
+
+        // A reduce-motion reader gets the same INFORMATION. The gyro falls back
+        // to a fixed pose rather than disappearing, so the signal must not be
+        // conditioned on motion being available.
+        AgentTranscriptMotion.qaWithMotion(enabled: true, reducedMotion: true) {
+            tile.qaTranscriptForChecks?.setThinkingIndicatorVisible(true)
+        }
+        guard tile.qaThinkingIndicatorVisible else {
+            throw fail(
+                "streaming liveness: the tail vanished under reduce-motion — the fixed-pose "
+                + "fallback exists so the signal survives without the animation"
+            )
+        }
+    }
+
 }
