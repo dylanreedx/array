@@ -16,6 +16,12 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+if CommandLine.arguments.contains("--codex-appserver-parity-check") {
+    runCodexAppServerParityChecks()
+    print("CodexAppServerParityChecks passed")
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--codex-appserver-runner-check") {
     runCodexAppServerRunnerChecks()
     print("CodexAppServerRunnerChecks passed")
