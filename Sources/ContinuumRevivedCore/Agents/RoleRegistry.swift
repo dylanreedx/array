@@ -41,7 +41,16 @@ public struct RoleRegistry: Sendable {
     /// tool-detail whitelist is key-driven rather than tool-driven.
     public static func spawnToolNames(for harness: AgentHarness) -> [String] {
         switch harness {
-        case .pi: return ["spawn_agent"]
+        // T5.2 — pi has TWO delegation verbs, and only one of them is Array's.
+        // `spawn_agent` is Array's own bundled extension
+        // (`Resources/PiExtensions/continuum-spawn-agent.ts`); `delegate_agent`
+        // comes from a third-party extension the user installed themselves.
+        // Both are named because `--tools` is a HARD allowlist that covers
+        // extension tools, so omitting one denies it to every roled agent —
+        // which is what made pi delegation look broken. Naming a tool that is not
+        // installed is harmless: pi filters the list against its registry rather
+        // than erroring.
+        case .pi: return ["spawn_agent", "delegate_agent"]
         case .claudeCode: return ["Agent", "Task"]
         case .codex: return ["spawn_agent"]
         }
@@ -103,12 +112,15 @@ public struct RoleRegistry: Sendable {
     /// to invent, and it already includes spawning.
     public func toolsArguments(roleId: String?, allowingSpawn: Bool) -> [String] {
         guard let roleId, let tools = byID[roleId]?.tools else { return [] }
-        guard allowingSpawn, let spawnTool = RoleRegistry.spawnToolNames(for: harness).first else {
-            return ["--tools", tools]
-        }
+        let spawnTools = RoleRegistry.spawnToolNames(for: harness)
+        guard allowingSpawn, !spawnTools.isEmpty else { return ["--tools", tools] }
         let declared = tools.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-        guard !declared.contains(spawnTool) else { return ["--tools", tools] }
-        return ["--tools", (declared + [spawnTool]).joined(separator: ", ")]
+        // ALL missing spawn verbs, not just the first: pi's two are different
+        // tools from different extensions, and appending only one silently denies
+        // the other. A role that already declares one keeps its own ordering.
+        let missing = spawnTools.filter { !declared.contains($0) }
+        guard !missing.isEmpty else { return ["--tools", tools] }
+        return ["--tools", (declared + missing).joined(separator: ", ")]
     }
 
     /// What a role runs with: the flags an agent started for it must carry.

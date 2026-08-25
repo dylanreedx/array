@@ -143,3 +143,28 @@ public struct SpawnRequest: Equatable, Sendable {
             displayLabel: label)
     }
 }
+
+/// What the supervisor hands its runner factory: the record, plus the one fact
+/// about it that the record itself cannot carry.
+///
+/// `spawnDepth` lives here rather than on `AgentRecord` because it is not a
+/// property of an agent — it is a property of the agent's position in a tree the
+/// supervisor owns, and it changes when a parent is archived. `runnerConfig` is
+/// `nonisolated` and pure over one record, while `depth(of:)` walks the
+/// supervisor's `records` map on the main actor; this struct is the seam between
+/// the two.
+///
+/// It is a struct rather than a second parameter on the factory closure so that
+/// the many `makeRunner: { _ in … }` injections in the checks keep compiling, and
+/// only the ones that actually read the record have to change — which the
+/// compiler then enumerates exhaustively.
+public struct AgentRunnerLaunch: Sendable {
+    public let record: AgentRecord
+    /// Links from this agent up to a root. 0 for a user-created agent.
+    public let spawnDepth: Int
+
+    public init(record: AgentRecord, spawnDepth: Int) {
+        self.record = record
+        self.spawnDepth = spawnDepth
+    }
+}

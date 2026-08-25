@@ -19,14 +19,17 @@ func runStrictAgentHarnessChecks() throws {
             lastActivityAt: Date())
     }
 
-    let claude = AgentSupervisor.productionRunner(for: record(.claudeCode, model: "anthropic/opus"))
-    let codex = AgentSupervisor.productionRunner(for: record(.codex, model: "openai-codex/gpt-5.6-sol"))
+    func launch(_ record: AgentRecord, spawnDepth: Int = 0) -> AgentRunnerLaunch {
+        AgentRunnerLaunch(record: record, spawnDepth: spawnDepth)
+    }
+    let claude = AgentSupervisor.productionRunner(for: launch(record(.claudeCode, model: "anthropic/opus")))
+    let codex = AgentSupervisor.productionRunner(for: launch(record(.codex, model: "openai-codex/gpt-5.6-sol")))
     let piRecord = record(.pi, model: "openai-codex/gpt-5.6-sol")
-    let pi = AgentSupervisor.productionRunner(for: piRecord)
+    let pi = AgentSupervisor.productionRunner(for: launch(piRecord))
     try expect(claude is ClaudeAgentRunner, "Claude Code did not construct ClaudeAgentRunner")
     try expect(codex is CodexAgentRunner, "Codex did not construct CodexAgentRunner")
     try expect(pi is PiAgentRunner, "Pi + OpenAI model did not construct PiAgentRunner")
-    let piConfig = AgentSupervisor.runnerConfig(for: piRecord)
+    let piConfig = AgentSupervisor.runnerConfig(for: piRecord, spawnDepth: 0)
     let piArgs = PiAgentRunner.processArguments(model: piConfig.model, thinking: piConfig.thinking, sessionId: piConfig.sessionId, extraArgs: piConfig.extraArgs, prompt: "PROMPT")
     try expect(piArgs == ["-p", "--mode", "json", "--model", "openai-codex/gpt-5.6-sol", "--thinking", "high", "--session-id", AgentSupervisor.sessionId(for: piRecord.id), "PROMPT"],
                "strict Pi argv changed: \(piArgs)")
@@ -49,6 +52,62 @@ func runStrictAgentHarnessChecks() throws {
                                        "--session-id", AgentSupervisor.sessionId(for: piRecord.id),
                                        "-e", fixtureExtensionPath, "PROMPT"],
                "strict Pi argv's -e must sit right after the session flag, ahead of extras and the prompt, got \(piArgsWithExtension)")
+
+    // T5 (2026-08-25). `toolsArguments(roleId:allowingSpawn:)` has said since C8
+    // that "the caller passes `allowingSpawn: depth < maxSpawnDepth`". No
+    // production caller ever did — both went through the convenience overload,
+    // which hardcodes false — so Array's own pi spawn tool was denied to every
+    // ROLED agent for as long as it shipped. Dylan: "delegate agent in Pi doesn't
+    // work."
+    //
+    // This must use a ROLED record. A roleless pi agent sends no `--tools` at
+    // all, and pi treats an absent allowlist as permit-everything, so it has had
+    // both spawn verbs all along — a roleless witness would have passed while the
+    // defect stood, which is the exact shape of a check that never runs.
+    let roledRoot = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+        .appendingPathComponent("continuum-t5-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(
+        at: roledRoot.appendingPathComponent(".pi/agents", isDirectory: true),
+        withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: roledRoot) }
+    try """
+        ---
+        name: scout
+        description: Reads and greps.
+        tools: read, grep
+        ---
+        Read things.
+        """.write(
+            to: roledRoot.appendingPathComponent(".pi/agents/scout.md"),
+            atomically: true, encoding: .utf8)
+
+    var roled = record(.pi, model: "openai-codex/gpt-5.6-sol")
+    roled.role = "scout"
+    roled.cwd = roledRoot.path
+    roled.lastObservedWhere = roledRoot.path
+    // `runnerConfig` builds the registry from `checkoutRoot`, which `init`
+    // defaults from `cwd` — so assigning `cwd` after the fact is not enough, and
+    // getting this wrong reads as "the role has no tools" rather than as a
+    // mis-set fixture.
+    roled.checkoutRoot = roledRoot.path
+    // Below the cap, the model is OFFERED the spawn verbs, so it never proposes
+    // what it cannot have — better than refusing after the fact.
+    for depth in [0, 1] {
+        let args = AgentSupervisor.runnerConfig(for: roled, spawnDepth: depth).extraArgs
+        try expect(args == ["--tools", "read, grep, spawn_agent, delegate_agent"],
+                   "a roled pi agent at depth \(depth) must be offered BOTH pi delegation verbs "
+                   + "(Array's own spawn_agent and the third-party delegate_agent) — got \(args)")
+    }
+    // At the cap, withheld — Array's own limit, enforced by omission.
+    let cappedArgs = AgentSupervisor.runnerConfig(
+        for: roled, spawnDepth: AgentSupervisor.maxSpawnDepth).extraArgs
+    try expect(cappedArgs == ["--tools", "read, grep"],
+               "a roled pi agent AT the spawn depth cap must not be offered a spawn verb, got \(cappedArgs)")
+
+    // A roleless agent is unrestricted and must stay that way: passing --tools at
+    // all would NARROW what it can do today.
+    try expect(AgentSupervisor.runnerConfig(for: piRecord, spawnDepth: 0).extraArgs.isEmpty,
+               "a roleless pi agent must still send no --tools, or this change narrows it")
 
     let catalog = AgentModelCatalog()
     catalog.resetForQA(snapshot: .init(harness: .claudeCode, readiness: .ready, models: ["anthropic/opus"], displayNames: ["anthropic/opus": "Claude"], contextWindows: ["anthropic/opus": 1]))

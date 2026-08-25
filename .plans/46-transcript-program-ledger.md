@@ -2110,3 +2110,55 @@ genuinely different quantities — the tail anchors on `submittedAt`, which prec
 the first entry and so includes spawn/cold-start dead air the document cannot see.
 They will read close, not equal. Asserting equality would have pinned a falsehood,
 so the two are left as what they honestly are.
+
+## T5 — Array's own pi spawn tool had never been reachable (2026-08-25)
+
+Dylan: *"delegate agent in Pi doesn't work."* Two independent causes; this is the
+one that was Array's own bug.
+
+`RoleRegistry.toolsArguments(roleId:allowingSpawn:)` has carried a comment since
+C8 saying *"The caller passes `allowingSpawn: depth < maxSpawnDepth`"*. **No
+production caller ever did.** Both went through the convenience overload, which
+hardcodes `false`; `allowingSpawn: true` appeared only in a check. So every roled
+pi agent was denied `spawn_agent` — while the extension itself was bundled,
+installed and correctly passed as `-e`. Three of four blockers fixed, the feature
+still dead.
+
+**Sharpening the claim changed the witness.** A *roleless* pi agent sends no
+`--tools` at all, and pi treats an absent allowlist as permit-everything
+(`agent-session.js`), so a roleless agent has had both verbs all along — almost
+certainly how `Fixtures/spawn-agent-tool-call.jsonl` was captured. The defect is
+specific to ROLED agents, so a roleless witness would have passed while the bug
+stood. Both witnesses use a roled record, and one asserts the roleless case still
+sends nothing, because passing `--tools` there would *narrow* what it can do.
+
+**T5.1, the seam.** `runnerConfig` is `nonisolated` and pure over one record;
+`depth(of:)` walks the supervisor's record tree on the main actor. The factory
+seam now takes `AgentRunnerLaunch { record, spawnDepth }` — a struct rather than a
+second parameter so the ~60 `makeRunner: { _ in … }` injections keep compiling and
+only the ~14 that read the record change, which the compiler enumerated
+exhaustively. `spawnDepth` is **required with no default**: a defaulted parameter
+is exactly how this bug happened once. `maxSpawnDepth` became `nonisolated`.
+`RoleRegistry.resolve` deliberately stays at `false` — it computes spawn-time
+flags for a child whose depth is not yet known, and `runnerConfig` re-derives the
+live list every turn.
+
+**T5.2, and it is a judgement call worth flagging.** `spawnToolNames(for: .pi)`
+returned `["spawn_agent"]` and `toolsArguments` appended only `.first`. pi has
+**two** delegation verbs and only one is Array's: `delegate_agent` comes from a
+third-party extension Dylan installed himself. Because `--tools` is a hard
+allowlist that covers extension tools, T6 would have been dead on arrival for
+roled agents without this. All missing verbs are now appended. **Measured, not
+assumed:** naming a tool that is not installed is silently filtered by pi — a
+probe with `--tools 'read,definitely_not_a_tool'` exited 0 with a normal session.
+
+**Witnesses.** `--strict-agent-harness-check` pins the argv for a roled record at
+depth 0, 1 and the cap. `--agent-supervisor-check`'s `checkSpawnFromToolCall` is
+the one that matters: it takes the depth from the supervisor's own record tree, so
+it fails on a supervisor that never threads it — `runnerConfig` alone would go
+green because the check would be choosing the depth itself. It also asserts the
+act still tests what it claims (the child really is below the cap) before
+asserting the outcome, and that the grandchild AT the cap is offered nothing.
+
+*Teeth, verified:* reverting the call site to `allowingSpawn: false` fails at
+depth 0; changing `<` to `<=` fails at the cap.

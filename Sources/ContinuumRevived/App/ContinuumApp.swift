@@ -4831,7 +4831,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 report("FAIL: could not move the spawned agent onto anthropic/haiku"); Foundation.exit(2)
             }
             guard let record = self.agentSupervisor.records[agentId],
-                  AgentSupervisor.productionRunner(for: record) is ClaudeAgentRunner
+                  AgentSupervisor.productionRunner(for: AgentRunnerLaunch(record: record, spawnDepth: 0)) is ClaudeAgentRunner
             else {
                 report("FAIL: anthropic/haiku did not route to ClaudeAgentRunner"); Foundation.exit(2)
             }
@@ -4909,7 +4909,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 report("FAIL: could not move the spawned agent onto openai-codex/gpt-5.4-mini"); Foundation.exit(2)
             }
             guard let record = self.agentSupervisor.records[agentId],
-                  AgentSupervisor.productionRunner(for: record) is CodexAgentRunner
+                  AgentSupervisor.productionRunner(for: AgentRunnerLaunch(record: record, spawnDepth: 0)) is CodexAgentRunner
             else {
                 report("FAIL: openai-codex/gpt-5.4-mini did not route to CodexAgentRunner"); Foundation.exit(2)
             }
@@ -27737,10 +27737,10 @@ extension AppDelegate {
     let holdRunners = HoldingTiles()
     revealApp.agentSupervisor = AgentSupervisor(
         store: revealAgentStore,
-        makeRunner: { record in
+        makeRunner: { launch in
             ScriptedAgentRunner(
                 script: turnScript,
-                holdUntilStopped: record.tileId.map { holdRunners.tiles.contains($0) } ?? false)
+                holdUntilStopped: launch.record.tileId.map { holdRunners.tiles.contains($0) } ?? false)
         })
     revealApp.agentSupervisor.restore()
     let revealSupervisor = revealApp.agentSupervisor

@@ -879,7 +879,7 @@ final class AgentSupervisor {
     static let replayCap = 500
 
     private let store: AgentStore
-    private let makeRunner: (AgentRecord) -> AgentRunning
+    private let makeRunner: (AgentRunnerLaunch) -> AgentRunning
     private let warn: (String) -> Void
     /// The production writer is `AgentStore.upsert`. The optional seam exists only
     /// for deterministic checks that need to model an AtomicWriter throw before or
@@ -1015,7 +1015,7 @@ final class AgentSupervisor {
 
     init(
         store: AgentStore,
-        makeRunner: @escaping (AgentRecord) -> AgentRunning = AgentSupervisor.productionRunner,
+        makeRunner: @escaping (AgentRunnerLaunch) -> AgentRunning = AgentSupervisor.productionRunner,
         warn: @escaping (String) -> Void = { fputs($0 + "\n", stderr) },
         upsertRecord: ((AgentRecord) throws -> Void)? = nil,
         nameGenerationCapabilityProvider: (@Sendable () -> AgentNameGenerationCapability?)? = nil,
@@ -1101,11 +1101,12 @@ final class AgentSupervisor {
     /// is pure and pinned in the matrix (`AgentBackendConfig.route`); only the
     /// backend preference and the availability reads are live. The DEFAULT
     /// backend (`.pi`) preserves the shipped native-preferring behaviour exactly.
-    nonisolated static func productionRunner(for record: AgentRecord) -> AgentRunning {
+    nonisolated static func productionRunner(for launch: AgentRunnerLaunch) -> AgentRunning {
+        let record = launch.record
         switch record.harness {
         case .claudeCode: return claudeRunner(for: record)
         case .codex: return codexRunner(for: record)
-        case .pi: return piRunner(for: record)
+        case .pi: return piRunner(for: launch)
         case nil: return RefusingAgentRunner(reason: "This agent has unresolved harness ownership. Choose Claude Code, Codex, or Pi in the agent composer. Help → Environment Setup…")
         }
     }
@@ -1119,11 +1120,12 @@ final class AgentSupervisor {
     /// verified against a live multi-second turn when it was written; the shape is
     /// confirmed against pi's own `rpc-types.d.ts`, but confirmed-by-declaration is
     /// not the same as driven.
-    nonisolated static func piRunner(for record: AgentRecord) -> AgentRunning {
+    nonisolated static func piRunner(for launch: AgentRunnerLaunch) -> AgentRunning {
+        let config = runnerConfig(for: launch.record, spawnDepth: launch.spawnDepth)
         guard piSessionTransportEnabled() else {
-            return PiAgentRunner(config: runnerConfig(for: record))
+            return PiAgentRunner(config: config)
         }
-        return PiRpcAgentRunner(config: runnerConfig(for: record))
+        return PiRpcAgentRunner(config: config)
     }
 
     /// Env-gated, like the codex transport switch, so a self-check leg and a
@@ -1214,7 +1216,15 @@ final class AgentSupervisor {
     /// files are tracked in the repository, so an isolated agent's worktree carries
     /// the same `.pi/agents` its project does, and editing a role file takes effect on
     /// the next run instead of being frozen at spawn time.
-    nonisolated static func runnerConfig(for record: AgentRecord) -> PiAgentRunner.Config {
+    /// `spawnDepth` is REQUIRED and has no default. `toolsArguments`' own comment
+    /// has said since C8 that "the caller passes `allowingSpawn: depth <
+    /// maxSpawnDepth`" — and no production caller ever did, so Array's pi spawn
+    /// tool was denied to every ROLED agent for the whole time it shipped. A
+    /// defaulted parameter is exactly how that happened once; it does not get a
+    /// second chance.
+    nonisolated static func runnerConfig(
+        for record: AgentRecord, spawnDepth: Int
+    ) -> PiAgentRunner.Config {
         let cwd = URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true)
         // `model`/`thinking` come from the RECORD: the role already decided them at
         // spawn time (`handleSpawnRequest`), and a role file edited since must not
@@ -1238,9 +1248,12 @@ final class AgentSupervisor {
             // actor, on every turn — to compute an empty array for the common case.
             // Array's own project has 12 role files; a roleless agent read all of
             // them before each prompt.
+            // T5 — the spawn verbs are appended only below Array's own cap, so the
+            // model is never OFFERED a verb it cannot use. That is better than
+            // refusing after the fact: it never proposes what it cannot have.
             extraArgs: record.role.map {
                 RoleRegistry(projectRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true))
-                    .toolsArguments(roleId: $0)
+                    .toolsArguments(roleId: $0, allowingSpawn: spawnDepth < Self.maxSpawnDepth)
             } ?? []
         )
     }
@@ -2180,7 +2193,9 @@ final class AgentSupervisor {
         // speaks for it. Cleared here rather than in `stop` because the throw it
         // guards arrives strictly after `stop` returns.
         stopRequestedAgents.remove(id)
-        let runner = makeRunner(record)
+        // `depth(of:)` walks the parent chain, which the caps bound at 3 links,
+        // once per turn — not on any per-delta path.
+        let runner = makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id)))
         runners[id] = runner
         notifyTurnCapabilitiesChanged(id)
         // P2D.2: an agent asking for another agent arrives here, out of band from
@@ -2411,7 +2426,7 @@ final class AgentSupervisor {
     /// A cap exists because the request is MODEL-AUTHORED (the packet's watch-out): a
     /// prompt that tells a worker to delegate produces workers that delegate, and
     /// every one of them is a Pi process. Nothing else in the app bounds that.
-    static let maxSpawnDepth = 2
+    nonisolated static let maxSpawnDepth = 2
     /// How many children one parent may have. Same reason, the other axis: a single
     /// turn can emit as many tool calls as the model likes.
     static let maxChildrenPerParent = 4
@@ -6831,7 +6846,7 @@ func runAgentSupervisorChecks() async throws {
     guard let record = supervisor.records[agentId] else {
         throw fail("the supervisor lost the record it spawned")
     }
-    guard AgentSupervisor.piRunner(for: record) is PiAgentRunner else {
+    guard AgentSupervisor.piRunner(for: AgentRunnerLaunch(record: record, spawnDepth: 0)) is PiAgentRunner else {
         throw fail("the default runner factory does not produce a PiAgentRunner")
     }
     guard AgentSupervisor.claudeRunner(for: record) is ClaudeAgentRunner else {
@@ -9101,7 +9116,7 @@ func runAgentRestoreChecks() async throws {
     let queue = ScriptedRunnerQueue([ScriptedAgentRunner(script: turn)])
     let supervisor = AgentSupervisor(
         store: store,
-        makeRunner: { queue.next($0) },
+        makeRunner: { queue.next($0.record) },
         codexRestoredContextSnapshot: { record in
             record.id == codexExact.id ? repairedExactSnapshot : nil
         })
@@ -9184,7 +9199,7 @@ func runAgentRestoreChecks() async throws {
     }
     guard AgentSupervisor.claudeRunnerConfig(for: tiledRecord).sessionId
             == AgentSupervisor.claudeSessionId(for: tiled.id),
-          AgentSupervisor.runnerConfig(for: tiledRecord).sessionId
+          AgentSupervisor.runnerConfig(for: tiledRecord, spawnDepth: 0).sessionId
             == AgentSupervisor.sessionId(for: tiled.id) else {
         throw fail("a fresh agent's runner configs must still use the derived seed, not a nil providerSessionId")
     }
@@ -10123,7 +10138,7 @@ private func checkTileIsASubscriber(
         ScriptedAgentRunner(script: turnTwo),
         blocking
     ])
-    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0) })
+    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0.record) })
     let tileId = UUID()
     let agentId = supervisor.spawn(
         role: nil,
@@ -10269,7 +10284,7 @@ private func checkTileIsASubscriber(
         .turnCompleted(threadId: provider, turnId: "t1", outcome: .completed, errorMessage: nil)
     ]
     let otherQueue = ScriptedRunnerQueue([ScriptedAgentRunner(script: otherTurn)])
-    let otherSupervisor = AgentSupervisor(store: store, makeRunner: { otherQueue.next($0) })
+    let otherSupervisor = AgentSupervisor(store: store, makeRunner: { otherQueue.next($0.record) })
     let otherAgentId = otherSupervisor.spawn(
         role: nil,
         prompt: "other prompt",
@@ -10352,7 +10367,7 @@ private func checkDetachOutlivesItsTile(
     // The second turn blocks, so the agent is provably mid-work when its tile closes.
     let blocking = ScriptedAgentRunner(script: [.turnStarted(threadId: provider, turnId: "t2")], holdUntilStopped: true)
     let queue = ScriptedRunnerQueue([ScriptedAgentRunner(script: firstTurn), blocking])
-    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0) })
+    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0.record) })
 
     // Spawned with NO tile, then bound by `attach` — the operation P2A.5 adds, and
     // the one Phase 3's "open in tile" will reach.
@@ -10676,7 +10691,7 @@ private func checkHeadlessAgents(
         ScriptedAgentRunner(script: [.turnStarted(threadId: provider, turnId: "t1")], holdUntilStopped: true)
     }
     let queue = ScriptedRunnerQueue(scripted)
-    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0) })
+    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0.record) })
 
     // A canvas with NO tiles on it, carried through the whole section.
     var canvasState = CanvasState(
@@ -11031,7 +11046,7 @@ private func checkSpawnFromToolCall(
     let parentRunner = FixtureStreamRunner(lines: lines)
     let projectId = UUID()
     var factory: SpawnedRunnerFactory!
-    let supervisor = AgentSupervisor(store: store, makeRunner: { factory.make($0) })
+    let supervisor = AgentSupervisor(store: store, makeRunner: { factory.make($0.record) })
     factory = SpawnedRunnerFactory()
     // The parent is spawned WITHOUT a prompt so its id exists before its runner is
     // needed; the factory then hands it the fixture runner.
@@ -11087,9 +11102,23 @@ private func checkSpawnFromToolCall(
     // …and the role's tool list is what the provider process would actually be
     // launched with. Red when `runnerConfig(for:)` drops `extraArgs`: `the child's
     // runner would not pass its role's tools: []`.
-    let childRunnerArgs = AgentSupervisor.runnerConfig(for: child).extraArgs
-    guard childRunnerArgs == ["--tools", scoutTools] else {
-        throw fail("the child's runner would not pass its role's tools: \(childRunnerArgs)")
+    //
+    // T5 (2026-08-25): the child sits BELOW the spawn cap, so its list must also
+    // carry pi's delegation verbs — `.pi/agents/*.md` roles declare none of them,
+    // and `--tools` is a hard allowlist that covers extension tools, so a roled
+    // agent that is not given them cannot delegate at all. This is the assertion
+    // that the depth actually reaches the runner: `runnerConfig` alone would go
+    // green on a supervisor that never threaded it, because the check would be
+    // choosing the depth itself. Here the depth comes from the supervisor's own
+    // record tree.
+    let childDepth = supervisor.depth(of: child.id)
+    guard childDepth < AgentSupervisor.maxSpawnDepth else {
+        throw fail("the child's depth is \(childDepth), which is not below the cap — this act no longer tests what it says")
+    }
+    let childRunnerArgs = AgentSupervisor.runnerConfig(for: child, spawnDepth: childDepth).extraArgs
+    let expectedChildTools = "\(scoutTools), " + RoleRegistry.spawnToolNames(for: .pi).joined(separator: ", ")
+    guard childRunnerArgs == ["--tools", expectedChildTools] else {
+        throw fail("the child's runner would not pass its role's tools plus the spawn verbs it is under the cap for: \(childRunnerArgs)")
     }
     guard let storedChild = try store.load(id: childId), storedChild.parentAgentID == parentId else {
         throw fail("the parent link did not reach the store: \(String(describing: try store.load(id: childId)?.parentAgentID))")
@@ -11176,6 +11205,16 @@ private func checkSpawnFromToolCall(
     guard supervisor.depth(of: grandchildId) == AgentSupervisor.maxSpawnDepth else {
         throw fail("the grandchild's depth is \(supervisor.depth(of: grandchildId)), expected \(AgentSupervisor.maxSpawnDepth)")
     }
+    // T5 — AT the cap the spawn verbs are WITHHELD, so the model is never offered
+    // a tool Array would have to refuse. The other half of the child assertion
+    // above, and the half that catches an off-by-one in the comparison.
+    let grandchildArgs = AgentSupervisor.runnerConfig(
+        for: grandchild, spawnDepth: supervisor.depth(of: grandchildId)).extraArgs
+    for spawnTool in RoleRegistry.spawnToolNames(for: .pi) {
+        guard !grandchildArgs.joined(separator: " ").contains(spawnTool) else {
+            throw fail("the grandchild is AT the depth cap but was still offered \(spawnTool): \(grandchildArgs)")
+        }
+    }
 
     let grandchildInbox = EventInbox()
     let grandchildStream = supervisor.events(for: grandchildId)
@@ -11253,8 +11292,8 @@ private func checkSpawnFromToolCall(
         guard worker.model == piConfig.model, worker.thinking == piConfig.thinking else {
             throw fail("\(worker.role ?? "?") did not inherit the parent's provider settings: model \(worker.model), thinking \(worker.thinking)")
         }
-        guard AgentSupervisor.runnerConfig(for: worker).extraArgs.isEmpty else {
-            throw fail("\(worker.role ?? "?") declares no tools but its runner would pass \(AgentSupervisor.runnerConfig(for: worker).extraArgs)")
+        guard AgentSupervisor.runnerConfig(for: worker, spawnDepth: 0).extraArgs.isEmpty else {
+            throw fail("\(worker.role ?? "?") declares no tools but its runner would pass \(AgentSupervisor.runnerConfig(for: worker, spawnDepth: 0).extraArgs)")
         }
     }
     let atCap = supervisor.children(of: parentId).count
@@ -11576,7 +11615,7 @@ private func checkIsolatedSpawn(
 
     let runner = ScriptedAgentRunner(script: [.sessionStateChanged(.ready)])
     let recorder = SpawningCwdRecorder(runner)
-    let supervisor = AgentSupervisor(store: store, makeRunner: { recorder.make($0) })
+    let supervisor = AgentSupervisor(store: store, makeRunner: { recorder.make($0.record) })
     let isolatedId = try supervisor.spawn(
         role: "implementer",
         prompt: "fix auth",
@@ -11634,7 +11673,7 @@ private func checkIsolatedSpawn(
     // The PRODUCTION factory, not the recorder: an injected runner cannot witness
     // what `PiAgentRunner.Config.cwd` would be, so a regression in `piRunner(for:)`
     // would pass everything above (from the cross-review).
-    guard let production = AgentSupervisor.piRunner(for: isolated) as? PiAgentRunner else {
+    guard let production = AgentSupervisor.piRunner(for: AgentRunnerLaunch(record: isolated, spawnDepth: 0)) as? PiAgentRunner else {
         throw fail("the default runner factory does not produce a PiAgentRunner for an isolated agent")
     }
     guard production.config.cwd.path == isolated.cwd else {
@@ -11896,7 +11935,7 @@ private func checkArchiveCleanup(
     // runner exiting rather than as a dictionary entry disappearing.
     let holding = ScriptedAgentRunner(script: [.sessionStateChanged(.running)], holdUntilStopped: true)
     let queue = ScriptedRunnerQueue([holding])
-    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0) })
+    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0.record) })
 
     func spawnIsolated(_ prompt: String?, role: String) throws -> (id: AgentID, record: AgentRecord) {
         let id = try supervisor.spawn(
@@ -12070,7 +12109,7 @@ private func checkArchiveCleanup(
         lastActivityAt: now,
         tileId: nil
     ))
-    let adopting = AgentSupervisor(store: store, makeRunner: { ScriptedRunnerQueue([]).next($0) })
+    let adopting = AgentSupervisor(store: store, makeRunner: { ScriptedRunnerQueue([]).next($0.record) })
     _ = adopting.restore()
     guard adopting.records[mislabelledId] != nil else {
         throw fail("the mislabelled record was not adopted, so the guard is untested")
@@ -12099,7 +12138,7 @@ private func checkArchiveCleanup(
 
     // MARK: 6 · orphans, and what is NOT one
 
-    let orphanSupervisor = AgentSupervisor(store: store, makeRunner: { ScriptedRunnerQueue([]).next($0) })
+    let orphanSupervisor = AgentSupervisor(store: store, makeRunner: { ScriptedRunnerQueue([]).next($0.record) })
     func spawnOn(
         _ supervisor: AgentSupervisor,
         role: String,
@@ -12128,7 +12167,7 @@ private func checkArchiveCleanup(
     try store.delete(id: orphanAgent.id)
 
     // A supervisor that never held either record — it only knows what the store says.
-    let afterRelaunch = AgentSupervisor(store: store, makeRunner: { ScriptedRunnerQueue([]).next($0) })
+    let afterRelaunch = AgentSupervisor(store: store, makeRunner: { ScriptedRunnerQueue([]).next($0.record) })
     _ = afterRelaunch.restore()
     let orphans = try afterRelaunch.orphanWorktrees(repo: repo)
     // Negative test observed red with the final code: with `knownAgentDirectories`
@@ -12170,7 +12209,7 @@ private func checkArchiveCleanup(
     // records alone would prune the one thing that could bring that agent back.
     let staleAgent = try spawnOn(afterRelaunch, role: "stale")
     try FileManager.default.removeItem(at: URL(fileURLWithPath: staleAgent.cwd))
-    let afterSecondRelaunch = AgentSupervisor(store: store, makeRunner: { ScriptedRunnerQueue([]).next($0) })
+    let afterSecondRelaunch = AgentSupervisor(store: store, makeRunner: { ScriptedRunnerQueue([]).next($0.record) })
     let restored = afterSecondRelaunch.restore()
     guard restored.stale.contains(staleAgent.id) else {
         throw fail("the stale agent was not marked stale, so this case is untested")
@@ -12546,7 +12585,7 @@ private func checkReadState(
     var persistedWriteCount = 0
     let supervisor = AgentSupervisor(
         store: store,
-        makeRunner: { queue.next($0) },
+        makeRunner: { queue.next($0.record) },
         // Count the actual production store writes, not an in-memory helper. The
         // closure still delegates to AgentStore.upsert, so every count is a real
         // AtomicWriter persistence that the readback below can observe.
@@ -13404,7 +13443,7 @@ private func checkPerAgentProviderSettings(
 
     // MARK: 2 · the NEXT turn's flags, from the reloaded record
 
-    let config = AgentSupervisor.runnerConfig(for: stored)
+    let config = AgentSupervisor.runnerConfig(for: stored, spawnDepth: 0)
     guard config.model == pickedModel, config.thinking == pickedThinking else {
         throw fail("provider-settings: the runner would be built with \(config.model) / \(config.thinking) — the record is not what decides the next turn")
     }
@@ -13455,7 +13494,7 @@ private func checkPerAgentProviderSettings(
     }
     guard supervisor.providerSettings(for: agentId)?.model == pickedModel,
           try store.load(id: agentId)?.model == pickedModel,
-          AgentSupervisor.runnerConfig(for: stored).model == pickedModel else {
+          AgentSupervisor.runnerConfig(for: stored, spawnDepth: 0).model == pickedModel else {
         throw fail("provider-settings: moving the global Settings default moved an agent that already existed — the record is the truth, and \"per-agent\" means the default is only a seed")
     }
 
@@ -13533,7 +13572,7 @@ private func checkPerAgentProviderSettings(
           try store.load(id: agentId)?.thinking == "low" else {
         throw fail("provider-settings: picking in the tile left the record at \(String(describing: supervisor.providerSettings(for: agentId))) / the store at \(String(describing: try store.load(id: agentId).map { "\($0.model) / \($0.thinking)" }))")
     }
-    guard AgentSupervisor.runnerConfig(for: try store.load(id: agentId)!).model == secondModel else {
+    guard AgentSupervisor.runnerConfig(for: try store.load(id: agentId)!, spawnDepth: 0).model == secondModel else {
         throw fail("provider-settings: the tile's pick does not reach the next turn's runner config")
     }
 
@@ -13946,8 +13985,8 @@ func runAgentFanOutChecks() async throws {
         .sessionStateChanged(.ready)
     ]
     let runners = FanOutRunnerLog()
-    let supervisor = AgentSupervisor(store: store, makeRunner: { record in
-        runners.make(sourceItemId: record.sourceItemId, script: record.sourceItemId == "CON-2" ? completing : [.sessionStateChanged(.running)])
+    let supervisor = AgentSupervisor(store: store, makeRunner: { launch in
+        runners.make(sourceItemId: launch.record.sourceItemId, script: launch.record.sourceItemId == "CON-2" ? completing : [.sessionStateChanged(.running)])
     })
 
     var fannedOut: [[LinearTicketQueueRow]] = []
