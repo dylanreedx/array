@@ -13186,6 +13186,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             },
             onConfirm: { [weak self] selection in
                 guard let self else { return }
+                guard let workspaceId = self.workspaceRuntime?.workspaceId else {
+                    if isNewZone {
+                        canvasView.cancelProvisionalZone(zoneId: placement.zoneId)
+                    }
+                    self.projectHomePicker = nil
+                    self.setWorkspaceManagementMessage("Couldn't determine the active workspace.")
+                    return
+                }
+                do {
+                    var liveRegistry = try registryStore.loadOrEmpty()
+                    if let owner = try liveRegistry.exclusiveWorkspaceOwner(of: selection.project.id),
+                       owner != workspaceId {
+                        // The picker used to commit the placement first and only
+                        // discover the ownership conflict on the next workspace
+                        // mount. The zone was durable but filtered as foreign, so
+                        // switching away and back looked exactly like data loss.
+                        // Keep the provisional zone memory-only, remove it before
+                        // any optional switch, and route through the same friendly
+                        // ownership helper as Add Project.
+                        if isNewZone {
+                            canvasView.cancelProvisionalZone(zoneId: placement.zoneId)
+                        }
+                        self.projectHomePicker = nil
+                        self.offerSwitchToOwningWorkspace(
+                            projectId: selection.project.id,
+                            workspaceId: owner
+                        )
+                        return
+                    }
+                    if try liveRegistry.exclusiveWorkspaceOwner(of: selection.project.id) == nil {
+                        try liveRegistry.assignProject(selection.project.id, to: workspaceId, now: Date())
+                        try registryStore.save(liveRegistry)
+                    }
+                } catch {
+                    if isNewZone {
+                        canvasView.cancelProvisionalZone(zoneId: placement.zoneId)
+                    }
+                    self.projectHomePicker = nil
+                    self.setWorkspaceManagementMessage(
+                        "Couldn't use that project here: \(error.localizedDescription)"
+                    )
+                    return
+                }
                 let label = self.zoneScopeLabel(ZoneScope(
                     projectId: selection.project.id,
                     homeRelativePath: selection.homeRelativePath
@@ -16269,6 +16312,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(zoneRegistry.refCount(for: projectP)  == 1, "pre-switch: P ref-count == 1")
         try expect(canvas.qaZoneDisplayName(zoneAa) == "Saved Pa Name",
                    "pre-switch: saved custom zone name must win over registry project name")
+
+        // A project/Home picker result from another workspace must be rejected
+        // before it can become a durable-but-unmountable zone. That exact split
+        // made a successfully saved zone disappear on A -> B -> A.
+        let foreignCreatedZone = ZonePlacement(
+            zoneId: UUID(uuidString: "00000000-0000-0000-0000-000000009F0D")!,
+            projectId: projectPb,
+            origin: ZonePoint(x: 1_400, y: 0),
+            size: ZoneSize(width: 640, height: 480),
+            color: "orange",
+            collapsed: false,
+            hydrationPolicy: .automatic,
+            name: "Must Stay Provisional"
+        )
+        do {
+            try runtime.commitCreatedZone(foreignCreatedZone)
+            throw CheckError.failed("foreign project zone was persisted into the mounted workspace")
+        } catch let ProjectWorkspaceOwnershipError.alreadyOwned(projectId, ownerId) {
+            // Expected: the picker can now offer a switch without leaving a
+            // hidden placement behind in this workspace.
+            try expect(projectId == projectPb && ownerId == workspaceWB,
+                       "foreign-zone rejection reported the wrong project owner")
+        } catch {
+            throw error
+        }
+        try expect(!runtime.document.zones.contains(where: { $0.zoneId == foreignCreatedZone.zoneId }),
+                   "rejected foreign project zone changed the runtime document")
+        let persistedAfterForeignRejection = try WorkspaceStore(
+            workspaceId: workspaceWA,
+            applicationSupportDirectory: appSupport
+        ).load()
+        try expect(!persistedAfterForeignRejection.zones.contains(where: { $0.zoneId == foreignCreatedZone.zoneId }),
+                   "rejected foreign project zone reached disk")
 
         // Mutate every persisted placement register through the mounted scene.
         // None of these writes is sent to the runtime; the switch boundary itself

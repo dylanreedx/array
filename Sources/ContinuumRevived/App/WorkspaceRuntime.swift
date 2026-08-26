@@ -80,6 +80,20 @@ final class WorkspaceRuntime {
 
     func commitCreatedZone(_ placement: ZonePlacement) throws {
         guard !document.zones.contains(where: { $0.zoneId == placement.zoneId }) else { return }
+        if let projectId = placement.projectId {
+            var ownershipRegistry = try registryStore.loadOrEmpty()
+            if let owner = try ownershipRegistry.exclusiveWorkspaceOwner(of: projectId),
+               owner != workspaceId {
+                throw ProjectWorkspaceOwnershipError.alreadyOwned(
+                    projectId: projectId,
+                    workspaceId: owner
+                )
+            }
+            if try ownershipRegistry.exclusiveWorkspaceOwner(of: projectId) == nil {
+                try ownershipRegistry.assignProject(projectId, to: workspaceId, now: Date())
+                try registryStore.save(ownershipRegistry)
+            }
+        }
         document.zones.append(placement)
         document.bringZoneToFront(placement.zoneId)
         document.lastActiveZoneId = placement.zoneId
