@@ -288,6 +288,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     private var arrivedDisplayIDs: Set<AgentNodeID> = []
     private var didSeedArrivedDisplayIDs = false
     private var entryDatesByID: [AgentNodeID: Date?] = [:]
+    /// `AgentEntry.finishedAt`, the other endpoint of a turn. Kept beside
+    /// `entryDatesByID` and rebuilt with it so the two can never disagree.
+    private var entryEndDatesByID: [AgentNodeID: Date?] = [:]
     private var nextEntryDateByEntryID: [AgentNodeID: Date] = [:]
     private var hoveredTurnEntryID: AgentNodeID?
     private var transcriptTrackingArea: NSTrackingArea?
@@ -1720,13 +1723,20 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 guard let index = entryIndexByID[id],
                       document.entries.indices.contains(index),
                       document.entries[index].id == id,
-                      document.entries[index].createdAt == (entryDatesByID[id] ?? nil)
+                      document.entries[index].createdAt == (entryDatesByID[id] ?? nil),
+                      // `finishedAt` is stamped by `finishEntry`, which reports the
+                      // entry in the changed set — so this is exactly where a turn
+                      // gaining its end must invalidate the cache. Omitting it
+                      // leaves every turn reading time-to-first-token forever.
+                      document.entries[index].finishedAt == (entryEndDatesByID[id] ?? nil)
                 else { stale = true; break }
             }
             if !stale { return }
         }
         entryDatesByID = Dictionary(
             uniqueKeysWithValues: document.entries.map { ($0.id, $0.createdAt) })
+        entryEndDatesByID = Dictionary(
+            uniqueKeysWithValues: document.entries.map { ($0.id, $0.finishedAt) })
         // `.plans/45` S6 — a reasoning span ends when the NEXT entry begins.
         // Derived from the document alone; an entry with no dated successor
         // gets nil, never a fabricated duration.
@@ -2479,9 +2489,18 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             var first: Date?
             var last: Date?
             for index in range where rows.indices.contains(index) {
-                guard let date = entryDatesByID[rows[index].entryID] ?? nil else { continue }
-                if first == nil || date < first! { first = date }
-                if last == nil || date > last! { last = date }
+                let entryID = rows[index].entryID
+                if let date = entryDatesByID[entryID] ?? nil {
+                    if first == nil || date < first! { first = date }
+                    if last == nil || date > last! { last = date }
+                }
+                // A turn ends when its last entry FINISHES, not when that entry
+                // began. `createdAt` on an assistant entry is the moment of its
+                // first token, so a span that ignores this reports time-to-first-
+                // token and contradicts the settled tail a few rows below.
+                if let end = entryEndDatesByID[entryID] ?? nil {
+                    if last == nil || end > last! { last = end }
+                }
             }
             guard let first, let last else { return nil }
             let span = last.timeIntervalSince(first)

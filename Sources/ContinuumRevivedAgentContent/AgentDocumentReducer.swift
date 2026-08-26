@@ -19,7 +19,8 @@ public struct AgentDocumentReducer: Sendable {
     private var topBlockLocations: [AgentNodeID: (entry: Int, block: Int)] = [:]
     private var topRoots: [AgentNodeID: AgentNodeID] = [:]
 
-    /// Supplies `AgentEntry.createdAt` when an entry is begun.
+    /// Supplies `AgentEntry.createdAt` when an entry is begun and
+    /// `AgentEntry.finishedAt` when it is finished.
     ///
     /// Defaults to `{ nil }` so the reducer stays a pure function of its
     /// mutations: an unstamped reducer produces byte-identical documents on every
@@ -239,6 +240,10 @@ public struct AgentDocumentReducer: Sendable {
             let revision = try nextRevision(document.entries[entryIndex].revision, id: id)
             document.entries[entryIndex].lifecycle = .finished
             document.entries[entryIndex].revision = revision
+            // The turn's real end. Stamped HERE and not on every mutation: the
+            // per-token path must stay free of clock reads, and this is the one
+            // moment that is actually the end of anything.
+            document.entries[entryIndex].finishedAt = createdAtProvider()
             updated = [id]
 
         case let .removeEntry(id):

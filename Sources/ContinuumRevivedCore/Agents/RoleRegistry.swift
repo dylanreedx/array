@@ -47,9 +47,16 @@ public struct RoleRegistry: Sendable {
         // comes from a third-party extension the user installed themselves.
         // Both are named because `--tools` is a HARD allowlist that covers
         // extension tools, so omitting one denies it to every roled agent —
-        // which is what made pi delegation look broken. Naming a tool that is not
-        // installed is harmless: pi filters the list against its registry rather
-        // than erroring.
+        // which is what made pi delegation look broken.
+        //
+        // Naming a tool that is not installed is harmless, and that is MEASURED,
+        // not assumed (pi 0.84.1, 2026-08-25). `--tools` is a pure allow-set
+        // filter applied TO the live registry — `dist/core/agent-session.js`
+        // iterates `_toolRegistry.keys()` and keeps the ones the set contains, so
+        // a name matching nothing simply never joins the active set. There is no
+        // validation pass over the list. Confirmed live too: the same invocation
+        // with and without a bogus tool name exits 0 both times with zero bytes on
+        // stderr and an otherwise identical event stream.
         case .pi: return ["spawn_agent", "delegate_agent"]
         case .claudeCode: return ["Agent", "Task"]
         case .codex: return ["spawn_agent"]

@@ -1971,7 +1971,11 @@ extension TranscriptRhythmChecks {
                     tool("t3", name: "Run tests"), tool("t4", name: "Read file"),
                     paragraph("a-t", "A missing index on the join column."),
                 ],
-                createdAt: base.addingTimeInterval(45)),
+                createdAt: base.addingTimeInterval(45),
+                // The reply's first token lands at +45; the answer finishes
+                // streaming at +120. A span measured createdAt-to-createdAt calls
+                // this turn 45s and throws away 75s of the model's actual work.
+                finishedAt: base.addingTimeInterval(120)),
             AgentEntry(
                 id: id("entry-u2"), revision: 1, role: .user,
                 provenance: .localPrompt(promptID: "span2"), lifecycle: .finished,
@@ -1980,7 +1984,8 @@ extension TranscriptRhythmChecks {
                 id: id("entry-a2"), revision: 1, role: .assistant,
                 provenance: .providerItem(provider: "fixture", itemID: "a2"),
                 lifecycle: .finished, blocks: [paragraph("a2-t", "Added.")],
-                createdAt: base.addingTimeInterval(61)),
+                createdAt: base.addingTimeInterval(61),
+                finishedAt: base.addingTimeInterval(64)),
         ]
         let document = AgentDocument(version: 1, entries: entries)
         let list = AgentTranscriptListView()
@@ -2013,13 +2018,18 @@ extension TranscriptRhythmChecks {
         guard let worked = summaries.first(where: { $0.hasPrefix("Worked") }) else {
             throw fail("span: no turn-scope header among \(summaries)")
         }
-        // 45s is the entry span. A sum over members that have no detail records
-        // is zero, and the old code printed no duration clause at all.
-        guard worked.contains("45s") else {
+        // The turn opened at +0 and its reply finished streaming at +120, so it
+        // took 2m 0s. Two wrong answers this must never give:
+        //   "0s"    — a sum over members with no detail records (the pre-T3 bug).
+        //   "45s"   — createdAt-to-createdAt, i.e. TIME TO FIRST TOKEN, which
+        //             throws away the whole answer and contradicts the settled
+        //             tail a few rows below it.
+        guard worked.contains("2m 0s") else {
             throw fail(
-                "span: the turn header read '\(worked)' — the document says the turn spanned 45s, "
-                + "and a duration derived from per-tool records excludes every interval where the "
-                + "model was thinking (and vanishes entirely once those records expire)"
+                "span: the turn header read '\(worked)' — the document says the turn ran from +0s "
+                + "to a reply that finished streaming at +120s, so it took 2m 0s. '45s' is the "
+                + "reply's FIRST TOKEN and excludes the entire answer; '0s' is a sum over per-tool "
+                + "records that excludes every interval where the model was thinking"
             )
         }
     }

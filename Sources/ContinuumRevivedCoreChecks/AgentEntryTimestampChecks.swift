@@ -100,5 +100,51 @@ func runAgentEntryTimestampChecks() {
            "the injected-clock projection init must NOT stamp, or every witness that compares "
            + "projected documents becomes time-dependent")
 
+    // 7. `finishedAt` — the OTHER endpoint, and the one a turn's duration needs.
+    //
+    //    `createdAt` on an assistant entry is the moment of its first token, so a
+    //    turn duration measured createdAt-to-createdAt reports time-to-first-token
+    //    and drops the whole answer. `finishEntry` is the only moment that is
+    //    genuinely an end, and it is the only place this is stamped: the
+    //    per-token path must stay free of clock reads.
+    let finishAt = Date(timeIntervalSince1970: 1_700_000_120)
+    var lifecycle = AgentDocumentReducer(createdAtProvider: { finishAt })
+    _ = try? lifecycle.apply(.beginEntry(
+        id: entryID, role: .assistant, provenance: .providerItem(provider: "fixture", itemID: "a")))
+    expect(lifecycle.document.entries.first?.finishedAt == nil,
+           "an OPEN entry must have no finishedAt — a turn still streaming has not ended, and "
+           + "reporting one would be a fabricated duration on live work")
+    _ = try? lifecycle.apply(.finishEntry(id: entryID))
+    expect(lifecycle.document.entries.first?.finishedAt == finishAt,
+           "finishEntry must stamp finishedAt, or every turn header reports time-to-first-token")
+
+    //    Same three properties createdAt owes, asserted for this field too.
+    var unstampedEnd = AgentDocumentReducer()
+    _ = try? unstampedEnd.apply(.beginEntry(
+        id: entryID, role: .assistant, provenance: .providerItem(provider: "fixture", itemID: "a")))
+    _ = try? unstampedEnd.apply(.finishEntry(id: entryID))
+    expect(unstampedEnd.document.entries.first?.finishedAt == nil,
+           "the default reducer must not stamp finishedAt either, or whole-document witnesses flap")
+    do {
+        let data = try JSONEncoder().encode(lifecycle.document)
+        let round = try JSONDecoder().decode(AgentDocument.self, from: data)
+        let back = round.entries.first?.finishedAt
+        expect(back.map { abs($0.timeIntervalSince(finishAt)) < 0.001 } == true,
+               "finishedAt must survive an encode/decode round trip; got \(String(describing: back))")
+    } catch {
+        fputs("FAIL: a finished document must round-trip; got \(error)\n", stderr)
+        exit(1)
+    }
+    do {
+        // The legacy payload again: it has a `finished` lifecycle and no
+        // `finishedAt`, which is every transcript on disk today.
+        let decoded = try JSONDecoder().decode(AgentDocument.self, from: Data(legacyJSON.utf8))
+        expect(decoded.entries[0].finishedAt == nil,
+               "an entry persisted before finishedAt existed must decode as nil")
+    } catch {
+        fputs("FAIL: the legacy document must still decode after finishedAt was added; got \(error)\n", stderr)
+        exit(1)
+    }
+
     print("AgentEntryTimestampChecks passed")
 }
