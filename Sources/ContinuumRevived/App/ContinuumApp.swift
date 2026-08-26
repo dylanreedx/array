@@ -16235,8 +16235,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                    && canvas.installedZoneLayerIds == mountedIdsBeforeFailureChecks,
                    "departing-save failure tore down or changed the mounted workspace")
 
-        // Legacy duplicate membership is an integrity stop. The switch must not
-        // edit either document or tear down the currently interactive A scene.
+        // Legacy duplicate membership remains visible to the strict integrity
+        // audit, but an unrelated stale membership must not make a safe target
+        // document impossible to mount. Switching still must not transfer the
+        // project or rewrite either document.
         var duplicateRegistry = appRegistry
         duplicateRegistry.workspaces = [
             WorkspaceEntry(id: workspaceWA, name: "A", projectIds: [projectPa, projectP], createdAt: now, updatedAt: now),
@@ -16248,21 +16250,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let bytesBBeforeRejectedSwitch = try Data(contentsOf: WorkspaceStore(
             workspaceId: workspaceWB, applicationSupportDirectory: appSupport).layout.canvasFile)
         do {
-            try runtime.switchWorkspace(to: workspaceWB)
-            throw CheckError.failed("duplicate project membership was silently accepted")
+            try duplicateRegistry.validateExclusiveProjectOwnership()
+            throw CheckError.failed("strict integrity audit silently accepted duplicate project membership")
         } catch is ProjectWorkspaceOwnershipError {
             // expected
         }
-        try expect(runtime.workspaceId == workspaceWA && canvas.installedZoneLayerIds.contains(zoneAa),
-                   "duplicate-membership rejection changed the mounted workspace")
+        try runtime.switchWorkspace(to: workspaceWB)
+        try expect(runtime.workspaceId == workspaceWB && canvas.installedZoneLayerIds.contains(zoneBb),
+                   "a stale unmounted membership prevented the safe target workspace from mounting")
         let bytesAAfterRejectedSwitch = try Data(contentsOf: WorkspaceStore(
             workspaceId: workspaceWA, applicationSupportDirectory: appSupport).layout.canvasFile)
         let bytesBAfterRejectedSwitch = try Data(contentsOf: WorkspaceStore(
             workspaceId: workspaceWB, applicationSupportDirectory: appSupport).layout.canvasFile)
         try expect(bytesABeforeRejectedSwitch == bytesAAfterRejectedSwitch,
-            "duplicate-membership rejection modified workspace A")
+            "safe switch with duplicate membership modified workspace A")
         try expect(bytesBBeforeRejectedSwitch == bytesBAfterRejectedSwitch,
-            "duplicate-membership rejection modified workspace B")
+            "safe switch with duplicate membership modified workspace B")
 
         // The explicit move boundary transfers ownership and all of P's zones in
         // one transaction; this is deliberately separate from workspace switch.

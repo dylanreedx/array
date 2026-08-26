@@ -143,12 +143,32 @@ public struct Registry: Codable, Equatable, Sendable {
     }
 
     public func exclusiveWorkspaceOwner(of projectId: UUID) throws -> UUID? {
-        try validateExclusiveProjectOwnership()
         guard let project = projects.first(where: { $0.id == projectId }) else {
             throw ProjectWorkspaceOwnershipError.unknownProject(projectId)
         }
-        let membership = workspaces.first(where: { $0.projectIds.contains(projectId) })?.id
-        return project.workspaceId ?? membership
+        let memberships = workspaces
+            .filter { Set($0.projectIds).contains(projectId) }
+            .map(\.id)
+
+        // `workspaceId` is the durable ownership declaration. Older Array
+        // versions could leave a second workspace membership behind; that stale
+        // reference must remain visible for explicit repair, but it must not make
+        // the declared owner's workspace impossible to mount at launch.
+        if let declared = project.workspaceId {
+            if let membership = memberships.first, !memberships.contains(declared) {
+                throw ProjectWorkspaceOwnershipError.ownerMismatch(
+                    projectId: projectId,
+                    declaredWorkspaceId: declared,
+                    membershipWorkspaceId: membership)
+            }
+            return declared
+        }
+        if memberships.count > 1 {
+            throw ProjectWorkspaceOwnershipError.duplicateMembership(
+                projectId: projectId,
+                workspaceIds: memberships.sorted { $0.uuidString < $1.uuidString })
+        }
+        return memberships.first
     }
 
     /// Add an unowned project to a workspace. A project already owned elsewhere

@@ -70,7 +70,6 @@ public struct DefaultWorkspaceMigration: Sendable {
         applicationSupportDirectory: URL,
         updatedAt: Date = Date()
     ) throws -> UUID? {
-        try registry.validateExclusiveProjectOwnership()
         if let owner = try registry.exclusiveWorkspaceOwner(of: projectId) {
             guard registry.workspaces.contains(where: { $0.id == owner }) else {
                 throw ProjectWorkspaceOwnershipError.unknownWorkspace(owner)
@@ -80,7 +79,9 @@ public struct DefaultWorkspaceMigration: Sendable {
                 throw ProjectWorkspaceOwnershipError.workspaceDocumentMissing(
                     projectId: projectId, workspaceId: owner)
             }
-            try registry.assignProject(projectId, to: owner, now: updatedAt)
+            if !registry.workspaces.contains(where: { $0.id == owner && $0.projectIds.contains(projectId) }) {
+                try registry.assignProject(projectId, to: owner, now: updatedAt)
+            }
             registry.lastActiveWorkspaceId = owner
             return owner
         }

@@ -514,7 +514,6 @@ final class WorkspaceRuntime {
     /// via `ZoneHydrationOrchestrator.plan`; only zones whose planned tier is `.live`
     /// get a controller acquired.
     func install(into canvasView: CanvasNSView, appRegistry: Registry) throws {
-        try appRegistry.validateExclusiveProjectOwnership()
         try Self.validateProjectOwnership(in: document, workspaceId: workspaceId, registry: appRegistry)
         self.canvasView = canvasView
         canvasView.activateUndoWorkspace(workspaceId)
@@ -1096,7 +1095,6 @@ final class WorkspaceRuntime {
         // workspace file. Duplicate legacy membership is an integrity error, not
         // an invitation to merge layouts during a switch.
         let appRegistry = try registryStore.loadOrEmpty()
-        try appRegistry.validateExclusiveProjectOwnership()
         try Self.validateProjectOwnership(in: document, workspaceId: workspaceId, registry: appRegistry)
         guard let targetDocument = try loadWorkspaceDocument(workspaceId: targetWorkspaceId) else {
             throw WorkspaceSwitchError.documentNotFound(targetWorkspaceId)

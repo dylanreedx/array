@@ -3655,6 +3655,29 @@ do {
     expect(existingRegistry.workspaces.first(where: { $0.id == workspaceA })?.projectIds.isEmpty == true, "DefaultWorkspaceMigration does not attach an owned project to the last-active workspace")
     expect(existingRegistry.workspaces.first(where: { $0.id == workspaceB })?.projectIds == [projectId], "DefaultWorkspaceMigration preserves exclusive workspace membership")
     expect(existingRegistry.projects.first?.workspaceId == workspaceB, "DefaultWorkspaceMigration preserves the project entry's owner")
+
+    // Pre-0.5.13 registries could retain a stale second membership. The durable
+    // project owner must still boot, while the strict integrity audit continues
+    // to report the duplicate for explicit repair.
+    existingRegistry.workspaces[0].projectIds = [projectId]
+    let duplicateMemberships = existingRegistry.workspaces.map(\.projectIds)
+    let duplicateWorkspaceId = try migration.ensureDefaultWorkspace(
+        for: project,
+        registry: &existingRegistry,
+        applicationSupportDirectory: scratch,
+        now: now.addingTimeInterval(180),
+        workspaceId: UUID(),
+        zoneId: UUID()
+    )
+    expect(duplicateWorkspaceId == workspaceB, "DefaultWorkspaceMigration boots the declared owner despite a stale second membership")
+    expect(existingRegistry.workspaces.map(\.projectIds) == duplicateMemberships,
+           "DefaultWorkspaceMigration preserves legacy duplicate membership for explicit repair")
+    do {
+        try existingRegistry.validateExclusiveProjectOwnership()
+        expect(false, "strict ownership audit reports legacy duplicate membership")
+    } catch let error as ProjectWorkspaceOwnershipError {
+        guard case .duplicateMembership = error else { throw error }
+    }
 }
 
 do {
