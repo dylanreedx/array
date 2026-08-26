@@ -98,3 +98,68 @@ rules exist to refuse.
 
 Recorded rather than silently dropped, because §2.6's other entries were derived
 the same way and should be measured before they are trusted.
+
+## M4 — polish, debt, and the observed-run subsystem
+
+| what | before | after |
+|---|---|---|
+| short bash/tool output | clipped: a legacy scroller takes ~15pt from a 33pt pane | overlay scrollers, vertical decided per layout, wheel forwarded |
+| "Thought" body | provider's whole-paragraph bold under our own title; body 60pt left of it; 2pt above vs 8pt between | heading flattened (phrase bold kept), body on the title's x, gaps equal |
+| delegated-run cursor | line index into a file whose inode changes | inode-keyed; rewrite closes the binding |
+| a quiet dead run | watcher polled for the life of the app, tile stuck mid-turn | pid liveness sweep, independent of the directory |
+| a capped-refused child | buffered events forever | never tailed; a not-yet-adopted child still is |
+| watcher filtering | via the records map, torn down mid-adoption-race | binding carries its parent |
+| `events.jsonl` read | total, every poll: ~19ms/MB twice a second | byte cursor while inode and size hold; stops at the last `\n` |
+| `check-root-docs.sh` | KNOWN-RED, asking the wrong file | GREEN, retired from `MATRIX_KNOWN_RED` (9 → 8) |
+
+## Matrix, runs 2 and 3
+
+Run 2 (quiet machine): **181 legs, 5 expected KNOWN-RED** (root-docs retired),
+and run 1's `--browser-inspector-network-lite-check` flake **did not recur** —
+confirming contention, not regression. One NEW failure,
+`--agent-local-file-link-check`, and it was a real catch: two assertions in it
+encoded the pre-world-space overlay design.
+
+- One demanded 65 tile visits per CAMERA step — it pinned recomputation as the
+  mechanism, so it now asserts the outcome (zero cost, connector still correct)
+  plus a separate tile-move invalidation.
+- One is a PIXEL test comparing a corridor from the route's own points against
+  canvas pixels. Those coincided only while the overlay was viewport-sized. It
+  now converts, and finds the connector's pixels — which is also the evidence
+  that the redesign draws what it always drew.
+
+**The zoom agent's own regression sweep ran `--relationship-geometry-check` and
+missed this leg.** Endpoint math passed while a pixel test failed; only the full
+matrix found it. That is the argument for the milestone gate, not the targeted one.
+
+## Matrix, run 3 — **PASSED**
+
+**181 legs, 4 expected KNOWN-RED, no real failures.**
+
+The run also reported one KNOWN-RED that PASSED and told us to remove it:
+`--perf-budget-gesture-transition-check`. **Re-judged instead of obeyed.** Five
+consecutive runs on the same quiet machine: **7.878 / 7.737 / 7.817 / 8.041 /
+8.296 ms** against a budget of **8.300**. It clears by four MICROseconds at the
+top of its own spread — a coin flip, not a fixed leg. Removing it would turn the
+gate red on any run that is not idle. The rationale is now recorded at the entry
+so this is not re-litigated; it leaves the list when the measurement has
+headroom.
+
+That closes the "`--perf-budget-gesture-transition-check` needs re-judging on a
+quiet machine" loose end from `.plans/49` §7 — verdict: **still KNOWN-RED, and
+now for a measured reason instead of an assumed one.**
+
+## What remains open
+
+- **Two pixel baselines** (`tiles.managedAgent-560x560-{aqua,darkAqua}.png`)
+  still await Dylan's supervised Retina-Main bless. `--component-lab-check` and
+  `--ui-baseline-check` are both KNOWN-RED **and** skipped by
+  `CONTINUUM_SKIP_UI_BASELINES=1`, which every run here used — so
+  `ComponentLab.runTranscriptReviewCheck`'s row floors have still never executed
+  in a gating run (`.plans/49` §6.2). **This is the largest remaining hole**, and
+  it is the reason Dylan's eyes keep finding what a leg should have.
+- `.plans/49` §3 (honesty: cap wording, steering advertised-then-refused, dead
+  buttons), §4 (subagent chip affordance, open-file-as-tile), and §6.1's stale
+  ledger tables are untouched.
+- §2.6's remaining O(rows) suspects are unmeasured; one of its entries already
+  failed to reproduce (above), so measure before trusting.
