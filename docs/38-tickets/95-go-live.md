@@ -50,7 +50,19 @@ Status as of 2026-08-09 (end of day):
      the pre-`65d420a` doc taxonomy, one of which demands "Continuum Revived" in
      the user-facing README and so contradicts the identity rule).
 
-     **It is 10 now.** The tenth is `--canvas-zoom-invalidation-probe-check`, the
+     **It is 8 as of 2026-08-25, and the membership below is history rather than
+     the current list — read `MATRIX_KNOWN_RED` in `run-matrix.sh`, which is and
+     always was the authoritative one.** Two entries named in this paragraph have
+     since left it: `--perf-budget-transcript-delta-check` (green, and now driving
+     the seam production actually runs — `.plans/50`) and `scripts/check-root-docs.sh`
+     (green; it was never link rot, it was asking the wrong FILE — eight of its
+     nine markers had moved to `CONTRIBUTING.md` and the ninth was the codename
+     the identity rule forbids). `--perf-budget-gesture-transition-check` remains
+     KNOWN-RED **by measurement, not by inheritance**: five runs on a quiet machine
+     put it at 7.878-8.296ms against a budget of 8.300, i.e. it clears by four
+     microseconds at the top of its spread.
+
+     **It was 10 at 0.4.13.** The tenth was `--canvas-zoom-invalidation-probe-check`, the
      diagnosis behind the zoom leg: it isolates why a zoom lays out every tile
      while a pan lays out none, and its answer is that the cost is
      `refreshZoomDependentChrome`, not the camera mechanism. Its other three

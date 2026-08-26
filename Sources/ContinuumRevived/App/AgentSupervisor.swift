@@ -4773,12 +4773,24 @@ final class AgentSupervisor {
 
     // MARK: - B5 command classifier
 
-    /// Capability facts for `AgentCommandExecutionPlanner`, from the BOUND
-    /// runner's harness rather than a stored preference — the same rule
-    /// `turnSnapshot` already follows for steer/queue. Every compiled runner
-    /// today is one-shot, so this is a harness lookup for now; a session
-    /// runner would replace it with its own measured capabilities the same way
-    /// `AgentSessionRunning.sessionCapabilities` does for steer.
+    /// Capability facts for `AgentCommandExecutionPlanner`.
+    ///
+    /// **This comment used to describe something the body does not do**, and the
+    /// difference is a live defect rather than a documentation nicety. It claimed
+    /// the facts came "from the BOUND runner's harness rather than a stored
+    /// preference — the same rule `turnSnapshot` already follows", and that
+    /// "every compiled runner today is one-shot". Both were false by 2026-08-25:
+    /// the body switches on `records[id]?.harness`, which IS the stored record and
+    /// not the bound runner, and `PiRpcAgentRunner`/`PiRpcTransport` ship a
+    /// session runner with `steer`, `interrupt` and a generic `command`.
+    ///
+    /// The consequence is `.plans/49` §3.4: a pi agent whose rpc runner is bound
+    /// and can genuinely take `/compact` is told it cannot, because this returns
+    /// `.oneShotProse` for `.pi` unconditionally. Fixing that means consulting the
+    /// bound runner the way `AgentSessionRunning.sessionCapabilities` already does
+    /// for steer — deliberately NOT done here, because it changes what the
+    /// composer offers and belongs with the rest of the advertise-then-refuse
+    /// work, not smuggled in behind a comment correction.
     ///
     /// Measured 2026-08-24: `claude -p` interprets `/help`, `/status`,
     /// `/compact` itself (synthetic zero-token replies); `codex exec --json`
