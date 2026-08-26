@@ -4097,6 +4097,36 @@ do {
     expect(!mutable.deleteWorkspace(id: created.id, now: Date()), "Registry.deleteWorkspace refuses to delete the last workspace")
 }
 
+// A stale duplicate belonging to some other project remains reportable by the
+// strict integrity audit, but it must not disable an otherwise safe assignment.
+do {
+    let workspaceA = UUID(uuidString: "AAAA0000-0000-4000-8000-000000000001")!
+    let workspaceB = UUID(uuidString: "BBBB0000-0000-4000-8000-000000000002")!
+    let projectToAssign = UUID(uuidString: "CCCC0000-0000-4000-8000-000000000003")!
+    let staleProject = UUID(uuidString: "DDDD0000-0000-4000-8000-000000000004")!
+    let now = Date(timeIntervalSince1970: 1_700_003_000)
+    var registry = Registry.empty()
+    registry.workspaces = [
+        WorkspaceEntry(id: workspaceA, name: "A", projectIds: [staleProject], createdAt: now, updatedAt: now),
+        WorkspaceEntry(id: workspaceB, name: "B", projectIds: [staleProject], createdAt: now, updatedAt: now),
+    ]
+    registry.projects = [
+        ProjectEntry(id: projectToAssign, name: "New", rootPath: "/tmp/new", workspaceId: nil, lastOpenedAt: now, pinned: false),
+        ProjectEntry(id: staleProject, name: "Stale", rootPath: "/tmp/stale", workspaceId: workspaceA, lastOpenedAt: now, pinned: false),
+    ]
+    do {
+        try registry.validateExclusiveProjectOwnership()
+        expect(false, "strict ownership audit still reports an unrelated stale duplicate")
+    } catch ProjectWorkspaceOwnershipError.duplicateMembership {
+        // Expected.
+    }
+    try registry.assignProject(projectToAssign, to: workspaceB, now: now)
+    expect(registry.projects.first(where: { $0.id == projectToAssign })?.workspaceId == workspaceB,
+           "Registry.assignProject ignores unrelated legacy duplicates")
+    expect(registry.workspaces.first(where: { $0.id == workspaceB })?.projectIds.contains(projectToAssign) == true,
+           "Registry.assignProject records the safe targeted membership")
+}
+
 // MARK: - Browser profile registry settings
 
 do {

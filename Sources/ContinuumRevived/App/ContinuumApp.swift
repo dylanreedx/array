@@ -3614,6 +3614,13 @@ private struct WorkspaceDeleteConfirmationRequest: Equatable {
     let deletionCopy: String
 }
 
+private struct ProjectWorkspaceConflictRequest: Equatable {
+    let projectId: UUID
+    let projectName: String
+    let workspaceId: UUID
+    let workspaceName: String
+}
+
 @MainActor
 /// P3.4's freeze, as a value the checks can hold still. An unobserved row's
 /// duration is the LAST-KNOWN fact: the first reading per identity is kept and
@@ -3705,6 +3712,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     var workspaceCreatePromptProvider: (() -> String?)?
     private var workspaceRenamePromptProvider: ((String) -> String?)?
     private var workspaceDeleteConfirmationProvider: ((WorkspaceDeleteConfirmationRequest) -> Bool)?
+    private var projectWorkspaceConflictSwitchProvider: ((ProjectWorkspaceConflictRequest) -> Bool)?
     /// P3.15: the same seam for deleting an agent.
     private var agentDeleteConfirmationProvider: ((AgentDeleteConfirmationRequest) -> Bool)?
     private var workspaceManagementMessage: String?
@@ -13322,9 +13330,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             setWorkspaceManagementMessage("Workspace name can't be empty.")
             return false
         }
+        let workspace: WorkspaceEntry
         do {
             var registry = try registryStore.loadOrEmpty()
-            let workspace = registry.createWorkspace(name: trimmed, now: Date())
+            workspace = registry.createWorkspace(name: trimmed, now: Date())
             let appSupport = registryStore.registryFile.deletingLastPathComponent()
             try WorkspaceStore(workspaceId: workspace.id, applicationSupportDirectory: appSupport).save(
                 WorkspaceDocument(
@@ -13335,16 +13344,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 )
             )
             try registryStore.save(registry)
-            // Switch in-process to the new empty workspace (no relaunch).
-            try workspaceRuntime?.switchWorkspace(to: workspace.id)
-            setWorkspaceManagementMessage("Created empty workspace “\(workspace.name)”.")
-            reloadWorkspaceSidebar()
-            return true
         } catch {
             fputs("Create Workspace failed: \(error)\n", stderr)
             setWorkspaceManagementMessage("Create workspace failed: \(error.localizedDescription)")
             return false
         }
+        do {
+            // Creation and navigation are deliberately reported separately. Once
+            // the registry entry and empty document are durable, a switch problem
+            // must not tell the user that creation failed or encourage duplicates.
+            try workspaceRuntime?.switchWorkspace(to: workspace.id)
+            setWorkspaceManagementMessage("Created empty workspace “\(workspace.name)”.")
+        } catch {
+            fputs("Created Workspace but switch failed: \(error)\n", stderr)
+            setWorkspaceManagementMessage(
+                "Created “\(workspace.name)”, but couldn't switch to it: \(error.localizedDescription)"
+            )
+        }
+        reloadWorkspaceSidebar()
+        return true
     }
 
     private func renameWorkspaceFromTopBar(workspaceId: UUID) {
@@ -13529,8 +13547,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try workspaceRuntime.addZone(projectId: projectId)
             reloadWorkspaceSidebar()
             fputs("Added project zone for \(projectId)\n", stderr)
+        } catch let ProjectWorkspaceOwnershipError.alreadyOwned(conflictingProjectId, ownerWorkspaceId) {
+            offerSwitchToOwningWorkspace(
+                projectId: conflictingProjectId,
+                workspaceId: ownerWorkspaceId
+            )
         } catch {
             fputs("Add Project to Canvas failed: \(error)\n", stderr)
+            setWorkspaceManagementMessage("Couldn't add project: \(error.localizedDescription)")
+        }
+    }
+
+    private func offerSwitchToOwningWorkspace(projectId: UUID, workspaceId: UUID) {
+        guard let registryStore,
+              let registry = try? registryStore.loadOrEmpty(),
+              let project = registry.projects.first(where: { $0.id == projectId }),
+              let workspace = registry.workspaces.first(where: { $0.id == workspaceId }) else {
+            setWorkspaceManagementMessage("That project already belongs to another workspace.")
+            return
+        }
+        let request = ProjectWorkspaceConflictRequest(
+            projectId: projectId,
+            projectName: project.name,
+            workspaceId: workspaceId,
+            workspaceName: workspace.name
+        )
+        let shouldSwitch: Bool
+        if let provider = projectWorkspaceConflictSwitchProvider {
+            shouldSwitch = provider(request)
+        } else {
+            let alert = NSAlert()
+            alert.messageText = "“\(project.name)” is already in “\(workspace.name)”"
+            alert.informativeText = "A project belongs to one workspace. You can switch to its workspace without moving or duplicating anything."
+            alert.addButton(withTitle: "Switch to \(workspace.name)")
+            alert.addButton(withTitle: "Cancel")
+            shouldSwitch = alert.runModal() == .alertFirstButtonReturn
+        }
+        guard shouldSwitch else {
+            setWorkspaceManagementMessage("“\(project.name)” remains in “\(workspace.name)”.")
+            return
+        }
+        do {
+            try workspaceRuntime?.switchWorkspace(to: workspaceId)
+            showWorkspaceSwitchTransitionLabel(workspaceId: workspaceId)
+            setWorkspaceManagementMessage("Switched to “\(workspace.name)” for “\(project.name)”.")
+            reloadWorkspaceSidebar()
+        } catch {
+            fputs("Switch to owning workspace failed: \(error)\n", stderr)
+            setWorkspaceManagementMessage("Couldn't switch to “\(workspace.name)”: \(error.localizedDescription)")
         }
     }
 
@@ -15541,6 +15605,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         // Fixed UUIDs for determinism.
         let workspaceW = UUID(uuidString: "00000000-0000-0000-0000-000000004800")!
+        let workspaceOther = UUID(uuidString: "00000000-0000-0000-0000-000000004802")!
         let projectP   = UUID(uuidString: "00000000-0000-0000-0000-000000004801")!
 
         // Temp directories.
@@ -15574,7 +15639,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
         var reg = Registry.empty()
         reg.lastActiveWorkspaceId = workspaceW
-        reg.workspaces = [WorkspaceEntry(id: workspaceW, name: "W", projectIds: [projectP], createdAt: now, updatedAt: now)]
+        reg.workspaces = [
+            WorkspaceEntry(id: workspaceW, name: "W", projectIds: [projectP], createdAt: now, updatedAt: now),
+            WorkspaceEntry(id: workspaceOther, name: "Other", projectIds: [], createdAt: now, updatedAt: now),
+        ]
         reg.projects = [
             ProjectEntry(id: projectP, name: "Project P", rootPath: pRoot.path, workspaceId: workspaceW, lastOpenedAt: now, pinned: false, missing: false)
         ]
@@ -15589,6 +15657,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             lastActiveZoneId: nil
         )
         try workspaceStore.save(emptyDoc)
+        try WorkspaceStore(workspaceId: workspaceOther, applicationSupportDirectory: appSupport).save(emptyDoc)
 
         // Registry factory: creates a real (lock-free) controller for P.
         let zoneRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { id in
@@ -15701,6 +15770,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                    "assertion 6: rejected project-less creation must not install a layer")
         try expect(zoneRegistry.liveProjectIds == Set([projectP]),
                    "assertion 6: rejected creation must not acquire another controller")
+
+        // 7. Adding an already-owned project from another workspace offers a
+        // direct switch instead of exposing an ownership UUID error. The helper
+        // must not transfer ownership or add a duplicate membership.
+        try runtime.switchWorkspace(to: workspaceOther)
+        var conflictRequest: ProjectWorkspaceConflictRequest?
+        delegate.projectWorkspaceConflictSwitchProvider = { request in
+            conflictRequest = request
+            return true
+        }
+        delegate.addProjectZone(projectId: projectP)
+        let registryAfterConflict = try registryStore.loadOrEmpty()
+        try expect(conflictRequest?.projectId == projectP
+                   && conflictRequest?.projectName == "Project P"
+                   && conflictRequest?.workspaceId == workspaceW
+                   && conflictRequest?.workspaceName == "W",
+                   "assertion 7: ownership helper did not describe the project and its workspace")
+        try expect(runtime.workspaceId == workspaceW,
+                   "assertion 7: accepting the ownership helper did not switch to the owning workspace")
+        try expect(registryAfterConflict.projects.first(where: { $0.id == projectP })?.workspaceId == workspaceW,
+                   "assertion 7: ownership helper transferred the project instead of switching")
+        try expect(registryAfterConflict.workspaces.first(where: { $0.id == workspaceOther })?.projectIds.contains(projectP) == false,
+                   "assertion 7: ownership helper added a duplicate project membership")
 
         // Write manifest artifact.
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
@@ -16202,6 +16294,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             workspaceId: workspaceWA, applicationSupportDirectory: appSupport).load()
         try expect(savedAAfterRoundTrip.zones.first(where: { $0.zoneId == zoneAa }) == mutatedAPlacement,
             "inv8: mounted placement and atomically saved workspace document diverged")
+
+        // A legacy foreign zone in the workspace being LEFT must not trap the
+        // user there. Preserve it on disk for explicit repair, switch to the
+        // valid target, then clean the fixture before returning. Target ownership
+        // remains strict and is exercised by ZoneRuntimeDuplicationChecks.
+        let foreignDepartingZone = ZonePlacement(
+            zoneId: UUID(uuidString: "00000000-0000-0000-0000-000000009F09")!,
+            projectId: projectPb,
+            origin: ZonePoint(x: 1_500, y: 0),
+            size: ZoneSize(width: 640, height: 480),
+            color: "orange",
+            collapsed: false,
+            hydrationPolicy: .automatic,
+            name: "Legacy Foreign Zone"
+        )
+        var contaminatedDepartingDocument = runtime.document
+        contaminatedDepartingDocument.zones.append(foreignDepartingZone)
+        contaminatedDepartingDocument.bringZoneToFront(foreignDepartingZone.zoneId)
+        runtime.replaceDocument(contaminatedDepartingDocument, for: workspaceWA)
+        try runtime.switchWorkspace(to: workspaceWB)
+        let preservedContamination = try WorkspaceStore(
+            workspaceId: workspaceWA, applicationSupportDirectory: appSupport).load()
+        try expect(preservedContamination.zones.contains(where: { $0.zoneId == foreignDepartingZone.zoneId }),
+                   "switching away silently deleted a legacy foreign zone instead of preserving it for repair")
+        var repairedFixture = preservedContamination
+        repairedFixture.zones.removeAll { $0.zoneId == foreignDepartingZone.zoneId }
+        try WorkspaceStore(workspaceId: workspaceWA, applicationSupportDirectory: appSupport).save(repairedFixture)
+        try runtime.switchWorkspace(to: workspaceWA)
 
         struct InjectedSwitchFailure: Error {}
         let mountedIdsBeforeFailureChecks = canvas.installedZoneLayerIds

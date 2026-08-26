@@ -1092,10 +1092,12 @@ final class WorkspaceRuntime {
         // canvas-less runtime fails at the first click instead.
         guard canvasView != nil else { throw WorkspaceSwitchError.noCanvas }
         // Validate and load the target before touching the mounted scene or either
-        // workspace file. Duplicate legacy membership is an integrity error, not
-        // an invitation to merge layouts during a switch.
+        // workspace file. Do not validate the departing document here: the mounted
+        // canvas is the current truth, and a legacy foreign zone in the old saved
+        // document must not trap the user in that workspace after they close it.
+        // Target ownership is still strict, so switching never mounts or transfers
+        // a project owned by another workspace.
         let appRegistry = try registryStore.loadOrEmpty()
-        try Self.validateProjectOwnership(in: document, workspaceId: workspaceId, registry: appRegistry)
         guard let targetDocument = try loadWorkspaceDocument(workspaceId: targetWorkspaceId) else {
             throw WorkspaceSwitchError.documentNotFound(targetWorkspaceId)
         }

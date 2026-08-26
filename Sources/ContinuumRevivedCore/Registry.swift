@@ -174,21 +174,19 @@ public struct Registry: Codable, Equatable, Sendable {
     /// Add an unowned project to a workspace. A project already owned elsewhere
     /// requires the explicit move API; this method never rewrites ownership.
     public mutating func assignProject(_ projectId: UUID, to workspaceId: UUID, now: Date) throws {
-        try validateExclusiveProjectOwnership()
         guard let projectIndex = projects.firstIndex(where: { $0.id == projectId }) else {
             throw ProjectWorkspaceOwnershipError.unknownProject(projectId)
         }
         guard let workspaceIndex = workspaces.firstIndex(where: { $0.id == workspaceId }) else {
             throw ProjectWorkspaceOwnershipError.unknownWorkspace(workspaceId)
         }
-        if let owner = projects[projectIndex].workspaceId, owner != workspaceId {
+        // Validate the project being assigned, not every historical registry
+        // membership. A stale duplicate for an unrelated project must not make
+        // all project-add actions unusable. The strict global audit remains
+        // available through validateExclusiveProjectOwnership().
+        if let owner = try exclusiveWorkspaceOwner(of: projectId), owner != workspaceId {
             throw ProjectWorkspaceOwnershipError.alreadyOwned(
                 projectId: projectId, workspaceId: owner)
-        }
-        if let membership = workspaces.first(where: { $0.projectIds.contains(projectId) })?.id,
-           membership != workspaceId {
-            throw ProjectWorkspaceOwnershipError.alreadyOwned(
-                projectId: projectId, workspaceId: membership)
         }
         projects[projectIndex].workspaceId = workspaceId
         if !workspaces[workspaceIndex].projectIds.contains(projectId) {
