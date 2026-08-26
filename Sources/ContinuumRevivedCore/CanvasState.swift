@@ -246,6 +246,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
     public var filesystemHomeRelativePath: String?
     public var filesystemWherePath: String?
     public var worktreeId: String?
+    public var agentSoundOverrides: AgentSoundOverrides?
 
     public init(
         launchProfileId: String? = nil,
@@ -266,7 +267,8 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         filesystemCheckoutRootPath: String? = nil,
         filesystemHomeRelativePath: String? = nil,
         filesystemWherePath: String? = nil,
-        worktreeId: String? = nil
+        worktreeId: String? = nil,
+        agentSoundOverrides: AgentSoundOverrides? = nil
     ) {
         self.launchProfileId = launchProfileId
         self.projectRelativeCwd = projectRelativeCwd
@@ -287,6 +289,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         self.filesystemHomeRelativePath = filesystemHomeRelativePath
         self.filesystemWherePath = filesystemWherePath
         self.worktreeId = worktreeId
+        self.agentSoundOverrides = agentSoundOverrides
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -309,6 +312,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         case filesystemHomeRelativePath
         case filesystemWherePath
         case worktreeId
+        case agentSoundOverrides
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -332,6 +336,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         try container.encodeIfPresent(filesystemHomeRelativePath, forKey: .filesystemHomeRelativePath)
         try container.encodeIfPresent(filesystemWherePath, forKey: .filesystemWherePath)
         try container.encodeIfPresent(worktreeId, forKey: .worktreeId)
+        try container.encodeIfPresent(agentSoundOverrides, forKey: .agentSoundOverrides)
     }
 }
 

@@ -66,6 +66,13 @@ public enum ManagedAgentActivityBridge {
             // tile keeps the detail; the phone gets only that an error occurred.
             return make(agentId, tileId, .error, "error", status, "Runtime error", now,
                         terminalOutcome: .runtimeError)
+        case .semanticSignal(_, _, let kind):
+            switch kind {
+            case .gitPushSucceeded:
+                return make(agentId, tileId, .tool, "git.push", status, "Pushed changes", now)
+            case .gitMergeSucceeded:
+                return make(agentId, tileId, .tool, "git.merge", status, "Merged changes", now)
+            }
         case .childAgentSpawned:
             // Identity details travel only in the encrypted transcript channel;
             // the legacy activity projection receives a generic safe milestone.

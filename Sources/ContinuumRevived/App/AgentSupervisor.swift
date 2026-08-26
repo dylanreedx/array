@@ -3538,7 +3538,7 @@ final class AgentSupervisor {
         case .sessionStateChanged, .turnCompleted, .itemStarted, .itemCompleted,
              .contentDelta, .requestOpened, .requestResolved, .userInputRequested,
              .userInputResolved, .tokenUsageUpdated, .contextWindowUpdated,
-             .childAgentSpawned, .runtimeError:
+             .childAgentSpawned, .runtimeError, .semanticSignal:
             return false
         }
     }
@@ -3561,7 +3561,7 @@ final class AgentSupervisor {
         case .turnCompleted, .itemStarted, .itemCompleted, .contentDelta,
              .requestResolved, .userInputResolved, .tokenUsageUpdated, .contextWindowUpdated, .runtimeError:
             return false
-        case .childAgentSpawned:
+        case .childAgentSpawned, .semanticSignal:
             return false
         }
     }
@@ -4101,7 +4101,7 @@ final class AgentSupervisor {
                 records[id] = record
             }
         case .itemStarted, .itemCompleted, .contentDelta, .tokenUsageUpdated,
-             .contextWindowUpdated, .childAgentSpawned:
+             .contextWindowUpdated, .childAgentSpawned, .semanticSignal:
             break
         }
         // The invariant this file owns, asserted in `--agent-supervisor-check`: a
@@ -4118,7 +4118,7 @@ final class AgentSupervisor {
             return true
         case .itemStarted, .itemCompleted, .contentDelta, .requestOpened,
              .requestResolved, .userInputRequested, .userInputResolved, .tokenUsageUpdated,
-             .contextWindowUpdated:
+             .contextWindowUpdated, .semanticSignal:
             return false
         }
     }
@@ -12458,6 +12458,7 @@ private func eventLabel(_ event: AgentRuntimeEvent) -> String {
     case let .contextWindowUpdated(threadId, snapshot): return "contextWindow:\(String(describing: snapshot.occupancyPercentage))@\(threadId)"
     case let .childAgentSpawned(threadId, childAgentID, _, _, sourceItemID, _, _):
         return "childAgentSpawned:\(childAgentID.uuidString)@\(sourceItemID):\(threadId)"
+    case let .semanticSignal(threadId, itemId, kind): return "semantic:\(kind.rawValue):\(itemId)@\(threadId)"
     case let .runtimeError(threadId, message): return "runtimeError:\(message)@\(threadId ?? "-")"
     }
 }

@@ -7103,8 +7103,8 @@ do {
             expect(field.currentValue(in: defaults) == nil, ".info field has no bound value")
             field.setValue(.string("ignored"), in: defaults)
             expect(field.currentValue(in: defaults) == nil, ".info setValue is a no-op")
-        case .shortcuts:
-            expect(field.currentValue(in: defaults) == nil, ".shortcuts field has no bound value")
+        case .shortcuts, .agentSounds:
+            expect(field.currentValue(in: defaults) == nil, "rich settings field has no directly bound value")
         case .toggle(_, _, let fallback):
             expect(field.currentValue(in: defaults) == .bool(fallback), "toggle currentValue on empty defaults is its declared default")
             field.setValue(.bool(!fallback), in: defaults)
@@ -11523,6 +11523,7 @@ runAgentContextIndexChecks()
 // Ticket: docs/38-tickets/90-agent-ux/P3.1-inbox-row-model.md — the snapshot +
 // context join that builds the desktop inbox's rows.
 runAgentInboxRowBuilderChecks()
+try runAgentAwarenessChecks()
 
 // Ticket: docs/38-tickets/90-agent-ux/P2C.1-worktree-manager.md — an agent gets
 // its own checkout, so N agents stop editing one working tree.

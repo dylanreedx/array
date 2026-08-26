@@ -139,6 +139,9 @@ for brand_mark in anthropic.svg gemini.svg openai-light.svg xai-light.svg; do
   [[ -s "$RESOURCES/BrandMarks/$brand_mark" ]] \
     || { echo "FAIL: missing provider brand mark $brand_mark" >&2; exit 1; }
 done
+[[ -s "$RESOURCES/AgentSounds/manifest.json" ]] \
+  || { echo "FAIL: missing bundled agent sound manifest" >&2; exit 1; }
+"$ROOT_DIR/scripts/generate-agent-sounds.py" --check "$RESOURCES/AgentSounds"
 
 # Sparkle (go-live Phase 2): feed keys in the plist, framework embedded with
 # its updater pieces, and the rpath that lets the bundled binary find it. The
@@ -207,7 +210,7 @@ project_root=$(mktemp -d "${TMPDIR:-/tmp}/continuum-bundle-project.XXXXXX")
 app_support=$(mktemp -d "${TMPDIR:-/tmp}/continuum-bundle-appsupport.XXXXXX")
 isolated_home=$(mktemp -d "${TMPDIR:-/tmp}/continuum-bundle-home.XXXXXX")
 : > "$SELF_CHECK_LOG"
-self_checks=(--palette-duplicate-root-check --file-tree-boot-persistence-check --menu-contract-check --delete-confirm-policy-defaults-check --tool-path-bootstrap-check --app-support-channel-check)
+self_checks=(--palette-duplicate-root-check --file-tree-boot-persistence-check --menu-contract-check --delete-confirm-policy-defaults-check --tool-path-bootstrap-check --app-support-channel-check --agent-awareness-check)
 if [[ -n "${CONTINUUM_BUNDLE_CHECK_FORCE_FAIL:-}" ]]; then
   self_checks+=("$CONTINUUM_BUNDLE_CHECK_FORCE_FAIL")
 fi

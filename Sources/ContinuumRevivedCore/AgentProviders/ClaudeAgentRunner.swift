@@ -170,10 +170,9 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     public typealias SessionMode = ClaudeSessionMode
 
     /// The claude args after the executable. `--verbose` is required by the
-    /// CLI for stream-json in print mode. `--dangerously-skip-permissions`
-    /// matches what a managed tile IS today: pi runs its role's tools without
-    /// asking either — a surfaced approval flow is the follow-up for both
-    /// backends, not a claude regression. Pure so the matrix can pin it.
+    /// CLI for stream-json in print mode. Permission mode is intentionally not
+    /// overridden: the user's effective Claude configuration remains
+    /// authoritative, while hook events expose native interaction seams.
     public static func processArguments(
         model: String,
         effort: String?,
@@ -187,10 +186,9 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         case .resume: sessionArgs = ["--resume", sessionId]
         case .start: sessionArgs = ["--session-id", sessionId]
         }
-        return ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]
+        return ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--include-hook-events"]
             + ["--model", model]
             + (effort.map { ["--effort", $0] } ?? [])
-            + ["--dangerously-skip-permissions"]
             + sessionArgs
             + extraArgs
             + [promptArgument(prompt)]

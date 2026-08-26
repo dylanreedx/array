@@ -26,6 +26,7 @@ public struct PiEventTranslator {
     private var turnCounter: Int = 0
     private var currentTurnId: String = "pi-unknown#t0"
     private var seenUsageSignatures = Set<String>()
+    private var semanticSignalsByItemID: [String: Set<AgentSemanticSignalKind>] = [:]
     private var workingDirectory: URL?
     private let now: @Sendable () -> Date
 
@@ -106,6 +107,11 @@ public struct PiEventTranslator {
             // the `toolcall_delta` fragments in `message_update` are partial JSON
             // by construction, so this is the only line worth reading.
             if let args = object["args"] as? [String: Any] {
+                if ["bash", "shell", "run", "exec", "execute_command"].contains(toolName.lowercased()),
+                   let command = args["command"] as? String {
+                    let signals = AgentGitOperationClassifier.operations(in: command)
+                    if !signals.isEmpty { semanticSignalsByItemID[toolCallId] = signals }
+                }
                 if let onSpawnRequest,
                    let request = SpawnRequest.parse(toolName: toolName, args: args, sourceItemID: toolCallId) {
                     onSpawnRequest(request)
@@ -154,12 +160,19 @@ public struct PiEventTranslator {
                     observedAt: Self.timestamp(from: object) ?? now()
                 )))
             }
-            return [.itemCompleted(
+            var events: [AgentRuntimeEvent] = [.itemCompleted(
                 threadId: threadId,
                 itemId: toolCallId,
                 kind: Self.itemKind(forTool: toolName),
                 status: isError ? .failed : .completed
             )]
+            let semantics = semanticSignalsByItemID.removeValue(forKey: toolCallId) ?? []
+            if !isError {
+                events += semantics.sorted { $0.rawValue < $1.rawValue }.map {
+                    .semanticSignal(threadId: threadId, itemId: toolCallId, kind: $0)
+                }
+            }
+            return events
 
         case "turn_end":
             return translateUsageEvents(from: object) + [.turnCompleted(

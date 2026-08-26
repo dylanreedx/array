@@ -33,6 +33,7 @@ public struct ClaudeEventTranslator {
     /// tool_use id → kind, so the matching tool_result completes with the
     /// same kind the start event carried.
     private var itemKinds: [String: ItemKind] = [:]
+    private var semanticSignalsByItemID: [String: Set<AgentSemanticSignalKind>] = [:]
     private var seenItemIds = Set<String>()
     private var workingDirectory: URL?
     private let now: @Sendable () -> Date
@@ -181,6 +182,12 @@ public struct ClaudeEventTranslator {
             }
             let kind = Self.itemKind(forTool: name)
             itemKinds[id] = kind
+            if ["bash", "shell", "run", "exec"].contains(name.lowercased()),
+               let input = block["input"] as? [String: Any],
+               let command = input["command"] as? String {
+                let signals = AgentGitOperationClassifier.operations(in: command)
+                if !signals.isEmpty { semanticSignalsByItemID[id] = signals }
+            }
             events.append(.itemStarted(threadId: threadId, itemId: id, kind: kind, title: name))
         }
         // Assistant TEXT blocks are deliberately not emitted: the same prose
@@ -211,12 +218,19 @@ public struct ClaudeEventTranslator {
                     observedAt: now()
                 )))
             }
+            let kind = itemKinds.removeValue(forKey: toolUseId) ?? .commandExecution
             events.append(.itemCompleted(
                 threadId: threadId,
                 itemId: toolUseId,
-                kind: itemKinds.removeValue(forKey: toolUseId) ?? .commandExecution,
+                kind: kind,
                 status: isError ? .failed : .completed
             ))
+            let semantics = semanticSignalsByItemID.removeValue(forKey: toolUseId) ?? []
+            if !isError {
+                events += semantics.sorted { $0.rawValue < $1.rawValue }.map {
+                    .semanticSignal(threadId: threadId, itemId: toolUseId, kind: $0)
+                }
+            }
         }
         return events
     }

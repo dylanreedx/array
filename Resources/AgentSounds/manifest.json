@@ -1,0 +1,162 @@
+[
+  {
+    "id": "prism",
+    "name": "Prism",
+    "family": "glass",
+    "filename": "prism.wav",
+    "duration": 0.72,
+    "imported": false
+  },
+  {
+    "id": "dewdrop",
+    "name": "Dewdrop",
+    "family": "glass",
+    "filename": "dewdrop.wav",
+    "duration": 0.46,
+    "imported": false
+  },
+  {
+    "id": "aurora",
+    "name": "Aurora",
+    "family": "glass",
+    "filename": "aurora.wav",
+    "duration": 0.96,
+    "imported": false
+  },
+  {
+    "id": "beacon",
+    "name": "Beacon",
+    "family": "glass",
+    "filename": "beacon.wav",
+    "duration": 0.64,
+    "imported": false
+  },
+  {
+    "id": "sprout",
+    "name": "Sprout",
+    "family": "organic",
+    "filename": "sprout.wav",
+    "duration": 0.42,
+    "imported": false
+  },
+  {
+    "id": "acorn",
+    "name": "Acorn",
+    "family": "organic",
+    "filename": "acorn.wav",
+    "duration": 0.36,
+    "imported": false
+  },
+  {
+    "id": "pluck",
+    "name": "Pluck",
+    "family": "organic",
+    "filename": "pluck.wav",
+    "duration": 0.52,
+    "imported": false
+  },
+  {
+    "id": "marimba",
+    "name": "Marimba",
+    "family": "organic",
+    "filename": "marimba.wav",
+    "duration": 0.78,
+    "imported": false
+  },
+  {
+    "id": "pixel",
+    "name": "Pixel",
+    "family": "digital",
+    "filename": "pixel.wav",
+    "duration": 0.3,
+    "imported": false
+  },
+  {
+    "id": "orbit",
+    "name": "Orbit",
+    "family": "digital",
+    "filename": "orbit.wav",
+    "duration": 0.7,
+    "imported": false
+  },
+  {
+    "id": "warp",
+    "name": "Warp",
+    "family": "digital",
+    "filename": "warp.wav",
+    "duration": 0.88,
+    "imported": false
+  },
+  {
+    "id": "radar",
+    "name": "Radar",
+    "family": "digital",
+    "filename": "radar.wav",
+    "duration": 0.82,
+    "imported": false
+  },
+  {
+    "id": "cloud",
+    "name": "Cloud",
+    "family": "soft",
+    "filename": "cloud.wav",
+    "duration": 0.88,
+    "imported": false
+  },
+  {
+    "id": "pebble",
+    "name": "Pebble",
+    "family": "soft",
+    "filename": "pebble.wav",
+    "duration": 0.34,
+    "imported": false
+  },
+  {
+    "id": "ripple",
+    "name": "Ripple",
+    "family": "soft",
+    "filename": "ripple.wav",
+    "duration": 1.05,
+    "imported": false
+  },
+  {
+    "id": "hush",
+    "name": "Hush",
+    "family": "soft",
+    "filename": "hush.wav",
+    "duration": 0.58,
+    "imported": false
+  },
+  {
+    "id": "pop",
+    "name": "Pop",
+    "family": "energetic",
+    "filename": "pop.wav",
+    "duration": 0.27,
+    "imported": false
+  },
+  {
+    "id": "spark",
+    "name": "Spark",
+    "family": "energetic",
+    "filename": "spark.wav",
+    "duration": 0.44,
+    "imported": false
+  },
+  {
+    "id": "bloom",
+    "name": "Bloom",
+    "family": "energetic",
+    "filename": "bloom.wav",
+    "duration": 0.82,
+    "imported": false
+  },
+  {
+    "id": "victory",
+    "name": "Victory",
+    "family": "energetic",
+    "filename": "victory.wav",
+    "duration": 1.16,
+    "imported": false
+  }
+]

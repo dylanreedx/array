@@ -354,9 +354,8 @@ private func runCodexTranslatorGateChecks() {
 }
 
 private func runCodexRunnerArgvChecks() {
-    // The exact argv, both session modes. Sandbox + approval ride as `-c`
-    // overrides (they work on resume too, unlike -s); `-C` is exec-only; the
-    // prompt is one trailing positional.
+    // The exact argv, both session modes. Approval and sandbox are inherited
+    // from the user's effective Codex configuration; `-C` is exec-only.
     let fresh = CodexCLIBackend.processArguments(
         model: "gpt-5.6-sol",
         effort: "high",
@@ -368,8 +367,6 @@ private func runCodexRunnerArgvChecks() {
     expect(fresh == [
         "exec",
         "--json", "--skip-git-repo-check",
-        "-c", "approval_policy=never",
-        "-c", "sandbox_mode=workspace-write",
         "-m", "gpt-5.6-sol",
         "-c", "model_reasoning_effort=high",
         "-C", "/tmp/work",
@@ -389,17 +386,10 @@ private func runCodexRunnerArgvChecks() {
     expect(resume == [
         "exec", "resume", codexTID,
         "--json", "--skip-git-repo-check",
-        "-c", "approval_policy=never",
-        "-c", "sandbox_mode=workspace-write",
         "-m", "gpt-5.6-sol",
         "--extra",
         "recall",
     ], "CodexCLIBackend argv (resume) drifted: \(resume)")
-
-    // The sandbox posture is one named constant (so danger-full-access is a
-    // one-line change later) and it is the plan's recommended default.
-    expect(CodexCLIBackend.sandboxMode == "workspace-write",
-           "CodexCLIBackend: the pinned sandbox posture must be workspace-write")
 
     #if os(macOS)
     // Executable resolution mirrors pi's/claude's GUI-thin-PATH strategy.

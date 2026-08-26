@@ -43,6 +43,7 @@ public enum SettingsSchema {
                 .choice(key: AgentModelConfig.modelKey, label: "Default Model", options: AgentModelConfig.modelOptions, default: AgentModelConfig.defaultModel),
                 .choice(key: AgentModelConfig.thinkingKey, label: "Default Reasoning Effort", options: AgentModelConfig.thinkingOptions, default: AgentModelConfig.defaultThinking),
                 .choice(key: AgentAutoSettleConfig.afterDaysKey, label: "Auto-Settle After", options: AgentAutoSettleConfig.options, default: AgentAutoSettleConfig.defaultOption),
+                .agentSounds(label: "Sounds"),
             ]),
             SettingsSection(id: "terminal", title: "Terminal", iconSystemName: "terminal", fields: [
                 .toggle(key: TmuxPersistenceConfig.enabledKey, label: "Keep Shells Alive (tmux)", default: TmuxPersistenceConfig.defaultEnabled),

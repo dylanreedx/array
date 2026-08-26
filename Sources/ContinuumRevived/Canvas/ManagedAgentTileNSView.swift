@@ -50,6 +50,8 @@ enum AgentStatusRowPlacement: String, CaseIterable, Sendable {
 
 @MainActor
 final class ManagedAgentTileNSView: TileNSView {
+    private let awarenessBadge = AgentSignalBadgeView()
+    private let awarenessBorder = AgentSignalBorderView()
     /// P1.9: the three views this tile paints layer fills on are stored so
     /// `applyTokens()` can re-assign them on an appearance change. `wantsLayer` is
     /// set here, at construction, so `applyTokens()` is order-independent — it runs
@@ -268,6 +270,8 @@ final class ManagedAgentTileNSView: TileNSView {
             statusUpdatedAt: Date()
         )
         super.init(tile: tile)
+        addSubview(awarenessBorder, positioned: .above, relativeTo: nil)
+        addSubview(awarenessBadge, positioned: .above, relativeTo: awarenessBorder)
         refreshTitleBarIdentity()
         // TileNSView establishes its compatibility border after its polymorphic
         // token call; re-apply once subclass initialization is complete so the
@@ -542,6 +546,89 @@ final class ManagedAgentTileNSView: TileNSView {
             renderRehydratedPreviousSession(rehydrated)
         }
         refreshTranscriptThinkingIndicator()
+    }
+
+    override func layout() {
+        super.layout()
+        awarenessBorder.frame = bounds.insetBy(dx: 2, dy: 2)
+        let width = min(150, max(94, awarenessBadge.fittingSize.width + 20))
+        awarenessBadge.frame = NSRect(
+            x: max(8, bounds.width - width - 10),
+            y: chromeBarHeight + 8,
+            width: width,
+            height: 22)
+    }
+
+    func applyAwarenessSignal(_ signal: AgentSignal?) {
+        awarenessBadge.apply(signal)
+        awarenessBorder.apply(signal)
+        needsLayout = true
+    }
+
+    var qaAwarenessSignal: AgentSignal? { awarenessBadge.signal }
+
+    override func makeAdditionalTitleBarMenuItems() -> [NSMenuItem] {
+        let root = NSMenuItem(title: "Sounds", action: nil, keyEquivalent: "")
+        let menu = NSMenu(title: "Sounds")
+        for kind in AgentSignalKind.allCases.sorted(by: { $0.priority > $1.priority }) {
+            let item = NSMenuItem(title: kind.displayName, action: nil, keyEquivalent: "")
+            let choices = NSMenu(title: kind.displayName)
+            choices.addItem(soundOverrideItem(title: "Inherit global", kind: kind, value: "inherit"))
+            choices.addItem(soundOverrideItem(title: "Mute", kind: kind, value: "mute"))
+            choices.addItem(.separator())
+            for sound in AgentSoundLibrary.shared.allEntries {
+                choices.addItem(soundOverrideItem(title: sound.name, kind: kind, value: "sound:\(sound.id.rawValue)"))
+            }
+            if case .sound(let reference) = tile.metadata.agentSoundOverrides?.values[kind],
+               !AgentSoundLibrary.shared.availableReferences.contains(reference) {
+                choices.addItem(.separator())
+                let warning = NSMenuItem(
+                    title: "Missing sound — using global",
+                    action: nil,
+                    keyEquivalent: "")
+                warning.isEnabled = false
+                choices.addItem(warning)
+            }
+            item.submenu = choices
+            menu.addItem(item)
+        }
+        root.submenu = menu
+        return [root]
+    }
+
+    private func soundOverrideItem(title: String, kind: AgentSignalKind, value: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: #selector(selectSoundOverride(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = "\(kind.rawValue)|\(value)"
+        let current = tile.metadata.agentSoundOverrides?.values[kind] ?? .inherit
+        switch (current, value) {
+        case (.inherit, "inherit"), (.mute, "mute"):
+            item.state = .on
+        case (.sound(let reference), let raw) where raw == "sound:\(reference.rawValue)":
+            item.state = .on
+        default:
+            break
+        }
+        return item
+    }
+
+    @objc private func selectSoundOverride(_ sender: NSMenuItem) {
+        guard let descriptor = sender.representedObject as? String,
+              let divider = descriptor.firstIndex(of: "|"),
+              let kind = AgentSignalKind(rawValue: String(descriptor[..<divider])) else { return }
+        let raw = String(descriptor[descriptor.index(after: divider)...])
+        let value: AgentSoundOverride
+        if raw == "inherit" { value = .inherit }
+        else if raw == "mute" { value = .mute }
+        else if raw.hasPrefix("sound:") {
+            value = .sound(AgentSoundReference(rawValue: String(raw.dropFirst("sound:".count))))
+        } else { return }
+        var next = tile
+        var overrides = next.metadata.agentSoundOverrides ?? AgentSoundOverrides()
+        overrides.values[kind] = value
+        next.metadata.agentSoundOverrides = overrides
+        tile = next
+        canvas?.updateTile(next)
     }
 
     /// Stop following the agent. Cancels the subscription and nothing else: the
@@ -1205,7 +1292,7 @@ final class ManagedAgentTileNSView: TileNSView {
             compactStatusTurn = .completed(outcome: .failed, phaseStartedAt: nil)
             compactStatusSession = .init(state: .error, startedAt: nil)
             compactStatusInteraction = .clear
-        case .itemStarted, .itemCompleted, .tokenUsageUpdated, .childAgentSpawned:
+        case .itemStarted, .itemCompleted, .tokenUsageUpdated, .childAgentSpawned, .semanticSignal:
             break
         case let .contextWindowUpdated(_, snapshot):
             compactContextWindow = withDerivedOccupancy(snapshot)

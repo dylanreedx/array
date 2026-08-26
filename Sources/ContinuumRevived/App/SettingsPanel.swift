@@ -249,6 +249,8 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
             return infoRow(for: field)
         case .shortcuts:
             return shortcutsRow(for: field)
+        case .agentSounds:
+            return AgentSoundSettingsView(defaults: defaults)
         }
     }
 
@@ -1046,6 +1048,8 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
             case .shortcuts:
                 // Guide must list at least one catalog entry beyond the header.
                 if !ShortcutCatalog.entries().isEmpty, descendantCount(of: row, ofType: NSTextField.self) < 2 { return false }
+            case .agentSounds:
+                if firstDescendant(of: row, ofType: AgentSoundSettingsView.self) == nil { return false }
             }
         }
         return true

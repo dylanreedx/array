@@ -32,6 +32,9 @@ public enum SettingsField: Equatable, Sendable {
     /// The keybindings editor/guide, which renders `ShortcutCatalog` rather than
     /// binding a single key.
     case shortcuts(label: String)
+    /// Rich agent-sound rule editor and import library. It owns several stable
+    /// AgentSoundConfig keys rather than pretending to be one scalar setting.
+    case agentSounds(label: String)
 
     /// The UserDefaults key this field reads/writes, or `nil` for static fields.
     public var key: String? {
@@ -45,6 +48,7 @@ public enum SettingsField: Equatable, Sendable {
         case .slider(let key, _, _, _, _): return key
         case .info: return nil
         case .shortcuts: return nil
+        case .agentSounds: return nil
         }
     }
 
@@ -60,6 +64,7 @@ public enum SettingsField: Equatable, Sendable {
         case .slider(_, let label, _, _, _): return label
         case .info(let label): return label
         case .shortcuts(let label): return label
+        case .agentSounds(let label): return label
         }
     }
 
@@ -93,6 +98,8 @@ public enum SettingsField: Equatable, Sendable {
         case .info:
             return nil
         case .shortcuts:
+            return nil
+        case .agentSounds:
             return nil
         }
     }
@@ -131,6 +138,8 @@ public enum SettingsField: Equatable, Sendable {
             break
         case .shortcuts:
             break
+        case .agentSounds:
+            break
         }
     }
 
@@ -145,7 +154,7 @@ public enum SettingsField: Equatable, Sendable {
         case .text(_, _, let value), .url(_, _, let value), .directory(_, _, let value): return .string(value)
         case .number(_, _, _, let value, _, _), .slider(_, _, _, let value, _): return .double(value)
         case .choice(_, _, _, let value): return .string(value)
-        case .info, .shortcuts: return nil
+        case .info, .shortcuts, .agentSounds: return nil
         }
     }
 

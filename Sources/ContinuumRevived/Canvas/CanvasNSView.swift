@@ -56,6 +56,8 @@ final class CanvasNSView: NSView, TokenThemed {
         var needsAttention: Int = 0
         var done: Int = 0
         var stale: Int = 0
+        var pushed: Int = 0
+        var merged: Int = 0
 
         static let empty = AgentStatusRollup()
 
@@ -65,6 +67,8 @@ final class CanvasNSView: NSView, TokenThemed {
             if needsAttention > 0 { parts.append("\(needsAttention) needs you") }
             if done > 0 { parts.append("\(done) done") }
             if stale > 0 { parts.append("\(stale) stale") }
+            if merged > 0 { parts.append("\(merged) merged") }
+            if pushed > 0 { parts.append("\(pushed) pushed") }
             return parts.isEmpty ? nil : parts.joined(separator: " · ")
         }
     }

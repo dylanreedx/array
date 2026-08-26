@@ -39,6 +39,7 @@ public struct CodexEventTranslator {
     private let runToken: String
     private var turnCounter: Int = 0
     private var currentTurnId: String
+    private var semanticSignalsByItemID: [String: Set<AgentSemanticSignalKind>] = [:]
     private var workingDirectory: URL?
     private let now: @Sendable () -> Date
 
@@ -116,7 +117,7 @@ public struct CodexEventTranslator {
 
     // MARK: - items
 
-    private func translateItemStarted(_ object: [String: Any]) -> [AgentRuntimeEvent] {
+    private mutating func translateItemStarted(_ object: [String: Any]) -> [AgentRuntimeEvent] {
         guard let item = object["item"] as? [String: Any],
               let rawId = item["id"] as? String,
               let itemType = item["type"] as? String
@@ -124,6 +125,10 @@ public struct CodexEventTranslator {
         let itemId = saltedItemId(rawId)
         switch itemType {
         case "command_execution":
+            if let command = item["command"] as? String {
+                let signals = AgentGitOperationClassifier.operations(in: command)
+                if !signals.isEmpty { semanticSignalsByItemID[itemId] = signals }
+            }
             // DROP `command` + `aggregated_output` (I5): the command is the
             // sensitive payload, so the title is a generic literal, NOT the
             // command (unlike claude, whose tool NAME is the safe title).
@@ -205,7 +210,7 @@ public struct CodexEventTranslator {
         }
     }
 
-    private func translateItemCompleted(_ object: [String: Any]) -> [AgentRuntimeEvent] {
+    private mutating func translateItemCompleted(_ object: [String: Any]) -> [AgentRuntimeEvent] {
         guard let item = object["item"] as? [String: Any],
               let itemType = item["type"] as? String
         else { return [] }
@@ -227,6 +232,7 @@ public struct CodexEventTranslator {
 
         case "command_execution":
             guard let rawId = item["id"] as? String else { return [] }
+            let itemID = saltedItemId(rawId)
             let exitCode = Self.intValue(item["exit_code"])
             // `.plans/45` S2 — the integer exit code (not just its zero-ness)
             // and a bounded output preview ride the side channel for the
@@ -235,18 +241,25 @@ public struct CodexEventTranslator {
                 let output = (item["aggregated_output"] as? String)
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                     .flatMap { $0.isEmpty ? nil : $0 }
-                onRuntimeObservation(.toolDetail(itemId: saltedItemId(rawId), detail: AgentToolDetailObservation(
+                onRuntimeObservation(.toolDetail(itemId: itemID, detail: AgentToolDetailObservation(
                     phase: .ended,
                     outputPreview: output,
                     exitCode: exitCode,
                     observedAt: now()
                 )))
             }
-            return [.itemCompleted(
+            var events: [AgentRuntimeEvent] = [.itemCompleted(
                 threadId: threadId,
-                itemId: saltedItemId(rawId),
+                itemId: itemID,
                 kind: .commandExecution,
                 status: exitCode == 0 ? .completed : .failed)]
+            let semantics = semanticSignalsByItemID.removeValue(forKey: itemID) ?? []
+            if exitCode == 0 {
+                events += semantics.sorted { $0.rawValue < $1.rawValue }.map {
+                    .semanticSignal(threadId: threadId, itemId: itemID, kind: $0)
+                }
+            }
+            return events
 
         case "file_change":
             guard let rawId = item["id"] as? String else { return [] }

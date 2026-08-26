@@ -2630,6 +2630,7 @@ enum LabCatalog {
         case .tokenUsageUpdated: return "tokenUsageUpdated"
         case .contextWindowUpdated: return "contextWindowUpdated"
         case .childAgentSpawned: return "childAgentSpawned"
+        case .semanticSignal(_, _, let kind): return "semanticSignal(\(kind.rawValue))"
         case .runtimeError: return "runtimeError"
         }
     }

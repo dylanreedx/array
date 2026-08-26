@@ -804,6 +804,16 @@ enum ContinuumApp {
 
     @MainActor
     static func main() {
+        if CommandLine.arguments.contains("--agent-awareness-check") {
+            do {
+                _ = NSApplication.shared
+                try AgentAwarenessSelfCheck.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--canvas-undo-check") {
             do {
                 _ = NSApplication.shared
@@ -3680,6 +3690,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var canvasView: CanvasNSView?
     private var workspaceSidebarView: WorkspaceSidebarView?
     private var observedAgentStatuses: [UUID: AgentStatus] = [:]
+    private lazy var agentSignalCenter: AgentSignalCenter = {
+        let center = AgentSignalCenter()
+        center.onChanged = { [weak self] tileID in
+            self?.applyAgentSignalVisual(tileID: tileID)
+        }
+        return center
+    }()
     private var workspaceTopBarView: WorkspaceTopBarView?
     private var canvasShortcutRailView: CanvasShortcutRailView?
     private var canvasGettingStartedView: CanvasGettingStartedView?
@@ -5021,6 +5038,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         focusBroker.appAcceptedTileFocusWithReason = { [weak self] tileId, reason in
             guard let self else { return }
             self.synchronizeAgentFocus(to: tileId)
+            self.agentSignalCenter.markViewed(tileID: tileId)
             self.recordAcceptedTileFocusInHistory(tileId, reason: reason)
             self.armZoneForFocusedTile(tileId, reason: reason)
         }
@@ -7149,22 +7167,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private static func canvasRollupsByZone(
         statuses: [UUID: AgentStatus],
-        canvas: CanvasNSView
+        canvas: CanvasNSView,
+        signals: [UUID: AgentSignal] = [:]
     ) -> [UUID: CanvasNSView.AgentStatusRollup] {
         var sidebarRollups: [UUID: SidebarAgentStatusRollup] = [:]
         for (tileId, status) in statuses {
             guard let zoneId = canvas.qaZoneMembership(of: tileId) else { continue }
             sidebarRollups[zoneId, default: .empty].add(status)
         }
-        return sidebarRollups.mapValues(canvasRollup(from:))
+        var result = sidebarRollups.mapValues(canvasRollup(from:))
+        for (tileID, signal) in signals {
+            guard let zoneID = canvas.qaZoneMembership(of: tileID) else { continue }
+            switch signal.kind {
+            case .gitPushSucceeded: result[zoneID, default: .empty].pushed += 1
+            case .gitMergeSucceeded: result[zoneID, default: .empty].merged += 1
+            case .completed, .failed, .actionRequired: break
+            }
+        }
+        return result
     }
 
     /// The runtime observer's map is an INPUT to the one derivation (P2B.4), so it
     /// is stored rather than pushed straight at the canvas: a later rebuild for any
     /// other reason must see the same statuses this one did.
     private func applyObserverStatuses(_ statuses: [UUID: AgentStatus]) {
+        for (tileID, status) in statuses where observedAgentStatuses[tileID] != status {
+            let overrides = canvasView?.allWorkspaceTiles()
+                .first(where: { $0.id == tileID })?.metadata.agentSoundOverrides
+            _ = agentSignalCenter.ingestObserved(
+                status: status,
+                tileID: tileID,
+                overrides: overrides
+            )
+        }
         observedAgentStatuses = statuses
         refreshAgentSurfaces()
+    }
+
+    private func applyAgentSignalVisual(tileID: UUID?) {
+        guard let canvasView else { return }
+        let tileIDs = tileID.map { [$0] } ?? Array(agentSignalCenter.currentByTile.keys)
+        for id in tileIDs {
+            (canvasView.tileView(for: id) as? ManagedAgentTileNSView)?
+                .applyAwarenessSignal(agentSignalCenter.currentByTile[id])
+        }
+        applyAgentStatusesToCanvas()
     }
 
     /// Canvas badges and zone rollups, from the snapshot.
@@ -7187,7 +7234,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             canvasView.tileView(for: tile.id)?.agentStatus = Self.canvasBadgeStatus(status)
         }
 
-        let rollupsByZone = Self.canvasRollupsByZone(statuses: statuses, canvas: canvasView)
+        let rollupsByZone = Self.canvasRollupsByZone(
+            statuses: statuses,
+            canvas: canvasView,
+            signals: agentSignalCenter.currentByTile
+        )
         let updatedModels = canvasView.zoneRenderModels.map { model in
             var updated = model
             updated.agentStatusRollup = rollupsByZone[model.placement.zoneId] ?? .empty
@@ -11820,6 +11871,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             agentID: agentId,
             supervisor: supervisor,
             projectName: projectName)
+        view.applyAwarenessSignal(agentSignalCenter.currentByTile[tileId])
 
         // P2A.7: an agent restored from the previous launch has a real conversation
         // and an empty desktop transcript (that transcript lives only in the view,
@@ -12198,6 +12250,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// timeline and nudges a companion publish so the phone updates (88.4c).
     /// `tileId` rides along as the optional view hint only (P2A.8).
     private func recordManagedActivity(agentId: AgentID, tileId: UUID?, event: AgentRuntimeEvent, status: AgentStatus) {
+        let overrides = tileId.flatMap { id in
+            canvasView?.allWorkspaceTiles().first(where: { $0.id == id })?.metadata.agentSoundOverrides
+        }
+        _ = agentSignalCenter.ingest(
+            event: event,
+            agentID: agentId,
+            tileID: tileId,
+            overrides: overrides
+        )
         guard let draft = ManagedAgentActivityBridge.draft(
             for: event, agentId: agentId.rawValue, tileId: tileId, status: status, now: Date()
         ) else { return }
@@ -13910,7 +13971,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         workspaceRuntime?.activeController?.onObservedAgentStatusesChanged = { [weak self] statuses in
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.observedAgentStatuses = statuses
                 self.applyObserverStatuses(statuses)
             }
         }

@@ -198,10 +198,9 @@ private func runClaudeRunnerArgvChecks() {
         prompt: AgentPrompt("do the thing")
     )
     expect(resume == [
-        "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+        "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--include-hook-events",
         "--model", "claude-haiku-4-5-20251001",
         "--effort", "high",
-        "--dangerously-skip-permissions",
         "--resume", claudeSID,
         "do the thing",
     ], "ClaudeAgentRunner argv (resume) drifted: \(resume)")
@@ -215,9 +214,8 @@ private func runClaudeRunnerArgvChecks() {
         prompt: AgentPrompt("first turn")
     )
     expect(start == [
-        "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+        "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--include-hook-events",
         "--model", "claude-haiku-4-5-20251001",
-        "--dangerously-skip-permissions",
         "--session-id", claudeSID,
         "--extra",
         "first turn",

@@ -19,14 +19,6 @@ import Foundation
 // <thread_id>`; a stale id fails and the runner self-heals to a fresh `exec`.
 
 public enum CodexCLIBackend {
-    /// The sandbox posture Array pins for every managed codex turn. `-c
-    /// sandbox_mode=<this>` works on BOTH `exec` and `exec resume` (unlike the
-    /// `-s` flag, which resume rejects), so it is deterministic regardless of
-    /// the user's `~/.codex/config.toml`. `workspace-write` lets the agent edit
-    /// its workspace and run commands with the network restricted — SAFER than
-    /// claude's no-restriction posture while still functional. A single named
-    /// constant so switching to `danger-full-access` later is a one-line change.
-    public static let sandboxMode = "workspace-write"
 
     /// `provider/model` catalogue id → the codex `-m` argument. Codex takes the
     /// bare slug (`gpt-5.6-sol`); the `openai-codex/` prefix is Array's
@@ -121,8 +113,6 @@ public enum CodexCLIBackend {
         }
         args += [
             "--json", "--skip-git-repo-check",
-            "-c", "approval_policy=never",
-            "-c", "sandbox_mode=\(sandboxMode)",
             "-m", model,
         ]
         if let effort {

@@ -489,6 +489,7 @@ public enum AgentRuntimeEvent: Codable, Equatable, Sendable {
     case requestResolved(threadId: String, requestId: String, decision: String)
     case userInputRequested(threadId: String, requestId: String, questions: [UserInputQuestion])
     case userInputResolved(threadId: String, requestId: String)
+    case semanticSignal(threadId: String, itemId: String, kind: AgentSemanticSignalKind)
     case tokenUsageUpdated(threadId: String, snapshot: TokenUsageSnapshot)
     case contextWindowUpdated(threadId: String, snapshot: AgentContextWindowSnapshot)
     /// Safe semantic identity for a child created by a local or provider spawn.
@@ -512,6 +513,7 @@ public enum AgentRuntimeEvent: Codable, Equatable, Sendable {
         case requestId
         case decision
         case questions
+        case semanticKind
         case snapshot
         case message
         case childAgentID
@@ -533,6 +535,7 @@ public enum AgentRuntimeEvent: Codable, Equatable, Sendable {
         case requestResolved
         case userInputRequested
         case userInputResolved
+        case semanticSignal
         case tokenUsageUpdated
         case contextWindowUpdated
         case childAgentSpawned
@@ -599,6 +602,12 @@ public enum AgentRuntimeEvent: Codable, Equatable, Sendable {
             self = .userInputResolved(
                 threadId: try container.decode(String.self, forKey: .threadId),
                 requestId: try container.decode(String.self, forKey: .requestId)
+            )
+        case .semanticSignal:
+            self = .semanticSignal(
+                threadId: try container.decode(String.self, forKey: .threadId),
+                itemId: try container.decode(String.self, forKey: .itemId),
+                kind: try container.decode(AgentSemanticSignalKind.self, forKey: .semanticKind)
             )
         case .tokenUsageUpdated:
             self = .tokenUsageUpdated(
@@ -681,6 +690,11 @@ public enum AgentRuntimeEvent: Codable, Equatable, Sendable {
             try container.encode(Discriminator.userInputResolved, forKey: .type)
             try container.encode(threadId, forKey: .threadId)
             try container.encode(requestId, forKey: .requestId)
+        case .semanticSignal(let threadId, let itemId, let kind):
+            try container.encode(Discriminator.semanticSignal, forKey: .type)
+            try container.encode(threadId, forKey: .threadId)
+            try container.encode(itemId, forKey: .itemId)
+            try container.encode(kind, forKey: .semanticKind)
         case .tokenUsageUpdated(let threadId, let snapshot):
             try container.encode(Discriminator.tokenUsageUpdated, forKey: .type)
             try container.encode(threadId, forKey: .threadId)

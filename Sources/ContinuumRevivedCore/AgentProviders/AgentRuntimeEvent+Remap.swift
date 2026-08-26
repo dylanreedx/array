@@ -32,6 +32,8 @@ extension AgentRuntimeEvent {
             return .userInputRequested(threadId: threadId, requestId: requestId, questions: questions)
         case let .userInputResolved(_, requestId):
             return .userInputResolved(threadId: threadId, requestId: requestId)
+        case let .semanticSignal(_, itemId, kind):
+            return .semanticSignal(threadId: threadId, itemId: itemId, kind: kind)
         case let .tokenUsageUpdated(_, snapshot):
             return .tokenUsageUpdated(threadId: threadId, snapshot: snapshot)
         case let .contextWindowUpdated(_, snapshot):
