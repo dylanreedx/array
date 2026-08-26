@@ -195,6 +195,9 @@ final class ManagedAgentTileNSView: TileNSView {
     /// The last settled turn's "Worked for Ns", measured submit -> completion
     /// (the user-message anchor; entry timestamps alone undercount).
     private var settledTurnStatusText: String?
+    /// See `TurnLiveness`. Written only from the event switch, so it moves with
+    /// the same stream that produces the transcript's rows.
+    private(set) var turnLiveness: TurnLiveness = .unknown
     var onUserInputSubmit: ((String, UserInputAnswers) -> Void)?
     /// Explicit provider response transport for v2 request blocks. Production
     /// binds nothing today because no compiled `AgentAdapter` response conformer
@@ -1170,7 +1173,14 @@ final class ManagedAgentTileNSView: TileNSView {
             if state == .ready || state == .stopped || state == .error {
                 compactStatusInteraction = nil
             }
+            // A session that stopped or errored ended whatever it was doing. This
+            // is the second way out of `.inFlight`, and it exists because a runner
+            // that dies mid-turn never sends `.turnCompleted`.
+            if state == .stopped || state == .error {
+                turnLiveness = .completed
+            }
         case .turnStarted:
+            turnLiveness = .inFlight
             settledTurnStatusText = nil
             transcriptCollectionFixture?.setTurnInFlight(true)
             compactStatusSession = .init(state: .running, startedAt: nil)
@@ -1189,6 +1199,7 @@ final class ManagedAgentTileNSView: TileNSView {
             // `.plans/45` S6 — "Worked for Ns" / "You stopped after Ns" (t3's
             // wording for interruptions). Anchored at submit when known —
             // provider events alone undercount the duration.
+            turnLiveness = .completed
             liveToolVerb = nil
             transcriptCollectionFixture?.setTurnInFlight(false)
             let anchor = v2TurnSnapshot?.submittedAt ?? v2TurnSnapshot?.turnStartedAt
@@ -1713,19 +1724,47 @@ final class ManagedAgentTileNSView: TileNSView {
     ///
     /// Growing glyphs are not a liveness signal — a partial paragraph is
     /// pixel-identical to a finished one, and a pause between sentences is
-    /// indistinguishable from a stall. A working status is now the whole
-    /// authority, which also means a tool call running MID-answer keeps the tail
-    /// up; the old predicate suppressed it whether or not work was happening,
-    /// because it keyed on the open entry rather than on the work.
+    /// indistinguishable from a stall. So a tool call running MID-answer keeps
+    /// the tail up, where the old predicate suppressed it whether or not work was
+    /// happening, because it keyed on the open entry rather than on the work.
+    ///
+    /// But the status is NOT the whole authority, and briefly making it so was a
+    /// regression. The removed term had been an accidental safety net: a turn that
+    /// ended without `descriptor.status` flipping still had an open assistant
+    /// entry, so the tail went quiet. Without it the same stall spins forever.
+    /// `TurnLiveness` is the deliberate replacement — an authority that moves with
+    /// the event stream the rows themselves come from, and that has two ways out
+    /// of "running" rather than none.
     ///
     /// `document` is taken, and deliberately unread, so that the witness for this
     /// rule can hand it a real streaming document and so that reintroducing the
     /// old term has somewhere to go wrong. Extracted from the body only because
     /// `statusIsActive` needs a live supervisor and this rule does not: a witness
     /// can drive the real decision without standing one up.
-    static func showsWorkingTail(statusIsActive: Bool, document: AgentDocument) -> Bool {
+    /// Where a turn actually stands, according to the event stream that carries
+    /// the content — as opposed to `descriptor.status`, which is republished
+    /// asynchronously by the supervisor and can still say `.working` well after a
+    /// turn has ended (and, on a stalled runner, forever).
+    enum TurnLiveness {
+        /// No turn boundary has been seen on this attachment yet — a tile that
+        /// attached mid-turn, or one replaying restored history. The status is the
+        /// only authority available, so it is deferred to.
+        case unknown
+        case inFlight
+        case completed
+    }
+
+    static func showsWorkingTail(
+        statusIsActive: Bool, document: AgentDocument, turnLiveness: TurnLiveness
+    ) -> Bool {
         _ = document
-        return statusIsActive
+        guard statusIsActive else { return false }
+        // A completed turn takes the tail down even while the status still says
+        // otherwise. `descriptor.status` is republished asynchronously and lags a
+        // turn's own completion event; on a runner that stalls it never flips at
+        // all. Deferring to it alone is what let the gyro spin after the agent was
+        // done — "the agent is done but i still see it".
+        return turnLiveness != .completed
     }
 
     private func refreshTranscriptThinkingIndicator() {
@@ -1750,7 +1789,8 @@ final class ManagedAgentTileNSView: TileNSView {
             statusIsActive = false
         }
         let showsWorkingTail = Self.showsWorkingTail(
-            statusIsActive: statusIsActive, document: model.document)
+            statusIsActive: statusIsActive, document: model.document,
+            turnLiveness: turnLiveness)
         if !statusIsActive, let settledTurnStatusText {
             transcriptCollectionFixture.setSettledTailStatus(settledTurnStatusText)
             return

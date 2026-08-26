@@ -501,7 +501,8 @@ extension AgentFirstPaintChecks {
         }
 
         // THE assertion: mid-answer, with work genuinely in flight, the tail stays.
-        guard ManagedAgentTileNSView.showsWorkingTail(statusIsActive: true, document: document) else {
+        guard ManagedAgentTileNSView.showsWorkingTail(
+            statusIsActive: true, document: document, turnLiveness: tile.turnLiveness) else {
             throw fail(
                 "streaming liveness: the tail was suppressed while an assistant entry was "
                 + "streaming — the gyro is the only animated element in the transcript and the "
@@ -511,10 +512,72 @@ extension AgentFirstPaintChecks {
         }
 
         // And the tail is not simply always on: a settled turn must still yield.
-        guard !ManagedAgentTileNSView.showsWorkingTail(statusIsActive: false, document: document) else {
+        guard !ManagedAgentTileNSView.showsWorkingTail(
+            statusIsActive: false, document: document, turnLiveness: tile.turnLiveness) else {
             throw fail(
                 "streaming liveness: the tail stayed up with no work in flight — a liveness "
                 + "signal that is always on carries no information"
+            )
+        }
+
+        // Mid-answer the tile must actually believe a turn is running. Teeth for
+        // the assertion below: if the boundary never reached `.inFlight`, the
+        // "completed hides it" assertion would pass for the wrong reason.
+        guard tile.turnLiveness == .inFlight else {
+            throw fail(
+                "streaming liveness: mid-answer the tile's turn boundary was \(tile.turnLiveness), "
+                + "so it never saw the turn start"
+            )
+        }
+
+        // THE regression this pair exists for. Dylan, watching a live tile:
+        // "the agent is done but i still see it."
+        //
+        // `statusIsActive` is deliberately passed as TRUE here, because that is
+        // precisely the situation: `descriptor.status` is republished
+        // asynchronously and still says `.working` when the turn's own completion
+        // event has already arrived — and on a runner that stalls it says so
+        // forever. The tail used to be saved from this by accident, because its
+        // old predicate also required the last entry not to be an open stream.
+        // Removing that term to keep the gyro up during streaming removed the
+        // accident too, and turned "silently hidden on a stall" into "spins
+        // forever on a stall".
+        tile.ingest(.turnCompleted(
+            threadId: thread, turnId: "turn-1", outcome: .completed, errorMessage: nil))
+        guard tile.turnLiveness == .completed else {
+            throw fail(
+                "streaming liveness: a turnCompleted event left the tile's turn boundary at "
+                + "\(tile.turnLiveness) — the tail's authority never learned the turn ended"
+            )
+        }
+        guard !ManagedAgentTileNSView.showsWorkingTail(
+            statusIsActive: true, document: tile.qaDocumentForChecks,
+            turnLiveness: tile.turnLiveness) else {
+            throw fail(
+                "streaming liveness: the tail stayed up after the turn's own completion event, "
+                + "on the strength of a status that had not caught up yet — an agent that is "
+                + "done must not keep spinning"
+            )
+        }
+
+        // The other exit, for a runner that dies without ever sending
+        // turnCompleted: a stopped session ends the turn too.
+        let stopped = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(), kind: .managedAgent, title: "streaming-liveness-stopped",
+            frame: TileFrame(x: 0, y: 0, width: 560, height: 460),
+            zPosition: .fromLegacyRank(1), runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")))
+        stopped.layoutSubtreeIfNeeded()
+        stopped.ingest(.turnStarted(threadId: thread, turnId: "turn-1"))
+        stopped.ingest(.contentDelta(
+            threadId: thread, turnId: "turn-1", streamKind: .assistant, delta: "half an answer"))
+        stopped.ingest(.sessionStateChanged(.stopped))
+        guard !ManagedAgentTileNSView.showsWorkingTail(
+            statusIsActive: true, document: stopped.qaDocumentForChecks,
+            turnLiveness: stopped.turnLiveness) else {
+            throw fail(
+                "streaming liveness: the tail stayed up after the session stopped mid-turn — a "
+                + "runner that dies never sends turnCompleted, so this is the exit that has to work"
             )
         }
 
