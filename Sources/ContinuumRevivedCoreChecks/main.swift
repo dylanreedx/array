@@ -6500,6 +6500,74 @@ do {
     expect(missingSnapshot.finalMarkdown == nil, "RunArtifactsReader tolerates missing final.md")
 }
 
+// MARK: - RunArtifactsReader.tailEventsJSONL — incremental reads cost only what is new
+//
+// E: `readEventsJSONL` re-reads and re-parses the WHOLE file on every call, no
+// matter how little of it is new — measured at ~19ms/MB, almost entirely in
+// `split`/`JSONSerialization`, and re-incurred on every one of the watcher's
+// 0.25s polls. `tailEventsJSONL` exists to make that O(new bytes) instead of
+// O(file size). Gated on COUNTS, never wall-clock: a busy machine flakes a
+// millisecond budget but cannot make a re-parsed prefix produce the right
+// number of events by accident.
+do {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("continuum-tail-events-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: root) }
+    try fm.createDirectory(at: root, withIntermediateDirectories: true)
+    let eventsURL = root.appendingPathComponent("events.jsonl")
+
+    func line(_ i: Int) -> String { #"{"ts":"\#(i)","type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"line-\#(i)"}]}}"# }
+
+    let prefixCount = 5000
+    let prefixText = (0..<prefixCount).map(line).joined(separator: "\n") + "\n"
+    try prefixText.write(to: eventsURL, atomically: true, encoding: .utf8)
+
+    let first = RunArtifactsReader.tailEventsJSONL(at: eventsURL, from: nil)
+    expect(first.events.count == prefixCount, "tailEventsJSONL: the first read (no prior cursor) reads everything, got \(first.events.count) of \(prefixCount)")
+    expect(first.rewrote == false, "tailEventsJSONL: a first-ever read is not a rewrite")
+    expect(first.state != nil, "tailEventsJSONL: no cursor state returned from the first read")
+    let state1 = first.state ?? RunEventsFileState(inode: 0, byteOffset: 0)
+    expect(state1.byteOffset == UInt64(prefixText.utf8.count), "tailEventsJSONL: the cursor after a full read should sit at end-of-file, got \(state1.byteOffset) vs \(prefixText.utf8.count)")
+
+    // Append a SMALL delta to a LARGE prefix — the shape that actually occurs
+    // in production (a live run keeps growing while Array tails it).
+    let deltaCount = 5
+    let deltaText = (prefixCount..<(prefixCount + deltaCount)).map(line).joined(separator: "\n") + "\n"
+    let handle = try FileHandle(forWritingTo: eventsURL)
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data(deltaText.utf8))
+    try handle.close()
+
+    let second = RunArtifactsReader.tailEventsJSONL(at: eventsURL, from: state1)
+    // THE assertion: exactly the 5 new events, not 5005. A re-read-from-scratch
+    // implementation (the pre-fix behavior) would return `prefixCount + deltaCount`
+    // here — this is the counting proof, not a timing one.
+    expect(second.events.count == deltaCount, "tailEventsJSONL: an append re-read the \(prefixCount)-line prefix instead of reading only the \(deltaCount) new lines — got \(second.events.count) events")
+    expect(second.events.first?.rawJSON.contains("line-\(prefixCount)") == true, "tailEventsJSONL: the first delivered event after the append is not the first new line")
+    expect(second.rewrote == false, "tailEventsJSONL: an append (same inode) must not read as a rewrite")
+    expect(second.state != nil, "tailEventsJSONL: no cursor state returned from the second read")
+    let state2 = second.state ?? RunEventsFileState(inode: 0, byteOffset: 0)
+    // Bytes, not milliseconds: the cursor advanced by exactly the appended
+    // byte count — proof the read started at the OLD end-of-file, not at 0.
+    expect(state2.byteOffset - state1.byteOffset == UInt64(deltaText.utf8.count),
+           "tailEventsJSONL: cursor advanced by \(state2.byteOffset - state1.byteOffset) bytes, expected exactly the \(deltaText.utf8.count)-byte delta")
+
+    // A third read with nothing new returns nothing and does not move the cursor.
+    let third = RunArtifactsReader.tailEventsJSONL(at: eventsURL, from: state2)
+    expect(third.events.isEmpty, "tailEventsJSONL: a read with no new bytes returned \(third.events.count) events")
+    expect(third.state?.byteOffset == state2.byteOffset, "tailEventsJSONL: a read with no new bytes moved the cursor")
+
+    // A completion rewrite (temp-file + rename) is detected by inode, not size,
+    // and is read fresh from byte 0 — this is what makes the A fix possible.
+    let rewriteText = (0..<3).map(line).joined(separator: "\n") + "\n"
+    try rewriteText.write(to: eventsURL, atomically: true, encoding: .utf8)
+    let fourth = RunArtifactsReader.tailEventsJSONL(at: eventsURL, from: state2)
+    expect(fourth.rewrote == true, "tailEventsJSONL: a temp-file+rename replace was not detected as a rewrite")
+    expect(fourth.events.count == 3, "tailEventsJSONL: a detected rewrite should read the fresh file from byte 0, got \(fourth.events.count) events instead of 3")
+
+    print("RunArtifactsReader.tailEventsJSONL checks passed: a first read consumes the whole file, an append of 5 lines onto a 5,000-line prefix reads and parses only those 5 (cursor advancing by exactly the appended byte count), a no-op read moves nothing, and a rename-based rewrite is caught by inode and re-read from byte 0")
+}
+
 // MARK: - RunArtifactsWatcher debounced updates
 
 do {
