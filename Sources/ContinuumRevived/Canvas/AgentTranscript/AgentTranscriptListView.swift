@@ -262,6 +262,13 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     private let turnSeparatorLayer = CAShapeLayer()
     private let hoverTimeLayer = CATextLayer()
     private var turnStartRowsByEntry: [(row: Int, entryID: AgentNodeID, date: Date?)] = []
+    /// Position of each entry within `turnStartRowsByEntry`.
+    ///
+    /// The three lookups below were `first(where:)` over that array, and one of
+    /// them runs on every `mouseMoved` — a linear scan of the conversation per
+    /// pointer sample, on the main thread, purely to answer a question a
+    /// dictionary answers in constant time.
+    private var turnStartIndexByEntry: [AgentNodeID: Int] = [:]
     /// `.plans/45` S4.3 — the display projection between `rows` and the
     /// diffable snapshot. `rows == flatten(document)` is untouched; these are
     /// rebuilt O(rows) once per visual apply.
@@ -1866,6 +1873,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         turnStartRowsByEntry = starts.map {
             ($0.row, $0.entryID, entryDatesByID[$0.entryID] ?? nil)
         }
+        turnStartIndexByEntry = Dictionary(
+            turnStartRowsByEntry.enumerated().map { ($0.element.entryID, $0.offset) },
+            uniquingKeysWith: { first, _ in first })
 
         let path = CGMutablePath()
         let inset = transcriptLayout.contentInsets.left
@@ -1889,7 +1899,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
 
     private func updateHoverTimeLayer() {
         guard let hoveredTurnEntryID,
-              let turn = turnStartRowsByEntry.first(where: { $0.entryID == hoveredTurnEntryID }),
+              let turnIndex = turnStartIndexByEntry[hoveredTurnEntryID],
+              turnStartRowsByEntry.indices.contains(turnIndex),
+              case let turn = turnStartRowsByEntry[turnIndex],
               let date = turn.date,
               let frame = transcriptLayout.layoutAttributesForItem(
                   at: IndexPath(item: turn.row, section: 0))?.frame
@@ -2009,7 +2021,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// given turn's start row, or nil when that entry starts no turn — so a
     /// witness can drive the REAL hit-test without inventing geometry.
     func qaTurnStartPointForChecks(entryID: AgentNodeID) -> NSPoint? {
-        guard let turn = turnStartRowsByEntry.first(where: { $0.entryID == entryID }),
+        guard let turnIndex = turnStartIndexByEntry[entryID],
+              turnStartRowsByEntry.indices.contains(turnIndex),
+              case let turn = turnStartRowsByEntry[turnIndex],
               let frame = transcriptLayout.layoutAttributesForItem(
                   at: IndexPath(item: turn.row, section: 0))?.frame else { return nil }
         return convert(NSPoint(x: frame.midX, y: frame.midY), from: collectionView)
