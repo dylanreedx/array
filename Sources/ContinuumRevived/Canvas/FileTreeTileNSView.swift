@@ -17,6 +17,8 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
     private var suppressExpansionPersistence = false
 
     private let rootStack = NSStackView()
+    private let pathLabel = NSTextField(labelWithString: "")
+    private let collapseButton = NSButton()
     private let searchField = NSSearchField()
     private let truncationBanner = NSTextField(labelWithString: "")
     private let scrollView = NSScrollView()
@@ -82,6 +84,8 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         stateLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         truncationBanner.backgroundColor = SurfaceToken.tileChrome.color.nsColor(in: self)
         truncationBanner.textColor = AccentToken.accentApproval.color.nsColor(in: self)
+        pathLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        collapseButton.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
         if outlineView.numberOfRows > 0 { outlineView.reloadData() }
     }
 
@@ -89,6 +93,15 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         canvas?.bringToFront(tileId: tile.id)
         window?.makeFirstResponder(searchField)
         return true
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "f" {
+            window?.makeFirstResponder(searchField)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
     }
 
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
@@ -117,6 +130,10 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         let view = outlineView.makeView(withIdentifier: Self.rowIdentifier, owner: self) as? NSTableCellView
             ?? makeCellView()
         view.textField?.stringValue = rowTitle(for: item)
+        view.imageView?.image = icon(for: item)
+        view.imageView?.contentTintColor = item.node.isDirectory
+            ? AccentToken.accentWorking.color.nsColor(in: self)
+            : TextToken.textSecondary.color.nsColor(in: self)
         // P1.11: an ignored path is de-emphasised metadata, so `textSecondary` —
         // Apple's `secondaryLabelColor` measures 2.07:1 on a card and 3.95:1 on
         // white and cannot clear AA by construction (P0.4 root cause 1).
@@ -163,6 +180,7 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         guard let item = notification.userInfo?["NSObject"] as? FileTreeOutlineItem else {
             return
         }
+        outlineView.reloadItem(item)
         guard shouldPersistExpansionChanges else {
             return
         }
@@ -176,6 +194,7 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         guard let item = notification.userInfo?["NSObject"] as? FileTreeOutlineItem else {
             return
         }
+        outlineView.reloadItem(item)
         guard shouldPersistExpansionChanges else {
             return
         }
@@ -214,14 +233,43 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         onOpenFile?(absolutePath(for: item.node.relativePath))
     }
 
+    @objc private func openSelectedAsTile(_ sender: Any?) {
+        guard let item = clickedOrSelectedItem(), !item.node.isDirectory else { return }
+        onSpawnFile?(absolutePath(for: item.node.relativePath))
+    }
+
+    @objc private func collapseAll(_ sender: Any?) {
+        suppressExpansionPersistence = true
+        collapseVisibleItems()
+        suppressExpansionPersistence = false
+        fileTreeTile.expandedPaths.removeAll()
+        persist()
+    }
+
     private func buildContent() {
         rootStack.orientation = .vertical
         rootStack.spacing = 0
-        rootStack.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 8, right: 8)
+        rootStack.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 10, right: 10)
         rootStack.wantsLayer = true
 
+        pathLabel.stringValue = URL(fileURLWithPath: fileTreeTile.rootPath).lastPathComponent
+        pathLabel.toolTip = fileTreeTile.rootPath
+        pathLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        pathLabel.lineBreakMode = .byTruncatingMiddle
+        pathLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        collapseButton.image = NSImage(systemSymbolName: "chevron.up.chevron.down", accessibilityDescription: "Collapse all folders")
+        collapseButton.isBordered = false
+        collapseButton.controlSize = .small
+        collapseButton.target = self
+        collapseButton.action = #selector(collapseAll(_:))
+        collapseButton.toolTip = "Collapse all folders"
+        let header = NSStackView(views: [pathLabel, collapseButton])
+        header.orientation = .horizontal
+        header.spacing = 6
+        header.alignment = .centerY
+
         searchField.font = NSFont.token(.bodyMono)
-        searchField.placeholderString = "Search files"
+        searchField.placeholderString = "Filter files (fuzzy)"
         searchField.delegate = self
         searchField.translatesAutoresizingMaskIntoConstraints = false
 
@@ -238,8 +286,8 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         outlineView.addTableColumn(column)
         outlineView.outlineTableColumn = column
         outlineView.headerView = nil
-        outlineView.rowHeight = 22
-        outlineView.intercellSpacing = NSSize(width: 0, height: 2)
+        outlineView.rowHeight = 24
+        outlineView.intercellSpacing = .zero
         outlineView.selectionHighlightStyle = .regular
         outlineView.dataSource = self
         outlineView.delegate = self
@@ -250,6 +298,11 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         outlineView.setDraggingSourceOperationMask(.copy, forLocal: false)
 
         let menu = NSMenu()
+        menu.addItem(NSMenuItem(
+            title: "Open as File Tile",
+            action: #selector(openSelectedAsTile(_:)),
+            keyEquivalent: ""
+        ))
         menu.addItem(NSMenuItem(
             title: "Open in Preferred Editor",
             action: #selector(openSelectedInEditor(_:)),
@@ -286,7 +339,10 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
             searchField.heightAnchor.constraint(equalToConstant: 28)
         ])
 
+        rootStack.addArrangedSubview(header)
         rootStack.addArrangedSubview(searchField)
+        rootStack.setCustomSpacing(6, after: header)
+        rootStack.setCustomSpacing(8, after: searchField)
         rootStack.addArrangedSubview(truncationBanner)
         rootStack.addArrangedSubview(scrollView)
         setContentView(rootStack)
@@ -342,6 +398,7 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
 
     private func apply(_ snapshot: FileTreeSnapshot) {
         latestSnapshot = snapshot
+        pathLabel.stringValue = "\(snapshot.root.lastPathComponent)  ·  \(snapshot.nodes.count)"
         outlineModel = FileTreeOutlineModel(snapshot: snapshot, query: fileTreeTile.searchQuery)
         suppressExpansionPersistence = true
         outlineView.reloadData()
@@ -504,6 +561,27 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         item.node.displayName
     }
 
+    private func icon(for item: FileTreeOutlineItem) -> NSImage? {
+        if item.node.isDirectory {
+            return NSImage(
+                systemSymbolName: outlineView.isItemExpanded(item) ? "folder.fill" : "folder",
+                accessibilityDescription: "Folder"
+            )
+        }
+        let ext = URL(fileURLWithPath: item.node.displayName).pathExtension.lowercased()
+        let symbol: String
+        switch ext {
+        case "swift", "js", "jsx", "ts", "tsx", "go", "rs", "c", "h", "cpp", "hpp", "cs", "py", "sh":
+            symbol = "chevron.left.forwardslash.chevron.right"
+        case "html", "css", "scss": symbol = "globe"
+        case "json", "yaml", "yml", "toml": symbol = "curlybraces"
+        case "md", "markdown", "txt", "rtf": symbol = "doc.text"
+        case "png", "jpg", "jpeg", "gif", "webp", "svg": symbol = "photo"
+        default: symbol = "doc"
+        }
+        return NSImage(systemSymbolName: symbol, accessibilityDescription: "File")
+    }
+
     private func badgeTitle(for node: FileTreeNode) -> String {
         guard let gitStatus = node.gitStatus else {
             return ""
@@ -565,11 +643,21 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         badge.alignment = .center
         badge.translatesAutoresizingMaskIntoConstraints = false
         badge.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let icon = NSImageView()
+        icon.imageScaling = .scaleProportionallyDown
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(icon)
         cell.addSubview(text)
         cell.addSubview(badge)
         cell.textField = text
+        cell.imageView = icon
         NSLayoutConstraint.activate([
-            text.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+            icon.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 3),
+            icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 16),
+            icon.heightAnchor.constraint(equalToConstant: 16),
+            text.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 5),
             text.trailingAnchor.constraint(lessThanOrEqualTo: badge.leadingAnchor, constant: -6),
             text.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
             badge.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),

@@ -224,8 +224,8 @@ public enum RuntimeRefKind: String, Codable, Equatable, Sendable {
     case file
 }
 
-/// The reading/editing presentation selected for a Markdown-bearing tile. Kept
-/// in tile metadata (rather than a view) so restoring a canvas preserves intent.
+/// The reading/editing presentation selected for a Markdown-bearing tile.
+/// Stored with the tile so workspace switching and relaunch preserve intent.
 public enum MarkdownDocumentMode: String, Codable, Equatable, Sendable {
     case preview
     case split

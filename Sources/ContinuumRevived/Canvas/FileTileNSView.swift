@@ -3,22 +3,32 @@ import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
-/// Tile view for a single file: non-Markdown files are read-only, while
-/// `.md`/`.markdown` documents have a native Preview/Edit surface.
+/// Tile view for a single file: source files are readable agent-change
+/// projections, while Markdown documents share Preview/Split/Edit behavior
+/// with notes and retain explicit repository-file save semantics.
 @MainActor
 final class FileTileNSView: TileNSView, NSTextViewDelegate {
     typealias Mode = MarkdownDocumentMode
 
+    private struct RecoveryDraft: Codable, Equatable {
+        var filePath: String
+        var baseText: String
+        var draftText: String
+        var updatedAt: Date
+    }
+
     private(set) var textView: NSTextView
     private let scrollView: NSScrollView
     private let filePath: String?
-    /// Markdown files default to Preview, while a selected mode is durable tile metadata.
+    private let sourceLanguage: FilePreview.SourceLanguage
+    private var lineNumberRuler: CodeLineNumberRulerView?
+    private var languageLabel: NSTextField?
     private(set) var mode: Mode = .preview
-    private var markdownSurface: MarkdownDocumentSurface!
     private(set) var presentation: FilePreview.Presentation = .sourceText
     /// One immutable loaded-text snapshot shared by both modes, so switching is
     /// instant and Preview can never drift from Source inside one tile.
     private(set) var loadedText: String?
+    private var markdownSurface: MarkdownDocumentSurface?
     private var modeControl: NSSegmentedControl?
     private let dirtyLabel = NSTextField(labelWithString: "")
     private let referenceLabel = NSTextField(labelWithString: "")
@@ -27,7 +37,9 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
     private(set) var isDirty = false
     private(set) var hasExternalConflict = false
     private var savedText: String?
+    private var loadedModificationDate: Date?
     private var externalChangeTimer: Timer?
+    private var recoverySaveTimer: Timer?
     var onSaveFailure: ((String) -> Void)?
     private var pendingReveal: (line: Int, column: Int?)?
     /// The "file unavailable" placeholder, built lazily by `showMessage`. Held so
@@ -38,6 +50,9 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
 
     override init(tile: Tile) {
         self.filePath = tile.metadata.documentLocation?.path ?? tile.metadata.filePath
+        self.sourceLanguage = FilePreview.sourceLanguage(
+            forPath: tile.metadata.documentLocation?.path ?? tile.metadata.filePath ?? ""
+        )
 
         let tv = NSTextView()
         tv.isEditable = false
@@ -81,12 +96,6 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
 
         super.init(tile: tile)
 
-        markdownSurface = MarkdownDocumentSurface(
-            textView: tv, sourceScrollView: sv, initialDraft: "",
-            mode: tile.metadata.markdownDocumentMode ?? .preview,
-            theme: { [weak self] in self?.effectiveTokenTheme ?? .dark }
-        )
-        mode = markdownSurface.mode
         setContentView(sv)
         activeBody = sv
         tv.delegate = self
@@ -100,14 +109,21 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         if window == nil {
             externalChangeTimer?.invalidate()
             externalChangeTimer = nil
-        } else if presentation == .markdown {
+        } else if loadedText != nil {
             startExternalChangeMonitoring()
         }
+    }
+
+    override func prepareForRemovalFromScene() {
+        externalChangeTimer?.invalidate()
+        externalChangeTimer = nil
+        flushRecoveryDraft()
     }
 
     override func applyTokens() {
         super.applyTokens()
         applyDocumentTokens(to: textView)
+        if presentation == .sourceText, loadedText != nil { applyCodePresentation() }
         messageContainer?.layer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(in: self)
         messageLabel?.textColor = TextToken.textSecondary.color.nsColor(in: self)
         markdownSurface?.applyTheme()
@@ -119,7 +135,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         // Before targeting a view inside the body: while surfaced, that view is
         // PARKED, and AppKit will happily focus it there.
         promoteForIncomingFocus()
-        window?.makeFirstResponder(mode == .preview ? (markdownSurface.previewView ?? textView) : textView)
+        window?.makeFirstResponder(mode == .preview ? (markdownSurface?.previewView ?? textView) : textView)
         return true
     }
 
@@ -159,20 +175,22 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
     /// metadata, and its already-loaded text.
     func setMode(_ newMode: Mode) {
         guard presentation == .markdown, newMode != mode else { return }
+        promoteForIncomingFocus()
         mode = newMode
         modeControl?.selectedSegment = newMode.segmentIndex
-        markdownSurface.setMode(newMode)
+        markdownSurface?.setMode(newMode)
+        showBody()
+        window?.makeFirstResponder(newMode == .preview ? (markdownSurface?.previewView ?? textView) : textView)
         tile.metadata.markdownDocumentMode = newMode
         canvas?.updateTile(tile)
-        showBody()
-        window?.makeFirstResponder(newMode == .preview ? (markdownSurface.previewView ?? textView) : textView)
     }
 
     func textDidChange(_ notification: Notification) {
         guard presentation == .markdown else { return }
         loadedText = textView.string
-        markdownSurface.draftDidChange(textView.string)
+        markdownSurface?.draftDidChange(textView.string)
         setDirty(savedText != loadedText)
+        scheduleRecoveryDraftSave()
         bumpSurfaceEpoch()
     }
 
@@ -190,10 +208,14 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
             try textView.string.write(to: URL(fileURLWithPath: filePath), atomically: true, encoding: .utf8)
             self.savedText = textView.string
             loadedText = textView.string
+            markdownSurface?.replaceDraft(textView.string)
+            loadedModificationDate = Self.modificationDate(for: filePath)
             hasExternalConflict = false
             setDirty(false)
+            discardRecoveryDraft()
             return true
         } catch {
+            showSaveFailure(error.localizedDescription)
             onSaveFailure?(error.localizedDescription)
             return false
         }
@@ -201,48 +223,78 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
 
     /// Reloads external edits only while the tile has no local draft. A dirty
     /// draft is never overwritten; it is marked conflicted for the next save.
-    func refreshFromDisk() {
-        guard presentation == .markdown, let filePath,
-              case let .text(diskText) = FilePreview.load(path: filePath),
-              diskText != savedText else { return }
-        if isDirty {
+    func refreshFromDisk(force: Bool = false) {
+        guard let filePath else { return }
+        let modificationDate = Self.modificationDate(for: filePath)
+        guard force || modificationDate != loadedModificationDate else { return }
+        guard case let .text(diskText) = FilePreview.load(path: filePath) else { return }
+        guard diskText != savedText else {
+            loadedModificationDate = modificationDate
+            return
+        }
+        if presentation == .markdown, isDirty {
             hasExternalConflict = true
             dirtyLabel.stringValue = "!"
             dirtyLabel.toolTip = "The file changed on disk"
         } else {
             savedText = diskText
             loadedText = diskText
+            loadedModificationDate = modificationDate
             textView.string = diskText
+            markdownSurface?.replaceDraft(diskText)
             showBody()
         }
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if presentation == .markdown, modifiers == [.command, .option],
+           let key = event.charactersIgnoringModifiers,
+           let selectedMode = ["1": Mode.preview, "2": .split, "3": .edit][key] {
+            setMode(selectedMode)
+            return true
+        }
+        if presentation == .markdown, mode != .preview,
+           MarkdownEditingCommands.handleKeyEquivalent(event, in: textView) {
+            return true
+        }
         if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
            event.charactersIgnoringModifiers?.lowercased() == "s",
            presentation == .markdown {
-            if hasExternalConflict {
-                let alert = NSAlert()
-                alert.messageText = "This file changed on disk"
-                alert.informativeText = "Reload the disk version, overwrite it with your draft, or keep editing."
-                alert.addButton(withTitle: "Reload")
-                alert.addButton(withTitle: "Overwrite")
-                alert.addButton(withTitle: "Cancel")
-                switch alert.runModal() {
-                case .alertFirstButtonReturn:
-                    setDirty(false)
-                    hasExternalConflict = false
-                    refreshFromDisk()
-                case .alertSecondButtonReturn:
-                    _ = save(overwriteExternalChanges: true)
-                default: break
-                }
-            } else {
-                _ = save()
-            }
+            _ = saveInteractively()
             return true
         }
         return super.performKeyEquivalent(with: event)
+    }
+
+    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard presentation == .markdown else { return false }
+        return MarkdownEditingCommands.handleCommand(commandSelector, in: textView)
+    }
+
+    /// Shared by Command-S and dirty-tile close. Returns true only when there is
+    /// no longer an unsaved draft; Cancel and write failure keep the tile open.
+    @discardableResult
+    func saveInteractively() -> Bool {
+        guard hasExternalConflict else { return save() }
+        let alert = NSAlert()
+        alert.messageText = "This file changed on disk"
+        alert.informativeText = "Reload the disk version, overwrite it with your draft, or keep editing."
+        alert.addButton(withTitle: "Reload")
+        alert.addButton(withTitle: "Overwrite")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            setDirty(false)
+            hasExternalConflict = false
+            refreshFromDisk(force: true)
+            discardRecoveryDraft()
+            return true
+        case .alertSecondButtonReturn:
+            return save(overwriteExternalChanges: true)
+        default:
+            return false
+        }
     }
 
     private func setDirty(_ dirty: Bool) {
@@ -251,6 +303,19 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         dirtyLabel.toolTip = dirty ? "Unsaved Markdown changes" : nil
         dirtyLabel.setAccessibilityLabel(dirty ? "Unsaved changes" : "Saved")
     }
+
+    /// The close orchestrator uses these rather than reaching into recovery
+    /// implementation details. Discard is explicit and only follows the user's
+    /// Discard choice; scene teardown merely flushes the draft.
+    func discardUnsavedChanges() {
+        recoverySaveTimer?.invalidate()
+        recoverySaveTimer = nil
+        discardRecoveryDraft()
+        setDirty(false)
+        hasExternalConflict = false
+    }
+
+    func flushUnsavedRecovery() { flushRecoveryDraft() }
 
     @objc private func modeControlChanged(_ sender: NSSegmentedControl) {
         setMode(Mode(segmentIndex: sender.selectedSegment) ?? .edit)
@@ -261,19 +326,21 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         let control = NSSegmentedControl(labels: ["Preview", "Split", "Edit"], trackingMode: .selectOne, target: self, action: #selector(modeControlChanged(_:)))
         control.controlSize = .small
         control.font = NSFont.systemFont(ofSize: 10, weight: .medium)
-        // Keep all three actions equally sized; `labels:` otherwise gives the
-        // longer Preview label a larger hit target and makes mode placement drift.
         for segment in 0..<control.segmentCount { control.setWidth(160 / 3, forSegment: segment) }
         control.selectedSegment = mode.segmentIndex
         control.setAccessibilityLabel("Markdown display mode")
         modeControl = control
+        let formatControl = MarkdownEditingCommands.makeToolbarPopUp(
+            target: self,
+            action: #selector(applyMarkdownCommand(_:))
+        )
         dirtyLabel.font = NSFont.systemFont(ofSize: 11, weight: .bold)
         dirtyLabel.textColor = NSColor.systemOrange
         dirtyLabel.alignment = .center
         referenceLabel.font = NSFont.systemFont(ofSize: 10, weight: .medium)
         referenceLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         referenceLabel.isHidden = true
-        let stack = NSStackView(views: [referenceLabel, dirtyLabel, control])
+        let stack = NSStackView(views: [referenceLabel, dirtyLabel, formatControl, control])
         stack.orientation = .horizontal
         stack.spacing = 4
         titleAccessoryStack = stack
@@ -312,14 +379,16 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         // because `setContentView` below would replace the surface host and strand
         // the parked body.
         promoteForIncomingFocus()
-        if presentation == .markdown {
-            if textView.string != loadedText { textView.string = loadedText }
+        if presentation == .markdown, let markdownSurface {
             markdownSurface.replaceDraft(loadedText)
-            setContentView(markdownSurface.activeBody)
-            activeBody = markdownSurface.activeBody
+            let body = markdownSurface.activeBody
+            setContentView(body)
+            activeBody = body
+            markdownSurface.restorePresentationState()
             if mode != .preview { applyPendingReveal() }
         } else {
             if textView.string != loadedText { textView.string = loadedText }
+            applyCodePresentation()
             setContentView(scrollView)
             activeBody = scrollView
             applyPendingReveal()
@@ -329,7 +398,8 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
 
     /// Scrolls the source view to a one-based line (and optional column) without
     /// persisting anything. Called when an agent link named `file.swift:42`.
-    /// Markdown tiles switch to Source first: a coordinate refers to the text.
+    /// Preview switches to Edit because a coordinate refers to source. Split
+    /// remains Split and reveals within its already-visible source pane.
     func reveal(line: Int, column: Int? = nil) {
         guard line > 0 else { return }
         pendingReveal = (line, column)
@@ -397,9 +467,26 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
     }
 
     /// QA: the rendered Markdown document, when one is installed.
-    var qaMarkdownDocument: FileMarkdownDocumentView? { markdownSurface.previewView }
+    var qaMarkdownDocument: FileMarkdownDocumentView? { markdownSurface?.previewView }
     /// QA: the mode control, which must exist for Markdown and never otherwise.
     var qaModeControl: NSSegmentedControl? { modeControl }
+    var qaSourceLanguage: FilePreview.SourceLanguage { sourceLanguage }
+    var qaHasLineNumbers: Bool { scrollView.rulersVisible && scrollView.verticalRulerView === lineNumberRuler }
+    var qaRecoveryURL: URL? { recoveryURL }
+    func qaFlushRecoveryDraft() { flushRecoveryDraft() }
+    var qaSyntaxForegroundCount: Int {
+        guard let storage = textView.textStorage, storage.length > 0 else { return 0 }
+        var colors = Set<String>()
+        storage.enumerateAttribute(
+            .foregroundColor,
+            in: NSRange(location: 0, length: min(storage.length, 2_000))
+        ) { value, _, _ in
+            guard let color = value as? NSColor,
+                  let rgb = color.usingColorSpace(.sRGB) else { return }
+            colors.insert("\(rgb.redComponent)-\(rgb.greenComponent)-\(rgb.blueComponent)")
+        }
+        return colors.count
+    }
 
     struct TextVisibilityEvidence: CustomStringConvertible {
         var containsExpectedText = false
@@ -552,15 +639,37 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
     private func apply(_ result: FilePreview) {
         switch result {
         case let .text(content):
-            loadedText = content
+            let recovery = loadRecoveryDraft(forDiskText: content)
+            let initialText = recovery?.draftText ?? content
+            loadedText = initialText
             savedText = content
+            loadedModificationDate = filePath.flatMap { Self.modificationDate(for: $0) }
             presentation = filePath.map { FilePreview.presentation(forPath: $0) } ?? .sourceText
             if presentation == .markdown {
                 configureMarkdownEditor()
+                mode = tile.metadata.markdownDocumentMode ?? .preview
+                markdownSurface = MarkdownDocumentSurface(
+                    textView: textView,
+                    sourceScrollView: scrollView,
+                    initialDraft: initialText,
+                    mode: mode,
+                    theme: { [weak self] in self?.effectiveTokenTheme ?? .dark }
+                )
                 installModeControl()
-                startExternalChangeMonitoring()
+                if recovery != nil {
+                    textView.string = initialText
+                    hasExternalConflict = recovery?.baseText != content
+                    setDirty(true)
+                    if hasExternalConflict {
+                        dirtyLabel.stringValue = "!"
+                        dirtyLabel.toolTip = "Recovered draft; the file also changed on disk"
+                    }
+                }
+            } else {
+                configureCodePresentation()
             }
             showBody()
+            startExternalChangeMonitoring()
         case let .unavailable(message):
             loadedText = nil
             showMessage(message)
@@ -569,12 +678,54 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
 
     private func configureMarkdownEditor() {
         textView.isEditable = true
+        textView.menu = MarkdownEditingCommands.makeContextMenu(
+            target: self,
+            action: #selector(applyMarkdownCommand(_:))
+        )
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         textView.textContainer?.lineBreakMode = .byWordWrapping
         scrollView.hasHorizontalScroller = false
+    }
+
+    @objc private func applyMarkdownCommand(_ sender: NSMenuItem) {
+        guard let command = MarkdownEditingCommands.Command(rawValue: sender.tag) else { return }
+        MarkdownEditingCommands.apply(command, in: textView)
+    }
+
+    private func configureCodePresentation() {
+        let ruler = CodeLineNumberRulerView(scrollView: scrollView, textView: textView)
+        lineNumberRuler = ruler
+        scrollView.verticalRulerView = ruler
+        scrollView.hasVerticalRuler = true
+        scrollView.rulersVisible = true
+
+        let label = NSTextField(labelWithString: sourceLanguage.rawValue.uppercased())
+        label.font = NSFont.monospacedSystemFont(ofSize: 9, weight: .semibold)
+        label.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        label.setAccessibilityLabel("Language: \(sourceLanguage.rawValue)")
+        languageLabel = label
+        setTitleBarAccessory(label)
+    }
+
+    private func applyCodePresentation() {
+        let selection = textView.selectedRange()
+        let visibleOrigin = scrollView.contentView.bounds.origin
+        textView.textStorage?.setAttributedString(CodeSyntaxHighlighter.attributedString(
+            textView.string,
+            language: sourceLanguage,
+            in: self
+        ))
+        let length = textView.string.utf16.count
+        textView.setSelectedRange(NSRange(
+            location: min(selection.location, length),
+            length: min(selection.length, max(0, length - min(selection.location, length)))
+        ))
+        scrollView.contentView.scroll(to: visibleOrigin)
+        lineNumberRuler?.needsDisplay = true
+        languageLabel?.textColor = TextToken.textSecondary.color.nsColor(in: self)
     }
 
     private func startExternalChangeMonitoring() {
@@ -584,6 +735,81 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         }
         RunLoop.main.add(timer, forMode: .common)
         externalChangeTimer = timer
+    }
+
+    private var recoveryURL: URL? {
+        let root: URL
+        if let checkoutRoot = tile.metadata.documentLocation?.checkoutRootPath {
+            root = URL(fileURLWithPath: checkoutRoot, isDirectory: true)
+                .appendingPathComponent(".array", isDirectory: true)
+        } else {
+            guard let applicationSupport = FileManager.default.urls(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask
+            ).first else { return nil }
+            root = applicationSupport
+                .appendingPathComponent(AppChannel.liveApplicationSupportDirectoryName, isDirectory: true)
+        }
+        return root
+            .appendingPathComponent("recovery", isDirectory: true)
+            .appendingPathComponent("file-drafts", isDirectory: true)
+            .appendingPathComponent("\(tile.id.uuidString).json", isDirectory: false)
+    }
+
+    private func scheduleRecoveryDraftSave() {
+        recoverySaveTimer?.invalidate()
+        guard isDirty else {
+            discardRecoveryDraft()
+            return
+        }
+        recoverySaveTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.flushRecoveryDraft() }
+        }
+    }
+
+    private func flushRecoveryDraft() {
+        recoverySaveTimer?.invalidate()
+        recoverySaveTimer = nil
+        guard presentation == .markdown, isDirty,
+              let recoveryURL, let filePath, let savedText else { return }
+        let record = RecoveryDraft(
+            filePath: filePath,
+            baseText: savedText,
+            draftText: textView.string,
+            updatedAt: Date()
+        )
+        do {
+            try AtomicWriter(backupsDirectory: nil, retainedBackups: 0).write(record, to: recoveryURL)
+        } catch {
+            let message = "Could not protect the unsaved draft: \(error.localizedDescription)"
+            showSaveFailure(message)
+            onSaveFailure?(message)
+        }
+    }
+
+    private func showSaveFailure(_ message: String) {
+        dirtyLabel.stringValue = "!"
+        dirtyLabel.toolTip = "Save failed: \(message)"
+        dirtyLabel.setAccessibilityLabel("File save failed: \(message)")
+    }
+
+    private func loadRecoveryDraft(forDiskText diskText: String) -> RecoveryDraft? {
+        guard let recoveryURL, let filePath,
+              let record: RecoveryDraft = try? AtomicWriter(
+                backupsDirectory: nil,
+                retainedBackups: 0
+              ).read(at: recoveryURL),
+              record.filePath == filePath else { return nil }
+        if record.draftText == diskText {
+            discardRecoveryDraft()
+            return nil
+        }
+        return record
+    }
+
+    private func discardRecoveryDraft() {
+        guard let recoveryURL else { return }
+        try? FileManager.default.removeItem(at: recoveryURL)
     }
 
     private func showMessage(_ message: String) {
@@ -619,5 +845,9 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
             return true
         }
         return false
+    }
+
+    nonisolated private static func modificationDate(for path: String) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
     }
 }

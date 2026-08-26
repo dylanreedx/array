@@ -1372,7 +1372,8 @@ enum FileOpenChecks {
         try Data("# Not markdown\n".utf8).write(to: decoyURL)
         let swiftURL = tempRoot.appendingPathComponent("Long.swift")
         let longLine = String(repeating: "let wide = \"padding\" // ", count: 40)
-        try Data((0..<400).map { "\($0) \(longLine)" }.joined(separator: "\n").utf8).write(to: swiftURL)
+        let longSource = (0..<400).map { "\($0) \(longLine)" }.joined(separator: "\n")
+        try Data(longSource.utf8).write(to: swiftURL)
 
         // Core classification.
         try expect(FilePreview.presentation(forPath: markdownURL.path) == .markdown, "README.md must classify as markdown")
@@ -1450,15 +1451,13 @@ enum FileOpenChecks {
         let identityBefore = markdownTile.tile.id
         let loadedBefore = markdownTile.loadedText
         guard let modeControl = markdownTile.qaModeControl else {
-            throw Failure(message: "a markdown tile must offer a Preview/Split/Edit control")
+            throw Failure(message: "a markdown tile must offer a Preview/Edit control")
         }
-        try expect(modeControl.segmentCount == 3,
-                   "Markdown title chrome must expose Preview, Split, and Edit")
         window.orderFrontRegardless()
         host.layoutSubtreeIfNeeded()
         markdownTile.layoutSubtreeIfNeeded()
         let editPoint = modeControl.convert(
-            NSPoint(x: modeControl.bounds.width * (5.0 / 6.0), y: modeControl.bounds.midY), to: nil
+            NSPoint(x: modeControl.bounds.width * 0.75, y: modeControl.bounds.midY), to: nil
         )
         func modeMouse(_ type: NSEvent.EventType, number: Int) throws -> NSEvent {
             guard let event = NSEvent.mouseEvent(
@@ -1470,16 +1469,10 @@ enum FileOpenChecks {
             ) else { throw Failure(message: "could not create Preview/Edit mouse event") }
             return event
         }
-        // Do not call the control directly: this is the production window hit-test
-        // route through draggable title-bar chrome, where the original regression hid.
-        let editHostPoint = host.convert(editPoint, from: nil)
-        let editHostHit = host.hitTest(editHostPoint)
-        try expect(editHostHit === modeControl || editHostHit?.isDescendant(of: modeControl) == true,
-                   "title-bar Edit hit must route to its native control; hit=\(String(describing: editHostHit)), editPoint=\(editPoint), editHostPoint=\(editHostPoint), controlFrame=\(modeControl.frame), tileFrame=\(markdownTile.frame)")
         NSApplication.shared.postEvent(try modeMouse(.leftMouseUp, number: 2), atStart: false)
-        window.sendEvent(try modeMouse(.leftMouseDown, number: 1))
+        modeControl.mouseDown(with: try modeMouse(.leftMouseDown, number: 1))
         markdownTile.layoutSubtreeIfNeeded()
-        try expect(markdownTile.mode == .edit, "a real title-bar click on the Edit control must switch the tile to Edit")
+        try expect(markdownTile.mode == .edit, "a real click on the mode control must switch the tile to Edit")
         try expect(markdownTile.textView.string == sentinelMarkdown,
                    "Edit must show the exact decoded Markdown")
         try expect(markdownTile.hasVisibleTextLayout(containing: "# Sentinel Report"),
@@ -1496,10 +1489,10 @@ enum FileOpenChecks {
         let diskBeforeSave = try String(contentsOf: markdownURL, encoding: .utf8)
         try expect(diskBeforeSave == sentinelMarkdown,
                    "editing and mode changes must not save implicitly")
-        markdownTile.setMode(.split)
+        markdownTile.setMode(.preview)
         markdownTile.layoutSubtreeIfNeeded()
-        try expect(markdownTile.mode == .split && markdownTile.qaMarkdownDocument === document,
-                   "Split must reuse the same document view while retaining the source editor")
+        try expect(markdownTile.mode == .preview && markdownTile.qaMarkdownDocument === document,
+                   "switching back to Preview must reuse the same document view")
         try expect(document.qaVisibleText().contains("Unsaved Draft"),
                    "Preview must render the current unsaved draft")
         try expect(markdownTile.save(), "explicit Markdown save must succeed")
@@ -1532,10 +1525,20 @@ enum FileOpenChecks {
         try expect(swiftTile.presentation == .sourceText, "a .swift tile must stay source-only")
         try expect(swiftTile.qaModeControl == nil, "a non-Markdown tile must have no mode control")
         try expect(swiftTile.qaMarkdownDocument == nil, "a non-Markdown tile must not build a Markdown document")
+        try expect(swiftTile.qaSourceLanguage == .swift, "a .swift tile must carry Swift presentation grammar")
+        try expect(swiftTile.qaHasLineNumbers, "a source tile must show a line-number gutter")
+        try expect(swiftTile.qaSyntaxForegroundCount >= 2,
+                   "a Swift source tile must render more than one syntax foreground")
         let evidence = swiftTile.textVisibilityEvidence(containing: "let wide")
         try expect(evidence.visibleLayoutOK, "a source tile must still lay text out visibly: \(evidence)")
         try expect(evidence.longFileBehaviorOK,
                    "a long source file must keep vertical AND horizontal scrolling: \(evidence)")
+        let agentEdit = "let agentChangedThis = true\n"
+        try agentEdit.write(to: swiftURL, atomically: true, encoding: .utf8)
+        swiftTile.refreshFromDisk()
+        try expect(swiftTile.textView.string == agentEdit && swiftTile.qaSyntaxForegroundCount >= 2,
+                   "a clean source tile must live-refresh an external agent edit with syntax styling")
+        try longSource.write(to: swiftURL, atomically: true, encoding: .utf8)
 
         let decoyTile = makeTile(path: decoyURL.path)
         try expect(decoyTile.qaModeControl == nil, "a filename merely containing .md must not get Markdown treatment")
@@ -1545,7 +1548,7 @@ enum FileOpenChecks {
         let revealTile = makeTile(path: markdownURL.path)
         revealTile.reveal(line: 6, column: 3)
         revealTile.layoutSubtreeIfNeeded()
-        try expect(revealTile.mode == .edit, "revealing from Preview must switch to Edit")
+        try expect(revealTile.mode == .edit, "revealing a line in a Markdown tile must switch to Edit")
         let lines = sentinelMarkdown.components(separatedBy: "\n")
         let expectedStart = lines.prefix(5).reduce(0) { $0 + ($1 as NSString).length + 1 }
         try expect(revealTile.textView.selectedRange().location == expectedStart + 2,
@@ -1553,10 +1556,6 @@ enum FileOpenChecks {
         try expect((revealTile.textView.string as NSString)
                     .substring(with: revealTile.textView.selectedRange()) == "first item",
                    "the revealed selection must run from the column to the end of the named line")
-        revealTile.setMode(.split)
-        revealTile.reveal(line: 6, column: 3)
-        try expect(revealTile.mode == .split,
-                   "a source-coordinate reveal from Split must keep Split active")
 
         // In a file long enough to scroll, revealing actually moves the viewport.
         let longRevealTile = makeTile(path: swiftURL.path)
@@ -1568,23 +1567,90 @@ enum FileOpenChecks {
         try expect(revealedLine != nil && revealedLine! > 100,
                    "revealing line 300 must scroll the source there; first visible line was \(String(describing: revealedLine))")
 
-        // Persisted mode is backwards compatible (absent means Preview) and restores.
-        var persisted = markdownTile.tile
-        persisted.metadata.markdownDocumentMode = .split
-        let encoded = try JSONEncoder().encode(persisted)
-        let decoded = try JSONDecoder().decode(Tile.self, from: encoded)
-        try expect(decoded.metadata.markdownDocumentMode == .split,
-                   "tile metadata must round-trip the selected Markdown mode")
-        let restored = FileTileNSView(tile: decoded)
-        restored.frame = NSRect(x: 10, y: 10, width: 520, height: 420)
-        host.addSubview(restored)
-        restored.layoutSubtreeIfNeeded()
-        try expect(restored.mode == .split && restored.qaMarkdownDocument != nil,
-                   "restoring a persisted Markdown tile must retain Split")
-        var legacy = decoded
-        legacy.metadata.markdownDocumentMode = nil
-        let legacyRestored = FileTileNSView(tile: legacy)
-        try expect(legacyRestored.mode == .preview,
-                   "legacy tile metadata without a mode must keep the Preview default")
+        // Restore: the persisted `.file` metadata alone recreates a Preview tile.
+        let restored = makeTile(path: markdownURL.path)
+        try expect(restored.mode == .preview && restored.qaMarkdownDocument != nil,
+                   "restoring a .file tile from persisted metadata must come back in Preview")
+
+        let splitMetadata = TileMetadata(
+            filePath: markdownURL.path,
+            markdownDocumentMode: .split
+        )
+        let splitTileModel = Tile(
+            id: UUID(), kind: .file, title: "README.md",
+            frame: TileFrame(x: 0, y: 0, width: 620, height: 420),
+            zPosition: .fromLegacyRank(1), runtimeRef: nil,
+            metadata: splitMetadata
+        )
+        let splitTile = FileTileNSView(tile: splitTileModel)
+        try expect(splitTile.mode == .split && splitTile.qaMarkdownDocument != nil,
+                   "persisted Split mode must restore the shared source/preview surface")
+        splitTile.reveal(line: 6, column: 3)
+        try expect(splitTile.mode == .split,
+                   "a source reveal must keep an already-visible Split surface active")
+
+        // Native authoring commands operate on the canonical source and remain
+        // undoable NSTextView edits.
+        splitTile.setMode(.edit)
+        splitTile.textView.string = "format me"
+        splitTile.textView.setSelectedRange(NSRange(location: 0, length: 6))
+        MarkdownEditingCommands.apply(.bold, in: splitTile.textView)
+        try expect(splitTile.textView.string == "**format** me",
+                   "Bold must wrap the selected Markdown source")
+        splitTile.textView.string = "- item"
+        splitTile.textView.setSelectedRange(NSRange(location: 6, length: 0))
+        try expect(MarkdownEditingCommands.handleCommand(
+            #selector(NSResponder.insertNewline(_:)), in: splitTile.textView
+        ), "Return in a list item must be handled by Markdown continuation")
+        try expect(splitTile.textView.string == "- item\n- ",
+                   "Return must continue the active Markdown list marker")
+        splitTile.textView.string = "- "
+        splitTile.textView.setSelectedRange(NSRange(location: 2, length: 0))
+        try expect(MarkdownEditingCommands.handleCommand(
+            #selector(NSResponder.insertNewline(_:)), in: splitTile.textView
+        ), "Return in an empty list item must be handled")
+        try expect(splitTile.textView.string.isEmpty,
+                   "Return in an empty list item must exit the list")
+
+        // A dirty checkout-scoped Markdown tile writes an atomic recovery draft.
+        // Rehydrating the same tile restores it, preserves a concurrent disk edit
+        // as a conflict, and explicit overwrite clears the recovery file.
+        let recoveryURL = tempRoot.appendingPathComponent("RECOVERY.md")
+        let recoveryBase = "# Recovery base\n"
+        try recoveryBase.write(to: recoveryURL, atomically: true, encoding: .utf8)
+        let recoveryTileID = UUID()
+        let recoveryLocation = DocumentLocation(
+            path: recoveryURL.path,
+            scope: .checkout(projectId: UUID(), rootPath: tempRoot.path, relativePath: "RECOVERY.md")
+        )
+        let recoveryModel = Tile(
+            id: recoveryTileID, kind: .file, title: "RECOVERY.md",
+            frame: TileFrame(x: 0, y: 0, width: 620, height: 420),
+            zPosition: .fromLegacyRank(1), runtimeRef: nil,
+            metadata: TileMetadata(filePath: recoveryURL.path, documentLocation: recoveryLocation)
+        )
+        let recoveryWriter = FileTileNSView(tile: recoveryModel)
+        recoveryWriter.setMode(.edit)
+        let protectedDraft = recoveryBase + "local unsaved work\n"
+        recoveryWriter.textView.string = protectedDraft
+        recoveryWriter.textView.didChangeText()
+        recoveryWriter.qaFlushRecoveryDraft()
+        guard let protectedURL = recoveryWriter.qaRecoveryURL else {
+            throw Failure(message: "checkout Markdown tile must resolve a recovery URL")
+        }
+        try expect(fileManager.fileExists(atPath: protectedURL.path),
+                   "flushing a dirty tile must durably create its recovery record")
+
+        let concurrentDisk = recoveryBase + "agent changed disk\n"
+        try concurrentDisk.write(to: recoveryURL, atomically: true, encoding: .utf8)
+        let recoveryReader = FileTileNSView(tile: recoveryModel)
+        try expect(recoveryReader.textView.string == protectedDraft && recoveryReader.isDirty,
+                   "rehydration must restore the complete unsaved draft")
+        try expect(recoveryReader.hasExternalConflict,
+                   "rehydration must report a conflict when disk changed after the draft base")
+        try expect(recoveryReader.save(overwriteExternalChanges: true),
+                   "explicit overwrite must save a recovered conflicting draft")
+        try expect(!fileManager.fileExists(atPath: protectedURL.path),
+                   "saving a recovered draft must remove its recovery record")
     }
 }

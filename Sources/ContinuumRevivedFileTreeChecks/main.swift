@@ -93,6 +93,14 @@ expect(filteredOutline.children(of: filteredOutline.rootItems.first { $0.node.re
 }), "outline filter should keep matched descendant file")
 expect(!filteredRootPaths.contains("linked-dir-target"), "outline filter should hide unrelated directories")
 
+let fuzzyOutline = FileTreeOutlineModel(snapshot: finalSnapshot, query: "src apsw")
+expect(fuzzyOutline.rootItems.contains(where: { $0.node.relativePath == "Sources" }),
+       "fuzzy multi-term search should retain a matched file's ancestor")
+expect(FileTreeOutlineModel.fuzzyMatchScore(query: "apsw", candidate: "Sources/App.swift") != nil,
+       "fuzzy search should match ordered non-contiguous characters")
+expect(FileTreeOutlineModel.fuzzyMatchScore(query: "zzq", candidate: "Sources/App.swift") == nil,
+       "fuzzy search should reject candidates missing query characters")
+
 let batchedRecorder = SnapshotRecorder()
 try await FileTreeScanner(batchSize: 2).scan(root: scratch, ignoreList: FileTreeScanner.defaultIgnoredNames) { snapshot in
     Task { await batchedRecorder.append(snapshot) }

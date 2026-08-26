@@ -5606,6 +5606,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             fputs("deleteTile exit kind=\(tile.kind.rawValue) id=\(id.uuidString) outcome=\(deleteOutcome)\n", stderr)
         }
 
+        if tile.kind == .file,
+           let fileView = canvasView.tileView(for: id) as? FileTileNSView,
+           fileView.isDirty {
+            let alert = NSAlert()
+            alert.messageText = "Save changes before closing?"
+            alert.informativeText = "This Markdown file has an unsaved draft."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Save")
+            alert.addButton(withTitle: "Discard")
+            alert.addButton(withTitle: "Cancel")
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                guard fileView.saveInteractively() else {
+                    deleteOutcome = "kept-open-save-failed-or-cancelled"
+                    return
+                }
+            case .alertSecondButtonReturn:
+                fileView.discardUnsavedChanges()
+            default:
+                deleteOutcome = "cancelled-dirty-file"
+                return
+            }
+        }
+
         let policy = DeleteConfirmPolicy.current
         if policy.requiresConfirmation(for: tile.kind) {
             let configuration = policy.alertConfiguration(for: tile.kind)

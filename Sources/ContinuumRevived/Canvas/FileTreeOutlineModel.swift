@@ -54,12 +54,11 @@ public struct FileTreeOutlineModel: Hashable, Sendable {
     }
 
     private static func filteredNodes(_ nodes: [FileTreeNode], query: String) -> [FileTreeNode] {
-        let lowerQuery = query.lowercased()
+        let terms = query.lowercased().split(whereSeparator: { $0.isWhitespace }).map(String.init)
         let nodeByPath = Dictionary(uniqueKeysWithValues: nodes.map { ($0.relativePath, $0) })
         var included = Set<String>()
 
-        for node in nodes where node.displayName.lowercased().contains(lowerQuery)
-            || node.relativePath.lowercased().contains(lowerQuery) {
+        for node in nodes where terms.allSatisfy({ fuzzyMatchScore(query: $0, candidate: node.relativePath) != nil }) {
             included.insert(node.relativePath)
             var parent = parentPath(for: node.relativePath)
             while let path = parent {
@@ -71,6 +70,35 @@ public struct FileTreeOutlineModel: Hashable, Sendable {
         }
 
         return nodes.filter { included.contains($0.relativePath) }
+    }
+
+    /// Scores a case-insensitive fuzzy subsequence. Contiguous characters and
+    /// path/word boundaries win, so `ftom` finds `FileTreeOutlineModel.swift`
+    /// while exact fragments still rank naturally. Nil means no match.
+    public static func fuzzyMatchScore(query: String, candidate: String) -> Int? {
+        let query = Array(query.lowercased())
+        let candidate = Array(candidate.lowercased())
+        guard !query.isEmpty else { return 0 }
+        guard query.count <= candidate.count else { return nil }
+
+        var queryIndex = 0
+        var score = 0
+        var previousMatch: Int?
+        for (index, character) in candidate.enumerated() where queryIndex < query.count {
+            guard character == query[queryIndex] else { continue }
+            let isBoundary = index == 0 || "/_- .".contains(candidate[index - 1])
+            if let previousMatch {
+                score += index == previousMatch + 1 ? 12 : max(1, 6 - (index - previousMatch))
+            } else {
+                score += max(1, 8 - index / 3)
+            }
+            if isBoundary { score += 10 }
+            previousMatch = index
+            queryIndex += 1
+        }
+        guard queryIndex == query.count else { return nil }
+        if candidate.count == query.count { score += 30 }
+        return score
     }
 
     private static func parentPath(for relativePath: String) -> String? {

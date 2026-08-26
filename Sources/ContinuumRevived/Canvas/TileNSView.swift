@@ -727,11 +727,9 @@ class TileNSView: NSView, TokenThemed {
         // Claim the entire post-resize grab strip before `super.hitTest` so terminal
         // content cannot swallow title-bar drags. Route through TitleBarView first
         // so close/accessory controls still win; otherwise return self for move.
-        // Normal AppKit delivery reaches this override with a world-plane point,
-        // but direct host embedding (used by the file document route) can supply a
-        // tile-local point. Resolve an accessory against both coordinate candidates
-        // before claiming title-bar drag; otherwise one embedding makes the other
-        // lose its native control hit target.
+        // Normal canvas delivery reaches this override with a world-plane point,
+        // while direct host embedding can supply a tile-local point. Resolve an
+        // accessory against both candidates before claiming the draggable strip.
         if let titleBar {
             for titleCandidate in [local, point] {
                 let titlePoint = convert(titleCandidate, to: titleBar)
@@ -1386,16 +1384,10 @@ private final class TitleBarView: NSView, TokenThemed {
         if closeButton.frame.contains(point) {
             return closeButton
         }
-        // The title bar owns drag routing, so its accessory must be claimed
-        // before returning the bar. An accessory may be a stack (file reference
-        // badge + dirty state + mode control), so return its native leaf control.
         if let accessoryView, accessoryView.frame.contains(point) {
-            // NSStackView intentionally reports itself for hits in this hierarchy;
-            // walk arranged descendants so its embedded segmented control receives
-            // native tracking rather than the draggable title bar.
+            // NSStackView reports itself for this hierarchy. Return its native
+            // leaf control so tracking/action is not swallowed by title-bar drag.
             func deepestAccessoryHit(in view: NSView) -> NSView? {
-                // NSControl owns its tracking loop; never return its internal
-                // hosting view or the action cannot reach the target.
                 if view is NSControl { return view }
                 for child in view.subviews.reversed() {
                     let childPoint = child.convert(point, from: self)

@@ -24,6 +24,7 @@ final class TileSpawner {
         case canvasUnavailable
         case invalidPaneId(String)
         case agentLaunchSelectionRequired
+        case noteIndexMissing(UUID)
     }
 
     struct AnnotatedProfile {
@@ -2158,13 +2159,18 @@ final class TileSpawner {
     }
 
     /// Writes the current text body and updates the note's `updatedAt` timestamp.
-    func writeNoteSnapshot(noteId: UUID, tileId: UUID, text: String) {
-        try? projectStore.saveNoteBody(id: noteId, text: text)
-        guard var state = try? projectStore.loadNoteState(),
-              let idx = state.tiles.firstIndex(where: { $0.id == noteId && $0.tileId == tileId })
-        else { return }
-        state.tiles[idx].updatedAt = Date()
-        try? projectStore.saveNoteState(state)
+    func writeNoteSnapshot(noteId: UUID, tileId: UUID, text: String) -> Result<Void, Error> {
+        do {
+            try projectStore.saveNoteBody(id: noteId, text: text)
+            var state = try projectStore.loadNoteState()
+            guard let idx = state.tiles.firstIndex(where: { $0.id == noteId && $0.tileId == tileId })
+            else { throw SpawnError.noteIndexMissing(noteId) }
+            state.tiles[idx].updatedAt = Date()
+            try projectStore.saveNoteState(state)
+            return .success(())
+        } catch {
+            return .failure(error)
+        }
     }
 
     private func upsertNoteTile(noteId: UUID, tileId: UUID, title: String) throws {
@@ -3658,12 +3664,12 @@ final class TileSpawner {
         guard let noteView = canvas.tileView(for: noteTileId) as? NoteTileNSView else {
             throw CheckError.failed("spawnNote did not install NoteTileNSView")
         }
-        try expect(noteView.mode == .edit, "new notes should open in Edit mode")
+        try expect(noteView.mode == .split, "new wide notes should open in Split mode")
         noteView.textView.string = "# note body ok"
         noteView.setMode(.preview)
         try expect(noteView.mode == .preview, "notes should render their working Markdown draft in Preview")
         noteView.setMode(.edit)
-        spawner.writeNoteSnapshot(noteId: noteId, tileId: noteTileId, text: noteView.textView.string)
+        _ = spawner.writeNoteSnapshot(noteId: noteId, tileId: noteTileId, text: noteView.textView.string)
 
         let fileTileId: UUID
         switch spawner.spawnFile(path: sampleFile.path, title: nil) {

@@ -2716,6 +2716,17 @@ do {
     let textFile = scratch.appendingPathComponent("hello.txt")
     try Data("hello file tile".utf8).write(to: textFile)
     expect(FilePreview.load(path: textFile.path) == .text("hello file tile"), "FilePreview loads UTF-8 text")
+    let languageCases: [(String, FilePreview.SourceLanguage)] = [
+        ("app.tsx", .typescript), ("server.js", .javascript), ("index.html", .html),
+        ("styles.scss", .css), ("main.go", .go), ("lib.rs", .rust),
+        ("bridge.hpp", .c), ("Program.cs", .csharp), ("worker.py", .python),
+        ("Scene.swift", .swift), ("package.json", .json), ("Dockerfile", .shell),
+        ("LICENSE", .plainText)
+    ]
+    for (path, expected) in languageCases {
+        expect(FilePreview.sourceLanguage(forPath: path) == expected,
+               "FilePreview language classifier maps \(path) to \(expected.rawValue)")
+    }
 
     let missingPreview = FilePreview.load(path: scratch.appendingPathComponent("missing.txt").path)
     expect(missingPreview == .unavailable("File not found"), "FilePreview reports missing files")

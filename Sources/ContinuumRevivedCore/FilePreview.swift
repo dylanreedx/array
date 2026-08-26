@@ -13,6 +13,49 @@ public enum FilePreview: Equatable, Sendable {
         case markdown
     }
 
+    /// Lightweight language identity for code presentation. This deliberately
+    /// stops short of an editor/LSP contract: file tiles need stable visual
+    /// grammar now, while parsing, diagnostics, and editing can evolve
+    /// independently later.
+    public enum SourceLanguage: String, CaseIterable, Equatable, Sendable {
+        case javascript = "JavaScript"
+        case typescript = "TypeScript"
+        case html = "HTML"
+        case css = "CSS"
+        case go = "Go"
+        case rust = "Rust"
+        case c = "C / C++"
+        case csharp = "C#"
+        case python = "Python"
+        case swift = "Swift"
+        case json = "JSON"
+        case shell = "Shell"
+        case plainText = "Text"
+    }
+
+    public static func sourceLanguage(forPath path: String) -> SourceLanguage {
+        let url = URL(fileURLWithPath: path)
+        let name = url.lastPathComponent.lowercased()
+        let ext = url.pathExtension.lowercased()
+        switch ext {
+        case "js", "jsx", "mjs", "cjs": return .javascript
+        case "ts", "tsx", "mts", "cts": return .typescript
+        case "html", "htm": return .html
+        case "css", "scss", "sass", "less": return .css
+        case "go": return .go
+        case "rs": return .rust
+        case "c", "h", "cc", "cpp", "cxx", "hpp", "hxx": return .c
+        case "cs": return .csharp
+        case "py", "pyw": return .python
+        case "swift": return .swift
+        case "json", "jsonc": return .json
+        case "sh", "bash", "zsh", "fish": return .shell
+        default:
+            if ["dockerfile", "makefile", "gemfile", "rakefile"].contains(name) { return .shell }
+            return .plainText
+        }
+    }
+
     /// Markdown is decided by the real path extension, case-insensitively. A
     /// filename that merely CONTAINS `.md` (`notes.md.txt`, `mdfile`) is source.
     public static func presentation(forPath path: String) -> Presentation {

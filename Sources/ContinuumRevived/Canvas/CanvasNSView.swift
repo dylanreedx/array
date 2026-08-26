@@ -2373,6 +2373,7 @@ final class CanvasNSView: NSView, TokenThemed {
             }
         }
         if let view = tileViews[id] {
+            view.prepareForRemovalFromScene()
             focusBroker?.unregister(view.focusSurfaceID)
             releaseSurfaceResidency(of: view)
             view.removeFromSuperview()
@@ -2385,6 +2386,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // rehydrated on the next load. The layer owns its own view map too.
         for layer in zoneLayers {
             if let view = layer.tileViews[id] {
+                view.prepareForRemovalFromScene()
                 focusBroker?.unregister(view.focusSurfaceID)
                 releaseSurfaceResidency(of: view)
                 view.removeFromSuperview()

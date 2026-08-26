@@ -7,13 +7,20 @@ import Foundation
 @MainActor
 final class NoteTileNSView: TileNSView, NSTextViewDelegate {
     typealias Mode = MarkdownDocumentMode
+    enum SaveState: Equatable {
+        case saved
+        case saving
+        case failed(String)
+    }
     private(set) var textView: NSTextView
     private let scrollView: NSScrollView
     let noteId: UUID
     private(set) var mode: Mode = .edit
     private var markdownSurface: MarkdownDocumentSurface!
     private var modeControl: NSSegmentedControl?
+    private let saveStateLabel = NSTextField(labelWithString: "Saved")
     private var activeBody: NSView?
+    private(set) var saveState: SaveState = .saved
 
     /// Fires whenever text changes; the app wires this to debounced persistence.
     var onTextChange: (() -> Void)?
@@ -55,14 +62,21 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
         super.init(tile: tile)
 
         markdownSurface = MarkdownDocumentSurface(
-            textView: tv, sourceScrollView: sv, initialDraft: initialBody,
+            textView: tv,
+            sourceScrollView: sv,
+            initialDraft: initialBody,
             mode: tile.metadata.markdownDocumentMode ?? (tile.frame.width >= 520 ? .split : .edit),
             theme: { [weak self] in self?.effectiveTokenTheme ?? .dark }
         )
         mode = markdownSurface.mode
-        setContentView(markdownSurface.activeBody)
-        activeBody = markdownSurface.activeBody
+        let body = markdownSurface.activeBody
+        setContentView(body)
+        activeBody = body
         tv.delegate = self
+        tv.menu = MarkdownEditingCommands.makeContextMenu(
+            target: self,
+            action: #selector(applyMarkdownCommand(_:))
+        )
         installModeControl()
     }
 
@@ -72,6 +86,7 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
         super.applyTokens()
         applyDocumentTokens(to: textView)
         markdownSurface?.applyTheme()
+        setSaveState(saveState)
     }
 
     override func acquireFocus(reason: FocusRequest) -> Bool {
@@ -85,9 +100,13 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
 
     func textDidChange(_ notification: Notification) {
         markdownSurface.draftDidChange(textView.string)
+        setSaveState(.saving)
         surfaceEpoch &+= 1
         onTextChange?()
     }
+
+    func markSaved() { setSaveState(.saved) }
+    func markSaveFailed(_ message: String) { setSaveState(.failed(message)) }
 
     func setMode(_ newMode: Mode) {
         guard newMode != mode else { return }
@@ -95,8 +114,10 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
         mode = newMode
         modeControl?.selectedSegment = newMode.segmentIndex
         markdownSurface.setMode(newMode)
-        setContentView(markdownSurface.activeBody)
-        activeBody = markdownSurface.activeBody
+        let body = markdownSurface.activeBody
+        setContentView(body)
+        activeBody = body
+        markdownSurface.restorePresentationState()
         window?.makeFirstResponder(newMode == .preview ? (markdownSurface.previewView ?? textView) : textView)
         tile.metadata.markdownDocumentMode = newMode
         canvas?.updateTile(tile)
@@ -111,22 +132,71 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
         let control = NSSegmentedControl(labels: ["Preview", "Split", "Edit"], trackingMode: .selectOne, target: self, action: #selector(modeChanged(_:)))
         control.controlSize = .small
         control.font = NSFont.systemFont(ofSize: 10, weight: .medium)
-        // Keep all three actions equally sized; `labels:` otherwise gives the
-        // longer Preview label a larger hit target and makes mode placement drift.
         for segment in 0..<control.segmentCount { control.setWidth(160 / 3, forSegment: segment) }
         control.selectedSegment = mode.segmentIndex
         control.setAccessibilityLabel("Note Markdown display mode")
         modeControl = control
-        setTitleBarAccessory(control)
+        let formatControl = MarkdownEditingCommands.makeToolbarPopUp(
+            target: self,
+            action: #selector(applyMarkdownCommand(_:))
+        )
+        saveStateLabel.font = NSFont.systemFont(ofSize: 9, weight: .medium)
+        saveStateLabel.alignment = .right
+        saveStateLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let stack = NSStackView(views: [saveStateLabel, formatControl, control])
+        stack.orientation = .horizontal
+        stack.spacing = 5
+        setTitleBarAccessory(stack)
+        setSaveState(.saved)
+    }
+
+    private func setSaveState(_ state: SaveState) {
+        saveState = state
+        switch state {
+        case .saved:
+            saveStateLabel.stringValue = "Saved"
+            saveStateLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+            saveStateLabel.toolTip = nil
+            saveStateLabel.setAccessibilityLabel("Note saved")
+        case .saving:
+            saveStateLabel.stringValue = "Saving…"
+            saveStateLabel.textColor = AccentToken.accentWorking.color.nsColor(in: self)
+            saveStateLabel.toolTip = nil
+            saveStateLabel.setAccessibilityLabel("Saving note")
+        case let .failed(message):
+            saveStateLabel.stringValue = "Save failed"
+            saveStateLabel.textColor = AccentToken.accentFailed.color.nsColor(in: self)
+            saveStateLabel.toolTip = message
+            saveStateLabel.setAccessibilityLabel("Note save failed: \(message)")
+        }
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifiers == [.command, .option],
+           let key = event.charactersIgnoringModifiers,
+           let selectedMode = ["1": Mode.preview, "2": .split, "3": .edit][key] {
+            setMode(selectedMode)
+            return true
+        }
+        if mode != .preview, MarkdownEditingCommands.handleKeyEquivalent(event, in: textView) {
+            return true
+        }
         if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
            event.charactersIgnoringModifiers?.lowercased() == "s" {
             saveAsMarkdown()
             return true
         }
         return super.performKeyEquivalent(with: event)
+    }
+
+    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        MarkdownEditingCommands.handleCommand(commandSelector, in: textView)
+    }
+
+    @objc private func applyMarkdownCommand(_ sender: NSMenuItem) {
+        guard let command = MarkdownEditingCommands.Command(rawValue: sender.tag) else { return }
+        MarkdownEditingCommands.apply(command, in: textView)
     }
 
     func saveAsMarkdown() {
@@ -152,7 +222,7 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
         return activeBody?.subviews.compactMap { ($0 as? NSScrollView)?.contentView.bounds.origin } ?? []
     }
 
-    /// QA access to the title-bar control exercised through the window route.
+    /// QA access to the real title-bar control.
     var qaModeControl: NSSegmentedControl? { modeControl }
 
     // MARK: - Export (A4)
@@ -283,7 +353,7 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
 
         try dispatchClick(at: windowPoint, in: window)
         AppDelegate.routeTileClickFocus(at: windowPoint, in: canvas, focusBroker: focusBroker)
-        try expect(focusBroker.activeSurface == .tile(tileId), "body click production focus router should keep note tile active; activeSurface=\(String(describing: focusBroker.activeSurface))")
+        try expect(focusBroker.activeSurface == .tile(tileId), "body click production focus router should keep note tile active; activeSurface=\(String(describing: focusBroker.activeSurface)) point=\(windowPoint) canvasPoint=\(canvasPoint) tileAtPoint=\(String(describing: canvas.tileId(at: canvasPoint))) firstResponder=\(String(describing: window.firstResponder)) hit=\(String(describing: hitView))")
 
         let firstResponderDescription = String(describing: window.firstResponder)
         let textViewHasFocus = window.firstResponder === noteView.textView
@@ -294,25 +364,27 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
         try dispatchKey(sentinel, in: window)
         try expect(noteView.textView.string.contains(sentinel), "keyDown should edit note text; got \(noteView.textView.string.debugDescription)")
 
-        // Production pointer delivery through the title-bar's accessory routing,
-        // not a direct target/action invocation. This was the missing oracle for
-        // the mode-control defect: a control can have a target and still be
-        // unreachable once drag chrome owns the event.
         guard let modeControl = noteView.qaModeControl else {
             throw CheckError.failed("note must install a Preview/Split/Edit control")
         }
-        let splitPoint = modeControl.convert(NSPoint(x: modeControl.bounds.width * 0.5, y: modeControl.bounds.midY), to: nil)
-        let splitWorldPoint = canvas.worldPlane.convert(splitPoint, from: nil)
-        let splitWorldHit = canvas.worldPlane.hitTest(splitWorldPoint)
+        let splitPoint = modeControl.convert(
+            NSPoint(x: modeControl.bounds.width * 0.5, y: modeControl.bounds.midY),
+            to: nil
+        )
+        let splitWorldHit = canvas.worldPlane.hitTest(canvas.worldPlane.convert(splitPoint, from: nil))
         try expect(splitWorldHit === modeControl || splitWorldHit?.isDescendant(of: modeControl) == true,
                    "title-bar Split hit must route to its native control; hit=\(String(describing: splitWorldHit))")
         try dispatchClick(at: splitPoint, in: window)
         noteView.layoutSubtreeIfNeeded()
         try expect(noteView.mode == .split && modeControl.selectedSegment == 1,
-                   "title-bar Split click must select Split and replace the body; mode=\(noteView.mode), segment=\(modeControl.selectedSegment)")
+                   "a real title-bar click must install Split")
         try expect(noteView.textView.string.contains(sentinel),
-                   "mode switching must retain the note draft")
-        let editPoint = modeControl.convert(NSPoint(x: modeControl.bounds.width * (5.0 / 6.0), y: modeControl.bounds.midY), to: nil)
+                   "mode switching must retain the canonical note draft")
+
+        let editPoint = modeControl.convert(
+            NSPoint(x: modeControl.bounds.width * (5.0 / 6.0), y: modeControl.bounds.midY),
+            to: nil
+        )
         let editWorldHit = canvas.worldPlane.hitTest(canvas.worldPlane.convert(editPoint, from: nil))
         try expect(editWorldHit === modeControl || editWorldHit?.isDescendant(of: modeControl) == true,
                    "title-bar Edit hit must route to its native control; hit=\(String(describing: editWorldHit))")
@@ -320,7 +392,9 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
         let sourceHasFocus = window.firstResponder === noteView.textView
             || (window.firstResponder as? NSTextView)?.delegate === noteView.textView.delegate
         try expect(noteView.mode == .edit && sourceHasFocus,
-                   "title-bar Edit click must restore the source editor and focus; mode=\(noteView.mode), firstResponder=\(String(describing: window.firstResponder))")
+                   "Edit must restore the source editor and first responder")
+        try expect(noteView.tile.metadata.markdownDocumentMode == .edit,
+                   "the selected note mode must be stored in tile metadata")
 
         let manifest: [String: Any] = [
             "check": "note-click-focus",

@@ -757,10 +757,24 @@ final class ZoneRuntimeController {
         noteSaveTimer?.invalidate()
         noteSaveTimer = nil
         guard isNoteDirty, let tileSpawner else { return }
+        var hadFailure = false
         for view in noteViews.values {
-            tileSpawner.writeNoteSnapshot(noteId: view.noteId, tileId: view.tile.id, text: view.textView.string)
+            switch tileSpawner.writeNoteSnapshot(
+                noteId: view.noteId,
+                tileId: view.tile.id,
+                text: view.textView.string
+            ) {
+            case .success:
+                view.markSaved()
+            case let .failure(error):
+                hadFailure = true
+                view.markSaveFailed(error.localizedDescription)
+            }
         }
-        isNoteDirty = false
+        // A failed write must remain pending so a later lifecycle flush can
+        // retry it; clearing this bit would make the visible failure terminal
+        // and could strand the only in-memory copy of the note.
+        isNoteDirty = hadFailure
     }
 
     func flushFileTreeSave() {
