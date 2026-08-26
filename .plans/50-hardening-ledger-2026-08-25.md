@@ -77,3 +77,24 @@ machine before this branch is called green.**
 
 Note the shape of the trap, again: the shell reported **exit 0** while the
 report said `Matrix FAILED`. Judge by the summary, never the exit code.
+
+## A `.plans/49` claim that did NOT reproduce
+
+`.plans/49` §2.6 lists `measurementCache.invalidate(id:)` filtering an
+**"unbounded, never-evicted"** height cache, on the reasoning that the cache key
+includes the block revision and a streaming block's revision advances per chunk
+— so one permanent entry per token.
+
+**Measured instead:** 150 chunks streamed into one answer through the real tile
+grew the cache by **1 entry** (46 total), *with revision-eviction deliberately
+disabled*. So the cache is not growing per token on this path, and
+`invalidate(id:)` is filtering tens of entries, not thousands.
+
+An index and a revision-eviction were written and then **reverted**: with the
+premise unreproduced, the eviction has no demonstrable benefit and the index
+optimises a walk over ~46 items. Neither could be given a witness that failed
+without it, and an unwitnessed change to a cache is exactly what this project's
+rules exist to refuse.
+
+Recorded rather than silently dropped, because §2.6's other entries were derived
+the same way and should be measured before they are trusted.
