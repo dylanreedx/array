@@ -1,0 +1,85 @@
+@property --ambient-x{syntax:"<length>";inherits:false;initial-value:0px}
+@property --ambient-y{syntax:"<length>";inherits:false;initial-value:0px}
+@property --ambient-r{syntax:"<angle>";inherits:false;initial-value:0deg}
+.assembly{position:absolute;inset:0;color:#f2f4f8;pointer-events:none}
+.stage{position:absolute;inset:0;overflow:hidden;perspective:1700px;transform-style:preserve-3d;outline:none;pointer-events:none;isolation:isolate}
+.portal{position:absolute;z-index:0;inset:clamp(2svh,calc(74svh - var(--assembly-progress) * 190svh),74svh) clamp(8px,1.2vw,20px) 1.5svh;overflow:hidden;border:0;border-radius:calc(44px + var(--detach-progress) * 96px) calc(38px + var(--detach-progress) * 58px) 26px 26px;background:#0b0d10;transform:translateZ(calc(var(--detach-progress) * -90px));opacity:clamp(0,calc(var(--assembly-progress) * 5),1);will-change:inset,border-radius,transform}
+.portal>span{display:none}
+.device{position:absolute;z-index:3;pointer-events:none;transform-style:preserve-3d;will-change:transform,opacity}
+.macSurface{--mac-settle:clamp(0,calc((var(--assembly-progress) - .28) * 2.28),1);left:50%;top:calc(50% + 32px);width:min(1380px,calc(100vw - clamp(28px,5vw,76px)));height:min(810px,calc(100svh - 116px));transform:translate3d(-50%,-50%,calc(var(--detach-progress) * 35px)) scale(calc(.88 + var(--mac-settle) * .12));opacity:1}
+.macSurface>:global([data-mac-workspace]){height:100%;min-height:0}
+.companionSurface{--phone-arrival:clamp(0,calc((var(--assembly-progress) - .72) * 4.55),1);z-index:12;right:clamp(28px,5.5vw,92px);bottom:clamp(28px,5vh,58px);width:clamp(225px,19vw,292px);height:min(66svh,610px);filter:drop-shadow(0 28px 44px rgb(0 0 0/36%));transform:translate3d(calc((1 - var(--phone-arrival)) * 20vw),calc((1 - var(--phone-arrival)) * 4vh),115px) rotateY(calc((1 - var(--phone-arrival)) * -5deg)) scale(calc(.84 + var(--phone-arrival) * .16))}
+.companionSurface::before{position:absolute;inset:0;border:.5px solid rgb(152 162 176/38%);border-radius:44px;background:#0b0d11;opacity:clamp(0,calc((1 - var(--phone-arrival)) * .34),.34);content:""}
+.companionSurface>:global([data-testid="companion"]){height:100%;min-height:0;opacity:clamp(0,calc((var(--assembly-progress) - .54) * 4.5),1)}
+.assembly:not([data-assembly-phase=ready]) :global([data-mac-workspace]),
+.assembly:not([data-assembly-phase=ready]) :global([data-assembly-chrome=body]),
+.assembly:not([data-assembly-phase=ready]) :global([data-assembly-chrome=canvas-shell]),
+.assembly:not([data-assembly-phase=ready]) :global([data-interaction-id=canvas-surface]),
+.assembly:not([data-assembly-phase=ready]) :global([data-assembly-chrome=world]){overflow:visible}
+.assembly:not([data-assembly-phase=ready]) :global([data-mac-workspace]),.assembly:not([data-assembly-phase=ready]) :global([data-assembly-chrome=canvas]){border-color:transparent;background:transparent;box-shadow:none}.assembly:not([data-assembly-phase=ready]) :global([data-assembly-chrome=status]){opacity:0}
+.assembly[data-input-mode=workspace],.assembly[data-input-mode=workspace] .stage,.assembly[data-input-mode=workspace] .device{pointer-events:auto}.assembly[data-input-mode=workspace] .device[data-focused=true]{z-index:15}.assembly[data-input-mode=workspace] .macSurface[data-focused=true]{filter:drop-shadow(0 22px 42px rgb(0 0 0/15%))}
+.capture{position:absolute;z-index:30;display:grid;place-items:center;border:0;color:#f5f6f8;background:transparent;cursor:pointer;pointer-events:auto}.capture:focus-visible,.done:focus-visible,.toast button:focus-visible{outline:2px solid #78b8ff;outline-offset:3px}
+.captureMac{left:50%;top:calc(50% + 32px);width:min(1380px,calc(100vw - clamp(28px,5vw,76px)));height:min(810px,calc(100svh - 116px));border-radius:18px;transform:translate(-50%,-50%)}
+.captureCompanion{right:clamp(28px,5.5vw,92px);bottom:clamp(28px,5vh,58px);width:clamp(225px,19vw,292px);height:min(66svh,610px);border-radius:44px;background:transparent}
+.readyCue{position:absolute;z-index:38;color:#5fa8ff;pointer-events:none;animation:ready-cue-in 480ms cubic-bezier(.16,1,.3,1) both}
+.portalReadyCue{inset:calc(2svh + 8px) clamp(16px,calc(1.2vw + 8px),28px) calc(1.5svh + 8px)}
+.readyCueBorder{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.readyCueBorder rect{rx:32px;x:1px;y:1px;width:calc(100% - 2px);height:calc(100% - 2px);fill:none;stroke:currentColor;vector-effect:non-scaling-stroke}
+.readyCueMarch{stroke-width:1.5;stroke-dasharray:6 4;stroke-linecap:round;opacity:.76;animation:ready-cue-march 2.5s linear infinite}
+.readyCueImpact{stroke-width:2;opacity:0;animation:ready-cue-impact 820ms cubic-bezier(.16,1,.3,1) both}
+.readyCueScrim{position:absolute;inset:0;background:rgb(4 6 9/72%);backdrop-filter:blur(5px) saturate(.78);animation:ready-scrim-in 520ms ease-out both}
+.readyCueLabel{position:absolute;z-index:2;top:50%;left:50%;width:min(650px,calc(100% - 40px));display:grid;justify-items:center;padding:38px 34px 32px;color:#f5f8fc;text-align:center;letter-spacing:-.02em;transform:translate(-50%,-50%);pointer-events:auto;animation:ready-label-impact 620ms cubic-bezier(.16,1,.3,1) both}
+.readyCuePointer{position:relative;width:50px;height:50px;display:grid;place-items:center;margin-bottom:18px;color:#78b8ff;background:rgb(95 168 255/14%);border:1px solid rgb(95 168 255/34%);border-radius:15px}
+.readyCuePointer>svg{position:relative;z-index:2;width:24px;height:24px}
+.readyCuePointer>i{position:absolute;width:10px;height:10px;border:1.5px solid currentColor;border-radius:50%;transform:translate(10px,9px);animation:ready-pointer-tap 900ms 260ms cubic-bezier(.2,.8,.2,1) both}
+.readyCueLabel strong{font-size:clamp(42px,5.4vw,76px);font-weight:720;line-height:.92;letter-spacing:-.065em}
+.readyCueLabel p{max-width:530px;margin:20px 0 0;color:#b8c0cb;font-size:clamp(14px,1.35vw,18px);line-height:1.48;letter-spacing:-.018em}
+.readyCueActions{display:flex;align-items:center;justify-content:center;gap:9px;margin-top:28px}
+.readyCueActions button{min-height:46px;padding:0 18px;border:1px solid #424b58;border-radius:11px;color:#d7dde6;background:#171c23;font-size:12px;font-weight:690;pointer-events:auto}
+.readyCueActions button:first-child{min-width:150px;border-color:#78b8ff;color:#07101b;background:#78b8ff}
+.readyCueActions button:hover{filter:brightness(1.08)}
+.readyCueActions button:focus-visible{outline:2px solid #fff;outline-offset:3px}
+@keyframes ready-cue-march{to{stroke-dashoffset:-20}}
+@keyframes ready-cue-in{from{opacity:0}to{opacity:1}}
+@keyframes ready-scrim-in{from{opacity:0}to{opacity:1}}
+@keyframes ready-cue-impact{0%{opacity:0;transform:scale(.985);transform-origin:center}24%{opacity:.9}100%{opacity:0;transform:scale(1.012);transform-origin:center}}
+@keyframes ready-label-impact{0%{opacity:0;transform:translate(-50%,-46%) scale(.9)}55%{opacity:1;transform:translate(-50%,-51%) scale(1.025)}100%{opacity:1;transform:translate(-50%,-50%) scale(1)}}
+@keyframes ready-pointer-tap{0%{opacity:0;transform:translate(7px,6px) scale(.35)}28%{opacity:1;transform:translate(7px,6px) scale(.65)}68%,100%{opacity:0;transform:translate(7px,6px) scale(2.2)}}
+.assembly[data-device-focus=companion] .captureMac{z-index:14}
+.assembly[data-device-focus=companion] .companionSurface[data-focused=true]{z-index:15}
+.done{position:absolute;z-index:80;top:max(16px,env(safe-area-inset-top));right:max(18px,env(safe-area-inset-right));min-height:42px;padding:0 17px;border:1px solid #424955;border-radius:12px;color:#f4f6f8;background:rgb(17 21 27/94%);box-shadow:0 12px 34px rgb(0 0 0/24%);font-size:12px;font-weight:720}
+.toast{position:absolute;z-index:90;left:50%;bottom:22px;display:flex;align-items:center;gap:14px;padding:11px 14px;border:1px solid #494f5a;border-radius:12px;color:#f5f4ee;background:#22262d;box-shadow:0 12px 34px rgb(0 0 0/42%);transform:translateX(-50%);font-size:12px;pointer-events:auto}.toast button{padding:0;border:0;color:#8fcab0;background:transparent;font-weight:750}.live{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+
+/* Real tile wrappers detach; the Mac workspace never becomes a fake screenshot. */
+:global([data-assembly-root]) [data-assembly-surface]{--float-x:0px;--float-y:0px;--float-z:0px;--float-scale:1;--float-rx:0deg;--float-ry:0deg;--float-rz:0deg;--ambient-x:0px;--ambient-y:0px;--ambient-r:0deg;transform:translate3d(calc(var(--detach-progress) * var(--float-x) + var(--detach-progress) * var(--ambient-x) + var(--detach-progress) * var(--pointer-shift-x)),calc(var(--detach-progress) * var(--float-y) + var(--detach-progress) * var(--ambient-y) + var(--detach-progress) * var(--pointer-shift-y)),calc(var(--detach-progress) * var(--float-z))) rotateX(calc(var(--detach-progress) * var(--float-rx) + var(--pointer-tilt-y))) rotateY(calc(var(--detach-progress) * var(--float-ry) + var(--pointer-tilt-x))) rotateZ(calc(var(--detach-progress) * var(--float-rz) + var(--detach-progress) * var(--ambient-r))) scale(calc(1 - var(--detach-progress) * (1 - var(--float-scale))));transform-origin:center;box-shadow:0 calc(var(--detach-progress) * 16px) calc(var(--detach-progress) * 38px) rgb(0 0 0 / calc(var(--detach-progress) * 24%));will-change:transform}
+:global([data-assembly-root][data-assembly-measuring=true]) [data-assembly-surface]{transform:none!important;box-shadow:none!important}
+:global([data-assembly-root]) [data-assembly-surface=stabilize]{--float-z:170px;--float-ry:-2.8deg;--float-rz:-2.2deg}
+:global([data-assembly-root]) [data-assembly-surface=browser]{--float-z:120px;--float-ry:3deg;--float-rz:2deg}
+:global([data-assembly-root]) [data-assembly-surface=shell]{--float-z:85px;--float-rx:-2.4deg;--float-rz:-1.7deg}
+:global([data-assembly-root]) [data-assembly-surface=note]{--float-z:135px;--float-rz:2.4deg}
+:global([data-assembly-root]) [data-assembly-surface=verify]{--float-z:155px;--float-ry:2.6deg;--float-rz:1deg}
+:global([data-assembly-root]) [data-assembly-surface=audit]{opacity:calc(1 - var(--detach-progress));box-shadow:none}
+.assembly[data-assembly-phase=glimpse] :global([data-assembly-surface=stabilize]){animation:surface-drift-a 9.4s ease-in-out infinite alternate}
+.assembly[data-assembly-phase=glimpse] :global([data-assembly-surface=browser]){animation:surface-drift-b 11.8s ease-in-out -2.1s infinite alternate}
+.assembly[data-assembly-phase=glimpse] :global([data-assembly-surface=shell]){animation:surface-drift-c 8.6s ease-in-out -4.2s infinite alternate}
+.assembly[data-assembly-phase=glimpse] :global([data-assembly-surface=note]){animation:surface-drift-d 13.2s ease-in-out -1.4s infinite alternate}
+.assembly[data-assembly-phase=glimpse] :global([data-assembly-surface=verify]){animation:surface-drift-e 10.7s ease-in-out -5.1s infinite alternate}
+@keyframes surface-drift-a{to{--ambient-x:5px;--ambient-y:-6px;--ambient-r:.28deg}}
+@keyframes surface-drift-b{to{--ambient-x:-7px;--ambient-y:3px;--ambient-r:-.22deg}}
+@keyframes surface-drift-c{to{--ambient-x:4px;--ambient-y:6px;--ambient-r:.18deg}}
+@keyframes surface-drift-d{to{--ambient-x:-4px;--ambient-y:-5px;--ambient-r:-.3deg}}
+@keyframes surface-drift-e{to{--ambient-x:6px;--ambient-y:4px;--ambient-r:.2deg}}
+.assembly[data-assembly-phase=ready][data-input-mode=page] :global([data-assembly-surface]){animation:ready-surface-confirm 680ms cubic-bezier(.16,1,.3,1) both}
+.assembly[data-assembly-phase=ready][data-input-mode=page] :global([data-assembly-surface=browser]){animation-delay:45ms}
+.assembly[data-assembly-phase=ready][data-input-mode=page] :global([data-assembly-surface=shell]){animation-delay:90ms}
+.assembly[data-assembly-phase=ready][data-input-mode=page] :global([data-assembly-surface=note]){animation-delay:135ms}
+.assembly[data-assembly-phase=ready][data-input-mode=page] :global([data-assembly-surface=verify]){animation-delay:180ms}
+@keyframes ready-surface-confirm{0%{outline:0 solid rgb(95 168 255/0);outline-offset:0}38%{outline:2px solid rgb(95 168 255/70%);outline-offset:2px}100%{outline:0 solid rgb(95 168 255/0);outline-offset:6px}}
+
+/* Structural chrome forms behind the already-visible working surfaces. */
+:global([data-assembly-root]) :global([data-mac-workspace]>header),:global([data-assembly-root]) :global([data-mac-workspace] aside),:global([data-assembly-root]) :global([data-mac-workspace] [aria-label="Canvas controls"]),:global([data-assembly-root]) :global([data-mac-workspace] section:has(>[data-interaction-id^="zone-drag-"])){opacity:clamp(0,calc((var(--assembly-progress) - .3) * 3.3),1)}
+
+@media(max-width:900px){.macSurface,.captureMac{left:47%;width:min(1160px,164vw);height:min(710px,66svh);transform-origin:30% 50%}.companionSurface,.captureCompanion{right:max(18px,6vw);bottom:4svh;width:min(72vw,310px);height:min(61svh,590px)}.companionSurface{transform:translate3d(calc((1 - var(--phone-arrival)) * 48vw),calc((1 - var(--phone-arrival)) * 8vh),115px) scale(calc(.84 + var(--phone-arrival) * .16))}}
+@media(max-width:900px){.portalReadyCue .readyCueLabel{top:50%}}
+@media(max-width:620px){.macSurface,.captureMac{left:15%;top:29%;width:168vw;height:45svh}.companionSurface,.captureCompanion{right:4vw;bottom:2.5svh;width:min(84vw,328px);height:63svh}.companionSurface{transform:translate3d(calc((1 - var(--phone-arrival)) * 34vw),calc((1 - var(--phone-arrival)) * 4vh),115px) scale(calc(.82 + var(--phone-arrival) * .18))}.readyCueLabel{width:calc(100% - 22px);padding:24px 14px}.readyCueLabel strong{font-size:44px}.readyCueLabel p{max-width:310px;margin-top:14px;font-size:14px}.readyCueActions{width:100%;flex-direction:column;margin-top:20px}.readyCueActions button{width:min(260px,100%);min-height:46px}.done{top:10px;right:10px;min-height:44px}.toast{bottom:12px;max-width:calc(100vw - 24px);white-space:nowrap}}
+@media(prefers-reduced-motion:reduce){.portal{inset:2svh clamp(8px,1.2vw,20px) 1.5svh;transform:none;opacity:1}.macSurface{transform:translate3d(-50%,-50%,0);opacity:1}.companionSurface{transform:none;opacity:1}:global([data-assembly-root]) [data-assembly-surface]{transform:none;will-change:auto;animation:none!important}.readyCue,.readyCueScrim,.readyCueBorder rect,.readyCueLabel,.readyCuePointer>i,.assembly[data-assembly-phase=ready][data-input-mode=page] :global([data-assembly-surface]){animation:none}}

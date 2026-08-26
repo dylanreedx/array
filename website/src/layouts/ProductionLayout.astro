@@ -1,0 +1,57 @@
+---
+import '../styles/production.css';
+interface Props { title: string; description: string }
+const { title, description } = Astro.props;
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="description" content={description} />
+    <meta name="theme-color" content="#f2f3f1" id="theme-color" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content="https://arrayapp.dev/" />
+    <meta name="twitter:card" content="summary" />
+    <link rel="canonical" href="https://arrayapp.dev/" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>{title}</title>
+    <script is:inline>
+      (() => {
+        let stored;
+        try { stored = localStorage.getItem('array-theme'); } catch {}
+        const theme = stored === 'light' || stored === 'dark' ? stored : (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
+      })();
+    </script>
+  </head>
+  <body>
+    <slot />
+    <script is:inline>
+      (() => {
+        const header = document.querySelector('.production-header');
+        const button = document.querySelector('[data-theme-toggle]');
+        const label = button?.querySelector('.sr-only');
+        const apply = (theme) => {
+          document.documentElement.dataset.theme = theme;
+          document.documentElement.style.colorScheme = theme;
+          document.querySelector('#theme-color')?.setAttribute('content', theme === 'dark' ? '#0f1115' : '#f2f3f1');
+          button?.setAttribute('aria-pressed', String(theme === 'dark'));
+          if (label) label.textContent = theme === 'dark' ? 'Use light theme' : 'Use dark theme';
+        };
+        apply(document.documentElement.dataset.theme || 'light');
+        button?.addEventListener('click', () => {
+          const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+          try { localStorage.setItem('array-theme', next); } catch {}
+          apply(next);
+        });
+        const updateHeader = () => header?.classList.toggle('is-scrolled', scrollY > 40);
+        addEventListener('scroll', updateHeader, { passive: true });
+        updateHeader();
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,47 @@
+---
+import ProductionLayout from '../layouts/ProductionLayout.astro';
+import SiteHeader from './marketing/SiteHeader.astro';
+import DemoIsland from './demo/DemoIsland';
+import DownloadSplit from './marketing/DownloadSplit.astro';
+import { canonicalCopy } from '../features/demo/fixture';
+---
+<ProductionLayout title="Array · Keep every agent in view" description="A native macOS workspace for agents, terminals, browsers, notes, and projects.">
+  <SiteHeader />
+  <main>
+    <section class="living-assembly" id="product" data-assembly-root data-testid="hero-scroll-track">
+      <div class="living-assembly__sticky" data-testid="hero-pin">
+        <div class="hero-copy">
+          <h1 data-testid="hero-heading">{canonicalCopy.headline}</h1>
+          <p class="hero-copy__body">{canonicalCopy.body}</p>
+          <div class="hero-copy__actions">
+            <DownloadSplit idPrefix="hero" />
+            <button type="button" class="see-all" data-see-all data-interaction-id="hero-see-all">{canonicalCopy.secondary}</button>
+          </div>
+          <p class="hero-copy__requirements">{canonicalCopy.requirements}</p>
+        </div>
+        <div class="living-workspace" id="workspace">
+          <DemoIsland client:idle />
+        </div>
+      </div>
+      <span class="assembly-anchor assembly-anchor--companion" id="companion" aria-hidden="true"></span>
+      <span class="assembly-anchor assembly-anchor--ready" id="agents" aria-hidden="true"></span>
+    </section>
+
+    <section class="final-cta">
+      <h2>More work. Less hidden state.</h2>
+      <p>Download Array for Mac and keep every active agent, tool, and project in view.</p>
+      <DownloadSplit idPrefix="final" />
+      <small>{canonicalCopy.requirements}</small>
+    </section>
+  </main>
+  <footer class="production-footer">
+    <a href="/" aria-label="Array home" data-interaction-id="footer-home">Array</a>
+    <p>Companion for iOS is coming soon.</p>
+    <a href="/appcast.xml" data-interaction-id="footer-release-feed">Release feed</a>
+  </footer>
+</ProductionLayout>
+
+<script>
+  import { installAssembly } from '../lib/assembly-controller';
+  installAssembly();
+</script>
