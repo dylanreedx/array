@@ -7,23 +7,18 @@ import Foundation
 /// `.md`/`.markdown` documents have a native Preview/Edit surface.
 @MainActor
 final class FileTileNSView: TileNSView, NSTextViewDelegate {
-    enum Mode: Equatable {
-        case preview
-        case source
-    }
+    typealias Mode = MarkdownDocumentMode
 
     private(set) var textView: NSTextView
     private let scrollView: NSScrollView
     private let filePath: String?
-    /// Markdown files only. Deliberately view-local: reopening or restoring a
-    /// Markdown tile returns to Preview, so this slice adds nothing to
-    /// `TileMetadata` or sync before dogfooding says it is worth it.
+    /// Markdown files default to Preview, while a selected mode is durable tile metadata.
     private(set) var mode: Mode = .preview
+    private var markdownSurface: MarkdownDocumentSurface!
     private(set) var presentation: FilePreview.Presentation = .sourceText
     /// One immutable loaded-text snapshot shared by both modes, so switching is
     /// instant and Preview can never drift from Source inside one tile.
     private(set) var loadedText: String?
-    private var markdownView: FileMarkdownDocumentView?
     private var modeControl: NSSegmentedControl?
     private let dirtyLabel = NSTextField(labelWithString: "")
     private let referenceLabel = NSTextField(labelWithString: "")
@@ -86,6 +81,12 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
 
         super.init(tile: tile)
 
+        markdownSurface = MarkdownDocumentSurface(
+            textView: tv, sourceScrollView: sv, initialDraft: "",
+            mode: tile.metadata.markdownDocumentMode ?? .preview,
+            theme: { [weak self] in self?.effectiveTokenTheme ?? .dark }
+        )
+        mode = markdownSurface.mode
         setContentView(sv)
         activeBody = sv
         tv.delegate = self
@@ -109,7 +110,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         applyDocumentTokens(to: textView)
         messageContainer?.layer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(in: self)
         messageLabel?.textColor = TextToken.textSecondary.color.nsColor(in: self)
-        markdownView?.applyTheme(effectiveTokenTheme)
+        markdownSurface?.applyTheme()
         bumpSurfaceEpoch()
     }
 
@@ -118,7 +119,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         // Before targeting a view inside the body: while surfaced, that view is
         // PARKED, and AppKit will happily focus it there.
         promoteForIncomingFocus()
-        window?.makeFirstResponder(mode == .preview ? (markdownView ?? textView) : textView)
+        window?.makeFirstResponder(mode == .preview ? (markdownSurface.previewView ?? textView) : textView)
         return true
     }
 
@@ -159,13 +160,18 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
     func setMode(_ newMode: Mode) {
         guard presentation == .markdown, newMode != mode else { return }
         mode = newMode
-        modeControl?.selectedSegment = newMode == .preview ? 0 : 1
+        modeControl?.selectedSegment = newMode.segmentIndex
+        markdownSurface.setMode(newMode)
+        tile.metadata.markdownDocumentMode = newMode
+        canvas?.updateTile(tile)
         showBody()
+        window?.makeFirstResponder(newMode == .preview ? (markdownSurface.previewView ?? textView) : textView)
     }
 
     func textDidChange(_ notification: Notification) {
         guard presentation == .markdown else { return }
         loadedText = textView.string
+        markdownSurface.draftDidChange(textView.string)
         setDirty(savedText != loadedText)
         bumpSurfaceEpoch()
     }
@@ -247,15 +253,18 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
     }
 
     @objc private func modeControlChanged(_ sender: NSSegmentedControl) {
-        setMode(sender.selectedSegment == 0 ? .preview : .source)
+        setMode(Mode(segmentIndex: sender.selectedSegment) ?? .edit)
     }
 
     private func installModeControl() {
         guard modeControl == nil else { return }
-        let control = NSSegmentedControl(labels: ["Preview", "Edit"], trackingMode: .selectOne, target: self, action: #selector(modeControlChanged(_:)))
+        let control = NSSegmentedControl(labels: ["Preview", "Split", "Edit"], trackingMode: .selectOne, target: self, action: #selector(modeControlChanged(_:)))
         control.controlSize = .small
         control.font = NSFont.systemFont(ofSize: 10, weight: .medium)
-        control.selectedSegment = mode == .preview ? 0 : 1
+        // Keep all three actions equally sized; `labels:` otherwise gives the
+        // longer Preview label a larger hit target and makes mode placement drift.
+        for segment in 0..<control.segmentCount { control.setWidth(160 / 3, forSegment: segment) }
+        control.selectedSegment = mode.segmentIndex
         control.setAccessibilityLabel("Markdown display mode")
         modeControl = control
         dirtyLabel.font = NSFont.systemFont(ofSize: 11, weight: .bold)
@@ -303,14 +312,13 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         // because `setContentView` below would replace the surface host and strand
         // the parked body.
         promoteForIncomingFocus()
-        switch (presentation, mode) {
-        case (.markdown, .preview):
-            let view = markdownView ?? FileMarkdownDocumentView(frame: bounds)
-            markdownView = view
-            view.apply(markdown: loadedText, theme: effectiveTokenTheme)
-            setContentView(view)
-            activeBody = view
-        default:
+        if presentation == .markdown {
+            if textView.string != loadedText { textView.string = loadedText }
+            markdownSurface.replaceDraft(loadedText)
+            setContentView(markdownSurface.activeBody)
+            activeBody = markdownSurface.activeBody
+            if mode != .preview { applyPendingReveal() }
+        } else {
             if textView.string != loadedText { textView.string = loadedText }
             setContentView(scrollView)
             activeBody = scrollView
@@ -325,8 +333,8 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
     func reveal(line: Int, column: Int? = nil) {
         guard line > 0 else { return }
         pendingReveal = (line, column)
-        if presentation == .markdown, mode != .source {
-            setMode(.source)
+        if presentation == .markdown, mode == .preview {
+            setMode(.edit)
         } else {
             applyPendingReveal()
         }
@@ -389,7 +397,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
     }
 
     /// QA: the rendered Markdown document, when one is installed.
-    var qaMarkdownDocument: FileMarkdownDocumentView? { markdownView }
+    var qaMarkdownDocument: FileMarkdownDocumentView? { markdownSurface.previewView }
     /// QA: the mode control, which must exist for Markdown and never otherwise.
     var qaModeControl: NSSegmentedControl? { modeControl }
 
