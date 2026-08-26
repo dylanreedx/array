@@ -280,6 +280,16 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// string. The two inputs that can legitimately change it are the display
     /// projection and the tool-detail records, and both clear this.
     private var clusterSummaryCache: [AgentNodeID: String] = [:]
+
+    /// Digest of the display sequence, maintained where the sequence is built.
+    ///
+    /// `AgentTranscriptLayout.prepare()` consults this to decide whether its own
+    /// fast path is safe, and `prepare()` runs on every display cycle — so
+    /// computing it by walking `displayItems` made the layout's fast path cost
+    /// exactly what it was there to avoid. The sequence changes only where it is
+    /// planned, and an incremental apply cannot move a boundary, so the digest
+    /// belongs next to the plan.
+    private var displayBoundarySignature = 0
     /// `.plans/45` S4.3 — the display projection between `rows` and the
     /// diffable snapshot. `rows == flatten(document)` is untouched; these are
     /// rebuilt O(rows) once per visual apply.
@@ -511,19 +521,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             // guard only compares width bucket and count. The signature hashes
             // the DISPLAY sequence including cluster ids and member counts: a
             // fold changes geometry without changing the row count (S4.3).
-            var hasher = Hasher()
-            for item in displayItems {
-                switch item {
-                case let .row(index):
-                    hasher.combine(rows[index].entryID)
-                case let .header(header):
-                    hasher.combine(header.id)
-                    hasher.combine(header.memberIndexes.count)
-                    hasher.combine(header.isExpanded)
-                    hasher.combine(header.isLive)
-                }
-            }
-            return hasher.finalize()
+            return displayBoundarySignature
         }
         transcriptLayout.measuredHeight = { [weak self] index, width in
             guard let self else { return 1 }
@@ -2443,6 +2441,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         // A4.2 — a second pass, at TURN granularity, over the same [Item] list:
         // folds an entire completed turn under one "Worked for …" header,
         // preserving its terminal answer row. Never touches `rows`.
+        defer { recomputeDisplayBoundarySignature() }
         displayItems = AgentTranscriptClusterPlanner.foldTurns(
             items: clusteredItems,
             facts: facts,
@@ -2491,6 +2490,29 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         var presented = block
         presented.payload = .toolCall(payload)
         return presented
+    }
+
+    /// Recomputed with the plan, never from `prepare()`. Hashes the DISPLAY
+    /// sequence — cluster ids, member counts, expansion and liveness included —
+    /// because a fold changes geometry without changing the row count (S4.3), and
+    /// a row whose ENTRY changed without the COUNT changing would otherwise keep
+    /// stale geometry through the layout's guard.
+    private func recomputeDisplayBoundarySignature() {
+        recordHistoryScan("display boundary signature")
+        var hasher = Hasher()
+        for item in displayItems {
+            switch item {
+            case let .row(index):
+                guard rows.indices.contains(index) else { continue }
+                hasher.combine(rows[index].entryID)
+            case let .header(header):
+                hasher.combine(header.id)
+                hasher.combine(header.memberIndexes.count)
+                hasher.combine(header.isExpanded)
+                hasher.combine(header.isLive)
+            }
+        }
+        displayBoundarySignature = hasher.finalize()
     }
 
     private func displayStartsTurn(at index: Int) -> Bool {
