@@ -137,10 +137,6 @@ MATRIX_KNOWN_RED=(
   # ms on the same host. All correctness assertions inside the leg stay green.
   # Preserve the tripwire as an inherited RED; do not weaken or rebaseline it.
   --tile-surface-residency-check
-  # `check-root-docs.sh` demands 9 README markers from the pre-65d420a doc
-  # taxonomy, one of which ("Continuum Revived") now contradicts the
-  # user-visible-identity rule. It must leave this list when its cause is fixed.
-  scripts/check-root-docs.sh
 )
 # Advisory legs whose status the caller captures itself (`|| var=$?`); these must
 # keep returning their real status or that handling silently stops working.

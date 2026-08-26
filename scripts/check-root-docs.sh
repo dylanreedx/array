@@ -71,24 +71,30 @@ check_local_links() {
 require_file README.md
 require_file CONTRIBUTING.md
 
+# This gate is real link-rot protection, and it spent a long time KNOWN-RED for
+# a reason that was never about link rot: it was asking the WRONG FILE. Eight of
+# its nine failing markers are contributor-workflow pointers that moved to
+# CONTRIBUTING.md, and the ninth was the old codename, which the identity rule
+# (AGENTS.md, non-negotiable 4) forbids in anything a user reads. Deleting the
+# check would have thrown away the gate to silence the symptom.
 for marker in \
-  "Continuum Revived" \
   "macOS 14" \
   "SwiftPM" \
   "scripts/prepare-ghosttykit.sh" \
   "swift build" \
-  "./scripts/run-matrix.sh" \
-  "qa/run-autonomous.sh --scope changed" \
+  "scripts/run-matrix.sh" \
   "scripts/check-app-bundle.sh" \
-  "qa-runs" \
-  "docs/README.md" \
-  "docs/20-product-vision.md" \
-  "docs/21-agent-workflow.md" \
-  "do not push"; do
+  "docs/README.md"; do
   require_marker README.md "$marker"
 done
 
+# Moved here from the README list: these describe how a contributor WORKS, not
+# how the project is oriented, and CONTRIBUTING.md is where they actually live.
 for marker in \
+  "qa/run-autonomous.sh --scope changed" \
+  "qa-runs" \
+  "docs/20-product-vision.md" \
+  "docs/21-agent-workflow.md" \
   "Linear" \
   "source of truth" \
   "no ticket, no code" \

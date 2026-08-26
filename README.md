@@ -10,7 +10,12 @@ GhosttyKit terminals, Sparkle updates. Download: [arrayapp.dev](https://arrayapp
 
 ## Build & run (dev)
 
+Requires macOS 14 or newer. `ThirdParty/` is gitignored, so a fresh clone has no
+terminal engine until you link one — `scripts/prepare-ghosttykit.sh` does that,
+and the build fails without it.
+
 ```sh
+scripts/prepare-ghosttykit.sh          # link GhosttyKit.xcframework — once per clone
 swift build --product Array            # bare binary (dev channel by default)
 .build/debug/Array                     # run it — uses "Array Dev" state, never prod
 
@@ -38,6 +43,8 @@ the disposable namespace supplied by `run-matrix.sh` and
 `qa/run-autonomous.sh`. Run the complete crash-witness gate from an external
 terminal or CI. See `AGENTS.md` under **Verifying**.
 
-Two documented KNOWN-RED legs exist — see
+Some legs are documented KNOWN-RED and are listed in `MATRIX_KNOWN_RED` inside
+`scripts/run-matrix.sh`, which is the only current list — read the end-of-run
+summary rather than the exit code, and see
 [docs/38-tickets/95-go-live.md](docs/38-tickets/95-go-live.md) before assuming
 a regression.
