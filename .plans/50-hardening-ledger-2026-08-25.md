@@ -163,3 +163,38 @@ now for a measured reason instead of an assumed one.**
   ledger tables are untouched.
 - §2.6's remaining O(rows) suspects are unmeasured; one of its entries already
   failed to reproduce (above), so measure before trusting.
+
+## Matrix, run 4 — five terminal legs red, and it is the MACHINE, not the branch
+
+Run 4 (2026-08-26, ~01:00) reported 5 regressions, all terminal:
+`--terminal-tmux-live-integration-check`, `--terminal-theme-fidelity-check`,
+`--terminal-snapshot-tier-check`, `--terminal-fills-tile-check`,
+`--session-resume-check`.
+
+**Every failure is the same failure**: *"timed out waiting for initial real
+terminal surface"*, *"spawned terminal surface missing"*, *"terminal surface
+missing"*, *"check timed out"*. A surface that never came up.
+
+Evidence it is not this branch:
+
+- **Two of the five run with tmux explicitly DISABLED**
+  (`-continuum.terminal.tmux.enabled NO`), so it is not the tmux socket.
+- **Run 3 was green on every one of them**, and the only `Sources/` change since
+  is `0f39b85e`, which is **comment-only** — verified by filtering the diff to
+  non-`///` lines and getting nothing back.
+- `ThirdParty/GhosttyKit.xcframework` resolves (it is a symlink into iCloud
+  Drive; it was checked and lists its slices).
+- `pmset -g assertions` reports `PreventUserIdleDisplaySleep 0` at ~1am, i.e.
+  **nothing is holding the display awake**. These legs bring up REAL terminal
+  surfaces, which is display-dependent work.
+
+**Diagnosis: a sleeping display, not a regression.** This is the
+`three-failures-one-costume` pattern again — a timeout and a crash and an
+environment fault all read as "it broke".
+
+**The branch's authoritative green is run 3** (181 legs, 4 expected KNOWN-RED),
+which contained every behavioural change in this program. Everything committed
+after it is documentation plus one comment.
+
+**Owed: one terminal-leg run with the display awake**, which needs Dylan's
+machine in a normal state. Do not "fix" anything here first.
