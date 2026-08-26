@@ -11,8 +11,8 @@ import Foundation
 func runPiEventTranslatorChecks() {
     runPiContextWindowTelemetryChecks()
 
-    // Real captured schema: session → agent_start → turn_start → streamed text
-    // → a read tool round-trip → turn_end → a second turn → agent_settled.
+    // Real captured schema: one agent run contains two model turns because the
+    // first calls a tool. Only agent_start/agent_settled are lifecycle edges.
     let fixture: [String] = [
         #"{"type":"session","version":3,"id":"SID-abc","timestamp":"2026-07-22T22:05:25.001Z","cwd":"/private/tmp/SECRET-PATH/pi-probe"}"#,
         #"{"type":"agent_start"}"#,
@@ -41,10 +41,8 @@ func runPiEventTranslatorChecks() {
         .contentDelta(threadId: "SID-abc", turnId: "SID-abc#t1", streamKind: .assistant, delta: " world"),
         .itemStarted(threadId: "SID-abc", itemId: "call_1", kind: .commandExecution, title: "read"),
         .itemCompleted(threadId: "SID-abc", itemId: "call_1", kind: .commandExecution, status: .completed),
+        .contentDelta(threadId: "SID-abc", turnId: "SID-abc#t1", streamKind: .assistant, delta: "done"),
         .turnCompleted(threadId: "SID-abc", turnId: "SID-abc#t1", outcome: .completed, errorMessage: nil),
-        .turnStarted(threadId: "SID-abc", turnId: "SID-abc#t2"),
-        .contentDelta(threadId: "SID-abc", turnId: "SID-abc#t2", streamKind: .assistant, delta: "done"),
-        .turnCompleted(threadId: "SID-abc", turnId: "SID-abc#t2", outcome: .completed, errorMessage: nil),
         .sessionStateChanged(.ready),
     ]
 
@@ -52,12 +50,12 @@ func runPiEventTranslatorChecks() {
     expect(events == expected,
            "PiEventTranslator: mapping must equal the expected sequence.\n  got: \(events)\n  want: \(expected)")
 
-    // 2. Turn-id synthesis — Pi gives none; two turns get distinct stable ids.
+    // 2. Run-id synthesis — internal tool turns retain one stable lifecycle id.
     let turnIds = events.compactMap { event -> String? in
         if case let .turnStarted(_, turnId) = event { return turnId }
         return nil
     }
-    expect(turnIds == ["SID-abc#t1", "SID-abc#t2"], "PiEventTranslator: turn ids synthesised distinctly, got \(turnIds)")
+    expect(turnIds == ["SID-abc#t1"], "PiEventTranslator: one agent run must synthesize one lifecycle id, got \(turnIds)")
 
     // 3. I5 by construction — encode every produced event and prove the
     //    sensitive Pi payloads (cwd, tool arg path, file-result body) never
@@ -69,7 +67,7 @@ func runPiEventTranslatorChecks() {
     expect(!json.contains("SECRET-FILE-BODY"), "PiEventTranslator I5: tool result body must not appear in any event")
     expect(json.contains("read"), "PiEventTranslator: the tool name is preserved as the item title")
 
-    print("PiEventTranslator checks passed: \(events.count) events from the real GPT-5.6 json schema map exactly, turn ids synthesised (\(turnIds)), I5-safe by construction (cwd/path/file-body dropped, tool name kept)")
+    print("PiEventTranslator checks passed: \(events.count) events map one tool-using agent run to one lifecycle, ids synthesized (\(turnIds)), I5-safe by construction")
 }
 
 private func runPiContextWindowTelemetryChecks() {
@@ -116,15 +114,15 @@ private func runPiContextWindowTelemetryChecks() {
     )
     expect(turnEndEvents.contains(.tokenUsageUpdated(threadId: "pi-unknown", snapshot: TokenUsageSnapshot(inputTokens: 1086, outputTokens: 4, totalCostUsd: 0.00555))),
            "Pi usage: turn_end must parse committed usage shape before completion; got \(turnEndEvents)")
-    expect(turnEndEvents.contains(.turnCompleted(threadId: "pi-unknown", turnId: "pi-unknown#t0", outcome: .completed, errorMessage: nil)),
-           "Pi usage: turn_end must keep emitting turn completion; got \(turnEndEvents)")
+    expect(!turnEndEvents.contains { if case .turnCompleted = $0 { return true }; return false },
+           "Pi usage: internal turn_end must not emit lifecycle completion; got \(turnEndEvents)")
     let duplicatedTurnEnd = translator.translate(line:
         #"{"type":"turn_end","message":{"role":"assistant","usage":{"input":1026,"output":43,"cacheRead":7,"cacheWrite":11,"reasoning":13,"totalTokens":1069,"cost":{"total":0.00642}},"timestamp":1785037741229}}"#
     )
     expect(!duplicatedTurnEnd.contains { if case .tokenUsageUpdated = $0 { return true }; return false }
            && !duplicatedTurnEnd.contains { if case .contextWindowUpdated = $0 { return true }; return false }
-           && duplicatedTurnEnd.contains(.turnCompleted(threadId: "pi-unknown", turnId: "pi-unknown#t0", outcome: .completed, errorMessage: nil)),
-           "Pi usage: duplicate message_end/turn_end usage from committed fixture shape must not double-count telemetry, while completion remains; got \(duplicatedTurnEnd)")
+           && !duplicatedTurnEnd.contains { if case .turnCompleted = $0 { return true }; return false },
+           "Pi usage: duplicate message_end/turn_end usage must not double-count telemetry or close the run; got \(duplicatedTurnEnd)")
 
     let authoritative = AgentContextWindowSnapshot(
         usedTokens: 256,

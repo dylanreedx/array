@@ -28,10 +28,12 @@ func runStrictAgentHarnessChecks() throws {
     let pi = AgentSupervisor.productionRunner(for: launch(piRecord))
     try expect(claude is ClaudeAgentRunner, "Claude Code did not construct ClaudeAgentRunner")
     try expect(codex is CodexAgentRunner, "Codex did not construct CodexAgentRunner")
-    try expect(pi is PiAgentRunner, "Pi + OpenAI model did not construct PiAgentRunner")
+    try expect(pi is PiRpcAgentRunner, "Pi + OpenAI model did not construct PiRpcAgentRunner")
     let piConfig = AgentSupervisor.runnerConfig(for: piRecord, spawnDepth: 0)
-    let piArgs = PiAgentRunner.processArguments(model: piConfig.model, thinking: piConfig.thinking, sessionId: piConfig.sessionId, extraArgs: piConfig.extraArgs, prompt: "PROMPT")
-    try expect(piArgs == ["-p", "--mode", "json", "--model", "openai-codex/gpt-5.6-sol", "--thinking", "high", "--session-id", AgentSupervisor.sessionId(for: piRecord.id), "PROMPT"],
+    let piArgs = PiRpcAgentRunner.processArguments(
+        model: piConfig.model, thinking: piConfig.thinking,
+        sessionId: piConfig.sessionId, extraArgs: piConfig.extraArgs)
+    try expect(piArgs == ["--mode", "rpc", "--model", "openai-codex/gpt-5.6-sol", "--thinking", "high", "--session-id", AgentSupervisor.sessionId(for: piRecord.id)],
                "strict Pi argv changed: \(piArgs)")
 
     // C8: pi subagent spawning had four independent blockers; this is #3 —

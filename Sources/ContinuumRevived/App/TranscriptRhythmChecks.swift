@@ -310,6 +310,17 @@ enum TranscriptRhythmChecks {
                 + "landed in T1 but the reveal is not reading it (or the hit-test/conversion broke)"
             )
         }
+        guard let stampedStartFrame = list.qaTurnStartFrameForChecks(entryID: stamped.id) else {
+            throw fail("hover time: the stamped turn lost its start-row geometry")
+        }
+        let hoverTimeFrame = list.qaHoverTimeFrameForChecks
+        guard hoverTimeFrame.maxY <= stampedStartFrame.minY + 0.5,
+              hoverTimeFrame.minX >= stampedStartFrame.minX + UserPromptView.leadingInset - 0.5 else {
+            throw fail(
+                "hover time: frame \(hoverTimeFrame) overlaps the user turn/authorship rule at "
+                + "\(stampedStartFrame); it must sit above the turn and align beyond the rule"
+            )
+        }
         list.qaHoverAtPointForChecks(unstampedPoint)
         guard !list.qaHoverTimeVisibleForChecks else {
             throw fail(

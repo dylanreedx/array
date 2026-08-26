@@ -125,8 +125,13 @@ public struct PiAgentStateReader: AgentStateReader {
         }
 
         switch events.events.last?.type {
-        case "finished", "agent_end":
+        case "finished", "agent_settled":
             return .done
+        case "agent_end":
+            // Pi may automatically retry, compact, or drain a queued
+            // continuation after agent_end. Only agent_settled is terminal;
+            // old completed run artifacts are still covered by run.status.done.
+            return run.status == .running && age <= config.freshWorkingWindow ? .working : .idle
         case "turn_start", "tool_execution_start", "message_start":
             return age <= config.freshWorkingWindow ? .working : .idle
         case "turn_end", "tool_execution_end", "message_end":
