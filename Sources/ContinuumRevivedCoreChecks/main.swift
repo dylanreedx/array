@@ -4070,7 +4070,7 @@ do {
     expect(!mutable.workspaces.contains(where: { $0.id == workspaceId }), "Registry.deleteWorkspace removes the registry entry")
     expect(mutable.lastActiveWorkspaceId == created.id, "Registry.deleteWorkspace reassigns last active workspace")
     expect(mutable.lastActiveProjectId == nil, "Registry.deleteWorkspace clears active project when deleted workspace has no replacement project")
-    expect(mutable.projects.first(where: { $0.id == projectId })?.workspaceId == workspaceId, "Registry.deleteWorkspace leaves project entries untouched")
+    expect(mutable.projects.first(where: { $0.id == projectId })?.workspaceId == nil, "Registry.deleteWorkspace clears project ownership rather than leaving a dangling workspace reference")
     expect(!mutable.deleteWorkspace(id: created.id, now: Date()), "Registry.deleteWorkspace refuses to delete the last workspace")
 }
 
