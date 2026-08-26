@@ -130,9 +130,24 @@ test('Mac, Command Center, Companion, and shared approval state are interactive'
   await expect(page.getByRole('status').filter({ hasText: 'Zone created' })).toBeVisible();
   await page.getByRole('button', { name: /Add or jump/ }).click();
   await expect(page.getByRole('dialog', { name: 'Command Center' })).toBeVisible();
+  const command = page.getByRole('dialog', { name: 'Command Center' });
+  await expect(command.locator('h3', { hasText: 'Needs You' })).toBeVisible();
+  await expect(command.locator('h3', { hasText: 'Recent' })).toBeVisible();
+  await expect(command.locator('h3', { hasText: 'Create' })).toBeVisible();
+  await expect(command.getByRole('option', { name: /Verify approval handoff/ })).toHaveAttribute('aria-selected', 'true');
+  await expect.poll(() => command.evaluate((element) => Math.round(element.getBoundingClientRect().width))).toBe(660);
+  await expect.poll(() => command.getByRole('option').first().evaluate((element) => Math.round(element.getBoundingClientRect().height))).toBe(46);
   await page.locator('[data-interaction-id="command-search"]').fill('New Agent');
   await page.keyboard.press('Enter');
   await expect(page.getByRole('dialog', { name: 'Choose a model' })).toBeVisible();
+  await expect(page.locator('h3', { hasText: 'Quick Start' })).toBeVisible();
+  await expect(page.locator('h3', { hasText: 'OpenAI Codex' })).toBeVisible();
+  await expect(page.locator('h3', { hasText: 'Anthropic' })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Choose a model' }).locator('[data-provider-mark="openai"]').first()).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog', { name: 'Command Center' })).toBeVisible();
+  await page.locator('[data-interaction-id="command-search"]').fill('New Agent');
+  await page.keyboard.press('Enter');
   await page.keyboard.press('Enter');
   await expect(page.getByRole('dialog', { name: /Choose effort/ })).toBeVisible();
   await page.keyboard.press('Enter');
@@ -144,6 +159,27 @@ test('Mac, Command Center, Companion, and shared approval state are interactive'
   await expect(page.getByText('Approval sent')).toBeVisible();
   await page.getByRole('button', { name: 'Focus Mac workspace' }).click();
   await expect(page.getByText('Running the approved iOS verification').first()).toBeVisible();
+});
+
+test('Command Center remains a contained native surface on mobile', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await revealDemo(page);
+  await page.getByRole('button', { name: 'Focus Mac workspace' }).click();
+  await page.keyboard.press('Control+K');
+  const command = page.getByRole('dialog', { name: 'Command Center' });
+  await expect(command).toBeVisible();
+  const box = await command.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.x).toBeGreaterThanOrEqual(8);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(382);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(836);
+  await expect.poll(() => command.getByRole('option').first().evaluate((element) => Math.round(element.getBoundingClientRect().height))).toBe(48);
+  await page.locator('[data-interaction-id="command-search"]').fill('New Agent');
+  await page.keyboard.press('Enter');
+  const models = page.getByRole('dialog', { name: 'Choose a model' });
+  await expect(models.getByRole('group', { name: 'Quick Start' })).toBeVisible();
+  await expect(models.getByRole('group', { name: 'OpenAI Codex' })).toBeVisible();
+  await expect(models.locator('[data-provider-mark="openai"]').first()).toBeVisible();
 });
 
 test('every visible control satisfies the central interaction contract or is a real link', async ({ page }) => {

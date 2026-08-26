@@ -12,7 +12,7 @@ The homepage now contains only the primary hero and workspace, one closing downl
 
 - Removed the static canvas, navigation, phone, and agent preview components.
 - Removed duplicate product introductions, feature cards, eyebrow copy, and the segmented device selector.
-- Added the asymmetric portal, deterministic scroll phases, shallow pointer perspective, and Glimpse-only floating motion.
+- Added the asymmetric portal, deterministic scroll phases, and five staggered floating paths with independent scale, rotation, timing, and depth-weighted pointer parallax.
 - Added a sticky ready shelf and interaction gate that prevents visitors from accidentally scrolling past the live demo.
 - Kept the primary DMG link functional without hydration and simplified the product download menu.
 
@@ -23,6 +23,7 @@ The homepage now contains only the primary hero and workspace, one closing downl
 - Added bounded camera geometry so the complete workspace cannot be lost offscreen.
 - Added screen-constant tile resize affordances and animated deterministic layout settlement.
 - Added Command Center, scripted agent lifecycle, local browser history, safe shell commands, editable notes, and mirrored approval state.
+- Rebuilt Command Center against the native AppKit source: 660px upper-aligned frosted geometry, unboxed search, 46px rows, real category sections, attention-first results, provider-grouped model selection, native density, compact shortcuts, and nested Escape and Backspace navigation.
 - Added a central interaction contract and automated no-dead-control audit.
 
 ### Companion

@@ -25,6 +25,33 @@ export const READY_LANDING_POINT = .84;
 const clamp = (value: number) => Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
 const clampPointer = (value: number) => Math.max(-1, Math.min(1, Number.isFinite(value) ? value : 0));
 
+type SurfacePointerProfile = {
+  x: number;
+  y: number;
+  rotateX: number;
+  rotateY: number;
+};
+
+const surfacePointerProfiles: Readonly<Record<string, SurfacePointerProfile>> = {
+  stabilize: { x: 9, y: 6, rotateX: .62, rotateY: .8 },
+  browser: { x: -6.5, y: 5, rotateX: .48, rotateY: -.58 },
+  shell: { x: 4.5, y: -4, rotateX: -.34, rotateY: .42 },
+  note: { x: -4, y: -5.5, rotateX: -.46, rotateY: -.38 },
+  verify: { x: 7.5, y: -3.5, rotateX: -.36, rotateY: .68 },
+};
+
+export function surfacePointerPose(id: string, pointerX: number, pointerY: number, amount = 1) {
+  const profile = surfacePointerProfiles[id];
+  const strength = clamp(amount);
+  if (!profile) return { x: 0, y: 0, rotateX: 0, rotateY: 0 };
+  return {
+    x: clampPointer(pointerX) * profile.x * strength,
+    y: clampPointer(pointerY) * profile.y * strength,
+    rotateX: clampPointer(pointerY) * profile.rotateX * strength,
+    rotateY: clampPointer(pointerX) * profile.rotateY * strength,
+  };
+}
+
 export function assemblyProgressForScroll(value: number) {
   return clamp(clamp(value) / ASSEMBLY_TIMELINE_END);
 }
@@ -52,6 +79,7 @@ export function installAssembly() {
   let readyGateHeld = false;
   let readyGateReleased = false;
   let touchY = 0;
+  const surfaces = Array.from(track.querySelectorAll<HTMLElement>('[data-assembly-surface]'));
 
   type SurfaceTarget = { x: number; y: number; scale: number };
 
@@ -84,7 +112,6 @@ export function installAssembly() {
   };
 
   const measureSurfaceTargets = () => {
-    const surfaces = Array.from(track.querySelectorAll<HTMLElement>('[data-assembly-surface]'));
     if (!surfaces.length) return;
     const targets = targetsForViewport(innerWidth, innerHeight);
     const stageRect = track.querySelector<HTMLElement>('[data-assembly-pin]')?.getBoundingClientRect();
@@ -114,13 +141,16 @@ export function installAssembly() {
 
   const writePointer = () => {
     pointerQueued = false;
-    const amount = reduced.matches ? 0 : detachProgress * .8;
+    const amount = reduced.matches ? 0 : detachProgress;
     track.style.setProperty('--pointer-x', String(pointerX));
     track.style.setProperty('--pointer-y', String(pointerY));
-    track.style.setProperty('--pointer-tilt-x', `${pointerX * amount}deg`);
-    track.style.setProperty('--pointer-tilt-y', `${pointerY * -amount}deg`);
-    track.style.setProperty('--pointer-shift-x', `${pointerX * amount * 7}px`);
-    track.style.setProperty('--pointer-shift-y', `${pointerY * amount * 5}px`);
+    for (const surface of surfaces) {
+      const pose = surfacePointerPose(surface.dataset.assemblySurface ?? '', pointerX, pointerY, amount);
+      surface.style.setProperty('--surface-pointer-x', `${pose.x}px`);
+      surface.style.setProperty('--surface-pointer-y', `${pose.y}px`);
+      surface.style.setProperty('--surface-pointer-rx', `${pose.rotateX}deg`);
+      surface.style.setProperty('--surface-pointer-ry', `${pose.rotateY}deg`);
+    }
   };
 
   const landingTop = () => trackTop + (trackHeight - innerHeight) * READY_LANDING_POINT;
@@ -171,8 +201,16 @@ export function installAssembly() {
   addEventListener('scroll', request, { passive: true });
   const onResize = () => { measure(); request(); };
   const onPointerMove = (event: PointerEvent) => {
+    if (event.pointerType && event.pointerType !== 'mouse' && event.pointerType !== 'pen') return;
     pointerX = clampPointer(event.clientX / Math.max(1, innerWidth) * 2 - 1);
     pointerY = clampPointer(event.clientY / Math.max(1, innerHeight) * 2 - 1);
+    if (pointerQueued) return;
+    pointerQueued = true;
+    requestAnimationFrame(writePointer);
+  };
+  const onPointerLeave = () => {
+    pointerX = 0;
+    pointerY = 0;
     if (pointerQueued) return;
     pointerQueued = true;
     requestAnimationFrame(writePointer);
@@ -199,6 +237,7 @@ export function installAssembly() {
     if (event.key === 'ArrowDown' || event.key === 'PageDown' || event.key === ' ' || event.key === 'End') event.preventDefault();
   }, { capture: true });
   track.addEventListener('pointermove', onPointerMove, { passive: true });
+  track.addEventListener('pointerleave', onPointerLeave, { passive: true });
   track.addEventListener('array:release-ready-gate', releaseReadyGate);
   reduced.addEventListener('change', request);
   new ResizeObserver(onResize).observe(track);

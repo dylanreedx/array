@@ -44,9 +44,9 @@ Native radii follow the checked-in `12 → 10 → 8 → 6` ladder. Marketing por
 - Authored resting rotation stays within 4 degrees.
 - Detached surfaces receive shallow shadows. Settled surfaces are flat and shadowless.
 - The real component tree supplies both detached and settled surfaces. There is no presentation clone tree.
-- Each detached surface has one restrained Glimpse-phase motion profile. Movement stays within 7px and 0.3 degrees and stops before portal assembly begins.
-- Pointer response is animation-frame coalesced and contributes no more than 7px translation and 0.8 degrees of rotation.
-- Ambient surface motion pauses offscreen, while the document is hidden, during assembly, and under Reduced Motion.
+- Each detached surface has its own continuous motion path, duration, negative phase offset, and scale breath. Movement stays within 8px, 0.34 degrees, and 1.8 percent scale variation, then fades to zero as the surface settles.
+- Pointer response is animation-frame coalesced and depth-weighted per surface. It contributes no more than 9px translation and 0.8 degrees of rotation, and may move middle planes against the near plane to avoid rigid group motion.
+- Ambient surface motion pauses once surfaces settle and under Reduced Motion.
 - Product-state motion remains semantic. Gyros animate only for a working agent, approval emphasis belongs only to attention state, and loading motion belongs only to active local fixture work.
 
 ## Assembly phases
@@ -98,6 +98,19 @@ Every visible control has a stable `data-interaction-id` resolved by the central
 
 Base UI owns the deferred Command Center dialog and its focus containment, dismissal, and restoration. The critical download control uses native HTML so its direct DMG link and keyboard menu work before hydration.
 
+### Command Center
+
+The website Command Center follows the native `LaunchProfilePalette` rather than a generic web command menu.
+
+- The desktop surface is capped at 660px wide and 520px tall, sits near the upper edge of the Mac workspace, and uses the native 14px overlay radius.
+- The search field is part of the surface. It never sits inside a second bordered card.
+- Search typography is 16px medium. Result titles are 13.5px medium, subtitles are 11.5px, result rows are 46px, and category headers occupy 24px.
+- Empty-query results are recognition-first and grouped as Needs You, Recent, Create, and Actions. Typed search expands into agents, tiles, closed surfaces, zones, and lower-frequency actions.
+- Attention work is listed first and uses approval amber only as a semantic accent.
+- New Agent advances in place. The model step includes Quick Start plus provider-grouped OpenAI Codex, Anthropic, and Pi results with the local provider marks. The reasoning step keeps the same surface and row geometry.
+- Arrow keys skip section headings. Return opens the active result. Escape moves back one level before it closes the root surface. Backspace on an empty nested search also moves back.
+- The footer is compact instructional chrome. Visible shortcuts describe working actions and are not decorative keycaps.
+
 Reveal readiness never owns input. Page scrolling remains active until a deliberate canvas click or keyboard focus changes `inputMode` to `workspace`. While active, a non-passive listener contains wheel and pinch input on the selected canvas. Escape and the in-canvas Done action return ownership to the page.
 
 The reducer owns committed product state. Pointer movement stays transient until release. History is bounded, asynchronous work uses generation IDs, and Reset cancels stale completion by advancing the generation.
@@ -146,6 +159,6 @@ Copy is direct, spatial, and product-specific. It describes visible state, paral
 - No separate static product preview, duplicate demo, clone tree, feature-card strip, or default tutorial panel.
 - No eyebrow, section kicker, `NATIVE ON macOS` label, or metadata used only as decoration.
 - No segmented Mac and Companion toggle when the devices themselves can be selected.
-- No giant radius applied to native app chrome, thick workspace outline, repeated border stack, dotted marketing grid, glow, glass, or ambient movement outside the Glimpse phase.
+- No giant radius applied to native app chrome, thick workspace outline, repeated border stack, dotted marketing grid, glow, glass, or ambient movement after surfaces settle.
 - No literal letters, emoji, or Unicode approximations standing in for Array glyphs or native control symbols.
 - No wheel, pinch, drag, or keyboard input leaking from an active canvas into the page.
