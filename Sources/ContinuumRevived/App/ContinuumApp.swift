@@ -15164,17 +15164,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private static func recordProjectInRegistry(project: Project, in store: RegistryStore, preferredWorkspaceId: UUID? = nil) throws {
         var registry = try store.loadOrEmpty()
-        if let preferredWorkspaceId,
-           registry.workspaces.contains(where: { $0.id == preferredWorkspaceId && $0.projectIds.contains(project.id) }) {
-            registry.lastActiveWorkspaceId = preferredWorkspaceId
-            registry.lastActiveProjectId = project.id
+        let persistedWorkspaceId = registry.lastActiveWorkspaceId.flatMap { candidate in
+            registry.workspaces.contains(where: { $0.id == candidate }) ? candidate : nil
+        }
+        let explicitlySelectedWorkspaceId = preferredWorkspaceId.flatMap { candidate in
+            registry.workspaces.contains(where: { $0.id == candidate && $0.projectIds.contains(project.id) })
+                ? candidate
+                : nil
         }
         let workspaceId = try DefaultWorkspaceMigration().ensureDefaultWorkspace(
             for: project,
             registry: &registry,
             applicationSupportDirectory: store.registryFile.deletingLastPathComponent()
         )
-        registry.lastActiveWorkspaceId = workspaceId
+        // Booting a project controller is an implementation detail; it must not
+        // replace the canvas the user selected before quitting. This matters most
+        // for an empty workspace, which intentionally has no project controller of
+        // its own. An explicit picker selection still wins when it names a workspace
+        // that actually contains the chosen project.
+        registry.lastActiveWorkspaceId = explicitlySelectedWorkspaceId ?? persistedWorkspaceId ?? workspaceId
         registry.lastActiveProjectId = project.id
         try store.save(registry)
     }
@@ -15342,6 +15350,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(!runtime.document.zones.contains(where: { $0.zoneId == groupZoneId }), "runtime document should drop closed group zone")
         let diskAfterClose = try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport).load()
         try expect(!diskAfterClose.zones.contains(where: { $0.zoneId == groupZoneId }), "disk document should drop closed group zone")
+
+        // A normal relaunch still boots one project controller, even when the
+        // selected workspace is empty. That controller must not drag startup back
+        // to its owning workspace.
+        let emptyWorkspaceId = UUID(uuidString: "00000000-0000-0000-0000-000000003407")!
+        var registryWithEmptySelection = try registryStore.loadOrEmpty()
+        registryWithEmptySelection.workspaces.append(WorkspaceEntry(
+            id: emptyWorkspaceId,
+            name: "Empty Personal",
+            projectIds: [],
+            createdAt: now,
+            updatedAt: now
+        ))
+        registryWithEmptySelection.lastActiveWorkspaceId = emptyWorkspaceId
+        try registryStore.save(registryWithEmptySelection)
+        try WorkspaceStore(workspaceId: emptyWorkspaceId, applicationSupportDirectory: appSupport).save(
+            WorkspaceDocument(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                zones: [],
+                zoneZOrder: [],
+                lastActiveZoneId: nil
+            )
+        )
+        try recordProjectInRegistry(project: project, in: registryStore)
+        let registryAfterEmptyRelaunch = try registryStore.loadOrEmpty()
+        try expect(registryAfterEmptyRelaunch.lastActiveWorkspaceId == emptyWorkspaceId,
+                   "booting the last project must not replace an empty selected workspace")
+        let emptyRelaunchDocument = try loadActiveWorkspaceDocument(from: registryStore)
+        try expect(emptyRelaunchDocument?.workspaceId == emptyWorkspaceId && emptyRelaunchDocument?.document.zones.isEmpty == true,
+                   "relaunch must restore the selected empty workspace document")
 
         let artifactDir = URL(fileURLWithPath: fileManager.currentDirectoryPath)
             .appendingPathComponent("qa-runs", isDirectory: true)
