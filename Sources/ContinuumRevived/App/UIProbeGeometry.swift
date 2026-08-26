@@ -5907,10 +5907,14 @@ enum UIProbeGeometry {
         guard !footer.qaHasVisibleContextLabel else {
             throw fail("\(label): footer kept the visible inert Next turn label instead of leaving next-turn context to the picker accessibility labels")
         }
+        guard !footer.harnessButton.isHidden,
+              footer.harnessButton.frame.width > 0 else {
+            throw fail("\(label): provider picker is unreachable; a Pi agent must be able to switch harness at every supported tile width")
+        }
         guard footer.qaFitsCurrentTitles else {
             throw fail("\(label): the footer's own measured fit rejects its current titles — the fit tiers (full → abbreviated) must converge at every gate width")
         }
-        for (name, button) in [("model", footer.modelButton), ("effort", footer.effortButton)] {
+        for (name, button) in [("provider", footer.harnessButton), ("model", footer.modelButton), ("effort", footer.effortButton)] where !button.isHidden {
             guard button.frame.width >= button.intrinsicContentSize.width - 0.5 else {
                 throw fail("\(label): \(name) picker squeezed below its measured width (frame \(button.frame.width), needs \(button.intrinsicContentSize.width)) — its title will ellipsize")
             }
@@ -5932,6 +5936,7 @@ enum UIProbeGeometry {
             let footer = tile.qaProviderFooterView
             footer.layoutSubtreeIfNeeded()
             let effortLabel = "\(label).effort=\(effort)"
+            if footer.effortButton.isHidden { continue }
             guard footer.effortButton.contentCompressionResistancePriority(for: .horizontal).rawValue
                     > footer.modelButton.contentCompressionResistancePriority(for: .horizontal).rawValue,
                   footer.effortButton.contentHuggingPriority(for: .horizontal).rawValue

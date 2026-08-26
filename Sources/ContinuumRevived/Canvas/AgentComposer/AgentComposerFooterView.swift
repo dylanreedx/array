@@ -24,6 +24,8 @@ final class AgentComposerFooterView: NSView, TokenThemed {
     private var recordHarness = AgentHarnessConfig.resolved()
     private var selectedHarness = AgentHarnessConfig.resolved()
     private var usesCompactLabels = false
+    private var usesCondensedModelTrigger = false
+    private var hidesEffort = false
     private var contrastObservations: [NSKeyValueObservation] = []
 
     var onSettingsWrite: SettingsWriter?
@@ -105,22 +107,25 @@ final class AgentComposerFooterView: NSView, TokenThemed {
         // old hard-coded 390 was compact where full fits and full where it
         // clipped, depending entirely on the catalogue's string lengths).
         let compact = requiredWidth(usingCompactLabels: false) > bounds.width
-        // A third control landed on this row (harness) and a narrow tile cannot
-        // hold three even abbreviated. Something has to give, and the stack's own
-        // answer was the worst one: the harness and effort buttons resist
-        // compression outright, so the deficit fell entirely on the model button —
-        // the one control the user actually changes per turn — and drove it to
-        // ZERO width at 320pt. The harness yields instead, and yields by hiding
-        // rather than squeezing, because a truncated harness name is not a control
-        // anyone can use. It returns as soon as the row can hold it.
-        //
-        // The decision reads the THREE-control requirement whether or not the
-        // harness is currently hidden, so hiding cannot shrink the number that
-        // decides to hide and oscillate.
-        let hidesHarness = requiredWidth(usingCompactLabels: true) > bounds.width
-        if compact != usesCompactLabels || hidesHarness != harnessButton.isHidden {
+        // The provider/harness control must remain reachable at every supported
+        // tile width. Hiding it made a Pi agent impossible to switch away from Pi.
+        // At the 320pt tile floor the footer cannot physically hold three custom
+        // popup controls (their chrome alone is wider than the available space),
+        // so effort yields first. If provider + model still do not fit, shorten
+        // only the CLOSED model trigger to "Model"; its popover rows and
+        // accessibility value retain the exact selected model.
+        let shouldHideEffort = requiredWidth(
+            usingCompactLabels: true, condenseModelTrigger: false) > bounds.width
+        let condensesModelTrigger = shouldHideEffort && requiredWidth(
+            usingCompactLabels: true, condenseModelTrigger: false,
+            includeEffort: false) > bounds.width
+        if compact != usesCompactLabels
+            || condensesModelTrigger != usesCondensedModelTrigger
+            || shouldHideEffort != hidesEffort {
             usesCompactLabels = compact
-            harnessButton.isHidden = hidesHarness
+            usesCondensedModelTrigger = condensesModelTrigger
+            hidesEffort = shouldHideEffort
+            effortButton.isHidden = shouldHideEffort
             rebuildChoices()
         }
     }
@@ -139,13 +144,22 @@ final class AgentComposerFooterView: NSView, TokenThemed {
     /// The row's fitting width for the CURRENT selection's titles: the same
     /// per-button expression `ChoiceButton` measures itself with, so this cannot
     /// drift from what the buttons actually need.
-    private func requiredWidth(usingCompactLabels compact: Bool) -> CGFloat {
-        let modelTitle = compact ? Self.abbreviatedModel(settings.model) : (AgentModelCatalog.shared.displayName(for: settings.model, harness: recordHarness) ?? settings.model)
+    private func requiredWidth(
+        usingCompactLabels compact: Bool,
+        condenseModelTrigger: Bool? = nil,
+        includeEffort: Bool = true
+    ) -> CGFloat {
+        let condensed = condenseModelTrigger ?? usesCondensedModelTrigger
+        let modelTitle = compact && condensed
+            ? "Model"
+            : (compact ? Self.abbreviatedModel(settings.model) : (AgentModelCatalog.shared.displayName(for: settings.model, harness: recordHarness) ?? settings.model))
         let effortTitle = compact ? Self.abbreviatedEffort(settings.thinking) : settings.thinking.capitalized
         let harnessTitle = compact ? Self.abbreviatedHarness(recordHarness) : recordHarness.rawValue
-        return ChoiceButton.fittingWidth(forTitle: harnessTitle)
+        let providerAndModel = ChoiceButton.fittingWidth(forTitle: harnessTitle)
             + CGFloat(Space.m) + ChoiceButton.fittingWidth(forTitle: modelTitle)
-            + CGFloat(Space.m) + ChoiceButton.fittingWidth(forTitle: effortTitle)
+        return includeEffort
+            ? providerAndModel + CGFloat(Space.m) + ChoiceButton.fittingWidth(forTitle: effortTitle)
+            : providerAndModel
     }
 
     var controlsEnabled: Bool {
@@ -204,7 +218,9 @@ final class AgentComposerFooterView: NSView, TokenThemed {
     }
 
     private func rebuildChoices() {
-        harnessButton.items = AgentHarness.allCases.map { harness in ChoiceItem(id: harness.rawValue, title: harness.rawValue) }
+        harnessButton.items = AgentHarness.allCases.map { harness in
+            ChoiceItem(id: harness.rawValue, title: usesCompactLabels ? Self.abbreviatedHarness(harness) : harness.rawValue)
+        }
         harnessButton.selectedID = selectedHarness.rawValue
         let snapshot = AgentModelCatalog.shared.snapshot(for: selectedHarness)
         var models = snapshot.models
@@ -212,6 +228,7 @@ final class AgentComposerFooterView: NSView, TokenThemed {
         modelButton.items = models.map { model in
             ChoiceItem(id: model, title: usesCompactLabels ? Self.abbreviatedModel(model) : (snapshot.displayNames[model] ?? model))
         }
+        modelButton.selectedTitleOverride = usesCondensedModelTrigger ? "Model" : nil
         var efforts = AgentModelConfig.thinkingOptions
         if !efforts.contains(settings.thinking) { efforts.append(settings.thinking) }
         effortButton.items = efforts.map { effort in ChoiceItem(id: effort, title: usesCompactLabels ? Self.abbreviatedEffort(effort) : effort.capitalized) }
@@ -337,8 +354,9 @@ final class AgentComposerFooterView: NSView, TokenThemed {
     /// true, both buttons must sit at (or above) their intrinsic width and render
     /// their selected titles without ellipsis — the truncation gate's precondition.
     var qaFitsCurrentTitles: Bool {
-        let needed = modelButton.intrinsicContentSize.width + CGFloat(Space.m)
-            + effortButton.intrinsicContentSize.width
+        let needed = harnessButton.intrinsicContentSize.width + CGFloat(Space.m)
+            + modelButton.intrinsicContentSize.width
+            + (effortButton.isHidden ? 0 : CGFloat(Space.m) + effortButton.intrinsicContentSize.width)
         return bounds.width > 0 && needed <= bounds.width + 0.5
     }
     @discardableResult func qaPickModel(_ value: String) -> Bool {

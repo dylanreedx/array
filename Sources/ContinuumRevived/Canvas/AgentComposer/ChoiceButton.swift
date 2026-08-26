@@ -28,6 +28,11 @@ class ChoiceButton: NSControl, TokenThemed {
     var selectedID: String? {
         didSet { updatePresentation() }
     }
+    /// Optional compact trigger copy. The menu rows and accessibility value keep
+    /// the selected item's exact title; only the closed button is shortened.
+    var selectedTitleOverride: String? {
+        didSet { updatePresentation() }
+    }
     var onSelection: ((ChoiceItem) -> Void)?
     /// Restore the trigger's neutral label after a transient action/confirmation.
     /// This keeps the visible control title owned by the custom button rather than
@@ -298,7 +303,7 @@ class ChoiceButton: NSControl, TokenThemed {
 
     private func updatePresentation() {
         if let item = items.first(where: { $0.id == selectedID }) {
-            titleLabel.stringValue = item.title
+            titleLabel.stringValue = selectedTitleOverride ?? item.title
             setAccessibilityValue(item.title)
         }
         setAccessibilityEnabled(isEnabled && items.contains(where: \.enabled))
