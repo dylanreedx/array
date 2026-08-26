@@ -1,0 +1,44 @@
+---
+import { DOWNLOAD_URL } from '../../features/demo/fixture';
+interface Props { compact?: boolean; idPrefix: string }
+const { compact = false, idPrefix } = Astro.props;
+---
+<div class:list={["download-split", { "download-split--compact": compact }]} data-download-split data-testid={`download-${idPrefix}`}>
+  <a class="download-split__main" href={DOWNLOAD_URL} data-interaction-id="download-main" data-testid="download-main">
+    <span class="download-split__mark" aria-hidden="true"><img src="/array-logo-dark.svg" alt="" /></span>
+    <strong>Download for Mac</strong>
+  </a>
+  <details>
+    <summary aria-label="Choose an Array download" data-interaction-id="download-trigger" data-testid="download-trigger"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 6 3.5 3.5L11.5 6"></path></svg></summary>
+    <div class="download-split__menu" role="menu" data-testid="download-popover">
+      <a href={DOWNLOAD_URL} role="menuitem" data-interaction-id="download-mac" data-testid="download-mac">
+        <span class="download-platform-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><rect x="4" y="4.25" width="16" height="11.5" rx="1.7"></rect><path d="M2.75 18.5h18.5M9.25 18.5h5.5"></path></svg>
+        </span>
+        <span class="download-row-copy"><strong>Array for Mac</strong></span>
+        <svg class="download-row-action" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5v9m0 0 3-3m-3 3-3-3M4 15.5h12"></path></svg>
+      </a>
+      <div role="menuitem" aria-disabled="true" aria-describedby={`${idPrefix}-companion-reason`} data-testid="download-companion">
+        <span class="download-platform-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><rect x="7.1" y="2.5" width="9.8" height="19" rx="2.2"></rect><path d="M10.2 5h3.6M11.1 18.8h1.8"></path></svg>
+        </span>
+        <span class="download-row-copy"><strong>Array Companion</strong></span>
+        <small class="download-row-status" id={`${idPrefix}-companion-reason`}>Coming soon</small>
+      </div>
+    </div>
+  </details>
+</div>
+<style>
+  .download-split__mark { overflow: hidden; }
+  .download-split__mark img { width: 100%; height: 100%; display: block; object-fit: cover; }
+</style>
+<script>
+  document.querySelectorAll<HTMLElement>('[data-download-split]').forEach((root) => {
+    if (root.dataset.ready) return;
+    root.dataset.ready = 'true';
+    const details = root.querySelector('details');
+    const trigger = root.querySelector<HTMLElement>('summary');
+    addEventListener('pointerdown', (event) => { if (details?.open && !root.contains(event.target as Node)) details.open = false; }, { passive: true });
+    root.addEventListener('keydown', (event) => { if (event.key === 'Escape' && details?.open) { event.preventDefault(); details.open = false; trigger?.focus(); } });
+  });
+</script>

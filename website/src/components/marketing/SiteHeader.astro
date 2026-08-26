@@ -1,0 +1,16 @@
+---
+import Logo from '../Logo.astro';
+import DownloadSplit from './DownloadSplit.astro';
+---
+<header class="production-header" data-testid="site-nav">
+  <div class="production-header__inner">
+    <Logo />
+    <span aria-hidden="true"></span>
+    <div class="production-header__actions">
+      <button class="production-theme" type="button" data-theme-toggle data-interaction-id="theme-toggle" aria-pressed="false">
+        <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="none"><circle cx="8" cy="8" r="5.5" stroke="currentColor"/><path d="M8 2.5a5.5 5.5 0 0 1 0 11Z" fill="currentColor"/></svg><span class="sr-only">Use dark theme</span>
+      </button>
+      <DownloadSplit compact idPrefix="nav" />
+    </div>
+  </div>
+</header>
