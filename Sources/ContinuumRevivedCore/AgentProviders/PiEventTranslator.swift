@@ -26,6 +26,13 @@ public struct PiEventTranslator {
     private var turnCounter: Int = 0
     private var currentTurnId: String = "pi-unknown#t0"
     private var seenUsageSignatures = Set<String>()
+    /// Did the message currently being assembled already emit its text as deltas?
+    ///
+    /// This is what keeps `replayingCompletedMessages` honest. See the doc on that
+    /// flag: a run's `events.jsonl` holds BOTH forms of the same words for the
+    /// whole time the run is live, so recovery has to be decided per message, not
+    /// per reader.
+    private var streamedTextInCurrentMessage = false
     private var workingDirectory: URL?
     private let now: @Sendable () -> Date
 
@@ -72,8 +79,12 @@ public struct PiEventTranslator {
     /// text as `message_update` → `text_delta`, and `message_end` contributes only
     /// usage, so reading both would duplicate every word.
     ///
-    /// On for replaying an observed child's `events.jsonl`, where it is the only
-    /// way to get the prose at all. Measured, not assumed: the `harness-agents`
+    /// On for reading an observed child's `events.jsonl`, where it is the only
+    /// way to get the prose once the run has ended. It does NOT mean "this file is
+    /// finished": the same reader tails the run live, and a live file holds both
+    /// the deltas and the `message_end` that closes them. So this flag only grants
+    /// PERMISSION to recover; `streamedTextInCurrentMessage` decides whether there
+    /// is anything left to recover. Measured, not assumed: the `harness-agents`
     /// extension rewrites that file when the run completes and the rewrite strips
     /// **every** `message_update` line (24 → 0 in a probe), leaving `message_end`
     /// holding the full text. Replaying a finished run without this yields tools,
@@ -150,14 +161,25 @@ public struct PiEventTranslator {
             currentTurnId = "\(threadId)#t\(turnCounter)"
             return [.turnStarted(threadId: threadId, turnId: currentTurnId)]
 
+        case "message_start":
+            // Purely structural, and deliberately not folded into `default`: this
+            // is where the per-message recovery state resets.
+            streamedTextInCurrentMessage = false
+            return []
+
         case "message_update":
             return translateMessageUpdate(object)
 
         case "message_end":
             var events = translateUsageEvents(from: object)
-            if replayingCompletedMessages {
+            // Recover the completed text only for a message that never streamed.
+            // A run being tailed live has not been compacted yet, so its deltas
+            // are still in the file and this same `message_end` closes them —
+            // recovering unconditionally repeats the entire answer.
+            if replayingCompletedMessages && !streamedTextInCurrentMessage {
                 events.insert(contentsOf: completedMessageText(from: object), at: 0)
             }
+            streamedTextInCurrentMessage = false
             return events
 
         case "tool_execution_start":
@@ -370,12 +392,13 @@ public struct PiEventTranslator {
 
     // MARK: - message_update sub-protocol
 
-    private func translateMessageUpdate(_ object: [String: Any]) -> [AgentRuntimeEvent] {
+    private mutating func translateMessageUpdate(_ object: [String: Any]) -> [AgentRuntimeEvent] {
         guard let event = object["assistantMessageEvent"] as? [String: Any],
               let subtype = event["type"] as? String else { return [] }
         switch subtype {
         case "text_delta":
             guard let delta = event["delta"] as? String, !delta.isEmpty else { return [] }
+            streamedTextInCurrentMessage = true
             return [.contentDelta(threadId: threadId, turnId: currentTurnId, streamKind: .assistant, delta: delta)]
         case "thinking_delta":
             guard let delta = event["delta"] as? String, !delta.isEmpty else { return [] }

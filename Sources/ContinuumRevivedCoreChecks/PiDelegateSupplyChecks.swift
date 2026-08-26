@@ -175,5 +175,51 @@ func runPiDelegateSupplyChecks() {
                "T6: replaying the child republished its prompt body in \(event)")
     }
 
+    // MARK: 2b · the shape production ACTUALLY reads while the run is live
+    //
+    // The capture above is the post-compaction shape. Production does not wait for
+    // it: the tail polls at 0.25s and the extension only rewrites `events.jsonl`
+    // when the run ENDS, so for the whole duration of the run Array reads a file
+    // that holds BOTH forms of the same words — `message_update` deltas AND the
+    // `message_end` that closes them. A recovery keyed on the reader's mode says
+    // every sentence twice for that entire window.
+    //
+    // So the recovery is keyed on the MESSAGE, not on the reader: text is
+    // recovered from `message_end` only for a message that never streamed. That
+    // rule is correct in both file shapes, which is why this check and the one
+    // above run the SAME production flag over two different captures.
+    guard let liveLines = fixture("pi-delegate-run-events-live.jsonl") else {
+        expect(false, "T6: the pre-compaction pi delegate capture is missing")
+        return
+    }
+    let liveObjects = objects(liveLines)
+    expect(liveObjects.count == liveLines.count, "T6: the live child capture has unparseable lines")
+    // The fixture's own teeth, both halves: this capture must contain the deltas
+    // the post-compaction one lacks, AND the completed message that duplicates
+    // them. Without either, the doubling cannot occur and the check is vacuous.
+    expect(liveObjects.contains { ($0["type"] as? String) == "message_update" },
+           "T6: the live child capture has no message_update lines, so it is not the pre-compaction shape")
+    expect(liveObjects.contains {
+        ($0["type"] as? String) == "message_end"
+            && (($0["message"] as? [String: Any])?["role"] as? String) == "assistant"
+    }, "T6: the live child capture has no completed assistant message, so nothing could double")
+
+    var liveTranslator = PiEventTranslator(
+        workingDirectory: URL(fileURLWithPath: "/private/tmp/fixture-repo", isDirectory: true),
+        now: { Date(timeIntervalSinceReferenceDate: 900) },
+        // Exactly what `AgentSupervisor.bindObservedRun` builds. A witness that
+        // passed `false` here would be testing a translator production never makes.
+        replayingCompletedMessages: true)
+    let liveEvents = liveLines.flatMap { liveTranslator.translate(line: $0) }
+    let liveProse = assistantText(liveEvents).joined()
+    let sentence = "Both helpers build their column list from the same shared descriptor, then diverge only in how they format the blend column."
+    expect(liveProse == sentence,
+           "T6: a live-tailed child said its answer more than once — got \(liveProse.count) characters of prose for a \(sentence.count)-character answer")
+
+    // And the streamed path still streams: the words must arrive as the deltas
+    // they were, not as one block delivered at message_end.
+    expect(assistantText(liveEvents).count >= 3,
+           "T6: the live child's prose arrived in \(assistantText(liveEvents).count) pieces — the deltas were dropped in favour of the completed message, which is the opposite defect")
+
     print("Pi delegate supply checks passed: a third-party delegate_agent call mints one observed read-only child keyed on its tool call id, binds its run directory from the tool result, keeps the task body off the event boundary and off the detail channel, and a completed run's prose is recovered from message_end without the live path reading it twice")
 }
