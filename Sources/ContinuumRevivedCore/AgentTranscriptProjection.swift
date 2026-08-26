@@ -309,6 +309,45 @@ public struct AgentTranscriptProjection: Sendable {
         requestEntries[requestID]
     }
 
+    /// What the reducer has touched since a consumer last drained it.
+    ///
+    /// A renderer coalescing many mutations into one presentation needs to know
+    /// which nodes moved, and it has exactly two ways to find out: ask the
+    /// reducer, which computed it, or walk the whole document and diff it. The
+    /// transcript did the second — `applyCoalesced` full-flattened on every
+    /// streaming chunk, which is O(history) per token and measured 93ms per delta
+    /// at 10,000 rows. This is the first.
+    public struct TouchedNodes: Equatable, Sendable {
+        public var ids: Set<AgentNodeID> = []
+        /// Anything that inserted, removed or reordered a node.
+        ///
+        /// A structural step cannot be summarised as "these ids changed" — the
+        /// row index has to be rebuilt — so a consumer must take the full walk.
+        /// Defaulting this to TRUE on any doubt is what keeps the fast path
+        /// honest: the expensive answer is always correct, the cheap one is not.
+        public var isStructural: Bool = false
+
+        mutating func formUnion(_ patch: AgentDocumentPatch) {
+            ids.formUnion(patch.updated)
+            ids.formUnion(patch.inserted)
+            ids.formUnion(patch.moved)
+            ids.formUnion(patch.removed)
+            if !patch.inserted.isEmpty || !patch.removed.isEmpty || !patch.moved.isEmpty {
+                isStructural = true
+            }
+        }
+    }
+
+    private var touched = TouchedNodes()
+
+    /// Hands over everything touched since the last call and starts a new
+    /// accumulation. Draining is destructive on purpose: two consumers cannot
+    /// both be told "you have not seen this yet".
+    public mutating func drainTouchedNodes() -> TouchedNodes {
+        defer { touched = TouchedNodes() }
+        return touched
+    }
+
     public mutating func ingest(_ event: AgentRuntimeEvent) {
         events.append(event)
         if events.count > Self.eventWindow { events.removeFirst(events.count - Self.eventWindow) }
@@ -316,7 +355,7 @@ public struct AgentTranscriptProjection: Sendable {
             signals: deriveStatusSignals(from: events, threadId: threadId, engineStatus: .idle)
         )
         for mutation in mutations(for: event) {
-            do { try reducer.apply(mutation) }
+            do { record(try reducer.apply(mutation)) }
             catch { rejectedMutationCount += 1 }
         }
     }
@@ -637,7 +676,7 @@ public struct AgentTranscriptProjection: Sendable {
 
     private mutating func apply(_ mutations: [AgentDocumentMutation]) {
         for mutation in mutations {
-            do { try reducer.apply(mutation) }
+            do { record(try reducer.apply(mutation)) }
             catch { rejectedMutationCount += 1 }
         }
     }
@@ -647,9 +686,20 @@ public struct AgentTranscriptProjection: Sendable {
     ) throws -> [AgentDocumentPatch] {
         var patches: [AgentDocumentPatch] = []
         for mutation in mutations {
-            patches.append(try reducer.apply(mutation))
+            patches.append(record(try reducer.apply(mutation)))
         }
         return patches
+    }
+
+    /// Accumulates one reducer patch into the touched set.
+    ///
+    /// The reducer already knows exactly which nodes each mutation moved; every
+    /// consumer of this projection used to throw that away and rediscover it by
+    /// walking the whole document. See `TouchedNodes`.
+    @discardableResult
+    private mutating func record(_ patch: AgentDocumentPatch) -> AgentDocumentPatch {
+        touched.formUnion(patch)
+        return patch
     }
 }
 

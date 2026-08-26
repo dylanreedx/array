@@ -2127,18 +2127,33 @@ final class ManagedAgentTileNSView: TileNSView {
         lastForwardedDocumentVersion = document.version
         let next = AgentDocument(version: v2RenderedDocument.version &+ 1, entries: document.entries)
         do {
-            // `enqueue` gates presentation at 30Hz and recomputes the touched rows
-            // from the document at flush time, so the enqueued patch only has to be
-            // one valid version step. Deriving node-level sets here re-scanned the
-            // whole document per chunk to build a diff the list then recomputed
-            // anyway, and calling `apply` directly bypassed the visual-update gate
-            // entirely — the one-apply-per-token shape P3.11's negative witness
-            // exists to fail.
-            try transcript.enqueue(
-                document: next,
-                patch: AgentDocumentPatch.empty(fromVersion: v2RenderedDocument.version),
-                final: final
-            )
+            // The patch carries the REDUCER'S OWN changed set, drained from the
+            // model. `enqueue` gates presentation at 30Hz and unions these across
+            // everything it coalesces, so the list is told exactly which nodes
+            // moved rather than rediscovering it.
+            //
+            // The empty patch this replaces was not a small thing. It left
+            // `applyCoalesced` with no locality at all, so every streaming chunk
+            // took the full walk: flatten the whole document, build an O(rows)
+            // index, diff every row's content, rebuild every per-row structure.
+            // Measured at 93ms per delta over 10,000 rows — and invisible, because
+            // the gate drove `apply(document:patch:)`, which has no production
+            // callers at all.
+            //
+            // Deriving the set HERE by diffing documents would be the old mistake
+            // in a new place: this asks the reducer, which already computed it,
+            // and costs a set union per chunk.
+            let touched = model.drainTouchedNodes()
+            let patch: AgentDocumentPatch
+            if touched.isStructural || touched.ids.isEmpty {
+                patch = try AgentDocumentPatch.empty(fromVersion: v2RenderedDocument.version)
+            } else {
+                patch = try AgentDocumentPatch(
+                    fromVersion: v2RenderedDocument.version,
+                    toVersion: next.version,
+                    updated: Array(touched.ids))
+            }
+            try transcript.enqueue(document: next, patch: patch, final: final)
             v2RenderedDocument = next
             v2RenderError = nil
             if case .needsAction = v2TurnSnapshot?.state {
@@ -2627,6 +2642,17 @@ final class ManagedAgentTileNSView: TileNSView {
     func qaRefreshLocation(at now: Date) { refreshLocationStatus(at: now) }
     func qaPrepareStreamingMarkupForTeardown() { prepareStreamingMarkupForTeardown(final: true) }
     func qaFireStreamingMarkupTimer(generation: UInt64) { streamingMarkupParseTimerFired(generation: generation) }
+
+    /// Presents whatever streamed markup is pending, through the production
+    /// boundary path.
+    ///
+    /// The timer seam above is wall-clock gated (`flushPendingStreamingMarkupIfDue`),
+    /// so in a fixture it is never due and a check that fires it measures an empty
+    /// queue while believing it measured a cheap one. This is the same boundary a
+    /// real turn crosses, just invoked deterministically.
+    func qaFlushStreamingMarkupForChecks(final: Bool = false) {
+        flushPendingStreamingMarkupForBoundary(final: final)
+    }
     var qaBranchChipIsWarning: Bool {
         agentHeader.qaBranchIsWarning
     }

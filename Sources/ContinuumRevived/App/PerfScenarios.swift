@@ -900,12 +900,25 @@ enum PerfScenarios {
     ///
     /// This is the streaming axis of the contract in
     /// [scalability-tdd.md](../../../docs/internals/scalability-tdd.md): a delta
-    /// must cost `O(changed + visible rows)` and never `O(history)`. Today
-    /// `AgentTranscriptListView.apply(document:patch:)` takes a real
-    /// `AgentDocumentPatch` and then ignores its locality entirely, calling
-    /// `flatten(document)` — which walks every entry, every top-level block, and
-    /// recursively every child. So one revised token at the tail re-indexes the
-    /// whole conversation.
+    /// must cost `O(changed + visible rows)` and never `O(history)`.
+    ///
+    /// **This scenario drives the seam production actually uses, and for most of
+    /// its life it did not.** It called `apply(document:patch:)` with a real,
+    /// node-level `AgentDocumentPatch` — a method with ZERO production callers.
+    /// A streaming tile goes through `enqueue(document:patch:final:)` with
+    /// `AgentDocumentPatch.empty(...)`, because the 30Hz scheduler coalesces
+    /// several reducer results into one presentation and a caller's patch cannot
+    /// describe the coalesced step. So the budgets below were measured on an
+    /// incremental path nothing reached, while production full-flattened on every
+    /// chunk — the same failure shape CLAUDE.md hazard 9 records for
+    /// `WorkspaceRuntime.install(into:)`, and the reason a headline
+    /// 50.2ms → 5.7ms win was banked on a seam nothing calls.
+    ///
+    /// The fixture also alternates user and assistant entries. It used to be
+    /// uniformly `.assistant`, so `startsTurn` was never true, `turnRanges`
+    /// returned a single range, `foldTurns` early-returned, and turn headers,
+    /// `clusterSummaryText` and every tool-detail path were unreachable BY
+    /// CONSTRUCTION — invisible to the gate no matter how expensive they became.
     ///
     /// The fixture sweeps history length and reports the SLOPE for the same reason
     /// `canvas.camera-slope` does: a single-size fixture can sit green while the
@@ -919,6 +932,12 @@ enum PerfScenarios {
         let deltas = 20
 
         func nodeID(_ value: String) -> AgentNodeID { AgentNodeID(rawValue: value)! }
+        func promptBlock(_ index: Int) -> AgentBlock {
+            AgentBlock(
+                id: nodeID("delta-block-\(index)"), revision: 1, kind: .paragraph,
+                payload: .paragraph([.text("prompt \(index)")])
+            )
+        }
         func fixtureBlock(_ index: Int, revision: UInt64 = 1) -> AgentBlock {
             AgentBlock(
                 id: nodeID("delta-block-\(index)"), revision: revision,
@@ -948,11 +967,20 @@ enum PerfScenarios {
             // `prepareToolDetailLifecycle` builds a dictionary over every entry on
             // every delta. Measuring the realistic shape catches both.
             var entries = (0..<history).map { index in
-                AgentEntry(
-                    id: nodeID("delta-entry-\(index)"), revision: 1, role: .assistant,
-                    provenance: .localNotice(reason: "transcript delta fixture"),
-                    blocks: [fixtureBlock(index)]
-                )
+                // Alternating roles, so the document has REAL turns. A user entry
+                // is what makes `startsTurn` true, and without one the whole
+                // folding projection is dead code as far as this gate is
+                // concerned.
+                index.isMultiple(of: 2)
+                    ? AgentEntry(
+                        id: nodeID("delta-entry-\(index)"), revision: 1, role: .user,
+                        provenance: .localPrompt(promptID: "delta-\(index)"),
+                        lifecycle: .finished,
+                        blocks: [promptBlock(index)])
+                    : AgentEntry(
+                        id: nodeID("delta-entry-\(index)"), revision: 1, role: .assistant,
+                        provenance: .localNotice(reason: "transcript delta fixture"),
+                        blocks: [fixtureBlock(index)])
             }
             let list = AgentTranscriptListView()
             list.frame = NSRect(x: 0, y: 0, width: 320, height: 240)
@@ -970,6 +998,7 @@ enum PerfScenarios {
                     inserted: entries.flatMap { $0.blocks.map(\.id) }
                 )
             )
+            list.flushPendingVisualUpdate()
             host.layoutSubtreeIfNeeded()
             list.collectionView.layoutSubtreeIfNeeded()
 
@@ -977,6 +1006,8 @@ enum PerfScenarios {
                 throw Failure(message: "transcript-delta harness must hold \(history) rows; got \(list.qaSemanticRowCount)")
             }
 
+            // Every sweep size is even, so the last entry is the ASSISTANT half of
+            // the final turn — which is what a streaming answer actually revises.
             let tailIndex = history - 1
             let tailEntryID = entries[tailIndex].id
             let tailID = entries[tailIndex].blocks[0].id
@@ -993,16 +1024,24 @@ enum PerfScenarios {
                     provenance: .localNotice(reason: "transcript delta fixture"),
                     blocks: [fixtureBlock(tailIndex, revision: version)]
                 )
-                try list.apply(
+                // EXACTLY what `ManagedAgentTileNSView` does per chunk: one
+                // version step carrying the reducer's own changed set, through the
+                // coalescing scheduler. The two things that make this faithful and
+                // that it previously got wrong are (1) `enqueue`, not the
+                // `apply(document:patch:)` seam which has no production callers,
+                // and (2) a patch naming only what a content delta touches — the
+                // tile drains it from the model rather than diffing documents.
+                try list.enqueue(
                     document: AgentDocument(version: version, entries: entries),
                     patch: try AgentDocumentPatch(
                         fromVersion: version - 1, toVersion: version,
-                        updated: [tailID, tailEntryID]
-                    )
+                        updated: [tailID, tailEntryID])
                 )
-                // `apply(document:patch:)` is the SYNCHRONOUS seam — the 30 Hz
-                // visual scheduler sits on the enqueue path, not this one — so the
-                // invalidation count below is already final for this delta.
+                // The scheduler gates presentation at 30Hz; a gate that let it
+                // coalesce would measure a fraction of the deltas and call the
+                // rest free. Flushing every step measures the per-delta cost the
+                // budget names, which is also what a slow chunk rate produces.
+                list.flushPendingVisualUpdate()
                 let invalidated = list.qaLastInvalidatedTopLevelCount
                 if invalidated == 0 { deltasWithoutInvalidation += 1 }
                 worstInvalidated = max(worstInvalidated, invalidated)

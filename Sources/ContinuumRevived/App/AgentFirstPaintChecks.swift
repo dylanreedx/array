@@ -68,6 +68,7 @@ enum AgentFirstPaintChecks {
         try checkPopoverCommandEchoesLikeATypedSend()
         try checkMirroredAgentOffersNoComposerOrStop()
         try checkStreamingResponseKeepsALivenessSignal()
+        try checkAStreamingChunkDoesNotWalkTheWholeTranscript()
         print("ContinuumRevivedAgentFirstPaintChecks passed: the prompt echo precedes the action sink, acceptance and refusal both resolve the latch, the spawn window carries a state, a word, and a clock, the optimistic indicator survives synchronize, settled turns read their duration, a mid-turn attachment resolves honestly instead of forcing sendPrompt, and a popover-selected command echoes exactly like a typed one, an agent Array only mirrors offers no composer, no provider controls and no Stop, and a streaming response keeps a liveness signal instead of going dead")
     }
 
@@ -460,6 +461,160 @@ extension AgentFirstPaintChecks {
     /// it once at launch, so every check leg — and every pixel baseline — sees a
     /// motionless transcript. No screenshot gate could ever have caught this, and
     /// that is why it shipped.
+    /// A streaming chunk must not cost the whole conversation — asserted through
+    /// the TILE, which is the only thing that streams.
+    ///
+    /// `--perf-budget-transcript-delta-check` drives `AgentTranscriptListView`
+    /// directly, so it can only ever be as faithful as the patch the scenario
+    /// chooses to hand it. For most of its life it handed a node-level patch to
+    /// `apply(document:patch:)` — a method with ZERO production callers — while a
+    /// real tile enqueued an EMPTY patch and took the full walk on every token.
+    /// The gate reported 5.5ms; production cost 93ms at 10,000 rows.
+    ///
+    /// This check exists so that divergence cannot recur silently: it ingests
+    /// real events into a real tile and asserts, on the tile's own transcript,
+    /// that the streaming path stayed local. No fixture chooses the patch here —
+    /// the tile does, exactly as it does in the field.
+    @MainActor
+    private static func checkAStreamingChunkDoesNotWalkTheWholeTranscript() throws {
+        let thread = "thread-main"
+        let tile = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(), kind: .managedAgent, title: "streaming-locality",
+            frame: TileFrame(x: 0, y: 0, width: 560, height: 460),
+            zPosition: .fromLegacyRank(1), runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")))
+        tile.layoutSubtreeIfNeeded()
+
+        // Build a conversation with real history: 40 completed turns, each a user
+        // prompt and an assistant reply. History is the variable the whole
+        // contract is about, so a fixture without it proves nothing.
+        for turn in 0..<40 {
+            tile.ingest(.turnStarted(threadId: thread, turnId: "turn-\(turn)"))
+            tile.ingest(.contentDelta(
+                threadId: thread, turnId: "turn-\(turn)", streamKind: .assistant,
+                delta: "Answer number \(turn), long enough to be a real row of prose."))
+            tile.ingest(.turnCompleted(
+                threadId: thread, turnId: "turn-\(turn)", outcome: .completed, errorMessage: nil))
+        }
+        guard let transcript = tile.qaTranscriptForChecks else {
+            throw fail("streaming locality: the tile has no transcript to measure")
+        }
+        tile.qaFlushStreamingMarkupForChecks()
+        transcript.flushPendingVisualUpdate()
+
+        // The fixture's own teeth: there must actually BE history to walk.
+        guard transcript.qaSemanticRowCount >= 40 else {
+            throw fail(
+                "streaming locality: the fixture built only \(transcript.qaSemanticRowCount) rows, "
+                + "so a whole-history walk would be indistinguishable from a local one"
+            )
+        }
+        let history = transcript.qaSemanticRowCount
+
+        // Present whatever has been ingested, through the REAL forwarding path.
+        //
+        // `tile.ingest` alone presents nothing: streaming markup is parsed on a
+        // debounce timer, and only `synchronizeV2Transcript` forwards to the
+        // transcript. Flushing the list's visual scheduler without firing that
+        // timer measures an empty queue — which is exactly how the first draft of
+        // this check passed with the fix reverted.
+        func present() {
+            tile.qaFlushStreamingMarkupForChecks()
+            transcript.flushPendingVisualUpdate()
+        }
+
+        // Now stream one more answer, chunk by chunk, and measure ONLY that.
+        //
+        // The FIRST chunk of a turn is structural — it begins the assistant entry
+        // and its markup block — and a structural step legitimately rebuilds the
+        // row index. That is a cost per TURN, which is fine. The contract being
+        // asserted is that it is not a cost per TOKEN, which is what a streaming
+        // answer produces hundreds of.
+        tile.ingest(.turnStarted(threadId: thread, turnId: "turn-live"))
+        tile.ingest(.contentDelta(
+            threadId: thread, turnId: "turn-live", streamKind: .assistant, delta: "opening "))
+        present()
+        transcript.qaResetFlattenStats()
+        let visualAppliesBefore = transcript.qaVisualApplyCount
+        let chunks = 12
+        for chunk in 0..<chunks {
+            tile.ingest(.contentDelta(
+                threadId: thread, turnId: "turn-live", streamKind: .assistant,
+                delta: "chunk \(chunk) "))
+            // Present every chunk. Letting the 30Hz scheduler coalesce would
+            // measure a fraction of them and call the rest free.
+            present()
+        }
+
+        // POSITIVE CONTROL, and the reason this check can be trusted at all.
+        // Every count budget below is satisfied perfectly by a transcript that
+        // presented NOTHING, so the first thing to establish is that the chunks
+        // reached the renderer.
+        let presented = transcript.qaVisualApplyCount - visualAppliesBefore
+        guard presented >= chunks else {
+            throw fail(
+                "streaming locality: \(chunks) chunks produced only \(presented) presentations, so "
+                + "the zeroes below measure an empty queue rather than a cheap one"
+            )
+        }
+
+        guard transcript.qaFullFlattenCount == 0 else {
+            throw fail(
+                "streaming locality: \(chunks) chunks INSIDE an already-open answer caused "
+                + "\(transcript.qaFullFlattenCount) whole-document rebuilds over \(history) rows of "
+                + "history — the tile is not telling the transcript what changed, so every token "
+                + "re-indexes the entire conversation"
+            )
+        }
+        guard transcript.qaHistoryScanCount == 0 else {
+            throw fail(
+                "streaming locality: \(chunks) streaming chunks walked the applied history "
+                + "\(transcript.qaHistoryScanCount) times over \(history) rows"
+            )
+        }
+        // Cheap and WRONG is the failure a cost witness cannot see, so the rows
+        // are checked against a from-scratch walk of the same document.
+        if let mismatch = transcript.qaIndexEquivalenceMismatch(for: tile.qaDocumentForChecks) {
+            throw fail(
+                "streaming locality: the incremental rows diverged from a full walk — \(mismatch)"
+            )
+        }
+        // And the per-turn cost is bounded too, so this cannot be satisfied by
+        // moving the walk somewhere the measurement above does not look.
+        transcript.qaResetFlattenStats()
+        for turn in 100..<104 {
+            tile.ingest(.turnStarted(threadId: thread, turnId: "turn-\(turn)"))
+            for chunk in 0..<8 {
+                tile.ingest(.contentDelta(
+                    threadId: thread, turnId: "turn-\(turn)", streamKind: .assistant,
+                    delta: "chunk \(chunk) "))
+                present()
+            }
+            tile.ingest(.turnCompleted(
+                threadId: thread, turnId: "turn-\(turn)", outcome: .completed, errorMessage: nil))
+            present()
+        }
+        // 4 turns × 8 chunks = 32 presented steps. A handful of structural walks
+        // is the entry and block each turn begins; anything approaching 32 is the
+        // per-token regression this exists to catch.
+        guard transcript.qaFullFlattenCount <= 12 else {
+            throw fail(
+                "streaming locality: 4 turns of 8 chunks each cost "
+                + "\(transcript.qaFullFlattenCount) whole-document rebuilds — a walk per turn is "
+                + "the structural cost of opening an entry, a walk per token is the regression"
+            )
+        }
+
+        // And it still rendered: a path that stopped presenting would score zero
+        // on both counters above.
+        guard transcript.qaSemanticRowCount > history else {
+            throw fail(
+                "streaming locality: the streamed answer never became a row — "
+                + "\(transcript.qaSemanticRowCount) rows for \(history) of history"
+            )
+        }
+    }
+
     @MainActor
     private static func checkStreamingResponseKeepsALivenessSignal() throws {
         let thread = "thread-main"

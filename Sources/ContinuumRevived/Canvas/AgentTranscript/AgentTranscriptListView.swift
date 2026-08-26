@@ -611,6 +611,19 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         guard patch.fromVersion == expected else {
             throw UpdateError.versionMismatch(expected: expected, actual: patch.fromVersion)
         }
+        // Union this step into the coalesced description before scheduling. A
+        // patch that names nothing, or one that changes structure, poisons the
+        // fast path for the whole coalesced window — deliberately, because a
+        // partially-known changed set is worse than an unknown one.
+        if coalescedFromVersion == nil { coalescedFromVersion = patch.fromVersion }
+        let structural = !patch.inserted.isEmpty || !patch.removed.isEmpty || !patch.moved.isEmpty
+        if structural || patch.updated.isEmpty {
+            coalescedTouchedIDs = nil
+        } else if coalescedTouchedIDs != nil {
+            coalescedTouchedIDs?.formUnion(patch.updated)
+        } else if coalescedFromVersion == patch.fromVersion {
+            coalescedTouchedIDs = Set(patch.updated)
+        }
         latestEnqueuedVersion = patch.toVersion
         updateScheduler.schedule({ [weak self] in
             guard let self else { return }
@@ -657,6 +670,22 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// instead of rebuilt. Nil is always the safe answer — it means "rebuild
     /// everything" — so a new decline path costs correctness nothing.
     private var pendingIncrementalRowIDs: Set<AgentNodeID>?
+
+    /// The union of everything the enqueued-but-unpresented patches touched.
+    ///
+    /// The 30Hz scheduler presents only the LAST enqueued snapshot, so a
+    /// per-enqueue patch cannot describe the step that is actually applied. That
+    /// is why this path used to take an empty patch and rediscover the changed
+    /// set by walking the whole document — O(history) per streaming chunk, 93ms
+    /// per delta at 10,000 rows. Unioning the patches as they arrive describes
+    /// the coalesced step exactly, at the cost of a set insert per chunk.
+    ///
+    /// `nil` means "no usable locality": either nothing has been enqueued, or one
+    /// of the coalesced steps was structural, or a caller passed a patch that
+    /// named nothing. All three fall back to the full walk, which is always
+    /// correct.
+    private var coalescedTouchedIDs: Set<AgentNodeID>?
+    private var coalescedFromVersion: UInt64?
 
     private(set) var qaHistoryScanCount = 0
 
@@ -861,10 +890,31 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// unchanged IDs; reconfiguration is limited to rows touched by the patch.
     /// There is intentionally no reloadData path after (or before) initial load.
     private func applyCoalesced(document: AgentDocument) throws {
+        let touched = coalescedTouchedIDs
+        let from = coalescedFromVersion
+        coalescedTouchedIDs = nil
+        coalescedFromVersion = nil
+
+        // The content-only fast path. `touched` is the union of the reducer's own
+        // patches across everything the scheduler coalesced, so it describes the
+        // step being applied exactly — no walk required to discover it, and the
+        // per-row structures below can be patched rather than rebuilt.
+        if let touched, !touched.isEmpty, let from, from == appliedVersion,
+           let patch = try? AgentDocumentPatch(
+               fromVersion: from, toVersion: document.version, updated: Array(touched)),
+           let flattened = try incrementallyIndexed(document: document, patch: patch) {
+            prepareToolDetailLifecycle(for: document, updatedNodeIDs: Array(touched))
+            captureTurnTimes(from: document, updatedNodeIDs: Array(touched))
+            try applyWithScroll(
+                document: document, flattened: flattened, changedNodeIDs: touched)
+            return
+        }
+
+        // The fallback, and it must stay correct rather than fast: with no usable
+        // locality the changed set can only be found by comparing against the
+        // cached rows, which needs the full walk.
         prepareToolDetailLifecycle(for: document)
         captureTurnTimes(from: document)
-        // No patch here: this path derives its own changed set by comparing against
-        // the cached rows, so the full walk is the only correct option.
         let flattened = try flatten(document)
         let oldIndexes = Dictionary(uniqueKeysWithValues: rows.enumerated().map { ($0.element.id, $0.offset) })
         let changedNodeIDs = Set(flattened.rows.compactMap { row -> AgentNodeID? in

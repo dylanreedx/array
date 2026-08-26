@@ -95,6 +95,12 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
         )
     }
     public var currentStatus: AgentStatus { semanticProjection.currentStatus }
+    /// See `AgentTranscriptProjection.TouchedNodes`. Forwarded so a renderer can
+    /// take the reducer's own answer instead of rediscovering it by walking the
+    /// whole document on every streaming chunk.
+    public mutating func drainTouchedNodes() -> AgentTranscriptProjection.TouchedNodes {
+        semanticProjection.drainTouchedNodes()
+    }
     public var events: [AgentRuntimeEvent] { semanticProjection.events }
     public var activeToolCount: Int { semanticProjection.activeToolCount }
     public var streamingMarkupParseCount: Int { semanticProjection.streamingMarkupParseCount }
