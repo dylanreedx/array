@@ -1730,7 +1730,7 @@ final class CanvasNSView: NSView, TokenThemed {
             .filter { $0.parentTileID != $0.childTileID }
             .filter { tileView(for: $0.parentTileID) != nil && tileView(for: $0.childTileID) != nil }
             .prefix(InboxSort.maxVisibleChildren)
-        guard let anyParent = resolved.first.flatMap({ tileView(for: $0.parentTileID) }) else {
+        guard !resolved.isEmpty else {
             clearContextualAgentLineage()
             return
         }
@@ -1738,32 +1738,35 @@ final class CanvasNSView: NSView, TokenThemed {
         let overlay = agentLineageOverlay ?? AgentLineageOverlayView()
         agentLineageOverlay = overlay
         if overlay.superview == nil {
-            worldPlane.addSubview(overlay, positioned: .below, relativeTo: anyParent)
-            reorderTileSubviewsByZIndex()
+            overlay.frame = bounds
+            overlay.autoresizingMask = [.width, .height]
+            overlay.setMarchingSuspended(overlayAnimationsSuspended)
+            // Priority-visible over opaque tiles. Focus, attention, and HUD
+            // siblings already above the world plane retain precedence.
+            addSubview(overlay, positioned: .above, relativeTo: worldPlane)
         }
-        overlay.reducesMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         updateContextualAgentLineageGeometry()
     }
 
     func clearContextualAgentLineage() {
         contextualAgentLineage = []
+        agentLineageOverlay?.hide()
         agentLineageOverlay?.removeFromSuperview()
     }
 
     private func updateContextualAgentLineageGeometry() {
         guard !contextualAgentLineage.isEmpty, let overlay = agentLineageOverlay else { return }
-        overlay.frame = worldPlane.bounds
-        overlay.edges = contextualAgentLineage.compactMap { relation -> (start: CGPoint, end: CGPoint)? in
+        overlay.frame = bounds
+        let segments = contextualAgentLineage.compactMap { relation -> DocumentRelationshipOverlayView.Segment? in
             guard let parent = tileView(for: relation.parentTileID),
                   let child = tileView(for: relation.childTileID) else { return nil }
-            let parentRect = overlay.convert(parent.bounds, from: parent)
-            let childRect = overlay.convert(child.bounds, from: child)
-            let travelsRight = childRect.midX >= parentRect.midX
-            return (
-                start: CGPoint(x: travelsRight ? parentRect.maxX : parentRect.minX, y: parentRect.midY),
-                end: CGPoint(x: travelsRight ? childRect.minX : childRect.maxX, y: childRect.midY)
+            return .init(
+                source: overlay.convert(parent.bounds, from: parent),
+                target: overlay.convert(child.bounds, from: child),
+                emphasized: true
             )
         }
+        overlay.show(segments: segments)
     }
 
     func setDocumentRelationships(_ links: [DocumentAgentLink], agentTileIds: [AgentID: UUID]) {
@@ -1809,7 +1812,14 @@ final class CanvasNSView: NSView, TokenThemed {
     /// resolved them — never more than `InboxSort.maxVisibleChildren`.
     var qaLineageEndpointsInCanvasSpace: [(start: CGPoint, end: CGPoint)] {
         guard let overlay = agentLineageOverlay else { return [] }
-        return overlay.edges.map { (overlay.convert($0.start, to: self), overlay.convert($0.end, to: self)) }
+        return overlay.endpoints.map { (overlay.convert($0.start, to: self), overlay.convert($0.end, to: self)) }
+    }
+
+    var qaLineageAnimationCount: Int { agentLineageOverlay?.qaAnimationCount ?? 0 }
+    var qaLineageIsAnimating: Bool { agentLineageOverlay?.qaIsAnimating == true }
+    var qaLineageHitTestPassesThrough: Bool {
+        guard let overlay = agentLineageOverlay else { return true }
+        return overlay.hitTest(CGPoint(x: overlay.bounds.midX, y: overlay.bounds.midY)) == nil
     }
 
     var qaDocumentRelationshipRoutes: [DocumentRelationshipOverlayView.Route] {
@@ -2435,6 +2445,7 @@ final class CanvasNSView: NSView, TokenThemed {
     private func applyOverlayAnimationSuspension() {
         let suspended = overlayAnimationsSuspended
         focusBorderOverlay?.setMarchingSuspended(suspended)
+        agentLineageOverlay?.setMarchingSuspended(suspended)
         for overlay in attentionBorderOverlays.values {
             overlay.setMarchingSuspended(suspended)
         }

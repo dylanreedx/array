@@ -165,19 +165,14 @@ public enum CodexCLIBackend {
         return args
     }
 
-    /// Which transport `CodexAgentRunner` drives. `.exec` is what ships today;
-    /// `.appServer` is reachable for testing/rollout only, gated on an
-    /// environment variable rather than a persisted per-record setting —
-    /// making it a real user-facing choice needs `AgentRecord`/
-    /// `AgentSupervisor.codexRunnerConfig`, both off-limits to this ticket
-    /// (see .plans/46, "Codex app-server migration"). Default OFF: the
-    /// exec path stays the shipped behavior until a live rollout has evidence
-    /// to flip this.
+    /// App-server is the default because it is the only Codex transport with
+    /// structured provider-owned subagent identity. `exec` remains an explicit
+    /// emergency escape hatch.
     public enum Transport: String, Sendable { case exec, appServer }
     public static func transportOverride(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> Transport {
-        environment["CONTINUUM_CODEX_TRANSPORT"] == "app-server" ? .appServer : .exec
+        environment["CONTINUUM_CODEX_TRANSPORT"] == "exec" ? .exec : .appServer
     }
 
     /// The distinguishing app-server JSON-RPC error for a `thread/resume` on a
@@ -299,6 +294,10 @@ public final class CodexAgentRunner: @unchecked Sendable {
     /// turn — `runOnceAppServer` owns the whole lifecycle of a single value.
     private var appServerTurnCompletion: (threadId: String, turnId: String, semaphore: DispatchSemaphore)?
     private var appServerTurnOutcome: AgentRuntimeEvent?
+    private var appServerPrimaryThreadID: String?
+    private var appServerLiveChildThreads: Set<String> = []
+    private var appServerTurnAccepted = false
+    private var providerSubagentActivityHandler: (@Sendable (ProviderSubagentActivity) -> Void)?
 
     public init(config: Config) {
         self.config = config
@@ -314,8 +313,16 @@ public final class CodexAgentRunner: @unchecked Sendable {
     /// a NEW id).
     public func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
         if CodexCLIBackend.transportOverride() == .appServer {
-            try runAppServer(prompt: prompt, onEvent: onEvent)
-            return
+            do {
+                try runAppServer(prompt: prompt, onEvent: onEvent)
+                return
+            } catch {
+                // Startup compatibility fallback only. Once Codex accepted
+                // `turn/start`, replaying the prompt through exec could repeat
+                // filesystem or network side effects.
+                let canFallback = queue.sync { !appServerTurnAccepted && !stopRequested }
+                guard canFallback else { throw error }
+            }
         }
         if config.threadId == nil {
             let result = try runOnce(mode: .fresh, threadId: nil, prompt: prompt, onEvent: onEvent)
@@ -401,11 +408,13 @@ public final class CodexAgentRunner: @unchecked Sendable {
     }
 
     /// One app-server subprocess, driven through initialize → thread/start (or
-    /// thread/resume) → turn/start → wait for THIS thread's own turn/completed
-    /// → teardown. Single-agent scope only: there is no delegating child here,
-    /// so there is no ordering hazard to guard against in THIS method — the
-    /// hazard is a property of `CodexAppServerEventTranslator`'s lack of a gate
-    /// (verified in `CodexAppServerParityChecks`), not of this loop.
+    /// thread/resume) → turn/start → wait for the primary turn AND every
+    /// announced child thread to complete → teardown. The app-server can emit a
+    /// child's final frames after the parent's `turn/completed`; keeping one live
+    /// child set here prevents teardown from truncating those frames. The pure
+    /// translator independently remains ungated and is verified by
+    /// `CodexAppServerParityChecks`; the process-lifetime half is verified by the
+    /// late-child scenario in `CodexAppServerRunnerChecks`.
     private func runOnceAppServer(
         mode: CodexCLIBackend.SessionMode,
         threadId: String?,
@@ -418,6 +427,20 @@ public final class CodexAgentRunner: @unchecked Sendable {
         queue.sync {
             appServerTranslator = CodexAppServerEventTranslator(workingDirectory: config.cwd)
             appServerTranslator.onRuntimeObservation = runtimeObservationHandler
+            appServerPrimaryThreadID = nil
+            appServerLiveChildThreads.removeAll()
+            appServerTurnAccepted = false
+            appServerTurnOutcome = nil
+            appServerTranslator.onSubagentAnnouncement = { [weak self] parent, child, item, label in
+                guard let self else { return }
+                self.appServerLiveChildThreads.insert(child)
+                self.providerSubagentActivityHandler?(.childAnnounced(
+                    parentProviderThreadID: parent,
+                    childProviderThreadID: child,
+                    sourceItemID: item,
+                    displayLabel: label
+                ))
+            }
         }
 
         let spawned: ProcessGroupChild
@@ -436,16 +459,32 @@ public final class CodexAgentRunner: @unchecked Sendable {
         let transport = CodexAppServerTransport(child: spawned) { [weak self] line in
             guard let self else { return }
             self.queue.sync {
+                let providerThreadID = Self.appServerThreadID(in: line)
                 let events = self.appServerTranslator.translate(line: line)
                 for event in events {
-                    if case .turnCompleted(let eventThreadId, let eventTurnId, _, _) = event,
-                       let expected = self.appServerTurnCompletion,
-                       eventThreadId == expected.threadId, eventTurnId == expected.turnId {
-                        self.appServerTurnOutcome = event
+                    if case .turnCompleted(let eventThreadId, let eventTurnId, _, _) = event {
+                        if eventThreadId == self.appServerPrimaryThreadID,
+                           self.appServerTurnCompletion?.turnId == nil
+                            || eventTurnId == self.appServerTurnCompletion?.turnId {
+                            self.appServerTurnOutcome = event
+                        } else {
+                            self.appServerLiveChildThreads.remove(eventThreadId)
+                        }
                     }
-                    onEvent(event)
+                    if let providerThreadID,
+                       let primary = self.appServerPrimaryThreadID,
+                       providerThreadID != primary {
+                        self.providerSubagentActivityHandler?(.threadEvent(
+                            providerThreadID: providerThreadID,
+                            event: event
+                        ))
+                    } else {
+                        onEvent(event)
+                    }
                 }
-                if let expected = self.appServerTurnCompletion, self.appServerTurnOutcome != nil {
+                if let expected = self.appServerTurnCompletion,
+                   self.appServerTurnOutcome != nil,
+                   self.appServerLiveChildThreads.isEmpty {
                     expected.semaphore.signal()
                 }
             }
@@ -459,6 +498,8 @@ public final class CodexAgentRunner: @unchecked Sendable {
                 self.appServerTransport = nil
                 self.appServerActiveTurn = nil
                 self.appServerTurnCompletion = nil
+                self.appServerPrimaryThreadID = nil
+                self.appServerLiveChildThreads.removeAll()
             }
         }
 
@@ -508,6 +549,11 @@ public final class CodexAgentRunner: @unchecked Sendable {
             }
         }
 
+        queue.sync {
+            appServerPrimaryThreadID = resolvedThreadId
+            providerSubagentActivityHandler?(.primaryThread(providerThreadID: resolvedThreadId))
+        }
+
         var turnParams: [String: Any] = [
             "threadId": resolvedThreadId,
             "input": [["type": "text", "text": CodexCLIBackend.promptArgument(prompt)]],
@@ -522,14 +568,18 @@ public final class CodexAgentRunner: @unchecked Sendable {
             self.appServerTransport = transport
             self.appServerActiveTurn = (resolvedThreadId, turnId)
             self.appServerTurnCompletion = (resolvedThreadId, turnId, semaphore)
-            self.appServerTurnOutcome = nil
+            self.appServerTurnAccepted = true
+            if self.appServerTurnOutcome != nil, self.appServerLiveChildThreads.isEmpty {
+                semaphore.signal()
+            }
         }
 
         // No timeout on the wait itself: matches `spawned.wait()`'s unbounded
         // block on the exec path, and does NOT gate notification forwarding —
         // every method still translates and forwards independently of this
-        // wait, exactly as `CodexAppServerEventTranslator` has no gate (this is
-        // single-agent scope; there is no child here to truncate). `stop()`
+        // wait, exactly as `CodexAppServerEventTranslator` has no gate. An
+        // announced child keeps this wait unresolved after the primary's
+        // completion until that child's own terminal event arrives. `stop()`
         // unblocks it two ways: `turn/interrupt` over the live connection
         // produces a `turn/completed(status: interrupted)` notification
         // (measured live) which resolves it normally, OR — if that races
@@ -586,15 +636,16 @@ public final class CodexAgentRunner: @unchecked Sendable {
         running?.terminateGroup(graceSeconds: ProcessGroupChild.Grace.interactive)
     }
 
-    /// Measured 2026-08-24 (`.plans/46`): codex app-server DOES carry a
-    /// subagent side channel (`subAgentActivity`/`collabAgentToolCall` items,
-    /// a real delegating child thread) — the old claim that "codex has no
-    /// spawn_agent side channel" is false for this transport. This ticket's
-    /// scope is the single-agent path only; mapping that channel into
-    /// `SpawnRequest` is the next ticket (see .plans/46, "the codex arm is a
-    /// RUNNER rewrite, not a flag"). The handler is accepted for seam parity
-    /// and still never fires, on EITHER transport, deliberately, for now.
+    /// Exec has no structured subagent side channel. App-server reports through
+    /// `ProviderSubagentActivityObserving` below instead of pretending an
+    /// Array-owned `spawn_agent` request occurred.
     public func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {}
+
+    public func observeProviderSubagentActivity(
+        _ handler: @escaping @Sendable (ProviderSubagentActivity) -> Void
+    ) {
+        queue.sync { providerSubagentActivityHandler = handler }
+    }
 
     public func observeRuntimeObservations(
         _ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void
@@ -674,8 +725,14 @@ public final class CodexAgentRunner: @unchecked Sendable {
         spawned.standardOutput.readabilityHandler = nil
         spawned.standardError.readabilityHandler = nil
 
-        let remainder = spawned.standardOutput.readDataToEndOfFile()
-        let stderrRemainder = spawned.standardError.readDataToEndOfFile()
+        // Bounded, never `readDataToEndOfFile()`: a descendant that inherited
+        // fd 1/2 keeps the write end open after the leader exits, and the
+        // unbounded read then blocks until that process dies — potentially
+        // forever. Kill the group's leftovers first so the pipes close (a clean
+        // exit leaves nothing, making this a no-op).
+        spawned.terminateGroup(graceSeconds: ProcessGroupChild.Grace.interactive)
+        let remainder = ProcessGroupChild.drainRemainder(of: spawned.standardOutput)
+        let stderrRemainder = ProcessGroupChild.drainRemainder(of: spawned.standardError)
         let finalState: (stderr: String, threadId: String?, terminal: [AgentRuntimeEvent]) = queue.sync {
             if !remainder.isEmpty { consume(remainder, onEvent: onEvent) }
             flushBuffer(onEvent: onEvent)
@@ -751,6 +808,16 @@ public final class CodexAgentRunner: @unchecked Sendable {
     ) {
         queue.sync { events.forEach(onEvent) }
     }
+
+    private static func appServerThreadID(in line: String) -> String? {
+        guard let data = line.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let params = object["params"] as? [String: Any]
+        else { return nil }
+        return params["threadId"] as? String
+    }
 }
+
+extension CodexAgentRunner: ProviderSubagentActivityObserving {}
 
 #endif  // os(macOS)

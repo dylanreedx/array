@@ -1878,10 +1878,10 @@ enum UIProbeAppearance {
             .link(destination: "file:///Users/example/private.txt", title: nil, children: [.text("local")]),
             .hardBreak, .text("next"), .softBreak, .text("soft")
         ]
-        var activated: [URL] = []
+        var activated: [(URL, AgentLinkOpenTarget)] = []
         var localFiles: [String] = []
         let actions = AgentRenderActions { action in
-            if case let .activateLink(_, url) = action { activated.append(url) }
+            if case let .activateLink(_, url, target) = action { activated.append((url, target)) }
             if case let .openLocalFile(_, destination) = action { localFiles.append(destination) }
         }
         let lightContext = AgentRenderContext(actions: actions, tokens: .transcript, appearance: .light)
@@ -1909,10 +1909,15 @@ enum UIProbeAppearance {
               view.linkRanges[0].disposition == .openExternally,
               view.linkRanges[1].disposition == .openLocalFile,
               view.activateLink(at: view.linkRanges[0].range.location),
+              view.activateLink(at: view.linkRanges[0].range.location, target: .systemBrowser),
               view.activateLink(at: view.linkRanges[1].range.location),
-              activated.map(\URL.absoluteString) == ["https://example.com/docs"],
+              activated.count == 2,
+              activated[0].0.absoluteString == "https://example.com/docs",
+              activated[0].1 == .array,
+              activated[1].0.absoluteString == "https://example.com/docs",
+              activated[1].1 == .systemBrowser,
               localFiles == ["file:///Users/example/private.txt"] else {
-            throw fail("rich inline link witness: a local file must request host resolution with its raw destination and never become a URL action, and an https link must stay a URL action")
+            throw fail("rich inline link witness: https must distinguish Array/system intent, while a local file requests host resolution with its raw destination and never becomes a URL action")
         }
 
         let lightColor = attributed.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor

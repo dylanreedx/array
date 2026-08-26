@@ -869,6 +869,16 @@ enum AgentNameOneShot {
     }
 }
 
+/// One-way latch: did this run deliver a `.turnCompleted`? Set and read on the
+/// main queue in production — the lock exists so the compiler can prove the
+/// capture by the runner's `@Sendable` event closure is safe.
+private final class TerminalDeliveryLatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func set() { lock.withLock { value = true } }
+    var isSet: Bool { lock.withLock { value } }
+}
+
 @MainActor
 final class AgentSupervisor {
     /// How much of an agent's event history a late subscriber replays. Capped
@@ -2235,6 +2245,19 @@ final class AgentSupervisor {
                 }
             }
         }
+        // Codex app-server keys every frame by a provider thread id and can nest
+        // descendants. Keep that provider identity local, map the primary to the
+        // root Array agent, and adopt each announced child beneath the mapped
+        // provider parent.
+        if let observing = runner as? ProviderSubagentActivityObserving {
+            providerThreadAgentRoutes[id] = [:]
+            pendingProviderThreadEvents[id] = [:]
+            observing.observeProviderSubagentActivity { [weak self] activity in
+                DispatchQueue.main.async {
+                    self?.handleProviderSubagentActivity(activity, rootAgentID: id)
+                }
+            }
+        }
         // T6: pi's delegated child does not stream on the parent at all — it
         // writes its own run directory — so its runner reports a LOCATION and the
         // supervisor tails it. Different mechanism, same destination: the child's
@@ -2247,11 +2270,41 @@ final class AgentSupervisor {
             }
         }
         let threadId = Self.threadId(for: id)
+        // The translators mint `.turnCompleted` only from a provider result line.
+        // A CLI that dies without one (crash mid-line, init never parsed, silent
+        // exit 0) must not leave the turn open forever — the supervisor watches
+        // for the terminal event itself and closes the turn when the runner
+        // returns or throws without having delivered one.
+        let sawTurnCompleted = TerminalDeliveryLatch()
+        let harnessName = record.harness?.rawValue ?? "agent"
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 try runner.run(prompt: prompt) { event in
                     let bound = event.withThreadId(threadId)
-                    DispatchQueue.main.async { self?.deliver(bound, to: id) }
+                    DispatchQueue.main.async {
+                        if case .turnCompleted = bound { sawTurnCompleted.set() }
+                        self?.deliver(bound, to: id)
+                    }
+                }
+                // Dispatched from the same runner thread AFTER `run` returned, so
+                // main-queue FIFO serializes this behind every queued delivery.
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    guard !sawTurnCompleted.isSet else { return }
+                    // A stop already closes the turn through its own synchronous
+                    // `.sessionStateChanged(.stopped)`; a "no result" mint over it
+                    // would misreport a deliberate stop as a runner defect.
+                    guard !self.stopRequestedAgents.contains(id) else { return }
+                    let message = "The \(harnessName) process exited without reporting a result."
+                    self.appendAgentDiagnostics(
+                        "harness=\(harnessName) exit=no-result \(message)", agentID: id)
+                    self.deliver(
+                        .turnCompleted(
+                            threadId: threadId,
+                            turnId: "no-result:\(threadId)",
+                            outcome: .interrupted,
+                            errorMessage: message),
+                        to: id)
                 }
             } catch {
                 let message = SecretRedactor.redactLocalDiagnostics(String(describing: error))
@@ -2287,7 +2340,23 @@ final class AgentSupervisor {
                         return
                     }
                     fputs("AgentSupervisor: runner failed for agent \(id.rawValue.uuidString): \(message)\n", stderr)
+                    // The fputs above is /dev/null for a GUI launched via `open`;
+                    // this line is the trail that survives the process.
+                    self.appendAgentDiagnostics(
+                        "harness=\(harnessName) exit=threw \(message)", agentID: id)
                     self.deliver(.runtimeError(threadId: threadId, message: message), to: id)
+                    // `.runtimeError` shows the error row; a `.turnCompleted` is
+                    // still owed so every consumer of turn liveness sees the turn
+                    // END — unless the runner already closed it before throwing.
+                    if !sawTurnCompleted.isSet {
+                        self.deliver(
+                            .turnCompleted(
+                                threadId: threadId,
+                                turnId: "failed:\(threadId)",
+                                outcome: .failed,
+                                errorMessage: message),
+                            to: id)
+                    }
                 }
             }
             DispatchQueue.main.async { self?.clearRunner(runner, for: id) }
@@ -2832,21 +2901,6 @@ final class AgentSupervisor {
         ), to: childID)
     }
 
-    /// Turns an observed `spawn_agent` call into a real child agent.
-    ///
-    /// THE TOOL CALL IS THE API (P2D.1): the extension is inert, so this is the only
-    /// place a child is created. The child inherits the parent's project always, and
-    /// the parent's model and thinking level unless the ROLE it was asked for declares
-    /// its own (P2D.3) — a `code-scout` runs what `.pi/agents/code-scout.md` says it
-    /// runs. A role id this project does not define is REFUSED, not defaulted: the
-    /// orchestrator asked for a specific worker, and quietly starting a generic one
-    /// would answer a question nobody asked.
-    ///
-    /// `parentAgentID` is set on the child's record, which is what makes P2D.4's
-    /// nesting and P2D.5's roll-up possible from the store alone.
-    ///
-    /// Returns nil on a refusal, having said so in the parent's transcript.
-    @discardableResult
     /// Routes one frame of a claude subagent's work to the child it belongs to.
     ///
     /// The child is found by re-deriving its id, never by looking up a table the
@@ -2879,6 +2933,48 @@ final class AgentSupervisor {
     /// down by `stopObservedRunLivenessSweepIfIdle` once none remain.
     private var observedRunLivenessTimer: DispatchSourceTimer?
     private var pendingSubagentEvents: [AgentID: [AgentRuntimeEvent]] = [:]
+    private var providerThreadAgentRoutes: [AgentID: [String: AgentID]] = [:]
+    private var pendingProviderThreadEvents: [AgentID: [String: [AgentRuntimeEvent]]] = [:]
+
+    private func handleProviderSubagentActivity(
+        _ activity: ProviderSubagentActivity,
+        rootAgentID: AgentID
+    ) {
+        switch activity {
+        case let .primaryThread(providerThreadID):
+            providerThreadAgentRoutes[rootAgentID, default: [:]][providerThreadID] = rootAgentID
+
+        case let .childAnnounced(parentProviderThreadID, childProviderThreadID, sourceItemID, displayLabel):
+            guard let parentAgentID = providerThreadAgentRoutes[rootAgentID]?[parentProviderThreadID]
+            else { return }
+            let request = SpawnRequest(
+                role: nil,
+                prompt: "Codex delegated work",
+                isolated: false,
+                sourceItemID: sourceItemID,
+                observedOnly: true,
+                displayLabel: displayLabel
+            )
+            guard let childAgentID = handleSpawnRequest(request, from: parentAgentID) else { return }
+            providerThreadAgentRoutes[rootAgentID, default: [:]][childProviderThreadID] = childAgentID
+            let pending = pendingProviderThreadEvents[rootAgentID]?
+                .removeValue(forKey: childProviderThreadID) ?? []
+            for event in pending {
+                deliver(event.withThreadId(Self.threadId(for: childAgentID)), to: childAgentID)
+            }
+
+        case let .threadEvent(providerThreadID, event):
+            guard let target = providerThreadAgentRoutes[rootAgentID]?[providerThreadID] else {
+                pendingProviderThreadEvents[rootAgentID, default: [:]][providerThreadID, default: []]
+                    .append(event)
+                return
+            }
+            // Primary events already travel through AgentRunning.onEvent. This
+            // channel is for provider-owned descendants only.
+            guard target != rootAgentID else { return }
+            deliver(event.withThreadId(Self.threadId(for: target)), to: target)
+        }
+    }
 
     private func flushPendingSubagentEvents(for childID: AgentID) {
         guard let held = pendingSubagentEvents.removeValue(forKey: childID), !held.isEmpty
@@ -2983,6 +3079,21 @@ final class AgentSupervisor {
         return childID
     }
 
+    /// Turns an observed `spawn_agent` call into a real child agent.
+    ///
+    /// THE TOOL CALL IS THE API (P2D.1): the extension is inert, so this is the only
+    /// place a child is created. The child inherits the parent's project always, and
+    /// the parent's model and thinking level unless the ROLE it was asked for declares
+    /// its own (P2D.3) — a `code-scout` runs what `.pi/agents/code-scout.md` says it
+    /// runs. A role id this project does not define is REFUSED, not defaulted: the
+    /// orchestrator asked for a specific worker, and quietly starting a generic one
+    /// would answer a question nobody asked.
+    ///
+    /// `parentAgentID` is set on the child's record, which is what makes P2D.4's
+    /// nesting and P2D.5's roll-up possible from the store alone.
+    ///
+    /// Returns nil on a refusal, having said so in the parent's transcript.
+    @discardableResult
     func handleSpawnRequest(_ request: SpawnRequest, from parentId: AgentID) -> AgentID? {
         guard let parent = records[parentId] else {
             return refuseSpawn(.unknownParent, for: parentId)
@@ -2998,26 +3109,36 @@ final class AgentSupervisor {
         // even asking what harness it claims, since that field describes who
         // PRODUCED it, not something Array can spawn through.
         guard parent.capabilities != .observedReadOnly else {
-            return refuseSpawn(.observedParentCannotSpawn, for: parentId)
+            return refuseSpawn(
+                .observedParentCannotSpawn, for: parentId,
+                handle: request.sourceItemID, requestedRole: request.role)
         }
         guard let parentHarness = parent.harness else {
             warn("AgentSupervisor.handleSpawnRequest: child of \(parentId.rawValue.uuidString) not spawned: parent harness ownership is unresolved")
-            return refuseSpawn(.roleUnresolved, for: parentId)
+            return refuseSpawn(
+                .roleUnresolved, for: parentId,
+                handle: request.sourceItemID, requestedRole: request.role)
         }
         // C12 — codex delegation may genuinely be happening; Array's transport
         // (`codex exec --json`) has no wire representation for it, so refuse
         // honestly about observability rather than silently producing nothing or
         // claiming codex itself cannot spawn.
         guard parentHarness != .codex else {
-            return refuseSpawn(.codexSubagentsUnobservable, for: parentId)
+            return refuseSpawn(
+                .codexSubagentsUnobservable, for: parentId,
+                handle: request.sourceItemID, requestedRole: request.role)
         }
         let depth = depth(of: parentId) + 1
         guard depth <= Self.maxSpawnDepth else {
-            return refuseSpawn(.depthCapped(depth: depth, cap: Self.maxSpawnDepth), for: parentId)
+            return refuseSpawn(
+                .depthCapped(depth: depth, cap: Self.maxSpawnDepth), for: parentId,
+                handle: request.sourceItemID, requestedRole: request.role)
         }
         let siblings = children(of: parentId).count
         guard siblings < Self.maxChildrenPerParent else {
-            return refuseSpawn(.childCapped(children: siblings, cap: Self.maxChildrenPerParent), for: parentId)
+            return refuseSpawn(
+                .childCapped(children: siblings, cap: Self.maxChildrenPerParent), for: parentId,
+                handle: request.sourceItemID, requestedRole: request.role)
         }
         // The role resolves against the PROJECT's registry, not the parent's possibly
         // isolated checkout — and after the caps, so a request that was going to be
@@ -3031,7 +3152,8 @@ final class AgentSupervisor {
         if request.role != nil, registry.definesNoRoles {
             return refuseSpawn(
                 .projectDeclaresNoRoles(directory: RoleRegistry.directoryName(for: parentHarness)),
-                for: parentId)
+                for: parentId,
+                handle: request.sourceItemID, requestedRole: request.role)
         }
         do {
             resolvedRole = try registry.resolve(
@@ -3040,7 +3162,9 @@ final class AgentSupervisor {
             )
         } catch {
             warn("AgentSupervisor.handleSpawnRequest: child of \(parentId.rawValue.uuidString) not spawned: \(error)")
-            return refuseSpawn(.roleUnresolved, for: parentId)
+            return refuseSpawn(
+                .roleUnresolved, for: parentId,
+                handle: request.sourceItemID, requestedRole: request.role)
         }
         do {
             let childID = try spawn(
@@ -3054,6 +3178,26 @@ final class AgentSupervisor {
                 parentAgentID: parentId,
                 isolated: request.isolated
             )
+            // The child record remembers the tool call that asked for it, so its
+            // terminal `.turnCompleted` in `deliver` can rewrite the result file
+            // even across a relaunch. Distinct from `sourceItemId` (fan-out and
+            // naming semantics) on purpose.
+            if let handle = SpawnResultFile.validatedHandle(request.sourceItemID),
+               var child = records[childID] {
+                child.spawnResultHandle = handle
+                records[childID] = child
+                persist(child)
+                SpawnResultFile.write(
+                    SpawnResultFile(
+                        toolCallId: handle,
+                        status: .spawned,
+                        agentId: childID.rawValue,
+                        role: request.role
+                    ),
+                    parentCwd: parent.cwd,
+                    warn: warn
+                )
+            }
             let childName = records[childID]?.humanDisplayName ?? "Subagent"
             deliver(.childAgentSpawned(
                 threadId: Self.threadId(for: parentId),
@@ -3069,7 +3213,9 @@ final class AgentSupervisor {
             // The isolated spawn refuses to fall back to the shared checkout (P2C.2),
             // so a failed worktree is a failed spawn — reported, not downgraded.
             warn("AgentSupervisor.handleSpawnRequest: child of \(parentId.rawValue.uuidString) not spawned: \(error)")
-            return refuseSpawn(.worktreeFailed, for: parentId)
+            return refuseSpawn(
+                .worktreeFailed, for: parentId,
+                handle: request.sourceItemID, requestedRole: request.role)
         }
     }
 
@@ -3080,9 +3226,14 @@ final class AgentSupervisor {
     /// tool and the tool's effect did not happen — and because the bridge already
     /// renders `.itemCompleted(.failed)` on the timeline while collapsing the title to
     /// a safe token on the way to the phone.
-    private func refuseSpawn(_ refusal: SpawnRefusal, for parentId: AgentID) -> AgentID? {
+    private func refuseSpawn(
+        _ refusal: SpawnRefusal,
+        for parentId: AgentID,
+        handle: String? = nil,
+        requestedRole: String? = nil
+    ) -> AgentID? {
         warn("AgentSupervisor: refusing \(SpawnRequest.toolName) from \(parentId.rawValue.uuidString) — \(refusal.reason)")
-        guard records[parentId] != nil else { return nil }
+        guard let parent = records[parentId] else { return nil }
         let itemId = "spawn-refused-\(UUID().uuidString)"
         let thread = Self.threadId(for: parentId)
         deliver(.itemStarted(
@@ -3097,6 +3248,25 @@ final class AgentSupervisor {
             kind: .error,
             status: .failed
         ), to: parentId)
+        // The MODEL's copy of the refusal. The transcript items above are
+        // UI-only — the extension's `spawn_agent` has already answered
+        // "spawned" by the time this runs, so without this file the model's
+        // only view of a refused spawn is a success. `wait_agents` reads it as
+        // a terminal status. Local file under the parent's own cwd, so echoing
+        // the reason (already role-free, path-free) breaks no I5 boundary.
+        if let handle = SpawnResultFile.validatedHandle(handle) {
+            SpawnResultFile.write(
+                SpawnResultFile(
+                    toolCallId: handle,
+                    status: .refused,
+                    role: requestedRole,
+                    reason: refusal.reason,
+                    endedAt: Date()
+                ),
+                parentCwd: parent.cwd,
+                warn: warn
+            )
+        }
         return nil
     }
 
@@ -3448,6 +3618,16 @@ final class AgentSupervisor {
             return report
         }
         cleanUpWorktree(of: record, into: &report)
+        // A spawned child's result file goes with the child. Archiving the
+        // PARENT deliberately leaves its `spawn-results/` directory alone —
+        // `.array/` is project-local scratch and the parent's cwd may already
+        // be gone with its worktree.
+        if let handle = record.spawnResultHandle,
+           let parentID = record.parentAgentID,
+           let parent = records[parentID] {
+            try? FileManager.default.removeItem(
+                at: SpawnResultFile.url(parentCwd: parent.cwd, handle: handle))
+        }
 
         records.removeValue(forKey: id)
         history.removeValue(forKey: id)
@@ -5211,6 +5391,15 @@ final class AgentSupervisor {
             continuation.yield(event)
         }
 
+        // A spawned child's turn ending is the moment its result becomes
+        // collectable: rewrite the parent's `spawn-results/<handle>.json` from
+        // `spawned` to a terminal status, carrying the child's final assistant
+        // text. After `ingestTranscriptEvent` above on purpose — the projection
+        // must already hold this turn's last assistant entry.
+        if case let .turnCompleted(_, _, outcome, errorMessage) = event {
+            writeTerminalSpawnResult(for: id, outcome: outcome, errorMessage: errorMessage)
+        }
+
         // P2D.6: the agent finished the work its item was fanned out for, so the
         // item is done. Only `.completed` — a turn that failed or was aborted has
         // not done the work, and checking the row off would lose it. Last, after
@@ -5222,6 +5411,46 @@ final class AgentSupervisor {
             completedFanOutItems.insert(itemId)
             onFanOutItemCompleted?(itemId, id)
         }
+    }
+
+    /// The child half of the `spawn_agent` result-file channel. No-op for any
+    /// agent without a spawn handle (user-created agents, observed children) and
+    /// for a child whose parent is gone — nothing is waiting on the file then.
+    /// A later turn of the same child overwrites with its own final text: the
+    /// last answer is the freshest one, and `wait_agents` only reads during the
+    /// parent's own turn.
+    private func writeTerminalSpawnResult(for id: AgentID, outcome: TurnOutcome, errorMessage: String?) {
+        guard let child = records[id],
+              let handle = child.spawnResultHandle,
+              let parentID = child.parentAgentID,
+              let parent = records[parentID] else { return }
+        let status: SpawnResultFile.Status
+        switch outcome {
+        case .completed: status = .completed
+        case .failed: status = .failed
+        case .interrupted, .cancelled: status = .interrupted
+        }
+        var finalText: String?
+        var finalTextTruncated: Bool?
+        if status == .completed, let text = transcriptProjections[id]?.finalAssistantText {
+            let capped = SpawnResultFile.cappedFinalText(text)
+            finalText = capped.text
+            finalTextTruncated = capped.truncated ? true : nil
+        }
+        SpawnResultFile.write(
+            SpawnResultFile(
+                toolCallId: handle,
+                status: status,
+                agentId: id.rawValue,
+                role: child.role,
+                reason: errorMessage,
+                finalText: finalText,
+                finalTextTruncated: finalTextTruncated,
+                endedAt: Date()
+            ),
+            parentCwd: parent.cwd,
+            warn: warn
+        )
     }
 
     private func updateTurnFacts(with event: AgentRuntimeEvent, for id: AgentID, now: Date = Date()) {
@@ -5375,6 +5604,36 @@ final class AgentSupervisor {
                 handleQueueOnTurnCompleted(outcome: outcome, for: id)
             }
         }
+    }
+
+    /// Failure-time diagnostics that survive the process. The supervisor's other
+    /// trail is `fputs(stderr)`/`warn`, which for a GUI app launched via `open`
+    /// goes to /dev/null — so WHY a runner died was unrecoverable after the fact.
+    /// One line per failure, redacted upstream by `SecretRedactor` (never prompt
+    /// text or command bodies), appended under the app-support root the store
+    /// already owns — which is what keeps checks off the real file. Rotated at
+    /// 1 MB to a single `.old`; never on a hot path.
+    private func appendAgentDiagnostics(_ message: String, agentID: AgentID) {
+        let line = "\(ISO8601DateFormatter().string(from: Date())) "
+            + "agent=\(agentID.rawValue.uuidString) \(message)\n"
+        let url = store.layout.applicationSupportDirectory
+            .appendingPathComponent("agent-diagnostics.log", isDirectory: false)
+        let fileManager = FileManager.default
+        try? fileManager.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let size = (try? fileManager.attributesOfItem(atPath: url.path))?[.size] as? Int,
+           size > 1_048_576 {
+            let old = url.appendingPathExtension("old")
+            try? fileManager.removeItem(at: old)
+            try? fileManager.moveItem(at: url, to: old)
+        }
+        if !fileManager.fileExists(atPath: url.path) {
+            fileManager.createFile(atPath: url.path, contents: nil)
+        }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: Data(line.utf8))
     }
 
     private func persist(_ record: AgentRecord) {
@@ -6937,7 +7196,13 @@ func runAgentSupervisorChecks() async throws {
                     startedAt: locationObservedAt,
                     updatedAt: locationObservedAt,
                     evidenceSource: .toolEvent)),
-        ])
+        ],
+        // Every assertion below reads MID-TURN state (the stale timer, the live
+        // projector). A script that returned would now be closed by the
+        // supervisor's no-result mint — correctly, but that is section 23's
+        // subject, not this one's — so the run stays open until the explicit
+        // stop at the end of the section.
+        holdUntilStopped: true)
     let locationSupervisor = AgentSupervisor(store: locationStore, makeRunner: { _ in locationRunner })
     let locationAgentId = locationSupervisor.spawn(
         role: nil,
@@ -7021,6 +7286,7 @@ func runAgentSupervisorChecks() async throws {
           !locationTile.qaLocationStaleTimerActive else {
         throw fail("detached tile froze current What after removing its observer/timer instead of demoting it to recent")
     }
+    locationSupervisor.stop(locationAgentId)
 
     // Exercise the real native location band at narrow width. Externality has its
     // own fixed marker lane, so tail truncation can never turn an outside fact into
@@ -7321,6 +7587,10 @@ func runAgentSupervisorChecks() async throws {
 
     let spawnCallReport = try await checkSpawnFromToolCall(fail: fail)
 
+    // MARK: 13b · a spawn's result is COLLECTABLE: refused/spawned/terminal reach the model's file channel
+
+    let spawnResultReport = try await checkSpawnResultFileChannel(fail: fail)
+
     // MARK: 14 · a turn you did not watch is unread, and looking clears it (P3.3)
 
     let readStateReport = try await checkReadState(config: config, cwd: cwd, fail: fail)
@@ -7357,14 +7627,127 @@ func runAgentSupervisorChecks() async throws {
     // MARK: 22 · B7.2 — `/clear` is one transaction, not a notice alone
 
     let clearCommandReport = try await checkClearCommandTransaction(config: config, cwd: cwd, fail: fail)
+
+    // MARK: 23 · a runner that dies without a result still ends the turn
+
+    // D1 (2026-08-26): the translators mint `.turnCompleted` only from a provider
+    // result line. A CLI that exits 0 without one (crash mid-line, init never
+    // parsed, silent death) made `run()` return normally, the do-block fell
+    // through to `clearRunner`, and NOTHING ever told the tile the turn ended —
+    // it showed "Working" forever. The supervisor now closes the turn itself.
+    let noResultStore = AgentStore(
+        applicationSupportDirectory: root.appendingPathComponent("no-result", isDirectory: true))
+    let noResultRunner = ScriptedAgentRunner(script: [
+        .turnStarted(threadId: scriptThread, turnId: "t-lost"),
+        .contentDelta(threadId: scriptThread, turnId: "t-lost", streamKind: .assistant, delta: "half an answer"),
+    ])
+    let noResultSupervisor = AgentSupervisor(store: noResultStore, makeRunner: { _ in noResultRunner })
+    let noResultId = noResultSupervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, model: config.model, thinking: config.thinking)
+    let noResultInbox = EventInbox()
+    let noResultStream = noResultSupervisor.events(for: noResultId)
+    let noResultTask = Task { @MainActor in for await event in noResultStream { noResultInbox.append(event) } }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { noResultSupervisor.subscriberCount(for: noResultId) == 1 }) else {
+        throw fail("no-result exit: the subscriber never registered")
+    }
+    noResultSupervisor.send("a prompt whose result will be lost", to: noResultId)
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, {
+        noResultInbox.events.contains { if case .turnCompleted = $0 { return true } else { return false } }
+    }) else {
+        throw fail(
+            "no-result exit: the runner returned without a result event and no .turnCompleted was "
+            + "ever delivered — the tile shows Working forever")
+    }
+    let noResultCompletions = noResultInbox.events.compactMap { event -> (turnId: String, outcome: TurnOutcome, message: String?)? in
+        if case let .turnCompleted(_, turnId, outcome, message) = event { return (turnId, outcome, message) }
+        return nil
+    }
+    guard noResultCompletions.count == 1 else {
+        throw fail("no-result exit: expected exactly one minted .turnCompleted, got \(noResultCompletions.count)")
+    }
+    guard noResultCompletions[0].outcome == .interrupted else {
+        throw fail("no-result exit: the minted completion's outcome is \(noResultCompletions[0].outcome), expected .interrupted")
+    }
+    guard noResultCompletions[0].message?.contains("exited without reporting a result") == true else {
+        throw fail("no-result exit: the minted completion carries no explanation: \(String(describing: noResultCompletions[0].message))")
+    }
+    // The mint must be TERMINAL: behind every event the runner queued, never before.
+    guard case .turnCompleted = noResultInbox.events.last! else {
+        throw fail("no-result exit: the minted completion was not the last event delivered — \(noResultInbox.events.map(eventLabel))")
+    }
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { noResultSupervisor.isRunning(noResultId) == false }) else {
+        throw fail("no-result exit: the runner slot was never cleared")
+    }
+
+    // D1-catch: a runner that THROWS mid-turn (not a stop) must both show the
+    // error row (.runtimeError, unchanged) AND close the turn (.turnCompleted),
+    // each exactly once — the error alone left the tile's liveness dangling.
+    struct RunnerExploded: Error, CustomStringConvertible {
+        var description: String { "checks-runner-exploded mid-turn" }
+    }
+    let thrownRunner = ScriptedAgentRunner(
+        script: [.turnStarted(threadId: scriptThread, turnId: "t-thrown")],
+        stopError: RunnerExploded())
+    let thrownSupervisor = AgentSupervisor(store: noResultStore, makeRunner: { _ in thrownRunner })
+    let thrownId = thrownSupervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, model: config.model, thinking: config.thinking)
+    let thrownInbox = EventInbox()
+    let thrownStream = thrownSupervisor.events(for: thrownId)
+    let thrownTask = Task { @MainActor in for await event in thrownStream { thrownInbox.append(event) } }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { thrownSupervisor.subscriberCount(for: thrownId) == 1 }) else {
+        throw fail("thrown mid-turn: the subscriber never registered")
+    }
+    thrownSupervisor.send("a prompt whose runner throws", to: thrownId)
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, {
+        thrownInbox.events.contains { if case .turnCompleted = $0 { return true } else { return false } }
+    }) else {
+        throw fail("thrown mid-turn: no closing .turnCompleted was delivered after the runtime error")
+    }
+    let thrownErrors = thrownInbox.events.filter { if case .runtimeError = $0 { return true } else { return false } }
+    let thrownCompletions = thrownInbox.events.compactMap { event -> TurnOutcome? in
+        if case let .turnCompleted(_, _, outcome, _) = event { return outcome }
+        return nil
+    }
+    guard thrownErrors.count == 1 else {
+        throw fail("thrown mid-turn: expected exactly one .runtimeError, got \(thrownErrors.count)")
+    }
+    guard thrownCompletions == [.failed] else {
+        throw fail("thrown mid-turn: expected exactly one closing .turnCompleted(.failed), got \(thrownCompletions)")
+    }
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { thrownSupervisor.isRunning(thrownId) == false }) else {
+        throw fail("thrown mid-turn: the runner slot was never cleared")
+    }
+
+    // D4: WHY a runner died must survive the process. For a GUI app launched via
+    // `open`, stderr is /dev/null, so the fputs trail was unrecoverable. Both
+    // failure paths above append one redacted line to a durable file under the
+    // (isolated) app-support root.
+    let diagnosticsLog = noResultStore.layout.applicationSupportDirectory
+        .appendingPathComponent("agent-diagnostics.log", isDirectory: false)
+    guard let diagnosticsText = try? String(contentsOf: diagnosticsLog, encoding: .utf8) else {
+        throw fail("diagnostics: no agent-diagnostics.log was written at \(diagnosticsLog.path)")
+    }
+    guard diagnosticsText.contains("checks-runner-exploded") else {
+        throw fail("diagnostics: the thrown runner's redacted message never reached the log: \(diagnosticsText)")
+    }
+    guard diagnosticsText.contains("exited without reporting a result") else {
+        throw fail("diagnostics: the no-result exit left no trail in the log: \(diagnosticsText)")
+    }
+    noResultTask.cancel()
+    thrownTask.cancel()
+    let deadRunnerReport = "a runner that returned with no result minted one terminal "
+        + ".turnCompleted(.interrupted), a mid-turn throw delivered .runtimeError plus one closing "
+        + ".turnCompleted(.failed), and both left a redacted line in agent-diagnostics.log"
+
     let piDelegateReport = try await checkPiDelegatedRunTailing(fail: fail)
+    let codexSubagentReport = try await checkCodexProviderSubagentRouting(fail: fail)
     let refusalReport = try await checkRefusedSpawnIsActionableAndLeavesNothing(fail: fail)
     let observedCapReport = try await checkObservedRunCapRefusalDoesNotBufferForever(fail: fail)
     let observedRaceReport = try await checkObservedRunBindingSurvivesAdoptionRace(fail: fail)
     let observedLivenessReport = try await checkObservedRunLivenessSweepClosesQuietDeadRun(fail: fail)
 
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport); \(piDelegateReport); \(refusalReport); \(observedCapReport); \(observedRaceReport); \(observedLivenessReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(spawnResultReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport); \(deadRunnerReport); \(piDelegateReport); \(codexSubagentReport); \(refusalReport); \(observedCapReport); \(observedRaceReport); \(observedLivenessReport)")
 }
 
 /// B7.2 — `/clear`'s one-transaction contract, driven through the real
@@ -10253,7 +10636,14 @@ private func checkLiveV2TileMigration<Failure: Error>(
     cwd: URL,
     fail: (String) -> Failure
 ) async throws -> String {
-    let supervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+    // The runner is a transport stub — the turn shapes under test are
+    // hand-delivered via `qaDeliver`. It still closes its own turn like a real
+    // provider does, because a runner that returns WITHOUT a `.turnCompleted` is
+    // now (correctly) closed by the supervisor's no-result mint, and that
+    // interrupted completion is section 23's subject, not this leg's.
+    let supervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: [
+        .turnCompleted(threadId: "v2-stub", turnId: "composer-turn", outcome: .completed, errorMessage: nil)
+    ]) })
     let tileID = UUID()
     let agentID = supervisor.spawn(
         role: "migration-check",
@@ -11362,6 +11752,144 @@ extension FixtureStreamRunner: ObservedRunReporting {
     func observeObservedRuns(_ handler: @escaping @Sendable (ObservedRunHandle) -> Void) {
         lock.withLock { observedRunHandler = handler }
     }
+}
+
+/// Offline Codex app-server double for the supervisor seam. Announcements are
+/// emitted first so the check can subscribe to the adopted descendants; their
+/// transcript frames wait behind `releaseDescendantEvents()`.
+private final class ProviderSubagentFixtureRunner:
+    AgentRunning, ProviderSubagentActivityObserving, @unchecked Sendable
+{
+    private let lock = NSLock()
+    private let descendantGate = DispatchSemaphore(value: 0)
+    private var activityHandler: (@Sendable (ProviderSubagentActivity) -> Void)?
+
+    func observeProviderSubagentActivity(
+        _ handler: @escaping @Sendable (ProviderSubagentActivity) -> Void
+    ) {
+        lock.withLock { activityHandler = handler }
+    }
+
+    func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+        guard let activity = lock.withLock({ activityHandler }) else { return }
+        let parent = "codex-provider-parent"
+        let child = "codex-provider-child"
+        let grandchild = "codex-provider-grandchild"
+        activity(.primaryThread(providerThreadID: parent))
+        activity(.childAnnounced(
+            parentProviderThreadID: parent, childProviderThreadID: child,
+            sourceItemID: "codex-child-call", displayLabel: "Scout"))
+        activity(.childAnnounced(
+            parentProviderThreadID: child, childProviderThreadID: grandchild,
+            sourceItemID: "codex-grandchild-call", displayLabel: "Verifier"))
+        guard descendantGate.wait(timeout: .now() + 10) == .success else { return }
+        activity(.threadEvent(providerThreadID: child, event: .turnStarted(
+            threadId: child, turnId: "codex-child-turn")))
+        activity(.threadEvent(providerThreadID: child, event: .contentDelta(
+            threadId: child, turnId: "codex-child-turn",
+            streamKind: .assistant, delta: "child routed")))
+        activity(.threadEvent(providerThreadID: grandchild, event: .turnStarted(
+            threadId: grandchild, turnId: "codex-grandchild-turn")))
+        activity(.threadEvent(providerThreadID: grandchild, event: .contentDelta(
+            threadId: grandchild, turnId: "codex-grandchild-turn",
+            streamKind: .assistant, delta: "grandchild routed")))
+        activity(.threadEvent(providerThreadID: grandchild, event: .turnCompleted(
+            threadId: grandchild, turnId: "codex-grandchild-turn",
+            outcome: .completed, errorMessage: nil)))
+        activity(.threadEvent(providerThreadID: child, event: .turnCompleted(
+            threadId: child, turnId: "codex-child-turn",
+            outcome: .completed, errorMessage: nil)))
+        onEvent(.turnCompleted(
+            threadId: parent, turnId: "codex-parent-turn",
+            outcome: .completed, errorMessage: nil))
+    }
+
+    func stop() { descendantGate.signal() }
+    func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {}
+    func observeRuntimeObservations(
+        _ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void
+    ) {}
+    func releaseDescendantEvents() { descendantGate.signal() }
+}
+
+@MainActor
+private func checkCodexProviderSubagentRouting(
+    fail: (String) -> Error
+) async throws -> String {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-codex-subagent-routing-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let runner = ProviderSubagentFixtureRunner()
+    let supervisor = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: root),
+        makeRunner: { _ in runner })
+    let config = AgentModelConfig.resolvedFromDefaults(harness: .codex)
+    let parentID = supervisor.spawn(
+        role: nil, prompt: nil,
+        cwd: URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true),
+        harness: .codex, model: config.model, thinking: config.thinking)
+    let parentInbox = EventInbox()
+    let parentTask = Task { @MainActor in
+        for await event in supervisor.events(for: parentID) { parentInbox.append(event) }
+    }
+    defer { parentTask.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.subscriberCount(for: parentID) == 1
+    }) else { throw fail("Codex routing: the parent subscriber never registered") }
+
+    supervisor.send("delegate twice", to: parentID)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        guard let child = supervisor.children(of: parentID).first else { return false }
+        return supervisor.children(of: child).count == 1
+    }) else {
+        throw fail("Codex routing: structured announcements did not create a nested child and grandchild")
+    }
+    guard let childID = supervisor.children(of: parentID).first,
+          let grandchildID = supervisor.children(of: childID).first,
+          let childRecord = supervisor.records[childID],
+          let grandchildRecord = supervisor.records[grandchildID]
+    else { throw fail("Codex routing: adopted descendant records disappeared") }
+    guard childRecord.capabilities == .observedReadOnly,
+          grandchildRecord.capabilities == .observedReadOnly,
+          childRecord.harness == .codex,
+          grandchildRecord.harness == .codex else {
+        throw fail("Codex routing: provider-owned descendants must remain read-only Codex records")
+    }
+
+    let childInbox = EventInbox()
+    let grandchildInbox = EventInbox()
+    let childTask = Task { @MainActor in
+        for await event in supervisor.events(for: childID) { childInbox.append(event) }
+    }
+    let grandchildTask = Task { @MainActor in
+        for await event in supervisor.events(for: grandchildID) { grandchildInbox.append(event) }
+    }
+    defer { childTask.cancel(); grandchildTask.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.subscriberCount(for: childID) == 1
+            && supervisor.subscriberCount(for: grandchildID) == 1
+    }) else { throw fail("Codex routing: descendant subscribers never registered") }
+
+    runner.releaseDescendantEvents()
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        childInbox.events.contains {
+            if case .contentDelta(_, _, _, "child routed") = $0 { return true }
+            return false
+        } && grandchildInbox.events.contains {
+            if case .contentDelta(_, _, _, "grandchild routed") = $0 { return true }
+            return false
+        }
+    }) else {
+        throw fail("Codex routing: provider thread events did not reach their own descendant transcripts")
+    }
+    guard !parentInbox.events.contains(where: {
+        if case .contentDelta(_, _, _, let delta) = $0 {
+            return delta == "child routed" || delta == "grandchild routed"
+        }
+        return false
+    }) else { throw fail("Codex routing: descendant content leaked into the parent transcript") }
+
+    return "structured Codex provider activity adopted one read-only child plus a nested grandchild and routed each provider thread only to its own transcript"
 }
 
 /// A runner factory that hands a distinct runner to each agent and remembers which
@@ -12675,6 +13203,164 @@ private func checkSpawnFromToolCall(
 
     for id in supervisor.children(of: parentId) + [grandchildId] { supervisor.stop(id) }
     return "the captured spawn_agent call produced 1 child (role \(capturedRole) at \(scoutModel)/\(scoutThinking) and --tools from its role file, isolated on \(branch), parent linked in the store) that ran the requested prompt, prompt/role absent from \(parentInbox.events.count) parent events and \(published.count) published activity events while tool.\(SpawnRequest.toolName) crossed, a grandchild got a sibling worktree, depth capped at \(AgentSupervisor.maxSpawnDepth) and children at \(AgentSupervisor.maxChildrenPerParent) with the refusal said in the requesting agent's transcript, \(workers.count) role-only children inherited the parent's settings, an undefined role was refused without echoing its id, a codex parent was refused honestly about transport observability rather than a false claim it cannot spawn, and a mirrored observedReadOnly parent restored from the store was refused for having no runner to spawn through — neither refusal echoing its request; and a claude Agent announcement was ADOPTED as one observedReadOnly, parented, process-less child at a (parent, tool_use_id)-derived id that re-observation converges on, with exactly one chip on the parent and no prompt in it"
+}
+
+/// The `spawn_agent` result-file channel — what makes delegation COLLECTABLE.
+///
+/// Witnessed live 2026-08-22: `spawn_agent` is fire-and-forget, so a parent's
+/// model spawned two children, had no way to read their results, slept in a
+/// loop, gave up and redid the work itself; and a REFUSED spawn still read
+/// "spawned" to the model, because `refuseSpawn` synthesizes transcript items
+/// the model never receives. The channel is
+/// `<parent cwd>/.array/spawn-results/<toolCallId>.json`, written by the
+/// production functions this check drives (`handleSpawnRequest`,
+/// `refuseSpawn`, `deliver`'s `.turnCompleted`), and read by the extension's
+/// `wait_agents` tool.
+///
+/// Three lifecycles, all in an isolated temp cwd:
+///   1. a REFUSED spawn writes `refused` with the refusal's own reason
+///      (red at HEAD: no file existed at all),
+///   2. a successful spawn writes `spawned` synchronously, and the child's
+///      `.turnCompleted(.completed)` rewrites it to `completed` carrying the
+///      child's final assistant text (red at HEAD),
+///   3. an interrupted child's file ends `interrupted`; archiving that child
+///      removes its file.
+@MainActor
+private func checkSpawnResultFileChannel(
+    fail: (String) -> Error
+) async throws -> String {
+    let piConfig = AgentModelConfig.resolvedFromDefaults(harness: .pi)
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-spawn-result-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    // Deliberately NO .pi/agents directory, so a NAMED role is the refusal.
+    let cwd = root.appendingPathComponent("project", isDirectory: true)
+    try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+    let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support", isDirectory: true))
+
+    let childAnswer = "The final answer from the spawned child: 42."
+    let completedScript: [AgentRuntimeEvent] = [
+        .turnStarted(threadId: "child-thread", turnId: "turn-1"),
+        .itemStarted(threadId: "child-thread", itemId: "msg-1", kind: .assistantMessage, title: nil),
+        .contentDelta(threadId: "child-thread", turnId: "turn-1", streamKind: .assistant, delta: childAnswer),
+        .itemCompleted(threadId: "child-thread", itemId: "msg-1", kind: .assistantMessage, status: .completed),
+        .turnCompleted(threadId: "child-thread", turnId: "turn-1", outcome: .completed, errorMessage: nil),
+        .sessionStateChanged(.ready),
+    ]
+    let interruptedScript: [AgentRuntimeEvent] = [
+        .turnStarted(threadId: "child-thread", turnId: "turn-1"),
+        .turnCompleted(threadId: "child-thread", turnId: "turn-1", outcome: .interrupted, errorMessage: nil),
+        .sessionStateChanged(.ready),
+    ]
+    // The parent never runs a turn here; each CHILD gets the next script in
+    // order, so the two spawns below exercise two different terminal outcomes.
+    var childScripts = [completedScript, interruptedScript]
+    // A transcript store is required: `finalText` is read from the transcript
+    // projection, which `ingestTranscriptEvent` only feeds when one is injected
+    // — exactly production's shape.
+    let transcriptStore = AgentTranscriptStore(
+        root: root.appendingPathComponent("transcripts", isDirectory: true))
+    let supervisor = AgentSupervisor(store: store, makeRunner: { launch in
+        if launch.record.parentAgentID == nil {
+            return ScriptedAgentRunner(script: [.sessionStateChanged(.ready)])
+        }
+        return ScriptedAgentRunner(script: childScripts.isEmpty ? [.sessionStateChanged(.ready)] : childScripts.removeFirst())
+    }, warn: { _ in }, transcriptStore: transcriptStore)
+    let parentId = supervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, harness: .pi,
+        model: piConfig.model, thinking: piConfig.thinking)
+
+    func resultFile(_ handle: String) -> SpawnResultFile? {
+        guard let data = try? Data(contentsOf: SpawnResultFile.url(parentCwd: cwd.path, handle: handle)) else {
+            return nil
+        }
+        return try? JSONCodec.makeDecoder().decode(SpawnResultFile.self, from: data)
+    }
+
+    // MARK: 1 · a refusal reaches the MODEL's channel, with the reason
+
+    let refusedHandle = "call_refused_no_roles"
+    guard supervisor.handleSpawnRequest(
+        SpawnRequest(role: "researcher", prompt: "look it up", isolated: false, sourceItemID: refusedHandle),
+        from: parentId
+    ) == nil else {
+        throw fail("a named role in a project with no roles was not refused")
+    }
+    guard let refused = resultFile(refusedHandle) else {
+        throw fail("a refused spawn wrote no result file — the refusal is still UI-only and the model still believes it spawned")
+    }
+    guard refused.status == .refused, refused.toolCallId == refusedHandle else {
+        throw fail("the refused result file says \(refused.status.rawValue) for \(refused.toolCallId), expected refused/\(refusedHandle)")
+    }
+    guard refused.reason == AgentSupervisor.SpawnRefusal
+        .projectDeclaresNoRoles(directory: RoleRegistry.directoryName(for: .pi)).reason else {
+        throw fail("the refused result file's reason is \(String(describing: refused.reason)), not the refusal's own")
+    }
+
+    // MARK: 2 · spawned synchronously, then rewritten to completed with the child's final text
+
+    let okHandle = "call_ok_completed"
+    guard let childId = supervisor.handleSpawnRequest(
+        SpawnRequest(role: nil, prompt: "find the answer", isolated: false, sourceItemID: okHandle),
+        from: parentId
+    ) else {
+        throw fail("a roleless spawn inside every cap was refused")
+    }
+    // Synchronous read on the same actor turn: the child's runner has not run
+    // yet, so this MUST already say `spawned` — the write is part of the spawn.
+    guard let spawned = resultFile(okHandle), spawned.status == .spawned else {
+        throw fail("a successful spawn did not synchronously write a spawned result file, got \(String(describing: resultFile(okHandle)?.status))")
+    }
+    guard spawned.agentId == childId.rawValue else {
+        throw fail("the spawned result file names agent \(String(describing: spawned.agentId)), not the child \(childId.rawValue)")
+    }
+    guard supervisor.records[childId]?.spawnResultHandle == okHandle else {
+        throw fail("the child record does not remember its spawn handle: \(String(describing: supervisor.records[childId]?.spawnResultHandle))")
+    }
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { resultFile(okHandle)?.status == .completed }) else {
+        throw fail("the child's turnCompleted never rewrote the result file to completed; last status \(String(describing: resultFile(okHandle)?.status))")
+    }
+    guard let completed = resultFile(okHandle), completed.finalText == childAnswer else {
+        throw fail("the completed result file does not carry the child's final assistant text: \(String(describing: resultFile(okHandle)?.finalText))")
+    }
+    guard completed.agentId == childId.rawValue, completed.endedAt != nil else {
+        throw fail("the completed result file lost the child's identity or endedAt")
+    }
+
+    // MARK: 3 · an interrupted child says so, and archiving it removes the file
+
+    let interruptedHandle = "call_interrupted"
+    guard let interruptedChildId = supervisor.handleSpawnRequest(
+        SpawnRequest(role: nil, prompt: "work that will be stopped", isolated: false, sourceItemID: interruptedHandle),
+        from: parentId
+    ) else {
+        throw fail("the second spawn inside every cap was refused")
+    }
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { resultFile(interruptedHandle)?.status == .interrupted }) else {
+        throw fail("an interrupted child's result file never reached interrupted; last status \(String(describing: resultFile(interruptedHandle)?.status))")
+    }
+    _ = supervisor.archive(interruptedChildId)
+    guard resultFile(interruptedHandle) == nil else {
+        throw fail("archiving a spawned child left its result file behind")
+    }
+
+    // A handle that cannot be a filename writes nothing, anywhere.
+    let beforeTraversal = (try? FileManager.default.contentsOfDirectory(
+        atPath: SpawnResultFile.directory(parentCwd: cwd.path).path)) ?? []
+    _ = supervisor.handleSpawnRequest(
+        SpawnRequest(role: "researcher", prompt: "x", isolated: false, sourceItemID: "../escape"),
+        from: parentId)
+    let afterTraversal = (try? FileManager.default.contentsOfDirectory(
+        atPath: SpawnResultFile.directory(parentCwd: cwd.path).path)) ?? []
+    guard beforeTraversal.sorted() == afterTraversal.sorted(),
+          !FileManager.default.fileExists(atPath: cwd.deletingLastPathComponent()
+              .appendingPathComponent("escape.json").path) else {
+        throw fail("a path-shaped toolCallId reached the filesystem")
+    }
+
+    supervisor.stop(childId)
+    supervisor.stop(parentId)
+    return "spawn results: a refusal wrote refused with its reason to the model's file channel, a launch wrote spawned synchronously and the child's turnCompleted rewrote it to completed with the final assistant text, an interrupted child ended interrupted and its archive removed the file, and a path-shaped handle wrote nothing"
 }
 
 /// P2C.2 — an isolated spawn works in its OWN checkout.

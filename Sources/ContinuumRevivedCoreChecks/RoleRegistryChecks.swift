@@ -266,21 +266,21 @@ func runRoleRegistryHarnessConvergenceChecks() throws {
     // first silently denied the other — which is what made pi delegation look
     // broken while Array's own extension was installed and loading correctly.
     expect(pi.toolsArguments(roleId: "pi-orchestrator", allowingSpawn: true)
-            == ["--tools", "read, grep, spawn_agent, delegate_agent"],
-           "T5.2: a roled pi agent allowed to spawn must be offered BOTH pi delegation verbs")
+            == ["--tools", "read, grep, spawn_agent, wait_agents, delegate_agent"],
+           "T5.2: a roled pi agent allowed to spawn must be offered BOTH pi delegation verbs plus spawn_agent's wait_agents collection half")
 
     // Idempotent, per verb: a role that already lists ONE is given only the other,
     // and keeps its own ordering.
     try writeRole(.pi, name: "pi-spawner", tools: "read, spawn_agent")
     let respawned = RoleRegistry(projectRoot: temp, harness: .pi)
     expect(respawned.toolsArguments(roleId: "pi-spawner", allowingSpawn: true)
-            == ["--tools", "read, spawn_agent, delegate_agent"],
-           "T5.2: a role already declaring one spawn verb must gain the missing one and not repeat the declared one")
-    try writeRole(.pi, name: "pi-both", tools: "read, delegate_agent, spawn_agent")
+            == ["--tools", "read, spawn_agent, wait_agents, delegate_agent"],
+           "T5.2: a role already declaring one spawn verb must gain the missing ones and not repeat the declared one")
+    try writeRole(.pi, name: "pi-both", tools: "read, delegate_agent, spawn_agent, wait_agents")
     let both = RoleRegistry(projectRoot: temp, harness: .pi)
     expect(both.toolsArguments(roleId: "pi-both", allowingSpawn: true)
-            == ["--tools", "read, delegate_agent, spawn_agent"],
-           "T5.2: a role declaring both verbs must be left exactly as written")
+            == ["--tools", "read, delegate_agent, spawn_agent, wait_agents"],
+           "T5.2: a role declaring every verb must be left exactly as written")
 
     // A role with no tool list keeps having none: pi's default already includes
     // spawning and inventing a list would NARROW what the agent may do.
@@ -289,8 +289,8 @@ func runRoleRegistryHarnessConvergenceChecks() throws {
 
     expect(RoleRegistry.spawnToolNames(for: .claudeCode) == ["Agent", "Task"],
            "C0b: claude's spawn verb must be detected under BOTH its current and former name")
-    expect(RoleRegistry.spawnToolNames(for: .pi) == ["spawn_agent", "delegate_agent"],
-           "T5.2: pi's spawn verbs are Array's own extension AND the third-party delegate_agent")
+    expect(RoleRegistry.spawnToolNames(for: .pi) == ["spawn_agent", "wait_agents", "delegate_agent"],
+           "T5.2: pi's spawn verbs are Array's own extension (spawn + its wait_agents collection half) AND the third-party delegate_agent")
 
     print("RoleRegistry harness convergence checks passed: three roots read independently, pi default preserved, and Array's depth cap withholds the spawn verb instead of refusing it")
 }

@@ -5043,9 +5043,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         focusBroker.appAcceptedTileFocusWithReason = { [weak self] tileId, reason in
             guard let self else { return }
             self.synchronizeAgentFocus(to: tileId)
+            self.updateContextualAgentLineage(forFocusedTile: tileId)
             self.recordAcceptedTileFocusInHistory(tileId, reason: reason)
             self.armZoneForFocusedTile(tileId, reason: reason)
         }
+    }
+
+    /// Focus owns the ephemeral lineage presentation. A child resolves upward
+    /// to its parent; a parent stays itself; both show the same bounded visible
+    /// direct-child fan. Non-agent focus clears the contextual overlay.
+    private func updateContextualAgentLineage(forFocusedTile tileId: UUID) {
+        guard let canvasView,
+              let focusedAgent = agentSupervisor.agent(forTile: tileId),
+              let focusedRecord = agentSupervisor.records[focusedAgent]
+        else {
+            self.canvasView?.clearContextualAgentLineage()
+            return
+        }
+        let parentID = focusedRecord.parentAgentID ?? focusedAgent
+        guard let parentTileID = agentSupervisor.records[parentID]?.tileId else {
+            canvasView.clearContextualAgentLineage()
+            return
+        }
+        let edges = agentSupervisor.children(of: parentID)
+            .sorted { $0.rawValue.uuidString < $1.rawValue.uuidString }
+            .compactMap { childID -> (parentTileID: UUID, childTileID: UUID)? in
+                guard let childTileID = agentSupervisor.records[childID]?.tileId,
+                      canvasView.tileView(for: childTileID) != nil else { return nil }
+                return (parentTileID, childTileID)
+            }
+        canvasView.showContextualAgentLineage(edges: edges)
     }
 
     /// T2 (`.plans/47`): working in a tile arms its zone, so the next thing you
@@ -11740,6 +11767,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // is not deleting a tile, the inverse of P2A.5's rule that closing a tile
             // is not deleting an agent), so submitting a prompt in it is how you ask
             // for an agent here again — deliberately, by a gesture, not by a relaunch.
+            // The suppressed tile renders no transcript until a prompt revives
+            // it, but binding the reveal is safe (it needs no agent of its own)
+            // and keeps any chip that ever renders here from clicking into
+            // nothing.
+            view.onRevealAgent = { [weak self, weak view] childID, _ in
+                if self?.revealAgentFromInbox(childID.rawValue) != true {
+                    view?.showActionFailedNotice(
+                        "Couldn't open that subagent — it may have been deleted.")
+                }
+            }
             view.onSubmitPrompt = { [weak self, weak view] prompt in
                 guard let self, let view else { return }
                 supervisor.allowAgentRespawn(forTile: tileId)
@@ -11822,8 +11859,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         view.onOpenLocalFile = { [weak self] destination in
             self?.openAgentLocalFile(destination, agentID: agentId, sourceTileId: tileId)
         }
-        view.onRevealAgent = { [weak self] childID, _ in
-            _ = self?.revealAgentFromInbox(childID.rawValue)
+        view.onOpenWebLink = { [weak self] url, target in
+            self?.openAgentWebLink(url, target: target, sourceTileId: tileId)
+        }
+        view.onRevealAgent = { [weak self, weak view] childID, _ in
+            // A silent false here is a chip that clicks and does nothing — the
+            // user cannot tell a dead chip from a slow reveal. Say it on the
+            // tile, through the same notice seam a refused send uses.
+            if self?.revealAgentFromInbox(childID.rawValue) != true {
+                view?.showActionFailedNotice(
+                    "Couldn't open that subagent — it may have been deleted.")
+            }
         }
         // C4: transcript persistence moved to `AgentSupervisor` itself, fed from
         // the same restamped event stream every consumer sees, so a tile-less
@@ -13561,6 +13607,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return false
         }
         return true
+    }
+
+    /// Opens an authorized transcript URL using the destination the click made
+    /// explicit. Array-owned web opens are anchored to the authoring tile and
+    /// its zone; Command-click/context-menu opens never create canvas state.
+    @discardableResult
+    func openAgentWebLink(
+        _ url: URL,
+        target: AgentLinkOpenTarget,
+        sourceTileId: UUID
+    ) -> Bool {
+        switch target {
+        case .systemBrowser:
+            return NSWorkspace.shared.open(url)
+        case .array:
+            guard ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                  let spawner = tileSpawner,
+                  let source = canvasView?.navigationTileSnapshot(for: sourceTileId)
+            else { return false }
+            switch spawner.spawnBrowser(
+                url: url.absoluteString,
+                beside: sourceTileId,
+                targetZoneId: source.zoneId
+            ) {
+            case let .spawned(runtime):
+                browserRuntimes.append(runtime)
+                workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
+                workspaceRuntime?.enforceBrowserRuntimeBudget()
+                focusSpawnedTile(runtime.tileId)
+                return true
+            case .invalidURL, .failure:
+                return false
+            }
+        }
     }
 
     func agentLocalFileOpener() -> AgentLocalFileOpener {

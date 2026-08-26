@@ -45,6 +45,14 @@ enum RelationshipGeometryChecks {
             && abs(lhs.width - rhs.width) < tolerance && abs(lhs.height - rhs.height) < tolerance
     }
 
+    private static func point(_ point: CGPoint, liesOnEdgeOf rect: CGRect, tolerance: CGFloat = 0.75) -> Bool {
+        let withinX = point.x >= rect.minX - tolerance && point.x <= rect.maxX + tolerance
+        let withinY = point.y >= rect.minY - tolerance && point.y <= rect.maxY + tolerance
+        let onVertical = abs(point.x - rect.minX) < tolerance || abs(point.x - rect.maxX) < tolerance
+        let onHorizontal = abs(point.y - rect.minY) < tolerance || abs(point.y - rect.maxY) < tolerance
+        return (withinY && onVertical) || (withinX && onHorizontal)
+    }
+
     static func run() throws {
         let agentTileId = UUID(uuidString: "00000000-0000-0000-0000-0000000000C1")!
         let fileTileId = UUID(uuidString: "00000000-0000-0000-0000-0000000000C2")!
@@ -146,14 +154,10 @@ enum RelationshipGeometryChecks {
             throw Failure(message: "lineage: expected exactly one overlay endpoint pair; got \(singleEndpoints.count)")
         }
         let endpoints = singleEndpoints[0]
-        try expect(abs(endpoints.start.y - agentRect.midY) < 0.5
-                   && endpoints.start.x >= agentRect.minX - 0.5
-                   && endpoints.start.x <= agentRect.maxX + 0.5,
+        try expect(point(endpoints.start, liesOnEdgeOf: agentRect),
                    "lineage: the start point must sit on the parent tile's edge. Got "
                    + "\(endpoints.start), tile \(agentRect)")
-        try expect(abs(endpoints.end.y - fileRect.midY) < 0.5
-                   && endpoints.end.x >= fileRect.minX - 0.5
-                   && endpoints.end.x <= fileRect.maxX + 0.5,
+        try expect(point(endpoints.end, liesOnEdgeOf: fileRect),
                    "lineage: the end point must sit on the child tile's edge. Got "
                    + "\(endpoints.end), tile \(fileRect)")
 
@@ -219,24 +223,30 @@ enum RelationshipGeometryChecks {
             throw Failure(message: "fan-out lineage: could not read the shared parent's rect")
         }
         for (offset, endpoint) in fanEndpoints.enumerated() {
-            try expect(abs(endpoint.start.y - fanParentRect.midY) < 0.5
-                       && endpoint.start.x >= fanParentRect.minX - 0.5
-                       && endpoint.start.x <= fanParentRect.maxX + 0.5,
+            try expect(point(endpoint.start, liesOnEdgeOf: fanParentRect),
                        "fan-out lineage edge \(offset): the start point must sit on the shared parent's edge. "
                        + "Got \(endpoint.start), tile \(fanParentRect)")
             guard let childRect = fanCanvas.qaTileRectInCanvasSpace(fanChildTileIds[offset]) else {
                 throw Failure(message: "fan-out lineage edge \(offset): could not read child \(offset)'s rect")
             }
-            try expect(abs(endpoint.end.y - childRect.midY) < 0.5
-                       && endpoint.end.x >= childRect.minX - 0.5
-                       && endpoint.end.x <= childRect.maxX + 0.5,
+            try expect(point(endpoint.end, liesOnEdgeOf: childRect),
                        "fan-out lineage edge \(offset): the end point must sit on child \(offset)'s edge. "
                        + "Got \(endpoint.end), tile \(childRect)")
         }
+        try expect(fanCanvas.qaLineageAnimationCount <= 1,
+                   "a bounded lineage fan must use at most one Core Animation loop; got "
+                   + "\(fanCanvas.qaLineageAnimationCount)")
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            try expect(fanCanvas.qaLineageIsAnimating,
+                       "lineage should march when Reduce Motion is off and the canvas is active")
+        }
+        try expect(fanCanvas.qaLineageHitTestPassesThrough,
+                   "the priority-visible lineage overlay must remain click-through")
 
         print("RelationshipGeometryChecks: the document connector and the lineage overlay both "
               + "paint on their endpoints at a panned, zoomed camera, and track it when it moves; "
               + "a 16-edge fan-out (maxChildrenPerParent² live streams) bounds to exactly "
-              + "InboxSort.maxVisibleChildren painted edges, each still on its own parent/child pair")
+              + "InboxSort.maxVisibleChildren painted edges, each still on its own parent/child pair, "
+              + "through one click-transparent animation")
     }
 }

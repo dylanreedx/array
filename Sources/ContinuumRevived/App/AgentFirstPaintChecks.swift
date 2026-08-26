@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
@@ -69,7 +70,8 @@ enum AgentFirstPaintChecks {
         try checkMirroredAgentOffersNoComposerOrStop()
         try checkStreamingResponseKeepsALivenessSignal()
         try checkAStreamingChunkDoesNotWalkTheWholeTranscript()
-        print("ContinuumRevivedAgentFirstPaintChecks passed: the prompt echo precedes the action sink, acceptance and refusal both resolve the latch, the spawn window carries a state, a word, and a clock, the optimistic indicator survives synchronize, settled turns read their duration, a mid-turn attachment resolves honestly instead of forcing sendPrompt, and a popover-selected command echoes exactly like a typed one, an agent Array only mirrors offers no composer, no provider controls and no Stop, and a streaming response keeps a liveness signal instead of going dead")
+        try checkADelegationTurnPresentsInteractiveSubagentChips()
+        print("ContinuumRevivedAgentFirstPaintChecks passed: the prompt echo precedes the action sink, acceptance and refusal both resolve the latch, the spawn window carries a state, a word, and a clock, the optimistic indicator survives synchronize, settled turns read their duration, a mid-turn attachment resolves honestly instead of forcing sendPrompt, and a popover-selected command echoes exactly like a typed one, an agent Array only mirrors offers no composer, no provider controls and no Stop, a streaming response keeps a liveness signal instead of going dead, and a real captured claude delegation renders two interactive subagent chips that supersede their Agent tool rows, hover, click through to onRevealAgent, and say a failed reveal out loud")
     }
 
     /// `.plans/45` S6 (C4). `beginOptimisticSubmission` turns the indicator on
@@ -736,6 +738,40 @@ extension AgentFirstPaintChecks {
             )
         }
 
+        // The THIRD exit (D2, 2026-08-26): a runner that throws mid-turn delivers
+        // `.runtimeError` — and only that, until the supervisor's closing mint
+        // lands. The tile's `.runtimeError` case updated the compact status but
+        // forgot `turnLiveness`, so the gyro kept spinning over the error row.
+        let errored = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(), kind: .managedAgent, title: "streaming-liveness-errored",
+            frame: TileFrame(x: 0, y: 0, width: 560, height: 460),
+            zPosition: .fromLegacyRank(1), runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")))
+        errored.layoutSubtreeIfNeeded()
+        errored.ingest(.turnStarted(threadId: thread, turnId: "turn-1"))
+        errored.ingest(.contentDelta(
+            threadId: thread, turnId: "turn-1", streamKind: .assistant, delta: "half an answer"))
+        guard errored.turnLiveness == .inFlight else {
+            throw fail(
+                "streaming liveness: the errored tile never saw its turn start "
+                + "(\(errored.turnLiveness)), so the runtimeError assertion below proves nothing"
+            )
+        }
+        errored.ingest(.runtimeError(threadId: thread, message: "runner failed"))
+        guard errored.turnLiveness == .completed else {
+            throw fail(
+                "streaming liveness: a runtimeError left the tile's turn boundary at "
+                + "\(errored.turnLiveness) — the error row shows, but the gyro spins forever over it"
+            )
+        }
+        guard !ManagedAgentTileNSView.showsWorkingTail(
+            statusIsActive: true, document: errored.qaDocumentForChecks,
+            turnLiveness: errored.turnLiveness) else {
+            throw fail(
+                "streaming liveness: the tail stayed up after a runtime error ended the turn"
+            )
+        }
+
         // A reduce-motion reader gets the same INFORMATION. The gyro falls back
         // to a fixed pose rather than disappearing, so the signal must not be
         // conditioned on motion being available.
@@ -746,6 +782,331 @@ extension AgentFirstPaintChecks {
             throw fail(
                 "streaming liveness: the tail vanished under reduce-motion — the fixed-pose "
                 + "fallback exists so the signal survives without the animation"
+            )
+        }
+    }
+
+    /// The dead-looking delegation. Witnessed live 2026-08-22: a claude turn
+    /// delegated two `Agent` subagents and the parent tile showed two static
+    /// tool rows saying "In progress" for two minutes — no chip, nothing
+    /// clickable — so the user concluded it hung and pressed Stop.
+    ///
+    /// This replays the REAL capture of that shape (claude 2.1.245,
+    /// production argv incl. `--include-partial-messages`
+    /// `--forward-subagent-text`, two parallel `Agent` calls) through the
+    /// production reading path: `ClaudeEventTranslator` → runtime events →
+    /// `ManagedAgentTileNSView.ingest`. The one production seam a check cannot
+    /// drive is the SUPERVISOR's adoption (`adoptObservedChild`): the
+    /// translator's `onSpawnRequest` hands the supervisor a `SpawnRequest`,
+    /// and the supervisor mints the child record and delivers
+    /// `.childAgentSpawned` back onto the parent's stream, after the
+    /// announcing line's own events (the handler hops the main queue). This
+    /// check synthesizes exactly that contract — same derived child id
+    /// (`AgentRecord.observedChildID`), same `sourceItemID` (the tool_use id),
+    /// same ordering — so everything downstream of the supervisor is the real
+    /// thing.
+    @MainActor
+    private static func checkADelegationTurnPresentsInteractiveSubagentChips() throws {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                "ContinuumRevivedCoreChecks/Fixtures/claude-delegation-two-agents.jsonl",
+                isDirectory: false)
+        guard let text = try? String(contentsOf: fixtureURL, encoding: .utf8) else {
+            throw fail("delegation chips: missing fixture at \(fixtureURL.path)")
+        }
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        guard lines.count > 100 else {
+            throw fail("delegation chips: the capture looks truncated at \(lines.count) lines")
+        }
+
+        let thread = "thread-main"
+        let parentAgentID = UUID()
+        let tile = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(), kind: .managedAgent, title: "delegation-chips",
+            frame: TileFrame(x: 0, y: 0, width: 560, height: 460),
+            zPosition: .fromLegacyRank(1), runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")))
+        tile.layoutSubtreeIfNeeded()
+        final class RevealLog: @unchecked Sendable {
+            var revealed: [(child: AgentID, parent: AgentID)] = []
+        }
+        let revealLog = RevealLog()
+        tile.onRevealAgent = { child, parent in
+            revealLog.revealed.append((child, parent))
+        }
+
+        // The translator's side channel, collected synchronously per line so the
+        // synthesized announcement can follow the line's own events — the order
+        // production delivers (`handleSpawnRequest` is queued behind `deliver`).
+        final class SpawnBox: @unchecked Sendable {
+            var pending: [SpawnRequest] = []
+            var all: [SpawnRequest] = []
+        }
+        let box = SpawnBox()
+        var translator = ClaudeEventTranslator()
+        translator.onSpawnRequest = { request in
+            box.pending.append(request)
+            box.all.append(request)
+        }
+
+        func synthesizedSpawnEvents() -> [AgentRuntimeEvent] {
+            let requests = box.pending
+            box.pending = []
+            return requests.compactMap { request in
+                guard let toolUseID = request.sourceItemID, request.observedOnly else { return nil }
+                return .childAgentSpawned(
+                    threadId: thread,
+                    childAgentID: AgentRecord.observedChildID(
+                        parentAgentID: parentAgentID, toolUseID: toolUseID),
+                    parentAgentID: parentAgentID,
+                    displayName: request.displayLabel ?? request.role ?? "Subagent",
+                    sourceItemID: toolUseID,
+                    provider: "claude",
+                    spawnedAt: Date())
+            }
+        }
+
+        for line in lines {
+            // The turn's settlement frame. Everything before it is the in-flight
+            // window the live defect lived in, so the liveness facts are pinned
+            // HERE — after both delegations started, before anything settled.
+            if line.contains("\"type\":\"result\"") {
+                guard box.all.count == 2 else {
+                    throw fail(
+                        "delegation chips: the fixture announced \(box.all.count) spawn requests "
+                        + "before its result frame — expected the two Agent calls; the translator "
+                        + "did not read this capture's tool_use shape (SpawnRequest.parseClaudeAgentTool)"
+                    )
+                }
+                guard tile.turnLiveness == .inFlight else {
+                    throw fail(
+                        "delegation chips: mid-delegation the tile's turn boundary was "
+                        + "\(tile.turnLiveness) — the working window never registered"
+                    )
+                }
+                guard ManagedAgentTileNSView.showsWorkingTail(
+                    statusIsActive: true, document: tile.qaDocumentForChecks,
+                    turnLiveness: tile.turnLiveness) else {
+                    throw fail(
+                        "delegation chips: the working tail was down while two subagents were "
+                        + "in flight — exactly the dead-looking window the user Stopped"
+                    )
+                }
+            }
+            let events = translator.translate(line: line)
+            for event in events { tile.ingest(event.withThreadId(thread)) }
+            for event in synthesizedSpawnEvents() { tile.ingest(event) }
+        }
+
+        guard let transcript = tile.qaTranscriptForChecks else {
+            throw fail("delegation chips: the tile has no transcript")
+        }
+        tile.qaFlushStreamingMarkupForChecks()
+        transcript.flushPendingVisualUpdate()
+        // The collection view materializes items only inside a real window's
+        // layout/display cycle, and only for the rows the viewport actually
+        // reaches — so the walk below SCROLLS through the whole document.
+        // Parked off every display (orderFrontOffscreenForChecks): real layout,
+        // nothing presented.
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 460),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
+        window.contentView = tile
+        window.orderFrontOffscreenForChecks()
+        window.layoutIfNeeded()
+        tile.layoutSubtreeIfNeeded()
+        transcript.layoutSubtreeIfNeeded()
+        transcript.collectionView.layoutSubtreeIfNeeded()
+
+        // The fixture's own teeth: the document must hold both Agent tool rows
+        // and both chips, or every display assertion below is vacuous.
+        var agentToolBlockIDs: [AgentNodeID] = []
+        var chipBlockIDs: [AgentNodeID] = []
+        var chipChildIDs: [UUID] = []
+        for entry in tile.qaDocumentForChecks.entries {
+            for block in entry.blocks {
+                switch block.payload {
+                case let .toolCall(payload) where payload.name == "Agent":
+                    agentToolBlockIDs.append(block.id)
+                case let .agentReference(payload):
+                    chipBlockIDs.append(block.id)
+                    chipChildIDs.append(payload.agentID)
+                default:
+                    break
+                }
+            }
+        }
+        guard agentToolBlockIDs.count == 2 else {
+            throw fail("delegation chips: expected 2 Agent tool rows in the document, found \(agentToolBlockIDs.count)")
+        }
+        guard chipBlockIDs.count == 2 else {
+            throw fail(
+                "delegation chips: expected 2 agentReference chips in the document, found "
+                + "\(chipBlockIDs.count) — the spawn announcements never became milestones"
+            )
+        }
+        let expectedChildIDs = box.all.compactMap { request in
+            request.sourceItemID.map {
+                AgentRecord.observedChildID(parentAgentID: parentAgentID, toolUseID: $0)
+            }
+        }
+        guard chipChildIDs == expectedChildIDs else {
+            throw fail("delegation chips: chip child ids \(chipChildIDs) diverged from the derived observed-child ids")
+        }
+
+        // (a) The chips are DISPLAYED and the tool rows they name are SUPERSEDED
+        // — one delegation is one row. Both halves asserted: a display that
+        // dropped everything would pass the second alone, and a fold that never
+        // fires would pass the first alone.
+        let displayed = Set(transcript.qaDisplayedRowIDsForChecks)
+        for chipID in chipBlockIDs where !displayed.contains(chipID) {
+            throw fail(
+                "delegation chips: chip \(chipID.rawValue) is not in the displayed rows — the "
+                + "delegation is invisible, which is the live defect"
+            )
+        }
+        let superseded = transcript.qaSupersededRowIDsForChecks
+        for toolID in agentToolBlockIDs {
+            guard superseded.contains(toolID) else {
+                throw fail(
+                    "delegation chips: Agent tool row \(toolID.rawValue) was never marked "
+                    + "superseded by its chip — the chip's sourceItemID (a raw tool_use id) "
+                    + "does not resolve to the row's node id, so one delegation renders as two rows"
+                )
+            }
+            guard !displayed.contains(toolID) else {
+                throw fail("delegation chips: superseded Agent tool row \(toolID.rawValue) is still displayed beside its chip")
+            }
+        }
+
+        // (b) The chip is INTERACTIVE: its real NSButton action must reach the
+        // tile's onRevealAgent with the derived child id. Rendered through the
+        // real collection view — a chip that exists in the projection but never
+        // materializes clickable is the other half of the live defect.
+        //
+        // Item preparation rides the scroll seam and only in-viewport rows get
+        // views (a chip scrolled away is recycled, and a recycled chip refuses
+        // its action by design) — so the viewport walks the whole document and
+        // each chip is hovered and pressed WHILE it is on screen. Two sweeps,
+        // because an item can materialize one layout pass after the scroll that
+        // brought its row into the viewport.
+        guard let enter = NSEvent.enterExitEvent(
+            with: .mouseEntered, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: 0, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil),
+            let exit = NSEvent.enterExitEvent(
+                with: .mouseExited, location: .zero, modifierFlags: [], timestamp: 0,
+                windowNumber: 0, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)
+        else {
+            throw fail("delegation chips: could not synthesize tracking events")
+        }
+        var exercisedChips = 0
+        var capturedChip = false
+        func exerciseChips(_ view: NSView) throws {
+            if let chip = view as? AgentReferenceChipView {
+                exercisedChips += 1
+                guard let row = chip.superview as? AgentReferenceChipRowView,
+                      chip.frame.width < row.bounds.width,
+                      chip.layer?.borderWidth == 1,
+                      chip.layer?.borderColor != nil,
+                      chip.qaHasAgentGlyph,
+                      chip.qaCellContentIsEmpty,
+                      chip.layer?.cornerRadius == 8,
+                      chip.intrinsicContentSize.height == 26 else {
+                    throw fail("delegation chips: the control is not a centred, icon-bearing agent capsule")
+                }
+                row.layoutSubtreeIfNeeded()
+                chip.layoutSubtreeIfNeeded()
+                guard abs(chip.qaContentGap - CGFloat(Space.s)) < 0.5,
+                      abs(chip.qaContentMidX - chip.bounds.midX) < 0.5,
+                      abs((chip.frame.minX + chip.qaTitleMinX) - ToolCallView.detailIndent) < 0.5 else {
+                    throw fail(
+                        "delegation chips: explicit icon/title geometry is not centred internally "
+                        + "and aligned to the transcript action reading column"
+                    )
+                }
+                if !capturedChip,
+                   let capturePath = ProcessInfo.processInfo.environment["CONTINUUM_AGENT_REFERENCE_CAPTURE"] {
+                    let rep = try UIProbe.bitmap(of: row, id: "agent-reference-chip")
+                    guard let png = rep.representation(using: .png, properties: [:]) else {
+                        throw fail("delegation chips: could not encode the requested visual witness")
+                    }
+                    try png.write(to: URL(fileURLWithPath: capturePath), options: .atomic)
+                    capturedChip = true
+                }
+                let emptyRowPoint = CGPoint(x: row.bounds.maxX - 1, y: row.bounds.midY)
+                guard row.hitTest(emptyRowPoint) == nil else {
+                    throw fail("delegation chips: empty row space is still clickable")
+                }
+                // Hover affordance: resting paints NOTHING (the census rule —
+                // nil, not .clear); entering paints a token tint; exiting
+                // returns to nil. Driven through the real responder methods.
+                let restingBackground = chip.layer?.backgroundColor
+                chip.mouseEntered(with: enter)
+                guard chip.layer?.backgroundColor != restingBackground else {
+                    throw fail(
+                        "delegation chips: hovering a chip changes nothing — no affordance "
+                        + "says this row is clickable"
+                    )
+                }
+                chip.mouseExited(with: exit)
+                guard chip.layer?.backgroundColor == restingBackground else {
+                    throw fail("delegation chips: mouseExited did not restore the state-coded resting fill")
+                }
+                chip.performClick(nil)
+            }
+            for subview in view.subviews { try exerciseChips(subview) }
+        }
+        let documentHeight = transcript.collectionView.frame.height
+        for _ in 0..<2 {
+            var y: CGFloat = 0
+            repeat {
+                tile.qaScrollTranscript(toY: y)
+                transcript.layoutSubtreeIfNeeded()
+                transcript.collectionView.layoutSubtreeIfNeeded()
+                if revealLog.revealed.count < 2 { try exerciseChips(transcript.collectionView) }
+                y += 200
+            } while y < documentHeight
+            if revealLog.revealed.count >= 2 { break }
+        }
+        guard exercisedChips >= 2 else {
+            throw fail(
+                "delegation chips: only \(exercisedChips) chip view(s) materialized in the "
+                + "collection view for 2 displayed chip rows — the chip exists in the "
+                + "projection but never becomes a pressable view "
+                + "(renderError=\(String(describing: transcript.qaRenderingErrorDescription)))"
+            )
+        }
+        guard revealLog.revealed.map(\.child.rawValue) == expectedChildIDs else {
+            throw fail(
+                "delegation chips: clicking the two chips reached onRevealAgent with "
+                + "\(revealLog.revealed.map(\.child.rawValue)) — expected the derived child ids "
+                + "\(expectedChildIDs); a chip whose click goes nowhere is a dead end"
+            )
+        }
+        guard revealLog.revealed.allSatisfy({ $0.parent.rawValue == parentAgentID }) else {
+            throw fail("delegation chips: a chip's reveal carried the wrong parent agent id")
+        }
+
+        // The loud-failure seam the app binds behind onRevealAgent: when a
+        // reveal returns false, the tile says so as a transcript row. A failure
+        // that only reaches a log is the silent dead end this ticket removes.
+        let rowsBeforeNotice = transcript.qaSemanticRowCount
+        tile.showActionFailedNotice("Couldn't open that subagent — it may have been deleted.")
+        transcript.flushPendingVisualUpdate()
+        let noticeLanded = tile.qaDocumentForChecks.entries.flatMap(\.blocks).contains { block in
+            if case let .notice(payload) = block.payload {
+                return agentPlainText(payload.message).contains("Couldn't open that subagent")
+            }
+            return false
+        }
+        guard noticeLanded, transcript.qaSemanticRowCount == rowsBeforeNotice + 1 else {
+            throw fail(
+                "delegation chips: a failed reveal's notice never became a transcript row "
+                + "(landed=\(noticeLanded), rows \(rowsBeforeNotice) -> \(transcript.qaSemanticRowCount))"
             )
         }
     }

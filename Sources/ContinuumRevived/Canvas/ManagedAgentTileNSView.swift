@@ -212,6 +212,9 @@ final class ManagedAgentTileNSView: TileNSView {
     /// binds it with this tile's id and agent id so resolution happens against the
     /// responding agent's own checkout.
     var onOpenLocalFile: ((String) -> Void)?
+    /// App-owned destination for an authorized transcript URL. The tile carries
+    /// the user's Array-vs-system intent but never chooses placement itself.
+    var onOpenWebLink: ((URL, AgentLinkOpenTarget) -> Void)?
     /// Resolves a durable transcript agent reference through the app-owned reveal
     /// path. A tile never creates another agent; it asks the app to reveal or
     /// attach the existing identity.
@@ -914,6 +917,17 @@ final class ManagedAgentTileNSView: TileNSView {
         synchronizeV2Transcript(final: true)
     }
 
+    /// The same notice seam, for a tile ACTION that failed — a chip click that
+    /// opened nothing must not read as an unsent message.
+    func showActionFailedNotice(_ text: String) {
+        model.appendNotice(
+            id: "notice-action-failed-\(text.hashValue)",
+            title: "not opened",
+            text: text
+        )
+        synchronizeV2Transcript(final: true)
+    }
+
     func showPreviousSessionNotice() {
         model.appendNotice(
             id: "notice-previous-session",
@@ -1224,6 +1238,10 @@ final class ManagedAgentTileNSView: TileNSView {
         case .requestResolved, .userInputResolved:
             compactStatusInteraction = .clear
         case .runtimeError:
+            // The third way out of `.inFlight`: a runner that throws mid-turn
+            // delivers this, and without it the gyro spins forever over the
+            // error row (D2, 2026-08-26).
+            turnLiveness = .completed
             transcriptCollectionFixture?.setTurnInFlight(false)
             compactStatusTurn = .completed(outcome: .failed, phaseStartedAt: nil)
             compactStatusSession = .init(state: .error, startedAt: nil)
@@ -2194,6 +2212,9 @@ final class ManagedAgentTileNSView: TileNSView {
             // app owns resolution: only it knows this tile's agent, and only that
             // agent's live cwd may resolve a relative path.
             onOpenLocalFile?(destination)
+            return
+        case let .activateLink(_, url, target):
+            onOpenWebLink?(url, target)
             return
         case let .revealAgent(_, agentID, parentAgentID):
             onRevealAgent?(AgentID(rawValue: agentID), AgentID(rawValue: parentAgentID))

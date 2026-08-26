@@ -866,7 +866,12 @@ final class TileSpawner {
     /// browser URL (`about:blank` unless overridden) if `url` is nil. Persists a BrowserTile entry into BrowserState alongside
     /// the canvas state. Returns the runtime so the caller can track it for
     /// shutdown.
-    func spawnBrowser(url: String? = nil, at worldPoint: CGPoint? = nil) -> BrowserOutcome {
+    func spawnBrowser(
+        url: String? = nil,
+        at worldPoint: CGPoint? = nil,
+        beside anchorTileId: UUID? = nil,
+        targetZoneId explicitTargetZoneId: UUID? = nil
+    ) -> BrowserOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
         let urlString = url ?? Self.defaultBrowserURL
         guard URL(string: urlString) != nil else {
@@ -881,13 +886,27 @@ final class TileSpawner {
 
         // T4 (`.plans/47`): like the note path, a browser ignored the creation
         // scope's zone and landed in whatever zone was armed.
-        let targetZoneId = creationScopeProvider?()?.zoneId
-        let frame = makeProjectTilePlacement(
-            worldPoint: worldPoint,
-            size: CanvasEngine.defaultFrame(for: .browser),
-            in: canvasView,
-            targetZoneId: targetZoneId
-        )
+        let worldSiblings = canvasView.allTilesInWorldFrames()
+        let anchor = worldPoint == nil
+            ? anchorTileId.flatMap { id in worldSiblings.first(where: { $0.id == id }) }
+            : nil
+        let targetZoneId = explicitTargetZoneId ?? anchor?.zoneId ?? creationScopeProvider?()?.zoneId
+        let size = CanvasEngine.defaultFrame(for: .browser)
+        let frame: TileFrame
+        if let anchor {
+            let world = Self.anchoredFrame(size: size, anchor: anchor.frame, siblings: worldSiblings)
+            frame = targetZoneId
+                .flatMap { canvasView.installedZonePlacement(for: $0) }
+                .map { CanvasEngine.worldToZoneLocal(world, zoneOrigin: $0.origin) }
+                ?? world
+        } else {
+            frame = makeProjectTilePlacement(
+                worldPoint: worldPoint,
+                size: size,
+                in: canvasView,
+                targetZoneId: targetZoneId
+            )
+        }
         let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
         var tile = Tile(
             id: UUID(),
@@ -895,6 +914,7 @@ final class TileSpawner {
             title: "Browser",
             frame: frame,
             zPosition: nextZ,
+            zoneId: targetZoneId,
             runtimeRef: nil,
             metadata: TileMetadata(url: urlString, browserProfileId: browserProfile(for: nil).id)
         )

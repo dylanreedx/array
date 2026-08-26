@@ -302,6 +302,13 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// alongside the row dictionary, so it costs the changed set on a delta.
     /// Chips are rare, so this stays a handful of entries even at fan-out scale.
     private var supersededRowIDs: Set<AgentNodeID> = []
+    /// Provider item id → the top-level row id its entry renders as. This is how
+    /// a chip's `sourceItemID` (a raw provider tool_use id) resolves to the tool
+    /// ROW it supersedes — row node ids are derived from the provider id, never
+    /// equal to it. Built by the full walk; entry provenance is immutable and
+    /// every structural change re-runs the walk, so the incremental paths read
+    /// it as-is.
+    private var rowIDBySourceItemID: [String: AgentNodeID] = [:]
     /// The tail-streaming flag the cached plan was built under. A flip is a
     /// projection input, so a patch that finds it changed must replan.
     private var lastPlannedTailStreaming: Bool?
@@ -2048,6 +2055,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         var topLevelIDs: Set<AgentNodeID> = []
         var positions: [AgentNodeID: RowPosition] = [:]
         var entryIndexes: [AgentNodeID: Int] = [:]
+        var sourceRowIDs: [String: AgentNodeID] = [:]
         qaFullFlattenCount += 1
         var nodeVisits = 0
         defer {
@@ -2076,6 +2084,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                     throw UpdateError.duplicateTopLevelBlock(entry.id)
                 }
                 positions[entry.id] = RowPosition(entryID: entry.id, entryIndex: entryIndex, blockIndex: nil, slot: rows.count)
+                if case let .providerItem(_, itemID?) = entry.provenance, sourceRowIDs[itemID] == nil {
+                    sourceRowIDs[itemID] = entry.id
+                }
                 rows.append(Row(content: .completedReasoning(entry), role: .reasoning, entryID: entry.id))
                 owners[entry.id] = [entry.id]
                 for block in entry.blocks {
@@ -2089,11 +2100,15 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                     throw UpdateError.duplicateTopLevelBlock(block.id)
                 }
                 positions[block.id] = RowPosition(entryID: entry.id, entryIndex: entryIndex, blockIndex: blockIndex, slot: rows.count)
+                if case let .providerItem(_, itemID?) = entry.provenance, sourceRowIDs[itemID] == nil {
+                    sourceRowIDs[itemID] = block.id
+                }
                 rows.append(Row(content: .block(block), role: entry.role, entryID: entry.id))
                 index(block, owner: block.id, detailID: detailID)
             }
             owners[entry.id] = []
         }
+        rowIDBySourceItemID = sourceRowIDs
         return (rows, owners, toolDetailIDs, positions, entryIndexes)
     }
 
@@ -2360,11 +2375,22 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     }
 
     /// The tool call a chip supersedes, if this row is a chip naming one.
-    private static func supersededID(of row: Row) -> AgentNodeID? {
+    ///
+    /// A chip's `sourceItemID` is the PROVIDER's tool_use id, verbatim. The tool
+    /// row it names carries a node id derived from that (`item:<b64>/child-key:…`),
+    /// never the raw id itself — so the two only meet through the provenance map
+    /// `flatten` builds. Comparing the raw id against row ids matched nothing,
+    /// ever, and the fold shipped dead: one delegation rendered as two rows
+    /// (witnessed by `checkADelegationTurnPresentsInteractiveSubagentChips`).
+    private func supersededID(of row: Row) -> AgentNodeID? {
         guard let block = row.block, case let .agentReference(payload) = block.payload,
               let source = payload.sourceItemID, !source.isEmpty
         else { return nil }
-        return AgentNodeID(rawValue: source)
+        // The chip's own entry carries the same provider item id in its
+        // provenance; with no tool row in the document the map resolves to the
+        // chip itself, and a chip must never supersede itself out of view.
+        guard let mapped = rowIDBySourceItemID[source], mapped != row.id else { return nil }
+        return mapped
     }
 
     /// Patches the projection for a content-only delta instead of rebuilding it.
@@ -2399,7 +2425,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         // A rebuilt row can BECOME a chip, which supersedes an earlier row that
         // is not itself in the changed set — so the affected slot has to join it.
         for id in changedRowIDs {
-            guard let row = rowsByID[id], let superseded = Self.supersededID(of: row),
+            guard let row = rowsByID[id], let superseded = supersededID(of: row),
                   supersededRowIDs.insert(superseded).inserted,
                   let slot = rowPositions[superseded]?.slot, rows.indices.contains(slot)
             else { continue }
@@ -2422,7 +2448,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// flip and a fold toggle.
     private func rebuildDisplayProjection() {
         recordHistoryScan("cluster projection")
-        supersededRowIDs = Set(rows.compactMap(Self.supersededID))
+        supersededRowIDs = Set(rows.compactMap(supersededID))
         cachedRowFacts = rows.indices.map { rowFact(at: $0) }
         replanDisplayProjection()
     }
@@ -2770,6 +2796,12 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     var qaClusterHeaderIDsForChecks: [AgentNodeID] { displayItems.compactMap {
         if case let .header(header) = $0 { return header.id } else { return nil }
     } }
+    /// The row ids the reader actually sees, in display order — after the
+    /// superseded fold and clustering, before the tail indicator.
+    var qaDisplayedRowIDsForChecks: [AgentNodeID] { displayItems.compactMap {
+        if case let .row(index) = $0 { return rows[index].id } else { return nil }
+    } }
+    var qaSupersededRowIDsForChecks: Set<AgentNodeID> { supersededRowIDs }
     /// Mirrors `qaIndexEquivalenceMismatch`: nil when the projection, the
     /// snapshot and the semantic rows agree; otherwise a description.
     func qaClusterProjectionMismatch() -> String? {

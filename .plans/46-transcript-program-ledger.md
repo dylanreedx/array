@@ -2334,3 +2334,59 @@ extension returns `spawned: <role>` whatever happens — so the MODEL is told it
 delegation succeeded while Array refuses it. The transcript is honest to the user
 and dishonest to the model, and the model then reasons about children that do not
 exist. That is a real design problem and it is not fixed here.
+
+## T8 — transcript links, surfaced Codex descendants, and focus lineage (2026-08-26)
+
+The release slice is specified and evidenced in
+`.plans/51-transcript-links-subagents-lineage.md`. It closes three seams that were
+individually small but collectively blocked a credible transcript feel test.
+
+**Links.** A normal transcript web-link click creates a fresh Array browser tile
+beside the agent and in the agent's resolved zone. A repeated click creates a
+second tile. Command-click and the context menu retain an explicit system-browser
+route. Local-file, `continuum:`, and rejected-scheme behavior is unchanged.
+
+**Delegation.** Claude references are content-sized outlined capsules with an
+inert surrounding row. Codex app-server is now the default transport and its
+structured provider identities are routed into observed-only child and nested
+grandchild agents. Parent completion waits for announced live descendants, so a
+late child's output and terminal state are not truncated or leaked into the
+parent transcript. `CONTINUUM_CODEX_TRANSPORT=exec` remains the explicit escape
+hatch, and fallback cannot replay a prompt after a turn has been accepted.
+
+**Lineage.** Parent or child focus now shows the parent's visible direct-child
+fan above opaque tiles and below focus/HUD chrome. One screen-space compound path
+and one dash-phase animation serve the entire bounded fan (eight children), with
+a restrained accent stroke, static arrowheads, Reduce Motion fallback, and lifecycle
+suspension. The overlay never participates in hit-testing.
+
+**First feel-pass correction, 2026-08-26.** The delegated controls were too
+cramped and read as anonymous text pills. They now centre a guaranteed agent
+glyph with the label, use balanced padding and a softer rounded-rectangle radius,
+and tint glyph/boundary/faint resting wash from live semantic state. The lineage
+halo read as a black outline in dark mode, so it was removed; the already
+priority-visible marching stroke was reduced to 1.25 points at 62% opacity.
+
+The follow-up screenshot also proved AppKit's button-cell centring was not
+centring the icon/title union. The universal agent-reference renderer now lays
+out an explicit 14-point glyph, four-point gap, and measured title as one centred
+group. The outer chip is inset so that title lands exactly on the existing tool
+action reading column. This is a single provider-neutral render path: Pi, Codex,
+and Claude do not carry separate capsule layouts.
+
+One final Codex screenshot showed two overlapping labels: the new explicit title
+plus `NSButtonCell`'s own painted title. The cell is now forced empty and its
+drawing is suppressed, leaving it responsible only for interaction, keyboard
+activation, and accessibility. The focused witness asserts that invariant and
+can emit a real PNG row for visual inspection.
+
+**Gate.** Focused link, first-paint, relationship-geometry, Codex backend/parity/
+runner, and supervisor witnesses passed. The strict harness and regenerated
+384-record matrix inventory passed. The complete
+`CONTINUUM_SKIP_UI_BASELINES=1 scripts/run-matrix.sh` run executed all 181 legs
+and passed: four established performance probes were expected-red, while the
+known-flaky gesture-transition probe happened to pass and remains allowlisted.
+UI baseline comparisons were intentionally skipped; live UI and bundle/codesign
+checks still ran. The remaining gate is a human feel pass in the isolated
+`~/Desktop/Array Transcript.app`; this work must not overwrite
+`/Applications/Array.app`.

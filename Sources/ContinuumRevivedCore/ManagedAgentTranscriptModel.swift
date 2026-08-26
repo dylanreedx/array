@@ -102,6 +102,15 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
         semanticProjection.drainTouchedNodes()
     }
     public var events: [AgentRuntimeEvent] { semanticProjection.events }
+    /// The raw markup source of the LAST assistant entry — what a spawned
+    /// child's terminal `SpawnResultFile` carries back to the parent's model as
+    /// `finalText`. Source text rather than a re-serialization of blocks, so
+    /// the parent's model reads exactly what the child's model wrote; nil when
+    /// the child produced no assistant message at all.
+    public var finalAssistantText: String? {
+        guard let entry = document.entries.last(where: { $0.role == .assistant }) else { return nil }
+        return semanticProjection.compatibilityMarkupSourcesByEntryID[entry.id]
+    }
     public var activeToolCount: Int { semanticProjection.activeToolCount }
     public var streamingMarkupParseCount: Int { semanticProjection.streamingMarkupParseCount }
     public var nextStreamingMarkupParseDeadline: TimeInterval? { semanticProjection.nextStreamingMarkupParseDeadline }

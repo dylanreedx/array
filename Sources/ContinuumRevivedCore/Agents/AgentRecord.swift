@@ -265,6 +265,15 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// that finishes after the app restarts has nothing to check off. An
     /// identifier the source surface already shows, so it is not new exposure.
     public var sourceItemId: String?
+    /// The `toolCallId` of the `spawn_agent` call that created this child, when
+    /// the parent's extension can collect the result (`wait_agents`). Distinct
+    /// from `sourceItemId` on purpose: that field feeds fan-out completion and
+    /// the naming ladder, and a pi tool-call id must reach neither. Written by
+    /// `handleSpawnRequest`, read at the child's terminal `turnCompleted` to
+    /// address `<parent cwd>/.array/spawn-results/<handle>.json`. Optional and
+    /// decode-tolerant — the `snoozedAt`/`sourceItemId` convention, no schema
+    /// bump.
+    public var spawnResultHandle: String? = nil
     public var createdAt: Date
     /// Metadata activity: the store hears this for every runtime event. It is
     /// intentionally not an auto-settle input.
@@ -743,6 +752,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         case schemaVersion, id, displayName, displayNameSource, namingRequest, role, harness, model, thinking, cwd
         case projectRoot, checkoutRoot, homeRelativePath, lastObservedWhere, worktreeId
         case worktreeBranch, projectId, parentAgentID, capabilities, sourceItemId
+        case spawnResultHandle
         case parentRelativeOrdinal, nextChildOrdinal
         case createdAtReferenceInterval, lastActivityAtReferenceInterval
         case latestPromptAtReferenceInterval, latestTurnAtReferenceInterval
@@ -806,6 +816,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         capabilities = (try? container.decodeIfPresent(
             AgentCapabilities.self, forKey: .capabilities)) ?? .managed
         sourceItemId = try container.decodeIfPresent(String.self, forKey: .sourceItemId)
+        spawnResultHandle = (try? container.decodeIfPresent(String.self, forKey: .spawnResultHandle)) ?? nil
         parentRelativeOrdinal = try container.decodeIfPresent(Int.self, forKey: .parentRelativeOrdinal)
         nextChildOrdinal = max(1, try container.decodeIfPresent(Int.self, forKey: .nextChildOrdinal) ?? 1)
         createdAt = Date(timeIntervalSinceReferenceDate:
@@ -891,6 +902,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
             try container.encode(capabilities, forKey: .capabilities)
         }
         try container.encodeIfPresent(sourceItemId, forKey: .sourceItemId)
+        try container.encodeIfPresent(spawnResultHandle, forKey: .spawnResultHandle)
         try container.encodeIfPresent(parentRelativeOrdinal, forKey: .parentRelativeOrdinal)
         if nextChildOrdinal != 1 {
             try container.encode(nextChildOrdinal, forKey: .nextChildOrdinal)

@@ -275,6 +275,27 @@ public protocol SubagentEventObserving: AnyObject {
     func observeSubagentEvents(_ handler: @escaping @Sendable (String, AgentRuntimeEvent) -> Void)
 }
 
+/// Local-only structured activity from a provider that owns its subagents and
+/// gives every thread a stable identity. This is deliberately non-Codable: it
+/// routes already-normalized events inside the process and never widens the
+/// synced runtime-event vocabulary.
+public enum ProviderSubagentActivity: Sendable {
+    case primaryThread(providerThreadID: String)
+    case childAnnounced(
+        parentProviderThreadID: String,
+        childProviderThreadID: String,
+        sourceItemID: String,
+        displayLabel: String?
+    )
+    case threadEvent(providerThreadID: String, event: AgentRuntimeEvent)
+}
+
+public protocol ProviderSubagentActivityObserving: AnyObject {
+    func observeProviderSubagentActivity(
+        _ handler: @escaping @Sendable (ProviderSubagentActivity) -> Void
+    )
+}
+
 /// A runner that can report where an observed child's transcript will be found.
 ///
 /// pi's `delegate_agent` child does not stream on the parent at all — it writes to

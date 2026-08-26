@@ -304,6 +304,17 @@ private final class EventCollector: @unchecked Sendable {
     func snapshot() -> [AgentRuntimeEvent] { lock.lock(); defer { lock.unlock() }; return events }
 }
 
+private final class ProviderActivityCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var activities: [ProviderSubagentActivity] = []
+    func append(_ activity: ProviderSubagentActivity) {
+        lock.lock(); activities.append(activity); lock.unlock()
+    }
+    func snapshot() -> [ProviderSubagentActivity] {
+        lock.lock(); defer { lock.unlock() }; return activities
+    }
+}
+
 private func runCodexAgentRunnerAppServerChecks() {
     let cwd = FileManager.default.temporaryDirectory
         .appendingPathComponent("continuum-codex-appserver-runner-\(UUID().uuidString)", isDirectory: true)
@@ -516,6 +527,89 @@ private func runCodexAgentRunnerAppServerChecks() {
             let progress = (try? String(contentsOf: fakeRoot.appendingPathComponent("progress.log"), encoding: .utf8)) ?? ""
             expect(progress.contains("turn/interrupt"),
                    "runner (stop, app-server): stop() must actually SEND turn/interrupt over the live connection, not just SIGTERM the process; fake saw: \(progress)")
+        }
+        try? FileManager.default.removeItem(at: fakeRoot)
+    }
+
+    // 2e. Delegation drain: the captured app-server ordering permits the
+    // parent's turn/completed to arrive before a child's final transcript
+    // frames. The production runner must keep the subprocess alive until the
+    // announced child's own terminal event, while routing child events through
+    // ProviderSubagentActivity rather than contaminating the parent stream.
+    do {
+        let parentThread = "fixture-parent-thread"
+        let parentTurn = "fixture-parent-turn"
+        let childThread = "fixture-child-thread"
+        let childTurn = "fixture-child-turn"
+        let (script, fakeRoot) = try! makeFakeAppServer(
+            scenario: [
+                .expectRequest(result: [:]),
+                .expectNotification,
+                .expectRequest(result: ["thread": ["id": parentThread]]),
+                .expectRequest(result: ["turn": ["id": parentTurn]]),
+                .emit(method: "turn/started",
+                      params: ["threadId": parentThread, "turn": ["id": parentTurn]]),
+                .emit(method: "item/started",
+                      params: [
+                        "threadId": parentThread,
+                        "turnId": parentTurn,
+                        "item": [
+                            "id": "fixture-child-call",
+                            "type": "subAgentActivity",
+                            "kind": "started",
+                            "agentPath": "/root/late_child",
+                            "agentThreadId": childThread,
+                        ],
+                      ]),
+                .emit(method: "turn/completed",
+                      params: ["threadId": parentThread,
+                               "turn": ["id": parentTurn, "status": "completed"]],
+                      delayMs: 10),
+                .emit(method: "item/agentMessage/delta",
+                      params: ["threadId": childThread, "turnId": childTurn, "delta": "late child result"],
+                      delayMs: 150),
+                .emit(method: "turn/completed",
+                      params: ["threadId": childThread,
+                               "turn": ["id": childTurn, "status": "completed"]],
+                      delayMs: 10),
+            ],
+            asExecutableNamed: "codex")
+        let fakeDir = script.deletingLastPathComponent()
+
+        withEnvironmentOverride([
+            "CONTINUUM_CODEX_TRANSPORT": "app-server",
+            "PATH": "\(fakeDir.path):\(ProcessInfo.processInfo.environment["PATH"] ?? "")",
+        ]) {
+            let runner = CodexAgentRunner(config: .init(model: "gpt-5.6-sol", cwd: cwd, threadId: nil))
+            let parentEvents = EventCollector()
+            let activities = ProviderActivityCollector()
+            runner.observeProviderSubagentActivity { activities.append($0) }
+            var caught: Error?
+            do {
+                try runner.run(prompt: "delegate once") { parentEvents.append($0) }
+            } catch {
+                caught = error
+            }
+
+            let providerActivities = activities.snapshot()
+            expect(caught == nil,
+                   "runner (delegation drain): a clean parent + late child must not throw; got \(String(describing: caught))")
+            expect(providerActivities.contains {
+                if case .childAnnounced(parentThread, childThread, "fixture-child-call", "late child") = $0 { return true }
+                return false
+            }, "runner (delegation drain): the structured child announcement must preserve parent, child, item, and label identity")
+            expect(providerActivities.contains {
+                if case .threadEvent(childThread, .contentDelta(_, _, _, "late child result")) = $0 { return true }
+                return false
+            }, "runner (delegation drain): the child delta emitted after parent completion must survive teardown and route to the child")
+            expect(providerActivities.contains {
+                if case .threadEvent(childThread, .turnCompleted(_, childTurn, .completed, _)) = $0 { return true }
+                return false
+            }, "runner (delegation drain): run() must not return until the child's own terminal event is routed")
+            expect(!parentEvents.snapshot().contains {
+                if case .contentDelta(let threadId, _, _, "late child result") = $0 { return threadId == childThread }
+                return false
+            }, "runner (delegation drain): a child frame must never leak into the parent transcript stream")
         }
         try? FileManager.default.removeItem(at: fakeRoot)
     }

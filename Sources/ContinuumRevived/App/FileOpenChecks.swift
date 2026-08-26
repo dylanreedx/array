@@ -894,6 +894,20 @@ enum FileOpenChecks {
             opens.append(result)
             if case let .refused(reason) = result { refusals.append(reason) }
         }
+        var webTargets: [AgentLinkOpenTarget] = []
+        var spawnedBrowserTileIDs: [UUID] = []
+        agentView.onOpenWebLink = { url, target in
+            webTargets.append(target)
+            guard target == .array,
+                  let spawner = harness.runtime.activeController?.tileSpawner else { return }
+            if case let .spawned(runtime) = spawner.spawnBrowser(
+                url: url.absoluteString,
+                beside: agentTile.id,
+                targetZoneId: harness.zone
+            ) {
+                spawnedBrowserTileIDs.append(runtime.tileId)
+            }
+        }
 
         // Render REAL assistant Markdown through the production ingest path.
         let markdown = """
@@ -978,6 +992,30 @@ enum FileOpenChecks {
         }
         try expect(harness.runtime.document.documentLinks.count == 1,
                    "repeat opens from one agent must deduplicate the relationship")
+
+        // Web links deliberately have the opposite duplicate policy: every
+        // ordinary activation creates a fresh browser beside the authoring
+        // agent, in that agent's zone, while explicit system intent creates no
+        // canvas state.
+        try activate("https://example.com/guide")
+        try activate("https://example.com/guide")
+        guard let webMatch = renderedLinks().first(where: {
+            $0.link.destination == "https://example.com/guide"
+        }) else { throw Failure(message: "the transcript lost its https link") }
+        _ = webMatch.view.activateLink(
+            at: webMatch.link.range.location,
+            target: .systemBrowser
+        )
+        try expect(webTargets == [.array, .array, .systemBrowser],
+                   "web link activation must preserve Array vs system intent; got \(webTargets)")
+        try expect(Set(spawnedBrowserTileIDs).count == 2,
+                   "two ordinary clicks must create two distinct browser tiles")
+        for browserTileID in spawnedBrowserTileIDs {
+            try expect(harness.canvas.tileIds(inZone: harness.zone).contains(browserTileID),
+                       "a transcript browser must belong to the source agent's zone")
+            try expect(harness.canvas.tileView(for: browserTileID) is BrowserTileNSView,
+                       "a transcript web link must install a real BrowserTileNSView")
+        }
 
         // A second agent reveals the same canonical document and contributes a
         // second persistent relationship (and therefore a second connector).

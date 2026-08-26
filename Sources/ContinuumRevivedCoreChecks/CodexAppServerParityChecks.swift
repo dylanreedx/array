@@ -340,7 +340,17 @@ private func runCodexAppServerOrderingHazardChecks() {
     // GREEN: the real translator has no such gate. Every method switches
     // independently, keyed by the threadId the frame itself carries — a late
     // child frame translates exactly as it would have if it arrived first.
+    final class AnnouncementBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [(String, String, String, String?)] = []
+        func append(_ value: (String, String, String, String?)) { lock.withLock { values.append(value) } }
+        func snapshot() -> [(String, String, String, String?)] { lock.withLock { values } }
+    }
+    let announcements = AnnouncementBox()
     var real = CodexAppServerEventTranslator()
+    real.onSubagentAnnouncement = { parent, child, item, label in
+        announcements.append((parent, child, item, label))
+    }
     let realEvents = fixtureLines.flatMap { real.translate(line: $0) }
     let realSawChildCommandCompletion = realEvents.contains {
         if case .itemCompleted(_, _, .commandExecution, .completed) = $0 { return true }; return false
@@ -352,6 +362,16 @@ private func runCodexAppServerOrderingHazardChecks() {
            "GREEN: CodexAppServerEventTranslator must still translate the child's commandExecution completion after the parent's turn/completed")
     expect(realTurnCompletions == 2,
            "GREEN: CodexAppServerEventTranslator must report BOTH the parent's and the child's turn/completed — got \(realTurnCompletions)")
+    let observedAnnouncements = announcements.snapshot()
+    expect(observedAnnouncements.count == 1,
+           "the captured delegating turn must announce exactly one structured child, got \(observedAnnouncements.count)")
+    if let announcement = observedAnnouncements.first {
+        expect(announcement.0 == "00000000-0000-4000-8000-000000000001"
+               && announcement.1 == "00000000-0000-4000-8000-000000000004"
+               && announcement.2 == "call_fixture0005"
+               && announcement.3 == "slow child",
+               "the structured child announcement must preserve parent thread, child thread, source item, and safe label")
+    }
 
     print("codex app-server ordering hazard: naive gate drops the late child event (RED), real translator does not (GREEN)")
 }

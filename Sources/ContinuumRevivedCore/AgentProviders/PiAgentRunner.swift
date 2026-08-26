@@ -308,8 +308,14 @@ public final class PiAgentRunner: @unchecked Sendable {
         spawned.standardError.readabilityHandler = nil
 
         // Flush any trailing partial line + drain whatever the handlers missed.
-        let remainder = spawned.standardOutput.readDataToEndOfFile()
-        let stderrRemainder = spawned.standardError.readDataToEndOfFile()
+        // Bounded, never `readDataToEndOfFile()`: a descendant that inherited
+        // fd 1/2 keeps the write end open after the leader exits, and the
+        // unbounded read then blocks until that process dies — potentially
+        // forever. Kill the group's leftovers first so the pipes close (a clean
+        // exit leaves nothing, making this a no-op).
+        spawned.terminateGroup(graceSeconds: ProcessGroupChild.Grace.interactive)
+        let remainder = ProcessGroupChild.drainRemainder(of: spawned.standardOutput)
+        let stderrRemainder = ProcessGroupChild.drainRemainder(of: spawned.standardError)
         let errText: String = queue.sync {
             if !remainder.isEmpty { consume(remainder, onEvent: onEvent) }
             flushBuffer(onEvent: onEvent)

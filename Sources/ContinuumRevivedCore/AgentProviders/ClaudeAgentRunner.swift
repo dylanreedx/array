@@ -447,8 +447,15 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         spawned.standardOutput.readabilityHandler = nil
         spawned.standardError.readabilityHandler = nil
 
-        let remainder = spawned.standardOutput.readDataToEndOfFile()
-        let stderrRemainder = spawned.standardError.readDataToEndOfFile()
+        // The LEADER exited, but a descendant that inherited fd 1/2 (a Task
+        // subagent, an MCP server, a backgrounded shell) keeps the pipe's write
+        // end open, and `readDataToEndOfFile()` then blocks until THAT process
+        // exits — potentially forever, parking this run() and its runner slot.
+        // Kill whatever is left of the group so the pipes close (a clean exit
+        // leaves nothing, making this a no-op), then drain with a bound.
+        spawned.terminateGroup(graceSeconds: ProcessGroupChild.Grace.interactive)
+        let remainder = ProcessGroupChild.drainRemainder(of: spawned.standardOutput)
+        let stderrRemainder = ProcessGroupChild.drainRemainder(of: spawned.standardError)
         let errText: String = queue.sync {
             if !remainder.isEmpty { consume(remainder, onEvent: onEvent) }
             flushBuffer(onEvent: onEvent)

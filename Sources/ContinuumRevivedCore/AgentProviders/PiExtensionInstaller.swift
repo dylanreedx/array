@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 // Ticket: C8 — pi subagent DETECTION (PiEventTranslator, AgentSupervisor's
@@ -25,13 +26,13 @@ public enum PiExtensionInstaller {
     }
 
     public enum InstallResult: Equatable, Sendable {
-        /// Wrote the file: either it was missing, or it matched our own
-        /// content already (write-if-absent path taken; see `install`).
+        /// Wrote the file: it was missing, or it byte-matched a PRIOR shipped
+        /// version of ours (see `knownPriorContentHashes`) and was updated.
         case installed
         /// Already present with exactly our content — no write needed.
         case alreadyCurrent
-        /// Present with DIFFERENT content and it isn't ours — left alone.
-        /// Never clobbers a user's modified copy.
+        /// Present with content that is neither current nor any prior shipped
+        /// version — left alone. Never clobbers a user's modified copy.
         case leftUserModifiedCopy
         /// The extension's own bytes could not be located to install (a
         /// dev/test binary not built with the Core resource, or the shipped
@@ -39,13 +40,31 @@ public enum PiExtensionInstaller {
         case sourceUnavailable
     }
 
-    /// Idempotent: safe to call on every launch. Compares by content, not by
-    /// existence, so re-running after an update replaces our own prior copy
-    /// but never a user's edited one. Never touches settings.json — pi's
-    /// auto-discovery finds this file without a settings entry.
+    /// SHA-256 (hex) of every PRIOR shipped version of the extension file.
+    /// This is what lets an update actually REACH existing installs: a copy
+    /// whose hash is listed here is ours, so it is overwritten; unknown bytes
+    /// are a user's edit and stay sacred. Before shipping a new version of the
+    /// .ts, append the hash of the version it replaces
+    /// (`git show HEAD:Sources/ContinuumRevivedCore/Resources/PiExtensions/continuum-spawn-agent.ts | shasum -a 256`).
+    public static let knownPriorContentHashes: Set<String> = [
+        // The original fire-and-forget spawn_agent (a8ab0b40, shipped by
+        // 5e4ac132; both commits carry byte-identical content).
+        "3e536320b6c99957255bb26b7709acdf838b075c99212c57211cf5f34831bd5a",
+    ]
+
+    public static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Idempotent: safe to call on every launch. Compares by content, so
+    /// re-running after an update replaces our own prior copy (current bytes or
+    /// a `knownPriorContentHashes` version) but never a user's edited one.
+    /// Never touches settings.json — pi's auto-discovery finds this file
+    /// without a settings entry.
     public static func install(
         sourceContent: Data? = nil,
         destinationDirectory: URL = PiExtensionInstaller.defaultExtensionsDirectory(),
+        knownPriorHashes: Set<String> = PiExtensionInstaller.knownPriorContentHashes,
         fileManager: FileManager = .default
     ) -> InstallResult {
         guard let content = sourceContent ?? bundledExtensionContent(fileManager: fileManager) else {
@@ -53,7 +72,11 @@ public enum PiExtensionInstaller {
         }
         let destination = destinationDirectory.appendingPathComponent(extensionFileName)
         if let existing = try? Data(contentsOf: destination) {
-            return existing == content ? .alreadyCurrent : .leftUserModifiedCopy
+            if existing == content { return .alreadyCurrent }
+            guard knownPriorHashes.contains(sha256Hex(existing)) else {
+                return .leftUserModifiedCopy
+            }
+            // A prior shipped version of our own file: fall through to the write.
         }
         do {
             try fileManager.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)

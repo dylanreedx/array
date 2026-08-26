@@ -163,7 +163,12 @@ enum AgentStopOutcomeChecks {
         try expect(failSupervisor.send("go", to: failID), "act3: the prompt must be accepted")
         try expect(waitUntil { failSupervisor.records[failID]?.latestTerminalEvent != nil },
                    "act3: a terminal event must have been recorded")
-        try expect(failSupervisor.records[failID]?.latestTerminalEvent?.outcome == .runtimeError,
+        // `.failed`, not `.runtimeError`: the supervisor now closes an errored
+        // turn with a `.turnCompleted(.failed)` after the `.runtimeError` (the
+        // no-result/liveness fix, 2026-08-26), and that closing completion is the
+        // last terminal stamp. The intent asserted is unchanged — a genuine
+        // failure reads as a FAILURE, never an interruption.
+        try expect(failSupervisor.records[failID]?.latestTerminalEvent?.outcome == .failed,
                    "act3: a genuine failure that nobody stopped must still be a failure; got "
                    + "\(String(describing: failSupervisor.records[failID]?.latestTerminalEvent?.outcome))")
         guard let failState = failSupervisor.turnSnapshot(for: failID)?.state else {
@@ -198,7 +203,9 @@ enum AgentStopOutcomeChecks {
                    + "\(String(describing: act4Supervisor.records[act4ID]?.latestTerminalEvent?.outcome))")
         try expect(waitUntil { act4Supervisor.send("second", to: act4ID) },
                    "act4: a second prompt must be accepted after the stop")
-        try expect(waitUntil { act4Supervisor.records[act4ID]?.latestTerminalEvent?.outcome == .runtimeError },
+        // `.failed` for the same reason as act3: the closing completion is the
+        // last terminal stamp on an errored turn.
+        try expect(waitUntil { act4Supervisor.records[act4ID]?.latestTerminalEvent?.outcome == .failed },
                    "act4: the SECOND turn genuinely failed and must be recorded as a failure — the "
                    + "previous turn's stop must not keep laundering errors; got "
                    + "\(String(describing: act4Supervisor.records[act4ID]?.latestTerminalEvent?.outcome))")

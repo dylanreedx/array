@@ -94,9 +94,9 @@ func runStrictAgentHarnessChecks() throws {
     // what it cannot have — better than refusing after the fact.
     for depth in [0, 1] {
         let args = AgentSupervisor.runnerConfig(for: roled, spawnDepth: depth).extraArgs
-        try expect(args == ["--tools", "read, grep, spawn_agent, delegate_agent"],
-                   "a roled pi agent at depth \(depth) must be offered BOTH pi delegation verbs "
-                   + "(Array's own spawn_agent and the third-party delegate_agent) — got \(args)")
+        try expect(args == ["--tools", "read, grep, spawn_agent, wait_agents, delegate_agent"],
+                   "a roled pi agent at depth \(depth) must be offered the complete delegation set "
+                   + "(Array's spawn_agent + wait_agents collection pair and the third-party delegate_agent) — got \(args)")
     }
     // At the cap, withheld — Array's own limit, enforced by omission.
     let cappedArgs = AgentSupervisor.runnerConfig(

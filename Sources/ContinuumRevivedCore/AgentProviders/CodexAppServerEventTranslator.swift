@@ -67,6 +67,14 @@ public struct CodexAppServerEventTranslator {
     private let now: @Sendable () -> Date
 
     public var onRuntimeObservation: (@Sendable (AgentRuntimeObservation) -> Void)?
+    /// Structured provider-owned child identity. Kept out of
+    /// `AgentRuntimeEvent` so provider thread ids remain a local routing detail.
+    public var onSubagentAnnouncement: (@Sendable (
+        _ parentThreadID: String,
+        _ childThreadID: String,
+        _ sourceItemID: String,
+        _ displayLabel: String?
+    ) -> Void)?
 
     public init(
         workingDirectory: URL? = nil,
@@ -159,6 +167,16 @@ public struct CodexAppServerEventTranslator {
         else { return [] }
 
         switch itemType {
+        case "subAgentActivity":
+            guard (item["kind"] as? String) == "started",
+                  let childThreadID = item["agentThreadId"] as? String,
+                  !childThreadID.isEmpty else { return [] }
+            let label = (item["agentPath"] as? String)
+                .map { URL(fileURLWithPath: $0).lastPathComponent }
+                .flatMap { $0.isEmpty ? nil : $0.replacingOccurrences(of: "_", with: " ") }
+            onSubagentAnnouncement?(threadId, childThreadID, itemId, label)
+            return []
+
         case "commandExecution":
             // Same I5 posture as exec: `command`/`aggregatedOutput` are the
             // sensitive payload, so the title is the generic literal "Shell",
@@ -199,8 +217,8 @@ public struct CodexAppServerEventTranslator {
             // userMessage (our own prompt echoed back — exec has no
             // equivalent), agentMessage/reasoning (no item.started analogue in
             // exec either; content arrives via delta + item.completed), and
-            // any item kind out of this ticket's single-agent scope
-            // (subAgentActivity, collabAgentToolCall, dynamicToolCall, …).
+            // any item kind outside the normalized timeline
+            // (collabAgentToolCall, dynamicToolCall, …).
             return []
         }
     }
