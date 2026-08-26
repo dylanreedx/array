@@ -1926,6 +1926,25 @@ extension TranscriptRhythmChecks {
                 throw fail("glyphs: '\(name ?? "<nil>")' left the icon column blank")
             }
         }
+        // T2 follow-up (2026-08-25) — raw substring matching collides on two
+        // axes this fixture list above never exercised: "cat" as a NEEDLE
+        // matches inside "locate"/"relocate", and "agent"/"task" as needles
+        // match inside any tool NAME merely containing those letters (an MCP
+        // tool literally named `mcp__linear__create_task`). Both must resolve
+        // to their own kind, not the collided one.
+        let fallback = ToolCallView.fallbackSymbolName
+        for (name, expected) in [
+            ("locate", fallback), ("relocate", fallback),
+            ("mcp__linear__create_task", fallback),
+        ] {
+            let resolved = ToolCallView.symbolName(forToolNamed: name)
+            guard resolved == expected else {
+                throw fail(
+                    "glyphs: '\(name)' resolved to '\(resolved)', expected '\(expected)' — "
+                    + "a substring collision, not the tool's own kind"
+                )
+            }
+        }
     }
 
 

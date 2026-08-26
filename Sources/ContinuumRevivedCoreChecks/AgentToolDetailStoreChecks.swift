@@ -12,6 +12,7 @@ func runAgentToolDetailStoreChecks() async throws {
     try await runAgentToolDetailAssociationAndExpiryChecks()
     try await runAgentToolDetailConcurrencyChecks()
     try await runAgentToolDetailPresentationChecks()
+    try await runAgentToolDetailDisclosureCollisionChecks()
     runAgentToolDetailSourceBoundaryChecks()
     try runAgentToolDetailCompileNegativeBoundaryCheck()
     print("Agent tool detail store checks passed: privacy redaction/fail-closed output, scoped cross-agent/turn identity, path-title retention/AX witnesses, implicit-path and compound-argv secret witnesses, cross-store reversed-arrival ties, provider ID bounds, argument/file bounds, truncation caps, start/end ordering, local expiry, same-ID concurrency, compact summaries, and source boundaries")
@@ -734,6 +735,48 @@ private func runAgentToolDetailPresentationChecks() async throws {
     }
     expect(!AgentToolDetailPresenter.compact(detail!).accessibilitySummary.contains("File.swift"),
            "AgentToolDetailPresenter compact: accessibility summary must not expose raw file names")
+}
+
+/// T2 follow-up (2026-08-25) — the single-file dedupe shipped in
+/// `runAgentToolDetailPresentationChecks` only ever constructed ONE affected
+/// file, so it could not express either failure mode the fix actually
+/// guards against: (1) two-or-more affected files sharing a basename ALL
+/// disappearing because the title can only ever name one of them, and
+/// (2) a non-file-oriented action line (a bash command) coincidentally
+/// containing an affected file's literal name as a substring.
+private func runAgentToolDetailDisclosureCollisionChecks() async throws {
+    let store = AgentToolDetailStore()
+
+    // Same basename from two different directories — real-world normal
+    // (`index.ts`, `mod.rs`, `__init__.py`). The title can only say
+    // "Edited index.ts"; both file lines must still appear, or the second
+    // file is invisible even fully expanded.
+    _ = await store.recordStart(AgentToolDetailStart(
+        identity: testToolDetailKey("tool-multi-same-basename"),
+        toolName: "edit",
+        affectedFiles: [
+            URL(fileURLWithPath: "/repo/a/src/index.ts"),
+            URL(fileURLWithPath: "/repo/b/lib/index.ts"),
+        ]
+    ))
+    let multiDetail = await store.detail(for: testToolDetailKey("tool-multi-same-basename"))!
+    let multiDisclosure = AgentToolDetailPresenter.observableDisclosureText(multiDetail)
+    expect(multiDisclosure.contains("…/src/index.ts") && multiDisclosure.contains("…/lib/index.ts"),
+           "AgentToolDetailPresenter disclosure: two affected files sharing a basename must BOTH stay listed, got \(multiDisclosure)")
+
+    // A bash/run row whose free-text action sentence happens to contain the
+    // word "test" must not swallow an affected file that is literally named
+    // "test" — the title isn't naming that file, it's narrating a command.
+    _ = await store.recordStart(AgentToolDetailStart(
+        identity: testToolDetailKey("tool-substring-collision"),
+        toolName: "bash",
+        arguments: [AgentToolDetailField(key: "command", value: "npm test")],
+        affectedFiles: [URL(fileURLWithPath: "/repo/test")]
+    ))
+    let collisionDetail = await store.detail(for: testToolDetailKey("tool-substring-collision"))!
+    let collisionDisclosure = AgentToolDetailPresenter.observableDisclosureText(collisionDetail)
+    expect(collisionDisclosure.contains("File: …/repo/test"),
+           "AgentToolDetailPresenter disclosure: an action line that merely CONTAINS a file's name as a substring (\u{201C}Ran npm test\u{201D} vs. a file literally named \u{201C}test\u{201D}) must not suppress that file's line, got \(collisionDisclosure)")
 }
 
 private func runAgentToolDetailSourceBoundaryChecks() {

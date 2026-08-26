@@ -379,7 +379,26 @@ final class ToolCallView: NSView {
     static func symbolName(forToolNamed name: String?) -> String {
         let fallback = fallbackSymbolName
         guard let name = name?.lowercased(), !name.isEmpty else { return fallback }
-        func any(_ needles: [String]) -> Bool { needles.contains { name.contains($0) } }
+        // Word-boundary matching, not raw substring: `name.contains("cat")` also
+        // matched inside "locate"/"relocate". A "word" here is a run of
+        // letters/digits/underscore — underscore counts as a word character (as
+        // it does for regex `\b`), so this alone is not enough for the
+        // delegation category below: "task"/"agent" are common SUFFIX words in
+        // namespaced tool names ("mcp__linear__create_task" is one underscore
+        // away from a `\b` match) and are handled separately.
+        func containsWord(_ name: String, _ needle: String) -> Bool {
+            guard !needle.isEmpty else { return false }
+            func isWordChar(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "_" }
+            var searchStart = name.startIndex
+            while let range = name.range(of: needle, range: searchStart..<name.endIndex) {
+                let leftBoundary = range.lowerBound == name.startIndex || !isWordChar(name[name.index(before: range.lowerBound)])
+                let rightBoundary = range.upperBound == name.endIndex || !isWordChar(name[range.upperBound])
+                if leftBoundary && rightBoundary { return true }
+                searchStart = range.upperBound
+            }
+            return false
+        }
+        func any(_ needles: [String]) -> Bool { needles.contains { containsWord(name, $0) } }
         // Delegation FIRST, and not a bubble. `bubble.left` is what
         // `CompletedReasoningDisclosureView` paints for reasoning, so a
         // `delegate_agent` row rendered as a thought — Dylan saw exactly that.
@@ -387,7 +406,19 @@ final class ToolCallView: NSView {
         // (`AgentReferenceRenderer` paints `person.crop.circle.badge.arrow.forward`).
         // It is tested before "read"/"search" because a delegation tool name can
         // contain either.
-        if any(["subagent", "delegate", "spawn_agent", "task", "agent"]) {
+        //
+        // "task" and "agent" are the delegation NOUN, not a verb, and they are
+        // common suffix words on unrelated namespaced tools (an MCP tool named
+        // `mcp__linear__create_task` is not a subagent). They only count when
+        // they are the tool's WHOLE name — the bare "Task"/"Agent" identifiers
+        // claude/pi actually send — never as a fragment of a longer name.
+        // "subagent"/"delegate_agent"/"spawn_agent" are themselves the known,
+        // unambiguous compound identifiers, so plain containment is fine there
+        // (word-boundary matching would reject them too: the "_" joining
+        // "delegate"/"spawn" to "agent" is itself a word character, so neither
+        // half alone is `\b`-bounded inside the compound).
+        let delegationCompounds = ["subagent", "delegate_agent", "spawn_agent"]
+        if delegationCompounds.contains(where: { name.contains($0) }) || name == "task" || name == "agent" {
             return "person.2"
         }
         // "run"/"cat" without the trailing space they used to carry: `"run "` and

@@ -942,12 +942,19 @@ public enum AgentToolDetailPresenter {
         var lines: [String] = []
         if let actionLine { lines.append(actionLine) }
         let fileLabel = observableFileAction(detail.toolName)
-        for fileName in observableAffectedFileNames(detail) {
+        let affectedFileNames = observableAffectedFileNames(detail)
+        // Suppression is only sound when there is exactly ONE affected file: the
+        // title names at most one basename ("Edited foo.js"), so with two or
+        // more files ("index.ts" from two different directories is a common
+        // real-world collision) dropping every line that happens to share that
+        // basename would hide files the title never actually distinguished.
+        // Multi-file rows always keep their file lines.
+        for fileName in affectedFileNames {
             // "Read foo.js" over "Read: …/dir/foo.js" — the title already names
             // the basename, and the directory it came from is still there
             // expanded. The argument loop below has had this suppression since
             // `.plans/45`; the file line never did.
-            guard !echoNamesFile(echo, fileName) else { continue }
+            guard !(affectedFileNames.count == 1 && echoNamesFile(echo, fileName, fileLabel: fileLabel)) else { continue }
             lines.append("\(fileLabel): \(fileName)")
         }
         for argument in detail.arguments.prefix(4)
@@ -976,7 +983,15 @@ public enum AgentToolDetailPresenter {
     /// underneath a "Read foo.js" title would be doubling. Compares the basename,
     /// because the line carries an abbreviated path and the title carries the
     /// bare name.
-    private static func echoNamesFile(_ echo: String, _ fileName: String) -> Bool {
+    ///
+    /// Restricted to `fileLabel`s that `pureSummary` actually builds AROUND a
+    /// basename ("Read"/"Changed" — the "Edited <basename>" / "Read <basename>"
+    /// sentences). For any other label the title's words are unrelated
+    /// narration (a bash command, a search description), and a substring hit
+    /// there is a coincidence, not doubling — e.g. an affected file literally
+    /// named "test" must not be swallowed by the title "Ran npm test".
+    private static func echoNamesFile(_ echo: String, _ fileName: String, fileLabel: String) -> Bool {
+        guard fileLabel == "Read" || fileLabel == "Changed" else { return false }
         let basename = fileName.split(separator: "/").last.map(String.init) ?? fileName
         guard !basename.isEmpty else { return false }
         return echo.contains(basename)
