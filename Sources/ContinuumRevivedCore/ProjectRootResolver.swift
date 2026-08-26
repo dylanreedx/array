@@ -70,6 +70,30 @@ public struct ProjectRootResolver: Sendable {
             return .needsPicker(.openLastProjectDisabled)
         }
 
+        // The selected workspace is the primary launch context. Prefer one of
+        // its authoritatively owned projects for the boot controller; otherwise
+        // a last-used project from another workspace can leak its flat canvas
+        // into the workspace being restored. An empty workspace intentionally
+        // has no candidate and falls through to the compatibility controller
+        // below, whose canvas is isolated by the app boot path.
+        if let workspaceId = registry.lastActiveWorkspaceId,
+           let workspace = registry.workspaces.first(where: { $0.id == workspaceId }) {
+            var candidateIds: [UUID] = []
+            if let lastActiveProjectId = registry.lastActiveProjectId {
+                candidateIds.append(lastActiveProjectId)
+            }
+            candidateIds.append(contentsOf: workspace.projectIds)
+            var visited = Set<UUID>()
+            for candidateId in candidateIds where visited.insert(candidateId).inserted {
+                guard let entry = registry.projects.first(where: {
+                    $0.id == candidateId && $0.workspaceId == workspaceId
+                }) else { continue }
+                if isUsableProjectRoot(entry.rootPath) {
+                    return .resolved(URL(fileURLWithPath: entry.rootPath), .registryLastActiveProject)
+                }
+            }
+        }
+
         if let projectId = registry.lastActiveProjectId,
            let entry = registry.projects.first(where: { $0.id == projectId }),
            isUsableProjectRoot(entry.rootPath) {

@@ -4015,6 +4015,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let activeWorkspace = try Self.loadActiveWorkspaceDocument(from: registryStore)
             let zoneRenderModels = Self.zoneRenderModels(from: activeWorkspace?.document, registry: updatedRegistry)
             let activeZone = zoneRenderModels.first(where: { $0.placement.projectId == project.id })?.placement
+            let bootProjectBelongsToSelectedWorkspace = Self.selectedWorkspaceOwnsBootProject(
+                project.id,
+                selectedWorkspaceId: activeWorkspace?.workspaceId,
+                registry: updatedRegistry
+            )
 
             let ghostty = try GhosttyRuntimeContext()
             let browserEngine = BrowserEngineContext()
@@ -4055,6 +4060,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 workspace: activeWorkspace?.document,
                 defaults: UserDefaults.standard,
                 presentAlert: Self.presentTopologyMigrationAlert
+            )
+            canvasState = Self.isolatedBootCanvasState(
+                projectCanvas: canvasState,
+                bootProjectId: project.id,
+                selectedWorkspaceId: activeWorkspace?.workspaceId,
+                selectedViewport: activeWorkspace?.document.viewport,
+                registry: updatedRegistry
             )
 
             let canvasView = CanvasNSView(canvasState: canvasState, activeZone: activeZone, zoneRenderModels: zoneRenderModels)
@@ -4118,9 +4130,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     registry: liveRegistry
                 )
             })
-            if let activeWorkspace {
+            if let activeWorkspace, bootProjectBelongsToSelectedWorkspace {
                 self.workspaceRuntime = WorkspaceRuntime(
                     boot: bootController,
+                    workspaceId: activeWorkspace.workspaceId,
+                    document: activeWorkspace.document,
+                    registry: bootRegistry,
+                    focusBroker: focusBroker,
+                    registryStore: registryStore,
+                    ghostty: ghostty,
+                    browserEngine: browserEngine
+                )
+            } else if let activeWorkspace {
+                // An empty workspace has no controller of its own. Keep the
+                // compatibility boot controller out of the runtime entirely so
+                // its tiles, zone, persistence hooks and creation scope cannot
+                // become part of the selected workspace by accident.
+                self.workspaceRuntime = WorkspaceRuntime(
                     workspaceId: activeWorkspace.workspaceId,
                     document: activeWorkspace.document,
                     registry: bootRegistry,
@@ -15187,6 +15213,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try store.save(registry)
     }
 
+    private static func selectedWorkspaceOwnsBootProject(
+        _ projectId: UUID,
+        selectedWorkspaceId: UUID?,
+        registry: Registry
+    ) -> Bool {
+        guard let selectedWorkspaceId else { return true }
+        return registry.projects.first(where: { $0.id == projectId })?.workspaceId == selectedWorkspaceId
+    }
+
+    private static func isolatedBootCanvasState(
+        projectCanvas: CanvasState,
+        bootProjectId: UUID,
+        selectedWorkspaceId: UUID?,
+        selectedViewport: CanvasViewport?,
+        registry: Registry
+    ) -> CanvasState {
+        guard !selectedWorkspaceOwnsBootProject(
+            bootProjectId,
+            selectedWorkspaceId: selectedWorkspaceId,
+            registry: registry
+        ) else { return projectCanvas }
+        return CanvasState(
+            viewport: selectedViewport ?? CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [],
+            groups: [],
+            lastActiveTileId: nil
+        )
+    }
+
     static func loadActiveZoneRenderModels(from store: RegistryStore) throws -> [CanvasNSView.ZoneRenderModel] {
         let registry = try store.loadOrEmpty()
         let activeWorkspace = try loadActiveWorkspaceDocument(from: store, registry: registry)
@@ -15377,6 +15432,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let registryAfterEmptyRelaunch = try registryStore.loadOrEmpty()
         try expect(registryAfterEmptyRelaunch.lastActiveWorkspaceId == emptyWorkspaceId,
                    "booting the last project must not replace an empty selected workspace")
+        try expect(!selectedWorkspaceOwnsBootProject(
+            project.id,
+            selectedWorkspaceId: emptyWorkspaceId,
+            registry: registryAfterEmptyRelaunch
+        ), "a project owned elsewhere must not become the empty workspace's boot controller")
+        let isolatedEmptyCanvas = isolatedBootCanvasState(
+            projectCanvas: try projectStore.loadCanvas(),
+            bootProjectId: project.id,
+            selectedWorkspaceId: emptyWorkspaceId,
+            selectedViewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            registry: registryAfterEmptyRelaunch
+        )
+        try expect(isolatedEmptyCanvas.tiles.isEmpty && isolatedEmptyCanvas.lastActiveTileId == nil,
+                   "a foreign compatibility controller must contribute zero tiles to an empty workspace at boot")
         let emptyRelaunchDocument = try loadActiveWorkspaceDocument(from: registryStore)
         try expect(emptyRelaunchDocument?.workspaceId == emptyWorkspaceId && emptyRelaunchDocument?.document.zones.isEmpty == true,
                    "relaunch must restore the selected empty workspace document")

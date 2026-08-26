@@ -4488,6 +4488,38 @@ do {
         "ProjectRootResolver uses usable registry lastActiveProjectId"
     )
 
+    let selectedWorkspaceId = UUID(uuidString: "00000000-0000-0000-0000-00000000A102")!
+    let selectedProjectId = UUID(uuidString: "00000000-0000-0000-0000-00000000A103")!
+    var workspaceScopedRegistry = registry
+    workspaceScopedRegistry.lastActiveWorkspaceId = selectedWorkspaceId
+    workspaceScopedRegistry.workspaces = [WorkspaceEntry(
+        id: selectedWorkspaceId,
+        name: "Selected",
+        projectIds: [selectedProjectId],
+        createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+        updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+    )]
+    workspaceScopedRegistry.projects.append(ProjectEntry(
+        id: selectedProjectId,
+        name: "Selected Project",
+        rootPath: "/selected/project",
+        workspaceId: selectedWorkspaceId,
+        lastOpenedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        pinned: false
+    ))
+    let workspaceScopedProbes = ProjectRootResolver.FileSystemProbes(
+        directoryExists: { $0 == "/registry/project" || $0 == "/selected/project" },
+        continuumDirectoryExists: { $0 == "/registry/project" || $0 == "/selected/project" },
+        canCreateContinuumDirectory: { _ in false }
+    )
+    let workspaceScopedDecision = ProjectRootResolver(
+        environment: [:], registry: workspaceScopedRegistry, fileSystem: workspaceScopedProbes
+    ).resolve()
+    expect(
+        workspaceScopedDecision == .resolved(URL(fileURLWithPath: "/selected/project"), .registryLastActiveProject),
+        "ProjectRootResolver boots a project owned by the selected workspace before a foreign last-active project"
+    )
+
     let missingRegistry = Registry(
         lastActiveWorkspaceId: nil,
         lastActiveProjectId: projectId,
