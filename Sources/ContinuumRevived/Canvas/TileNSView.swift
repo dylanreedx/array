@@ -701,11 +701,9 @@ class TileNSView: NSView, TokenThemed {
     /// bottom/left/right ring. Returning self for ring points routes mouseDown
     /// to TileNSView.mouseDown so the existing resize logic fires.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        // AppKit passes `point` in the receiver's SUPERVIEW coordinate system.
-        // Convert to this tile's world-sized bounds before ring math. Treating the
-        // canvas point as local only works accidentally near the canvas origin;
-        // elsewhere body content swallows the bottom/side rings while the title
-        // bar makes the top edge appear to work.
+        // The world plane passes its child a world (superview) point here.
+        // Convert before ring and title-bar math; otherwise a tile's position
+        // shifts the accessory hit region and can turn a control click into resize.
         let local = superview.map { convert(point, from: $0) } ?? point
         // A surfaced body is a picture, and a picture swallows clicks. AppKit
         // hit-tests BEFORE it delivers, so promoting here puts the real body back
@@ -729,11 +727,18 @@ class TileNSView: NSView, TokenThemed {
         // Claim the entire post-resize grab strip before `super.hitTest` so terminal
         // content cannot swallow title-bar drags. Route through TitleBarView first
         // so close/accessory controls still win; otherwise return self for move.
-        if bounds.contains(local), local.y < grabHeightInLocalCoordinates {
-            if let titleBar {
-                let titlePoint = convert(local, to: titleBar)
-                if let hit = titleBar.hitTest(titlePoint) { return hit }
+        // Normal AppKit delivery reaches this override with a world-plane point,
+        // but direct host embedding (used by the file document route) can supply a
+        // tile-local point. Resolve an accessory against both coordinate candidates
+        // before claiming title-bar drag; otherwise one embedding makes the other
+        // lose its native control hit target.
+        if let titleBar {
+            for titleCandidate in [local, point] {
+                let titlePoint = convert(titleCandidate, to: titleBar)
+                if let hit = titleBar.hitTest(titlePoint), hit !== titleBar { return hit }
             }
+        }
+        if bounds.contains(local), local.y < grabHeightInLocalCoordinates {
             return self
         }
         return super.hitTest(point)
@@ -1381,9 +1386,26 @@ private final class TitleBarView: NSView, TokenThemed {
         if closeButton.frame.contains(point) {
             return closeButton
         }
-        if let accessoryView {
-            let accessoryPoint = convert(point, to: accessoryView)
-            if let hit = accessoryView.hitTest(accessoryPoint) { return hit }
+        // The title bar owns drag routing, so its accessory must be claimed
+        // before returning the bar. An accessory may be a stack (file reference
+        // badge + dirty state + mode control), so return its native leaf control.
+        if let accessoryView, accessoryView.frame.contains(point) {
+            // NSStackView intentionally reports itself for hits in this hierarchy;
+            // walk arranged descendants so its embedded segmented control receives
+            // native tracking rather than the draggable title bar.
+            func deepestAccessoryHit(in view: NSView) -> NSView? {
+                // NSControl owns its tracking loop; never return its internal
+                // hosting view or the action cannot reach the target.
+                if view is NSControl { return view }
+                for child in view.subviews.reversed() {
+                    let childPoint = child.convert(point, from: self)
+                    if child.bounds.contains(childPoint) {
+                        return deepestAccessoryHit(in: child) ?? child
+                    }
+                }
+                return nil
+            }
+            return deepestAccessoryHit(in: accessoryView) ?? accessoryView
         }
         return self
     }

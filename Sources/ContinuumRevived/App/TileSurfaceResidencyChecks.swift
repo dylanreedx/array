@@ -1750,7 +1750,7 @@ enum TileSurfaceResidencyChecks {
         // The file tile's programmatic mode switch swaps the content view; the
         // promote-first guard is what keeps that from replacing the surface host.
         try expect(fileView.surfaceResidency == .surfaced, "precondition: file tile still surfaced")
-        fileView.setMode(.source)
+        fileView.setMode(.edit)
         world.pump()
         try expect(fileView.surfaceResidency == .native,
                    "a mode switch on a surfaced file tile must promote before swapping the body")

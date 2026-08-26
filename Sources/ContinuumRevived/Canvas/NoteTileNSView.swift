@@ -6,12 +6,12 @@ import Foundation
 /// Tile view that hosts an editable plain-text NSTextView for note content.
 @MainActor
 final class NoteTileNSView: TileNSView, NSTextViewDelegate {
-    enum Mode { case preview, edit }
+    typealias Mode = MarkdownDocumentMode
     private(set) var textView: NSTextView
     private let scrollView: NSScrollView
     let noteId: UUID
     private(set) var mode: Mode = .edit
-    private var markdownView: FileMarkdownDocumentView?
+    private var markdownSurface: MarkdownDocumentSurface!
     private var modeControl: NSSegmentedControl?
     private var activeBody: NSView?
 
@@ -54,8 +54,14 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
 
         super.init(tile: tile)
 
-        setContentView(sv)
-        activeBody = sv
+        markdownSurface = MarkdownDocumentSurface(
+            textView: tv, sourceScrollView: sv, initialDraft: initialBody,
+            mode: tile.metadata.markdownDocumentMode ?? (tile.frame.width >= 520 ? .split : .edit),
+            theme: { [weak self] in self?.effectiveTokenTheme ?? .dark }
+        )
+        mode = markdownSurface.mode
+        setContentView(markdownSurface.activeBody)
+        activeBody = markdownSurface.activeBody
         tv.delegate = self
         installModeControl()
     }
@@ -65,7 +71,7 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
     override func applyTokens() {
         super.applyTokens()
         applyDocumentTokens(to: textView)
-        markdownView?.applyTheme(effectiveTokenTheme)
+        markdownSurface?.applyTheme()
     }
 
     override func acquireFocus(reason: FocusRequest) -> Bool {
@@ -73,11 +79,12 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
         // While surfaced, `textView` is parked; focusing it there would send every
         // keystroke into a view clipped out of every draw.
         promoteForIncomingFocus()
-        window?.makeFirstResponder(mode == .preview ? (markdownView ?? textView) : textView)
+        window?.makeFirstResponder(mode == .preview ? (markdownSurface.previewView ?? textView) : textView)
         return true
     }
 
     func textDidChange(_ notification: Notification) {
+        markdownSurface.draftDidChange(textView.string)
         surfaceEpoch &+= 1
         onTextChange?()
     }
@@ -86,29 +93,28 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
         guard newMode != mode else { return }
         promoteForIncomingFocus()
         mode = newMode
-        modeControl?.selectedSegment = newMode == .preview ? 0 : 1
-        if newMode == .preview {
-            let view = markdownView ?? FileMarkdownDocumentView(frame: bounds)
-            markdownView = view
-            view.apply(markdown: textView.string, theme: effectiveTokenTheme)
-            setContentView(view)
-            activeBody = view
-        } else {
-            setContentView(scrollView)
-            activeBody = scrollView
-        }
+        modeControl?.selectedSegment = newMode.segmentIndex
+        markdownSurface.setMode(newMode)
+        setContentView(markdownSurface.activeBody)
+        activeBody = markdownSurface.activeBody
+        window?.makeFirstResponder(newMode == .preview ? (markdownSurface.previewView ?? textView) : textView)
+        tile.metadata.markdownDocumentMode = newMode
+        canvas?.updateTile(tile)
         surfaceEpoch &+= 1
     }
 
     @objc private func modeChanged(_ sender: NSSegmentedControl) {
-        setMode(sender.selectedSegment == 0 ? .preview : .edit)
+        setMode(Mode(segmentIndex: sender.selectedSegment) ?? .edit)
     }
 
     private func installModeControl() {
-        let control = NSSegmentedControl(labels: ["Preview", "Edit"], trackingMode: .selectOne, target: self, action: #selector(modeChanged(_:)))
+        let control = NSSegmentedControl(labels: ["Preview", "Split", "Edit"], trackingMode: .selectOne, target: self, action: #selector(modeChanged(_:)))
         control.controlSize = .small
         control.font = NSFont.systemFont(ofSize: 10, weight: .medium)
-        control.selectedSegment = 1
+        // Keep all three actions equally sized; `labels:` otherwise gives the
+        // longer Preview label a larger hit target and makes mode placement drift.
+        for segment in 0..<control.segmentCount { control.setWidth(160 / 3, forSegment: segment) }
+        control.selectedSegment = mode.segmentIndex
         control.setAccessibilityLabel("Note Markdown display mode")
         modeControl = control
         setTitleBarAccessory(control)
@@ -145,6 +151,9 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
         if let scroll = activeBody as? NSScrollView { return [scroll.contentView.bounds.origin] }
         return activeBody?.subviews.compactMap { ($0 as? NSScrollView)?.contentView.bounds.origin } ?? []
     }
+
+    /// QA access to the title-bar control exercised through the window route.
+    var qaModeControl: NSSegmentedControl? { modeControl }
 
     // MARK: - Export (A4)
 
@@ -284,6 +293,34 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
         let sentinel = "x"
         try dispatchKey(sentinel, in: window)
         try expect(noteView.textView.string.contains(sentinel), "keyDown should edit note text; got \(noteView.textView.string.debugDescription)")
+
+        // Production pointer delivery through the title-bar's accessory routing,
+        // not a direct target/action invocation. This was the missing oracle for
+        // the mode-control defect: a control can have a target and still be
+        // unreachable once drag chrome owns the event.
+        guard let modeControl = noteView.qaModeControl else {
+            throw CheckError.failed("note must install a Preview/Split/Edit control")
+        }
+        let splitPoint = modeControl.convert(NSPoint(x: modeControl.bounds.width * 0.5, y: modeControl.bounds.midY), to: nil)
+        let splitWorldPoint = canvas.worldPlane.convert(splitPoint, from: nil)
+        let splitWorldHit = canvas.worldPlane.hitTest(splitWorldPoint)
+        try expect(splitWorldHit === modeControl || splitWorldHit?.isDescendant(of: modeControl) == true,
+                   "title-bar Split hit must route to its native control; hit=\(String(describing: splitWorldHit))")
+        try dispatchClick(at: splitPoint, in: window)
+        noteView.layoutSubtreeIfNeeded()
+        try expect(noteView.mode == .split && modeControl.selectedSegment == 1,
+                   "title-bar Split click must select Split and replace the body; mode=\(noteView.mode), segment=\(modeControl.selectedSegment)")
+        try expect(noteView.textView.string.contains(sentinel),
+                   "mode switching must retain the note draft")
+        let editPoint = modeControl.convert(NSPoint(x: modeControl.bounds.width * (5.0 / 6.0), y: modeControl.bounds.midY), to: nil)
+        let editWorldHit = canvas.worldPlane.hitTest(canvas.worldPlane.convert(editPoint, from: nil))
+        try expect(editWorldHit === modeControl || editWorldHit?.isDescendant(of: modeControl) == true,
+                   "title-bar Edit hit must route to its native control; hit=\(String(describing: editWorldHit))")
+        try dispatchClick(at: editPoint, in: window)
+        let sourceHasFocus = window.firstResponder === noteView.textView
+            || (window.firstResponder as? NSTextView)?.delegate === noteView.textView.delegate
+        try expect(noteView.mode == .edit && sourceHasFocus,
+                   "title-bar Edit click must restore the source editor and focus; mode=\(noteView.mode), firstResponder=\(String(describing: window.firstResponder))")
 
         let manifest: [String: Any] = [
             "check": "note-click-focus",

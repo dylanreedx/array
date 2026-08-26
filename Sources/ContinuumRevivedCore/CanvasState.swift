@@ -224,6 +224,14 @@ public enum RuntimeRefKind: String, Codable, Equatable, Sendable {
     case file
 }
 
+/// The reading/editing presentation selected for a Markdown-bearing tile. Kept
+/// in tile metadata (rather than a view) so restoring a canvas preserves intent.
+public enum MarkdownDocumentMode: String, Codable, Equatable, Sendable {
+    case preview
+    case split
+    case edit
+}
+
 public struct TileMetadata: Codable, Equatable, Sendable {
     public var launchProfileId: String?
     public var projectRelativeCwd: String?
@@ -247,6 +255,8 @@ public struct TileMetadata: Codable, Equatable, Sendable {
     public var filesystemWherePath: String?
     public var worktreeId: String?
     public var agentSoundOverrides: AgentSoundOverrides?
+    /// Optional for backwards-compatible decoding of existing canvases.
+    public var markdownDocumentMode: MarkdownDocumentMode?
 
     public init(
         launchProfileId: String? = nil,
@@ -268,7 +278,8 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         filesystemHomeRelativePath: String? = nil,
         filesystemWherePath: String? = nil,
         worktreeId: String? = nil,
-        agentSoundOverrides: AgentSoundOverrides? = nil
+        agentSoundOverrides: AgentSoundOverrides? = nil,
+        markdownDocumentMode: MarkdownDocumentMode? = nil
     ) {
         self.launchProfileId = launchProfileId
         self.projectRelativeCwd = projectRelativeCwd
@@ -290,6 +301,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         self.filesystemWherePath = filesystemWherePath
         self.worktreeId = worktreeId
         self.agentSoundOverrides = agentSoundOverrides
+        self.markdownDocumentMode = markdownDocumentMode
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -313,6 +325,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         case filesystemWherePath
         case worktreeId
         case agentSoundOverrides
+        case markdownDocumentMode
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -337,6 +350,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         try container.encodeIfPresent(filesystemWherePath, forKey: .filesystemWherePath)
         try container.encodeIfPresent(worktreeId, forKey: .worktreeId)
         try container.encodeIfPresent(agentSoundOverrides, forKey: .agentSoundOverrides)
+        try container.encodeIfPresent(markdownDocumentMode, forKey: .markdownDocumentMode)
     }
 }
 
