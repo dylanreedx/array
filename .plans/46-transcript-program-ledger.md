@@ -11,6 +11,18 @@ Companion documents: `.plans/42` (evidence), `.plans/43` (design argument),
 `.plans/45` (the original handoff). `.plans/41` (zone lifecycle) and `.plans/44`
 (performance audit) belong to other agents; see S0.6.
 
+> **STALE ROWS — verify against code before taking any `TODO` here (2026-08-26).**
+> `.plans/49` §6.1 enumerates, with evidence, several tables in this file whose
+> rows still say `TODO` for work that shipped: Slice 0, Slice 1b, Slice 4, rows
+> 1d.1/1d.2, and row 1h.1 (whose residual is WORSE than it states, not better).
+> One is verified here: **row 4d.2 ("pi → `--mode rpc`") is not untouched** —
+> `PiRpcTransport.swift` and `PiRpcAgentRunner.swift` ship, with `run`, `stop`,
+> `steer`, `interrupt`, a generic `command`, a persistent session and
+> model/thinking arguments. The rows are deliberately NOT flipped wholesale,
+> because the picture is mixed rather than uniformly done and a row marked done
+> without a witness is exactly what the paragraph above forbids. Read the code,
+> then the row. `.plans/50` records the 2026-08-25 hardening pass.
+
 ## Status vocabulary
 
 | status | meaning |

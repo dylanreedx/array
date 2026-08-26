@@ -2,7 +2,13 @@
 
 Date: 2026-08-22
 
-Status: **proposal for discussion.** No implementation started. Evidence and
+Status: **SHIPPED, and this document is now history.** It said "No
+implementation started" until 2026-08-26, long after the program it proposes was
+built, released and hardened — see `.plans/46` (the ledger), `.plans/49` (the
+wrap-up findings) and `.plans/50` (the hardening pass). Kept for the design
+argument, which is still the reasoning behind what shipped.
+
+Original status line: **proposal for discussion.** No implementation started. Evidence and
 citations live in [`42-agent-tile-transcript-ux-brainstorm.md`](42-agent-tile-transcript-ux-brainstorm.md);
 this document is the sequenced plan built on it and is the one to keep editing.
 
