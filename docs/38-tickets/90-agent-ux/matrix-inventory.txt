@@ -1,4 +1,5 @@
 check --add-zone-check
+check --agent-awareness-check
 check --agent-display-name-check
 check --agent-fanout-check
 check --agent-first-paint-check
@@ -180,6 +181,7 @@ leg run scripts/check-sidebar-native-ux-program.sh
 leg run swift build
 leg run swift run ContinuumRevivedSyncIntegrationChecks
 leg run_app_check .build/debug/Array --add-zone-check
+leg run_app_check .build/debug/Array --agent-awareness-check
 leg run_app_check .build/debug/Array --agent-display-name-check
 leg run_app_check .build/debug/Array --agent-fanout-check
 leg run_app_check .build/debug/Array --agent-first-paint-check
@@ -367,15 +369,16 @@ leg run_leg swift run ContinuumRevivedPaletteChecks
 leg run_leg swift run ContinuumRevivedPerfChecks
 leg run_leg swift run ContinuumRevivedRelayChecks
 leg run_leg swift run ContinuumRevivedSyncChecks
+bundle-check --agent-awareness-check
 bundle-check --app-support-channel-check
 bundle-check --delete-confirm-policy-defaults-check
 bundle-check --file-tree-boot-persistence-check
 bundle-check --menu-contract-check
 bundle-check --palette-duplicate-root-check
 bundle-check --tool-path-bootstrap-check
-count ContinuumRevivedAgentContentChecks 21
+count ContinuumRevivedAgentContentChecks 22
 count ContinuumRevivedAgentUIChecks 19
-count ContinuumRevivedCoreChecks 93
+count ContinuumRevivedCoreChecks 98
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0
