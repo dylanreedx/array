@@ -43,6 +43,11 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
     public let config: Config
     public let sessionCapabilities: PiRpcSessionCapabilities = .full
 
+    /// True only while the long-lived RPC child is available for another turn.
+    /// The app uses this at the idle-session boundary so an unexpectedly exited
+    /// child is never put back in the per-agent reuse pool.
+    public var isSessionRunning: Bool { transport.isRunning }
+
     private let transport = PiRpcTransport()
     private let queue = DispatchQueue(label: "continuum.pi-rpc-agent-runner")
     private var translator: PiEventTranslator
@@ -72,6 +77,13 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
         }
     }
 
+    deinit {
+        // An idle RPC runner is intentionally retained between turns. If its
+        // owner disappears without an explicit app/archive teardown, do not
+        // leave Pi (or any tool subprocess in its process group) orphaned.
+        transport.stop(graceSeconds: ProcessGroupChild.Grace.interactive)
+    }
+
     // MARK: - AgentRunning-shaped surface
 
     /// Starts the child on first call; every subsequent call reuses the SAME
@@ -90,9 +102,16 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
             self.currentOnEvent = onEvent
         }
 
-        let text = Self.promptPayloadText(prompt)
+        let payload: [String: Any]
         do {
-            _ = try transport.sendAndAwait(type: "prompt", payload: ["message": text])
+            payload = try Self.promptPayload(prompt)
+        } catch {
+            queue.sync { turnSemaphore = nil; currentOnEvent = nil }
+            throw RunError.commandFailed(
+                command: "prompt", message: "could not prepare a local image attachment")
+        }
+        do {
+            _ = try transport.sendAndAwait(type: "prompt", payload: payload)
         } catch {
             queue.sync { turnSemaphore = nil; currentOnEvent = nil }
             throw RunError.commandFailed(command: "prompt", message: String(describing: error))
@@ -236,10 +255,39 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
             + extraArgs
     }
 
-    /// Joins the same segments `PiAgentRunner` would have passed as separate
-    /// argv entries into one message string for the `prompt`/`steer` payload.
+    /// RPC carries images in Pi's native `ImageContent` array. File references
+    /// remain explicit `@path` message segments so Pi can hand them to its Read
+    /// tool without copying arbitrary project bytes into JSON.
     public static func promptPayloadText(_ prompt: AgentPrompt) -> String {
-        PiAgentRunner.promptArgumentSegments(prompt).joined(separator: " ")
+        var segments: [String] = []
+        if !prompt.text.isEmpty { segments.append(prompt.text) }
+        segments.append(contentsOf: prompt.fileReferences.map(\.piPathReference))
+        return segments.joined(separator: " ")
+    }
+
+    public static func promptPayload(_ prompt: AgentPrompt) throws -> [String: Any] {
+        var payload: [String: Any] = ["message": promptPayloadText(prompt)]
+        if !prompt.imageAttachments.isEmpty {
+            payload["images"] = try prompt.imageAttachments.map { attachment in
+                let data = try Data(contentsOf: attachment.fileURL, options: [.mappedIfSafe])
+                return [
+                    "type": "image",
+                    "data": data.base64EncodedString(),
+                    "mimeType": attachment.metadata.contentType ?? inferredImageMIMEType(
+                        for: attachment.fileURL),
+                ]
+            }
+        }
+        return payload
+    }
+
+    private static func inferredImageMIMEType(for url: URL) -> String {
+        switch url.pathExtension.lowercased() {
+        case "jpg", "jpeg": return "image/jpeg"
+        case "gif": return "image/gif"
+        case "webp": return "image/webp"
+        default: return "image/png"
+        }
     }
 }
 

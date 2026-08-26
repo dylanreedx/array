@@ -15,7 +15,13 @@ import Foundation
 // only the tool NAME as their title, never the arguments. Proven in
 // `runPiEventTranslatorChecks`.
 //
-// Pi gives no turn IDs, so they are synthesised here as `<sessionId>#t<n>`,
+// Pi's "turn" is one model/tool cycle, not one user-visible agent run. A
+// single prompt that calls three tools can therefore contain four
+// turn_start/turn_end pairs. Array's lifecycle boundary is agent_start through
+// agent_settled; mapping Pi's internal turns to AgentRuntimeEvent.turn* resets
+// the run clock and emits a completion notification after every tool.
+//
+// Pi gives no agent-run IDs, so they are synthesised here as `<sessionId>#t<n>`,
 // stable within a session.
 //
 // Placement note (same as AgentUI): lives in Core for the first slice to avoid
@@ -23,8 +29,11 @@ import Foundation
 // multiple providers.
 public struct PiEventTranslator {
     private var threadId: String = "pi-unknown"
-    private var turnCounter: Int = 0
+    private var runCounter: Int = 0
     private var currentTurnId: String = "pi-unknown#t0"
+    private var runIsActive = false
+    private var pendingRunOutcome: TurnOutcome = .completed
+    private var pendingRunErrorMessage: String?
     private var seenUsageSignatures = Set<String>()
     private var semanticSignalsByItemID: [String: Set<AgentSemanticSignalKind>] = [:]
     /// Did the message currently being assembled already emit its text as deltas?
@@ -155,12 +164,13 @@ public struct PiEventTranslator {
             return [.sessionStateChanged(.ready)]
 
         case "agent_start":
-            return [.sessionStateChanged(.running)]
+            return beginRun()
 
         case "turn_start":
-            turnCounter += 1
-            currentTurnId = "\(threadId)#t\(turnCounter)"
-            return [.turnStarted(threadId: threadId, turnId: currentTurnId)]
+            // One Pi agent run contains another turn after each tool result.
+            // Keep those protocol cycles out of Array's user-visible lifecycle.
+            // The fallback preserves streams captured before agent_start.
+            return runIsActive ? [] : beginRun()
 
         case "message_start":
             // Purely structural, and deliberately not folded into `default`: this
@@ -282,15 +292,18 @@ public struct PiEventTranslator {
             return events
 
         case "turn_end":
-            return translateUsageEvents(from: object) + [.turnCompleted(
-                threadId: threadId,
-                turnId: currentTurnId,
-                outcome: .completed,
-                errorMessage: nil
-            )]
+            recordOutcome(from: object)
+            return translateUsageEvents(from: object)
+
+        case "agent_end":
+            // Current Pi follows this with agent_settled, after queued
+            // continuations, automatic retry, and compaction have drained.
+            // Older serialized logs ended here and omitted willRetry.
+            guard object["willRetry"] == nil else { return [] }
+            return finishRun()
 
         case "agent_settled":
-            return [.sessionStateChanged(.ready)]
+            return finishRun()
 
         // M2 (`.plans/46`): the two rpc-only protocol frame types. The event
         // stream is the SAME function print-mode and rpc-mode both use
@@ -305,8 +318,67 @@ public struct PiEventTranslator {
             return []
 
         default:
-            // session/user message echoes, agent_end transcript dump, etc.
+            // session/user message echoes, etc.
             return []
+        }
+    }
+
+    private mutating func beginRun() -> [AgentRuntimeEvent] {
+        var events: [AgentRuntimeEvent] = []
+        if runIsActive {
+            events.append(.turnCompleted(
+                threadId: threadId,
+                turnId: currentTurnId,
+                outcome: .interrupted,
+                errorMessage: nil))
+        }
+        runCounter += 1
+        currentTurnId = "\(threadId)#t\(runCounter)"
+        runIsActive = true
+        pendingRunOutcome = .completed
+        pendingRunErrorMessage = nil
+        events += [
+            .sessionStateChanged(.running),
+            .turnStarted(threadId: threadId, turnId: currentTurnId),
+        ]
+        return events
+    }
+
+    /// Completes exactly once, at Pi's agent-loop boundary rather than at an
+    /// internal model/tool turn boundary.
+    private mutating func finishRun() -> [AgentRuntimeEvent] {
+        guard runIsActive else { return [.sessionStateChanged(.ready)] }
+        runIsActive = false
+        return [
+            .turnCompleted(
+                threadId: threadId,
+                turnId: currentTurnId,
+                outcome: pendingRunOutcome,
+                errorMessage: pendingRunErrorMessage),
+            .sessionStateChanged(.ready),
+        ]
+    }
+
+    /// Pi places the terminal stop reason on the assistant message inside
+    /// turn_end. Tool-use turns are provisional; a later internal turn replaces
+    /// this value before agent_settled closes the run.
+    private mutating func recordOutcome(from object: [String: Any]) {
+        guard let message = object["message"] as? [String: Any],
+              let rawReason = message["stopReason"] as? String
+        else { return }
+        switch rawReason.lowercased() {
+        case "error", "failed", "failure":
+            pendingRunOutcome = .failed
+            pendingRunErrorMessage = rawReason
+        case "aborted", "interrupted":
+            pendingRunOutcome = .interrupted
+            pendingRunErrorMessage = nil
+        case "cancelled", "canceled":
+            pendingRunOutcome = .cancelled
+            pendingRunErrorMessage = nil
+        default:
+            pendingRunOutcome = .completed
+            pendingRunErrorMessage = nil
         }
     }
 

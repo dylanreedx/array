@@ -293,13 +293,19 @@ private func makeRunner(root: URL) -> (runner: PiRpcAgentRunner, restorePath: ()
     return (PiRpcAgentRunner(config: config), restore)
 }
 
-/// A minimal one-turn scenario: `prompt` acks, then streams `turn_start` /
-/// `turn_end` so `run()` has a real completion signal to wait on.
+/// A minimal one-run scenario. Pi's internal turn_end is not completion;
+/// agent_settled is the first point with no retry or continuation pending.
 private func oneTurnScenario() -> [String: Any] {
     [
         "handlers": [
             "prompt": [
-                "events": [["type": "turn_start"], ["type": "turn_end"]],
+                "events": [
+                    ["type": "agent_start"],
+                    ["type": "turn_start"],
+                    ["type": "turn_end"],
+                    ["type": "agent_end", "willRetry": false],
+                    ["type": "agent_settled"],
+                ],
             ],
         ],
         "default": ["events": []],
@@ -371,21 +377,25 @@ private func checkAbortKeepsConnectionAlive() {
 }
 
 /// `steer` must be a plain correlated command on the SAME connection while a
-/// turn is in flight -- it must NOT resolve or otherwise end that turn. Only
-/// the turn's own `turn_end` may do that. This is the honest boundary of what
+/// run is in flight -- it must NOT resolve or otherwise end that run. Only
+/// the run's own `agent_settled` may do that. This is the honest boundary of what
 /// Array's transport can witness: pi's own turn-boundary delivery timing
 /// (`agent-session.js:986`) is out of scope here (see the ledger), but "the
 /// client-side steer call does not itself terminate/interrupt the run" is
 /// squarely Array's to prove.
 private func checkSteerDoesNotEndTheTurn() {
-    // `turn_end` is held back 150ms (via its own `delay_ms`) so the steer call
+    // `agent_settled` is held back 150ms so the steer call
     // below has time to land, get answered, and be observed as complete
     // BEFORE the turn itself completes.
     let scenario: [String: Any] = [
         "handlers": [
             "prompt": [
-                "pre_events": [["type": "turn_start"]],
-                "events": [["type": "turn_end", "delay_ms": 150]],
+                "pre_events": [["type": "agent_start"], ["type": "turn_start"]],
+                "events": [
+                    ["type": "turn_end"],
+                    ["type": "agent_end", "willRetry": false],
+                    ["type": "agent_settled", "delay_ms": 150],
+                ],
             ],
             "steer": ["success": true],
         ],
@@ -443,11 +453,12 @@ private func checkMalformedFrameIsDroppedNotFatal() {
     let scenario: [String: Any] = [
         "handlers": [
             "prompt": [
-                "pre_events": [["type": "turn_start"]],
+                "pre_events": [["type": "agent_start"], ["type": "turn_start"]],
                 "events": [
                     ["raw": "not json at all {{{"],
                     ["type": "some_future_frame_type", "whatever": true],
                     ["type": "turn_end"],
+                    ["type": "agent_settled"],
                 ],
             ],
         ],

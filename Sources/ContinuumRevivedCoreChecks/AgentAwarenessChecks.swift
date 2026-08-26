@@ -68,6 +68,64 @@ func runAgentAwarenessChecks() throws {
         defaults: defaults)
     expect(missingFallback == global, "a missing imported sound falls back to the inherited global rule")
 
+    // Provider lifecycle invariant: tool/message completion is activity, not a
+    // completed user run. This is what protects both the tile timer anchor and
+    // the completion sound dispatcher from per-tool resets/rings.
+    var lifecyclePi = PiEventTranslator()
+    let piPrefix = [
+        #"{"type":"session","id":"thread-pi-lifecycle"}"#,
+        #"{"type":"agent_start"}"#,
+        #"{"type":"turn_start"}"#,
+        #"{"type":"tool_execution_start","toolCallId":"tool-1","toolName":"read","args":{"path":"safe"}}"#,
+        #"{"type":"tool_execution_end","toolCallId":"tool-1","toolName":"read","isError":false}"#,
+        #"{"type":"turn_end","message":{"role":"assistant","stopReason":"toolUse"}}"#,
+        #"{"type":"turn_start"}"#,
+        #"{"type":"turn_end","message":{"role":"assistant","stopReason":"stop"}}"#,
+        #"{"type":"agent_end","willRetry":false}"#,
+    ]
+    let piBeforeSettled = lifecyclePi.translate(stream: piPrefix)
+    expect(piBeforeSettled.filter { if case .turnStarted = $0 { return true }; return false }.count == 1,
+           "Pi tool cycles must preserve one run/timer start")
+    expect(!piBeforeSettled.contains { if case .turnCompleted = $0 { return true }; return false },
+           "Pi turn_end and agent_end must not complete before agent_settled")
+    let piSettled = lifecyclePi.translate(line: #"{"type":"agent_settled"}"#)
+    expect(piSettled.filter { if case .turnCompleted = $0 { return true }; return false }.count == 1,
+           "Pi agent_settled must emit exactly one completion")
+    expect(!lifecyclePi.translate(line: #"{"type":"agent_settled"}"#).contains {
+        if case .turnCompleted = $0 { return true }; return false
+    }, "replayed Pi agent_settled must not emit another completion")
+    var piSignalReducer = AgentSignalReducer()
+    let piCompletionSignals = (piBeforeSettled + piSettled).compactMap {
+        piSignalReducer.ingest(event: $0, agentID: agentID, tileID: tileID)
+    }.filter { $0.kind == .completed }
+    expect(piCompletionSignals.count == 1,
+           "one Pi tool-using run must dispatch one completion sound signal")
+
+    var lifecycleClaude = ClaudeEventTranslator(runToken: "lifecycle")
+    let claudeBeforeResult = lifecycleClaude.translate(stream: [
+        #"{"type":"system","subtype":"init","session_id":"thread-claude-lifecycle"}"#,
+        #"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{"path":"safe"}}]}}"#,
+        #"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","is_error":false,"content":"ok"}]}}"#,
+    ])
+    expect(!claudeBeforeResult.contains { if case .turnCompleted = $0 { return true }; return false },
+           "Claude tool completion must not complete the run")
+    expect(lifecycleClaude.translate(line: #"{"type":"result","subtype":"success","is_error":false}"#).filter {
+        if case .turnCompleted = $0 { return true }; return false
+    }.count == 1, "Claude result must emit one completion")
+
+    var lifecycleCodex = CodexEventTranslator(runToken: "lifecycle")
+    let codexBeforeTurn = lifecycleCodex.translate(stream: [
+        #"{"type":"thread.started","thread_id":"thread-codex-lifecycle"}"#,
+        #"{"type":"turn.started"}"#,
+        #"{"type":"item.started","item":{"id":"item-1","type":"command_execution","command":"pwd"}}"#,
+        #"{"type":"item.completed","item":{"id":"item-1","type":"command_execution","exit_code":0}}"#,
+    ])
+    expect(!codexBeforeTurn.contains { if case .turnCompleted = $0 { return true }; return false },
+           "Codex item completion must not complete the run")
+    expect(lifecycleCodex.translate(line: #"{"type":"turn.completed"}"#).filter {
+        if case .turnCompleted = $0 { return true }; return false
+    }.count == 1, "Codex turn.completed must emit one completion")
+
     var codex = CodexEventTranslator(runToken: "signal")
     let codexLines = [
         #"{"type":"thread.started","thread_id":"thread-c"}"#,

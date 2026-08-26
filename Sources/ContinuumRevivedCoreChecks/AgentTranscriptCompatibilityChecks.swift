@@ -396,11 +396,13 @@ private enum TranscriptCompatibilityScripts {
 
     static var twoTurns: TranscriptCompatibilityScript {
         TranscriptCompatibilityScript(
-            name: "a new turn does not append into the previous turn",
+            name: "a new agent run does not append into the previous run",
             steps: TranscriptCompatibilityHarness.sessionPrefix + [
                 TranscriptCompatibilityHarness.turnStart,
                 TranscriptCompatibilityHarness.textDelta(proseParagraphs[0]),
                 TranscriptCompatibilityHarness.turnEnd,
+                TranscriptCompatibilityHarness.settled,
+                TranscriptCompatibilityHarness.line(["type": "agent_start"]),
                 TranscriptCompatibilityHarness.turnStart,
                 TranscriptCompatibilityHarness.textDelta(proseParagraphs[1]),
                 TranscriptCompatibilityHarness.turnEnd,
@@ -409,16 +411,16 @@ private enum TranscriptCompatibilityScripts {
         )
     }
 
-    /// The same claim where it is load-bearing: a turn that never ended. Pi emits
-    /// `turn_end` on a clean turn, so `twoTurns` above would still split if only
-    /// the completion boundary reset the open run — an interrupted or dropped turn
-    /// is the case that proves `turn_start` itself ends it.
+    /// The same claim where it is load-bearing: a run that never settled. A
+    /// repeated agent_start defensively interrupts the stale lifecycle before
+    /// opening the next one. Pi's internal turn_start must not split a run.
     static var turnStartWithoutPreviousEnd: TranscriptCompatibilityScript {
         TranscriptCompatibilityScript(
-            name: "a turn that never ended does not absorb the next turn",
+            name: "an agent run that never settled does not absorb the next run",
             steps: TranscriptCompatibilityHarness.sessionPrefix + [
                 TranscriptCompatibilityHarness.turnStart,
                 TranscriptCompatibilityHarness.textDelta(proseParagraphs[0]),
+                TranscriptCompatibilityHarness.line(["type": "agent_start"]),
                 TranscriptCompatibilityHarness.turnStart,
                 TranscriptCompatibilityHarness.textDelta(proseParagraphs[1])
             ]

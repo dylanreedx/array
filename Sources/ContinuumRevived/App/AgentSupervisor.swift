@@ -56,6 +56,12 @@ protocol AgentRunning: AnyObject, Sendable {
     /// Codable runtime and companion activity streams.
     func observeRuntimeObservations(
         _ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void)
+    /// A provider session which remains useful after `run` returns can be
+    /// retained by the supervisor and rebound to the next prompt.
+    var keepsSessionAliveBetweenTurns: Bool { get }
+    /// Rechecked at the reuse boundary so a child that exited while idle is
+    /// discarded instead of failing the user's next prompt.
+    var canAcceptAnotherTurn: Bool { get }
 }
 
 extension AgentRunning {
@@ -63,6 +69,9 @@ extension AgentRunning {
     func run(prompt: String, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
         try run(prompt: AgentPrompt(prompt), onEvent: onEvent)
     }
+
+    var keepsSessionAliveBetweenTurns: Bool { false }
+    var canAcceptAnotherTurn: Bool { false }
 }
 
 /// B2.2 — a REFINEMENT, deliberately not a wider `AgentRunning`.
@@ -93,6 +102,10 @@ protocol AgentSessionRunning: AgentRunning {
 extension PiAgentRunner: AgentRunning {}
 extension PiRpcAgentRunner: AgentRunning {}
 extension PiRpcAgentRunner: AgentSessionRunning {}
+extension PiRpcAgentRunner {
+    var keepsSessionAliveBetweenTurns: Bool { true }
+    var canAcceptAnotherTurn: Bool { isSessionRunning }
+}
 extension ClaudeAgentRunner: AgentRunning {}
 extension CodexAgentRunner: AgentRunning {}
 
@@ -926,10 +939,12 @@ final class AgentSupervisor {
     /// The records this supervisor owns, in memory. `AgentStore` is the durable
     /// copy; this is the live one.
     private(set) var records: [AgentID: AgentRecord] = [:]
-    /// The runner for the prompt currently in flight, if any. One per agent: Pi is
-    /// one process per prompt with a stable `--session-id`, so a finished runner is
-    /// dropped and the next `send` makes a new one.
+    /// The runner for the prompt currently in flight, if any.
     private var runners: [AgentID: AgentRunning] = [:]
+    /// Provider sessions which are alive but have no turn in flight. Keeping
+    /// these separate preserves `runners` as the truthful busy/Stop capability
+    /// while avoiding a fresh Pi/Node/resource-loader startup on every message.
+    private var idleSessionRunners: [AgentID: AgentRunning] = [:]
     private var subscribers: [AgentID: [UUID: AsyncStream<AgentRuntimeEvent>.Continuation]] = [:]
     private var history: [AgentID: [AgentRuntimeEvent]] = [:]
     /// C4: the semantic document, built here so it exists whether or not any
@@ -1123,13 +1138,10 @@ final class AgentSupervisor {
 
     /// The only `PiAgentRunner(` construction in the app.
     ///
-    /// M4: the rpc session transport is opt-in, and the one-shot path stays on
-    /// disk as both the fallback and the anti-cheat baseline — a leg that proves
-    /// the new transport translates identically has to be able to run the old one.
-    /// It defaults OFF because one field of the rpc command payload had not been
-    /// verified against a live multi-second turn when it was written; the shape is
-    /// confirmed against pi's own `rpc-types.d.ts`, but confirmed-by-declaration is
-    /// not the same as driven.
+    /// RPC is the production default: it is Pi's native managed-session seam and
+    /// avoids paying process, resource, extension, and session-resume startup on
+    /// every prompt. The one-shot JSON runner remains as an explicit diagnostic
+    /// escape hatch (`CONTINUUM_PI_TRANSPORT=oneshot`) and parity baseline.
     nonisolated static func piRunner(for launch: AgentRunnerLaunch) -> AgentRunning {
         let config = runnerConfig(for: launch.record, spawnDepth: launch.spawnDepth)
         guard piSessionTransportEnabled() else {
@@ -1138,10 +1150,11 @@ final class AgentSupervisor {
         return PiRpcAgentRunner(config: config)
     }
 
-    /// Env-gated, like the codex transport switch, so a self-check leg and a
-    /// release build both take the shipped path unless a developer asks.
+    /// Default-on with an explicit developer fallback. `json` is accepted as an
+    /// alias because that is Pi's one-shot output mode name.
     nonisolated static func piSessionTransportEnabled() -> Bool {
-        ProcessInfo.processInfo.environment["CONTINUUM_PI_TRANSPORT"] == "rpc"
+        let override = ProcessInfo.processInfo.environment["CONTINUUM_PI_TRANSPORT"]?.lowercased()
+        return override != "oneshot" && override != "json"
     }
 
     /// The session runner bound to this agent RIGHT NOW, or nil.
@@ -2212,7 +2225,17 @@ final class AgentSupervisor {
         stopRequestedAgents.remove(id)
         // `depth(of:)` walks the parent chain, which the caps bound at 3 links,
         // once per turn — not on any per-delta path.
-        let runner = makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id)))
+        let runner: AgentRunning
+        if let idle = idleSessionRunners.removeValue(forKey: id) {
+            if idle.canAcceptAnotherTurn {
+                runner = idle
+            } else {
+                idle.stop()
+                runner = makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id)))
+            }
+        } else {
+            runner = makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id)))
+        }
         runners[id] = runner
         notifyTurnCapabilitiesChanged(id)
         // P2D.2: an agent asking for another agent arrives here, out of band from
@@ -2496,6 +2519,10 @@ final class AgentSupervisor {
         stopRequestedAgents.insert(id)
         runners[id]?.stop()
         runners[id] = nil
+        // Normally Stop is offered only for an active turn. Keeping teardown
+        // complete here also makes programmatic stop/archive paths safe if an
+        // idle persistent session exists.
+        idleSessionRunners.removeValue(forKey: id)?.stop()
         // T6: the parent's process group is what runs its delegated children, so
         // stopping the parent kills them. Keeping a watcher polling their run
         // directories afterwards would poll files nothing will ever write again.
@@ -2511,6 +2538,8 @@ final class AgentSupervisor {
     /// snapshot because `stop` mutates `runners`.
     func stopAll() {
         for id in Array(runners.keys) { stop(id) }
+        for runner in idleSessionRunners.values { runner.stop() }
+        idleSessionRunners.removeAll()
         // `stop(id)` reaches `stopObservedRuns(for: id)` only for a parent still
         // in `runners`. A parent whose runner had already exited but whose
         // observed children were still being tailed (B: quiet-forever until the
@@ -3593,7 +3622,7 @@ final class AgentSupervisor {
         // Stopped BEFORE the record is deleted, and that order is load-bearing: `stop`
         // delivers `.sessionStateChanged(.stopped)`, which is persist-worthy, so a stop
         // after the delete would write the record straight back.
-        if runners[id] != nil {
+        if runners[id] != nil || idleSessionRunners[id] != nil {
             report.wasRunning = true
             stop(id)
         }
@@ -4191,6 +4220,11 @@ final class AgentSupervisor {
         guard changed else { return false }
         records[id] = record
         persist(record)
+        // A persistent Pi process was launched with the previous harness/model/
+        // thinking arguments. Provider controls are disabled during a turn, so
+        // the only stale instance possible here is idle; retire it now and let
+        // the next send create a session with the newly persisted settings.
+        idleSessionRunners.removeValue(forKey: id)?.stop()
         return true
     }
 
@@ -5595,6 +5629,9 @@ final class AgentSupervisor {
         // finishing must not have its runner cleared by the old one's completion.
         if runners[id] === runner {
             runners[id] = nil
+            if runner.keepsSessionAliveBetweenTurns && runner.canAcceptAnotherTurn {
+                idleSessionRunners[id] = runner
+            }
             notifyTurnCapabilitiesChanged(id)
             // B4: this is the actual moment the runner slot frees, not the
             // `.turnCompleted` event itself — that event still fires while
@@ -5723,6 +5760,7 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
     /// through to a normal return after the semaphore, which is exactly why they
     /// were all green while a Stop was being recorded as a failure.
     private let stopError: Error?
+    private let persistentBetweenTurns: Bool
     private let released = DispatchSemaphore(value: 0)
     private let lock = NSLock()
     private var stopCountStorage = 0
@@ -5739,13 +5777,20 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
         runtimeObservations: [AgentRuntimeObservation] = [],
         holdUntilStopped: Bool = false,
         runError: Error? = nil,
-        stopError: Error? = nil
+        stopError: Error? = nil,
+        persistentBetweenTurns: Bool = false
     ) {
         self.script = script
         self.runtimeObservations = runtimeObservations
         self.holdUntilStopped = holdUntilStopped
         self.runError = runError
         self.stopError = stopError
+        self.persistentBetweenTurns = persistentBetweenTurns
+    }
+
+    var keepsSessionAliveBetweenTurns: Bool { persistentBetweenTurns }
+    var canAcceptAnotherTurn: Bool {
+        persistentBetweenTurns && lock.withLock { stopCountStorage == 0 }
     }
 
     var stopCount: Int { lock.withLock { stopCountStorage } }
@@ -7516,13 +7561,13 @@ func runAgentSupervisorChecks() async throws {
         throw fail("the stored record did not reflect the stop: lastActivityAt \(afterStop.timeIntervalSinceReferenceDate) is not after \(beforeStop.timeIntervalSinceReferenceDate)")
     }
 
-    // MARK: 5 · the production path still constructs a PiAgentRunner…
+    // MARK: 5 · the production path constructs Pi's persistent RPC runner…
 
     guard let record = supervisor.records[agentId] else {
         throw fail("the supervisor lost the record it spawned")
     }
-    guard AgentSupervisor.piRunner(for: AgentRunnerLaunch(record: record, spawnDepth: 0)) is PiAgentRunner else {
-        throw fail("the default runner factory does not produce a PiAgentRunner")
+    guard AgentSupervisor.piRunner(for: AgentRunnerLaunch(record: record, spawnDepth: 0)) is PiRpcAgentRunner else {
+        throw fail("the default runner factory does not produce a PiRpcAgentRunner")
     }
     guard AgentSupervisor.claudeRunner(for: record) is ClaudeAgentRunner else {
         throw fail("the claude runner factory does not produce a ClaudeAgentRunner")
@@ -7558,6 +7603,8 @@ func runAgentSupervisorChecks() async throws {
     let tileReport = try await checkTileIsASubscriber(store: store, config: config, cwd: cwd, fail: fail)
     let liveV2Report = try await checkLiveV2TileMigration(store: store, config: config, cwd: cwd, fail: fail)
     let capabilityReport = try await checkTurnCapabilityRepaint(store: store, config: config, cwd: cwd, fail: fail)
+    let persistentRunnerReport = try await checkPersistentRunnerReuse(
+        config: config, cwd: cwd, fail: fail)
 
     // MARK: 8 · closing a tile is closing a window, not ending the work (P2A.5)
 
@@ -7747,7 +7794,7 @@ func runAgentSupervisorChecks() async throws {
     let observedLivenessReport = try await checkObservedRunLivenessSweepClosesQuietDeadRun(fail: fail)
 
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(spawnResultReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport); \(deadRunnerReport); \(piDelegateReport); \(codexSubagentReport); \(refusalReport); \(observedCapReport); \(observedRaceReport); \(observedLivenessReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(persistentRunnerReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(spawnResultReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport); \(deadRunnerReport); \(piDelegateReport); \(codexSubagentReport); \(refusalReport); \(observedCapReport); \(observedRaceReport); \(observedLivenessReport)")
 }
 
 /// B7.2 — `/clear`'s one-transaction contract, driven through the real
@@ -10494,6 +10541,68 @@ private final class ScriptedRunnerQueue {
 
 private final class CapabilityRepaintRunnerBox: @unchecked Sendable {
     var made: [ScriptedAgentRunner] = []
+}
+
+/// Pi startup-latency regression: a session-capable runner returns after a
+/// settled turn but remains owned by the agent. The next prompt must rebind that
+/// exact process, while the UI still sees an unoccupied/sendable turn boundary.
+@MainActor
+private func checkPersistentRunnerReuse<Failure: Error>(
+    config: AgentModelConfig.Resolution,
+    cwd: URL,
+    fail: (String) -> Failure
+) async throws -> String {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-persistent-runner-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let thread = "persistent-provider"
+    let persistent = ScriptedAgentRunner(
+        script: [
+            .turnStarted(threadId: thread, turnId: "provider-turn"),
+            .turnCompleted(
+                threadId: thread, turnId: "provider-turn",
+                outcome: .completed, errorMessage: nil),
+            .sessionStateChanged(.ready),
+        ],
+        persistentBetweenTurns: true)
+    var factoryCount = 0
+    let supervisor = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: root),
+        makeRunner: { _ in
+            factoryCount += 1
+            return persistent
+        })
+    let id = supervisor.spawn(
+        role: "persistent-runner", prompt: nil, cwd: cwd,
+        model: config.model, thinking: config.thinking)
+
+    guard supervisor.send("first", to: id) else {
+        throw fail("persistent runner: first prompt was refused")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        persistent.completedRuns == 1
+            && supervisor.turnSnapshot(for: id)?.capabilities.canSend == true
+    }) else {
+        throw fail("persistent runner: first settled turn never became sendable")
+    }
+    guard supervisor.send("second", to: id) else {
+        throw fail("persistent runner: second prompt was refused")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        persistent.completedRuns == 2
+            && supervisor.turnSnapshot(for: id)?.capabilities.canSend == true
+    }) else {
+        throw fail("persistent runner: second settled turn never completed")
+    }
+    guard factoryCount == 1, persistent.prompts == ["first", "second"] else {
+        throw fail(
+            "persistent runner: two prompts used \(factoryCount) process(es), prompts \(persistent.prompts)")
+    }
+    supervisor.stopAll()
+    guard persistent.stopCount == 1 else {
+        throw fail("persistent runner: app teardown did not stop the idle session")
+    }
+    return "two prompts reused one persistent provider process and app teardown stopped its idle session"
 }
 
 /// P5.5 correction gate (`plan-P5.5-review-corrections.md` defect 1). The Pi
@@ -13469,10 +13578,10 @@ private func checkIsolatedSpawn(
         throw fail("the directory the runner works in is on branch \(checkedOut), not the agent's \(branch)")
     }
     // The PRODUCTION factory, not the recorder: an injected runner cannot witness
-    // what `PiAgentRunner.Config.cwd` would be, so a regression in `piRunner(for:)`
+    // what `PiRpcAgentRunner.Config.cwd` would be, so a regression in `piRunner(for:)`
     // would pass everything above (from the cross-review).
-    guard let production = AgentSupervisor.piRunner(for: AgentRunnerLaunch(record: isolated, spawnDepth: 0)) as? PiAgentRunner else {
-        throw fail("the default runner factory does not produce a PiAgentRunner for an isolated agent")
+    guard let production = AgentSupervisor.piRunner(for: AgentRunnerLaunch(record: isolated, spawnDepth: 0)) as? PiRpcAgentRunner else {
+        throw fail("the default runner factory does not produce a PiRpcAgentRunner for an isolated agent")
     }
     guard production.config.cwd.path == isolated.cwd else {
         throw fail("the production runner would start Pi in \(production.config.cwd.path), not the agent's worktree \(isolated.cwd)")

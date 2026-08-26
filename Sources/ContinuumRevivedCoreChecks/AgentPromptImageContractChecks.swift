@@ -57,6 +57,25 @@ func runAgentPromptImageContractChecks() {
     expect(Array(imageOnlyArgs.suffix(2)) == ["--no-session", "@/tmp/one image.png"],
            "image-only AgentPrompt must be accepted at the Pi adapter boundary as an @path argv token, got \(imageOnlyArgs)")
 
+    let rpcImageURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-rpc-image-\(UUID().uuidString).png")
+    let rpcImageBytes = Data([0x89, 0x50, 0x4E, 0x47])
+    try? rpcImageBytes.write(to: rpcImageURL)
+    defer { try? FileManager.default.removeItem(at: rpcImageURL) }
+    let rpcPrompt = AgentPrompt(
+        text: "describe",
+        imageAttachments: [localAttachment(2, path: rpcImageURL.path)])
+    guard let rpcPayload = try? PiRpcAgentRunner.promptPayload(rpcPrompt),
+          rpcPayload["message"] as? String == "describe",
+          let rpcImages = rpcPayload["images"] as? [[String: String]],
+          rpcImages.count == 1,
+          rpcImages[0]["type"] == "image",
+          rpcImages[0]["mimeType"] == "image/png",
+          Data(base64Encoded: rpcImages[0]["data"] ?? "") == rpcImageBytes else {
+        expect(false, "Pi RPC must carry image bytes through native ImageContent, never as a path in prose")
+        return
+    }
+
     let count = 12
     let many = AgentPrompt(text: "compare", imageAttachments: (0..<count).map { localAttachment($0) })
     let manySegments = Runner.promptArgumentSegments(many)

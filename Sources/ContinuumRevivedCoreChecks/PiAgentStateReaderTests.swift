@@ -144,6 +144,30 @@ func runPiAgentStateReaderTests() {
     }
 
     do {
+        let runDir = base.appendingPathComponent("pi-agent-end-retry-window", isDirectory: true)
+        let mtime = fixtureNow.addingTimeInterval(-2)
+        writeRun(runDir, status: "running", eventTypes: ["turn_end", "agent_end"], mtime: mtime)
+        let snapshot = reader.read(storeURL: runDir, config: .init(now: fixtureNow))
+        fixturesRead += 1
+        expect(snapshot.status == .working,
+               "pi-agent-end-retry-window: agent_end is non-terminal until agent_settled")
+        assertRoundTrip(snapshot, "pi-agent-end-retry-window")
+        assertI5Clean(snapshot, "pi-agent-end-retry-window")
+    }
+
+    do {
+        let runDir = base.appendingPathComponent("pi-settled", isDirectory: true)
+        let mtime = fixtureNow.addingTimeInterval(-2)
+        writeRun(runDir, status: "running", eventTypes: ["agent_end", "agent_settled"], mtime: mtime)
+        let snapshot = reader.read(storeURL: runDir, config: .init(now: fixtureNow))
+        fixturesRead += 1
+        expect(snapshot.status == .done,
+               "pi-settled: agent_settled is the observed terminal boundary")
+        assertRoundTrip(snapshot, "pi-settled")
+        assertI5Clean(snapshot, "pi-settled")
+    }
+
+    do {
         let runDir = base.appendingPathComponent("pi-stale", isDirectory: true)
         let mtime = fixtureNow.addingTimeInterval(-1_000)
         writeRun(runDir, status: "running", eventTypes: ["tool_execution_start"], mtime: mtime)
