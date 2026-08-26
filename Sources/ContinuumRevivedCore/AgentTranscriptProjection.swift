@@ -79,6 +79,20 @@ public struct AgentTranscriptProjection: Sendable {
     /// stream source is projected on demand by `compatibilityMarkupSourcesByEntryID`.
     public var finalizedCompatibilityMarkupSourceCount: Int { rawMarkupSourcesByEntryID.count }
 
+    /// Return the same semantic projection routed through a different host thread.
+    ///
+    /// A managed-agent tile is a disposable view of an agent-owned transcript. When
+    /// a workspace switch rebuilds that view, replaying the supervisor's bounded raw
+    /// event window truncates long turns. Copying the complete projection preserves
+    /// the document as well as an open stream's lossless Markdown buffer; only the
+    /// routing identity changes so future tile-bound events continue that stream.
+    public func rebound(to threadId: String) -> AgentTranscriptProjection {
+        var copy = self
+        copy.threadId = threadId
+        copy.events = events.map { $0.withThreadId(threadId) }
+        return copy
+    }
+
     /// Monotonic deadline for the delayed parse needed when a provider sends a
     /// delta inside the coalescing window and then pauses. Nil means no streamed
     /// Markdown parse is pending.

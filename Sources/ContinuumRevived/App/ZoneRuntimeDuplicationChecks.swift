@@ -207,106 +207,40 @@ enum ZoneRuntimeDuplicationChecks {
         try expect(browserRuntimeCount(browserB1) == 1,
                    "precondition: hydrating zone Z1 must give browser B1 exactly one runtime; "
                    + "got \(browserRuntimeCount(browserB1))")
-        let webViewsAfterInstall = browserEngine.webViewCreationCountForQA
+        let webViewsBeforeRejectedSwitch = browserEngine.webViewCreationCountForQA
+        let bytesABefore = try Data(contentsOf: WorkspaceStore(
+            workspaceId: workspaceWA, applicationSupportDirectory: appSupport).layout.canvasFile)
+        let bytesBBefore = try Data(contentsOf: WorkspaceStore(
+            workspaceId: workspaceWB, applicationSupportDirectory: appSupport).layout.canvasFile)
 
-        // === ACT 1: switch to WB. Same project, different zone. ===
-        try runtime.switchWorkspace(to: workspaceWB)
-        canvas.layoutSubtreeIfNeeded()
-
-        try expect(controllerBox.creations == 1,
-                   "act1: the shared project's controller must SURVIVE the switch — the whole "
-                   + "hazard depends on it. The factory ran \(controllerBox.creations) time(s), so "
-                   + "the controller was released and rebuilt and this fixture proves nothing.")
+        // A project is now exclusively workspace-owned. The legacy shared-project
+        // shape must stop before scene teardown, controller duplication, or file
+        // repair; an explicit project move is the only transfer operation.
+        do {
+            try runtime.switchWorkspace(to: workspaceWB)
+            throw Failure(message: "a project-owned-by-A document was silently mounted as workspace B")
+        } catch is ProjectWorkspaceOwnershipError {
+            // expected
+        }
+        try expect(runtime.workspaceId == workspaceWA,
+                   "ownership rejection changed the runtime's mounted workspace")
+        try expect(canvas.installedZoneLayerIds == [zoneZ1],
+                   "ownership rejection tore down or replaced the A scene")
         try expect(runtime.controller(for: projectPs) === controller,
-                   "act1: the surviving controller must be the same instance")
-        try expect(terminalRuntimeCount(terminalT2) == 1,
-                   "act1: zone Z2's terminal T2 must hydrate to exactly one runtime; "
-                   + "got \(terminalRuntimeCount(terminalT2))")
+                   "ownership rejection replaced the live project controller")
+        try expect(terminalRuntimeCount(terminalT1) == 1 && browserRuntimeCount(browserB1) == 1,
+                   "ownership rejection duplicated or removed a live runtime")
+        try expect(browserEngine.webViewCreationCountForQA == webViewsBeforeRejectedSwitch,
+                   "ownership rejection created a replacement browser runtime")
+        let bytesAAfter = try Data(contentsOf: WorkspaceStore(
+            workspaceId: workspaceWA, applicationSupportDirectory: appSupport).layout.canvasFile)
+        let bytesBAfter = try Data(contentsOf: WorkspaceStore(
+            workspaceId: workspaceWB, applicationSupportDirectory: appSupport).layout.canvasFile)
+        try expect(bytesAAfter == bytesABefore && bytesBAfter == bytesBBefore,
+                   "ownership rejection modified a workspace document")
 
-        // === ACT 2: switch back to WA. Z1's layer is rebuilt from scratch while
-        // the controller still holds T1's and B1's runtimes. ===
-        try runtime.switchWorkspace(to: workspaceWA)
-        canvas.layoutSubtreeIfNeeded()
-
-        try expect(controllerBox.creations == 1,
-                   "act2: the controller must still be the original; the factory ran "
-                   + "\(controllerBox.creations) time(s)")
-
-        try expect(terminalRuntimeCount(terminalT1) == 1,
-                   "act2: terminal T1 must still have exactly ONE runtime after a round trip; got "
-                   + "\(terminalRuntimeCount(terminalT1)). A second GhosttyTerminalRuntime re-binds "
-                   + "to the same persisted tmux pane, which is two Ghostty surfaces on one pty.")
-        try expect(browserRuntimeCount(browserB1) == 1,
-                   "act2: browser B1 must still have exactly ONE runtime after a round trip; got "
-                   + "\(browserRuntimeCount(browserB1)). A duplicate is a leaked WKWebView content "
-                   + "process.")
-
-        // Independent of the controller's own bookkeeping: the engine counts every
-        // web view it has ever built. One round trip through B1's zone may build
-        // ONE replacement, never two.
-        try expect(browserEngine.webViewCreationCountForQA == webViewsAfterInstall + 1,
-                   "act2: re-entering B1's zone must build exactly one replacement web view; the "
-                   + "engine went from \(webViewsAfterInstall) to "
-                   + "\(browserEngine.webViewCreationCountForQA)")
-
-        // Retiring must not degrade into skipping: the tile has to come back LIVE.
-        // A guard that keeps the count at one by leaving a placeholder would trade
-        // this defect for the one M1.2 just fixed, and would pass every assertion
-        // above.
-        try expect(!(canvas.tileView(for: terminalT1) is DescriptorTileNSView),
-                   "act2: T1 must come back as a live terminal tile, not a placeholder; got "
-                   + "\(String(describing: canvas.tileView(for: terminalT1).map { type(of: $0) }))")
-        try expect(canvas.tileView(for: browserB1) is BrowserTileNSView,
-                   "act2: B1 must come back as a live browser tile; got "
-                   + "\(String(describing: canvas.tileView(for: browserB1).map { type(of: $0) }))")
-
-        // === ACT 3: do it again. The per-tile counts above are satisfied by any
-        // fixed number of runtimes; only repetition distinguishes "one each" from
-        // "leaking one per switch". Totals, not per-tile filters, so a runtime
-        // accumulating under ANY tile id shows up.
-        //
-        // Note what this deliberately does NOT assert. The controller still holds
-        // T2's runtime, whose zone is no longer installed and whose host view
-        // `setZones` destroyed — an orphan. That is the same class of leak as the
-        // missing `ManagedAgentTileNSView.detach()` sweep and belongs to M1.4, so
-        // this leg pins the count as STABLE rather than pretending it is already
-        // cleaned up. If M1.4 sweeps it, these two numbers drop and this assertion
-        // is the thing that will say so.
-        let terminalsAfterFirstTrip = controller.runtimes.count
-        let browsersAfterFirstTrip = controller.browserRuntimes.count
-        let webViewsAfterFirstTrip = browserEngine.webViewCreationCountForQA
-
-        try runtime.switchWorkspace(to: workspaceWB)
-        canvas.layoutSubtreeIfNeeded()
-        try runtime.switchWorkspace(to: workspaceWA)
-        canvas.layoutSubtreeIfNeeded()
-
-        try expect(controllerBox.creations == 1,
-                   "act3: the controller must still be the original; the factory ran "
-                   + "\(controllerBox.creations) time(s)")
-        try expect(terminalRuntimeCount(terminalT1) == 1,
-                   "act3: T1 must still have exactly one runtime after a second round trip; got "
-                   + "\(terminalRuntimeCount(terminalT1))")
-        try expect(browserRuntimeCount(browserB1) == 1,
-                   "act3: B1 must still have exactly one runtime after a second round trip; got "
-                   + "\(browserRuntimeCount(browserB1))")
-        try expect(controller.runtimes.count == terminalsAfterFirstTrip,
-                   "act3: terminal runtimes must not accumulate across round trips — "
-                   + "\(terminalsAfterFirstTrip) after the first, "
-                   + "\(controller.runtimes.count) after the second: "
-                   + "\(controller.runtimes.map { String($0.tileId.uuidString.suffix(4)) })")
-        try expect(controller.browserRuntimes.count == browsersAfterFirstTrip,
-                   "act3: browser runtimes must not accumulate across round trips — "
-                   + "\(browsersAfterFirstTrip) after the first, "
-                   + "\(controller.browserRuntimes.count) after the second")
-        try expect(browserEngine.webViewCreationCountForQA == webViewsAfterFirstTrip + 1,
-                   "act3: a second round trip must build exactly one more web view; the engine "
-                   + "went from \(webViewsAfterFirstTrip) to "
-                   + "\(browserEngine.webViewCreationCountForQA)")
-
-        print("ZoneRuntimeDuplicationChecks: a shared project survived two workspace round trips "
-              + "with exactly one terminal runtime and one browser runtime per tile, live views "
-              + "for both, and no accumulation")
+        print("ZoneRuntimeDuplicationChecks: legacy shared-project membership was rejected before "
+              + "scene teardown, file writes, or runtime duplication")
     }
 
     /// Counts controller constructions so the leg can prove its own premise: if

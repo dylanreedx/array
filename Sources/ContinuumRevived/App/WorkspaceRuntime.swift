@@ -22,6 +22,11 @@ final class WorkspaceRuntime {
     private let ghostty: GhosttyRuntimeContext?
     private let browserEngine: BrowserEngineContext
 
+    /// Check seams for failure-atomic switch witnesses. Production leaves both
+    /// nil and uses WorkspaceStore's atomic read/write paths.
+    var _workspaceDocumentLoader: ((UUID) throws -> WorkspaceDocument?)?
+    var _workspaceDocumentSaver: ((UUID, WorkspaceDocument) throws -> Void)?
+
     // Tracks which projectIds this runtime acquired (for closeAll).
     private var acquiredProjectIds: [UUID] = []
 
@@ -60,6 +65,47 @@ final class WorkspaceRuntime {
     func replaceDocument(_ newDocument: WorkspaceDocument, for workspaceId: UUID) {
         guard self.workspaceId == workspaceId else { return }
         document = newDocument
+    }
+
+    /// Commit the exact placement emitted by the mounted canvas. No reload is
+    /// permitted here: the runtime's document is the in-memory workspace truth,
+    /// and re-reading disk would race other live zone mutations.
+    func commitZonePlacement(_ placement: ZonePlacement) throws {
+        guard let index = document.zones.firstIndex(where: { $0.zoneId == placement.zoneId }) else {
+            throw WorkspaceMutationError.zoneNotFound(placement.zoneId)
+        }
+        document.zones[index] = placement
+        try persistWorkspaceDocument()
+    }
+
+    func commitCreatedZone(_ placement: ZonePlacement) throws {
+        guard !document.zones.contains(where: { $0.zoneId == placement.zoneId }) else { return }
+        document.zones.append(placement)
+        document.bringZoneToFront(placement.zoneId)
+        document.lastActiveZoneId = placement.zoneId
+        try persistWorkspaceDocument()
+    }
+
+    func commitClosedZone(_ zoneId: UUID) throws {
+        guard document.zones.contains(where: { $0.zoneId == zoneId }) else {
+            throw WorkspaceMutationError.zoneNotFound(zoneId)
+        }
+        document.zones.removeAll { $0.zoneId == zoneId }
+        document.setTiles([], forZone: zoneId)
+        if document.lastActiveZoneId == zoneId {
+            document.lastActiveZoneId = document.zonesInZOrder.last?.zoneId
+        }
+        try persistWorkspaceDocument()
+    }
+
+    enum WorkspaceMutationError: Error, LocalizedError {
+        case zoneNotFound(UUID)
+
+        var errorDescription: String? {
+            switch self {
+            case let .zoneNotFound(zoneId): return "Zone \(zoneId) is not part of the mounted workspace."
+            }
+        }
     }
 
     /// Returns the placement of the installed ZoneLayer for `zoneId` (for check assertions).
@@ -468,6 +514,8 @@ final class WorkspaceRuntime {
     /// via `ZoneHydrationOrchestrator.plan`; only zones whose planned tier is `.live`
     /// get a controller acquired.
     func install(into canvasView: CanvasNSView, appRegistry: Registry) throws {
+        try appRegistry.validateExclusiveProjectOwnership()
+        try Self.validateProjectOwnership(in: document, workspaceId: workspaceId, registry: appRegistry)
         self.canvasView = canvasView
         canvasView.activateUndoWorkspace(workspaceId)
 
@@ -540,12 +588,13 @@ final class WorkspaceRuntime {
                 tileViews[tile.id] = view
             }
 
-            // Derive display name from registry project entry or zone name.
+            // A saved custom name always wins. Registry/project names are only
+            // fallbacks for a genuinely unnamed placement.
             let displayName: String
-            if let registryName = appRegistry.projects.first(where: { $0.id == projectId })?.name {
-                displayName = registryName
-            } else if !zone.name.isEmpty {
+            if !zone.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 displayName = zone.name
+            } else if let registryName = appRegistry.projects.first(where: { $0.id == projectId })?.name {
+                displayName = registryName
             } else {
                 displayName = controller.project.name
             }
@@ -632,9 +681,11 @@ final class WorkspaceRuntime {
     }
 
     private func _addProjectZone(projectId: UUID, appRegistry: Registry?) throws -> UUID {
-        // The same project may intentionally appear in several organizational
-        // zones. Acquire its runtime once, then create a distinct placement each
-        // time; zone membership remains per tile through `zoneId`.
+        let ownershipRegistry = try appRegistry ?? registryStore.loadOrEmpty()
+        if let owner = try ownershipRegistry.exclusiveWorkspaceOwner(of: projectId), owner != workspaceId {
+            throw ProjectWorkspaceOwnershipError.alreadyOwned(projectId: projectId, workspaceId: owner)
+        }
+        // A project may have multiple zones inside its one owning workspace.
         let controller: ZoneRuntimeController
         if acquiredProjectIds.contains(projectId), let existing = registry.controller(for: projectId) {
             controller = existing
@@ -996,8 +1047,26 @@ final class WorkspaceRuntime {
     }
 
     private func persistWorkspaceDocument() throws {
+        try saveWorkspaceDocument(document, workspaceId: workspaceId)
+    }
+
+    private func loadWorkspaceDocument(workspaceId: UUID) throws -> WorkspaceDocument? {
+        if let override = _workspaceDocumentLoader { return try override(workspaceId) }
         let appSupport = registryStore.registryFile.deletingLastPathComponent()
-        try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport).save(document)
+        return try WorkspaceStore(
+            workspaceId: workspaceId,
+            applicationSupportDirectory: appSupport).tryLoad()
+    }
+
+    private func saveWorkspaceDocument(_ document: WorkspaceDocument, workspaceId: UUID) throws {
+        if let override = _workspaceDocumentSaver {
+            try override(workspaceId, document)
+            return
+        }
+        let appSupport = registryStore.registryFile.deletingLastPathComponent()
+        try WorkspaceStore(
+            workspaceId: workspaceId,
+            applicationSupportDirectory: appSupport).save(document)
     }
 
     // MARK: - Workspace Switch (T09)
@@ -1023,23 +1092,32 @@ final class WorkspaceRuntime {
         // months, in silence. Refusing loudly means any future path that reaches a
         // canvas-less runtime fails at the first click instead.
         guard canvasView != nil else { throw WorkspaceSwitchError.noCanvas }
-        // 1. Flush current + persist departing workspace's live viewport/focus to disk.
+        // Validate and load the target before touching the mounted scene or either
+        // workspace file. Duplicate legacy membership is an integrity error, not
+        // an invitation to merge layouts during a switch.
+        let appRegistry = try registryStore.loadOrEmpty()
+        try appRegistry.validateExclusiveProjectOwnership()
+        try Self.validateProjectOwnership(in: document, workspaceId: workspaceId, registry: appRegistry)
+        guard let targetDocument = try loadWorkspaceDocument(workspaceId: targetWorkspaceId) else {
+            throw WorkspaceSwitchError.documentNotFound(targetWorkspaceId)
+        }
+        try Self.validateProjectOwnership(
+            in: targetDocument, workspaceId: targetWorkspaceId, registry: appRegistry)
+
+        // Capture every visible register and synchronously save it while the
+        // departing scene is still mounted and interactive.
         let departingFocus = departingFocusSnapshot(from: canvasView)
         flushAll()
         try persistDepartingWorkspaceState(focus: departingFocus)
-
-        // 2. Load target document.
-        let appSupport = registryStore.registryFile.deletingLastPathComponent()
-        let targetStore = WorkspaceStore(workspaceId: targetWorkspaceId, applicationSupportDirectory: appSupport)
-        guard let targetDocument = try targetStore.tryLoad() else {
-            throw WorkspaceSwitchError.documentNotFound(targetWorkspaceId)
-        }
 
         // 3. Diff project sets.
         let currentProjectIds = Set(acquiredProjectIds)
         let targetProjectIds = Set(
             targetDocument.zones.compactMap(\.projectId)
         )
+        if let sharedProjectId = currentProjectIds.intersection(targetProjectIds).first {
+            throw WorkspaceSwitchError.projectAppearsInBothWorkspaces(sharedProjectId)
+        }
         let departing = currentProjectIds.subtracting(targetProjectIds)
         let arriving = targetProjectIds.subtracting(currentProjectIds)
 
@@ -1161,13 +1239,30 @@ final class WorkspaceRuntime {
 
     enum WorkspaceSwitchError: Error, CustomStringConvertible {
         case documentNotFound(UUID)
+        case projectAppearsInBothWorkspaces(UUID)
         /// M1.10: the runtime was asked to switch before anything gave it a canvas.
         case noCanvas
         var description: String {
             switch self {
             case let .documentNotFound(id): return "switchWorkspace: no document for workspace \(id)"
+            case let .projectAppearsInBothWorkspaces(projectId):
+                return "switchWorkspace: project \(projectId) appears in both workspaces; move it explicitly instead"
             case .noCanvas:
                 return "switchWorkspace: this WorkspaceRuntime has no canvas — nothing called adoptCanvas(_:), so the switch would have silently changed the document and left the canvas alone"
+            }
+        }
+    }
+
+    private static func validateProjectOwnership(
+        in document: WorkspaceDocument,
+        workspaceId: UUID,
+        registry: Registry
+    ) throws {
+        for projectId in Set(document.zones.compactMap(\.projectId)) {
+            guard try registry.exclusiveWorkspaceOwner(of: projectId) == workspaceId else {
+                let owner = try registry.exclusiveWorkspaceOwner(of: projectId) ?? workspaceId
+                throw ProjectWorkspaceOwnershipError.alreadyOwned(
+                    projectId: projectId, workspaceId: owner)
             }
         }
     }
@@ -1319,6 +1414,12 @@ final class WorkspaceRuntime {
     }
 
     private func persistDepartingWorkspaceState(focus: DepartingFocusSnapshot) throws {
+        if let visibleZones = canvasView?.workspaceZonePlacementsForPersistence() {
+            let visibleById = Dictionary(
+                visibleZones.map { ($0.zoneId, $0) },
+                uniquingKeysWith: { _, latest in latest })
+            document.zones = document.zones.map { visibleById[$0.zoneId] ?? $0 }
+        }
         if let liveViewport = canvasView?.viewport {
             document.viewport = liveViewport
         }
@@ -1335,9 +1436,7 @@ final class WorkspaceRuntime {
             canvas.lastActiveTileId = tileId
             try controller.projectStore.saveCanvas(canvas)
         }
-        let appSupportForSave = registryStore.registryFile.deletingLastPathComponent()
-        let departingStore = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupportForSave)
-        try departingStore.save(document)
+        try saveWorkspaceDocument(document, workspaceId: workspaceId)
     }
 
     @discardableResult

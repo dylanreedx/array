@@ -713,6 +713,16 @@ final class CanvasNSView: NSView, TokenThemed {
             placement = layer.placement
         }
         guard let placement else { return }
+        if let index = liveZones.firstIndex(where: { $0.zoneId == zoneId }) {
+            liveZones[index] = placement
+        }
+        if let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) {
+            layer.placement = placement
+            layer.renderModel.placement = placement
+        }
+        if let index = zoneRenderModels.firstIndex(where: { $0.placement.zoneId == zoneId }) {
+            zoneRenderModels[index].placement = placement
+        }
         if var model = zoneDisplayByZoneId[zoneId] {
             model.placement = placement
             zoneDisplayByZoneId[zoneId] = model
@@ -2059,6 +2069,13 @@ final class CanvasNSView: NSView, TokenThemed {
         var byId = Dictionary(uniqueKeysWithValues: liveZones.map { ($0.zoneId, $0) })
         for layer in zoneLayers { byId[layer.placement.zoneId] = layer.placement }
         return Array(byId.values)
+    }
+
+    /// Complete zone state exactly as the mounted workspace is displaying it.
+    /// WorkspaceRuntime reads this synchronously before a switch so an in-flight
+    /// debounce or stale document copy cannot discard the last visible mutation.
+    func workspaceZonePlacementsForPersistence() -> [ZonePlacement] {
+        allZonePlacements()
     }
 
     private func geometryTileIds(inZone zoneId: UUID) -> Set<UUID> {
@@ -4075,7 +4092,18 @@ final class CanvasNSView: NSView, TokenThemed {
               let idx = liveZones.firstIndex(where: { $0.zoneId == zoneId }),
               liveZones[idx].name != trimmed else { return false }
         liveZones[idx].name = trimmed
+        let placement = liveZones[idx]
+        if let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) {
+            layer.placement = placement
+            layer.renderModel.placement = placement
+            layer.renderModel.displayName = trimmed
+        }
+        if let modelIndex = zoneRenderModels.firstIndex(where: { $0.placement.zoneId == zoneId }) {
+            zoneRenderModels[modelIndex].placement = placement
+            zoneRenderModels[modelIndex].displayName = trimmed
+        }
         if var model = zoneDisplayByZoneId[zoneId] {
+            model.placement = placement
             model.displayName = trimmed
             zoneDisplayByZoneId[zoneId] = model
             zoneChromeViews[zoneId]?.update(model: model)
@@ -5430,11 +5458,15 @@ final class CanvasNSView: NSView, TokenThemed {
     func setZonePlacement(_ placement: ZonePlacement) {
         guard let layer = zoneLayers.first(where: { $0.placement.zoneId == placement.zoneId }) else { return }
         layer.placement = placement
+        layer.renderModel.placement = placement
         // M1.10: Model B owns geometry, so a layer placement change has to land
         // there too — `liveZones` is what every zone gesture and the chrome layout
         // read.
         if let index = liveZones.firstIndex(where: { $0.zoneId == placement.zoneId }) {
             liveZones[index] = placement
+        }
+        if let index = zoneRenderModels.firstIndex(where: { $0.placement.zoneId == placement.zoneId }) {
+            zoneRenderModels[index].placement = placement
         }
         if var model = zoneDisplayByZoneId[placement.zoneId] {
             model.placement = placement
@@ -9494,6 +9526,16 @@ final class CanvasNSView: NSView, TokenThemed {
         let zoneId = created[0].zoneId
         try expect(canvas.qaZoneDisplayName(zoneId) == "Zone 1", "seed name 'Zone 1'; got '\(canvas.qaZoneDisplayName(zoneId) ?? "nil")'")
 
+        // Production workspace hydration installs a ZoneLayer in addition to the
+        // live placement. Keep that exact split present so this check catches the
+        // regression where rename updated chrome but a later layer refresh restored
+        // the project/old name.
+        let installedLayer = CanvasNSView.ZoneLayer(
+            placement: created[0],
+            renderModel: CanvasNSView.ZoneRenderModel(
+                placement: created[0], displayName: "Zone 1"))
+        canvas.upsertZoneLayer(installedLayer)
+
         var renamed: [(UUID, String)] = []
         canvas.onZoneRenamed = { renamed.append(($0, $1)) }
 
@@ -9537,6 +9579,12 @@ final class CanvasNSView: NSView, TokenThemed {
         try expect(canvas.qaZoneDisplayName(zoneId) == "Work", "displayName after rename must be 'Work'; got '\(canvas.qaZoneDisplayName(zoneId) ?? "nil")'")
         try expect(canvas.qaLiveZonePlacement(zoneId)?.name == "Work", "stored name after rename must be 'Work'")
         try expect(renamed.count == 1 && renamed[0].1 == "Work", "onZoneRenamed must fire once with 'Work'; got \(renamed)")
+
+        try expect(installedLayer.placement.name == "Work", "installed ZoneLayer placement retained the pre-rename name")
+        try expect(installedLayer.renderModel.displayName == "Work", "installed ZoneLayer render model retained the project name")
+        canvas.setZones([installedLayer], documentZones: [installedLayer.renderModel])
+        try expect(canvas.qaZoneDisplayName(zoneId) == "Work", "a production layer reinstall flipped the custom name back")
+        try expect(canvas.qaLiveZonePlacement(zoneId)?.name == "Work", "a production layer reinstall restored the old placement name")
 
         // Empty/whitespace rename keeps the previous name.
         canvas.qaRenameZone(zoneId, to: "   ")

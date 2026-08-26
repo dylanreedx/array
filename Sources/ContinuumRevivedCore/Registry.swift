@@ -118,6 +118,86 @@ public struct Registry: Codable, Equatable, Sendable {
         return true
     }
 
+    /// Projects are workspace-owned, not shared layout ingredients. Legacy
+    /// registries that name the same project from multiple workspaces are left
+    /// untouched and reported so the user can explicitly move the project.
+    public func validateExclusiveProjectOwnership() throws {
+        var memberships: [UUID: [UUID]] = [:]
+        for workspace in workspaces {
+            for projectId in Set(workspace.projectIds) {
+                memberships[projectId, default: []].append(workspace.id)
+            }
+        }
+        for (projectId, workspaceIds) in memberships where workspaceIds.count > 1 {
+            throw ProjectWorkspaceOwnershipError.duplicateMembership(
+                projectId: projectId,
+                workspaceIds: workspaceIds.sorted { $0.uuidString < $1.uuidString })
+        }
+        for project in projects {
+            let membership = memberships[project.id]?.first
+            if let declared = project.workspaceId, let membership, declared != membership {
+                throw ProjectWorkspaceOwnershipError.ownerMismatch(
+                    projectId: project.id, declaredWorkspaceId: declared, membershipWorkspaceId: membership)
+            }
+        }
+    }
+
+    public func exclusiveWorkspaceOwner(of projectId: UUID) throws -> UUID? {
+        try validateExclusiveProjectOwnership()
+        guard let project = projects.first(where: { $0.id == projectId }) else {
+            throw ProjectWorkspaceOwnershipError.unknownProject(projectId)
+        }
+        let membership = workspaces.first(where: { $0.projectIds.contains(projectId) })?.id
+        return project.workspaceId ?? membership
+    }
+
+    /// Add an unowned project to a workspace. A project already owned elsewhere
+    /// requires the explicit move API; this method never rewrites ownership.
+    public mutating func assignProject(_ projectId: UUID, to workspaceId: UUID, now: Date) throws {
+        try validateExclusiveProjectOwnership()
+        guard let projectIndex = projects.firstIndex(where: { $0.id == projectId }) else {
+            throw ProjectWorkspaceOwnershipError.unknownProject(projectId)
+        }
+        guard let workspaceIndex = workspaces.firstIndex(where: { $0.id == workspaceId }) else {
+            throw ProjectWorkspaceOwnershipError.unknownWorkspace(workspaceId)
+        }
+        if let owner = projects[projectIndex].workspaceId, owner != workspaceId {
+            throw ProjectWorkspaceOwnershipError.alreadyOwned(
+                projectId: projectId, workspaceId: owner)
+        }
+        if let membership = workspaces.first(where: { $0.projectIds.contains(projectId) })?.id,
+           membership != workspaceId {
+            throw ProjectWorkspaceOwnershipError.alreadyOwned(
+                projectId: projectId, workspaceId: membership)
+        }
+        projects[projectIndex].workspaceId = workspaceId
+        if !workspaces[workspaceIndex].projectIds.contains(projectId) {
+            workspaces[workspaceIndex].projectIds.append(projectId)
+        }
+        workspaces[workspaceIndex].updatedAt = now
+    }
+
+    /// The only operation allowed to transfer ownership. Registry membership is
+    /// committed together; callers transfer the workspace zones/documents around
+    /// this explicit boundary rather than during an ordinary workspace switch.
+    public mutating func moveProject(_ projectId: UUID, to workspaceId: UUID, now: Date) throws {
+        try validateExclusiveProjectOwnership()
+        guard let projectIndex = projects.firstIndex(where: { $0.id == projectId }) else {
+            throw ProjectWorkspaceOwnershipError.unknownProject(projectId)
+        }
+        guard let targetIndex = workspaces.firstIndex(where: { $0.id == workspaceId }) else {
+            throw ProjectWorkspaceOwnershipError.unknownWorkspace(workspaceId)
+        }
+        for index in workspaces.indices {
+            workspaces[index].projectIds.removeAll { $0 == projectId }
+        }
+        if !workspaces[targetIndex].projectIds.contains(projectId) {
+            workspaces[targetIndex].projectIds.append(projectId)
+        }
+        workspaces[targetIndex].updatedAt = now
+        projects[projectIndex].workspaceId = workspaceId
+    }
+
     @discardableResult
     public mutating func deleteWorkspace(id: UUID, replacementId: UUID? = nil, now: Date) -> Bool {
         guard let idx = workspaces.firstIndex(where: { $0.id == id }) else { return false }
@@ -128,6 +208,10 @@ public struct Registry: Codable, Equatable, Sendable {
 
         let removedProjectIds = Set(workspaces[idx].projectIds)
         workspaces.remove(at: idx)
+        for projectIndex in projects.indices
+        where projects[projectIndex].workspaceId == id || removedProjectIds.contains(projects[projectIndex].id) {
+            projects[projectIndex].workspaceId = nil
+        }
         let replacementProjectIds = workspaces.first(where: { $0.id == replacement })?.projectIds ?? []
         for workspaceIdx in workspaces.indices where workspaces[workspaceIdx].id == replacement {
             workspaces[workspaceIdx].updatedAt = now
@@ -154,6 +238,32 @@ public struct Registry: Codable, Equatable, Sendable {
         projects = try container.decode([ProjectEntry].self, forKey: .projects)
         settings = try container.decode(RegistrySettings.self, forKey: .settings)
         pairedDevices = try container.decodeIfPresent([PairedDeviceEntry].self, forKey: .pairedDevices) ?? []
+    }
+}
+
+public enum ProjectWorkspaceOwnershipError: Error, Equatable, LocalizedError, Sendable {
+    case duplicateMembership(projectId: UUID, workspaceIds: [UUID])
+    case ownerMismatch(projectId: UUID, declaredWorkspaceId: UUID, membershipWorkspaceId: UUID)
+    case alreadyOwned(projectId: UUID, workspaceId: UUID)
+    case unknownProject(UUID)
+    case unknownWorkspace(UUID)
+    case workspaceDocumentMissing(projectId: UUID, workspaceId: UUID)
+
+    public var errorDescription: String? {
+        switch self {
+        case let .duplicateMembership(projectId, workspaceIds):
+            return "Project \(projectId) belongs to multiple workspaces (\(workspaceIds.map(\.uuidString).joined(separator: ", "))). Move it explicitly; no files or zones were changed."
+        case let .ownerMismatch(projectId, declared, membership):
+            return "Project \(projectId) declares workspace \(declared) but is listed in workspace \(membership). Move it explicitly; no files or zones were changed."
+        case let .alreadyOwned(projectId, workspaceId):
+            return "Project \(projectId) already belongs to workspace \(workspaceId). Move it explicitly to change ownership."
+        case let .unknownProject(projectId):
+            return "Unknown project \(projectId)."
+        case let .unknownWorkspace(workspaceId):
+            return "Unknown workspace \(workspaceId)."
+        case let .workspaceDocumentMissing(projectId, workspaceId):
+            return "Project \(projectId) belongs to workspace \(workspaceId), but that workspace document is missing. Ownership was not changed."
+        }
     }
 }
 

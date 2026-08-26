@@ -194,11 +194,36 @@ public struct AgentDiffFileSummary: Codable, Equatable, Sendable {
     public var displayName: String
     public var addedLineCount: UInt
     public var removedLineCount: UInt
+    /// False when a provider/detail source named the affected file but did not
+    /// supply a line diff. Zero is a legitimate measured count, so availability
+    /// must not be inferred from the two numeric values.
+    public var lineCountsAreKnown: Bool
 
-    public init(displayName: String, addedLineCount: UInt = 0, removedLineCount: UInt = 0) {
+    public init(
+        displayName: String,
+        addedLineCount: UInt? = nil,
+        removedLineCount: UInt? = nil
+    ) {
         self.displayName = displayName
-        self.addedLineCount = addedLineCount
-        self.removedLineCount = removedLineCount
+        self.addedLineCount = addedLineCount ?? 0
+        self.removedLineCount = removedLineCount ?? 0
+        lineCountsAreKnown = addedLineCount != nil && removedLineCount != nil
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case displayName, addedLineCount, removedLineCount, lineCountsAreKnown
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        displayName = try values.decode(String.self, forKey: .displayName)
+        addedLineCount = try values.decodeIfPresent(UInt.self, forKey: .addedLineCount) ?? 0
+        removedLineCount = try values.decodeIfPresent(UInt.self, forKey: .removedLineCount) ?? 0
+        // Old payloads always encoded the numeric defaults and had no
+        // availability bit. Preserve useful non-zero history, but treat legacy
+        // +0/−0 as unknown rather than continuing to assert false precision.
+        lineCountsAreKnown = try values.decodeIfPresent(Bool.self, forKey: .lineCountsAreKnown)
+            ?? (addedLineCount > 0 || removedLineCount > 0)
     }
 }
 

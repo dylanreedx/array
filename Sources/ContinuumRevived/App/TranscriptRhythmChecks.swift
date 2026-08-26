@@ -998,6 +998,29 @@ enum TranscriptRhythmChecks {
                 + "(\(colours.sorted())) — a diffstat distinguishes them"
             )
         }
+        // A host-local edit observation may know the affected file without
+        // carrying a line diff. That is unknown, not a measured +0/−0.
+        let unknown = AgentDiffSummaryView()
+        unknown.frame = NSRect(x: 0, y: 0, width: 520, height: 120)
+        unknown.apply(
+            blockID: AgentNodeID(rawValue: "diffstat-unknown-counts")!,
+            payload: AgentDiffPayload(
+                text: "edit",
+                summary: "edit",
+                files: [.init(displayName: "tests/test_privacy_registry.py")]
+            ),
+            context: AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
+        )
+        unknown.layoutSubtreeIfNeeded()
+        guard unknown.countsLabel.stringValue == "1 file · line counts unavailable",
+              unknown.fileStatLabels.first?.stringValue == "counts unavailable",
+              unknown.fileStatLabels.first?.stringValue.contains("+0") == false else {
+            throw fail(
+                "diffstat: an affected file without measured line counts rendered false precision: "
+                + "'\(unknown.countsLabel.stringValue)' / "
+                + "'\(unknown.fileStatLabels.first?.stringValue ?? "missing")'"
+            )
+        }
         // No stat may be CLIPPED. The first cut measured intrinsicContentSize on
         // a field built from an empty string, which under-reported the width and
         // silently dropped the removal count — visible only by looking at the

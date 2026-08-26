@@ -541,7 +541,11 @@ final class ManagedAgentTileNSView: TileNSView {
             self?.updateLiveToolVerb(for: observation)
         }
         hydrateManagedImagesFromDocument()
-        let stream = supervisor.events(for: agentID)
+        let attachment = supervisor.transcriptAttachment(for: agentID, reboundTo: threadId)
+        if let snapshot = attachment.snapshot {
+            installTranscriptSnapshot(snapshot)
+        }
+        let stream = attachment.tail
         eventSubscription = Task { @MainActor [weak self] in
             for await event in stream {
                 guard let self else { break }
@@ -564,6 +568,20 @@ final class ManagedAgentTileNSView: TileNSView {
             renderRehydratedPreviousSession(rehydrated)
         }
         refreshTranscriptThinkingIndicator()
+    }
+
+    /// Install the supervisor-owned semantic truth before following its live tail.
+    /// The view's prior projection was already reset by `attach`; forcing a full
+    /// document handoff here makes a workspace round trip independent of raw-event
+    /// replay caps and preserves an unfinished streamed response.
+    private func installTranscriptSnapshot(_ snapshot: ManagedAgentTranscriptModel) {
+        prepareStreamingMarkupForTeardown(final: true)
+        model = snapshot
+        descriptor.status = model.currentStatus
+        agentStatus = model.currentStatus
+        lastForwardedDocumentVersion = nil
+        synchronizeV2Transcript(final: true)
+        scheduleStreamingMarkupParseTimerIfNeeded()
     }
 
     override func layout() {

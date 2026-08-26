@@ -115,6 +115,15 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
     public var streamingMarkupParseCount: Int { semanticProjection.streamingMarkupParseCount }
     public var nextStreamingMarkupParseDeadline: TimeInterval? { semanticProjection.nextStreamingMarkupParseDeadline }
 
+    /// A complete value snapshot for a newly-created view of this agent. This is
+    /// intentionally not reconstruction from `events`: both event rings are bounded,
+    /// while the semantic document and open streaming buffer are the durable truth.
+    public func rebound(to threadId: String) -> ManagedAgentTranscriptModel {
+        var copy = self
+        copy.semanticProjection = semanticProjection.rebound(to: threadId)
+        return copy
+    }
+
     /// The semantic projection is the only mutable transcript owner. Legacy
     /// cards are rebuilt on read from its document; there is no second array to
     /// update, reconcile, or accidentally leave stale.

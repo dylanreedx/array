@@ -45,7 +45,9 @@ struct AgentTranscriptCopyController {
             return ([plan.title] + planLines(plan.steps)).compactMap { $0 }.joined(separator: "\n")
         case let .diff(diff):
             let safe = ([diff.summary] + diff.files.map {
-                "\($0.displayName) (+\($0.addedLineCount) −\($0.removedLineCount))"
+                $0.lineCountsAreKnown
+                    ? "\($0.displayName) (+\($0.addedLineCount) −\($0.removedLineCount))"
+                    : "\($0.displayName) (line counts unavailable)"
             }).compactMap { $0 }
             return safe.isEmpty ? "File changes" : safe.joined(separator: "\n")
         case let .approval(request), let .question(request): return plainText(request.prompt)

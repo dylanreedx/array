@@ -12830,6 +12830,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Drop a closed zone from the WorkspaceDocument (placement, z-order, and any
     /// persisted group-zone tiles) and flush. Called from canvasView.onZoneClosed.
     private func persistClosedZone(_ zoneId: UUID) {
+        if let workspaceRuntime {
+            do {
+                try workspaceRuntime.commitClosedZone(zoneId)
+                reloadWorkspaceSidebar()
+            } catch {
+                fputs("persistClosedZone failed: \(error)\n", stderr)
+            }
+            return
+        }
         guard let registryStore else { return }
         do {
             let workspaceId: UUID
@@ -12861,6 +12870,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     /// WorkspaceDocument and flushes the save. Called from canvasView.onZoneCreated.
     private func persistCreatedGroupZone(_ placement: ZonePlacement) {
+        if let workspaceRuntime {
+            do {
+                try workspaceRuntime.commitCreatedZone(placement)
+                reloadWorkspaceSidebar()
+            } catch {
+                fputs("persistCreatedGroupZone failed: \(error)\n", stderr)
+            }
+            return
+        }
         guard let registryStore else { return }
         do {
             let workspaceId: UUID
@@ -12894,6 +12912,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Finds the zone by zoneId in the stored WorkspaceDocument, replaces its origin/size
     /// with the committed placement, and flushes the save. Called from canvasView.onZoneMoved.
     private func persistMovedZone(_ placement: ZonePlacement) {
+        if let workspaceRuntime {
+            do {
+                try workspaceRuntime.commitZonePlacement(placement)
+            } catch {
+                fputs("persistMovedZone failed: \(error)\n", stderr)
+            }
+            return
+        }
         guard let registryStore else { return }
         do {
             let workspaceId: UUID
@@ -13006,6 +13032,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Persist a zone rename: update the stored zone's name so it survives relaunch.
     /// Mirrors `persistMovedZone` (full document load → mutate → save).
     private func persistRenamedZone(_ zoneId: UUID, name: String) {
+        if let workspaceRuntime, var placement = canvasView?.zonePlacement(for: zoneId) {
+            placement.name = name
+            do {
+                try workspaceRuntime.commitZonePlacement(placement)
+                reloadWorkspaceSidebar()
+            } catch {
+                fputs("persistRenamedZone failed: \(error)\n", stderr)
+            }
+            return
+        }
         guard let registryStore else { return }
         do {
             let workspaceId: UUID
@@ -13202,14 +13238,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let store = ProjectStore(projectRoot: root)
             let project = try Self.loadOrCreateProject(in: store, projectRoot: root)
             registry.upsertProject(project, openedAt: Date())
-            if let projectIndex = registry.projects.firstIndex(where: { $0.id == project.id }) {
-                registry.projects[projectIndex].workspaceId = workspaceRuntime?.workspaceId
-            }
-            if let workspaceId = workspaceRuntime?.workspaceId,
-               let workspaceIndex = registry.workspaces.firstIndex(where: { $0.id == workspaceId }),
-               !registry.workspaces[workspaceIndex].projectIds.contains(project.id) {
-                registry.workspaces[workspaceIndex].projectIds.append(project.id)
-                registry.workspaces[workspaceIndex].updatedAt = Date()
+            if let workspaceId = workspaceRuntime?.workspaceId {
+                try registry.assignProject(project.id, to: workspaceId, now: Date())
             }
             try registryStore.save(registry)
             reloadWorkspaceSidebar()
@@ -13492,15 +13522,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     return
                 }
                 let wId = workspaceRuntime.workspaceId
-                if let workspaceIndex = registry.workspaces.firstIndex(where: { $0.id == wId }) {
-                    if !registry.workspaces[workspaceIndex].projectIds.contains(projectId) {
-                        registry.workspaces[workspaceIndex].projectIds.append(projectId)
-                    }
-                    registry.workspaces[workspaceIndex].updatedAt = Date()
-                }
-                if let projectIndex = registry.projects.firstIndex(where: { $0.id == projectId }) {
-                    registry.projects[projectIndex].workspaceId = wId
-                }
+                try registry.assignProject(projectId, to: wId, now: Date())
                 try registryStore.save(registry)
             }
             // Delegate zone creation + canvas install + document save to the runtime.
@@ -15831,9 +15853,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try FileManager.default.removeItem(at: lastStore.layout.canvasFile)
         var fallbackRegistry = workspaceRegistry
         fallbackRegistry.projects[0].workspaceId = lastActiveWorkspaceId
-        let fallbackId = try resolver.resolveExistingWorkspace(for: projectId, registry: &fallbackRegistry, applicationSupportDirectory: appSupport, updatedAt: createdAt)
-        try expect(fallbackId == fallbackWorkspaceId, "deleted last-active workspace doc falls back even when the project entry points at it")
-        try expect(fallbackRegistry.lastActiveWorkspaceId == fallbackWorkspaceId, "fallback workspace becomes last active")
+        do {
+            _ = try resolver.resolveExistingWorkspace(
+                for: projectId, registry: &fallbackRegistry,
+                applicationSupportDirectory: appSupport, updatedAt: createdAt)
+            throw CheckFailure(description: "missing owned workspace silently moved the project to a fallback workspace")
+        } catch let error as ProjectWorkspaceOwnershipError {
+            guard case let .workspaceDocumentMissing(missingProjectId, missingWorkspaceId) = error,
+                  missingProjectId == projectId,
+                  missingWorkspaceId == lastActiveWorkspaceId else { throw error }
+        }
+        try expect(fallbackRegistry.lastActiveWorkspaceId == lastActiveWorkspaceId,
+                   "missing owned workspace must not rewrite ownership or selection")
 
         try lastStore.save(workspaceDocument(projectId: projectId, zoneId: UUID()))
         try lastStore.save(workspaceDocument(projectId: projectId, zoneId: UUID()))
@@ -15906,8 +15937,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     // swiftlint:disable:next function_body_length
     static func runWorkspaceSwitchSelfCheck() throws {
         // T09 — switchWorkspace(to:) in-process swap invariants.
-        // Builds two workspaces in memory sharing one project P (exercises ref-count sharing)
-        // and each with a unique project (Pa only in A, Pb only in B).
+        // Builds two workspaces whose projects are exclusively owned. Workspace A
+        // has Pa + P; workspace B has Pb. Ordinary switching never transfers P.
         // Calls the REAL workspaceRuntime.switchWorkspace(to: B) and asserts all 8 invariants.
         enum CheckError: Error, CustomStringConvertible {
             case failed(String)
@@ -15924,12 +15955,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let workspaceWA  = UUID(uuidString: "00000000-0000-0000-0000-000000009A01")!
         let workspaceWB  = UUID(uuidString: "00000000-0000-0000-0000-000000009B02")!
         let projectPa    = UUID(uuidString: "00000000-0000-0000-0000-000000009C03")!
-        let projectP     = UUID(uuidString: "00000000-0000-0000-0000-000000009D04")!  // shared
+        let projectP     = UUID(uuidString: "00000000-0000-0000-0000-000000009D04")!  // A-owned
         let projectPb    = UUID(uuidString: "00000000-0000-0000-0000-000000009E05")!
         let zoneAa       = UUID(uuidString: "00000000-0000-0000-0000-000000009F06")!  // Pa in WA
         let zoneAp       = UUID(uuidString: "00000000-0000-0000-0000-000000009F07")!  // P in WA
         let zoneBb       = UUID(uuidString: "00000000-0000-0000-0000-000000009F08")!  // Pb in WB
-        let zoneBp       = UUID(uuidString: "00000000-0000-0000-0000-000000009F09")!  // P in WB
         let tileInPa     = UUID(uuidString: "00000000-0000-0000-0000-000000009F0A")!
         let tileInP      = UUID(uuidString: "00000000-0000-0000-0000-000000009F0B")!
         let tileInPb     = UUID(uuidString: "00000000-0000-0000-0000-000000009F0C")!
@@ -15974,20 +16004,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let docA = WorkspaceDocument(
             viewport: CanvasViewport(x: 10, y: 20, zoom: 1),
             zones: [
-                ZonePlacement(zoneId: zoneAa, projectId: projectPa, origin: ZonePoint(x: 0, y: 0),   size: ZoneSize(width: 640, height: 480), color: "blue",  collapsed: false, hydrationPolicy: .automatic),
-                ZonePlacement(zoneId: zoneAp, projectId: projectP,  origin: ZonePoint(x: 700, y: 0), size: ZoneSize(width: 640, height: 480), color: "green", collapsed: false, hydrationPolicy: .automatic)
+                ZonePlacement(zoneId: zoneAa, projectId: projectPa, origin: ZonePoint(x: 0, y: 0),   size: ZoneSize(width: 640, height: 480), color: "blue",  collapsed: false, hydrationPolicy: .automatic, name: "Saved Pa Name"),
+                ZonePlacement(zoneId: zoneAp, projectId: projectP,  origin: ZonePoint(x: 700, y: 0), size: ZoneSize(width: 640, height: 480), color: "green", collapsed: false, hydrationPolicy: .automatic, name: "Saved P Name")
             ],
             zoneZOrder: [zoneAa, zoneAp],
             lastActiveZoneId: zoneAa
         )
-        // Workspace B: zones [Zbb→Pb, Zbp→P], active=Zbb, viewport=(50,60).
+        // Workspace B: zone [Zbb→Pb], active=Zbb, viewport=(50,60).
         let docB = WorkspaceDocument(
             viewport: CanvasViewport(x: 50, y: 60, zoom: 1),
             zones: [
-                ZonePlacement(zoneId: zoneBb, projectId: projectPb, origin: ZonePoint(x: 0, y: 0),   size: ZoneSize(width: 640, height: 480), color: "red",   collapsed: false, hydrationPolicy: .automatic),
-                ZonePlacement(zoneId: zoneBp, projectId: projectP,  origin: ZonePoint(x: 700, y: 0), size: ZoneSize(width: 640, height: 480), color: "green", collapsed: false, hydrationPolicy: .automatic)
+                ZonePlacement(zoneId: zoneBb, projectId: projectPb, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 640, height: 480), color: "red", collapsed: false, hydrationPolicy: .automatic)
             ],
-            zoneZOrder: [zoneBb, zoneBp],
+            zoneZOrder: [zoneBb],
             lastActiveZoneId: zoneBb
         )
         try WorkspaceStore(workspaceId: workspaceWA, applicationSupportDirectory: appSupport).save(docA)
@@ -15995,6 +16024,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         var appRegistry = Registry.empty()
         appRegistry.lastActiveWorkspaceId = workspaceWA
+        appRegistry.workspaces = [
+            WorkspaceEntry(id: workspaceWA, name: "A", projectIds: [projectPa, projectP], createdAt: now, updatedAt: now),
+            WorkspaceEntry(id: workspaceWB, name: "B", projectIds: [projectPb], createdAt: now, updatedAt: now)
+        ]
         appRegistry.projects = [
             ProjectEntry(id: projectPa, name: "Pa", rootPath: paRoot.path, workspaceId: workspaceWA, lastOpenedAt: now, pinned: false, missing: false),
             ProjectEntry(id: projectP,  name: "P",  rootPath: pRoot.path,  workspaceId: workspaceWA, lastOpenedAt: now, pinned: false, missing: false),
@@ -16035,11 +16068,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(canvas.installedZoneLayerIds.contains(zoneAp), "pre-switch: zoneAp installed in WA")
         try expect(zoneRegistry.refCount(for: projectPa) == 1, "pre-switch: Pa ref-count == 1")
         try expect(zoneRegistry.refCount(for: projectP)  == 1, "pre-switch: P ref-count == 1")
+        try expect(canvas.qaZoneDisplayName(zoneAa) == "Saved Pa Name",
+                   "pre-switch: saved custom zone name must win over registry project name")
 
-        // Capture P's controller identity BEFORE the switch.
-        guard let pControllerBefore = zoneRegistry.controller(for: projectP) else {
-            throw CheckError.failed("pre-switch: P controller must exist before switch")
+        // Mutate every persisted placement register through the mounted scene.
+        // None of these writes is sent to the runtime; the switch boundary itself
+        // must capture the exact visible state before unmounting A.
+        canvas.qaRenameZone(zoneAa, to: "Renamed A")
+        guard var mutatedAPlacement = canvas.zonePlacement(for: zoneAa) else {
+            throw CheckError.failed("pre-switch: missing mounted A placement")
         }
+        mutatedAPlacement.origin = ZonePoint(x: 123, y: 234)
+        mutatedAPlacement.size = ZoneSize(width: 777, height: 555)
+        mutatedAPlacement.color = "plum"
+        mutatedAPlacement.collapsed = true
+        mutatedAPlacement.hydrationPolicy = .pinnedLive
+        mutatedAPlacement.autoLayoutMode = .disabled
+        mutatedAPlacement.homeRelativePath = "Sources"
+        mutatedAPlacement.navKey = "q"
+        mutatedAPlacement.zPosition = FracIndex.after(
+            canvas.workspaceZonePlacementsForPersistence().map(\.zPosition).max() ?? .first)
+        canvas.setZonePlacement(mutatedAPlacement)
 
         // Focus a tile in WA (tileInPa).
         _ = focusBroker.requestFocus(.tile(tileInPa), reason: .userClick)
@@ -16063,10 +16112,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // --- Invariant 1: Canvas zone set == B's zones exactly ---
         let installedAfter = canvas.installedZoneLayerIds
         try expect(installedAfter.contains(zoneBb),  "inv1: zoneBb (Pb) must be installed after switch to WB")
-        try expect(installedAfter.contains(zoneBp),  "inv1: zoneBp (P) must be installed after switch to WB")
         try expect(!installedAfter.contains(zoneAa), "inv1: zoneAa (Pa) must NOT be installed after switch to WB")
         try expect(!installedAfter.contains(zoneAp), "inv1: zoneAp (P in WA) must NOT be installed after switch to WB")
-        try expect(installedAfter.count == 2,         "inv1: exactly 2 zone layers after switch; got \(installedAfter.count)")
+        try expect(installedAfter.count == 1,         "inv1: exactly 1 zone layer after switch; got \(installedAfter.count)")
 
         // --- Invariant 2: Focus scope == B's expected surface ---
         // WB lastActiveZoneId = Zbb → projectPb → lastActiveTileId = tileInPb (seeded above)
@@ -16097,17 +16145,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         // --- Invariant 4: Runtime ref-count ---
         try expect(zoneRegistry.refCount(for: projectPa) == 0, "inv4: Pa ref-count must be 0 after switch (released)")
-        try expect(zoneRegistry.refCount(for: projectP)  == 1, "inv4: P ref-count must be 1 after switch (shared, unchanged)")
+        try expect(zoneRegistry.refCount(for: projectP)  == 0, "inv4: A-owned P ref-count must be 0 after switch")
         try expect(zoneRegistry.refCount(for: projectPb) == 1, "inv4: Pb ref-count must be 1 after switch (acquired)")
         try expect(zoneRegistry.controller(for: projectPa) == nil, "inv4: Pa controller must be gone from registry after release")
-        try expect(zoneRegistry.controller(for: projectP)  != nil, "inv4: P controller must still be in registry (shared)")
+        try expect(zoneRegistry.controller(for: projectP)  == nil, "inv4: A-owned P controller must be released")
         try expect(zoneRegistry.controller(for: projectPb) != nil, "inv4: Pb controller must be in registry")
 
-        // --- Invariant 5: Demotion — shared P controller is SAME instance (not recreated) ---
-        guard let pControllerAfter = zoneRegistry.controller(for: projectP) else {
-            throw CheckError.failed("inv5: P controller must exist after switch")
-        }
-        try expect(pControllerAfter === pControllerBefore, "inv5: P controller must be the SAME instance (===) across the switch (shared, not recreated)")
+        // --- Invariant 5: no cross-workspace controller ownership survives ---
+        try expect(zoneRegistry.liveProjectIds == Set([projectPb]),
+                   "inv5: only B's project may remain live after the switch")
 
         // --- Invariant 6: Viewport == B's saved WorkspaceDocument.viewport ---
         let canvasViewport = canvas.viewport
@@ -16135,7 +16181,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(installedRoundTrip.contains(zoneAa), "inv8: round-trip: zoneAa must be re-installed in WA")
         try expect(installedRoundTrip.contains(zoneAp), "inv8: round-trip: zoneAp must be re-installed in WA")
         try expect(!installedRoundTrip.contains(zoneBb), "inv8: round-trip: zoneBb must NOT be installed in WA")
-        try expect(!installedRoundTrip.contains(zoneBp), "inv8: round-trip: zoneBp must NOT be installed in WA")
         // B-only adapter (Pb) should be released after round-trip.
         try expect(zoneRegistry.refCount(for: projectPb) == 0, "inv8: round-trip: Pb ref-count must be 0 after return to WA")
         // Pa and P must be re-acquired.
@@ -16149,6 +16194,93 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let roundTripViewport = canvas.viewport
         try expect(roundTripViewport.x == mutatedWAViewport.x && roundTripViewport.y == mutatedWAViewport.y,
                    "inv8: round-trip: canvas viewport must match WA's in-memory mutated viewport (\(mutatedWAViewport)); got \(roundTripViewport) — switchWorkspace must persist departing viewport before unloading")
+        try expect(canvas.zonePlacement(for: zoneAa) == mutatedAPlacement,
+                   "inv8: round-trip did not restore every visible placement register exactly")
+        try expect(canvas.qaZoneDisplayName(zoneAa) == "Renamed A",
+                   "inv8: custom inline name did not survive the workspace round trip")
+        let savedAAfterRoundTrip = try WorkspaceStore(
+            workspaceId: workspaceWA, applicationSupportDirectory: appSupport).load()
+        try expect(savedAAfterRoundTrip.zones.first(where: { $0.zoneId == zoneAa }) == mutatedAPlacement,
+            "inv8: mounted placement and atomically saved workspace document diverged")
+
+        struct InjectedSwitchFailure: Error {}
+        let mountedIdsBeforeFailureChecks = canvas.installedZoneLayerIds
+        runtime._workspaceDocumentLoader = { id in
+            if id == workspaceWB { throw InjectedSwitchFailure() }
+            return try WorkspaceStore(
+                workspaceId: id, applicationSupportDirectory: appSupport).tryLoad()
+        }
+        do {
+            try runtime.switchWorkspace(to: workspaceWB)
+            throw CheckError.failed("injected target-load failure was ignored")
+        } catch is InjectedSwitchFailure {
+            // expected
+        }
+        runtime._workspaceDocumentLoader = nil
+        try expect(runtime.workspaceId == workspaceWA
+                   && canvas.installedZoneLayerIds == mountedIdsBeforeFailureChecks,
+                   "target-load failure tore down or changed the mounted workspace")
+
+        runtime._workspaceDocumentSaver = { id, _ in
+            if id == workspaceWA { throw InjectedSwitchFailure() }
+        }
+        do {
+            try runtime.switchWorkspace(to: workspaceWB)
+            throw CheckError.failed("injected departing-save failure was ignored")
+        } catch is InjectedSwitchFailure {
+            // expected
+        }
+        runtime._workspaceDocumentSaver = nil
+        try expect(runtime.workspaceId == workspaceWA
+                   && canvas.installedZoneLayerIds == mountedIdsBeforeFailureChecks,
+                   "departing-save failure tore down or changed the mounted workspace")
+
+        // Legacy duplicate membership is an integrity stop. The switch must not
+        // edit either document or tear down the currently interactive A scene.
+        var duplicateRegistry = appRegistry
+        duplicateRegistry.workspaces = [
+            WorkspaceEntry(id: workspaceWA, name: "A", projectIds: [projectPa, projectP], createdAt: now, updatedAt: now),
+            WorkspaceEntry(id: workspaceWB, name: "B", projectIds: [projectPb, projectP], createdAt: now, updatedAt: now)
+        ]
+        try registryStore.save(duplicateRegistry)
+        let bytesABeforeRejectedSwitch = try Data(contentsOf: WorkspaceStore(
+            workspaceId: workspaceWA, applicationSupportDirectory: appSupport).layout.canvasFile)
+        let bytesBBeforeRejectedSwitch = try Data(contentsOf: WorkspaceStore(
+            workspaceId: workspaceWB, applicationSupportDirectory: appSupport).layout.canvasFile)
+        do {
+            try runtime.switchWorkspace(to: workspaceWB)
+            throw CheckError.failed("duplicate project membership was silently accepted")
+        } catch is ProjectWorkspaceOwnershipError {
+            // expected
+        }
+        try expect(runtime.workspaceId == workspaceWA && canvas.installedZoneLayerIds.contains(zoneAa),
+                   "duplicate-membership rejection changed the mounted workspace")
+        let bytesAAfterRejectedSwitch = try Data(contentsOf: WorkspaceStore(
+            workspaceId: workspaceWA, applicationSupportDirectory: appSupport).layout.canvasFile)
+        let bytesBAfterRejectedSwitch = try Data(contentsOf: WorkspaceStore(
+            workspaceId: workspaceWB, applicationSupportDirectory: appSupport).layout.canvasFile)
+        try expect(bytesABeforeRejectedSwitch == bytesAAfterRejectedSwitch,
+            "duplicate-membership rejection modified workspace A")
+        try expect(bytesBBeforeRejectedSwitch == bytesBAfterRejectedSwitch,
+            "duplicate-membership rejection modified workspace B")
+
+        // The explicit move boundary transfers ownership and all of P's zones in
+        // one transaction; this is deliberately separate from workspace switch.
+        try registryStore.save(appRegistry)
+        try ProjectWorkspaceMoveCoordinator(registryStore: registryStore)
+            .moveProject(projectP, to: workspaceWB, now: now.addingTimeInterval(1))
+        let movedSource = try WorkspaceStore(
+            workspaceId: workspaceWA, applicationSupportDirectory: appSupport).load()
+        let movedTarget = try WorkspaceStore(
+            workspaceId: workspaceWB, applicationSupportDirectory: appSupport).load()
+        let movedRegistry = try registryStore.loadOrEmpty()
+        let movedOwner = try movedRegistry.exclusiveWorkspaceOwner(of: projectP)
+        try expect(!movedSource.zones.contains(where: { $0.projectId == projectP }),
+                   "explicit project move left P's zones in the source workspace")
+        try expect(movedTarget.zones.contains(where: { $0.zoneId == zoneAp && $0.projectId == projectP }),
+                   "explicit project move did not transfer P's zones to the target")
+        try expect(movedOwner == workspaceWB,
+                   "explicit project move did not transfer registry ownership")
     }
 
     private func presentFatalError(_ error: Error) {

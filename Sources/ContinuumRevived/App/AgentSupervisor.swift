@@ -4901,6 +4901,35 @@ final class AgentSupervisor {
 
     // MARK: - Multicast
 
+    struct TranscriptAttachment {
+        /// Complete semantic state, including any open streaming markup buffer.
+        var snapshot: ManagedAgentTranscriptModel?
+        /// Events strictly after the snapshot/recent-events boundary.
+        var tail: AsyncStream<AgentRuntimeEvent>
+    }
+
+    /// Atomically snapshot the complete transcript and register its live tail.
+    /// `AgentSupervisor` is main-actor isolated, so no delivery can interleave the
+    /// snapshot read and continuation registration.
+    func transcriptAttachment(for id: AgentID, reboundTo threadId: String) -> TranscriptAttachment {
+        let snapshot = transcriptProjections[id]?.rebound(to: threadId)
+        let recent = history[id] ?? []
+        let tail = AsyncStream<AgentRuntimeEvent> { continuation in
+            // Compatibility supervisors without a transcript store still use the
+            // historical snapshot-then-tail contract. Production has `snapshot`
+            // and therefore yields no bounded replay into its transcript.
+            if snapshot == nil {
+                for event in recent { continuation.yield(event) }
+            }
+            let token = UUID()
+            subscribers[id, default: [:]][token] = continuation
+            continuation.onTermination = { [weak self] _ in
+                Task { @MainActor in self?.removeSubscriber(token, for: id) }
+            }
+        }
+        return TranscriptAttachment(snapshot: snapshot, tail: tail)
+    }
+
     /// Snapshot-then-tail, per `ActivityStore.subscribe()`: the buffered history is
     /// yielded before the subscriber is registered, so it cannot miss an event that
     /// arrives during attach and cannot see the tail before the history.
@@ -7609,6 +7638,8 @@ func runAgentSupervisorChecks() async throws {
     // MARK: 8 · closing a tile is closing a window, not ending the work (P2A.5)
 
     let detachReport = try await checkDetachOutlivesItsTile(store: store, config: config, cwd: cwd, fail: fail)
+    let snapshotTailReport = try await checkTranscriptSnapshotAndTailBeyondReplayCap(
+        config: config, cwd: cwd, fail: fail)
 
     // MARK: 9 · an agent exists and runs with no tile at all (P2A.6)
 
@@ -7794,7 +7825,83 @@ func runAgentSupervisorChecks() async throws {
     let observedLivenessReport = try await checkObservedRunLivenessSweepClosesQuietDeadRun(fail: fail)
 
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(persistentRunnerReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(spawnResultReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport); \(deadRunnerReport); \(piDelegateReport); \(codexSubagentReport); \(refusalReport); \(observedCapReport); \(observedRaceReport); \(observedLivenessReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(persistentRunnerReport); \(detachReport); \(snapshotTailReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(spawnResultReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport); \(deadRunnerReport); \(piDelegateReport); \(codexSubagentReport); \(refusalReport); \(observedCapReport); \(observedRaceReport); \(observedLivenessReport)")
+}
+
+/// A disposable tile must attach from the supervisor's complete semantic model,
+/// never by replaying the bounded raw-event ring. The turn intentionally remains
+/// open across attachment so this also covers streaming-Markdown parser state.
+@MainActor
+private func checkTranscriptSnapshotAndTailBeyondReplayCap(
+    config: AgentModelConfig.Resolution,
+    cwd: URL,
+    fail: (String) -> Error
+) async throws -> String {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-transcript-snapshot-tail-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support", isDirectory: true))
+    let transcriptStore = AgentTranscriptStore(root: root.appendingPathComponent("transcripts", isDirectory: true))
+    let supervisor = AgentSupervisor(
+        store: store,
+        makeRunner: { _ in ScriptedAgentRunner(script: []) },
+        warn: { _ in },
+        transcriptStore: transcriptStore)
+    let agentId = supervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, model: config.model, thinking: config.thinking)
+    let thread = AgentSupervisor.threadId(for: agentId)
+    let turn = "beyond-replay-cap"
+    supervisor.qaDeliver(.turnStarted(threadId: thread, turnId: turn), to: agentId)
+    supervisor.qaDeliver(.contentDelta(
+        threadId: thread, turnId: turn, streamKind: .assistant,
+        delta: "BEGIN-ONLY-ONCE|"), to: agentId)
+    for _ in 0..<550 {
+        supervisor.qaDeliver(.contentDelta(
+            threadId: thread, turnId: turn, streamKind: .assistant, delta: "x"), to: agentId)
+    }
+    supervisor.qaDeliver(.contentDelta(
+        threadId: thread, turnId: turn, streamKind: .assistant,
+        delta: "|BEFORE-ATTACH"), to: agentId)
+
+    let tileId = UUID()
+    let tile = ManagedAgentTileNSView(tile: Tile(
+        id: tileId,
+        kind: .managedAgent,
+        title: "snapshot-tail",
+        frame: TileFrame(x: 0, y: 0, width: 520, height: 320),
+        zPosition: .fromLegacyRank(1),
+        runtimeRef: nil,
+        metadata: TileMetadata(launchProfileId: "managed")
+    ))
+    tile.frame = NSRect(x: 0, y: 0, width: 520, height: 320)
+    tile.attach(agentID: agentId, supervisor: supervisor)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.subscriberCount(for: agentId) == 1
+            && tile.qaTranscriptText.contains("BEGIN-ONLY-ONCE|")
+            && tile.qaTranscriptText.contains("|BEFORE-ATTACH")
+    }) else {
+        throw fail("snapshot-tail: attaching after more than replayCap deltas truncated the open response: \(tile.qaTranscriptText)")
+    }
+
+    supervisor.qaDeliver(.contentDelta(
+        threadId: thread, turnId: turn, streamKind: .assistant,
+        delta: "|AFTER-ATTACH"), to: agentId)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        tile.qaTranscriptText.contains("|AFTER-ATTACH")
+    }) else {
+        throw fail("snapshot-tail: the tail did not continue the installed open response")
+    }
+    let copies = tile.qaTranscriptText.components(separatedBy: "BEGIN-ONLY-ONCE|").count - 1
+    guard copies == 1 else {
+        throw fail("snapshot-tail: snapshot/tail boundary duplicated the response prefix \(copies) times")
+    }
+    tile.detach()
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.subscriberCount(for: agentId) == 0
+    }) else {
+        throw fail("snapshot-tail: closing the replacement tile leaked its observer")
+    }
+    return "full semantic snapshot + tail preserved an open 552-delta response beyond replayCap with zero loss/duplication and zero leaked observers"
 }
 
 /// B7.2 — `/clear`'s one-transaction contract, driven through the real

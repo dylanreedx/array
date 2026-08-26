@@ -465,10 +465,12 @@ final class AgentDiffSummaryView: NSView {
         fileLabels.forEach { $0.textColor = context.tokens.primaryText.color.nsColor(for: theme) }
         let added = AccentToken.accentDone.color.nsColor(for: theme)
         let removed = AccentToken.accentFailed.color.nsColor(for: theme)
+        let unavailable = context.tokens.secondaryText.color.nsColor(for: theme)
         for (index, label) in fileStatLabels.enumerated() {
             guard displayedFiles.indices.contains(index) else { continue }
             let file = displayedFiles[index]
-            label.attributedStringValue = Self.statText(file, added: added, removed: removed)
+            label.attributedStringValue = Self.statText(
+                file, added: added, removed: removed, unavailable: unavailable)
         }
         for bar in fileStatBars { bar.applyColors(added: added, removed: removed) }
         openReviewButton.contentTintColor = context.tokens.primaryText.color.nsColor(for: theme)
@@ -503,13 +505,22 @@ final class AgentDiffSummaryView: NSView {
     static func countsText(_ files: [AgentDiffFileSummary]) -> String {
         var additions: UInt = 0
         var removals: UInt = 0
-        for file in files {
+        let known = files.filter(\.lineCountsAreKnown)
+        for file in known {
             let add = additions.addingReportingOverflow(file.addedLineCount)
             let remove = removals.addingReportingOverflow(file.removedLineCount)
             additions = add.overflow ? .max : add.partialValue
             removals = remove.overflow ? .max : remove.partialValue
         }
         let noun = files.count == 1 ? "file" : "files"
+        let unavailable = files.count - known.count
+        if known.isEmpty {
+            return "\(files.count) \(noun) · line counts unavailable"
+        }
+        if unavailable > 0 {
+            let unavailableNoun = unavailable == 1 ? "file" : "files"
+            return "\(files.count) \(noun) · +\(additions) −\(removals) · \(unavailable) \(unavailableNoun) without counts"
+        }
         return "\(files.count) \(noun) · +\(additions) −\(removals)"
     }
 
@@ -563,12 +574,22 @@ final class AgentDiffSummaryView: NSView {
             guard !(previousFiles.indices.contains(index) && previousFiles[index] == file) else { continue }
             let name = Self.safeSingleLine(file.displayName, fallback: "Changed file")
             if label.stringValue != name { label.stringValue = name }
-            label.setAccessibilityLabel("\(name), \(file.addedLineCount) additions, \(file.removedLineCount) removals")
-            let statString = Self.statText(file, added: added, removed: removed)
+            label.setAccessibilityLabel(file.lineCountsAreKnown
+                ? "\(name), \(file.addedLineCount) additions, \(file.removedLineCount) removals"
+                : "\(name), line counts unavailable")
+            let statString = Self.statText(
+                file,
+                added: added,
+                removed: removed,
+                unavailable: context.tokens.secondaryText.color.nsColor(for: theme)
+            )
             stat.attributedStringValue = statString
             qaStatMeasurementsForChecks += 1
             statLabelWidths[index] = ceil(statString.size().width) + CGFloat(Space.s)
-            bar.apply(added: file.addedLineCount, removed: file.removedLineCount)
+            bar.apply(
+                added: file.lineCountsAreKnown ? file.addedLineCount : 0,
+                removed: file.lineCountsAreKnown ? file.removedLineCount : 0
+            )
             bar.applyColors(added: added, removed: removed)
         }
         for index in displayedFiles.count..<fileLabels.count {
@@ -580,9 +601,20 @@ final class AgentDiffSummaryView: NSView {
 
     /// "+42 −3" with each number in its own accent. Monospaced digits so the
     /// columns line up down the card.
-    static func statText(_ file: AgentDiffFileSummary, added: NSColor, removed: NSColor) -> NSAttributedString {
+    static func statText(
+        _ file: AgentDiffFileSummary,
+        added: NSColor,
+        removed: NSColor,
+        unavailable: NSColor
+    ) -> NSAttributedString {
         let font = NSFont.monospacedDigitSystemFont(
             ofSize: NSFont.token(.label).pointSize, weight: .medium)
+        guard file.lineCountsAreKnown else {
+            return NSAttributedString(
+                string: "counts unavailable",
+                attributes: [.font: NSFont.token(.caption), .foregroundColor: unavailable]
+            )
+        }
         let result = NSMutableAttributedString()
         result.append(NSAttributedString(
             string: "+\(file.addedLineCount)",
