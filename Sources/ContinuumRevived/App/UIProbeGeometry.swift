@@ -7752,6 +7752,75 @@ enum UIProbeGeometry {
             throw fail("live tool disclosure did not remeasure and lay out its expanded summary")
         }
 
+        // `.plans/49` 5.1 — a SHORT tool output must not be clipped.
+        //
+        // `b5ff292f` fixed exactly this on `CodeBlockRenderer`; this pane and
+        // `CommandOutputView` never inherited it. The pane's height is
+        // content-derived with zero slack (one line = 17pt of glyphs inside an 8pt
+        // inset = 33pt exactly), so a vertical scroller asserted unconditionally
+        // at construction takes its width out of a viewport that has none to give,
+        // and a LEGACY scroller — the system default when "always show scroll
+        // bars" is on — takes ~15pt of a 33pt pane and clips the only line there
+        // is. Dylan: "bash expanded details also looks like shit."
+        let shortOutputID = id("tool-short-output")
+        var shortOutputPayload = AgentToolCallPayload(
+            name: "Ran a command", summary: "Ran a command", status: .completed)
+        shortOutputPayload.presentedOutputText = "2026-08-25T14:17:59Z"
+        let shortOutputTool = AgentBlock(
+            id: shortOutputID, revision: 1, kind: .toolCall,
+            payload: .toolCall(shortOutputPayload))
+        let shortOutputHost = AgentBlockHostView()
+        let shortOutputActions = store.renderActions(for: agentA)
+        let shortOutputContext = AgentRenderContext(
+            actions: shortOutputActions, tokens: .transcript, appearance: .dark)
+        shortOutputHost.frame = NSRect(x: 0, y: 0, width: 320, height: 1)
+        try shortOutputHost.apply(block: shortOutputTool, context: shortOutputContext)
+        guard let shortOutputView = shortOutputHost.rendererView as? ToolCallView else {
+            throw fail("short tool output did not render a tool view")
+        }
+        if !shortOutputView.isExpanded { shortOutputView.disclosureButton.performClick(nil) }
+        let shortOutputHeight = try shortOutputHost.measuredHeight(
+            for: shortOutputTool, width: 320, context: shortOutputContext)
+        shortOutputHost.frame = NSRect(x: 0, y: 0, width: 320, height: shortOutputHeight)
+        try shortOutputHost.apply(block: shortOutputTool, context: shortOutputContext)
+        shortOutputHost.layoutSubtreeIfNeeded()
+        shortOutputView.layoutSubtreeIfNeeded()
+
+        // The fixture's own teeth: the pane has to actually be showing, or every
+        // assertion below is about a hidden view.
+        guard !shortOutputView.outputScrollView.isHidden,
+              !shortOutputView.outputTextView.string.isEmpty else {
+            throw fail(
+                "short tool output: the output pane is hidden, so this witnesses nothing"
+            )
+        }
+        // Overlay scrollers cost zero viewport. Asserted directly because the
+        // alternative depends on the HOST's "always show scroll bars" setting —
+        // the bug is invisible on a machine set to overlay, which is precisely why
+        // it survived.
+        guard shortOutputView.outputScrollView.scrollerStyle == .overlay else {
+            throw fail(
+                "short tool output: the pane follows the system scroller style, so on a machine "
+                + "with always-visible scroll bars a legacy scroller takes ~15pt out of a 33pt "
+                + "viewport and clips the single line it holds"
+            )
+        }
+        guard !shortOutputView.outputScrollView.hasVerticalScroller else {
+            throw fail(
+                "short tool output: a one-line output reserved a vertical scroller it does not "
+                + "need — the pane has zero slack, so that width comes straight out of the line"
+            )
+        }
+        let measuredShortOutput = CommandOutputTextView.measuredSize(
+            shortOutputView.outputTextView.string)
+        guard measuredShortOutput.height
+            <= shortOutputView.outputScrollView.contentSize.height + 0.5 else {
+            throw fail(
+                "short tool output: the text needs \(measuredShortOutput.height)pt but the pane "
+                + "offers \(shortOutputView.outputScrollView.contentSize.height)pt — the line is clipped"
+            )
+        }
+
         let recreatedHost = AgentBlockHostView()
         recreatedHost.frame = NSRect(x: 0, y: 0, width: 320, height: expandedHeight)
         try recreatedHost.apply(block: completedTool, context: contextA)

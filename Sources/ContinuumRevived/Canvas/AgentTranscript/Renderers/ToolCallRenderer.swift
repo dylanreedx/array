@@ -63,7 +63,7 @@ final class ToolCallView: NSView {
     /// `.plans/45` S4.2 — the expanded pane's output, reusing the command
     /// output machinery (exact selection, dual-format copy) fed raw text from
     /// the host-local store — never a `.commandOutput` block (I5).
-    private(set) var outputScrollView = NSScrollView(frame: .zero)
+    private(set) var outputScrollView = CodeBlockScrollView(frame: .zero)
     private(set) var outputTextView = CommandOutputTextView(frame: .zero)
     private(set) var outputCopyButton = CommandOutputCopyButton(frame: .zero)
     private(set) var outputNoteLabel = NSTextField(labelWithString: "")
@@ -108,8 +108,19 @@ final class ToolCallView: NSView {
         outputScrollView.layer?.masksToBounds = true
         outputScrollView.drawsBackground = false
         outputScrollView.borderType = .noBorder
-        outputScrollView.hasVerticalScroller = true
         outputScrollView.hasHorizontalScroller = true
+        // Same treatment `CodeBlockRenderer` got in `b5ff292f`, which this pane
+        // never inherited. The pane's height is content-derived with ZERO slack —
+        // one line is 17pt of glyphs inside an 8pt inset, i.e. exactly 33pt — so a
+        // LEGACY scroller (the system default when "always show scroll bars" is
+        // on) takes ~15pt out of 33 and clips the top half of the only line there
+        // is. Worse, it feeds back: the horizontal bar shrinks the viewport, which
+        // makes the 33pt document genuinely taller than the viewport, which brings
+        // in the vertical bar, which eats the width. Overlay scrollers cost 0pt of
+        // viewport, and the vertical one is now decided per layout from the
+        // measured text rather than asserted once at construction.
+        outputScrollView.scrollerStyle = .overlay
+        outputScrollView.hasVerticalScroller = false
         outputScrollView.autohidesScrollers = true
         outputScrollView.documentView = outputTextView
         outputCopyButton.target = self
@@ -309,6 +320,13 @@ final class ToolCallView: NSView {
                 width: max(1, bounds.width - paneX - inset),
                 height: max(0, bounds.height - y - Self.detailBottomInset)
             ))
+            outputScrollView.layoutSubtreeIfNeeded()
+            let measuredOutput = CommandOutputTextView.measuredSize(outputTextView.string)
+            let needsVerticalScroll = measuredOutput.height > outputScrollView.contentSize.height + 0.5
+            if outputScrollView.hasVerticalScroller != needsVerticalScroll {
+                outputScrollView.hasVerticalScroller = needsVerticalScroll
+                outputScrollView.layoutSubtreeIfNeeded()
+            }
             outputTextView.sizeDocument(toFit: outputScrollView.contentSize)
         }
     }
