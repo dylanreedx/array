@@ -44,9 +44,9 @@ Native radii follow the checked-in `12 → 10 → 8 → 6` ladder. Marketing por
 - Authored resting rotation stays within 4 degrees.
 - Detached surfaces receive shallow shadows. Settled surfaces are flat and shadowless.
 - The real component tree supplies both detached and settled surfaces. There is no presentation clone tree.
-- Each detached surface has one restrained Glimpse-phase motion profile. Movement stays within 7px and 0.3 degrees and stops before portal assembly begins.
-- Pointer response is animation-frame coalesced and contributes no more than 7px translation and 0.8 degrees of rotation.
-- Ambient surface motion pauses offscreen, while the document is hidden, during assembly, and under Reduced Motion.
+- Each detached surface has its own continuous motion path, duration, negative phase offset, and scale breath. Movement stays within 8px, 0.34 degrees, and 1.8 percent scale variation, then fades to zero as the surface settles.
+- Pointer response is animation-frame coalesced and depth-weighted per surface. It contributes no more than 9px translation and 0.8 degrees of rotation, and may move middle planes against the near plane to avoid rigid group motion.
+- Ambient surface motion pauses once surfaces settle and under Reduced Motion.
 - Product-state motion remains semantic. Gyros animate only for a working agent, approval emphasis belongs only to attention state, and loading motion belongs only to active local fixture work.
 
 ## Assembly phases
@@ -146,6 +146,6 @@ Copy is direct, spatial, and product-specific. It describes visible state, paral
 - No separate static product preview, duplicate demo, clone tree, feature-card strip, or default tutorial panel.
 - No eyebrow, section kicker, `NATIVE ON macOS` label, or metadata used only as decoration.
 - No segmented Mac and Companion toggle when the devices themselves can be selected.
-- No giant radius applied to native app chrome, thick workspace outline, repeated border stack, dotted marketing grid, glow, glass, or ambient movement outside the Glimpse phase.
+- No giant radius applied to native app chrome, thick workspace outline, repeated border stack, dotted marketing grid, glow, glass, or ambient movement after surfaces settle.
 - No literal letters, emoji, or Unicode approximations standing in for Array glyphs or native control symbols.
 - No wheel, pinch, drag, or keyboard input leaking from an active canvas into the page.

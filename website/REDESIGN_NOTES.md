@@ -12,7 +12,7 @@ The homepage now contains only the primary hero and workspace, one closing downl
 
 - Removed the static canvas, navigation, phone, and agent preview components.
 - Removed duplicate product introductions, feature cards, eyebrow copy, and the segmented device selector.
-- Added the asymmetric portal, deterministic scroll phases, shallow pointer perspective, and Glimpse-only floating motion.
+- Added the asymmetric portal, deterministic scroll phases, and five staggered floating paths with independent scale, rotation, timing, and depth-weighted pointer parallax.
 - Added a sticky ready shelf and interaction gate that prevents visitors from accidentally scrolling past the live demo.
 - Kept the primary DMG link functional without hydration and simplified the product download menu.
 

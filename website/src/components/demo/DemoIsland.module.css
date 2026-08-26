@@ -1,6 +1,7 @@
 @property --ambient-x{syntax:"<length>";inherits:false;initial-value:0px}
 @property --ambient-y{syntax:"<length>";inherits:false;initial-value:0px}
 @property --ambient-r{syntax:"<angle>";inherits:false;initial-value:0deg}
+@property --ambient-scale{syntax:"<number>";inherits:false;initial-value:0}
 .assembly{position:absolute;inset:0;color:#f2f4f8;pointer-events:none}
 .stage{position:absolute;inset:0;overflow:hidden;perspective:1700px;transform-style:preserve-3d;outline:none;pointer-events:none;isolation:isolate}
 .portal{position:absolute;z-index:0;inset:clamp(2svh,calc(74svh - var(--assembly-progress) * 190svh),74svh) clamp(8px,1.2vw,20px) 1.5svh;overflow:hidden;border:0;border-radius:calc(44px + var(--detach-progress) * 96px) calc(38px + var(--detach-progress) * 58px) 26px 26px;background:#0b0d10;transform:translateZ(calc(var(--detach-progress) * -90px));opacity:clamp(0,calc(var(--assembly-progress) * 5),1);will-change:inset,border-radius,transform}
@@ -51,7 +52,7 @@
 .toast{position:absolute;z-index:90;left:50%;bottom:22px;display:flex;align-items:center;gap:14px;padding:11px 14px;border:1px solid #494f5a;border-radius:12px;color:#f5f4ee;background:#22262d;box-shadow:0 12px 34px rgb(0 0 0/42%);transform:translateX(-50%);font-size:12px;pointer-events:auto}.toast button{padding:0;border:0;color:#8fcab0;background:transparent;font-weight:750}.live{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
 
 /* Real tile wrappers detach; the Mac workspace never becomes a fake screenshot. */
-:global([data-assembly-root]) [data-assembly-surface]{--float-x:0px;--float-y:0px;--float-z:0px;--float-scale:1;--float-rx:0deg;--float-ry:0deg;--float-rz:0deg;--ambient-x:0px;--ambient-y:0px;--ambient-r:0deg;transform:translate3d(calc(var(--detach-progress) * var(--float-x) + var(--detach-progress) * var(--ambient-x) + var(--detach-progress) * var(--pointer-shift-x)),calc(var(--detach-progress) * var(--float-y) + var(--detach-progress) * var(--ambient-y) + var(--detach-progress) * var(--pointer-shift-y)),calc(var(--detach-progress) * var(--float-z))) rotateX(calc(var(--detach-progress) * var(--float-rx) + var(--pointer-tilt-y))) rotateY(calc(var(--detach-progress) * var(--float-ry) + var(--pointer-tilt-x))) rotateZ(calc(var(--detach-progress) * var(--float-rz) + var(--detach-progress) * var(--ambient-r))) scale(calc(1 - var(--detach-progress) * (1 - var(--float-scale))));transform-origin:center;box-shadow:0 calc(var(--detach-progress) * 16px) calc(var(--detach-progress) * 38px) rgb(0 0 0 / calc(var(--detach-progress) * 24%));will-change:transform}
+:global([data-assembly-root]) [data-assembly-surface]{--float-x:0px;--float-y:0px;--float-z:0px;--float-scale:1;--float-rx:0deg;--float-ry:0deg;--float-rz:0deg;--ambient-x:0px;--ambient-y:0px;--ambient-r:0deg;--ambient-scale:0;--surface-pointer-x:0px;--surface-pointer-y:0px;--surface-pointer-rx:0deg;--surface-pointer-ry:0deg;transform:translate3d(calc(var(--detach-progress) * var(--float-x) + var(--detach-progress) * var(--ambient-x) + var(--surface-pointer-x)),calc(var(--detach-progress) * var(--float-y) + var(--detach-progress) * var(--ambient-y) + var(--surface-pointer-y)),calc(var(--detach-progress) * var(--float-z))) rotateX(calc(var(--detach-progress) * var(--float-rx) + var(--surface-pointer-rx))) rotateY(calc(var(--detach-progress) * var(--float-ry) + var(--surface-pointer-ry))) rotateZ(calc(var(--detach-progress) * var(--float-rz) + var(--detach-progress) * var(--ambient-r))) scale(calc(1 - var(--detach-progress) * (1 - var(--float-scale)) + var(--detach-progress) * var(--ambient-scale)));transform-origin:center;box-shadow:0 calc(var(--detach-progress) * 16px) calc(var(--detach-progress) * 38px) rgb(0 0 0 / calc(var(--detach-progress) * 24%));will-change:transform}
 :global([data-assembly-root][data-assembly-measuring=true]) [data-assembly-surface]{transform:none!important;box-shadow:none!important}
 :global([data-assembly-root]) [data-assembly-surface=stabilize]{--float-z:170px;--float-ry:-2.8deg;--float-rz:-2.2deg}
 :global([data-assembly-root]) [data-assembly-surface=browser]{--float-z:120px;--float-ry:3deg;--float-rz:2deg}
@@ -59,16 +60,16 @@
 :global([data-assembly-root]) [data-assembly-surface=note]{--float-z:135px;--float-rz:2.4deg}
 :global([data-assembly-root]) [data-assembly-surface=verify]{--float-z:155px;--float-ry:2.6deg;--float-rz:1deg}
 :global([data-assembly-root]) [data-assembly-surface=audit]{opacity:calc(1 - var(--detach-progress));box-shadow:none}
-.assembly[data-assembly-phase=glimpse] :global([data-assembly-surface=stabilize]){animation:surface-drift-a 9.4s ease-in-out infinite alternate}
-.assembly[data-assembly-phase=glimpse] :global([data-assembly-surface=browser]){animation:surface-drift-b 11.8s ease-in-out -2.1s infinite alternate}
-.assembly[data-assembly-phase=glimpse] :global([data-assembly-surface=shell]){animation:surface-drift-c 8.6s ease-in-out -4.2s infinite alternate}
-.assembly[data-assembly-phase=glimpse] :global([data-assembly-surface=note]){animation:surface-drift-d 13.2s ease-in-out -1.4s infinite alternate}
-.assembly[data-assembly-phase=glimpse] :global([data-assembly-surface=verify]){animation:surface-drift-e 10.7s ease-in-out -5.1s infinite alternate}
-@keyframes surface-drift-a{to{--ambient-x:5px;--ambient-y:-6px;--ambient-r:.28deg}}
-@keyframes surface-drift-b{to{--ambient-x:-7px;--ambient-y:3px;--ambient-r:-.22deg}}
-@keyframes surface-drift-c{to{--ambient-x:4px;--ambient-y:6px;--ambient-r:.18deg}}
-@keyframes surface-drift-d{to{--ambient-x:-4px;--ambient-y:-5px;--ambient-r:-.3deg}}
-@keyframes surface-drift-e{to{--ambient-x:6px;--ambient-y:4px;--ambient-r:.2deg}}
+.assembly:not([data-assembly-phase=mac]):not([data-assembly-phase=companion]):not([data-assembly-phase=ready]) :global([data-assembly-surface=stabilize]){animation:surface-drift-a 10.6s cubic-bezier(.45,.05,.55,.95) -1.2s infinite}
+.assembly:not([data-assembly-phase=mac]):not([data-assembly-phase=companion]):not([data-assembly-phase=ready]) :global([data-assembly-surface=browser]){animation:surface-drift-b 13.4s cubic-bezier(.42,0,.58,1) -4.7s infinite}
+.assembly:not([data-assembly-phase=mac]):not([data-assembly-phase=companion]):not([data-assembly-phase=ready]) :global([data-assembly-surface=shell]){animation:surface-drift-c 8.8s cubic-bezier(.37,0,.63,1) -6.1s infinite}
+.assembly:not([data-assembly-phase=mac]):not([data-assembly-phase=companion]):not([data-assembly-phase=ready]) :global([data-assembly-surface=note]){animation:surface-drift-d 15.2s cubic-bezier(.45,.05,.55,.95) -2.6s infinite}
+.assembly:not([data-assembly-phase=mac]):not([data-assembly-phase=companion]):not([data-assembly-phase=ready]) :global([data-assembly-surface=verify]){animation:surface-drift-e 11.7s cubic-bezier(.42,0,.58,1) -8.3s infinite}
+@keyframes surface-drift-a{0%,100%{--ambient-x:-2px;--ambient-y:3px;--ambient-r:-.12deg;--ambient-scale:-.004}32%{--ambient-x:7px;--ambient-y:-8px;--ambient-r:.34deg;--ambient-scale:.014}68%{--ambient-x:-5px;--ambient-y:-3px;--ambient-r:-.24deg;--ambient-scale:.006}}
+@keyframes surface-drift-b{0%,100%{--ambient-x:6px;--ambient-y:-2px;--ambient-r:.2deg;--ambient-scale:.008}38%{--ambient-x:-8px;--ambient-y:5px;--ambient-r:-.3deg;--ambient-scale:-.006}72%{--ambient-x:2px;--ambient-y:8px;--ambient-r:.14deg;--ambient-scale:.012}}
+@keyframes surface-drift-c{0%,100%{--ambient-x:-3px;--ambient-y:-6px;--ambient-r:-.18deg;--ambient-scale:.004}44%{--ambient-x:5px;--ambient-y:7px;--ambient-r:.22deg;--ambient-scale:.018}76%{--ambient-x:7px;--ambient-y:-1px;--ambient-r:.08deg;--ambient-scale:-.005}}
+@keyframes surface-drift-d{0%,100%{--ambient-x:3px;--ambient-y:6px;--ambient-r:.26deg;--ambient-scale:-.006}29%{--ambient-x:-6px;--ambient-y:-7px;--ambient-r:-.32deg;--ambient-scale:.01}64%{--ambient-x:5px;--ambient-y:-3px;--ambient-r:.12deg;--ambient-scale:.015}}
+@keyframes surface-drift-e{0%,100%{--ambient-x:-5px;--ambient-y:1px;--ambient-r:-.16deg;--ambient-scale:.012}35%{--ambient-x:8px;--ambient-y:6px;--ambient-r:.28deg;--ambient-scale:-.004}70%{--ambient-x:2px;--ambient-y:-7px;--ambient-r:-.26deg;--ambient-scale:.016}}
 .assembly[data-assembly-phase=ready][data-input-mode=page] :global([data-assembly-surface]){animation:ready-surface-confirm 680ms cubic-bezier(.16,1,.3,1) both}
 .assembly[data-assembly-phase=ready][data-input-mode=page] :global([data-assembly-surface=browser]){animation-delay:45ms}
 .assembly[data-assembly-phase=ready][data-input-mode=page] :global([data-assembly-surface=shell]){animation-delay:90ms}
