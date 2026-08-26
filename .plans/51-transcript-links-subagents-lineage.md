@@ -235,3 +235,30 @@ and its drawing is suppressed; it remains only as the action/keyboard/AX host.
 The geometry witness asserts the empty-cell contract, and
 `CONTINUUM_AGENT_REFERENCE_CAPTURE=<png>` on `--agent-first-paint-check` emits a
 real rendered row for visual inspection.
+
+### Integration and release, 2026-08-26
+
+The transcript branch was committed as `486d156b` and merged into
+`array/integration` as `e65c4099`, on top of the agent-awareness sound work.
+The shared seams intentionally retain both contracts: tile focus acknowledges
+the sound signal and refreshes contextual lineage; Claude launches request both
+hook events and forwarded subagent text; Pi translation retains both semantic
+signal indexing and streamed-text state; and Codex app-server launches retain
+the explicit `approval_policy=never` and `sandbox_mode=workspace-write` policy.
+
+The merged focused suite passed CoreChecks, AgentSupervisor, agent awareness,
+agent first paint, relationship geometry, Codex backend/app-server parity and
+runner checks, the 387-record inventory, and whitespace validation. The release
+matrix then passed all 182 legs with the four documented known-red probes:
+`--nav-mode-check`, `--perf-budget-zoom-check`,
+`--canvas-zoom-invalidation-probe-check`, and
+`--perf-budget-magnify-slope-check`. The allowlisted gesture-transition probe
+passed. Display-dependent image baselines were deliberately skipped; live
+appearance, geometry, contrast, pixel, accessibility and screenshot-generation
+checks ran.
+
+Array 0.5.12 (build 37) was built from the merged integration branch. The app
+and DMG were Developer ID signed, accepted by Apple's notarization service,
+stapled, and accepted by Gatekeeper. Both `Array.dmg` and
+`Array-0.5.12.dmg` were published on GitHub, and the signed 35-item Sparkle
+appcast was regenerated for the website.
