@@ -128,6 +128,10 @@ enum PerfScenarios {
             // the filter is prefix-matched, so `--scenario canvas.zoom` would
             // otherwise sweep this in too.
             Scenario(name: "canvas.magnify-slope", run: { try canvasZoomSlope() }),
+            // The document-relationship overlay's own per-step cost, which
+            // magnify-slope's cheap descriptor tiles never exercise (it never sets
+            // up any document links). `.plans/44` item 1.
+            Scenario(name: "canvas.document-relationship-zoom-cost", run: { try canvasDocumentRelationshipZoomCost() }),
             // The TRANSITION between gestures, which every scenario above is
             // blind to: they each drive one pure gesture, and the complaint
             // that reframed the zoom program lived exactly at the seam ("it
@@ -536,6 +540,167 @@ enum PerfScenarios {
                 + String(format: "%.2f ms", $0.perStepMs)
             }.joined(separator: " | ")
         return PerfScenarioResult(name: "canvas.magnify-slope", detail: detail, measurements: measurements)
+    }
+
+    // MARK: - Scenario: document-relationship overlay cost during a zoom sweep
+
+    /// Does a zoom step touch the document-relationship overlay at all?
+    ///
+    /// `CanvasNSView.updateDocumentRelationshipOverlay` used to run from
+    /// `syncWorldPlaneToCamera` on every camera step: a full re-walk of every
+    /// installed tile (`tileIndexVisits`) and every document link
+    /// (`linkEvaluations`), plus an unconditional viewport-sized frame write
+    /// (`frameWrites`) — all of it on a canvas with ZERO document links, since
+    /// there was no early-out. `.plans/44` item 1.
+    ///
+    /// Two arms over the SAME fixture shape (installed tiles held fixed, only
+    /// the presence of document links differs), each swept through 40 zoom
+    /// steps:
+    ///
+    /// 1. No document links at all — the common case. The overlay must not be
+    ///    touched.
+    /// 2. Several real links between installed tiles — the overlay is now a
+    ///    world-space sibling (frame sized to content, not the viewport), so a
+    ///    camera step still must not touch it: the connectors track the
+    ///    camera for free via the normal view hierarchy, the same way tiles do.
+    ///
+    /// The teeth: `segmentCountAfterZoom` proves arm 2 actually drew something
+    /// (an early-out that fired unconditionally would zero this too), and
+    /// `cameraMutations` proves the sweep really moved the camera.
+    static func canvasDocumentRelationshipZoomCost() throws -> PerfScenarioResult {
+        let installed = 24
+        let linkedPairCount = 6
+        let steps = 40
+
+        struct Arm {
+            let label: String
+            let updateCalls: Int
+            let tileIndexVisits: Int
+            let linkEvaluations: Int
+            let frameWrites: Int
+            let segmentCountAfterZoom: Int
+            let cameraMutations: Int
+        }
+
+        func runArm(withLinks: Bool) throws -> Arm {
+            let canvas = CanvasNSView(
+                canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                                         tiles: [], groups: [], lastActiveTileId: nil),
+                activeZone: nil, zoneRenderModels: [], showsZoneChrome: false
+            )
+            canvas.frame = CGRect(x: 0, y: 0, width: 1_600, height: 1_000)
+            let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless],
+                                  backing: .buffered, defer: false)
+            window.contentView = canvas
+            window.orderFrontOffscreenForChecks()
+
+            var tiles: [Tile] = []
+            for index in 0..<installed {
+                let frame = TileFrame(x: Double(index % 6) * 260 + 40, y: Double(index / 6) * 260 + 60,
+                                      width: 220, height: 180)
+                let tile = Tile(id: UUID(), kind: .note, title: "doc-rel-\(index)",
+                                frame: frame, zPosition: .fromLegacyRank(index + 1),
+                                runtimeRef: nil, metadata: TileMetadata())
+                tiles.append(tile)
+                canvas.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
+            }
+            canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+            canvas.layoutSubtreeIfNeeded()
+
+            if withLinks {
+                var links: [DocumentAgentLink] = []
+                var agentTileIds: [AgentID: UUID] = [:]
+                let now = Date(timeIntervalSince1970: 1_900_000_000)
+                for pairIndex in 0..<linkedPairCount {
+                    let agentId = AgentID(rawValue: UUID())
+                    agentTileIds[agentId] = tiles[pairIndex * 2].id
+                    links.append(DocumentAgentLink(agentId: agentId, documentTileId: tiles[pairIndex * 2 + 1].id,
+                                                   createdAt: now, updatedAt: now))
+                }
+                canvas.setDocumentRelationships(links, agentTileIds: agentTileIds)
+                canvas.layoutSubtreeIfNeeded()
+            }
+
+            canvas.qaResetDocumentRelationshipStats()
+            canvas.qaResetCameraLayoutStats()
+            for step in 0..<steps {
+                let zoom = 0.4 + 0.6 * (1 + sin(Double(step) / 6.0)) / 2
+                canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: zoom))
+                canvas.layoutSubtreeIfNeeded()
+            }
+            let stats = canvas.qaDocumentRelationshipStats
+            let arm = Arm(
+                label: withLinks ? "with \(linkedPairCount) links" : "no links",
+                updateCalls: stats.updateCalls,
+                tileIndexVisits: stats.tileIndexVisits,
+                linkEvaluations: stats.linkEvaluations,
+                frameWrites: stats.frameWrites,
+                segmentCountAfterZoom: canvas.qaDocumentRelationshipSegmentCount,
+                cameraMutations: canvas.qaCameraLayoutStats.cameraMutations
+            )
+            window.orderOut(nil)
+            window.contentView = nil
+            return arm
+        }
+
+        let noLinks = try runArm(withLinks: false)
+        let withLinks = try runArm(withLinks: true)
+
+        var measurements: [PerfMeasurement] = []
+
+        for arm in [noLinks, withLinks] {
+            let prefix = "document-relationship-zoom-cost.\(arm.label == "no links" ? "empty" : "linked")"
+            measurements.append(PerfBudget(
+                metric: "\(prefix).updateCalls",
+                limit: .exactly(0),
+                unit: .count,
+                rationale: "a camera step must not invoke updateDocumentRelationshipOverlay at all — "
+                    + "it is a world-space sibling now, camera-invariant by construction"
+            ).evaluate(Double(arm.updateCalls)))
+
+            measurements.append(PerfBudget(
+                metric: "\(prefix).tileIndexVisits",
+                limit: .exactly(0),
+                unit: .count,
+                rationale: "no camera step may re-walk installed tiles for this overlay"
+            ).evaluate(Double(arm.tileIndexVisits)))
+
+            measurements.append(PerfBudget(
+                metric: "\(prefix).linkEvaluations",
+                limit: .exactly(0),
+                unit: .count,
+                rationale: "no camera step may re-evaluate document links"
+            ).evaluate(Double(arm.linkEvaluations)))
+
+            measurements.append(PerfBudget(
+                metric: "\(prefix).frameWrites",
+                limit: .exactly(0),
+                unit: .count,
+                rationale: "the overlay's frame tracks content, not the viewport — a camera step must "
+                    + "never rewrite it"
+            ).evaluate(Double(arm.frameWrites)))
+        }
+
+        measurements.append(PerfBudget(
+            metric: "document-relationship-zoom-cost.segmentCountAfterZoom",
+            limit: .atLeast(Double(linkedPairCount)),
+            unit: .count,
+            rationale: "teeth: the linked arm must still have every connector drawn after the sweep — "
+                + "zero updates must not mean zero output"
+        ).evaluate(Double(withLinks.segmentCountAfterZoom)))
+
+        measurements.append(PerfBudget(
+            metric: "document-relationship-zoom-cost.cameraMutations",
+            limit: .atLeast(1),
+            unit: .count,
+            rationale: "teeth: the sweep must have actually moved the camera in both arms"
+        ).evaluate(Double(min(noLinks.cameraMutations, withLinks.cameraMutations))))
+
+        let detail = "\(steps) zoom steps, \(installed) installed tiles; "
+            + "no links: \(noLinks.updateCalls) update calls / \(noLinks.tileIndexVisits) tile visits; "
+            + "\(linkedPairCount) links: \(withLinks.updateCalls) update calls / "
+            + "\(withLinks.tileIndexVisits) tile visits / \(withLinks.segmentCountAfterZoom) segments after sweep"
+        return PerfScenarioResult(name: "canvas.document-relationship-zoom-cost", detail: detail, measurements: measurements)
     }
 
     // MARK: - Scenario: the zoom→pan transition

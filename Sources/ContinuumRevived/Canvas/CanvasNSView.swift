@@ -838,10 +838,18 @@ final class CanvasNSView: NSView, TokenThemed {
     private var hoveredRelationshipEndpointId: UUID?
 
     struct DocumentRelationshipQAStats: Equatable {
+        /// Every call to `updateDocumentRelationshipOverlay`, including ones that
+        /// early-out. A camera step must not grow this — see
+        /// `canvas.document-relationship-zoom-cost`.
+        var updateCalls = 0
         var tileIndexVisits = 0
         var linkEvaluations = 0
         var segmentAssignments = 0
         var stackingReconciliations = 0
+        /// Times the overlay's own frame was actually rewritten. The overlay is a
+        /// world-space sibling now, so this must track content (tiles moving,
+        /// links changing), never the camera.
+        var frameWrites = 0
     }
     private(set) var qaDocumentRelationshipStats = DocumentRelationshipQAStats()
     func qaResetDocumentRelationshipStats() { qaDocumentRelationshipStats = .init() }
@@ -957,7 +965,11 @@ final class CanvasNSView: NSView, TokenThemed {
             zoom: viewport.zoom
         )
         qaCameraLayoutStats.cameraMutations += writes
-        updateDocumentRelationshipOverlay()
+        // The document-relationship overlay does NOT need a per-camera-step
+        // recompute: it is a world-space sibling now (see
+        // `updateDocumentRelationshipOverlay`'s doc comment), so its content is
+        // camera-invariant and every real invalidation (links set, tiles
+        // added/removed/moved, hover/focus) already calls it directly.
         updateContextualAgentLineageGeometry()
     }
 
@@ -1851,11 +1863,33 @@ final class CanvasNSView: NSView, TokenThemed {
             relationshipHitTestPassesThrough: documentRelationshipOverlay.hitTest(.zero) == nil)
     }
 
+    /// Perf (.plans/44 M item 1): this used to run every camera step from
+    /// `syncWorldPlaneToCamera`, sizing itself to `worldPlane.bounds` — a
+    /// viewport-sized frame write on every step, plus a full re-walk of every
+    /// installed tile, even on a canvas with zero document links.
+    ///
+    /// Both tile views and this overlay are direct children of `worldPlane` at
+    /// WORLD frames, so a rect resolved in `worldPlane`'s own coordinate space
+    /// is camera-invariant: pan and zoom only change `worldPlane`'s bounds, not
+    /// the relative position of its children. That means the overlay's frame
+    /// can be sized to its CONTENT (the union of every linked tile pair, in
+    /// world space) instead of the viewport, and this function no longer needs
+    /// to run on a camera step at all — `syncWorldPlaneToCamera` does not call
+    /// it. `qaSegmentRectInCanvasSpace` still resolves the live, on-screen
+    /// position at call time via the normal view hierarchy, which is what lets
+    /// the camera move the connectors "for free" the same way it moves tiles.
+    ///
+    /// Real callers remain: `setDocumentRelationships`, tile add/remove,
+    /// `markActive`/hover (emphasis), and every geometry commit that already
+    /// routes through `layoutAllTiles` or a zone-placement update.
     private func updateDocumentRelationshipOverlay() {
-        if documentRelationshipOverlay.frame != worldPlane.bounds {
-            documentRelationshipOverlay.frame = worldPlane.bounds
+        qaDocumentRelationshipStats.updateCalls += 1
+        guard !documentLinks.isEmpty else {
+            if !documentRelationshipOverlay.segments.isEmpty {
+                documentRelationshipOverlay.segments = []
+            }
+            return
         }
-        let visible = worldPlane.bounds
         let focused = canvasState.lastActiveTileId
         var viewsByTileId = tileViews
         qaDocumentRelationshipStats.tileIndexVisits += tileViews.count
@@ -1865,32 +1899,55 @@ final class CanvasNSView: NSView, TokenThemed {
                 viewsByTileId[tileId] = view
             }
         }
-        let segments = documentLinks.compactMap { link -> DocumentRelationshipOverlayView.Segment? in
+        struct Pair {
+            let agentTileId: UUID
+            let documentTileId: UUID
+            let sourceWorldFrame: CGRect
+            let targetWorldFrame: CGRect
+        }
+        var pairs: [Pair] = []
+        pairs.reserveCapacity(documentLinks.count)
+        for link in documentLinks {
             qaDocumentRelationshipStats.linkEvaluations += 1
             guard let agentTileId = documentAgentTileIds[link.agentId],
                   let source = viewsByTileId[agentTileId], !source.isHidden,
-                  let target = viewsByTileId[link.documentTileId], !target.isHidden,
-                  source.frame.union(target.frame).intersects(visible) else { return nil }
-            // T8 (`.plans/48`): converted into the OVERLAY's coordinate space, not
-            // handed raw `worldPlane` frames.
-            //
-            // `worldPlane` implements pan as `setBoundsOrigin(worldOrigin)`, so its
-            // `bounds.origin` IS the camera's world position. Assigning that rect
-            // as this overlay's FRAME positions it correctly, but the overlay's own
-            // `bounds.origin` stays (0,0) — so a path drawn at world W painted at
-            // `worldOrigin + W`, displaced by exactly the camera pan and growing
-            // the further you pan from the world origin. At viewport (0,0) the
-            // offset is zero, which is the only viewport the old coverage used.
-            //
-            // `convert` rather than subtracting `worldPlane.bounds.origin`: it is
-            // the idiom the lineage overlay and the focus border already use in
-            // this file, and it cannot drift if the camera model changes again.
-            return .init(
-                source: documentRelationshipOverlay.convert(source.bounds, from: source),
-                target: documentRelationshipOverlay.convert(target.bounds, from: target),
-                emphasized: focused == agentTileId || focused == link.documentTileId
-                    || hoveredRelationshipEndpointId == agentTileId
-                    || hoveredRelationshipEndpointId == link.documentTileId
+                  let target = viewsByTileId[link.documentTileId], !target.isHidden else { continue }
+            pairs.append(Pair(
+                agentTileId: agentTileId,
+                documentTileId: link.documentTileId,
+                sourceWorldFrame: worldPlane.convert(source.bounds, from: source),
+                targetWorldFrame: worldPlane.convert(target.bounds, from: target)
+            ))
+        }
+        guard !pairs.isEmpty else {
+            if !documentRelationshipOverlay.segments.isEmpty {
+                documentRelationshipOverlay.segments = []
+            }
+            return
+        }
+        // Padded past the route's max escape clearance (12pt, `route(for:)`'s
+        // overlap-fallback polyline) plus stroke width, so every drawn path —
+        // including curve handles, which stay within the source/target union —
+        // stays inside the view it is drawn into.
+        var worldBounds = pairs[0].sourceWorldFrame.union(pairs[0].targetWorldFrame)
+        for pair in pairs.dropFirst() {
+            worldBounds = worldBounds.union(pair.sourceWorldFrame).union(pair.targetWorldFrame)
+        }
+        let paddedBounds = worldBounds.insetBy(dx: -32, dy: -32)
+        if documentRelationshipOverlay.frame != paddedBounds {
+            qaDocumentRelationshipStats.frameWrites += 1
+            documentRelationshipOverlay.frame = paddedBounds
+        }
+        // T8 (`.plans/48`): converted into the OVERLAY's coordinate space via
+        // `convert`, the same idiom the lineage overlay and the focus border
+        // already use — it cannot drift if the camera model changes again.
+        let segments = pairs.map { pair -> DocumentRelationshipOverlayView.Segment in
+            .init(
+                source: documentRelationshipOverlay.convert(pair.sourceWorldFrame, from: worldPlane),
+                target: documentRelationshipOverlay.convert(pair.targetWorldFrame, from: worldPlane),
+                emphasized: focused == pair.agentTileId || focused == pair.documentTileId
+                    || hoveredRelationshipEndpointId == pair.agentTileId
+                    || hoveredRelationshipEndpointId == pair.documentTileId
             )
         }
         if documentRelationshipOverlay.segments != segments {
