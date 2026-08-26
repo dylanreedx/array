@@ -269,6 +269,17 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// pointer sample, on the main thread, purely to answer a question a
     /// dictionary answers in constant time.
     private var turnStartIndexByEntry: [AgentNodeID: Int] = [:]
+
+    /// Memoised cluster header summaries.
+    ///
+    /// `refreshVisibleClusterHeaders` runs on EVERY apply — i.e. per streamed
+    /// token — and recomputes the string for every visible header. Since T3 that
+    /// walk is O(members + turn length) rather than O(members). But `foldTurns`
+    /// only emits a turn header for turns BEFORE the last, which are settled by
+    /// construction, so every execution after the first produces a byte-identical
+    /// string. The two inputs that can legitimately change it are the display
+    /// projection and the tool-detail records, and both clear this.
+    private var clusterSummaryCache: [AgentNodeID: String] = [:]
     /// `.plans/45` S4.3 — the display projection between `rows` and the
     /// diffable snapshot. `rows == flatten(document)` is untouched; these are
     /// rebuilt O(rows) once per visual apply.
@@ -2298,6 +2309,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             // `AgentToolDetailStore` owns the sanitizer. Keeping its records
             // intact here is what preserves approved affected-file observations.
             self.toolDetailsByID = Dictionary(uniqueKeysWithValues: details.map { ($0.identity, $0) })
+            self.clusterSummaryCache.removeAll(keepingCapacity: true)
             self.refreshVisibleToolDetails()
         }
     }
@@ -2451,6 +2463,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             uniquingKeysWith: { first, _ in first }
         )
         clusterHeadersByID = [:]
+        clusterSummaryCache.removeAll(keepingCapacity: true)
         headerIDByFoldedMemberID = [:]
         clusterMemberIDs = []
         for item in displayItems {
@@ -2693,7 +2706,16 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             guard let view = item.headerView,
                   let clusterID = view.clusterID,
                   let header = clusterHeadersByID[clusterID] else { continue }
-            view.setSummaryText(clusterSummaryText(header))
+            let summary: String
+            if let cached = clusterSummaryCache[clusterID] {
+                summary = cached
+            } else {
+                summary = clusterSummaryText(header)
+                // A LIVE header is the one that still moves — it counts the steps
+                // of the turn in flight — so it is recomputed rather than cached.
+                if !header.isLive { clusterSummaryCache[clusterID] = summary }
+            }
+            view.setSummaryText(summary)
         }
     }
 
@@ -2775,6 +2797,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// equivalent.
     func seedStoreSanitizedToolDetails(_ records: [AgentToolDetailKey: AgentToolDetailRecord]) {
         toolDetailsByID = records
+        clusterSummaryCache.removeAll(keepingCapacity: true)
         refreshVisibleToolDetails()
     }
 

@@ -35,7 +35,19 @@ through `enqueue()` with an EMPTY patch → `applyCoalesced` → full walk per t
 | turn-chrome boundary hash in `layout()` | O(all rows) **per display cycle** | maintained on the full walk only |
 | turn-start lookups | `first(where:)`, one per `mouseMoved` | dictionary |
 
-`transcript-delta.worstDeltaDuration`: 5.970 → **4.736 ms**.
+| settled cluster summaries | recomputed per apply, O(members + turn length) each | memoised, cleared by the projection and by tool-detail arrival |
+
+`transcript-delta.worstDeltaDuration` sits at **5.7-6.0 ms** over three runs
+(10,000 rows). A single 4.736 ms sample was measured after the hover fix and is
+**not** the honest number — the scenario neither hovers nor renders cluster
+headers, so two of the three fixes above are invisible to it. Their value is
+real but unwitnessed by THIS leg; the display-cycle fix has its own witness in
+`--transcript-rhythm-check`.
+
+**Still linear**: 0.3 ms at 10 rows against ~5.8 ms at 10,000. Remaining
+per-apply O(rows) suspects, none yet fixed: `boundarySignature` before
+`prepare()`'s fast-path guard, `measurementCache.invalidate` filtering an
+unbounded never-evicted height cache, and `Set(toolDetailIDByBlockID.values)`.
 
 ## Row/glyph over-reach (from yesterday)
 
