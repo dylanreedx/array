@@ -16201,6 +16201,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try runtime.switchWorkspace(to: workspaceWB)
         canvas.layoutSubtreeIfNeeded()
 
+        let registryAfterSwitchToB = try registryStore.loadOrEmpty()
+        try expect(registryAfterSwitchToB.lastActiveWorkspaceId == workspaceWB,
+                   "switch must persist WB as the workspace restored on relaunch")
+
         // --- Invariant 1: Canvas zone set == B's zones exactly ---
         let installedAfter = canvas.installedZoneLayerIds
         try expect(installedAfter.contains(zoneBb),  "inv1: zoneBb (Pb) must be installed after switch to WB")
@@ -16268,6 +16272,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         _ = focusBroker.requestFocus(.canvas, reason: .appActivated)
         try runtime.switchWorkspace(to: workspaceWA)
         canvas.layoutSubtreeIfNeeded()
+
+        let registryAfterReturnToA = try registryStore.loadOrEmpty()
+        try expect(registryAfterReturnToA.lastActiveWorkspaceId == workspaceWA,
+                   "round-trip must persist WA as the workspace restored on relaunch")
 
         let installedRoundTrip = canvas.installedZoneLayerIds
         try expect(installedRoundTrip.contains(zoneAa), "inv8: round-trip: zoneAa must be re-installed in WA")

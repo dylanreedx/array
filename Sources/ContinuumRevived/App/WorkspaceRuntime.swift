@@ -1107,7 +1107,7 @@ final class WorkspaceRuntime {
         // but exclude it from the mounted scene. Rejecting the entire target here
         // made every old A↔B pair permanently unswitchable when either side carried
         // one stale pre-exclusive-ownership placement.
-        let appRegistry = try registryStore.loadOrEmpty()
+        var appRegistry = try registryStore.loadOrEmpty()
         guard var targetDocument = try loadWorkspaceDocument(workspaceId: targetWorkspaceId) else {
             throw WorkspaceSwitchError.documentNotFound(targetWorkspaceId)
         }
@@ -1213,6 +1213,13 @@ final class WorkspaceRuntime {
             layer.tileViews = tileViews
             layers.append(layer)
         }
+
+        // Commit the selected workspace only after every throwing preparation step
+        // has succeeded, but before changing the mounted canvas. A failed registry
+        // save therefore leaves the departing scene intact; a successful switch is
+        // also the workspace restored on the next launch.
+        appRegistry.lastActiveWorkspaceId = targetWorkspaceId
+        try registryStore.save(appRegistry)
 
         // 4. Swap canvas. The first switch also retires the boot-only flat
         // compatibility scene so tiles from the departing project cannot remain
