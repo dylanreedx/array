@@ -64,6 +64,7 @@ enum TranscriptRhythmChecks {
         try checkTurnFolding()
         try checkARowSaysEachThingOnce()
         try checkAFoldedTurnReportsASpanNotASum()
+        try checkADisplayCycleCostsNothingPerRow()
         try checkGlyphsDistinguishRowKinds()
         print(
             "TranscriptRhythmChecks: heading ladder, hanging indents, thematic break, "
@@ -1962,6 +1963,81 @@ extension TranscriptRhythmChecks {
     /// timestamps the whole time. It also proves the figure survives the detail
     /// store's 1 h TTL, which is why a turn reads its span from `createdAt`
     /// rather than from the records.
+    /// A display cycle must not cost the conversation.
+    ///
+    /// `layout()` ran once per display cycle and hashed EVERY row's entryID to
+    /// decide whether a turn rule could have moved — work proportional to content
+    /// repeated per frame, which is the exact sin the comment above that loop
+    /// invokes `performance.md` to condemn. At 10,000 rows it is a measurable
+    /// slice of every frame, and it is paid whether or not anything changed.
+    ///
+    /// The signature is now maintained at apply time, on the only apply that can
+    /// move a boundary. This asserts the consequence: with the document settled,
+    /// display cycles are free.
+    private static func checkADisplayCycleCostsNothingPerRow() throws {
+        func id(_ suffix: String) -> AgentNodeID { AgentNodeID(rawValue: "cycle-\(suffix)")! }
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        var entries: [AgentEntry] = []
+        for index in 0..<400 {
+            entries.append(AgentEntry(
+                id: id("entry-\(index)"), revision: 1,
+                role: index.isMultiple(of: 2) ? .user : .assistant,
+                provenance: index.isMultiple(of: 2)
+                    ? .localPrompt(promptID: "p\(index)")
+                    : .providerItem(provider: "fixture", itemID: "a\(index)"),
+                lifecycle: .finished,
+                blocks: [AgentBlock(
+                    id: id("block-\(index)"), revision: 1, kind: .paragraph,
+                    payload: .paragraph([.text("row \(index)")]))],
+                createdAt: base.addingTimeInterval(Double(index)),
+                finishedAt: base.addingTimeInterval(Double(index) + 0.5)))
+        }
+        let document = AgentDocument(version: 1, entries: entries)
+        let list = AgentTranscriptListView()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 720),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        let host = NSView(frame: window.contentRect(forFrameRect: window.frame))
+        host.addSubview(list)
+        window.contentView = host
+        list.frame = host.bounds
+        list.layoutSubtreeIfNeeded()
+        try list.apply(
+            document: document,
+            patch: AgentDocumentPatch(
+                fromVersion: 0, toVersion: document.version,
+                inserted: document.entries.flatMap(\.blocks).map(\.id)))
+        list.layout()
+        list.collectionView.layout()
+
+        // The fixture's own teeth: there has to be enough history for a per-row
+        // cost to be distinguishable from a constant one.
+        guard list.qaSemanticRowCount >= 400 else {
+            throw fail(
+                "display cycle: the fixture holds \(list.qaSemanticRowCount) rows, too few for a "
+                + "per-row cost to show up"
+            )
+        }
+        // Now the document is settled. Every display cycle from here changes
+        // nothing, so every one of them should be free.
+        list.qaResetFlattenStats()
+        for _ in 0..<30 { list.layout() }
+        guard list.qaHistoryScanCount == 0 else {
+            throw fail(
+                "display cycle: 30 display cycles over a SETTLED transcript walked the whole "
+                + "history \(list.qaHistoryScanCount) times across \(list.qaSemanticRowCount) rows — "
+                + "work proportional to content, repeated per frame"
+            )
+        }
+        guard list.qaFullFlattenCount == 0 else {
+            throw fail(
+                "display cycle: 30 display cycles rebuilt the row index "
+                + "\(list.qaFullFlattenCount) times with nothing changed"
+            )
+        }
+    }
+
     private static func checkAFoldedTurnReportsASpanNotASum() throws {
         func id(_ suffix: String) -> AgentNodeID { AgentNodeID(rawValue: "span-\(suffix)")! }
         func tool(_ suffix: String, name: String) -> AgentBlock {

@@ -235,6 +235,22 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     private let authoritativeReasoningDuration: (AgentEntry) -> TimeInterval?
     private var dataSource: NSCollectionViewDiffableDataSource<Int, AgentNodeID>!
     private var rows: [Row] = []
+
+    /// Hash of the row→entry boundary sequence, maintained at apply time.
+    ///
+    /// `layout()` needs to know whether a turn rule could have MOVED, and used to
+    /// answer by hashing every row's `entryID` — an O(all rows) walk **per display
+    /// cycle**, which is `performance.md`'s central sin committed by the very code
+    /// whose comment invokes it. It cannot be a plain revision counter: a
+    /// content-only delta replaces `rows` without moving a single boundary, and
+    /// counting it would rebuild the chrome on every streamed token.
+    ///
+    /// So it is recomputed only on a FULL walk, which is already O(rows) and is
+    /// the only apply that can change the sequence: `incrementallyIndexed`
+    /// refuses anything with an insert, a removal, a move, a differing entry
+    /// count, or a changed role/lifecycle/block-count, so an incremental apply
+    /// provably leaves every boundary where it was.
+    private var rowEntryBoundarySignature = 0
     private var rowsByID: [AgentNodeID: Row] = [:]
     /// `.plans/45` T3. Turn chrome, drawn as LAYERS rather than views.
     ///
@@ -1052,6 +1068,12 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             }
         }
         rows = flattened.rows
+        if incrementalSlots == nil {
+            recordHistoryScan("turn chrome boundary hash")
+            var boundaries = Hasher()
+            for row in rows { boundaries.combine(row.entryID) }
+            rowEntryBoundarySignature = boundaries.finalize()
+        }
         if let incrementalSlots {
             for pair in incrementalSlots { rowsByID[pair.id] = flattened.rows[pair.slot] }
             patchDisplayProjection(changedRowIDs: Set(incrementalSlots.map(\.id)))
@@ -1474,7 +1496,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         // positioned from PREPARED attributes, and reading them before the
         // prepare pass returns nothing, so the path came out empty.
         var hasher = Hasher()
-        for row in rows { hasher.combine(row.entryID) }
+        hasher.combine(rowEntryBoundarySignature)
         hasher.combine(Int(collectionView.bounds.width.rounded()))
         let signature = hasher.finalize()
         if signature != preparedTurnChromeSignature {
