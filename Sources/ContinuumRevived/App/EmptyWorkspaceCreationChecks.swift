@@ -98,12 +98,14 @@ enum EmptyWorkspaceCreationChecks {
         appRegistry.projects = [
             ProjectEntry(id: projectAlpha, name: "Alpha", rootPath: alphaRoot.path, workspaceId: workspaceWA,
                          lastOpenedAt: now, pinned: false, missing: false),
-            ProjectEntry(id: projectBeta, name: "Beta", rootPath: betaRoot.path, workspaceId: workspaceWA,
+            // Registered but unowned: this is the project the new workspace can
+            // honestly adopt without sharing Alpha's canvas.
+            ProjectEntry(id: projectBeta, name: "Beta", rootPath: betaRoot.path, workspaceId: nil,
                          lastOpenedAt: now, pinned: false, missing: false)
         ]
         appRegistry.workspaces = [WorkspaceEntry(
             id: workspaceWA, name: "Alpha Workspace",
-            projectIds: [projectAlpha, projectBeta], createdAt: now, updatedAt: now)]
+            projectIds: [projectAlpha], createdAt: now, updatedAt: now)]
         let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
         try registryStore.save(appRegistry)
 
@@ -161,6 +163,13 @@ enum EmptyWorkspaceCreationChecks {
         delegate.workspaceCreatePromptProvider = { "Empty" }
         delegate.qaCreateWorkspaceFromChrome()
 
+        let emptyWorkspaceId = runtime.workspaceId
+        try expect(emptyWorkspaceId != workspaceWA,
+                   "the + button must switch to the newly created workspace")
+        try expect(canvas.installedZoneLayerIds.isEmpty,
+                   "a new workspace mounted another workspace's zone layers: \(canvas.installedZoneLayerIds)")
+        try expect(canvas.qaTotalInstalledTileCount == 0 && canvas.navigationTileSnapshots().isEmpty,
+                   "a new workspace retained another workspace's visible tiles")
         try expect(runtime.activeController == nil,
                    "precondition: creating an empty workspace must leave no active controller — that "
                    + "is the state this leg exists for")
@@ -213,11 +222,14 @@ enum EmptyWorkspaceCreationChecks {
                    + "is the same dead end one level down")
         try expect(runtime.controller(for: projectBeta) != nil,
                    "Beta must now have a live controller")
-        let emptyWorkspaceId = runtime.workspaceId
         let savedDoc = try WorkspaceStore(workspaceId: emptyWorkspaceId,
                                           applicationSupportDirectory: appSupport).tryLoad()
         try expect(savedDoc?.zones.contains(where: { $0.projectId == projectBeta }) == true,
                    "the new zone must be persisted into the workspace document")
+        try expect(runtime.workspaceId == emptyWorkspaceId
+                   && canvas.installedZoneLayerIds.count == 1
+                   && !canvas.installedZoneLayerIds.contains(zoneAlpha),
+                   "adopting an unowned project did not keep the new workspace on its own canvas")
 
         // === E: and now a note lands somewhere real, in the RIGHT project. ===
         // The durable fact, not `performPaletteAction`'s return: that return is a

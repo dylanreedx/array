@@ -491,10 +491,17 @@ final class WorkspaceRuntime {
         for document: WorkspaceDocument,
         layers: [CanvasNSView.ZoneLayer]
     ) -> [CanvasNSView.ZoneRenderModel] {
+        zoneRenderModels(for: document.zones, layers: layers)
+    }
+
+    private static func zoneRenderModels(
+        for zones: [ZonePlacement],
+        layers: [CanvasNSView.ZoneLayer]
+    ) -> [CanvasNSView.ZoneRenderModel] {
         let byZone = Dictionary(
             layers.map { ($0.placement.zoneId, $0.renderModel) },
             uniquingKeysWith: { first, _ in first })
-        return document.zones.map { zone in
+        return zones.map { zone in
             byZone[zone.zoneId]
                 ?? CanvasNSView.ZoneRenderModel(
                     placement: zone,
@@ -1095,14 +1102,22 @@ final class WorkspaceRuntime {
         // workspace file. Do not validate the departing document here: the mounted
         // canvas is the current truth, and a legacy foreign zone in the old saved
         // document must not trap the user in that workspace after they close it.
-        // Target ownership is still strict, so switching never mounts or transfers
-        // a project owned by another workspace.
+        // A target may contain a legacy foreign zone too. The declared project
+        // owner remains authoritative: preserve that zone in the target document,
+        // but exclude it from the mounted scene. Rejecting the entire target here
+        // made every old A↔B pair permanently unswitchable when either side carried
+        // one stale pre-exclusive-ownership placement.
         let appRegistry = try registryStore.loadOrEmpty()
-        guard let targetDocument = try loadWorkspaceDocument(workspaceId: targetWorkspaceId) else {
+        guard var targetDocument = try loadWorkspaceDocument(workspaceId: targetWorkspaceId) else {
             throw WorkspaceSwitchError.documentNotFound(targetWorkspaceId)
         }
-        try Self.validateProjectOwnership(
+        let targetZones = try Self.mountableZones(
             in: targetDocument, workspaceId: targetWorkspaceId, registry: appRegistry)
+        let targetZoneIds = Set(targetZones.map(\.zoneId))
+        if let active = targetDocument.lastActiveZoneId, !targetZoneIds.contains(active) {
+            targetDocument.lastActiveZoneId = targetDocument.zonesInZOrder
+                .last(where: { targetZoneIds.contains($0.zoneId) })?.zoneId
+        }
 
         // Capture every visible register and synchronously save it while the
         // departing scene is still mounted and interactive.
@@ -1113,7 +1128,7 @@ final class WorkspaceRuntime {
         // 3. Diff project sets.
         let currentProjectIds = Set(acquiredProjectIds)
         let targetProjectIds = Set(
-            targetDocument.zones.compactMap(\.projectId)
+            targetZones.compactMap(\.projectId)
         )
         if let sharedProjectId = currentProjectIds.intersection(targetProjectIds).first {
             throw WorkspaceSwitchError.projectAppearsInBothWorkspaces(sharedProjectId)
@@ -1123,7 +1138,7 @@ final class WorkspaceRuntime {
 
         // Build new ZoneLayers for the target workspace before releasing (so shared controllers stay alive).
         let plan = ZoneHydrationOrchestrator.plan(
-            zones: targetDocument.zones,
+            zones: targetZones,
             viewport: targetDocument.viewport,
             visibleSize: canvasView.map { CGSize(width: $0.bounds.width > 0 ? $0.bounds.width : 1280,
                                                   height: $0.bounds.height > 0 ? $0.bounds.height : 720) }
@@ -1136,7 +1151,7 @@ final class WorkspaceRuntime {
         // newlyAcquired tracks the full set of projectIds this workspace owns after the switch (de-duped).
         var newlyAcquired: [UUID] = []
         var acquiredSet = Set<UUID>()
-        for zone in targetDocument.zones {
+        for zone in targetZones {
             guard let projectId = zone.projectId else { continue }
             guard plan.tier(for: zone.zoneId) == .live else { continue }
             if arriving.contains(projectId) && !acquiredSet.contains(projectId) {
@@ -1152,7 +1167,7 @@ final class WorkspaceRuntime {
         // Build layers from newly acquired + shared controllers.
         var layers: [CanvasNSView.ZoneLayer] = []
         var membershipCache: [UUID: [UUID: [Tile]]] = [:]
-        for zone in targetDocument.zones {
+        for zone in targetZones {
             guard let projectId = zone.projectId else {
                 // Ambient zone: rendered from the workspace document's ambientTiles
                 // register, same as install (ticket 03).
@@ -1204,7 +1219,7 @@ final class WorkspaceRuntime {
         // visible or navigable in an unrelated (including empty) workspace.
         canvasView?.retireFlatCompatibilityScene()
         if let canvas = canvasView { hydrateZoneLayerTiles?(canvas, layers, .beforeInstall) }
-        canvasView?.setZones(layers, documentZones: Self.zoneRenderModels(for: targetDocument, layers: layers))
+        canvasView?.setZones(layers, documentZones: Self.zoneRenderModels(for: targetZones, layers: layers))
         installedLayers = layers
 
         // 5. Release departing (after setZones so adapters are already unregistered by T05).
@@ -1264,6 +1279,22 @@ final class WorkspaceRuntime {
                 throw ProjectWorkspaceOwnershipError.alreadyOwned(
                     projectId: projectId, workspaceId: owner)
             }
+        }
+    }
+
+    /// The document stays byte-for-byte semantically complete, while the mounted
+    /// scene contains only ambient zones and zones whose project declares this
+    /// workspace as its owner. Ordinary switching never moves, deletes, or rewrites
+    /// a legacy foreign placement; the explicit project-move flow remains the only
+    /// ownership writer.
+    private static func mountableZones(
+        in document: WorkspaceDocument,
+        workspaceId: UUID,
+        registry: Registry
+    ) throws -> [ZonePlacement] {
+        try document.zones.filter { zone in
+            guard let projectId = zone.projectId else { return true }
+            return try registry.exclusiveWorkspaceOwner(of: projectId) == workspaceId
         }
     }
 

@@ -16295,10 +16295,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(savedAAfterRoundTrip.zones.first(where: { $0.zoneId == zoneAa }) == mutatedAPlacement,
             "inv8: mounted placement and atomically saved workspace document diverged")
 
-        // A legacy foreign zone in the workspace being LEFT must not trap the
-        // user there. Preserve it on disk for explicit repair, switch to the
-        // valid target, then clean the fixture before returning. Target ownership
-        // remains strict and is exercised by ZoneRuntimeDuplicationChecks.
+        // A legacy foreign zone in either direction must not trap the user.
+        // Preserve it on disk for explicit repair, omit it from the mounted scene,
+        // and prove the same contaminated document can be entered again.
         let foreignDepartingZone = ZonePlacement(
             zoneId: UUID(uuidString: "00000000-0000-0000-0000-000000009F09")!,
             projectId: projectPb,
@@ -16318,10 +16317,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             workspaceId: workspaceWA, applicationSupportDirectory: appSupport).load()
         try expect(preservedContamination.zones.contains(where: { $0.zoneId == foreignDepartingZone.zoneId }),
                    "switching away silently deleted a legacy foreign zone instead of preserving it for repair")
+        try runtime.switchWorkspace(to: workspaceWA)
+        try expect(!canvas.installedZoneLayerIds.contains(foreignDepartingZone.zoneId)
+                   && canvas.installedZoneLayerIds.contains(zoneAa),
+                   "switching into a legacy-contaminated target mounted its foreign zone or hid its owned zones")
+        let preservedAfterTargetMount = try WorkspaceStore(
+            workspaceId: workspaceWA, applicationSupportDirectory: appSupport).load()
+        try expect(preservedAfterTargetMount.zones.contains(where: { $0.zoneId == foreignDepartingZone.zoneId }),
+                   "switching into a contaminated target silently deleted its preserved foreign zone")
         var repairedFixture = preservedContamination
         repairedFixture.zones.removeAll { $0.zoneId == foreignDepartingZone.zoneId }
+        runtime.replaceDocument(repairedFixture, for: workspaceWA)
         try WorkspaceStore(workspaceId: workspaceWA, applicationSupportDirectory: appSupport).save(repairedFixture)
-        try runtime.switchWorkspace(to: workspaceWA)
 
         struct InjectedSwitchFailure: Error {}
         let mountedIdsBeforeFailureChecks = canvas.installedZoneLayerIds
