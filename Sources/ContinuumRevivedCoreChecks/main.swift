@@ -3651,10 +3651,10 @@ do {
         workspaceId: UUID(),
         zoneId: UUID()
     )
-    expect(preservedWorkspaceId == workspaceA, "DefaultWorkspaceMigration honors the registry last-active workspace")
-    expect(existingRegistry.workspaces.first(where: { $0.id == workspaceA })?.projectIds == [projectId], "DefaultWorkspaceMigration attaches project to last active workspace")
-    expect(existingRegistry.workspaces.first(where: { $0.id == workspaceB })?.projectIds.contains(projectId) == true, "DefaultWorkspaceMigration preserves shared workspace membership")
-    expect(existingRegistry.projects.first?.workspaceId == workspaceA, "DefaultWorkspaceMigration updates project entry workspace assignment")
+    expect(preservedWorkspaceId == workspaceB, "DefaultWorkspaceMigration preserves the project's exclusive owner")
+    expect(existingRegistry.workspaces.first(where: { $0.id == workspaceA })?.projectIds.isEmpty == true, "DefaultWorkspaceMigration does not attach an owned project to the last-active workspace")
+    expect(existingRegistry.workspaces.first(where: { $0.id == workspaceB })?.projectIds == [projectId], "DefaultWorkspaceMigration preserves exclusive workspace membership")
+    expect(existingRegistry.projects.first?.workspaceId == workspaceB, "DefaultWorkspaceMigration preserves the project entry's owner")
 }
 
 do {
