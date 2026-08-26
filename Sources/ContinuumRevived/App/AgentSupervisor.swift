@@ -5528,7 +5528,13 @@ final class AgentSupervisor {
             // a proxy: `record.lastSeenAt` is the spawn instant, and the event ring's
             // trailing working run starts at whatever synthetic draft a restore left
             // behind — which is the 158-hour reading the sidebar was showing.
-            facts.turnStartedAt = now
+            // Provider adapters may repeat a start boundary while one user turn
+            // is still active (for example around nested/subagent protocol
+            // cycles). A repeated boundary is activity, but it is not a new
+            // elapsed-time origin. Preserve the oldest authoritative stamp until
+            // a terminal event clears it; this keeps every provider and every
+            // surface on one honest clock.
+            facts.turnStartedAt = facts.turnStartedAt.map { min($0, now) } ?? now
             if var record = records[id] {
                 // P6.2: a turn start is real activity; the surrounding event
                 // delivery may still update metadata for non-activity events.
@@ -9562,6 +9568,15 @@ private func checkCapabilityDrivenTurnStates<Failure: Error>(
     guard let working = supervisor.turnSnapshot(for: id),
           working.state == .working, working.capabilities.canStop else {
         throw fail("turn-state: explicit turnStarted did not present stoppable Working")
+    }
+    guard let originalStart = working.turnStartedAt else {
+        throw fail("turn-state: working turn has no elapsed-time origin")
+    }
+    supervisor.qaDeliver(.turnStarted(
+        threadId: AgentSupervisor.threadId(for: id), turnId: "nested-provider-cycle"
+    ), to: id, now: originalStart.addingTimeInterval(600))
+    guard supervisor.turnSnapshot(for: id)?.turnStartedAt == originalStart else {
+        throw fail("turn-state: repeated provider turnStarted reset the 10-minute elapsed clock")
     }
     supervisor.qaDeliver(.turnCompleted(
         threadId: AgentSupervisor.threadId(for: id),
@@ -16535,10 +16550,12 @@ func checkInboxStateAgreesWithTilePresenter<Failure: Error>(fail: (String) -> Fa
     )
     let workingPresentation = AgentTileStatePresenter.present(
         name: "Agreement", snapshot: working, branchContext: nil,
-        startedAt: working.turnStartedAt, now: now
+        // A replay/rebuilt view may offer a newer local fallback. The tile must
+        // ignore it while the supervisor has the real turn origin.
+        startedAt: now.addingTimeInterval(-3), now: now
     )
     guard workingPresentation.elapsedSeconds == 30 else {
-        throw fail("presenter-agreement: the tile header measures \(String(describing: workingPresentation.elapsedSeconds))s from the stamped turn start, expected 30")
+        throw fail("presenter-agreement: the tile header measures \(String(describing: workingPresentation.elapsedSeconds))s from a replay-restamped local clock instead of the supervisor's 30s turn start")
     }
     return "row/tile state agreement over \(states.count) snapshots (\(rows.joined(separator: ", "))), two documented divergences (failed, starting), 30s elapsed from the stamped start on both surfaces and from the submission in the spawn window"
 }

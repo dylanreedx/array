@@ -1164,17 +1164,18 @@ final class ManagedAgentTileNSView: TileNSView {
         default:
             break
         }
-        // Turn-local, not session-local: each new turn resets the semantic timer.
-        // AgentTileHeaderView owns the one-second repaint and never touches the
-        // transcript layout beneath it.
+        // Compatibility-only local anchor. The v2 header uses the supervisor's
+        // stamped snapshot; do not restamp this fallback when replay or a provider
+        // repeats the same turn boundary.
         surfaceVisualEpoch &+= 1
-        if case .turnStarted = event { startedAt = Date() }
+        if case .turnStarted = event, startedAt == nil { startedAt = Date() }
         // A prompt is done once the agent settles or a turn ends. Clearing the
         // in-flight latch here re-enables the compose row (see submitPrompt).
         switch event {
         case .turnCompleted, .runtimeError,
              .sessionStateChanged(.ready), .sessionStateChanged(.stopped), .sessionStateChanged(.error):
             promptInFlight = false
+            startedAt = nil
         default:
             break
         }

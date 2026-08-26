@@ -35,15 +35,17 @@ struct AgentTileStatePresenter {
         case .starting, .working, .queued, .needsAction: isTimed = true
         case .ready, .failed, .restored: isTimed = false
         }
-        // `.starting` has no provider turn yet, so `turnStartedAt` (and therefore
-        // the caller's `startedAt`) is nil by invariant. Anchor the spawn clock on
-        // the submission instead — otherwise the one window the user actually
-        // complains about is the one window with no elapsed reading.
+        // The snapshot is the supervisor-owned clock. A tile-local `startedAt`
+        // can be restamped when a capped event replay reaches `.turnStarted`, or
+        // when the view is rebuilt after a workspace round trip. It is therefore
+        // only a compatibility fallback, never allowed to reset a live turn.
+        // `.starting` has no provider turn yet, so anchor that spawn window on the
+        // supervisor's submission stamp instead.
         let anchor: Date?
         if case .starting = snapshot.state {
             anchor = snapshot.submittedAt ?? startedAt
         } else {
-            anchor = startedAt
+            anchor = snapshot.turnStartedAt ?? startedAt
         }
         let effectiveStart = isTimed ? anchor : nil
         let elapsed = effectiveStart.map { max(0, Int(now.timeIntervalSince($0))) }
