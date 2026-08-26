@@ -1935,11 +1935,18 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         let size = hoverTimeLayer.preferredFrameSize()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        // In the left gutter, outside the reading column, so revealing it can
-        // never reflow a line of text.
+        // Treat the time as a quiet eyebrow for the turn. The user surface now
+        // owns a full-height authorship rule at `frame.minX`; leaving the time
+        // in the old left-gutter position put that rule (and the item view that
+        // owns it) directly over the label. The inter-turn air already belongs
+        // to this boundary, so place the overlay there and align it with the
+        // user prose just beyond the rule. It still never participates in text
+        // layout or reflows a line.
         hoverTimeLayer.frame = CGRect(
-            x: max(0, transcriptLayout.contentInsets.left - size.width - CGFloat(Space.s)),
-            y: frame.minY, width: size.width, height: size.height)
+            x: frame.minX + UserPromptView.leadingInset,
+            y: max(0, frame.minY - size.height),
+            width: size.width,
+            height: size.height)
         CATransaction.commit()
         setHoverTime(opacity: 1)
     }
@@ -2025,6 +2032,8 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
 
     var qaHoverTimeVisibleForChecks: Bool { hoverTimeLayer.opacity > 0 }
 
+    var qaHoverTimeFrameForChecks: CGRect { hoverTimeLayer.frame }
+
     /// Corrected 2026-08-24 (`.plans/45` S4.0): the old entryID-based QA
     /// bypassed the tracking-area hit-test and its coordinate conversion, so a
     /// conversion bug stayed green. This runs the REAL `mouseMoved` body on a
@@ -2043,6 +2052,15 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
               let frame = transcriptLayout.layoutAttributesForItem(
                   at: IndexPath(item: turn.row, section: 0))?.frame else { return nil }
         return convert(NSPoint(x: frame.midX, y: frame.midY), from: collectionView)
+    }
+
+    func qaTurnStartFrameForChecks(entryID: AgentNodeID) -> CGRect? {
+        guard let turnIndex = turnStartIndexByEntry[entryID],
+              turnStartRowsByEntry.indices.contains(turnIndex),
+              case let turn = turnStartRowsByEntry[turnIndex]
+        else { return nil }
+        return transcriptLayout.layoutAttributesForItem(
+            at: IndexPath(item: turn.row, section: 0))?.frame
     }
 
     private func flatten(_ document: AgentDocument) throws -> RowIndex {
